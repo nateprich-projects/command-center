@@ -30,6 +30,10 @@ RUN=$(python3 $CC/heartbeat.py start --agent claude)
 
 Every exit path below finishes it.
 
+**If the heartbeat prints a warning about GitHub being unreachable, keep going.**
+It spools the record locally and a later run pushes it. Instrumentation does not
+gate the work it instruments.
+
 ## 2. Check the budget, and believe it
 
 ```bash

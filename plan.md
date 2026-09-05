@@ -381,11 +381,20 @@ against fixtures.
 **GitHub is the state.** No persistence, no locking, no journal — there is no shared
 mutable state to protect.
 
-**Local state, deliberately kept out of GitHub.** Two things live only on the Mac mini:
+**Instrumentation must not gate the thing it instruments.** The heartbeat writes to a
+local spool first and pushes to GitHub afterwards, so a network blip can never stop a run.
+It once did: `heartbeat start` raised, the run stopped at step one, and because the thing
+that failed *was* the record, it left no trace of having stopped — indistinguishable from
+never having run, which is the exact state the heartbeat exists to rule out. Anything
+undrained is flushed by the next run that gets through, and a record that could not even
+be spooled is reported as lost rather than as saved.
+
+**Local state, deliberately kept out of GitHub.** Three things live only on the Mac mini:
 the statusline usage cache, because the numbers are readable only from inside a live
-session, and the agents' own session transcripts, which `prior_run.py` reads to recover a
-dead run's intent. Both are **recovery aids, never state of record** — lose them and the
-funnel is unaffected.
+session; the agents' own session transcripts, which `prior_run.py` reads to recover a
+dead run's intent and `usage.py` reads to estimate consumption; and the heartbeat spool,
+a write-ahead buffer that drains into GitHub. All three are **buffers and recovery aids,
+never state of record** — lose them and the funnel is unaffected.
 
 **Retired from v1:** `$COPILOT_HOME` runtime state, checkouts, coordinators, Run Map,
 the canvas extension, the operation engine with its claims and recovery, safety

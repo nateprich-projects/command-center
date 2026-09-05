@@ -7,6 +7,7 @@ tests here are as much about what must NOT be reported as what must.
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
 import time
@@ -149,3 +150,69 @@ def test_the_unfinished_ttl_matches_the_lock_ttl():
     import funnel
 
     assert watchdog.UNFINISHED_SECONDS == funnel.LOCK_TTL.total_seconds()
+
+
+# -- instrumentation must not gate the thing it instruments -----------------
+
+
+def _isolate_spool(tmp_path, monkeypatch):
+    monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(tmp_path / "spool"))
+    monkeypatch.setattr(heartbeat, "BACKOFF", [])          # no sleeping in tests
+    monkeypatch.setattr(heartbeat, "_ensure_branch", lambda: None)
+
+
+def _offline(monkeypatch):
+    def boom(*a, **k):
+        raise heartbeat.HeartbeatError("GitHub unreachable")
+    monkeypatch.setattr(heartbeat, "gh", boom)
+
+
+def test_a_github_outage_does_not_stop_a_run(tmp_path, monkeypatch):
+    """This is the bug it was written for: a blip made `heartbeat start` raise,
+    the run stopped at step one, and the thing that failed *was* the record — so
+    it left no trace of having stopped."""
+    _isolate_spool(tmp_path, monkeypatch); _offline(monkeypatch)
+    assert heartbeat.append("codex", {"run": "a", "phase": "start", "ts": 1}) is False
+
+
+def test_a_record_survives_the_outage_locally(tmp_path, monkeypatch):
+    _isolate_spool(tmp_path, monkeypatch); _offline(monkeypatch)
+    heartbeat.append("codex", {"run": "a", "phase": "start", "ts": 1})
+    assert [r["run"] for r in heartbeat._spooled("codex")] == ["a"]
+
+
+def test_the_spool_drains_when_github_returns(tmp_path, monkeypatch):
+    _isolate_spool(tmp_path, monkeypatch); _offline(monkeypatch)
+    heartbeat.append("codex", {"run": "a", "phase": "start", "ts": 1})
+    heartbeat.append("codex", {"run": "b", "phase": "finish", "ts": 2})
+    assert len(heartbeat._spooled("codex")) == 2
+
+    sent = {}
+    monkeypatch.setattr(heartbeat, "_fetch", lambda agent: (None, None))
+    def ok(*args, **k):
+        sent["args"] = args
+        return "{}"
+    monkeypatch.setattr(heartbeat, "gh", ok)
+
+    assert heartbeat.append("codex", {"run": "c", "phase": "start", "ts": 3}) is True
+    assert heartbeat._spooled("codex") == []
+    body = [a for a in sent["args"] if a.startswith("content=")][0]
+    import base64
+    text = base64.b64decode(body.split("=", 1)[1]).decode()
+    assert [json.loads(l)["run"] for l in text.splitlines()] == ["a", "b", "c"]
+
+
+def test_read_includes_records_not_yet_pushed(tmp_path, monkeypatch):
+    """A local reader must see the whole picture, not just what GitHub has."""
+    _isolate_spool(tmp_path, monkeypatch); _offline(monkeypatch)
+    heartbeat.append("codex", {"run": "a", "phase": "start", "ts": 1})
+    monkeypatch.setattr(heartbeat, "_fetch", lambda agent: (None, None))
+    assert [r["run"] for r in heartbeat.read("codex")] == ["a"]
+
+
+def test_a_spool_write_failure_is_still_not_fatal(tmp_path, monkeypatch):
+    """Even the fallback failing must not take the run down."""
+    monkeypatch.setattr(heartbeat, "SPOOL_DIR", "/proc/nonexistent/nope")
+    monkeypatch.setattr(heartbeat, "BACKOFF", [])
+    _offline(monkeypatch)
+    assert heartbeat.append("codex", {"run": "a", "phase": "start", "ts": 1}) is False

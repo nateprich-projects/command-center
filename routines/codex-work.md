@@ -22,6 +22,11 @@ RUN=$(python3 $CC/heartbeat.py start --agent codex)
 Keep `$RUN`. **Every exit path below finishes it.** A start without a finish is
 read by the watchdog as a run that died, so never leave one dangling on purpose.
 
+**If the heartbeat prints a warning about GitHub being unreachable, keep going.**
+It spools the record locally and a later run pushes it. Instrumentation does not
+gate the work it instruments — an earlier version stopped the run here, and left
+no trace of having stopped, which is indistinguishable from never running.
+
 ## 2. Check the budget, and believe it
 
 ```bash

@@ -178,7 +178,32 @@ merged PR, and increments a visible counter.
   archived, and marked cold storage.
 - **Budget:** each agent gets a hard slice, enforced by an **early-exit gate inside the
   session** (see below). Target ~10% remaining Saturday morning (Claude) and Sunday
-  morning (Codex).
+  morning (Codex). There is no monthly limit; only the 5-hour and weekly windows exist.
+
+  **The gate reserves the cost of the run it authorises** — `used + reserve <= allowed`,
+  not `used <= allowed`. Nothing can cap a session's spend once it begins, so a bare
+  threshold check is a start check rather than a bound: it waves through a run that then
+  blows past the line. Measured across 14 real Codex sessions, the median cost about 1% of
+  the week and one cost 65%. Bootstrap reserves are 15% weekly and 30% five-hour,
+  deliberately high, to be replaced by the measured p90 once the heartbeat has recorded
+  real one-ticket runs.
+
+- **A dying run must lose time, not work.** A session killed mid-run by a rate limit
+  leaves a claimed lock and whatever it had done locally. So every run works on a branch
+  named deterministically from its ticket (`ticket/<number>`) and **commits and pushes
+  after each meaningful step** — the remote holds the work, which is why no state file is
+  needed to find it again. A later run reads the ticket, inspects that branch, and decides
+  to continue or reset; it treats the diff as untrusted, since it has no memory of the
+  dead run's intent, and the review against `plan.md` catches a half-built diff either way.
+
+  _Rejected: starting every run from `main`. It makes a dead run safe by discarding
+  everything it had done — and what it spent doing that is the exact resource being
+  rationed. A run dying at 90% complete would lose the most expensive part._
+
+  The residual gap, accepted: for up to the 2-hour TTL after a mid-run death the claim
+  still looks fresh, so nothing starts. Shortening the TTL trades that against killing
+  legitimately slow runs, and with no agent identity a run cannot tell its own dead claim
+  from another run in progress.
 - **Stop-time buffer:** runs finish at least 5 hours before any window Nate might want
   the account back. The 5-hour rolling window, not the weekly one, is what actually
   locks him out.
@@ -314,7 +339,13 @@ safe across many sessions — not this situation.
 
 **Watchdog:** a GitHub Actions cron checks heartbeats written by each run. It records
 **outcome, not just liveness** — "ran, skipped, budget pace exceeded" is healthy;
-"ran, errored" three times is not. Actions is the right home precisely because the
+"ran, errored" three times is not.
+
+Each run records **start and end separately**, with a usage reading at each. A single
+outcome line cannot detect a run that died before writing one — it is indistinguishable
+from a run that never started, which is precisely the failure mode a rate limit produces.
+The paired readings are also what measure real run cost, and so what replaces the
+bootstrap reserves above. Actions is the right home precisely because the
 watchdog cannot live inside the thing it watches: an app that quit is invisible to
 every other signal on a machine that is otherwise fine.
 

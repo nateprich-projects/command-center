@@ -44,8 +44,23 @@ def test_spending_the_week_on_monday_is_over_pace():
 
 
 def test_an_even_burn_is_under_pace():
-    verdict = usage.pace(seven_day(44.0, 0.5), NOW)   # allowed = 45%
+    # allowed = 45%; 25 used + 15 reserved = 40
+    verdict = usage.pace(seven_day(25.0, 0.5), NOW)
     assert not verdict["over_pace"]
+
+
+def test_the_gate_reserves_the_cost_of_the_run_it_authorises():
+    """Without this the gate is a start check, not a bound on spend: it waves
+    through a run that then blows straight past the line."""
+    # allowed = 45%, and 44% used is under it — but not with a run's cost to come
+    assert usage.pace(seven_day(44.0, 0.5), NOW)["over_pace"]
+
+
+def test_the_five_hour_reserve_applies_too():
+    under = {"windows": {"five_hour": {"used_percent": 45.0, "resets_at": NOW}}}
+    over = {"windows": {"five_hour": {"used_percent": 55.0, "resets_at": NOW}}}
+    assert not usage.pace(under, NOW)["over_pace"]   # 45 + 30 = 75 < 80
+    assert usage.pace(over, NOW)["over_pace"]        # 55 + 30 = 85 > 80
 
 
 def test_the_target_leaves_headroom_at_the_end_of_the_week():
@@ -75,9 +90,11 @@ def test_the_five_hour_window_has_a_flat_ceiling():
 def test_either_window_alone_can_stop_a_run():
     reading = {"source": "test", "captured_at": NOW, "windows": {
         "five_hour": {"used_percent": 95.0, "resets_at": NOW + 600},
-        "seven_day": {"used_percent": 1.0, "resets_at": NOW + WEEK * 0.9},
+        "seven_day": {"used_percent": 1.0, "resets_at": NOW + WEEK * 0.02},
     }}
-    assert usage.pace(reading, NOW)["over_pace"]
+    verdict = usage.pace(reading, NOW)
+    assert verdict["over_pace"]
+    assert [v["over"] for v in verdict["windows"]] == [True, False]
 
 
 # -- unknown is never "under pace" -----------------------------------------

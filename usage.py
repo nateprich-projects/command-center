@@ -46,6 +46,23 @@ WEEKLY_TARGET = 90.0
 #: weekly one, is what actually locks Nate out of his own account.
 FIVE_HOUR_CEILING = 80.0
 
+#: What a run is assumed to cost, reserved before it is allowed to start.
+#:
+#: A gate that only asks "are we under the line *now*" is a start check, not a
+#: bound on spend — it will wave through a run that then blows straight past the
+#: line, because nothing can cap a session's consumption once it begins. So the
+#: gate reserves the cost of the run it is authorising.
+#:
+#: These are deliberately high bootstrap values, not measurements. Measured
+#: across 14 real Codex sessions on 2026-09-05: median weekly cost ~1%, but one
+#: session cost 65% of the week. None of those were one-ticket routine runs,
+#: because no routine had run yet. **Replace these with the measured p90 once
+#: the heartbeat has recorded real runs** — it records usage at run start and
+#: end for exactly this purpose. Erring high costs a refused run; erring low
+#: costs the week.
+WEEKLY_RESERVE = 15.0
+FIVE_HOUR_RESERVE = 30.0
+
 FIVE_HOUR = 300 * 60
 SEVEN_DAY = 10080 * 60
 
@@ -169,13 +186,13 @@ def pace(reading: Dict, now: float) -> Dict:
 
     five = windows.get("five_hour") or {}
     if five.get("used_percent") is not None:
-        over = five["used_percent"] > FIVE_HOUR_CEILING
         verdicts.append(
             {
                 "window": "five_hour",
                 "used_percent": five["used_percent"],
+                "reserve": FIVE_HOUR_RESERVE,
                 "allowed_percent": FIVE_HOUR_CEILING,
-                "over": over,
+                "over": five["used_percent"] + FIVE_HOUR_RESERVE > FIVE_HOUR_CEILING,
             }
         )
 
@@ -188,9 +205,10 @@ def pace(reading: Dict, now: float) -> Dict:
             {
                 "window": "seven_day",
                 "used_percent": seven["used_percent"],
+                "reserve": WEEKLY_RESERVE,
                 "allowed_percent": round(allowed, 1),
                 "elapsed_fraction": round(elapsed_fraction, 3),
-                "over": seven["used_percent"] > allowed,
+                "over": seven["used_percent"] + WEEKLY_RESERVE > allowed,
             }
         )
 
@@ -250,9 +268,12 @@ def main(argv=None) -> int:
 
     for window in verdict["windows"]:
         print(
-            "{:<10} {:>5.1f}% used, {:>5.1f}% allowed {}".format(
+            "{:<10} {:>5.1f}% used + {:>4.1f}% reserved = {:>5.1f}%, "
+            "{:>5.1f}% allowed  {}".format(
                 window["window"],
                 window["used_percent"],
+                window["reserve"],
+                window["used_percent"] + window["reserve"],
                 window["allowed_percent"],
                 "OVER" if window["over"] else "ok",
             ),

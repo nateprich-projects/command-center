@@ -59,18 +59,24 @@ CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/*/*/*/*.jsonl")
 #: counting it adds arithmetic without changing a decision.
 BUDGETED_MODEL = "opus"
 
-#: Base capacity in Opus output tokens, measured on 2026-09-05. The 5-hour
-#: figure is the window that took the account to the edge of its limit. The
-#: weekly figure is the trailing 7-day Opus total at a reported 67% used, with
-#: the promo of the day divided back out. Both are single observations — replace
-#: them when better data exists.
-FIVE_HOUR_CAPACITY = 700_000.0
-WEEKLY_CAPACITY = 1_500_000.0
+#: Base capacity in Opus output tokens, calibrated 2026-09-05 against Claude's
+#: own usage panel: 1,667,023 tokens since the weekly reset reading 61% used,
+#: and 262,413 in the trailing five hours reading 45%. The weekly figure has the
+#: +50% promo of that day divided back out.
+#:
+#: An earlier pair of numbers was wrong in both directions, because the weekly
+#: one was calibrated against a percentage read off the *ChatGPT* usage panel
+#: rather than Claude's. Cross-wiring two providers' figures produces a
+#: confidently wrong constant, so re-derive these only from Claude's own panel.
+FIVE_HOUR_CAPACITY = 583_000.0
+WEEKLY_CAPACITY = 1_822_000.0
 
-#: Because the estimate cannot see claude.ai or mobile, inflate it before
-#: judging. Calibrated rather than guessed: on 2026-09-05 the estimate put the
-#: weekly window at 67.7% against a reported 67%, so the blind spot is small.
-ESTIMATE_HAIRCUT = 1.10
+#: No inflation. The capacities above are calibrated from the real panel using
+#: these same token counts, so any systematic blind spot is already absorbed
+#: into them — a haircut on top would double-count the conservatism. The
+#: reserves below carry the margin instead. Raise this only if the estimate is
+#: observed reading low against the panel.
+ESTIMATE_HAIRCUT = 1.0
 
 #: When the weekly window resets, in local time. The estimate counts tokens
 #: **since the most recent reset**, not over a trailing seven days.
@@ -178,15 +184,17 @@ FIVE_HOUR_CEILING = 80.0
 #: line, because nothing can cap a session's consumption once it begins. So the
 #: gate reserves the cost of the run it is authorising.
 #:
-#: These are deliberately high bootstrap values, not measurements. Measured
-#: across 14 real Codex sessions on 2026-09-05: median weekly cost ~1%, but one
-#: session cost 65% of the week. None of those were one-ticket routine runs,
-#: because no routine had run yet. **Replace these with the measured p90 once
-#: the heartbeat has recorded real runs** — it records usage at run start and
-#: end for exactly this purpose. Erring high costs a refused run; erring low
-#: costs the week.
-WEEKLY_RESERVE = 15.0
-FIVE_HOUR_RESERVE = 30.0
+#: Sized against what a run actually costs, now that we can measure it. A
+#: Claude routine run with nothing to do cost 2,690 output tokens; even a run
+#: ten times heavier is about 27,000. Against the capacities above that is
+#: roughly 1.5% of a weekly window and 4.6% of a five-hour one.
+#:
+#: The reserves are therefore several times the largest plausible run, not the
+#: order-of-magnitude guesses they started as — those were set before any run
+#: had happened, and made the gate refuse work it had ample room for. Widen them
+#: again if the heartbeat shows real runs costing more than this.
+WEEKLY_RESERVE = 5.0
+FIVE_HOUR_RESERVE = 10.0
 
 FIVE_HOUR = 300 * 60
 SEVEN_DAY = 10080 * 60

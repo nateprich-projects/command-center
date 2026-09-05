@@ -69,10 +69,19 @@ def test_the_gate_reserves_the_cost_of_the_run_it_authorises():
 
 
 def test_the_five_hour_reserve_applies_too():
-    under = {"windows": {"five_hour": {"used_percent": 45.0, "resets_at": NOW}}}
-    over = {"windows": {"five_hour": {"used_percent": 55.0, "resets_at": NOW}}}
-    assert not usage.pace(under, NOW)["over_pace"]   # 45 + 30 = 75 < 80
-    assert usage.pace(over, NOW)["over_pace"]        # 55 + 30 = 85 > 80
+    under = {"windows": {"five_hour": {"used_percent": 65.0, "resets_at": NOW}}}
+    over = {"windows": {"five_hour": {"used_percent": 75.0, "resets_at": NOW}}}
+    assert not usage.pace(under, NOW)["over_pace"]   # 65 + 10 = 75 < 80
+    assert usage.pace(over, NOW)["over_pace"]        # 75 + 10 = 85 > 80
+
+
+def test_the_reserves_are_sized_against_a_real_run_not_a_guess():
+    """A run with nothing to do cost 2,690 output tokens; ten times that is
+    ~1.5% of a weekly window. Reserves an order of magnitude above that refused
+    work the budget had ample room for."""
+    biggest_plausible_run = 27_000.0
+    assert usage.WEEKLY_RESERVE > 100 * biggest_plausible_run / usage.WEEKLY_CAPACITY
+    assert usage.FIVE_HOUR_RESERVE > 100 * biggest_plausible_run / usage.FIVE_HOUR_CAPACITY
 
 
 def test_the_target_leaves_headroom_at_the_end_of_the_week():

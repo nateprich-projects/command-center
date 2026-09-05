@@ -50,6 +50,12 @@ BRANCH = "heartbeat"
 #: state. Anything undrained is flushed by the next run that gets through.
 SPOOL_DIR = os.path.expanduser("~/.claude/command-center-heartbeat")
 
+#: The id of the run currently in progress, per agent. `start` writes it and
+#: `finish` reads it, so a routine never needs `RUN=$(...)` — a command
+#: substitution makes the command string unpredictable, and a permission rule
+#: can only match a string it can predict.
+CURRENT = os.path.join(SPOOL_DIR, "{}.current")
+
 #: Four attempts over roughly eleven seconds. Long enough to ride out a blip,
 #: short enough not to eat a run's time when GitHub is genuinely down.
 BACKOFF = [1, 3, 7]
@@ -114,6 +120,23 @@ def _ensure_branch() -> None:
                            "-f", "tree=" + tree["sha"]))
     gh("api", "-X", "POST", "repos/{}/git/refs".format(REPO),
        "-f", "ref=refs/heads/" + BRANCH, "-f", "sha=" + commit["sha"])
+
+
+def _remember(agent: str, run_id: str) -> None:
+    try:
+        os.makedirs(SPOOL_DIR, exist_ok=True)
+        with open(CURRENT.format(agent), "w") as fh:
+            fh.write(run_id)
+    except OSError:
+        pass
+
+
+def _current(agent: str) -> Optional[str]:
+    try:
+        with open(CURRENT.format(agent)) as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
 
 
 def _spool_path(agent: str) -> str:
@@ -256,7 +279,10 @@ def main(argv=None) -> int:
 
     finish = sub.add_parser("finish", help="record how a run ended")
     finish.add_argument("--agent", required=True, choices=["codex", "claude"])
-    finish.add_argument("--run", required=True)
+    finish.add_argument(
+        "--run", default=None,
+        help="defaults to the run id recorded by the matching `start`",
+    )
     finish.add_argument("--outcome", required=True, choices=OUTCOMES)
     finish.add_argument("--note", default=None)
     finish.add_argument(
@@ -276,6 +302,7 @@ def main(argv=None) -> int:
 
         if args.command == "start":
             run_id = uuid.uuid4().hex[:12]
+            _remember(args.agent, run_id)
             pushed = append(args.agent, {
                 "run": run_id,
                 "agent": args.agent,
@@ -293,8 +320,15 @@ def main(argv=None) -> int:
             print(run_id)
             return 0
 
+        run_id = args.run or _current(args.agent)
+        if not run_id:
+            print(
+                "heartbeat: no run id given and none recorded by `start`",
+                file=sys.stderr,
+            )
+            return 2
         pushed = append(args.agent, {
-            "run": args.run,
+            "run": run_id,
             "agent": args.agent,
             "phase": "finish",
             "ts": int(time.time()),

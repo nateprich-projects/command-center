@@ -20,16 +20,10 @@ is `Shaped`-to-`Ready`. Reviewing also *finishes* work where a breakdown
 finite class — bounded by what Codex can produce under the lock and the budget —
 and only finite classes may preempt.
 
-`CC=/Users/nateprich/.claude/command-center` — the Command Center checkout. Use the
-absolute path, not `~` — Claude Code will not offer "always allow" for a shell command
-with a tilde in a variable assignment (expansion timing is ambiguous), which silently
-turns this from an unattended routine into one that stalls waiting for an approval that
-never comes.
-
 ## 1. Record that you started
 
 ```bash
-RUN=$(python3 $CC/heartbeat.py start --agent claude)
+python3 /Users/nateprich/.claude/command-center/heartbeat.py start --agent claude
 ```
 
 Every exit path below finishes it.
@@ -41,7 +35,7 @@ gate the work it instruments.
 ## 2. Check the budget, and believe it
 
 ```bash
-python3 $CC/usage.py gate claude
+python3 /Users/nateprich/.claude/command-center/usage.py gate claude
 ```
 
 Exit 1 → finish `skipped-over-pace` and stop. Exit 2 → finish
@@ -62,7 +56,7 @@ So before reviewing anything, check the open PRs for:
 - **approved but unmerged** — finish the merge, if it still meets the bar below.
 - **merged but its ticket still open** — close the ticket and check whether its parent has any children left.
 
-`python3 $CC/prior_run.py <issue-number> --agent claude` shows what a previous
+`python3 /Users/nateprich/.claude/command-center/prior_run.py <issue-number> --agent claude` shows what a previous
 run intended, if you need it. Evidence of intent, never of truth.
 
 ## 4. Job one: pick one PR
@@ -103,7 +97,7 @@ Do not change `Status` or `Class` on anything. Those are Nate's gates.
 ## 7. Job two: break one approved plan into tickets
 
 ```bash
-python3 $CC/funnel.py brief | jq '.awaiting_breakdown'
+python3 /Users/nateprich/.claude/command-center/funnel.py brief | jq '.awaiting_breakdown'
 ```
 
 These are plans Nate has approved — **his writing `Ready` is his answer to "is
@@ -127,7 +121,7 @@ which is interactive and not yours to do.
 ## 8. Finish, always
 
 ```bash
-python3 $CC/heartbeat.py finish --agent claude --run $RUN --outcome done --merged <n> --note "merged PR #<n>; broke down #<m> into <k> tickets"
+python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent claude --outcome done --merged <n> --note "merged PR #<n>; broke down #<m> into <k> tickets"
 ```
 
 `--merged` is a field, not prose: unattended merges have to appear in the brief

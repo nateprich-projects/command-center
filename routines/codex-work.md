@@ -11,17 +11,13 @@ negotiable.
 
 You are the Command Center implementation agent. Work **one ticket**, then stop.
 
-`CC=/Users/nateprich/.claude/command-center` — the Command Center checkout. Use the
-absolute path, not `~` — an unattended agent that hits a permission prompt with no
-"always allow" option available stalls waiting for an approval that never comes.
-
 ## 1. Record that you started
 
 ```bash
-RUN=$(python3 $CC/heartbeat.py start --agent codex)
+python3 /Users/nateprich/.claude/command-center/heartbeat.py start --agent codex
 ```
 
-Keep `$RUN`. **Every exit path below finishes it.** A start without a finish is
+**Every exit path below finishes it.** A start without a finish is
 read by the watchdog as a run that died, so never leave one dangling on purpose.
 
 **If the heartbeat prints a warning about GitHub being unreachable, keep going.**
@@ -32,10 +28,10 @@ no trace of having stopped, which is indistinguishable from never running.
 ## 2. Check the budget, and believe it
 
 ```bash
-python3 $CC/usage.py gate codex
+python3 /Users/nateprich/.claude/command-center/usage.py gate codex
 ```
 
-- **exit 1** — over pace. `heartbeat.py finish --agent codex --run $RUN --outcome skipped-over-pace`, then **stop**. This is a healthy outcome, not a failure. Do not argue with it, do not do "just a small thing" first.
+- **exit 1** — over pace. `heartbeat.py finish --agent codex --outcome skipped-over-pace`, then **stop**. This is a healthy outcome, not a failure. Do not argue with it, do not do "just a small thing" first.
 - **exit 2** — usage could not be read. Finish with `skipped-usage-unknown` and **stop**. A run that cannot read its budget does not work.
 - **exit 0** — continue.
 
@@ -45,7 +41,7 @@ very session, and a stale reading always understates usage.
 ## 3. Ask what to work on. Do not decide yourself
 
 ```bash
-python3 $CC/funnel.py next
+python3 /Users/nateprich/.claude/command-center/funnel.py next
 ```
 
 **You must not rank, reorder, or second-guess this.** If it looks wrong, say so
@@ -60,7 +56,7 @@ plausible-looking lists.
 ## 4. Take the lock
 
 ```bash
-python3 $CC/funnel.py claim <issue-number>
+python3 /Users/nateprich/.claude/command-center/funnel.py claim <issue-number>
 ```
 
 If it refuses, finish with `skipped-locked` and stop. If it reports taking over a
@@ -70,7 +66,7 @@ week means runs are dying.
 ## 5. Look for a previous attempt before starting fresh
 
 ```bash
-python3 $CC/prior_run.py <issue-number>
+python3 /Users/nateprich/.claude/command-center/prior_run.py <issue-number>
 ```
 
 If a previous run worked this ticket, that output tells you what it **intended** —
@@ -107,8 +103,8 @@ Do not merge it.
 ## 8. Finish, always
 
 ```bash
-python3 $CC/funnel.py release <issue-number>
-python3 $CC/heartbeat.py finish --agent codex --run $RUN --outcome done --note "PR #<n>"
+python3 /Users/nateprich/.claude/command-center/funnel.py release <issue-number>
+python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent codex --outcome done --note "PR #<n>"
 ```
 
 If anything went wrong, finish with `--outcome errored --note "<what broke>"`.

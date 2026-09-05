@@ -102,22 +102,19 @@ These are plans Nate has approved — **his writing `Ready` is his answer to "is
 the plan good?"** — that have no tickets yet. Until they do, Codex has nothing to
 start and the item waits on the funnel, not on him. Take the oldest.
 
-Read the plan in the issue body, then create **sub-issues** of it, each one a
-single run's work: one ticket Codex can finish and open a PR for. Prefer more,
-smaller tickets over fewer large ones — a ticket too big to finish in one run
-dies to the budget and has to be resumed.
+**Use the `breakdown` skill.** It carries the sizing standard, the ordering and
+coverage rules, worked examples, and what to do when a plan will not decompose.
+It exists so that the fiftieth unattended breakdown is done the same way as the
+first — the same reason `funnel.py` owns ranking rather than each agent.
 
-Even trivial work gets at least one ticket. A parentless item is a project, never
-a ticket; that distinction is what keeps an issue out of two queues at once.
+In short: one ticket is one Codex run ending in a PR; split by behaviour rather
+than by layer; every project gets at least one ticket; do not set `Status` or
+`Class` on what you create; and **do not create repositories** — comment and
+leave that to Nate.
 
-**Do not create repositories.** `plan.md` says work "earns a repo" at this gate,
-but creating repos, applying topics and transferring issues unattended is a level
-of authority this system does not grant an agent — and a mistake scatters work
-into places the funnel then has to find. If the work needs its own repo, say so
-in a comment on the issue and leave it for Nate.
-
-Do not set `Status` or `Class` on the tickets you create. Sub-issues join the
-Project automatically with blank fields, and that is correct — they inherit.
+If the plan is too vague to size, **do not invent the missing decisions.** Say
+what is undecided in a comment and leave it. It needs another grilling pass,
+which is interactive and not yours to do.
 
 ## 8. Finish, always
 

@@ -61,7 +61,12 @@ if [ -d "$CLAUDE/command-center" ] && [ ! -L "$CLAUDE/command-center" ]; then
 fi
 link "$REPO"               "$CLAUDE/command-center"
 link "$REPO/statusline.sh" "$CLAUDE/statusline.sh"
-link "$REPO/skills/funnel" "$CLAUDE/skills/funnel"
+# Every skill in the checkout, not a hardcoded list: naming them one by one is
+# how a new skill silently does not exist until someone remembers this file.
+for skill in "$REPO"/skills/*/; do
+  [ -d "$skill" ] || continue
+  link "${skill%/}" "$CLAUDE/skills/$(basename "$skill")"
+done
 
 # ---------------------------------------------------------------------------
 # settings.json — a user-global file that may hold unrelated settings, so it is

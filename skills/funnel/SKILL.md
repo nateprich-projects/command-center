@@ -10,8 +10,11 @@ Render the Command Center funnel readably.
 ## Run this
 
 ```bash
-python3 ~/.claude/command-center/funnel.py brief
+python3 /Users/nateprich/.claude/command-center/funnel.py brief
 ```
+
+Use the absolute path, not `~` — it matches the existing `Bash(python3
+/Users/nateprich/.claude/command-center/*)` always-allow rule exactly; a tilde would not.
 
 It prints JSON. Render it as described below.
 

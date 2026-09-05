@@ -20,7 +20,11 @@ is `Shaped`-to-`Ready`. Reviewing also *finishes* work where a breakdown
 finite class — bounded by what Codex can produce under the lock and the budget —
 and only finite classes may preempt.
 
-`CC=~/.claude/command-center` — the Command Center checkout.
+`CC=/Users/nateprich/.claude/command-center` — the Command Center checkout. Use the
+absolute path, not `~` — Claude Code will not offer "always allow" for a shell command
+with a tilde in a variable assignment (expansion timing is ambiguous), which silently
+turns this from an unattended routine into one that stalls waiting for an approval that
+never comes.
 
 ## 1. Record that you started
 

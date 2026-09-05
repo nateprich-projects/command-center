@@ -3,6 +3,10 @@
   "permissions": {
     "allow": [
       "Bash(python3 /Users/nateprich/.claude/command-center/*)",
+      "Bash(CC=/Users/nateprich/.claude/command-center; python3 $CC/heartbeat.py *)",
+      "Bash(CC=/Users/nateprich/.claude/command-center; python3 $CC/usage.py *)",
+      "Bash(CC=/Users/nateprich/.claude/command-center; python3 $CC/funnel.py *)",
+      "Bash(CC=/Users/nateprich/.claude/command-center; python3 $CC/prior_run.py *)",
       "Bash(python3 -m pytest*)",
       "Bash(gh pr *)",
       "Bash(gh issue *)",

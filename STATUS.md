@@ -170,29 +170,61 @@ verified by tests: breakdown quality and review judgement.
 The first scheduled Claude run fired, recorded **both** heartbeats correctly, and
 exited `skipped-usage-unknown`. The trial found two problems on night one.
 
-**1. Permission prompts (fixed).** The task runs in `permissionMode: default`, so
-it prompted on tool use and waited for a human. The folder grant Nate accepted
-persists (`hasTrustDialogAccepted: true`), but the per-tool "allow once" clicks
-did not — `allowedTools` stayed empty. `.claude/settings.json` in this repo now
-allows exactly what the routine runs and nothing else: the Command Center
-scripts, pytest, read-only git, and the `gh` verbs for issues and PRs. Not
-allowed: `git push`, `Edit`/`Write`, and `gh repo *`.
+**1. Permission prompts (fixed, twice — the first fix was incomplete).** The task
+runs in `permissionMode: default`, so it prompted on tool use and waited for a
+human. The folder grant Nate accepted persists (`hasTrustDialogAccepted: true`),
+but the per-tool "allow once" clicks did not — `allowedTools` stayed empty.
+`.claude/settings.json` in this repo was updated same-day to allow the Command
+Center scripts, pytest, read-only git, and the `gh` verbs for issues and PRs.
 
-**2. The Claude budget gate cannot pass — unresolved, and it blocks everything.**
-`usage.py gate claude` reads the cache written by `statusline.sh`, and a
-scheduled run never writes it: the desktop app does not render a status line, so
-the file does not exist at all. Claude transcripts do not carry `rate_limits`
-either, and nothing else on disk persists it. So the gate fails closed on every
-run, forever.
+That fix covered a bare `python3 /Users/nateprich/.claude/command-center/*`
+invocation, but the routine actually runs `CC=/Users/nateprich/.claude/command-center;
+python3 $CC/<script>.py ...` — a compound command that rule never matched, so
+prompts continued on every step. Worse, `routines/claude.md` used `CC=~/...`
+(a tilde in a variable assignment), and Claude Code will not offer "always allow"
+at all for that shape — no fix to `allowedTools` could have closed the loop while
+the tilde stayed. **2026-09-05, later the same day:** the routine docs now use
+the absolute path, and `.claude/settings.json` has explicit rules for the
+compound `CC=...; python3 $CC/heartbeat.py|usage.py|funnel.py|prior_run.py *`
+shape. Not allowed: `git push`, `Edit`/`Write`, `gh repo *`.
 
-This is the deadlock `plan.md` already rejected in another form — *"avoids the
-deadlock a fail-closed pre-session gate would create, where a stale cache
-prevents the very run that would refresh it."* Fail-closed is a safety property
-when the signal is usually available. When it is **never** available it is not
-safety, it is an off switch, and the routine can never run.
+**2. The Claude budget gate — resolved, not just worked around.** `usage.py gate
+claude` originally read only the cache `statusline.sh` writes, and a scheduled
+run never triggers that (the desktop app renders no status line for one), so the
+gate failed closed on every run. Fixed same-day with `read_claude_local()`: when
+the statusline cache is missing or stale, it estimates Opus usage directly from
+Claude Code's own transcripts (`~/.claude/projects/*/*.jsonl`), which a scheduled
+run writes just like any other session. Capacities are calibrated against the
+real usage panel (see the constants and their comments in `usage.py`).
 
-Awaiting a decision. Codex is unaffected: it writes `rate_limits` into its own
-session rollout, so its gate works.
+**Verified live, 2026-09-05 ~10:31 local:** `usage.py gate claude` returned real
+numbers with no cache present — `five_hour 37.6%`, `seven_day 63.8%`, exit 0 —
+and the weekly reset it computed (12:00 local) landed within a minute of the
+actual subscription reset. The estimate cannot see claude.ai or mobile usage on the same subscription, so it
+reads **lower** than reality — which is the *dangerous* direction, not a chosen
+safety margin. Every other decision here errs the other way on the principle that
+erring high costs a refused run while erring low costs the week.
+
+Two things hold it in check. The capacities are calibrated from the real usage
+panel using these same token counts, so the systematic part of the blind spot is
+already absorbed into them — which is why `ESTIMATE_HAIRCUT` is 1.0 rather than a
+multiplier stacked on top. And the reserves carry the remaining margin. What is
+*not* covered is variance: a week with heavy claude.ai use would drift, and the
+check for that is comparing `python3 usage.py claude` against the panel
+occasionally. If they diverge, re-derive the capacities rather than reinstating a
+haircut.
+
+Residual gap: an account that has done *no* Claude Code work at all in the
+trailing 5h/7d has no transcripts to estimate from, and the gate still fails
+closed (exit 2) in that case. Narrow, and unlikely to bite given how much of this
+work happens in Claude Code.
+
+The original failure was the deadlock `plan.md` had already rejected in another
+form — *"avoids the deadlock a fail-closed pre-session gate would create, where a
+stale cache prevents the very run that would refresh it."* Fail-closed is a
+safety property when the signal is usually available; when it is **never**
+available it is an off switch. Codex was never affected: it writes `rate_limits`
+into its own session rollout, so its gate always worked.
 
 ### What would count as failure
 

@@ -11,7 +11,9 @@ negotiable.
 
 You are the Command Center implementation agent. Work **one ticket**, then stop.
 
-`CC=~/.claude/command-center` — the Command Center checkout.
+`CC=/Users/nateprich/.claude/command-center` — the Command Center checkout. Use the
+absolute path, not `~` — an unattended agent that hits a permission prompt with no
+"always allow" option available stalls waiting for an approval that never comes.
 
 ## 1. Record that you started
 

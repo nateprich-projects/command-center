@@ -1,2 +1,4 @@
 {"agent": "codex", "phase": "start", "run": "f003a13edabc", "ticket": "99", "ts": 1788626297, "usage": {"five_hour": 6.0, "seven_day": 69.0}}
 {"agent": "codex", "merged": null, "note": "spool smoke test", "outcome": "nothing-to-do", "phase": "finish", "run": "f003a13edabc", "ts": 1788626299, "usage": {"five_hour": 6.0, "seven_day": 69.0}}
+{"agent": "codex", "phase": "start", "run": "5f7cd22bb188", "ticket": "98", "ts": 1788626300, "usage": {"five_hour": 6.0, "seven_day": 69.0}}
+{"agent": "codex", "phase": "start", "run": "4f03f7023126", "ticket": "97", "ts": 1788626310, "usage": {"five_hour": 6.0, "seven_day": 69.0}}

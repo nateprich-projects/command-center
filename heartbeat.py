@@ -189,6 +189,10 @@ def main(argv=None) -> int:
     finish.add_argument("--run", required=True)
     finish.add_argument("--outcome", required=True, choices=OUTCOMES)
     finish.add_argument("--note", default=None)
+    finish.add_argument(
+        "--merged", default=None,
+        help="PR number merged unattended; recorded so the brief can surface it",
+    )
 
     show = sub.add_parser("read", help="print an agent's records as JSON")
     show.add_argument("--agent", required=True, choices=["codex", "claude"])
@@ -220,6 +224,10 @@ def main(argv=None) -> int:
             "ts": int(time.time()),
             "outcome": args.outcome,
             "note": args.note,
+            # Recorded as a field, not scraped out of the note. plan.md requires
+            # unattended merges to appear in the brief as a record, and a record
+            # that has to be parsed out of prose is not a record.
+            "merged": args.merged,
             "usage": usage_snapshot(args.agent),
         })
         return 0

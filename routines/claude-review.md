@@ -86,12 +86,18 @@ Do not change `Status` or `Class` on anything. Those are Nate's gates.
 ## 7. Finish, always
 
 ```bash
-python3 $CC/heartbeat.py finish --agent claude --run $RUN --outcome done --note "merged PR #<n>"
+python3 $CC/heartbeat.py finish --agent claude --run $RUN --outcome done --merged <n> --note "merged PR #<n>"
 ```
+
+`--merged` is a field, not prose: unattended merges have to appear in the brief
+as a record, and a record that must be parsed out of a sentence is not one.
 
 Use `errored` with a note if something broke. Unattended merges must appear in
 the brief as a record — the note is that record.
 
 **If Nate later finds a merged PR is broken**, that is not "a bug". It is the
-auto-merge bar having failed, which is a different and more serious thing. Three
-in a week means stop auto-merging and fix this prompt.
+auto-merge bar having failed, which is a different and more serious thing. He
+runs `funnel reject <pr>`, which reopens the ticket, files the regression,
+returns the parent to `Building` with `Class: Broken`, and reports the count.
+**Three in a week and auto-merging stops** until this prompt is fixed. Check
+`rejected_merges.stop_auto_merging` in `funnel brief` before merging anything.

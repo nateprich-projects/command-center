@@ -345,3 +345,36 @@ def test_an_empty_lock_field_is_not_a_claim():
     nodes = json.loads(FIXTURE.read_text())
     beta12 = next(i for i in (funnel._from_node(n) for n in nodes) if i and i.number == 12)
     assert beta12.in_motion_since is None
+
+
+# -- rejected merges: the feedback loop on unattended merging ---------------
+
+
+def regression(number, days_ago, pr=99):
+    return item(number, None, None, days=days_ago,
+                title="{}{}: something".format(funnel.REGRESSION_PREFIX, pr))
+
+
+def test_rejected_merges_are_counted_from_the_issues_themselves():
+    """The regression issues are the counter — GitHub is the state, so there is
+    nothing separate to keep in step."""
+    verdict = funnel.rejected_merges([regression(1, 1), regression(2, 3)], NOW)
+    assert verdict["count"] == 2
+    assert not verdict["stop_auto_merging"]
+
+
+def test_three_in_a_week_says_stop_auto_merging():
+    """Not 'there are bugs' — the auto-merge bar has failed."""
+    rows = [regression(1, 1), regression(2, 3), regression(3, 6)]
+    assert funnel.rejected_merges(rows, NOW)["stop_auto_merging"]
+
+
+def test_older_rejections_fall_out_of_the_window():
+    rows = [regression(1, 1), regression(2, 30), regression(3, 60)]
+    verdict = funnel.rejected_merges(rows, NOW)
+    assert verdict["count"] == 1
+    assert not verdict["stop_auto_merging"]
+
+
+def test_ordinary_issues_are_not_counted_as_rejections():
+    assert funnel.rejected_merges([item(1, "Ready", "New")], NOW)["count"] == 0

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ PROJECT_OWNER = "nateprich"
 PROJECT_NUMBER = 2
 TOPIC = "command-center"
 OWNERS = [("user", "nateprich"), ("organization", "nateprich-projects")]
+REPO = "nateprich-projects/command-center"
 
 #: The single-in-motion lock. Codex acts as Nate through the gh CLI — no bot
 #: identity, no originating-app marker — so no GitHub write can identify it and
@@ -60,6 +62,16 @@ GATES = {
 DECISION_ORDER = ["Building", "Ready", "Shaped"]
 
 MAINTENANCE_WINDOW = timedelta(days=30)
+
+#: Regression issues opened by `funnel reject`. The issues themselves are the
+#: counter — GitHub is the state, so there is nothing else to keep in step.
+REGRESSION_PREFIX = "Regression from PR #"
+
+#: Three rejected merges in a week means the auto-merge bar has failed. That is
+#: not "there are bugs" — it is a different and more serious fact, and the
+#: response is to stop auto-merging and fix the review prompt.
+REJECTED_MERGE_ALARM = 3
+REJECTED_MERGE_WINDOW = timedelta(days=7)
 
 
 # --------------------------------------------------------------------------
@@ -276,6 +288,56 @@ def next_ticket(items: Sequence[Item], now: datetime) -> Optional[Item]:
             if effective_class(candidate, by_ref) == "Broken" and candidate.ref != holder.ref:
                 return candidate
     return None
+
+
+def rejected_merges(items: Iterable[Item], now: datetime) -> Dict[str, object]:
+    """Merges Nate checked and found broken.
+
+    The information carried here is not "there is a bug" — it is "the
+    auto-merge bar failed", which is the feedback loop on letting Claude merge
+    unattended. Without it, a failed bar is noticed only by someone remembering
+    it happened before.
+    """
+    cutoff = now - REJECTED_MERGE_WINDOW
+    recent = [
+        i
+        for i in items
+        if i.title.startswith(REGRESSION_PREFIX)
+        and i.status_since
+        and i.status_since >= cutoff
+    ]
+    return {
+        "window_days": REJECTED_MERGE_WINDOW.days,
+        "count": len(recent),
+        "refs": [i.ref for i in recent],
+        "stop_auto_merging": len(recent) >= REJECTED_MERGE_ALARM,
+    }
+
+
+def unattended_merges(now: datetime) -> List[Dict[str, object]]:
+    """Merges Claude made without Nate, read from its own heartbeat records.
+
+    plan.md makes these a condition of unattended merging being allowed at all:
+    they must appear in the brief as a record.
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import heartbeat
+
+        rows = heartbeat.read("claude")
+    except Exception:
+        return []
+
+    cutoff = (now - MAINTENANCE_WINDOW).timestamp()
+    return [
+        {
+            "pr": row.get("merged"),
+            "at": datetime.fromtimestamp(row["ts"], timezone.utc).isoformat(),
+            "note": row.get("note"),
+        }
+        for row in rows
+        if row.get("merged") and (row.get("ts") or 0) >= cutoff
+    ]
 
 
 def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
@@ -616,6 +678,8 @@ def cmd_brief(items: List[Item], now: datetime) -> int:
         "in_motion": holder.ref if holder else None,
         "stale_locks_taken_over": [i.ref for i in stale_locks(items, now)],
         "maintenance_load": maintenance_load(items, now),
+        "unattended_merges": unattended_merges(now),
+        "rejected_merges": rejected_merges(items, now),
     }
     print(json.dumps(brief, indent=2))
     return 0
@@ -678,6 +742,113 @@ def cmd_claim(items: List[Item], now: datetime, ref: str) -> int:
     return 0
 
 
+SET_FIELD = """
+mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+  updateProjectV2ItemFieldValue(input: {
+    projectId: $project, itemId: $item, fieldId: $field,
+    value: {singleSelectOptionId: $option}
+  }) { projectV2Item { id } }
+}
+"""
+
+CLASS_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhY15k"
+STATUS_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhY1tc"
+
+
+def _option_id(field_id: str, name: str) -> str:
+    data = gh_graphql(
+        '{node(id:"%s"){... on ProjectV2SingleSelectField{options{id name}}}}'
+        % field_id
+    )
+    for option in data["node"]["options"]:
+        if option["name"] == name:
+            return option["id"]
+    raise GitHubError("no option {} on that field".format(name))
+
+
+def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -> int:
+    """Record that a merged PR turned out to be broken.
+
+    This is not "file a bug". The information is that **the auto-merge bar
+    failed**, which is a different and more serious fact, and it is the only
+    feedback loop on letting Claude merge unattended. One action does all four
+    steps, rather than leaving them to be remembered.
+
+    This is also the single case in the design where `Class` is written by code
+    rather than by Nate.
+    """
+    number = pr.rstrip("/").split("/")[-1].lstrip("#")
+    repo = REPO
+
+    def run(*args: str) -> str:
+        out = subprocess.run(list(args), capture_output=True, text=True)
+        if out.returncode != 0:
+            raise GitHubError(out.stderr.strip())
+        return out.stdout.strip()
+
+    data = json.loads(run(
+        "gh", "pr", "view", number, "--repo", repo,
+        "--json", "title,url,headRefName,merged",
+    ))
+    if not data.get("merged"):
+        raise GitHubError(
+            "PR #{} is not merged — a rejected merge is one that landed".format(number)
+        )
+
+    branch = data.get("headRefName") or ""
+    ticket_no = branch.split("/")[-1] if branch.startswith("ticket/") else None
+    ticket = next((i for i in items if str(i.number) == ticket_no), None) if ticket_no else None
+
+    # 1. Reopen the ticket, so the work is visibly unfinished again.
+    if ticket:
+        run("gh", "issue", "reopen", str(ticket.number), "--repo", repo)
+        print("reopened {}".format(ticket.ref))
+
+    # 2. File the regression against the merged PR. These issues *are* the
+    #    counter — GitHub is the state, so there is nothing else to keep in step.
+    body = "\n".join(filter(None, [
+        "A merge that landed without Nate turned out to be broken.",
+        "",
+        "- Merged PR: {}".format(data.get("url")),
+        "- Ticket: {}".format("#" + ticket_no if ticket_no else "unknown"),
+        "",
+        "**What this means:** not that there is a bug, but that the auto-merge bar",
+        "failed. Three of these in a week and auto-merging stops until the review",
+        "prompt in `routines/claude-review.md` is fixed.",
+        "",
+        "What is broken: {}".format(note) if note else None,
+    ]))
+    url = run(
+        "gh", "issue", "create", "--repo", repo,
+        "--title", "{}{}: {}".format(REGRESSION_PREFIX, number, data.get("title", "")),
+        "--body", body,
+    ).splitlines()[-1]
+    print("filed {}".format(url))
+
+    # 3. Return the parent to Building and mark it Broken. Broken is finite, so
+    #    it may preempt — which is the point: a broken merge jumps the queue.
+    parent = next(
+        (i for i in items if ticket and i.ref == ticket.parent), None
+    )
+    if parent and parent.item_id:
+        gh_graphql(SET_FIELD, project=PROJECT_ID, item=parent.item_id,
+                   field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Building"))
+        gh_graphql(SET_FIELD, project=PROJECT_ID, item=parent.item_id,
+                   field=CLASS_FIELD_ID, option=_option_id(CLASS_FIELD_ID, "Broken"))
+        print("{} -> Building / Broken".format(parent.ref))
+    elif ticket:
+        print("note: {} has no parent in the Project; set its Class by hand"
+              .format(ticket.ref), file=sys.stderr)
+
+    # 4. Say the count out loud. A counter nobody sees is not a counter.
+    count = rejected_merges(items, now)["count"] + 1
+    print("\nrejected merges in the last {} days: {}".format(
+        REJECTED_MERGE_WINDOW.days, count))
+    if count >= REJECTED_MERGE_ALARM:
+        print("STOP AUTO-MERGING. Fix routines/claude-review.md before the next run.")
+    return 0
+
+
 def cmd_release(items: List[Item], now: datetime, ref: str) -> int:
     write_lock(find(items, ref), "")
     return 0
@@ -693,6 +864,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
     release = sub.add_parser("release", help="give up the lock on a ticket")
     release.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    reject = sub.add_parser(
+        "reject", help="a merged PR turned out to be broken: undo and record it")
+    reject.add_argument("pr", help="PR number or URL")
+    reject.add_argument("--note", default=None, help="what is broken")
     args = parser.parse_args(argv)
 
     now = datetime.now(timezone.utc)
@@ -707,6 +882,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_claim(items, now, args.ref)
         if args.command == "release":
             return cmd_release(items, now, args.ref)
+        if args.command == "reject":
+            return cmd_reject(items, now, args.pr, args.note)
         return {"queue": cmd_queue, "next": cmd_next, "brief": cmd_brief}[args.command](
             items, now
         )

@@ -8,6 +8,37 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+## jq
+
+### `// empty` inside object construction discards the whole object
+
+**2026-09-05 · jq 1.7.1 · measured**
+
+**Build the object, then filter — never `{key: (x // empty)}`.** In jq, `empty` is an
+empty *stream*, not a missing value, so an `empty` anywhere in object construction makes
+the entire object produce no output.
+
+This bites precisely where the Claude Code status-line docs recommend `// empty`. That
+advice is correct for reading a scalar (`jq -r '.rate_limits.seven_day.used_percentage //
+empty'`) and wrong for assembling one, and the two look identical:
+
+```
+$ echo '{"rate_limits":{"seven_day":{"used_percentage":41}}}' \
+    | jq '{five_hour: (.rate_limits.five_hour // empty), seven_day: .rate_limits.seven_day}'
+                                                    # → no output at all
+```
+
+In `statusline.sh` that wrote a **zero-byte cache** whenever exactly one rate-limit window
+was present — which is the normal state after a window expires, not an edge case. The
+render still looked perfect, so only a test that read the file back caught it.
+
+Use instead:
+
+```
+jq '{five_hour: .rate_limits.five_hour, seven_day: .rate_limits.seven_day}
+    | with_entries(select(.value != null))'
+```
+
 ## GitHub
 
 ### A sub-issue joins its parent's Project automatically, with blank fields

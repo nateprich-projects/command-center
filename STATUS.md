@@ -29,6 +29,15 @@ vacuously true for a childless item each fail a test.
 Stdlib only, Python 3.9. Authentication is delegated to the `gh` CLI, so the program
 never reads, stores or passes a token.
 
+**Deliverable #4 — `statusline.sh`.** Renders the status line and caches both rate-limit
+windows. 8 tests covering the absence cases: a missing window is omitted rather than shown
+as `0%`, an absent `rate_limits` renders "usage unknown" and does not erase a previous
+reading, and a present payload replaces the file wholesale so an expired window cannot
+linger. Written atomically via `mktemp` + `mv`.
+
+**Not installed.** It lives in the repo; wiring it into `~/.claude/settings.json` is a
+change to a user-global config and has not been made.
+
 ## Built, not verified
 
 - **`funnel.py` at scale.** Exercised against a Project holding one item. Pagination,

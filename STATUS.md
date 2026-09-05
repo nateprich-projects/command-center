@@ -91,6 +91,41 @@ is not already a symlink, and refuses to touch a `settings.json` it cannot parse
 
 Nothing.
 
+## Trial run, started 2026-09-05
+
+v0 is **not accepted**. Accepting something that has never executed is not much of
+an accept, so it runs for a few days first and then the gate gets answered on evidence.
+
+Three real items were placed at different stages to exercise the whole path:
+
+| Item | Stage | Class | Exercises |
+|---|---|---|---|
+| [#16 `funnel park`](https://github.com/nateprich-projects/command-center/issues/16) | Ready | Improve | Breakdown, then Codex work. Highest on the ladder, so its tickets go first |
+| [#17 `funnel doctor`](https://github.com/nateprich-projects/command-center/issues/17) | Ready | New | Breakdown, then Codex. Below #16, so it proves the ladder actually orders |
+| [#18 multi-repo](https://github.com/nateprich-projects/command-center/issues/18) | Shaped | Improve | Nate's "is the plan good?" gate |
+| [#15 self-improvement](https://github.com/nateprich-projects/command-center/issues/15) | Ideas | — | That Ideas stays silent and needs no Class |
+
+All three are real work, not busywork: #16 is required by `plan.md` and has no
+command, #17 checks an install whose parts have each already broken once, and #18
+fixes a known ambiguity in `find()` that would claim the wrong ticket once a
+second repo joins.
+
+**Codex is gated until roughly Sun 6 Sep, 05:48.** Its weekly window is at 67%
+used, and 67 + 15 reserved exceeds the pace line until the line rises to meet it.
+Until then every Codex run should record `skipped-over-pace` and do nothing. That
+is the budget gate working, not a failure — and it is itself the first thing
+under test.
+
+### What would count as failure
+
+- Breakdowns producing tickets too large to finish in one run, or built on
+  decisions the plan never made
+- The ladder not putting #16's tickets before #17's
+- Two Codex runs working at once, or a stale claim never taken over
+- A start recorded with no finish
+- The watchdog firing on healthy outcomes, or staying silent through a real one
+- A merged PR that does not match its plan
+
 ## Open questions
 
 - **"Share of runs" has no run log in v0.** `maintenance_load` derives it from issues

@@ -417,6 +417,26 @@ _Rejected: an open PR as the predicate — it misses the window between run star
 creation, which is precisely when a run dies. Rejected: a branch, which appears later
 still._
 
+### A funnel item is a project; its sub-issues are the tickets
+
+The four gates only make sense for a project. "Is the plan good?" and "start now?" are
+decisions about *build the funnel*; they are nonsense about *write the tests*, which is a
+step, not a decision. Codex works tickets, one per run.
+
+So: **the project-level issue carries `Status` and `Class`. Its sub-issues are tickets and
+carry neither** — they inherit `Class` for ladder ranking, and `Status` does not apply to
+them. This is what keeps the gate count at roughly four decisions per project rather than
+four per ticket.
+
+GitHub adds a sub-issue to its parent's Project automatically, with its fields blank, so
+this shape needs no maintenance. A parentless item with no `Status` at all is therefore
+not a ticket — it is a project that was added and forgotten, and it is flagged as needing
+a `Class`.
+
+_Rejected: every issue carrying its own `Status`. Tried briefly and it is incoherent —
+`command-center#1` appeared simultaneously in Nate's queue asking "start now?" and in
+Codex's queue offering itself as work._
+
 ## Verification status
 
 **Resolved 2026-09-05:**

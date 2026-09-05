@@ -10,6 +10,32 @@ be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes pe
 
 ## GitHub
 
+### A sub-issue joins its parent's Project automatically, with blank fields
+
+**2026-09-05 · GitHub Projects v2 · measured**
+
+**Do not add tickets to the Project by hand, and do not treat a blank `Status` on a child
+as a missing value.** Linking an issue as a sub-issue via `addSubIssue` adds it to every
+Project its parent belongs to, with all custom fields unset.
+
+Observed: Project 2 held only `command-center#2`. After linking seven issues as its
+sub-issues, the Project reported all eight, with `Status`/`Class` set only on the parent:
+
+```
+#2  Status=Building  Class=New
+#3  Status=-         Class=-
+#4  Status=-         Class=-      ... and so on
+```
+
+Two consequences. **A blank `Status` on a child is the normal, correct state** — the
+"anything not in Ideas must carry a Class" rule has to exempt anything with a parent, or
+every ticket is permanently invalid. And **a parentless item with no `Status` is a
+different case entirely**: a project added and forgotten, which must still be flagged.
+
+`subIssuesSummary.total` and Project membership both lag by a second or two after
+`addSubIssue`. A read immediately afterwards can report the old count or omit the item;
+it settles on its own.
+
 ### An issue does not see a Project owned by a different owner
 
 **2026-09-05 · GitHub GraphQL · measured**

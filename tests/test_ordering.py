@@ -16,6 +16,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import funnel  # noqa: E402
 from funnel import (  # noqa: E402
     Item,
+    effective_class,
     awaiting_decision,
     gate_question,
     ladder_index,
@@ -117,6 +118,26 @@ def test_anything_past_ideas_must_carry_a_class():
     assert needs_class(item(1, "Shaped", None))
     assert needs_class(item(2, "Ready", None))
     assert needs_class(item(3, "Building", None))
+
+
+def test_a_ticket_is_exempt_because_it_inherits():
+    """Sub-issues join the parent's Project with blank fields. That is normal,
+    not a forgotten field."""
+    parent = item(1, "Ready", "New", children_total=1, children_done=0)
+    ticket = item(2, None, None, parent="nateprich/beta#1")
+    assert not needs_class(ticket)
+    assert effective_class(ticket, {parent.ref: parent}) == "New"
+
+
+def test_a_project_with_no_status_at_all_still_needs_a_class():
+    """The forgotten-field case: added to the Project and never touched again.
+    A missing Status must not excuse a missing Class."""
+    assert needs_class(item(1, None, None))
+
+
+def test_a_ticket_with_its_own_class_keeps_it_when_it_has_no_parent_record():
+    orphan = item(1, "Ready", "Broken", parent="nateprich/beta#999")
+    assert effective_class(orphan, {}) == "Broken"
 
 
 def test_ideas_done_and_parked_are_exempt_from_class():

@@ -121,9 +121,25 @@ def ladder_index(klass: Optional[str]) -> int:
     return LADDER.index(klass) if klass in LADDER else len(LADDER)
 
 
+def effective_class(item: Item, by_ref: Dict[str, Item]) -> Optional[str]:
+    """A ticket inherits its parent's Class — the ladder ranks projects, not
+    individual tickets. Sub-issues join the parent's Project automatically with
+    their fields blank, so this is the normal case, not an edge case."""
+    parent = by_ref.get(item.parent or "")
+    return (parent.klass if parent else None) or item.klass
+
+
 def needs_class(item: Item) -> bool:
-    """Anything not in Ideas must carry a Class. Unset is invalid."""
-    if item.state == "CLOSED" or item.status in (None, "Ideas", "Done", "Parked"):
+    """Anything not in Ideas must carry a Class. Unset is invalid.
+
+    Tickets are exempt because they inherit. A parentless item is a project,
+    and a project with no Status at all is exactly the forgotten-field case
+    this is meant to catch — so a missing Status does not excuse a missing
+    Class.
+    """
+    if item.state == "CLOSED" or item.parent:
+        return False
+    if item.status in ("Ideas", "Done", "Parked"):
         return False
     return item.klass not in LADDER
 
@@ -179,10 +195,6 @@ def startable(items: Sequence[Item]) -> List[Item]:
             return item.status in ("Ready", "Building") and not item.is_blocked
         return parent.status in ("Ready", "Building") and not parent.is_blocked
 
-    def effective_class(item: Item) -> Optional[str]:
-        parent = by_ref.get(item.parent or "")
-        return (parent.klass if parent else None) or item.klass
-
     def in_flight(item: Item) -> bool:
         """Once a project is Building, its remaining tickets finish first.
 
@@ -195,7 +207,7 @@ def startable(items: Sequence[Item]) -> List[Item]:
         since = item.status_since or datetime.max.replace(tzinfo=timezone.utc)
         return (
             not in_flight(item),
-            ladder_index(effective_class(item)),
+            ladder_index(effective_class(item, by_ref)),
             since,
             item.repo,
             item.number,
@@ -255,13 +267,9 @@ def next_ticket(items: Sequence[Item], now: datetime) -> Optional[Item]:
 
     by_ref = {i.ref: i for i in items}
 
-    def effective_class(item: Item) -> Optional[str]:
-        parent = by_ref.get(item.parent or "")
-        return (parent.klass if parent else None) or item.klass
-
-    if effective_class(holder) != "Broken":
+    if effective_class(holder, by_ref) != "Broken":
         for candidate in queue:
-            if effective_class(candidate) == "Broken" and candidate.ref != holder.ref:
+            if effective_class(candidate, by_ref) == "Broken" and candidate.ref != holder.ref:
                 return candidate
     return None
 
@@ -516,14 +524,15 @@ def launch_command(item: Item) -> str:
     return 'claude "Work {} — {}"'.format(item.url, item.title)
 
 
-def item_json(item: Item, now: datetime) -> dict:
+def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = None) -> dict:
+    by_ref = by_ref if by_ref is not None else {}
     return {
         "ref": item.ref,
         "repo": item.repo,
         "title": item.title,
         "url": item.url,
         "status": item.status,
-        "class": item.klass,
+        "class": effective_class(item, by_ref),
         "waiting_on": gate_question(item),
         "waited": humanise(item.waited(now)),
         "waited_days": item.waited(now).days if item.waited(now) else None,
@@ -557,8 +566,11 @@ def cmd_queue(items: List[Item], now: datetime) -> int:
     print("\nStartable by Codex ({}), ladder order:".format(len(tickets)))
     if not tickets:
         print("  nothing")
+    by_ref = {i.ref: i for i in items}
     for item in tickets:
-        print("  {:<12} {:<34} {}".format(item.klass or "no class", item.ref, item.title))
+        klass = effective_class(item, by_ref)
+        shown = (klass or "no class") + ("" if item.klass else " (inherited)" if klass else "")
+        print("  {:<24} {:<34} {}".format(shown, item.ref, item.title))
 
     missing = [i for i in items if needs_class(i)]
     if missing:
@@ -580,12 +592,13 @@ def cmd_next(items: List[Item], now: datetime) -> int:
                 file=sys.stderr,
             )
         return 1
-    print(json.dumps(item_json(ticket, now), indent=2))
+    print(json.dumps(item_json(ticket, now, {i.ref: i for i in items}), indent=2))
     return 0
 
 
 def cmd_brief(items: List[Item], now: datetime) -> int:
     decisions = awaiting_decision(items)
+    by_ref = {i.ref: i for i in items}
     counts = {}
     for stage in STAGES:
         if stage == "Ideas":
@@ -599,8 +612,8 @@ def cmd_brief(items: List[Item], now: datetime) -> int:
         "generated_at": now.isoformat(),
         "total_needing_nate": len(decisions),
         "counts_by_gate": counts,
-        "items": [item_json(i, now) for i in decisions],
-        "needs_class": [item_json(i, now) for i in items if needs_class(i)],
+        "items": [item_json(i, now, by_ref) for i in decisions],
+        "needs_class": [item_json(i, now, by_ref) for i in items if needs_class(i)],
         "in_motion": holder.ref if holder else None,
         "stale_locks_taken_over": [i.ref for i in stale_locks(items, now)],
         "maintenance_load": maintenance_load(items, now),

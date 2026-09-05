@@ -43,6 +43,18 @@ def test_spending_the_week_on_monday_is_over_pace():
     assert verdict["over_pace"]
 
 
+def test_the_weekly_window_is_anchored_to_a_known_reset():
+    """A trailing count keeps last week's tokens past a reset, refusing work
+    against a completely fresh budget."""
+    import datetime as _dt
+    for probe in (NOW, NOW + 86400 * 3, NOW + 86400 * 6):
+        reset = usage.last_weekly_reset(probe)
+        assert reset <= probe
+        assert probe - reset < 7 * 86400
+        assert _dt.datetime.fromtimestamp(reset).weekday() == usage.WEEKLY_RESET_WEEKDAY
+        assert _dt.datetime.fromtimestamp(reset).hour == usage.WEEKLY_RESET_HOUR
+
+
 def test_an_even_burn_is_under_pace():
     # allowed = 45%; 25 used + 15 reserved = 40
     verdict = usage.pace(seven_day(25.0, 0.5), NOW)
@@ -71,9 +83,18 @@ def test_the_target_leaves_headroom_at_the_end_of_the_week():
     assert verdict["windows"][0]["allowed_percent"] == usage.WEEKLY_TARGET
 
 
-def test_a_fresh_window_allows_almost_nothing():
-    verdict = usage.pace(seven_day(5.0, 0.0), NOW)
-    assert verdict["over_pace"]
+def test_a_fresh_window_allows_the_floor_not_zero():
+    """Without a floor the line starts at zero, the reserve alone exceeds it,
+    and nothing runs for the first day of every week — a dead zone at exactly
+    the moment the budget is most free."""
+    assert not usage.pace(seven_day(5.0, 0.0), NOW)["over_pace"]
+    assert usage.pace(seven_day(5.0, 0.0), NOW)["windows"][0]["allowed_percent"] == \
+        usage.WEEKLY_FLOOR
+
+
+def test_the_floor_does_not_license_spending_the_week_on_day_one():
+    """It permits a little early work, not a sprint."""
+    assert usage.pace(seven_day(40.0, 0.02), NOW)["over_pace"]
 
 
 # -- the five-hour ceiling --------------------------------------------------
@@ -334,7 +355,8 @@ def test_a_rolling_estimate_gets_a_flat_ceiling_not_a_pace_line():
     """A trailing window has no cycle position, so the proportional line would
     read 0% allowed forever — the failure that made the gate unusable."""
     reading = {"estimated": True, "windows": {
-        "seven_day": {"used_percent": 50.0, "resets_at": NOW + WEEK}}}
+        "seven_day": {"used_percent": 50.0, "rolling": True,
+                      "resets_at": NOW + WEEK}}}
     verdict = usage.pace(reading, NOW)
     assert verdict["windows"][0]["allowed_percent"] == usage.WEEKLY_TARGET
     assert verdict["windows"][0]["elapsed_fraction"] is None

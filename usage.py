@@ -72,6 +72,30 @@ WEEKLY_CAPACITY = 1_500_000.0
 #: weekly window at 67.7% against a reported 67%, so the blind spot is small.
 ESTIMATE_HAIRCUT = 1.10
 
+#: When the weekly window resets, in local time. The estimate counts tokens
+#: **since the most recent reset**, not over a trailing seven days.
+#:
+#: A trailing window seemed conservative and is in fact broken: at a reset the
+#: real usage drops to zero while a trailing count keeps the previous week's
+#: tokens for another seven days, so the gate would refuse for days against a
+#: completely fresh budget. Knowing the anchor also gives the weekly window a
+#: cycle position, so it can use the same proportional pace line as a real
+#: reading instead of falling back to a flat ceiling.
+WEEKLY_RESET_WEEKDAY = 5  # Monday is 0, so 5 is Saturday
+WEEKLY_RESET_HOUR = 12    # local noon
+
+
+def last_weekly_reset(now: float) -> float:
+    """The most recent weekly reset at or before `now`, in local time."""
+    here = datetime.datetime.fromtimestamp(now)
+    candidate = here.replace(
+        hour=WEEKLY_RESET_HOUR, minute=0, second=0, microsecond=0
+    ) - datetime.timedelta(days=(here.weekday() - WEEKLY_RESET_WEEKDAY) % 7)
+    if candidate > here:
+        candidate -= datetime.timedelta(days=7)
+    return candidate.timestamp()
+
+
 #: Anthropic runs limit promos regularly, so the boost is read at runtime rather
 #: than written into this file with an expiry date. The app caches the notice it
 #: displays; that is the source.
@@ -138,6 +162,11 @@ MAX_AGE = 15 * 60
 #: 7-day window, leaving ~10% for Nate.
 WEEKLY_TARGET = 90.0
 
+#: An early-cycle allowance. Without it the proportional line starts at zero, so
+#: the reserve alone exceeds it and nothing can run for the first day or so of
+#: every week — a dead zone at exactly the moment the budget is most free.
+WEEKLY_FLOOR = 25.0
+
 #: Never burn a 5-hour window past this. The rolling 5-hour window, not the
 #: weekly one, is what actually locks Nate out of his own account.
 FIVE_HOUR_CEILING = 80.0
@@ -172,7 +201,8 @@ def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
     cache, which such a run never writes.
     """
     now = time.time() if now is None else now
-    cutoff = now - SEVEN_DAY
+    reset = last_weekly_reset(now)
+    cutoff = min(reset, now - FIVE_HOUR)
     five_hour = weekly = 0.0
     seen = False
 
@@ -200,7 +230,8 @@ def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
                     if not tokens or stamp is None or stamp < cutoff:
                         continue
                     seen = True
-                    weekly += tokens
+                    if stamp >= reset:
+                        weekly += tokens
                     if stamp >= now - FIVE_HOUR:
                         five_hour += tokens
         except OSError:
@@ -220,8 +251,10 @@ def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
                     100.0 * five_hour * ESTIMATE_HAIRCUT
                     / capacity("five_hour", now),
                 ),
-                # A rolling estimate has no reset instant to report. The weekly
-                # pace line needs one, so give it the end of the trailing window.
+                # The 5-hour window is anchored to first use, which is not
+                # knowable here, so this one stays a trailing count — and the
+                # five-hour rule is a flat ceiling anyway.
+                "rolling": True,
                 "resets_at": now + FIVE_HOUR,
             },
             "seven_day": {
@@ -230,7 +263,8 @@ def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
                     100.0 * weekly * ESTIMATE_HAIRCUT
                     / capacity("seven_day", now),
                 ),
-                "resets_at": now + SEVEN_DAY,
+                "rolling": False,
+                "resets_at": reset + SEVEN_DAY,
             },
         },
         "opus_output_tokens": {"five_hour": five_hour, "seven_day": weekly},
@@ -368,16 +402,16 @@ def pace(reading: Dict, now: float) -> Dict:
 
     seven = windows.get("seven_day") or {}
     if seven.get("used_percent") is not None and seven.get("resets_at"):
-        if reading.get("estimated"):
-            # A trailing-window estimate has no cycle position, so the
-            # proportional line is meaningless — it would read "0% allowed"
-            # forever. A rolling total gets a flat ceiling instead.
+        if seven.get("rolling"):
+            # A trailing count has no cycle position, so the proportional line
+            # is meaningless — it would read "0% allowed" forever. A rolling
+            # total gets a flat ceiling instead.
             elapsed_fraction = None
             allowed = WEEKLY_TARGET
         else:
             remaining = max(0.0, float(seven["resets_at"]) - now)
             elapsed_fraction = max(0.0, min(1.0, 1.0 - remaining / SEVEN_DAY))
-            allowed = WEEKLY_TARGET * elapsed_fraction
+            allowed = max(WEEKLY_FLOOR, WEEKLY_TARGET * elapsed_fraction)
         verdicts.append(
             {
                 "window": "seven_day",

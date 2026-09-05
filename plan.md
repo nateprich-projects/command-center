@@ -287,9 +287,20 @@ The haircut is calibrated rather than guessed: on 2026-09-05 the estimate put th
 window at 67.7% against a reported 67%.
 
 Two shapes must not be confused. A **resetting** window gets the proportional pace line,
-because its `resets_at` says how far through the cycle it is. A **rolling** estimate has
-no cycle position, so it gets a flat ceiling — applying the pace line to it computes
+because its `resets_at` says how far through the cycle it is. A **rolling** count has no
+cycle position, so it gets a flat ceiling — applying the pace line to it computes
 "0% allowed" forever.
+
+**The weekly estimate counts from the known reset — Saturday noon, local — not over a
+trailing seven days.** A trailing window looks conservative and is broken: at a reset the
+real usage drops to zero while the trailing count carries the previous week's tokens for
+another seven days, so the gate refuses for days against a completely fresh budget. The
+5-hour window stays a trailing count, because it is anchored to first use, which is not
+knowable here — and the five-hour rule is a flat ceiling anyway.
+
+**The weekly line has a floor as well as a slope.** A purely proportional line starts at
+zero, so the reserve alone exceeds it and nothing can run for the first day or so of every
+week — a dead zone at exactly the moment the budget is most free.
 
 **Only Opus is budgeted.** It is what actually consumes a window: the 5-hour window that
 came closest to the limit carried 713k Opus output tokens against 44k of everything else.

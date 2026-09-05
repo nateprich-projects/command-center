@@ -1,2 +1,0 @@
-{"agent": "codex", "phase": "start", "run": "30fb61757276", "ticket": "9", "ts": 1788598015, "usage": {"five_hour": 14.0, "seven_day": 67.0}}
-{"agent": "codex", "note": "smoke test", "outcome": "nothing-to-do", "phase": "finish", "run": "30fb61757276", "ts": 1788598018, "usage": {"five_hour": 14.0, "seven_day": 67.0}}

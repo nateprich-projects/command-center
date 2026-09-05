@@ -543,6 +543,35 @@ _Rejected: every issue carrying its own `Status`. Tried briefly and it is incohe
 `command-center#1` appeared simultaneously in Nate's queue asking "start now?" and in
 Codex's queue offering itself as work._
 
+### One routine, one model
+
+Claude's four jobs — reconcile, review, merge, break down — stay in **one routine on
+one model (Opus)**, rather than being split so that cheaper work runs on a cheaper model.
+
+The deciding argument is coherence rather than cost. **The budget gate counts Opus**, so a
+routine that runs Opus spends exactly what its own gate can see. A Sonnet routine would
+be invisible to the gate governing it while still being blocked by Nate's Opus usage — a
+cheap thing gated on an expensive thing's behalf, which reads fine today and confuses
+everyone later. These are also light runs: no code is written, and a run with nothing to
+do costs about 2,700 output tokens on any model.
+
+The accepted cost: **routine throughput depends on Nate's own Opus usage.** A heavy
+interactive session pushes the routines out. That is the gate working, but it means the
+routines are quietest exactly when he has been busiest.
+
+_Rejected: splitting by job — Sonnet for reconcile, review and merge; Opus for breakdown
+only. It is cheaper, and the review bar is external (`plan.md`) so a weaker reviewer's
+mistakes are catchable, now that `funnel reject` counts failed merges and stops
+auto-merging at three in a week. It loses on fragility: two schedules, two prompts, two
+silence thresholds for the watchdog, and the ordering guarantee between reviewing and
+breaking down becomes a matter of cadence rather than a rule. Nothing in this system has
+yet completed a single end-to-end cycle; that is the wrong moment to double its moving
+parts._
+
+_Rejected: Sonnet reviewing but not merging, with Opus merging on a slower schedule. It
+keeps the irreversible act on the stronger model, at the cost of another moving part and
+a merge delayed by up to one schedule interval._
+
 ### Shaped to Ready: who breaks the plan into tickets
 
 The stage table defines `Ready` as "broken into issues" and the actor table

@@ -1006,6 +1006,113 @@ ANSWERS = {
 }
 
 
+SUB_ISSUES = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      subIssues(first: 50) {
+        nodes { number title state repository { nameWithOwner } }
+      }
+    }
+  }
+}
+"""
+
+
+def _gh_json(*args: str):
+    out = subprocess.run(list(args), capture_output=True, text=True)
+    if out.returncode != 0:
+        return None
+    try:
+        return json.loads(out.stdout)
+    except ValueError:
+        return None
+
+
+def _ticket_pr(repo: str, number: int) -> Optional[Dict]:
+    """The PR for a ticket, found by the branch name the routine guarantees."""
+    rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "all",
+                    "--head", "ticket/{}".format(number), "--json",
+                    "number,state,url,mergedAt,reviews") or []
+    return rows[0] if rows else None
+
+
+def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
+    """Everything needed to answer this item's gate.
+
+    A gate answered without context is not a decision, it is a coin toss. What
+    matters differs by gate: the plan at Shaped, the tickets at Ready, and at
+    Building what actually shipped and what the reviewer said about it.
+    """
+    item = find(items, ref)
+    print("{}  {}".format(item.ref, item.title))
+    print("{}  |  Class {}  |  {} at this gate".format(
+        item.status or "no status", item.klass or "unset",
+        humanise(item.waited(now))))
+    print(item.url)
+    print("=" * 72)
+    print("GATE: {}".format(gate_question(item) or "not waiting on you"))
+    print("")
+
+    owner, name = item.repo.split("/")
+
+    if item.status == "Shaped":
+        detail = _gh_json("gh", "issue", "view", str(item.number), "--repo",
+                          item.repo, "--json", "body") or {}
+        body = (detail.get("body") or "").strip()
+        print("--- the plan ---")
+        print(body if len(body) < 4000 else body[:4000] + " ...[truncated]")
+        print("")
+
+    if item.children_total:
+        data = gh_graphql(SUB_ISSUES, owner=owner, name=name, number=item.number)
+        issue = (data.get("repository") or {}).get("issue") or {}
+        children = (issue.get("subIssues") or {}).get("nodes") or []
+        print("--- tickets ({}/{} closed) ---".format(
+            item.children_done, item.children_total))
+        for child in children:
+            mark = "x" if child["state"] == "CLOSED" else " "
+            print("  [{}] #{} {}".format(mark, child["number"], child["title"]))
+            pr = _ticket_pr(child["repository"]["nameWithOwner"], child["number"])
+            if pr:
+                print("        PR #{} {}{}".format(
+                    pr["number"], pr["state"].lower(),
+                    " (merged)" if pr.get("mergedAt") else ""))
+                for review in (pr.get("reviews") or [])[-2:]:
+                    text = " ".join((review.get("body") or "").split())
+                    if text:
+                        print("        review: {}".format(text[:200]))
+            elif child["state"] == "CLOSED":
+                print("        closed with no ticket/* PR -- check why")
+        print("")
+
+    comments = (_gh_json("gh", "issue", "view", str(item.number), "--repo",
+                         item.repo, "--json", "comments") or {}).get("comments", [])
+    if comments:
+        print("--- comments ({}) ---".format(len(comments)))
+        for c in comments[-4:]:
+            text = " ".join((c.get("body") or "").split())
+            print("  {}: {}".format(
+                (c.get("author") or {}).get("login", "?"), text[:200]))
+        print("")
+
+    if item.status == "Building":
+        merged = [m for m in unattended_merges(now) if m.get("pr")]
+        print("--- merged without you, last 30 days: {} ---".format(len(merged)))
+        for m in merged[-5:]:
+            print("  PR #{} at {}".format(m["pr"], m["at"][:16]))
+        rejected = rejected_merges(items, now)
+        print("rejected merges in the last {} days: {}{}".format(
+            rejected["window_days"], rejected["count"],
+            "   ** STOP AUTO-MERGING **" if rejected["stop_auto_merging"] else ""))
+        print("")
+
+    verb = {frm: v for v, (frm, _, _) in ANSWERS.items()}.get(item.status or "")
+    if verb:
+        print("Answer it:  python3 funnel.py {} {} --yes".format(verb, item.number))
+    return 0
+
+
 def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
                confirmed: bool) -> int:
     """Answer a gate: move an item to the next stage.
@@ -1078,6 +1185,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub.add_parser("next", help="the single next ticket Codex should work, or nothing")
     sub.add_parser("brief", help="JSON for the /funnel skill and the morning brief")
     sub.add_parser("ideas", help="captured ideas, flagged ones first")
+    show = sub.add_parser("show", help="everything needed to answer an item's gate")
+    show.add_argument("ref", help="issue number, owner/repo#number, or URL")
     for verb, (frm, to, meaning) in ANSWERS.items():
         answer = sub.add_parser(
             verb, help="Nate's answer at the {} gate: {} ({} → {})".format(
@@ -1122,6 +1231,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_reject(items, now, args.pr, args.note)
         if args.command in ANSWERS:
             return cmd_answer(items, now, args.command, args.ref, args.confirmed)
+        if args.command == "show":
+            return cmd_show(items, now, args.ref)
         if args.command == "ideas":
             return cmd_ideas(items, now)
         if args.command == "capture":

@@ -50,6 +50,29 @@ Then the gate counts on one line. Then anything unusual, and only if present:
 
 Offer the `launch` command for the top item. Do not run it.
 
+## Interrogating before answering
+
+A gate answered without context is a coin toss, so when he asks about an item —
+or before he answers one — show him the evidence:
+
+```bash
+python3 /Users/nateprich/.claude/command-center/funnel.py show <issue>
+```
+
+It assembles what that gate actually needs: the plan at `Shaped`, the tickets at
+`Ready`, and at `Building` what shipped, which PRs merged without him, what the
+reviewer said, and the rejected-merge count.
+
+**"closed with no ticket/* PR" is a real finding, not a formatting quirk** — it
+means work was closed without going through review, and at the accept gate that
+is exactly what he should know before saying yes.
+
+## Answering a gate
+
+`funnel approve` / `start` / `accept` answer the three gates. They are **dry runs
+unless `--yes` is passed**, and they are **his alone** — never run one on his
+behalf, even to test it. Show him the command; let him run it.
+
 ## Say these things when they are true
 
 **"Nothing is waiting on you"** when `total_needing_nate` is 0. Say it plainly and stop.

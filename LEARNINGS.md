@@ -99,6 +99,40 @@ $ printf 'a\037\037\037b' | { IFS=$'\037' read -r one two three four; echo "[$on
 
 jq has no `@` operator for this; use `join("\u001f")` instead of `@tsv`.
 
+## Codex
+
+### Codex writes its rate limits into session rollout JSONL — as *used*, while the UI shows *remaining*
+
+**2026-09-05 · Codex desktop · measured**
+
+**There is no current-state file. Take the most recent `rate_limits` record across
+`~/.codex/sessions/*/*/*/*.jsonl`.** The Codex desktop app records them mid-session, in the
+same rollout files the CLI writes:
+
+```json
+"rate_limits": {"limit_id": "codex",
+  "primary":   {"used_percent": 14.0, "window_minutes": 300,   "resets_at": 1788596742},
+  "secondary": {"used_percent": 67.0, "window_minutes": 10080, "resets_at": 1788752667},
+  "credits":   {"has_credits": false, "unlimited": false, "balance": "0"}}
+```
+
+`primary` is the 5-hour window and `secondary` the 7-day one — but **match on
+`window_minutes`, not on the key name**, since primary/secondary are positional and a
+vendor may renumber them.
+
+**The field is `used_percent`; the ChatGPT UI shows usage *remaining*.** Verified against
+the app's own panel at the same moment: `used_percent` 14.0 / 67.0 displayed as "5h 85%,
+Weekly 33%", with both `resets_at` values matching the times shown to the minute. Reading
+one as the other inverts the budget and would let a run proceed exactly when it must not.
+
+Two further details:
+
+- This maps onto Claude's `rate_limits` one-for-one, under different names:
+  `five_hour`/`seven_day` and `used_percentage` there, `primary`/`secondary` and
+  `used_percent` here. Both carry `resets_at` as epoch seconds.
+- Like Claude's, the value is only written **by a running session**, so a reading taken
+  before the session does any work is stale — and stale always reads *low*.
+
 ## GitHub
 
 ### A sub-issue joins its parent's Project automatically, with blank fields

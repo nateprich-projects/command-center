@@ -471,15 +471,17 @@ Codex's queue offering itself as work._
 
 **Still open:**
 
-4. Codex's equivalent of the `rate_limits` payload — what it exposes and how to read it.
-   The early-exit gate pattern holds regardless.
 5. Dependabot across repos other than `workbench` (none configured there). A one-time
    sweep during each repo's onboarding.
 **Resolved 2026-09-05 (build kickoff):**
 
-6. `ProjectV2ItemStatusChangedEvent` fires and carries a usable timestamp. Observed on
+6. **Codex's usage is readable**, from `rate_limits` records in its session rollout JSONL —
+   the same two window lengths as Claude's, under different names, and expressed as *used*
+   where the UI shows *remaining*. `usage.py` normalises both vendors to one shape so the
+   early-exit gate is identical for both routines. See `LEARNINGS.md`.
+7. `ProjectV2ItemStatusChangedEvent` fires and carries a usable timestamp. Observed on
    `command-center#1`. Time-at-gate ships in v0; the issue-number stand-in is dropped.
-7. **The funnel lives on its own Project**, `github.com/users/nateprich/projects/2`
+8. **The funnel lives on its own Project**, `github.com/users/nateprich/projects/2`
    ("Command Center") — not Project 1, which was found to be in active use with 186 items
    on a `Todo`/`In Progress`/`Done` workflow across six un-onboarded repos. Sharing one
    Status field between two workflows would have made every gate count in the brief

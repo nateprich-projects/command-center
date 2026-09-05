@@ -188,6 +188,23 @@ merged PR, and increments a visible counter.
   deliberately high, to be replaced by the measured p90 once the heartbeat has recorded
   real one-ticket runs.
 
+- **The two agents need different recovery, because they leave different debris.**
+  Codex writes code, in an ephemeral directory, and its work is durable only once pushed.
+  Claude's review routine writes **GitHub artifacts** — review comments, approvals,
+  merges — so its output is durable by construction and there is nothing local to lose.
+
+  Claude's failure mode is instead a **half-applied sequence**: dying after approving but
+  before merging, or after merging but before returning the ticket to its parent. Both
+  leave GitHub internally inconsistent rather than incomplete, and both are reconciled by
+  the next run reading GitHub — which is exactly what "GitHub is the state" buys. No
+  push-as-you-go rule is needed or useful there.
+
+  Reading the dead run's transcript applies to **both**, and the two vendors' transcripts
+  share no structure: Codex writes `session_meta` plus `payload.role`, Claude nests the
+  role under `message` with content as a block list and carries `cwd` on every record.
+  Parsing one with the other's reader yields an empty digest under a confident header,
+  so `prior_run.py` detects the shape rather than assuming it.
+
 - **A dying run must lose time, not work.** A session killed mid-run by a rate limit
   leaves a claimed lock and whatever it had done locally. So every run works on a branch
   named deterministically from its ticket (`ticket/<number>`) and **commits and pushes

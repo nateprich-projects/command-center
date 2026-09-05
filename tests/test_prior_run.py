@@ -88,6 +88,62 @@ def test_a_ticket_url_is_accepted_as_well_as_a_number(tmp_path, monkeypatch):
         ["https://github.com/nateprich-projects/command-center/issues/42"]) == 0
 
 
+# -- the two vendors share no transcript structure -------------------------
+
+
+def claude_transcript(path, records, cwd="/tmp/work"):
+    lines = []
+    for role, content in records:
+        lines.append(json.dumps({
+            "type": role, "cwd": cwd, "sessionId": "s1", "gitBranch": "ticket/42",
+            "timestamp": "2026-09-05T08:00:00.000Z",
+            "message": {"role": role, "content": content},
+        }))
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_a_claude_transcript_is_parsed(tmp_path):
+    """Claude nests the role under `message` and has no session_meta. Assuming
+    Codex's shape produced a digest with zero messages that still rendered a
+    confident header."""
+    f = claude_transcript(tmp_path / "c.jsonl", [
+        ("user", "Please review PR #42"),
+        ("assistant", [{"type": "text", "text": "Reading the diff against plan.md."}]),
+    ])
+    d = prior_run.digest(str(f), shape="claude")
+    assert [m["text"] for m in d["messages"]] == [
+        "Please review PR #42", "Reading the diff against plan.md."]
+    assert d["meta"]["cwd"] == "/tmp/work"
+
+
+def test_claude_tool_uses_are_collected(tmp_path):
+    f = claude_transcript(tmp_path / "c.jsonl", [
+        ("assistant", [{"type": "tool_use", "name": "Bash",
+                        "input": {"command": "git status"}}]),
+    ])
+    d = prior_run.digest(str(f), shape="claude")
+    assert any("Bash" in call for call in d["tool_calls"])
+
+
+def test_claude_thinking_blocks_are_skipped(tmp_path):
+    """They are the largest part of a transcript, and the text blocks already
+    carry the intent."""
+    f = claude_transcript(tmp_path / "c.jsonl", [
+        ("assistant", [{"type": "thinking", "thinking": "z" * 9000},
+                       {"type": "text", "text": "Done."}]),
+    ])
+    d = prior_run.digest(str(f), shape="claude")
+    assert [m["text"] for m in d["messages"]] == ["Done."]
+
+
+def test_the_shape_is_detected_when_not_declared(tmp_path):
+    codex = rollout(tmp_path / "a.jsonl", [("user", "codex side")])
+    claude = claude_transcript(tmp_path / "b.jsonl", [("user", "claude side")])
+    assert prior_run.digest(str(codex))["messages"][0]["text"] == "codex side"
+    assert prior_run.digest(str(claude))["messages"][0]["text"] == "claude side"
+
+
 # -- stranded work ----------------------------------------------------------
 
 

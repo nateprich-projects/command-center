@@ -78,8 +78,74 @@ def _text(node) -> str:
     return ""
 
 
-def digest(path: str) -> Dict:
-    """Reduce a rollout to intent: what was asked, what was said, what was run."""
+def _read_codex(record):
+    """Codex rollout: {type, payload:{role|type, ...}}, meta in session_meta."""
+    payload = record.get("payload")
+    payload = payload if isinstance(payload, dict) else record
+
+    if record.get("type") == "session_meta":
+        return "meta", {
+            k: payload.get(k)
+            for k in ("id", "cwd", "timestamp", "originator")
+            if payload.get(k)
+        }
+
+    role = payload.get("role")
+    ptype = payload.get("type") or ""
+    if role in ("user", "assistant"):
+        return "message", {"role": role, "text": _text(payload).strip()}
+    if "tool_call" in ptype or "tool_use" in ptype:
+        name = payload.get("name") or payload.get("tool_name") or ptype
+        argument = _text(payload.get("input") or payload.get("arguments") or "")
+        return "tool", "{}: {}".format(name, argument[:160]).strip()
+    return None, None
+
+
+def _read_claude(record):
+    """Claude Code transcript: {type:'user'|'assistant', message:{role,content}}.
+
+    A different shape entirely from Codex's — the role is nested, assistant
+    content is a list of blocks, and there is no session_meta because cwd and
+    gitBranch ride on every record.
+    """
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return None, None
+
+    role = message.get("role")
+    if role not in ("user", "assistant"):
+        return None, None
+
+    content = message.get("content")
+    if isinstance(content, str):
+        return "message", {"role": role, "text": content.strip()}
+
+    parts, calls = [], []
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            parts.append(block.get("text") or "")
+        elif btype == "tool_use":
+            calls.append(
+                "{}: {}".format(block.get("name"), _text(block.get("input"))[:160]).strip()
+            )
+        # `thinking` blocks are deliberately skipped: they are the largest part
+        # of a transcript and the text blocks already carry the intent.
+    return "message+tools", (
+        {"role": role, "text": " ".join(p for p in parts if p).strip()},
+        calls,
+    )
+
+
+def digest(path: str, shape: Optional[str] = None) -> Dict:
+    """Reduce a session to intent: what was asked, what was said, what was run.
+
+    The two vendors' transcripts share no structure, so the shape is detected
+    rather than assumed. Assuming produced a digest with zero messages that
+    still rendered a confident-looking header.
+    """
     meta: Dict = {}
     messages: List[Dict] = []
     tools: List[str] = []
@@ -91,32 +157,37 @@ def digest(path: str) -> Dict:
             except ValueError:
                 continue
 
-            kind = record.get("type") or ""
-            payload = record.get("payload")
-            payload = payload if isinstance(payload, dict) else record
+            reader = _read_claude if (
+                shape == "claude"
+                or (shape is None and isinstance(record.get("message"), dict))
+            ) else _read_codex
 
-            if kind == "session_meta":
+            # Claude carries cwd/gitBranch on every record instead of a header.
+            if not meta and record.get("cwd"):
                 meta = {
-                    k: payload.get(k)
-                    for k in ("id", "cwd", "timestamp", "originator")
-                    if payload.get(k)
+                    k: record.get(k)
+                    for k in ("sessionId", "cwd", "timestamp", "gitBranch")
+                    if record.get(k)
                 }
-                continue
+                meta["id"] = meta.pop("sessionId", None)
 
-            role = payload.get("role") or record.get("role")
-            ptype = payload.get("type") or ""
+            kind, value = reader(record)
+            if kind == "meta" and value:
+                meta = value
+            elif kind == "message" and value and value["text"]:
+                messages.append(value)
+            elif kind == "message+tools":
+                message, calls = value
+                if message["text"]:
+                    messages.append(message)
+                tools.extend(calls)
+            elif kind == "tool" and value:
+                tools.append(value)
 
-            if role in ("user", "assistant"):
-                body = _text(payload).strip()
-                # Both vendors inject large context blocks as pseudo-user turns
-                # (plugin catalogues, environment dumps). They are not intent,
-                # and they would eat the whole cap.
-                if body and not body.startswith("<"):
-                    messages.append({"role": role, "text": body})
-            elif "tool_call" in ptype or "tool_use" in ptype:
-                name = payload.get("name") or payload.get("tool_name") or ptype
-                argument = _text(payload.get("input") or payload.get("arguments") or "")
-                tools.append("{}: {}".format(name, argument[:160]).strip())
+    # Both vendors inject large context blocks as pseudo-user turns (plugin
+    # catalogues, environment dumps). They are not intent, and they would eat
+    # the whole cap.
+    messages = [m for m in messages if not m["text"].startswith("<")]
 
     return {
         "session": os.path.basename(path),
@@ -239,8 +310,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return 1
 
-    d = digest(matches[0])
+    d = digest(matches[0], shape=args.agent)
     d["stranded"] = stranded((d.get("meta") or {}).get("cwd"))
+    if not d["messages"]:
+        print(
+            "warning: {} yielded no messages — the transcript shape may have "
+            "changed".format(os.path.basename(matches[0])),
+            file=sys.stderr,
+        )
     if len(matches) > 1:
         d["other_candidates"] = [os.path.basename(p) for p in matches[1:4]]
 

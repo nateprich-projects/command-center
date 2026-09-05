@@ -72,6 +72,33 @@ jq '{five_hour: .rate_limits.five_hour, seven_day: .rate_limits.seven_day}
     | with_entries(select(.value != null))'
 ```
 
+## bash
+
+### Tab as `IFS` silently collapses empty fields
+
+**2026-09-05 · bash 3.2 / 5.x · measured**
+
+**Never split positional fields on a tab. Use a non-whitespace separator such as US
+(`0x1f`).** Space, tab and newline are *IFS whitespace*: bash treats runs of them as one
+delimiter and discards leading ones. So a record with an empty field silently loses it and
+every later value shifts left.
+
+`statusline.sh` read six values out of one `jq ... | @tsv` call. With `five_hour` absent —
+the normal state once that window resets — the two empty fields collapsed and the
+**seven-day percentage rendered under the `5h` label**. The line looked entirely
+plausible; it just reported the wrong window, in the direction that gets the account
+locked out.
+
+```
+$ printf 'a\t\t\tb' | { IFS=$'\t' read -r one two three four; echo "[$one][$two][$three][$four]"; }
+[a][b][][]          # wanted [a][][][b]
+
+$ printf 'a\037\037\037b' | { IFS=$'\037' read -r one two three four; echo "[$one][$two][$three][$four]"; }
+[a][][][b]          # correct
+```
+
+jq has no `@` operator for this; use `join("\u001f")` instead of `@tsv`.
+
 ## GitHub
 
 ### A sub-issue joins its parent's Project automatically, with blank fields

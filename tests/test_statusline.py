@@ -74,6 +74,26 @@ def test_a_missing_window_is_omitted_not_rendered_as_zero(cache):
     assert "five_hour" not in json.loads(cache.read_text())
 
 
+def test_an_absent_field_does_not_shift_the_later_ones(cache):
+    """The fields are read positionally, so an empty one must stay empty rather
+    than letting every later value slide left. Getting this wrong labelled the
+    seven-day number as the five-hour one."""
+    payload = {"workspace": {"current_dir": "/tmp"},
+               "rate_limits": {"seven_day": {"used_percentage": 88.0,
+                                             "resets_at": soon(86400)}}}
+    out = run(payload, cache)          # no model, no five_hour
+    assert "7d 88%" in out
+    assert "5h" not in out
+    assert "tmp" in out                # the directory did not slide into a percentage
+
+
+def test_percentages_round_up_not_down(cache):
+    """Truncation always understates usage, and understating is what burns the
+    week."""
+    out = run(session(five_hour={"used_percentage": 89.6, "resets_at": soon(600)}), cache)
+    assert "5h 90%" in out
+
+
 def test_absent_rate_limits_says_so_rather_than_looking_healthy(cache):
     out = run(session(), cache)
     assert "usage unknown" in out

@@ -1,0 +1,110 @@
+[
+  {
+    "comment": "A project at Building whose children have all closed — waiting on Nate to accept.",
+    "status": {"name": "Building"},
+    "class": {"name": "New"},
+    "content": {
+      "number": 10, "title": "Ship the widget", "url": "https://github.com/nateprich-projects/alpha/issues/10",
+      "state": "OPEN", "stateReason": null, "closedAt": null,
+      "repository": {"nameWithOwner": "nateprich-projects/alpha"},
+      "labels": {"nodes": []},
+      "assignees": {"nodes": []},
+      "parent": null,
+      "subIssuesSummary": {"total": 2, "completed": 2},
+      "timelineItems": {"nodes": [
+        {"__typename": "ProjectV2ItemStatusChangedEvent", "createdAt": "2026-08-20T00:00:00Z", "status": "Ready", "project": {"number": 2}},
+        {"__typename": "ProjectV2ItemStatusChangedEvent", "createdAt": "2026-08-26T00:00:00Z", "status": "Building", "project": {"number": 2}}
+      ]}
+    }
+  },
+  {
+    "comment": "Same issue also sits in another project. Those events must be ignored.",
+    "status": {"name": "Ready"},
+    "class": {"name": "Maintenance"},
+    "content": {
+      "number": 11, "title": "Rotate the expiring cert", "url": "https://github.com/nateprich/beta/issues/11",
+      "state": "OPEN", "stateReason": null, "closedAt": null,
+      "repository": {"nameWithOwner": "nateprich/beta"},
+      "labels": {"nodes": []},
+      "assignees": {"nodes": []},
+      "parent": null,
+      "subIssuesSummary": {"total": 0, "completed": 0},
+      "timelineItems": {"nodes": [
+        {"__typename": "ProjectV2ItemStatusChangedEvent", "createdAt": "2026-09-01T00:00:00Z", "status": "Ready", "project": {"number": 2}},
+        {"__typename": "ProjectV2ItemStatusChangedEvent", "createdAt": "2026-09-04T00:00:00Z", "status": "Ready", "project": {"number": 99}}
+      ]}
+    }
+  },
+  {
+    "comment": "Assigned to Codex, then unassigned. The lock must not survive the unassign.",
+    "status": {"name": "Ready"},
+    "class": {"name": "Improve"},
+    "content": {
+      "number": 12, "title": "Tidy the config loader", "url": "https://github.com/nateprich/beta/issues/12",
+      "state": "OPEN", "stateReason": null, "closedAt": null,
+      "repository": {"nameWithOwner": "nateprich/beta"},
+      "labels": {"nodes": []},
+      "assignees": {"nodes": []},
+      "parent": null,
+      "subIssuesSummary": {"total": 0, "completed": 0},
+      "timelineItems": {"nodes": [
+        {"__typename": "ProjectV2ItemStatusChangedEvent", "createdAt": "2026-09-02T00:00:00Z", "status": "Ready", "project": {"number": 2}},
+        {"__typename": "AssignedEvent", "createdAt": "2026-09-04T10:00:00Z", "assignee": {"login": "nateprich"}},
+        {"__typename": "UnassignedEvent", "createdAt": "2026-09-04T11:00:00Z", "assignee": {"login": "nateprich"}}
+      ]}
+    }
+  },
+  {
+    "comment": "A ticket under project #10, still assigned to Codex — the live lock.",
+    "status": null,
+    "class": null,
+    "content": {
+      "number": 13, "title": "Wire the widget to the bus", "url": "https://github.com/nateprich-projects/alpha/issues/13",
+      "state": "OPEN", "stateReason": null, "closedAt": null,
+      "repository": {"nameWithOwner": "nateprich-projects/alpha"},
+      "labels": {"nodes": []},
+      "assignees": {"nodes": [{"login": "nateprich"}]},
+      "parent": {"number": 10, "repository": {"nameWithOwner": "nateprich-projects/alpha"}},
+      "subIssuesSummary": {"total": 0, "completed": 0},
+      "timelineItems": {"nodes": [
+        {"__typename": "AssignedEvent", "createdAt": "2026-09-05T05:30:00Z", "assignee": {"login": "nateprich"}}
+      ]}
+    }
+  },
+  {
+    "comment": "A closed, completed ticket inside the 30-day window.",
+    "status": {"name": "Done"},
+    "class": {"name": "Broken"},
+    "content": {
+      "number": 14, "title": "Cron stopped firing after the OS update", "url": "https://github.com/nateprich/beta/issues/14",
+      "state": "CLOSED", "stateReason": "COMPLETED", "closedAt": "2026-08-30T00:00:00Z",
+      "repository": {"nameWithOwner": "nateprich/beta"},
+      "labels": {"nodes": []},
+      "assignees": {"nodes": []},
+      "parent": null,
+      "subIssuesSummary": {"total": 0, "completed": 0},
+      "timelineItems": {"nodes": []}
+    }
+  },
+  {
+    "comment": "Parked, so it needs no Class and waits on nobody.",
+    "status": {"name": "Parked"},
+    "class": null,
+    "content": {
+      "number": 15, "title": "Rewrite everything in Rust", "url": "https://github.com/nateprich/beta/issues/15",
+      "state": "CLOSED", "stateReason": "NOT_PLANNED", "closedAt": "2026-08-31T00:00:00Z",
+      "repository": {"nameWithOwner": "nateprich/beta"},
+      "labels": {"nodes": []},
+      "assignees": {"nodes": []},
+      "parent": null,
+      "subIssuesSummary": {"total": 0, "completed": 0},
+      "timelineItems": {"nodes": []}
+    }
+  },
+  {
+    "comment": "A draft issue. Has no number and must be skipped entirely.",
+    "status": {"name": "Ideas"},
+    "class": null,
+    "content": {}
+  }
+]

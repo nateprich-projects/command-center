@@ -21,15 +21,24 @@ v0 in progress. Target: shipped in under two weeks from 2026-09-05.
 `#1` with a usable `createdAt`. The issue-number tiebreak stand-in was never needed.
 Evidence in `LEARNINGS.md`.
 
+**Deliverable #2 — `funnel.py`.** `queue`, `next` and `brief` all run against live
+GitHub. 38 fixture tests on the ordering rules, mutation-checked: reversing the bottom-up
+order, letting an unset `Class` rank as `Broken`, and making `children_all_closed`
+vacuously true for a childless item each fail a test.
+
+Stdlib only, Python 3.9. Authentication is delegated to the `gh` CLI, so the program
+never reads, stores or passes a token.
+
 ## Built, not verified
 
-Nothing.
+- **`funnel.py` at scale.** Exercised against a Project holding one item. Pagination,
+  multi-repo membership and the 30-day maintenance window have fixture coverage but no
+  live data behind them yet.
 
 ## Not started
 
 | # | Deliverable | Blocked on |
 |---|---|---|
-| 2 | `funnel.py` — `queue`, `next`, `brief`, with fixture tests on the ordering rules | — ([#1](https://github.com/nateprich-projects/command-center/issues/1)) |
 | 3 | `/funnel` skill | #2 |
 | 4 | `statusline.sh` — renders the status line, caches both rate-limit windows | — |
 | 5 | Codex routine and Claude review routine | #2, #4 |
@@ -42,6 +51,16 @@ Nothing.
 
 ## Open questions
 
+- **What identity does Codex assign as?** The single-in-motion lock is "an open issue
+  assigned to Codex". `funnel.CODEX_LOGIN` is currently `nateprich`, which cannot
+  distinguish a Codex run from Nate assigning himself an issue — a self-assignment would
+  read as a held lock and stall the queue for up to the 2-hour TTL.
+- **Is a funnel item a project or a ticket?** `funnel.py` currently treats an issue with
+  sub-issues as a project and its children as tickets, and a childless issue as both.
+  That is why `command-center#1` appears in both queues at once.
+- **"Share of runs" has no run log in v0.** `maintenance_load` derives it from issues
+  closed in the window, by `Class`. The heartbeat (#6) is the first thing that records
+  runs; this should probably read from it once it exists.
 - **Codex's usage signal.** Its equivalent of Claude's `rate_limits` payload is unknown.
   The early-exit gate pattern holds regardless; v0 ships that gate as an explicit
   fail-closed stub.

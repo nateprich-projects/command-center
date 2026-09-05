@@ -10,6 +10,35 @@ be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes pe
 
 ## GitHub
 
+### An issue does not see a Project owned by a different owner
+
+**2026-09-05 · GitHub GraphQL · measured**
+
+**Query the Project for its items; never query issues for their `projectItems`.** An
+`Issue.projectItems` connection returns a user-owned Project only when the repo has the
+same owner. For an org repo's issue in a user-owned Project it comes back **empty** — no
+error, no partial result, just `[]`.
+
+This funnel spans `nateprich` (user) and `nateprich-projects` (org) on purpose, and its
+Project is user-owned, so a repo-first query would have silently reported no `Status` for
+every org repo — half the system, failing plausibly.
+
+Measured on one issue in each pairing, same token, same `project` scope:
+
+```
+org repo   → user project:  command-center#1        projectItems → []
+user repo  → user project:  claude-second-brain#1   projectItems → [{project: {number: 1}}]
+```
+
+Both directions confirmed live: the org issue *is* in the Project (`Status=Ready`,
+`Class=New` read back through `projectV2.items`), and its timeline carries
+`ProjectV2ItemStatusChangedEvent` naming that project. Only `projectItems` is blind.
+
+Consequence for `funnel.py`: **the Project is the query root.** Items come from
+`projectV2.items`, the issue and its timeline are fetched inline through `content`, and
+the `command-center` repo topic is applied as a filter afterwards rather than as the
+discovery mechanism.
+
 ### The issue timeline carries timestamped Project status changes
 
 **2026-09-05 · GitHub GraphQL · measured**

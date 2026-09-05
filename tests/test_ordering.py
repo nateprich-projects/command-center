@@ -468,3 +468,16 @@ def test_ideas_are_listed_but_never_counted_as_waiting():
     assert len(funnel.ideas(rows)) == 19
     assert awaiting_decision(rows) == []
     assert [i for i in rows if needs_class(i)] == []
+
+
+# -- answering a gate is Nate's, and is a dry run by default ---------------
+
+
+def test_every_gate_has_exactly_one_answering_command():
+    """Each question the brief asks must be answerable, and only from the stage
+    that asks it."""
+    assert set(funnel.ANSWERS) == {"approve", "start", "accept"}
+    for verb, (frm, to, _) in funnel.ANSWERS.items():
+        assert frm in funnel.STAGES and to in funnel.STAGES
+        # never skips a gate
+        assert funnel.STAGES.index(to) == funnel.STAGES.index(frm) + 1

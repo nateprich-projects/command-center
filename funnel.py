@@ -995,6 +995,77 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str) -> in
     return 0
 
 
+#: The gates, and the command that answers each. **These are Nate's answers to
+#: his own questions — no agent may run them.** An agent writing `Ready` starts
+#: work he never authorised; one writing `Done` accepts its own output. Both are
+#: gate-jumping, which is the failure the whole funnel is arranged to prevent.
+ANSWERS = {
+    "approve": ("Shaped", "Ready", "the plan is good"),
+    "start": ("Ready", "Building", "start now"),
+    "accept": ("Building", "Done", "shipped and accepted"),
+}
+
+
+def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
+               confirmed: bool) -> int:
+    """Answer a gate: move an item to the next stage.
+
+    The brief shows what is waiting and asks the question; without this, the
+    only way to answer was to open the Project and change a dropdown. Friction
+    here lands on the one resource `plan.md` calls the bottleneck.
+
+    **Dry run unless `--yes` is passed.** These commands answer Nate's gates, and
+    the comment above `ANSWERS` saying no agent may run them proved insufficient
+    on the day it was written: an agent ran `accept` as a guard test and moved v0
+    to Done. A note in the source is not a control. Defaulting to a dry run means
+    the reflexive way to try one of these is also the harmless way.
+    """
+    expected, nxt, meaning = ANSWERS[verb]
+    item = find(items, ref)
+
+    if item.status != expected:
+        raise GitHubError(
+            "{} is at {}, not {} — `{}` answers the {} gate".format(
+                item.ref, item.status or "no status", expected, verb, expected)
+        )
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
+
+    if verb == "accept" and not item.children_all_closed:
+        raise GitHubError(
+            "{} still has open tickets ({}/{} closed). Accepting a project whose "
+            "work is unfinished is how a thing gets called shipped while a third "
+            "of it is missing.".format(
+                item.ref, item.children_done, item.children_total)
+        )
+
+    if not confirmed:
+        print("would move {} from {} to {} ({})".format(
+            item.ref, expected, nxt, meaning))
+        if verb == "accept":
+            print("and close it as completed")
+        print("\nNothing was changed. Re-run with --yes to answer the gate.")
+        return 1
+
+    gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
+               field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, nxt))
+
+    if verb == "accept":
+        # Done and Parked must stay distinguishable: `completed` here,
+        # `not planned` for a park. That ratio is the only way to tell whether
+        # the gates are set right.
+        subprocess.run(
+            ["gh", "issue", "close", str(item.number), "--repo", item.repo,
+             "--reason", "completed"], capture_output=True)
+
+    print("{} → {}  ({})".format(item.ref, nxt, meaning))
+    if verb == "approve":
+        print("The next Claude run will break it into tickets.")
+    elif verb == "start":
+        print("Codex can now pick up its tickets.")
+    return 0
+
+
 def cmd_release(items: List[Item], now: datetime, ref: str) -> int:
     write_lock(find(items, ref), "")
     return 0
@@ -1007,6 +1078,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub.add_parser("next", help="the single next ticket Codex should work, or nothing")
     sub.add_parser("brief", help="JSON for the /funnel skill and the morning brief")
     sub.add_parser("ideas", help="captured ideas, flagged ones first")
+    for verb, (frm, to, meaning) in ANSWERS.items():
+        answer = sub.add_parser(
+            verb, help="Nate's answer at the {} gate: {} ({} → {})".format(
+                frm, meaning, frm, to))
+        answer.add_argument("ref", help="issue number, owner/repo#number, or URL")
+        answer.add_argument(
+            "--yes", action="store_true", dest="confirmed",
+            help="actually do it; without this the command is a dry run",
+        )
     capture = sub.add_parser("capture", help="capture an idea into the funnel")
     capture.add_argument("title")
     capture.add_argument("--note", default=None, help="anything worth keeping now")
@@ -1040,6 +1120,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_release(items, now, args.ref)
         if args.command == "reject":
             return cmd_reject(items, now, args.pr, args.note)
+        if args.command in ANSWERS:
+            return cmd_answer(items, now, args.command, args.ref, args.confirmed)
         if args.command == "ideas":
             return cmd_ideas(items, now)
         if args.command == "capture":

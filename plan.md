@@ -291,11 +291,20 @@ because its `resets_at` says how far through the cycle it is. A **rolling** esti
 no cycle position, so it gets a flat ceiling — applying the pace line to it computes
 "0% allowed" forever.
 
-Capacity is measured, not assumed: a 5-hour window carrying 757k output tokens took the
-account to the edge of its limit, and the weekly figure comes from the observed 7-day
-total at a known percentage. **The weekly capacity is currently inflated by a +50% promo
-that ends 2026-09-13**, so both values are encoded with that date — otherwise the
-estimate would silently permit half again as much spending on the day it lapses.
+**Only Opus is budgeted.** It is what actually consumes a window: the 5-hour window that
+came closest to the limit carried 713k Opus output tokens against 44k of everything else.
+Counting Sonnet adds arithmetic without changing a decision, so it is not counted.
+
+Capacity is measured, not assumed — 700k Opus output tokens for the 5-hour window, 1.5M
+for the week, both from observation on 2026-09-05.
+
+**Promos are read at runtime, not written into the file.** Anthropic runs limit promos
+regularly; hardcoding one with its expiry date makes a permanent file carry a temporary
+fact, and guarantees it is wrong later. The multiplier is parsed from the notice the app
+itself caches. It is applied **only when the promo can be confirmed active** — both a
+percentage and a future end date must parse — because assuming a boost that has lapsed
+raises capacity and permits overspending, while ignoring a real one merely makes the gate
+stricter than it needs to be.
 
 **Codex's equivalent is not yet verified.** The same early-exit pattern applies whatever
 the mechanism turns out to be: start, read, exit if over pace.

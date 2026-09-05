@@ -244,38 +244,39 @@ def _at(now, hours_ago):
     return t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def test_opus_costs_more_than_sonnet_against_the_limit():
-    """Output tokens dominate cost, and Opus is far more expensive per token."""
-    assert usage._weight("claude-opus-5") > usage._weight("claude-sonnet-5")
-    assert usage._weight("claude-haiku-4-5") < usage._weight("claude-sonnet-5")
-
-
-def test_an_unknown_model_is_assumed_expensive():
-    """Guessing cheap on an unrecognised model errs low, and low burns the week."""
-    assert usage._weight("some-future-model") == usage.DEFAULT_WEIGHT
-    assert usage._weight(None) == usage.DEFAULT_WEIGHT
-
-
-def test_the_estimate_counts_weighted_output_tokens(tmp_path, monkeypatch):
+def test_only_opus_is_budgeted(tmp_path, monkeypatch):
+    """Opus is what consumes a window. The 5-hour window that came closest to
+    the limit carried 713k Opus tokens and 44k of everything else."""
     import time as _time
     now = _time.time()
-    transcript(tmp_path / "a.jsonl", [("claude-sonnet-5", 1000, _at(now, 1))])
+    transcript(tmp_path / "a.jsonl", [
+        ("claude-opus-5", 1000, _at(now, 1)),
+        ("claude-sonnet-5", 50000, _at(now, 1)),
+        ("claude-haiku-4-5", 50000, _at(now, 1)),
+    ])
     monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
-    r = usage.read_claude_local(now)
-    assert r["weighted_output_tokens"]["five_hour"] == 1000
-    assert r["estimated"] is True
+    assert usage.read_claude_local(now)["opus_output_tokens"]["five_hour"] == 1000
+
+
+def test_a_sonnet_only_session_reads_as_no_usage(tmp_path, monkeypatch):
+    """Not zero-but-known — genuinely nothing budgeted happened."""
+    import time as _time
+    now = _time.time()
+    transcript(tmp_path / "a.jsonl", [("claude-sonnet-5", 90000, _at(now, 1))])
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
+    assert usage.read_claude_local(now) is None
 
 
 def test_records_outside_the_window_are_not_counted(tmp_path, monkeypatch):
     import time as _time
     now = _time.time()
     transcript(tmp_path / "a.jsonl", [
-        ("claude-sonnet-5", 1000, _at(now, 1)),      # inside 5h
-        ("claude-sonnet-5", 500, _at(now, 20)),      # inside 7d, outside 5h
-        ("claude-sonnet-5", 9999, _at(now, 24 * 9)), # outside both
+        ("claude-opus-5", 1000, _at(now, 1)),
+        ("claude-opus-5", 500, _at(now, 20)),
+        ("claude-opus-5", 9999, _at(now, 24 * 9)),
     ])
     monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
-    w = usage.read_claude_local(now)["weighted_output_tokens"]
+    w = usage.read_claude_local(now)["opus_output_tokens"]
     assert w["five_hour"] == 1000
     assert w["seven_day"] == 1500
 
@@ -283,6 +284,50 @@ def test_records_outside_the_window_are_not_counted(tmp_path, monkeypatch):
 def test_no_transcripts_reads_as_none_not_as_zero(tmp_path, monkeypatch):
     monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "none/*.jsonl"))
     assert usage.read_claude_local(NOW) is None
+
+
+# -- promos are read at runtime, never written into the file ----------------
+
+
+def promo_config(tmp_path, monkeypatch, text, bar="seven_day"):
+    cfg = tmp_path / "claude.json"
+    cfg.write_text(json.dumps({"cachedGrowthBookFeatures": {
+        "tengu_rate_limit_promo_notices": [{"bar": bar, "text": text}]}}))
+    monkeypatch.setattr(usage, "CLAUDE_APP_CONFIG", str(cfg))
+    return cfg
+
+
+def test_a_live_promo_raises_capacity(tmp_path, monkeypatch):
+    promo_config(tmp_path, monkeypatch, "+50% weekly limits promo through Dec 31")
+    assert usage.promo_multiplier("seven_day", NOW) == 1.5
+    assert usage.capacity("seven_day", NOW) == usage.WEEKLY_CAPACITY * 1.5
+
+
+def test_a_lapsed_promo_is_ignored(tmp_path, monkeypatch):
+    """A stale cached notice must not keep inflating capacity."""
+    promo_config(tmp_path, monkeypatch, "+50% weekly limits promo through Jan 2")
+    assert usage.promo_multiplier("seven_day", NOW) == 1.0
+
+
+def test_an_unparseable_promo_is_ignored(tmp_path, monkeypatch):
+    """Assuming a boost that is not real permits overspending; ignoring a real
+    one only makes the gate stricter. Fail toward strict."""
+    promo_config(tmp_path, monkeypatch, "bigger limits for a while!")
+    assert usage.promo_multiplier("seven_day", NOW) == 1.0
+
+
+def test_a_promo_applies_only_to_its_own_window(tmp_path, monkeypatch):
+    promo_config(tmp_path, monkeypatch, "+50% weekly limits through Dec 31",
+                 bar="seven_day")
+    assert usage.promo_multiplier("five_hour", NOW) == 1.0
+
+
+def test_a_missing_app_config_is_not_an_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(usage, "CLAUDE_APP_CONFIG", str(tmp_path / "absent.json"))
+    assert usage.promo_multiplier("seven_day", NOW) == 1.0
+
+
+# -- the estimate is a fallback, never a preference -------------------------
 
 
 def test_a_rolling_estimate_gets_a_flat_ceiling_not_a_pace_line():
@@ -300,16 +345,7 @@ def test_a_real_reading_still_gets_the_proportional_line():
     assert verdict["windows"][0]["allowed_percent"] < usage.WEEKLY_TARGET
 
 
-def test_weekly_capacity_drops_when_the_promo_expires():
-    """A +50% promo ends 2026-09-13. Not encoding that would silently
-    over-spend by half on the day it lapses."""
-    assert usage.weekly_capacity(usage.PROMO_ENDS - 1) == usage.WEEKLY_CAPACITY_PROMO
-    assert usage.weekly_capacity(usage.PROMO_ENDS + 1) == usage.WEEKLY_CAPACITY_BASE
-    assert usage.WEEKLY_CAPACITY_BASE < usage.WEEKLY_CAPACITY_PROMO
-
-
 def test_a_fresh_real_reading_beats_the_estimate(tmp_path, monkeypatch):
-    """The estimate is a fallback, never a preference."""
     import time as _time
     now = _time.time()
     cache = tmp_path / "usage.json"
@@ -323,7 +359,7 @@ def test_a_fresh_real_reading_beats_the_estimate(tmp_path, monkeypatch):
 
 
 def test_a_stale_real_reading_falls_back_to_the_estimate(tmp_path, monkeypatch):
-    """Today's actual failure: no scheduled run ever writes the cache."""
+    """The actual failure: no scheduled run ever writes the cache."""
     import time as _time
     now = _time.time()
     cache = tmp_path / "usage.json"
@@ -341,6 +377,7 @@ def test_the_gate_can_now_pass_for_claude(tmp_path, monkeypatch):
     import time as _time
     now = _time.time()
     monkeypatch.setattr(usage, "CLAUDE_CACHE", str(tmp_path / "absent.json"))
-    transcript(tmp_path / "a.jsonl", [("claude-sonnet-5", 100, _at(now, 1))])
+    monkeypatch.setattr(usage, "CLAUDE_APP_CONFIG", str(tmp_path / "absent.json"))
+    transcript(tmp_path / "a.jsonl", [("claude-opus-5", 100, _at(now, 1))])
     monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
     assert usage.main(["gate", "claude"]) == 0

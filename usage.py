@@ -26,8 +26,10 @@ import argparse
 import glob
 import json
 import os
+import datetime
 import sys
 import time
+from datetime import timezone
 from typing import Dict, Optional
 
 CLAUDE_CACHE = os.path.expanduser("~/.claude/command-center-usage.json")
@@ -51,39 +53,81 @@ CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/*/*/*/*.jsonl")
 # it carries an explicit haircut below to lean the other way. It is used only
 # when the real reading is unavailable.
 
-#: Output tokens dominate what a session costs, and Opus costs far more per
-#: token than Sonnet against a subscription limit. 5x is a placeholder, not a
-#: published ratio.
-MODEL_WEIGHTS = {"opus": 5.0, "sonnet": 1.0, "haiku": 0.2, "fable": 1.0}
-DEFAULT_WEIGHT = 5.0  # unknown model: assume expensive
+#: Only Opus is budgeted. It is what actually consumes a subscription window —
+#: the 5-hour window that came closest to the limit on 2026-09-05 carried 713k
+#: Opus output tokens and 44k of everything else. Sonnet is cheap enough that
+#: counting it adds arithmetic without changing a decision.
+BUDGETED_MODEL = "opus"
 
-#: Capacity, in weighted output tokens, derived from observation on 2026-09-05:
-#: a 5-hour window carrying 757k output tokens (3.6M weighted, nearly all Opus)
-#: took the account to the edge of its 5-hour limit. The weekly figure is the
-#: measured 7-day total at a reported 67% used, with the +50% promo removed —
-#: that promo expires 2026-09-13, so the un-promoted number is the safe one.
-#: Both are estimates from single observations. Re-derive them from real data.
-FIVE_HOUR_CAPACITY = 3_600_000.0
-
-#: The weekly capacity is currently inflated by a "+50% weekly limits" promo
-#: that ends 2026-09-13. Encoding both values and the date stops the estimate
-#: silently over-spending by half on the day it expires.
-WEEKLY_CAPACITY_PROMO = 12_500_000.0
-WEEKLY_CAPACITY_BASE = 8_400_000.0
-PROMO_ENDS = 1789286400.0  # 2026-09-13T00:00:00Z
+#: Base capacity in Opus output tokens, measured on 2026-09-05. The 5-hour
+#: figure is the window that took the account to the edge of its limit. The
+#: weekly figure is the trailing 7-day Opus total at a reported 67% used, with
+#: the promo of the day divided back out. Both are single observations — replace
+#: them when better data exists.
+FIVE_HOUR_CAPACITY = 700_000.0
+WEEKLY_CAPACITY = 1_500_000.0
 
 #: Because the estimate cannot see claude.ai or mobile, inflate it before
-#: judging. Erring high costs a refused run; erring low costs the week.
-#:
-#: Calibrated rather than guessed: on 2026-09-05 this estimate put the weekly
-#: window at 67.7% against a reported 67%, so the blind spot is small. The
-#: trailing-7-day count is itself conservative — the real window resets, so the
-#: trailing total is always at least what the live window holds.
+#: judging. Calibrated rather than guessed: on 2026-09-05 the estimate put the
+#: weekly window at 67.7% against a reported 67%, so the blind spot is small.
 ESTIMATE_HAIRCUT = 1.10
 
+#: Anthropic runs limit promos regularly, so the boost is read at runtime rather
+#: than written into this file with an expiry date. The app caches the notice it
+#: displays; that is the source.
+CLAUDE_APP_CONFIG = os.path.expanduser("~/.claude.json")
 
-def weekly_capacity(now: float) -> float:
-    return WEEKLY_CAPACITY_PROMO if now < PROMO_ENDS else WEEKLY_CAPACITY_BASE
+
+def promo_multiplier(window: str, now: float) -> float:
+    """How much a current promo inflates a window's capacity, e.g. 1.5.
+
+    **Only applied when the promo can be confirmed active**, meaning both the
+    percentage and an end date in the future parse out of the notice. An
+    unconfirmed boost is ignored, because assuming one that has lapsed would
+    raise capacity, lower the apparent usage, and permit overspending — while
+    ignoring a real one merely makes the gate stricter than it needs to be.
+    """
+    import re
+
+    try:
+        with open(CLAUDE_APP_CONFIG) as fh:
+            notices = (
+                json.load(fh)
+                .get("cachedGrowthBookFeatures", {})
+                .get("tengu_rate_limit_promo_notices", [])
+            )
+    except (OSError, ValueError, AttributeError):
+        return 1.0
+
+    for notice in notices if isinstance(notices, list) else []:
+        if not isinstance(notice, dict) or notice.get("bar") != window:
+            continue
+        text = str(notice.get("text") or "")
+        percent = re.search(r"\+\s*(\d{1,3})\s*%", text)
+        through = re.search(
+            r"through\s+([A-Z][a-z]{2})\w*\s+(\d{1,2})", text
+        )
+        if not percent or not through:
+            continue
+        month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        try:
+            index = month.index(through.group(1)) + 1
+        except ValueError:
+            continue
+        today = datetime.datetime.fromtimestamp(now, timezone.utc)
+        ends = datetime.datetime(
+            today.year, index, int(through.group(2)), 23, 59, tzinfo=timezone.utc
+        )
+        if ends < today:
+            continue  # lapsed, or a stale cached notice
+        return 1.0 + int(percent.group(1)) / 100.0
+    return 1.0
+
+
+def capacity(window: str, now: float) -> float:
+    base = FIVE_HOUR_CAPACITY if window == "five_hour" else WEEKLY_CAPACITY
+    return base * promo_multiplier(window, now)
 
 #: A reading older than this is not trusted. Both sources are refreshed by the
 #: reading session itself, so anything older than a few minutes means the gate
@@ -119,14 +163,6 @@ FIVE_HOUR = 300 * 60
 SEVEN_DAY = 10080 * 60
 
 
-def _weight(model: Optional[str]) -> float:
-    name = (model or "").lower()
-    for key, value in MODEL_WEIGHTS.items():
-        if key in name:
-            return value
-    return DEFAULT_WEIGHT
-
-
 def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
     """Estimate Claude usage from Claude Code's own transcripts.
 
@@ -157,15 +193,16 @@ def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
                     message = record.get("message")
                     if not isinstance(message, dict):
                         continue
+                    if BUDGETED_MODEL not in (message.get("model") or "").lower():
+                        continue
                     tokens = (message.get("usage") or {}).get("output_tokens")
                     stamp = _epoch(record.get("timestamp") or "")
                     if not tokens or stamp is None or stamp < cutoff:
                         continue
                     seen = True
-                    cost = tokens * _weight(message.get("model"))
-                    weekly += cost
+                    weekly += tokens
                     if stamp >= now - FIVE_HOUR:
-                        five_hour += cost
+                        five_hour += tokens
         except OSError:
             continue
 
@@ -179,7 +216,9 @@ def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
         "windows": {
             "five_hour": {
                 "used_percent": min(
-                    100.0, 100.0 * five_hour * ESTIMATE_HAIRCUT / FIVE_HOUR_CAPACITY
+                    100.0,
+                    100.0 * five_hour * ESTIMATE_HAIRCUT
+                    / capacity("five_hour", now),
                 ),
                 # A rolling estimate has no reset instant to report. The weekly
                 # pace line needs one, so give it the end of the trailing window.
@@ -188,12 +227,13 @@ def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
             "seven_day": {
                 "used_percent": min(
                     100.0,
-                    100.0 * weekly * ESTIMATE_HAIRCUT / weekly_capacity(now),
+                    100.0 * weekly * ESTIMATE_HAIRCUT
+                    / capacity("seven_day", now),
                 ),
                 "resets_at": now + SEVEN_DAY,
             },
         },
-        "weighted_output_tokens": {"five_hour": five_hour, "seven_day": weekly},
+        "opus_output_tokens": {"five_hour": five_hour, "seven_day": weekly},
     }
 
 

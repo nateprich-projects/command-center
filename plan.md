@@ -306,8 +306,21 @@ week — a dead zone at exactly the moment the budget is most free.
 came closest to the limit carried 713k Opus output tokens against 44k of everything else.
 Counting Sonnet adds arithmetic without changing a decision, so it is not counted.
 
-Capacity is measured, not assumed — 700k Opus output tokens for the 5-hour window, 1.5M
-for the week, both from observation on 2026-09-05.
+Capacity is calibrated against Claude's own usage panel, not assumed. **The weekly window
+calibrates cleanly** — 1,667,023 Opus output tokens reading 61% — and it is the
+load-bearing gate.
+
+**The five-hour window does not calibrate, and is treated as the weaker signal.** Its two
+observations contradict each other: 262,413 tokens read 45% on the panel, implying a
+583k capacity, while a measured 801,303-token five-hour stretch did not hit the limit at
+all. The five-hour limit is therefore not a function of Opus output tokens alone — cache
+reads dwarf output in volume and very likely carry weight. Its capacity is set above the
+largest stretch actually observed so it does not produce false refusals, rather than
+tuned until it looks correct.
+
+_A caution recorded for later: a single 5-hour interactive session consumed 29% of the
+whole weekly window. Nate's own sessions, not the routines, are what fill the budget — a
+run with nothing to do costs 2,690 output tokens against that 801,303._
 
 **Promos are read at runtime, not written into the file.** Anthropic runs limit promos
 regularly; hardcoding one with its expiry date makes a permanent file carry a temporary

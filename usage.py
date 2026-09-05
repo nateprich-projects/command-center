@@ -68,7 +68,15 @@ BUDGETED_MODEL = "opus"
 #: one was calibrated against a percentage read off the *ChatGPT* usage panel
 #: rather than Claude's. Cross-wiring two providers' figures produces a
 #: confidently wrong constant, so re-derive these only from Claude's own panel.
-FIVE_HOUR_CAPACITY = 583_000.0
+#: The five-hour figure is deliberately generous, and is the weaker of the two.
+#: Its calibration is self-contradictory: 262,413 tokens read 45% on the panel,
+#: implying 583k capacity, yet a measured 801,303-token five-hour stretch did not
+#: hit the limit. Both cannot hold, so the five-hour limit is evidently not a
+#: function of Opus output tokens alone — cache reads dwarf output in volume and
+#: very likely carry weight. Set above the largest stretch actually observed, so
+#: this window does not produce false refusals; the weekly window, which
+#: calibrates cleanly, is the load-bearing gate.
+FIVE_HOUR_CAPACITY = 900_000.0
 WEEKLY_CAPACITY = 1_822_000.0
 
 #: No inflation. The capacities above are calibrated from the real panel using

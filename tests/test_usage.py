@@ -300,6 +300,10 @@ def test_a_sonnet_only_session_reads_as_no_usage(tmp_path, monkeypatch):
 def test_records_outside_the_window_are_not_counted(tmp_path, monkeypatch):
     import time as _time
     now = _time.time()
+    # Pin the weekly anchor a full week back, so this exercises the window
+    # boundaries rather than accidentally testing where today falls relative
+    # to Saturday noon.
+    monkeypatch.setattr(usage, "last_weekly_reset", lambda n: n - 7 * 86400)
     transcript(tmp_path / "a.jsonl", [
         ("claude-opus-5", 1000, _at(now, 1)),
         ("claude-opus-5", 500, _at(now, 20)),

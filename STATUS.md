@@ -249,6 +249,43 @@ deterministic by construction. They cannot cover the rest: an agent reviewing a
 PR composes `gh search` calls, loops and scratch scripts that no rule can predict
 in advance. That is what the mode is for.
 
+### Trial assessment after three runs, 2026-09-05
+
+**Runs.** 08:24 `skipped-usage-unknown` (the pre-fix failure). 10:18–10:31 `done`,
+broke down #16. 10:42–10:51 `done`, broke down #17. Both start and finish records
+paired with matching run ids; both gates passed on the local token estimate; no
+permission stalls after the mode change to `auto`.
+
+**Breakdown quality — good, with one caveat.** #17 produced three tickets split
+by area of checking rather than by layer, each independently verifiable, with
+#22 declaring its dependency on #21 **in the body** rather than inventing a label
+— exactly as the `breakdown` skill instructs. The bodies cite `plan.md` as the
+spec, reference existing code by file and line, and carry real judgement:
+*"Nothing is written on a refusal — a half-applied park is worse than no park"*,
+and *"distinguish not authenticated at all from authenticated without the scope;
+they are different findings with different fixes."*
+
+The caveat: **#16's breakdown is not independent evidence.** The `breakdown`
+skill's worked example is literally "add a `funnel park` command", split two ways
+— and #16 came back split the same two ways. That may be reasoning or it may be
+copying. #17 is the trustworthy signal, because nothing in the skill resembles it.
+
+**Bug found, fixed: Codex could jump the "start now?" gate.** `startable()`
+accepted a parent at `Ready` as well as `Building`. `Ready` means "broken into
+issues" and is still waiting on Nate — so the moment a breakdown finished, five
+tickets became startable for work he had never authorised. Only `Building`
+qualifies now; he answers the gate by moving the parent there. This was live and
+would have fired on the next Codex run.
+
+**Latent bug, documented not fixed.** `heartbeat finish` defaults to the run id
+recorded by `start`, in one file per agent. Two overlapping runs clobber that
+pointer — a manual smoke test at 10:45 landed inside run three's window and did
+exactly that. No records were corrupted here, because the routine passed its id
+explicitly, but the routine prompt no longer does. Mitigation for now: **do not
+run `heartbeat` commands by hand while a routine may be active.** A proper fix is
+to default to the most recent *unfinished* start, or to refuse when more than one
+is open.
+
 ### What would count as failure
 
 - Breakdowns producing tickets too large to finish in one run, or built on

@@ -265,7 +265,11 @@ def startable(items: Sequence[Item]) -> List[Item]:
             # not waiting to be worked. Treating it as both is what made an issue
             # appear in two queues at once.
             return False
-        return parent.status in ("Ready", "Building") and not parent.is_blocked
+        # Only `Building`. `Ready` means "broken into issues" and is still
+        # waiting on Nate's "start now?" — treating it as startable lets Codex
+        # begin work he never authorised, jumping a gate. He answers that gate
+        # by moving the parent to `Building`.
+        return parent.status == "Building" and not parent.is_blocked
 
     def in_flight(item: Item) -> bool:
         """Once a project is Building, its remaining tickets finish first.

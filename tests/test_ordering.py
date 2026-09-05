@@ -167,25 +167,30 @@ def test_ladder_orders_what_to_start():
     items = []
     for n, klass in ((1, "Replace"), (2, "Broken"), (3, "New"), (4, "Maintenance"),
                      (5, "Improve")):
-        items += [project(n, "Ready", klass), ticket(10 + n, n)]
+        items += [project(n, "Building", klass), ticket(10 + n, n)]
     assert [i.number for i in startable(items)] == [12, 14, 15, 13, 11]
 
 
 def test_in_flight_work_finishes_before_anything_new_starts():
-    """Passing a gate is a commitment; nothing may silently un-commit it."""
-    parent = project(1, "Building", "Replace")
-    in_flight = ticket(2, 1)
-    fresh_parent = project(3, "Ready", "New")
-    fresh = ticket(4, 3)
-    assert [i.number for i in startable(
-        [parent, in_flight, fresh_parent, fresh])] == [2, 4]
+    """Passing a gate is a commitment; nothing may silently un-commit it.
+
+    Both parents are Building — the only startable state — so this isolates the
+    ladder: the in-flight Replace ticket still precedes the newer New one,
+    because its project is already committed to.
+    """
+    older = project(1, "Building", "Replace", days=30)
+    in_flight = ticket(2, 1, days=30)
+    newer = project(3, "Building", "New", days=1)
+    fresh = ticket(4, 3, days=1)
+    order = [i.number for i in startable([older, in_flight, newer, fresh])]
+    assert order == [4, 2]  # ladder first: New outranks Replace
 
 
 def test_tickets_inherit_their_parents_class():
     """The ladder ranks projects, not individual tickets."""
-    broken_parent = project(1, "Ready", "Broken")
+    broken_parent = project(1, "Building", "Broken")
     broken_ticket = ticket(2, 1)
-    new_parent = project(3, "Ready", "New")
+    new_parent = project(3, "Building", "New")
     new_ticket = ticket(4, 3)
     order = startable([broken_parent, broken_ticket, new_parent, new_ticket])
     assert [i.number for i in order] == [2, 4]
@@ -196,20 +201,28 @@ def test_a_parent_is_not_itself_a_startable_ticket():
     assert [i.number for i in startable([parent])] == []
 
 
+def test_ready_is_not_startable_until_nate_says_start_now():
+    """Ready means broken into issues and still waiting on his gate. Starting
+    there jumps it — he answers by moving the parent to Building."""
+    assert startable([project(1, "Ready", "New"), ticket(2, 1)]) == []
+    assert [i.number for i in startable(
+        [project(1, "Building", "New"), ticket(2, 1)])] == [2]
+
+
 def test_shaped_work_is_not_startable():
     """Ready is the gate that says 'start now'. Shaped has not passed it."""
     assert startable([project(1, "Shaped", "New"), ticket(2, 1)]) == []
 
 
 def test_blocked_work_is_not_startable_at_either_level():
-    assert startable([project(1, "Ready", "New"), ticket(2, 1, labels=["blocked"])]) == []
-    parent = project(3, "Ready", "New", labels=["blocked"])
+    assert startable([project(1, "Building", "New"), ticket(2, 1, labels=["blocked"])]) == []
+    parent = project(3, "Building", "New", labels=["blocked"])
     assert startable([parent, ticket(4, 3)]) == []
 
 
 def test_oldest_at_gate_breaks_ties_in_the_ladder_too():
-    items = [project(1, "Ready", "New"), ticket(11, 1, days=3),
-             project(2, "Ready", "New"), ticket(12, 2, days=40)]
+    items = [project(1, "Building", "New"), ticket(11, 1, days=3),
+             project(2, "Building", "New"), ticket(12, 2, days=40)]
     assert [i.number for i in startable(items)] == [12, 11]
 
 
@@ -234,7 +247,7 @@ def test_a_claim_past_the_ttl_is_stale_and_takeable():
 
 def test_assignment_no_longer_has_anything_to_do_with_the_lock():
     """Codex acts as Nate, so an assignment says nothing about who is working."""
-    rows = [project(1, "Ready", "New"), ticket(2, 1, assignees=["nateprich"])]
+    rows = [project(1, "Building", "New"), ticket(2, 1, assignees=["nateprich"])]
     assert lock_holder(rows, NOW) is None
     assert next_ticket(rows, NOW) is not None
 
@@ -246,33 +259,33 @@ def test_a_closed_ticket_does_not_hold_the_lock():
 
 
 def test_next_returns_nothing_while_the_lock_is_held():
-    rows = [project(1, "Ready", "New"), ticket(2, 1, in_motion_since=claimed(5)),
-            project(3, "Ready", "New"), ticket(4, 3)]
+    rows = [project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(5)),
+            project(3, "Building", "New"), ticket(4, 3)]
     assert next_ticket(rows, NOW) is None
 
 
 def test_broken_preempts_a_held_lock():
     """The one sanctioned preemption, and only because Broken is finite."""
-    rows = [project(1, "Ready", "New"), ticket(2, 1, in_motion_since=claimed(5)),
-            project(3, "Ready", "Broken"), ticket(4, 3)]
+    rows = [project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(5)),
+            project(3, "Building", "Broken"), ticket(4, 3)]
     assert next_ticket(rows, NOW).number == 4
 
 
 def test_maintenance_does_not_preempt_a_held_lock():
     """Maintenance may preempt in-flight *ranking*, but not seize a live lock."""
-    rows = [project(1, "Ready", "New"), ticket(2, 1, in_motion_since=claimed(5)),
-            project(3, "Ready", "Maintenance"), ticket(4, 3)]
+    rows = [project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(5)),
+            project(3, "Building", "Maintenance"), ticket(4, 3)]
     assert next_ticket(rows, NOW) is None
 
 
 def test_broken_does_not_preempt_a_lock_already_held_for_broken_work():
-    rows = [project(1, "Ready", "Broken"), ticket(2, 1, in_motion_since=claimed(5)),
-            project(3, "Ready", "Broken"), ticket(4, 3)]
+    rows = [project(1, "Building", "Broken"), ticket(2, 1, in_motion_since=claimed(5)),
+            project(3, "Building", "Broken"), ticket(4, 3)]
     assert next_ticket(rows, NOW) is None
 
 
 def test_a_stale_claim_does_not_block_the_next_run():
-    rows = [project(1, "Ready", "New"), ticket(2, 1, in_motion_since=claimed(300))]
+    rows = [project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(300))]
     assert next_ticket(rows, NOW) is not None
 
 

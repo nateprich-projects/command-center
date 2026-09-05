@@ -39,11 +39,21 @@ as `0%`, an absent `rate_limits` renders "usage unknown" and does not erase a pr
 reading, and a present payload replaces the file wholesale so an expired window cannot
 linger. Written atomically via `mktemp` + `mv`.
 
-**Not installed.** It lives in the repo; wiring it into `~/.claude/settings.json` is a
-change to a user-global config and has not been made.
+**Nothing is installed.** `~/.claude/settings.json` is untouched — still 36 bytes and one
+key. `scripts/install.sh` does the wiring when Nate decides to run it.
+
+**Deliverable #3 — `/funnel` skill.** `skills/funnel/SKILL.md`. Shells out to
+`funnel brief` and renders it; explicitly forbidden from ranking, reordering or filtering.
+
+**`scripts/install.sh`.** Idempotent, symlink-based, `--dry-run` supported. Symlinks
+`funnel.py`, `statusline.sh` and the skill into `~/.claude`, and merges `statusLine` into
+`settings.json` key-by-key with a timestamped backup. Refuses to clobber a real file that
+is not already a symlink, and refuses to touch a `settings.json` it cannot parse.
 
 ## Built, not verified
 
+- **The `/funnel` skill end to end.** The brief JSON it consumes is verified; the skill
+  itself has not been invoked, because it is not installed.
 - **`funnel.py` at scale.** Exercised against a Project holding one item. Pagination,
   multi-repo membership and the 30-day maintenance window have fixture coverage but no
   live data behind them yet.

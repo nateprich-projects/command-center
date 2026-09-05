@@ -1,0 +1,76 @@
+---
+name: funnel
+description: Show what is waiting on Nate in the Command Center funnel — what needs a decision, at which gate, and for how long. Use when he asks what needs deciding, what is waiting on him, what to work on next, what is stuck or blocked, or invokes /funnel by name. Also use when he asks whether the funnel is healthy or whether maintenance is crowding out new work.
+---
+
+# /funnel
+
+Render the Command Center funnel readably.
+
+## Run this
+
+```bash
+python3 ~/.claude/command-center/funnel.py brief
+```
+
+It prints JSON. Render it as described below.
+
+**Do not rank, reorder, filter or re-prioritise anything.** `funnel.py` computes all
+ordering, and both agents act on its output. If the order looks wrong, say so — do not
+quietly fix it. A second opinion on ordering is how two agents drift apart while both
+produce plausible-looking lists.
+
+If the command fails, show the error. Do not fall back to querying GitHub yourself.
+
+## What the fields mean
+
+| Field | Meaning |
+|---|---|
+| `total_needing_nate` | How many decisions are waiting |
+| `counts_by_gate` | Open items at each gate. `Ideas` is deliberately excluded — it is unbounded and guilt-free, and counting it turns it into pressure |
+| `items` | The decisions, **already ordered**. Bottom-up: closest to shipping first |
+| `waiting_on` | The question being asked. `Accept it?` · `Start now?` · `Is the plan good?` · `Unblock or park?` |
+| `waited` | Time at the current gate |
+| `needs_class` | Items with no `Class` set. Invalid and not startable — a one-word fix in the Project |
+| `in_motion` | The ticket Codex currently holds the lock on, or `null` |
+| `stale_locks_taken_over` | Claims past the 2-hour TTL that were taken over |
+| `maintenance_load` | `upkeep_share` is the fraction of work closed in the last 30 days that was `Broken` or `Maintenance` |
+
+## How to render it
+
+Lead with the count and the ordered list. For each item: the question, the repo and issue
+title as a link, and how long it has waited. Keep it scannable — this is read to decide,
+not to browse.
+
+Then the gate counts on one line. Then anything unusual, and only if present:
+`needs_class`, `stale_locks_taken_over`, and `in_motion`.
+
+Offer the `launch` command for the top item. Do not run it.
+
+## Say these things when they are true
+
+**"Nothing is waiting on you"** when `total_needing_nate` is 0. Say it plainly and stop.
+Do not pad the answer with the ladder, the gate counts, or what Codex is doing.
+
+**Parking is a real option, every time.** The bottom-up ordering exists to force disposal,
+so the longest-waiting item is surfaced first precisely because it is the most likely
+park candidate. When something has waited a long time, say so and name parking as a
+choice — `Parked` requires a written reason, and that reason is the artifact that makes
+re-encountering the idea in four months a 30-second decision.
+
+**Flag the portfolio signal, do not tune it.** If `upkeep_share` is above roughly 0.5, or
+`days_since_anything_new_started` is large, that is not a scheduling problem to fix. It
+is the signal to reassess how many plates are spinning.
+
+**Three stale takeovers in a week means runs are dying.** One is noise.
+
+`upkeep_share` is `null` when nothing closed in the window. That is *unknown*, not
+healthy — do not report it as zero.
+
+## Do not
+
+- Do not add TODOs to TickTick. TickTick is the do-list; funnel items there would compete
+  with real tasks and erode its trustworthiness. It receives operational failure alerts
+  only.
+- Do not change `Status` or `Class` unless he asks. Those are his gates.
+- Do not open, close, or comment on issues as part of rendering a brief.

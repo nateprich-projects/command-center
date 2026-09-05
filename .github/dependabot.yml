@@ -1,0 +1,16 @@
+# Dependabot for this repo.
+#
+# There is no Python manifest to watch: funnel.py, usage.py, heartbeat.py and
+# prior_run.py are stdlib-only by design, and authentication is delegated to the
+# gh CLI so there is no SDK to keep current. The only pinned third-party code
+# here is the actions the watchdog workflow uses.
+#
+# Failing or insecure dependency updates are Class: Maintenance. Routine
+# non-failing bumps are Class: Improve. See plan.md.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3

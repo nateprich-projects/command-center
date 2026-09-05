@@ -9,9 +9,14 @@ Grilling is what feeds the whole funnel. Nothing reaches Codex that was not firs
 an idea, then a plan, then tickets — so an idea that never gets grilled is a
 project that never happens.
 
-It is also the one part that cannot be scheduled, which `plan.md` treats as a
-feature: it is the structural throttle on the system, so no artificial cap on
-throughput is needed. **One at a time. Do not offer to grill several.**
+Shaping is **on demand, never scheduled.** It starts new work, and the ladder says
+in-flight work finishes first — a routine that shaped plans on a timer would spend the
+same weekly budget that review and breakdown need for work already committed to. Nate
+asks; it happens.
+
+**Ideas and Shaped may grow without bound.** That is deliberate: bottom-up ordering and
+the single-in-motion lock are what limit the system, not the size of a backlog. Do not
+treat a long list as a problem to solve or apologise for.
 
 `CC=/Users/nateprich/.claude/command-center`
 
@@ -46,7 +51,35 @@ with real tasks and erode its trustworthiness.
 Read the issue first — `gh issue view <n> --repo <repo>` — so the session starts
 from what he already wrote rather than asking him to repeat it.
 
-Then **use the `grilling` skill** to do the actual work. Do not improvise a
+### Decide first whether this needs him at all
+
+**Most shaping does not.** Much of what reaches Ideas is applying an established pattern
+to a new instance, and the precedent is already written down — in `plan.md`, in
+`AGENTS.md`, or in a sibling project that solved the same problem. Grilling Nate about
+something precedent already settles spends his attention on nothing.
+
+So: **shape what precedent covers, and never invent a decision that is his.**
+
+Decide from precedent, and cite where it comes from:
+
+- anything `plan.md` or `AGENTS.md` already rules on
+- conventions a sibling project established — deployment shape, file layout, testing
+- technical choices with an obvious answer given those conventions
+
+Leave to Nate, and say so explicitly rather than guessing:
+
+- **anything that changes his exposure** — credentials, what is reachable from the
+  internet, what an agent may do unattended
+- **anything touching a gate or who may write one**
+- **scope and priority**: whether to build it at all, and how much
+- anything where the plan would encode a preference rather than a deduction
+
+The plan must **separate the two**. "Decided from precedent (source)" and "Needs you"
+are different sections, and the second is what he actually reads at the Shaped gate. If
+the second list is empty, say so — that is a good outcome, not a suspicious one.
+
+If an idea genuinely turns on his judgement, **use the `grilling` skill** to do the
+work with him. Do not improvise a
 gentler version of it: the point is to find the weaknesses now, while the idea is
 cheap to change, rather than after Codex has built it.
 

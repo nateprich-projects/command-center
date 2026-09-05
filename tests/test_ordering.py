@@ -203,52 +203,70 @@ def test_oldest_at_gate_breaks_ties_in_the_ladder_too():
 # -- The lock ---------------------------------------------------------------
 
 
-def test_a_fresh_assignment_holds_the_lock():
-    held = item(1, "Ready", "New", assignees=[funnel.CODEX_LOGIN], assigned_at=NOW - timedelta(minutes=30))
+def claimed(minutes_ago):
+    return NOW - timedelta(minutes=minutes_ago)
+
+
+def test_a_fresh_claim_holds_the_lock():
+    held = item(1, "Ready", "New", in_motion_since=claimed(30))
     assert lock_holder([held], NOW).number == 1
     assert stale_locks([held], NOW) == []
 
 
-def test_an_assignment_past_the_ttl_is_stale_and_takeable():
-    stale = item(1, "Ready", "New", assignees=[funnel.CODEX_LOGIN], assigned_at=NOW - timedelta(hours=3))
+def test_a_claim_past_the_ttl_is_stale_and_takeable():
+    stale = item(1, "Ready", "New", in_motion_since=claimed(180))
     assert lock_holder([stale], NOW) is None
     assert [i.number for i in stale_locks([stale], NOW)] == [1]
 
 
-def test_an_assignment_to_somebody_else_is_not_the_lock():
-    other = item(1, "Ready", "New", assignees=["someone-else"], assigned_at=NOW)
-    assert lock_holder([other], NOW) is None
+def test_assignment_no_longer_has_anything_to_do_with_the_lock():
+    """Codex acts as Nate, so an assignment says nothing about who is working."""
+    assigned = item(1, "Ready", "New", assignees=["nateprich"])
+    assert lock_holder([assigned], NOW) is None
+    assert next_ticket([assigned], NOW) is not None
+
+
+def test_a_closed_ticket_does_not_hold_the_lock():
+    """A run that closed its ticket without releasing must not wedge the queue."""
+    held = item(1, "Ready", "New", state="CLOSED", in_motion_since=claimed(5))
+    assert lock_holder([held], NOW) is None
 
 
 def test_next_returns_nothing_while_the_lock_is_held():
-    held = item(1, "Ready", "New", assignees=[funnel.CODEX_LOGIN], assigned_at=NOW - timedelta(minutes=5))
+    held = item(1, "Ready", "New", in_motion_since=claimed(5))
     waiting = item(2, "Ready", "New")
     assert next_ticket([held, waiting], NOW) is None
 
 
 def test_broken_preempts_a_held_lock():
     """The one sanctioned preemption, and only because Broken is finite."""
-    held = item(1, "Ready", "New", assignees=[funnel.CODEX_LOGIN], assigned_at=NOW - timedelta(minutes=5))
+    held = item(1, "Ready", "New", in_motion_since=claimed(5))
     urgent = item(2, "Ready", "Broken")
     assert next_ticket([held, urgent], NOW).number == 2
 
 
 def test_maintenance_does_not_preempt_a_held_lock():
     """Maintenance may preempt in-flight *ranking*, but not seize a live lock."""
-    held = item(1, "Ready", "New", assignees=[funnel.CODEX_LOGIN], assigned_at=NOW - timedelta(minutes=5))
+    held = item(1, "Ready", "New", in_motion_since=claimed(5))
     upkeep = item(2, "Ready", "Maintenance")
     assert next_ticket([held, upkeep], NOW) is None
 
 
 def test_broken_does_not_preempt_a_lock_already_held_for_broken_work():
-    held = item(1, "Ready", "Broken", assignees=[funnel.CODEX_LOGIN], assigned_at=NOW - timedelta(minutes=5))
+    held = item(1, "Ready", "Broken", in_motion_since=claimed(5))
     other = item(2, "Ready", "Broken")
     assert next_ticket([held, other], NOW) is None
 
 
-def test_a_stale_lock_does_not_block_the_next_run():
-    stale = item(1, "Ready", "New", assignees=[funnel.CODEX_LOGIN], assigned_at=NOW - timedelta(hours=5))
+def test_a_stale_claim_does_not_block_the_next_run():
+    stale = item(1, "Ready", "New", in_motion_since=claimed(300))
     assert next_ticket([stale, item(2, "Ready", "New", days=99)], NOW) is not None
+
+
+def test_an_unparseable_claim_reads_as_unlocked():
+    """A garbled field must not wedge the queue until somebody notices."""
+    assert funnel.parse_time("whenever") is None
+    assert funnel.parse_time("") is None
 
 
 def test_next_returns_nothing_when_there_is_nothing_to_do():
@@ -316,15 +334,14 @@ def test_time_at_gate_uses_the_last_move_into_the_current_status():
     assert alpha10.status_since == datetime(2026, 8, 26, tzinfo=timezone.utc)
 
 
-def test_an_unassign_releases_the_lock():
-    nodes = json.loads(FIXTURE.read_text())
-    beta12 = next(i for i in (funnel._from_node(n) for n in nodes) if i and i.number == 12)
-    assert beta12.assigned_at is None
-    assert lock_holder([beta12], NOW) is None
-
-
-def test_a_live_assignment_is_parsed_as_the_lock():
+def test_a_claim_is_parsed_from_the_project_field():
     nodes = json.loads(FIXTURE.read_text())
     items = [i for i in (funnel._from_node(n) for n in nodes) if i]
     holder = lock_holder(items, datetime(2026, 9, 5, 6, 0, tzinfo=timezone.utc))
     assert holder is not None and holder.number == 13
+
+
+def test_an_empty_lock_field_is_not_a_claim():
+    nodes = json.loads(FIXTURE.read_text())
+    beta12 = next(i for i in (funnel._from_node(n) for n in nodes) if i and i.number == 12)
+    assert beta12.in_motion_since is None

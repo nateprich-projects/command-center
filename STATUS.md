@@ -29,6 +29,10 @@ vacuously true for a childless item each fail a test.
 Stdlib only, Python 3.9. Authentication is delegated to the `gh` CLI, so the program
 never reads, stores or passes a token.
 
+**The single-in-motion lock.** `In motion since` text field on the Project, written by
+`funnel claim` / `funnel release`. Full cycle verified live: claim, `next` and a second
+claim both refuse, release, `next` resumes.
+
 **Deliverable #4 — `statusline.sh`.** Renders the status line and caches both rate-limit
 windows. 8 tests covering the absence cases: a missing window is omitted rather than shown
 as `0%`, an absent `rate_limits` renders "usage unknown" and does not erase a previous
@@ -60,13 +64,6 @@ Nothing.
 
 ## Open questions
 
-- **What identity does Codex assign as?** The single-in-motion lock is "an open issue
-  assigned to Codex". `funnel.CODEX_LOGIN` is currently `nateprich`, which cannot
-  distinguish a Codex run from Nate assigning himself an issue — a self-assignment would
-  read as a held lock and stall the queue for up to the 2-hour TTL.
-- **Is a funnel item a project or a ticket?** `funnel.py` currently treats an issue with
-  sub-issues as a project and its children as tickets, and a childless issue as both.
-  That is why `command-center#1` appears in both queues at once.
 - **"Share of runs" has no run log in v0.** `maintenance_load` derives it from issues
   closed in the window, by `Class`. The heartbeat (#6) is the first thing that records
   runs; this should probably read from it once it exists.

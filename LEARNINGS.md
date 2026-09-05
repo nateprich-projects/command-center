@@ -8,6 +8,39 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Codex acts as the account holder, so assignment cannot identify it
+
+**2026-09-05 · Codex desktop · measured**
+
+**No GitHub write can distinguish a Codex run from Nate working by hand.** Codex desktop
+shells out to the `gh` CLI using Nate's own credentials. It is not a GitHub App, has no
+bot identity, and leaves no originating-app marker.
+
+Measured with a deliberate probe (`command-center#10`), which asked Codex to assign the
+issue, comment, and open a PR. Every write came back the same:
+
+```
+assigned   actor=nateprich  assignee=nateprich  app=none
+comment    author=nateprich type=User           app=none
+PR #11     author=nateprich branch=probe/identity-check
+  commit   author=nateprich  Nate Rich <nateprich@outlook.com>
+```
+
+Codex's own comment: *"Acting via Codex desktop using the GitHub CLI, authenticated as
+@nateprich."*
+
+**A second GitHub account does not help**, because Codex is authorised by Nate's account
+and can only ever act as it.
+
+The observational method is sound — `github-project-automation[bot]` does appear as a
+distinct actor in the same data, so a bot identity would have shown up. The prior history
+was simply silent on Codex: 709 issue events and 197 PRs across these repos are all
+`actor=nateprich`, which is equally consistent with "acts as the user" and "has never run
+here". Only the probe separates those.
+
+Consequence: the single-in-motion lock cannot be "an issue assigned to the agent". It
+needs a marker only the agent writes.
+
 ## jq
 
 ### `// empty` inside object construction discards the whole object

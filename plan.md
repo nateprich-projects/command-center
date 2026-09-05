@@ -397,25 +397,45 @@ confirmed firing on 2026-09-05, so v0 ships true time-at-gate. Time at the curre
 is `now - createdAt` of the most recent event whose `status` equals the item's current
 Status, filtered to this Project.
 
-### Single-in-motion: a timestamped assignment lock with TTL takeover
+### Single-in-motion: a timestamped claim on a Project field, with TTL takeover
 
-**Predicate: an open issue assigned to Codex's identity.** Assignment happens at run
-start, which is when the lock needs to exist.
+**Superseded once, on evidence.** This was originally settled as an *assignment* lock —
+an open issue assigned to Codex, timestamped by the `assigned` timeline event. A probe
+(`command-center#10`, 2026-09-05) falsified the premise it rested on: **Codex desktop
+shells out to the `gh` CLI as Nate**, with no bot identity and no originating-app marker,
+so no GitHub write can distinguish a Codex run from Nate working by hand. A second GitHub
+account does not help, because Codex is authorised by Nate's account and can only act as
+it. Evidence in `LEARNINGS.md`.
 
-- The lock is **held** if such an issue exists and its `assigned` timeline event is
-  younger than a **2-hour TTL** — longer than any single ticket should honestly take.
-- **Older than TTL, the lock is stale.** The next run takes it over: unassign, reassign
-  to itself, continue. Self-correcting, no human in the loop.
-- **Every takeover is a line in the brief.** One is noise; three in a week means runs
-  are dying. **The watchdog owns this signal, not the lock.**
-- `Broken` preempting is the one case allowed to take the lock before the TTL expires.
+The lock therefore needs a marker **only the agent writes**:
 
-The `assigned` event's `createdAt` is available regardless of how stage is stored, so
-the lock has reliable timing independent of the decision above.
+- **`In motion since`**, a text field on the Project holding an ISO-8601 UTC timestamp.
+  Empty is free; set is held; **older than a 2-hour TTL is stale and takeable** — longer
+  than any single ticket should honestly take.
+- Written through **`funnel claim` and `funnel release`**, never by hand. The shared
+  program owns the transition for the same reason it owns ranking: two vendors' agents
+  implementing it from prose will drift, silently.
+- A stale claim is taken over by the next run — unset it, claim it, continue.
+  Self-correcting, no human in the loop.
+- **Every takeover is a line in the brief.** One is noise; three in a week means runs are
+  dying. **The watchdog owns that signal, not the lock.**
+- A `Broken` ticket may take the lock before the TTL expires. That is the one sanctioned
+  preemption, and it is only safe because `Broken` is finite.
+- An unparseable or hand-edited value reads as **unlocked**. A garbled field must not
+  wedge the queue until somebody notices.
 
-_Rejected: an open PR as the predicate — it misses the window between run start and PR
-creation, which is precisely when a run dies. Rejected: a branch, which appears later
-still._
+_Rejected: a third label, `in-motion`. Its `labeled` event would give a GitHub-recorded
+timestamp rather than a self-reported one, which is genuinely stronger. It loses because
+the label set was closed at two on public-readability grounds, and a lock is more internal
+than `Class` — which was kept off labels for exactly that reason. The weaker timestamp
+costs little: the only writer is the agent, and a wrong value is bounded by the TTL._
+
+_Rejected: keeping assignment and relying on Nate never self-assigning in a funnel repo.
+A social contract enforcing a correctness property, which fails silently and stalls all
+work for two hours. He has self-assigned before._
+
+_Rejected: an open PR or a branch as the predicate — both appear too late to cover the
+window between run start and PR creation, which is precisely when a run dies._
 
 ### A funnel item is a project; its sub-issues are the tickets
 

@@ -29,10 +29,16 @@ PROJECT_NUMBER = 2
 TOPIC = "command-center"
 OWNERS = [("user", "nateprich"), ("organization", "nateprich-projects")]
 
-#: Codex's GitHub identity. The assignment lock is held against this login.
-CODEX_LOGIN = "nateprich"
+#: The single-in-motion lock. Codex acts as Nate through the gh CLI — no bot
+#: identity, no originating-app marker — so no GitHub write can identify it and
+#: assignment cannot serve as the lock. See LEARNINGS.md. The marker is instead a
+#: Project field only the agent writes, through `funnel claim` / `funnel release`.
+LOCK_FIELD = "In motion since"
+LOCK_FIELD_ID = "PVTF_lAHOD7A-N84BihDgzhhZLyQ"
+PROJECT_ID = "PVT_kwHOD7A-N84BihDg"
 
-#: An assignment older than this is a stale lock and may be taken over.
+#: A claim older than this is stale and may be taken over. Longer than any
+#: single ticket should honestly take.
 LOCK_TTL = timedelta(hours=2)
 
 #: Funnel order. Index is the stage's depth; later means further along.
@@ -76,7 +82,8 @@ class Item:
     status_since: Optional[datetime] = None
     labels: List[str] = field(default_factory=list)
     assignees: List[str] = field(default_factory=list)
-    assigned_at: Optional[datetime] = None
+    in_motion_since: Optional[datetime] = None
+    item_id: Optional[str] = None  # the ProjectV2Item, needed to write the lock
     parent: Optional[str] = None  # "owner/repo#123"
     children_total: int = 0
     children_done: int = 0
@@ -219,35 +226,32 @@ def startable(items: Sequence[Item]) -> List[Item]:
 def lock_holder(items: Iterable[Item], now: datetime) -> Optional[Item]:
     """The item currently holding the single-in-motion lock, if any.
 
-    The lock is an open issue assigned to Codex whose `assigned` event is
-    younger than the TTL. Assignment exists from run start, which is when the
-    lock must exist — a PR or a branch appears too late to cover the window in
-    which a run most often dies.
+    The lock is an open ticket carrying a claim younger than the TTL. The claim
+    is written at run start, which is when the lock must exist — a PR or a
+    branch appears too late to cover the window in which a run most often dies.
     """
     held = [
         i
         for i in items
         if i.state == "OPEN"
-        and CODEX_LOGIN in i.assignees
-        and i.assigned_at is not None
-        and now - i.assigned_at < LOCK_TTL
+        and i.in_motion_since is not None
+        and now - i.in_motion_since < LOCK_TTL
     ]
-    return sorted(held, key=lambda i: i.assigned_at or now)[0] if held else None
+    return sorted(held, key=lambda i: i.in_motion_since or now)[0] if held else None
 
 
 def stale_locks(items: Iterable[Item], now: datetime) -> List[Item]:
-    """Assignments past the TTL. The next run takes these over; each takeover
-    is a line in the brief, because three in a week means runs are dying."""
+    """Claims past the TTL. The next run takes these over; each takeover is a
+    line in the brief, because three in a week means runs are dying."""
     return sorted(
         (
             i
             for i in items
             if i.state == "OPEN"
-            and CODEX_LOGIN in i.assignees
-            and i.assigned_at is not None
-            and now - i.assigned_at >= LOCK_TTL
+            and i.in_motion_since is not None
+            and now - i.in_motion_since >= LOCK_TTL
         ),
-        key=lambda i: i.assigned_at or now,
+        key=lambda i: i.in_motion_since or now,
     )
 
 
@@ -334,6 +338,10 @@ query($login: String!, $number: Int!, $cursor: String) {
       items(first: 50, after: $cursor) {
         pageInfo { hasNextPage endCursor }
         nodes {
+          id
+          lock: fieldValueByName(name: "In motion since") {
+            ... on ProjectV2ItemFieldTextValue { text }
+          }
           status: fieldValueByName(name: "Status") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
@@ -348,19 +356,10 @@ query($login: String!, $number: Int!, $cursor: String) {
               assignees(first: 10) { nodes { login } }
               parent { number repository { nameWithOwner } }
               subIssuesSummary { total completed }
-              timelineItems(last: 60, itemTypes: [
-                PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, ASSIGNED_EVENT, UNASSIGNED_EVENT
-              ]) {
+              timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]) {
                 nodes {
-                  __typename
                   ... on ProjectV2ItemStatusChangedEvent {
                     createdAt status project { number }
-                  }
-                  ... on AssignedEvent {
-                    createdAt assignee { ... on User { login } }
-                  }
-                  ... on UnassignedEvent {
-                    createdAt assignee { ... on User { login } }
                   }
                 }
               }
@@ -393,9 +392,21 @@ def gh_graphql(query: str, **variables) -> dict:
 
 
 def parse_time(value: Optional[str]) -> Optional[datetime]:
+    """Parse an ISO-8601 UTC timestamp.
+
+    GitHub's own fields are always well formed, but the lock field is written by
+    an agent and could be edited by hand in the Project UI. An unparseable claim
+    returns None, which reads as "not locked" — the safe direction, because the
+    alternative is a garbled value wedging the queue until someone notices.
+    """
     if not value:
         return None
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
 
 
 def member_repos() -> List[str]:
@@ -447,31 +458,19 @@ def _from_node(node: dict) -> Optional[Item]:
         children_total=summary.get("total") or 0,
         children_done=summary.get("completed") or 0,
         closed_at=parse_time(content.get("closedAt")),
+        item_id=node.get("id"),
+        in_motion_since=parse_time((node.get("lock") or {}).get("text")),
     )
 
     # Time at the current gate: the last status change into the status the item
     # actually holds, in *this* project. Events arrive oldest-first, and an
     # issue may sit in several projects — filtering on the project is what stops
     # time-at-gate being silently wrong.
-    assigned: Dict[str, Optional[datetime]] = {}
     for event in content["timelineItems"]["nodes"]:
-        kind = event["__typename"]
-        when = parse_time(event.get("createdAt"))
-        if kind == "ProjectV2ItemStatusChangedEvent":
-            if (event.get("project") or {}).get("number") != PROJECT_NUMBER:
-                continue
-            if event.get("status") == status:
-                item.status_since = when
-        elif kind == "AssignedEvent":
-            login = (event.get("assignee") or {}).get("login")
-            if login:
-                assigned[login] = when
-        elif kind == "UnassignedEvent":
-            login = (event.get("assignee") or {}).get("login")
-            if login:
-                assigned[login] = None
-
-    item.assigned_at = assigned.get(CODEX_LOGIN) if CODEX_LOGIN in item.assignees else None
+        if not event or (event.get("project") or {}).get("number") != PROJECT_NUMBER:
+            continue
+        if event.get("status") == status:
+            item.status_since = parse_time(event.get("createdAt"))
     return item
 
 
@@ -586,8 +585,8 @@ def cmd_next(items: List[Item], now: datetime) -> int:
         holder = lock_holder(items, now)
         if holder is not None:
             print(
-                "nothing — lock held by {} (assigned {} ago)".format(
-                    holder.ref, humanise(now - holder.assigned_at)
+                "nothing — lock held by {} (claimed {} ago)".format(
+                    holder.ref, humanise(now - holder.in_motion_since)
                 ),
                 file=sys.stderr,
             )
@@ -622,12 +621,78 @@ def cmd_brief(items: List[Item], now: datetime) -> int:
     return 0
 
 
+SET_LOCK = """
+mutation($project: ID!, $item: ID!, $field: ID!, $value: String!) {
+  updateProjectV2ItemFieldValue(input: {
+    projectId: $project, itemId: $item, fieldId: $field, value: {text: $value}
+  }) { projectV2Item { id } }
+}
+"""
+
+
+def write_lock(item: Item, value: str) -> None:
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project; cannot claim it".format(item.ref))
+    gh_graphql(
+        SET_LOCK,
+        project=PROJECT_ID,
+        item=item.item_id,
+        field=LOCK_FIELD_ID,
+        value=value,
+    )
+
+
+def find(items: Sequence[Item], ref: str) -> Item:
+    for i in items:
+        if i.ref == ref or str(i.number) == ref or i.url == ref:
+            return i
+    raise GitHubError("no funnel item matches {}".format(ref))
+
+
+def cmd_claim(items: List[Item], now: datetime, ref: str) -> int:
+    """Take the single-in-motion lock, or refuse.
+
+    Refusing is the normal outcome and is not an error worth shouting about;
+    the caller distinguishes by exit code.
+    """
+    target = find(items, ref)
+    holder = lock_holder(items, now)
+    if holder is not None and holder.ref != target.ref:
+        print(
+            "refused — lock held by {} (claimed {} ago)".format(
+                holder.ref, humanise(now - holder.in_motion_since)
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+    stale = [i for i in stale_locks(items, now) if i.ref != target.ref]
+    for item in stale:
+        # Self-correcting, no human in the loop. Every takeover is a line in the
+        # brief: one is noise, three in a week means runs are dying.
+        write_lock(item, "")
+        print("took over stale claim on {}".format(item.ref), file=sys.stderr)
+
+    write_lock(target, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    print(target.url)
+    return 0
+
+
+def cmd_release(items: List[Item], now: datetime, ref: str) -> int:
+    write_lock(find(items, ref), "")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("queue", help="everything, ordered")
     sub.add_parser("next", help="the single next ticket Codex should work, or nothing")
     sub.add_parser("brief", help="JSON for the /funnel skill and the morning brief")
+    claim = sub.add_parser("claim", help="take the single-in-motion lock on a ticket")
+    claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    release = sub.add_parser("release", help="give up the lock on a ticket")
+    release.add_argument("ref", help="issue number, owner/repo#number, or URL")
     args = parser.parse_args(argv)
 
     now = datetime.now(timezone.utc)
@@ -637,9 +702,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("funnel: {}".format(exc), file=sys.stderr)
         return 2
 
-    return {"queue": cmd_queue, "next": cmd_next, "brief": cmd_brief}[args.command](
-        items, now
-    )
+    try:
+        if args.command == "claim":
+            return cmd_claim(items, now, args.ref)
+        if args.command == "release":
+            return cmd_release(items, now, args.ref)
+        return {"queue": cmd_queue, "next": cmd_next, "brief": cmd_brief}[args.command](
+            items, now
+        )
+    except GitHubError as exc:
+        print("funnel: {}".format(exc), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

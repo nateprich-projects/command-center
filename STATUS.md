@@ -118,10 +118,25 @@ under test.
 
 ### Model and effort
 
-**The scheduled tasks do not set either.** `create_scheduled_task` has no parameter
-for model or effort, and nothing is recorded on the task — a run inherits whatever
-the app's default is at the moment it fires. Changing that default in the app
-changes how the routines behave, silently and mid-trial.
+**Pinned in `~/.claude/settings.json` for the trial:**
+
+```json
+{ "model": "claude-opus-5", "effortLevel": "high" }
+```
+
+The scheduled tasks themselves cannot set either — `create_scheduled_task` has no
+parameter for model or effort, and nothing is recorded on the task, so a run
+inherits the app default at the moment it fires. Pinning globally is the only
+lever; there is no per-task override, and scheduled tasks do not pick up a repo's
+project settings. **This pins interactive sessions too.**
+
+The key is `effortLevel`, not `effort`, and its values are `low | medium | high |
+xhigh` — the CLI flag spells the top level `max` where the setting spells it
+`xhigh`.
+
+Pinned to what was already running rather than to something better, deliberately:
+the trial is measuring breakdown and review quality, and changing the model at the
+same moment would make the results unattributable.
 
 Both are recoverable after the fact: Claude transcripts carry `effort` at the
 record level and `model` inside the message, and `prior_run.py` now surfaces both

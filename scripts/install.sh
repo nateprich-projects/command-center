@@ -47,7 +47,19 @@ case "$REPO" in
               echo "        If that volume is unmounted, the status line and /funnel stop working." ;;
 esac
 
-link "$REPO/funnel.py"     "$CLAUDE/command-center/funnel.py"
+# The whole checkout, not individual scripts: the routines call funnel.py,
+# usage.py, heartbeat.py and prior_run.py, and linking them one by one means a
+# new script silently does not exist until someone remembers to add it here.
+if [ -d "$CLAUDE/command-center" ] && [ ! -L "$CLAUDE/command-center" ]; then
+  if [ -z "$(find "$CLAUDE/command-center" -mindepth 1 ! -type l 2>/dev/null)" ]; then
+    $DRY || rm -rf "$CLAUDE/command-center"
+    say "replaced the old per-script directory with a single link"
+  else
+    say "REFUSING: $CLAUDE/command-center holds real files. Move it aside first."
+    exit 1
+  fi
+fi
+link "$REPO"               "$CLAUDE/command-center"
 link "$REPO/statusline.sh" "$CLAUDE/statusline.sh"
 link "$REPO/skills/funnel" "$CLAUDE/skills/funnel"
 

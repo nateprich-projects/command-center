@@ -1,0 +1,32 @@
+name: watchdog
+
+# Checks the heartbeats each run writes, and files an issue when something has
+# gone quiet or is dying.
+#
+# This lives in Actions precisely because the watchdog cannot live inside the
+# thing it watches: both routines require their app to be open on the Mac mini,
+# and an app that quit is invisible to every other signal on a machine that is
+# otherwise fine.
+#
+# It watches OUTCOME, not just liveness. "Ran, skipped, over pace" is healthy —
+# arguably the system working. "Started and never finished", three times, is not.
+
+on:
+  schedule:
+    - cron: "17 * * * *"     # hourly, off the hour so it never races a run
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check heartbeats
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/watchdog.py

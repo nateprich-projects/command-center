@@ -52,8 +52,25 @@ Verified from the installed paths, not the checkout.
 `settings.json` key-by-key with a timestamped backup. Refuses to clobber a real file that
 is not already a symlink, and refuses to touch a `settings.json` it cannot parse.
 
+**Deliverables #5, #6, #7 — the routines and the heartbeat.**
+
+- `heartbeat.py` — records run **start and finish separately**, each with a usage
+  snapshot, to an orphan `heartbeat` branch via the Contents API (compare-and-swap on
+  the blob sha, so a concurrent write is rejected rather than lost). Smoke-tested live.
+- `.github/workflows/watchdog.yml` + `.github/scripts/watchdog.py` — hourly. Reports
+  silence, dying runs, and repeated errors; deliberately silent on over-pace, locked and
+  nothing-to-do, which are the system working. Full cycle verified live: opened an issue,
+  detected recovery, closed it.
+- `routines/codex-work.md` and `routines/claude-review.md` — the prompts to paste into
+  Codex Scheduled and a Claude Code Routine.
+
 ## Built, not verified
 
+- **The routines have never run.** The prompts are written and every command in them
+  works, but neither has been scheduled in its app — that is a manual step in Codex
+  desktop and Claude Code, and it is the last thing standing between v0 and done.
+- **The watchdog has never run in Actions.** Verified by running the same script locally
+  against the real heartbeat branch.
 - **The `/funnel` skill end to end.** Installed and discoverable, but it has not been
   invoked in a fresh session yet — skills load at session start.
 - **`funnel.py` at scale.** Exercised against a Project holding one item. Pagination,

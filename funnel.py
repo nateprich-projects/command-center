@@ -172,6 +172,12 @@ def gate_question(item: Item) -> Optional[str]:
     if item.status == "Building":
         # Building waits on Nate only once every child has closed.
         return GATES["Building"] if item.children_all_closed else None
+    if item.status == "Ready" and not item.children_total:
+        # Nate writing Ready *is* his answer to "is the plan good?". Until the
+        # plan has been broken into sub-issues the system owes the work, so this
+        # waits on the funnel, not on him. Asking "start now?" about something
+        # with nothing to start would be asking him to approve an empty box.
+        return None
     return GATES.get(item.status or "")
 
 
@@ -196,6 +202,30 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
     return sorted((i for i in items if gate_question(i)), key=key)
 
 
+def awaiting_breakdown(items: Iterable[Item]) -> List[Item]:
+    """Approved plans with no tickets yet — Claude owes these a breakdown.
+
+    Deliberately *after* reviewing in the Claude routine's order. Bottom-up says
+    clear the lowest-funnel work first, and a review is Building-stage while a
+    breakdown is Shaped-to-Ready; reviewing also finishes work where a breakdown
+    creates it. Starvation is not a risk because PRs awaiting review are a finite
+    class, bounded by what Codex can produce under the lock and the budget — and
+    only finite classes may preempt.
+    """
+    return sorted(
+        (
+            i
+            for i in items
+            if i.state == "OPEN"
+            and i.status == "Ready"
+            and not i.children_total
+            and not i.is_blocked
+        ),
+        key=lambda i: (i.status_since or datetime.max.replace(tzinfo=timezone.utc),
+                       i.repo, i.number),
+    )
+
+
 def startable(items: Sequence[Item]) -> List[Item]:
     """Tickets Codex may pick up, best-first.
 
@@ -210,8 +240,11 @@ def startable(items: Sequence[Item]) -> List[Item]:
             return False
         parent = by_ref.get(item.parent or "")
         if parent is None:
-            # A standalone issue is its own project; it must itself be startable.
-            return item.status in ("Ready", "Building") and not item.is_blocked
+            # A parentless item is a project, never a ticket — that is the whole
+            # basis of the model. One with no children is awaiting its breakdown,
+            # not waiting to be worked. Treating it as both is what made an issue
+            # appear in two queues at once.
+            return False
         return parent.status in ("Ready", "Building") and not parent.is_blocked
 
     def in_flight(item: Item) -> bool:
@@ -633,6 +666,13 @@ def cmd_queue(items: List[Item], now: datetime) -> int:
         shown = (klass or "no class") + ("" if item.klass else " (inherited)" if klass else "")
         print("  {:<24} {:<34} {}".format(shown, item.ref, item.title))
 
+    pending = awaiting_breakdown(items)
+    if pending:
+        print("\nApproved, awaiting breakdown into tickets ({}):".format(len(pending)))
+        for item in pending:
+            print("  {:<34} {:<18} {}".format(
+                item.ref, humanise(item.waited(now)), item.title))
+
     missing = [i for i in items if needs_class(i)]
     if missing:
         print("\nInvalid — not in Ideas and carrying no Class ({}):".format(len(missing)))
@@ -675,6 +715,9 @@ def cmd_brief(items: List[Item], now: datetime) -> int:
         "counts_by_gate": counts,
         "items": [item_json(i, now, by_ref) for i in decisions],
         "needs_class": [item_json(i, now, by_ref) for i in items if needs_class(i)],
+        "awaiting_breakdown": [
+            item_json(i, now, by_ref) for i in awaiting_breakdown(items)
+        ],
         "in_motion": holder.ref if holder else None,
         "stale_locks_taken_over": [i.ref for i in stale_locks(items, now)],
         "maintenance_load": maintenance_load(items, now),

@@ -144,7 +144,7 @@ started.
 
 | Actor | Does | When |
 |---|---|---|
-| **Claude** | Grilling (produces the plan); PR review against `plan.md` | Grilling interactive; review on a routine |
+| **Claude** | Grilling (produces the plan); breaking an approved plan into tickets; PR review against `plan.md` | Grilling interactive; breakdown and review on one routine |
 | **Codex** | Implementation, one ticket per run | Hourly poll, single-in-motion lock |
 | **Nate** | The four gates; accepting a project as Done | When available |
 
@@ -510,6 +510,46 @@ a `Class`.
 _Rejected: every issue carrying its own `Status`. Tried briefly and it is incoherent —
 `command-center#1` appeared simultaneously in Nate's queue asking "start now?" and in
 Codex's queue offering itself as work._
+
+### Shaped to Ready: who breaks the plan into tickets
+
+The stage table defines `Ready` as "broken into issues" and the actor table
+assigned that work to nobody. It is Claude's, for the same reason grilling is:
+deciding what the tickets are is knowledge work, and Codex implements tickets
+rather than inventing them.
+
+**Nate writing `Ready` is his answer to "is the plan good?"** The breakdown is
+then the work that makes `Ready` true. So:
+
+- `Ready` with **no** tickets — waits on the funnel, not on Nate. Asking "start
+  now?" about something with nothing to start is asking him to approve an empty
+  box.
+- `Ready` **with** tickets — waits on Nate: "start now?"
+
+This keeps stage at four writes per item lifetime and needs no new Status option
+and no third label.
+
+**A parentless item is a project, never a ticket** — even trivial work gets at
+least one ticket under it. Allowing a childless item to be both is what once put
+the same issue in Nate's queue and Codex's queue simultaneously.
+
+**Review runs before breakdown** in the Claude routine. Bottom-up says clear the
+lowest-funnel work first, and a review is `Building`-stage where a breakdown is
+`Shaped`-to-`Ready`; reviewing also finishes work where a breakdown creates it.
+
+_Rejected: breakdown first, on the grounds that an unbroken plan blocks Codex.
+It does not — Codex draws tickets from any `Ready` or `Building` parent, so it
+stalls only if every parent lacks tickets. And the ordering would contradict the
+guiding principle for a benefit that was overstated. Starvation is not the risk
+it appears to be either: PRs awaiting review are a **finite** class, bounded by
+what Codex can produce under the lock and the budget, and only finite classes may
+preempt._
+
+**The routine does not create repositories.** `plan.md` describes work "earning a
+repo" at this gate, but creating repos, applying topics and transferring issues
+unattended is authority this system does not grant an agent, and a mistake
+scatters work into places the funnel then has to find. The routine says so in a
+comment and leaves it to Nate.
 
 ## Verification status
 

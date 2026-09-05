@@ -36,6 +36,18 @@ def at(days_ago: float) -> datetime:
     return NOW - timedelta(days=days_ago)
 
 
+def project(number, status, klass, days=1.0, children=1, done=0, **kw) -> Item:
+    """A parentless item with tickets under it — what the gates act on."""
+    return item(number, status, klass, days=days,
+                children_total=children, children_done=done, **kw)
+
+
+def ticket(number, parent, days=1.0, **kw) -> Item:
+    """A sub-issue. Carries no Status or Class of its own; it inherits."""
+    return item(number, None, None, days=days,
+                parent="nateprich/beta#{}".format(parent), **kw)
+
+
 def item(number, status=None, klass=None, days=1.0, **kw) -> Item:
     kw.setdefault("repo", "nateprich/beta")
     kw.setdefault("title", "issue {}".format(number))
@@ -52,9 +64,9 @@ def item(number, status=None, klass=None, days=1.0, **kw) -> Item:
 def test_decisions_run_bottom_up_not_top_down():
     """Clear the decision closest to shipping first."""
     items = [
-        item(1, "Shaped", "New"),
-        item(2, "Ready", "New"),
-        item(3, "Building", "New", children_total=1, children_done=1),
+        project(1, "Shaped", "New"),
+        project(2, "Ready", "New"),
+        project(3, "Building", "New", children=1, done=1),
     ]
     assert [i.number for i in awaiting_decision(items)] == [3, 2, 1]
 
@@ -77,7 +89,8 @@ def test_building_with_no_children_does_not_count_as_complete():
 
 def test_oldest_at_gate_wins_within_a_stage():
     """The longest-waiting item is the most likely park candidate."""
-    items = [item(1, "Ready", "New", days=2), item(2, "Ready", "New", days=30), item(3, "Ready", "New", days=9)]
+    items = [project(1, "Ready", "New", days=2), project(2, "Ready", "New", days=30),
+             project(3, "Ready", "New", days=9)]
     assert [i.number for i in awaiting_decision(items)] == [2, 3, 1]
 
 
@@ -86,8 +99,8 @@ def test_a_closed_item_waits_on_nobody():
 
 
 def test_blocked_surfaces_as_its_own_question_and_leads_its_stage():
-    blocked = item(1, "Ready", "New", days=1, labels=["blocked"])
-    older = item(2, "Ready", "New", days=20)
+    blocked = project(1, "Ready", "New", days=1, labels=["blocked"])
+    older = project(2, "Ready", "New", days=20)
     order = awaiting_decision([older, blocked])
     assert order[0].number == 1
     assert gate_question(blocked) == "Unblock or park?"
@@ -95,7 +108,7 @@ def test_blocked_surfaces_as_its_own_question_and_leads_its_stage():
 
 def test_unknown_status_still_appears_rather_than_vanishing():
     """An item with an unrecognised Status must not be silently dropped."""
-    items = [item(1, "Shaped", "New"), item(2, "Ready", "New")]
+    items = [project(1, "Shaped", "New"), project(2, "Ready", "New")]
     assert len(awaiting_decision(items)) == 2
 
 
@@ -151,30 +164,29 @@ def test_ideas_done_and_parked_are_exempt_from_class():
 
 
 def test_ladder_orders_what_to_start():
-    items = [
-        item(1, "Ready", "Replace"),
-        item(2, "Ready", "Broken"),
-        item(3, "Ready", "New"),
-        item(4, "Ready", "Maintenance"),
-        item(5, "Ready", "Improve"),
-    ]
-    assert [i.number for i in startable(items)] == [2, 4, 5, 3, 1]
+    items = []
+    for n, klass in ((1, "Replace"), (2, "Broken"), (3, "New"), (4, "Maintenance"),
+                     (5, "Improve")):
+        items += [project(n, "Ready", klass), ticket(10 + n, n)]
+    assert [i.number for i in startable(items)] == [12, 14, 15, 13, 11]
 
 
 def test_in_flight_work_finishes_before_anything_new_starts():
     """Passing a gate is a commitment; nothing may silently un-commit it."""
-    parent = item(1, "Building", "Replace", children_total=1, children_done=0)
-    in_flight = item(2, parent="nateprich/beta#1")
-    fresh = item(3, "Ready", "New")
-    assert [i.number for i in startable([parent, in_flight, fresh])] == [2, 3]
+    parent = project(1, "Building", "Replace")
+    in_flight = ticket(2, 1)
+    fresh_parent = project(3, "Ready", "New")
+    fresh = ticket(4, 3)
+    assert [i.number for i in startable(
+        [parent, in_flight, fresh_parent, fresh])] == [2, 4]
 
 
 def test_tickets_inherit_their_parents_class():
     """The ladder ranks projects, not individual tickets."""
-    broken_parent = item(1, "Ready", "Broken", children_total=1, children_done=0)
-    broken_ticket = item(2, parent="nateprich/beta#1")
-    new_parent = item(3, "Ready", "New", children_total=1, children_done=0)
-    new_ticket = item(4, parent="nateprich/beta#3")
+    broken_parent = project(1, "Ready", "Broken")
+    broken_ticket = ticket(2, 1)
+    new_parent = project(3, "Ready", "New")
+    new_ticket = ticket(4, 3)
     order = startable([broken_parent, broken_ticket, new_parent, new_ticket])
     assert [i.number for i in order] == [2, 4]
 
@@ -186,18 +198,19 @@ def test_a_parent_is_not_itself_a_startable_ticket():
 
 def test_shaped_work_is_not_startable():
     """Ready is the gate that says 'start now'. Shaped has not passed it."""
-    assert startable([item(1, "Shaped", "New")]) == []
+    assert startable([project(1, "Shaped", "New"), ticket(2, 1)]) == []
 
 
 def test_blocked_work_is_not_startable_at_either_level():
-    assert startable([item(1, "Ready", "New", labels=["blocked"])]) == []
-    parent = item(2, "Ready", "New", children_total=1, children_done=0, labels=["blocked"])
-    assert startable([parent, item(3, parent="nateprich/beta#2")]) == []
+    assert startable([project(1, "Ready", "New"), ticket(2, 1, labels=["blocked"])]) == []
+    parent = project(3, "Ready", "New", labels=["blocked"])
+    assert startable([parent, ticket(4, 3)]) == []
 
 
 def test_oldest_at_gate_breaks_ties_in_the_ladder_too():
-    items = [item(1, "Ready", "New", days=3), item(2, "Ready", "New", days=40)]
-    assert [i.number for i in startable(items)] == [2, 1]
+    items = [project(1, "Ready", "New"), ticket(11, 1, days=3),
+             project(2, "Ready", "New"), ticket(12, 2, days=40)]
+    assert [i.number for i in startable(items)] == [12, 11]
 
 
 # -- The lock ---------------------------------------------------------------
@@ -208,59 +221,59 @@ def claimed(minutes_ago):
 
 
 def test_a_fresh_claim_holds_the_lock():
-    held = item(1, "Ready", "New", in_motion_since=claimed(30))
+    held = ticket(1, 9, in_motion_since=claimed(30))
     assert lock_holder([held], NOW).number == 1
     assert stale_locks([held], NOW) == []
 
 
 def test_a_claim_past_the_ttl_is_stale_and_takeable():
-    stale = item(1, "Ready", "New", in_motion_since=claimed(180))
+    stale = ticket(1, 9, in_motion_since=claimed(180))
     assert lock_holder([stale], NOW) is None
     assert [i.number for i in stale_locks([stale], NOW)] == [1]
 
 
 def test_assignment_no_longer_has_anything_to_do_with_the_lock():
     """Codex acts as Nate, so an assignment says nothing about who is working."""
-    assigned = item(1, "Ready", "New", assignees=["nateprich"])
-    assert lock_holder([assigned], NOW) is None
-    assert next_ticket([assigned], NOW) is not None
+    rows = [project(1, "Ready", "New"), ticket(2, 1, assignees=["nateprich"])]
+    assert lock_holder(rows, NOW) is None
+    assert next_ticket(rows, NOW) is not None
 
 
 def test_a_closed_ticket_does_not_hold_the_lock():
     """A run that closed its ticket without releasing must not wedge the queue."""
-    held = item(1, "Ready", "New", state="CLOSED", in_motion_since=claimed(5))
+    held = ticket(1, 9, state="CLOSED", in_motion_since=claimed(5))
     assert lock_holder([held], NOW) is None
 
 
 def test_next_returns_nothing_while_the_lock_is_held():
-    held = item(1, "Ready", "New", in_motion_since=claimed(5))
-    waiting = item(2, "Ready", "New")
-    assert next_ticket([held, waiting], NOW) is None
+    rows = [project(1, "Ready", "New"), ticket(2, 1, in_motion_since=claimed(5)),
+            project(3, "Ready", "New"), ticket(4, 3)]
+    assert next_ticket(rows, NOW) is None
 
 
 def test_broken_preempts_a_held_lock():
     """The one sanctioned preemption, and only because Broken is finite."""
-    held = item(1, "Ready", "New", in_motion_since=claimed(5))
-    urgent = item(2, "Ready", "Broken")
-    assert next_ticket([held, urgent], NOW).number == 2
+    rows = [project(1, "Ready", "New"), ticket(2, 1, in_motion_since=claimed(5)),
+            project(3, "Ready", "Broken"), ticket(4, 3)]
+    assert next_ticket(rows, NOW).number == 4
 
 
 def test_maintenance_does_not_preempt_a_held_lock():
     """Maintenance may preempt in-flight *ranking*, but not seize a live lock."""
-    held = item(1, "Ready", "New", in_motion_since=claimed(5))
-    upkeep = item(2, "Ready", "Maintenance")
-    assert next_ticket([held, upkeep], NOW) is None
+    rows = [project(1, "Ready", "New"), ticket(2, 1, in_motion_since=claimed(5)),
+            project(3, "Ready", "Maintenance"), ticket(4, 3)]
+    assert next_ticket(rows, NOW) is None
 
 
 def test_broken_does_not_preempt_a_lock_already_held_for_broken_work():
-    held = item(1, "Ready", "Broken", in_motion_since=claimed(5))
-    other = item(2, "Ready", "Broken")
-    assert next_ticket([held, other], NOW) is None
+    rows = [project(1, "Ready", "Broken"), ticket(2, 1, in_motion_since=claimed(5)),
+            project(3, "Ready", "Broken"), ticket(4, 3)]
+    assert next_ticket(rows, NOW) is None
 
 
 def test_a_stale_claim_does_not_block_the_next_run():
-    stale = item(1, "Ready", "New", in_motion_since=claimed(300))
-    assert next_ticket([stale, item(2, "Ready", "New", days=99)], NOW) is not None
+    rows = [project(1, "Ready", "New"), ticket(2, 1, in_motion_since=claimed(300))]
+    assert next_ticket(rows, NOW) is not None
 
 
 def test_an_unparseable_claim_reads_as_unlocked():
@@ -378,3 +391,39 @@ def test_older_rejections_fall_out_of_the_window():
 
 def test_ordinary_issues_are_not_counted_as_rejections():
     assert funnel.rejected_merges([item(1, "Ready", "New")], NOW)["count"] == 0
+
+
+# -- Shaped to Ready: the breakdown ----------------------------------------
+
+
+def test_ready_with_no_tickets_waits_on_the_funnel_not_on_nate():
+    """Nate writing Ready *is* his answer to 'is the plan good?'. Asking 'start
+    now?' about something with nothing to start asks him to approve an empty
+    box."""
+    assert gate_question(item(1, "Ready", "New", children_total=0)) is None
+    assert gate_question(item(2, "Ready", "New", children_total=3)) == "Start now?"
+
+
+def test_approved_plans_with_no_tickets_are_owed_a_breakdown():
+    rows = [item(1, "Ready", "New", children_total=0),
+            item(2, "Ready", "New", children_total=2),
+            item(3, "Shaped", "New", children_total=0)]
+    assert [i.number for i in funnel.awaiting_breakdown(rows)] == [1]
+
+
+def test_a_blocked_plan_is_not_owed_a_breakdown():
+    rows = [item(1, "Ready", "New", children_total=0, labels=["blocked"])]
+    assert funnel.awaiting_breakdown(rows) == []
+
+
+def test_breakdowns_are_ordered_oldest_first_like_everything_else():
+    rows = [item(1, "Ready", "New", days=2, children_total=0),
+            item(2, "Ready", "New", days=20, children_total=0)]
+    assert [i.number for i in funnel.awaiting_breakdown(rows)] == [2, 1]
+
+
+def test_an_unbroken_plan_never_reaches_codex():
+    """A parentless item is a project, never a ticket. One with no children is
+    awaiting its breakdown, not waiting to be worked — treating it as both is
+    what put an issue in two queues at once."""
+    assert startable([item(1, "Ready", "New", children_total=0)]) == []

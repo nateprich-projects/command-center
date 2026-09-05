@@ -138,6 +138,25 @@ Pinned to what was already running rather than to something better, deliberately
 the trial is measuring breakdown and review quality, and changing the model at the
 same moment would make the results unattributable.
 
+**Codex is pinned already**, in `~/.codex/config.toml`: `model = "gpt-5.6-sol"`,
+`model_reasoning_effort = "high"`, confirmed across recent sessions including the
+identity probe. Left unchanged for the same reason. A separate
+`codex-auto-review` session runs at `low` effort alongside each real session —
+Codex's own built-in pass, outside this system's control, drawing on the same
+budget.
+
+**The pin has a cost worth watching.** The rate-limit numbers are account-level,
+so Nate's own interactive sessions and the routines draw on one weekly window.
+Pinning interactive work to Opus at `high` raises his consumption, which raises
+the number the routines gate on — trial fidelity bought at the price of the
+routines being refused more often. Dropping to a cheaper model per session with
+`--model` does not disturb the pin.
+
+**Not verified:** whether changing models in the app UI writes back to
+`settings.json` and silently un-pins this. `prior_run.py` reports the model and
+effort each run used, so drift is detectable in the data rather than assumed
+away.
+
 Both are recoverable after the fact: Claude transcripts carry `effort` at the
 record level and `model` inside the message, and `prior_run.py` now surfaces both
 as `ran as: <model> (effort <level>)`. At the time the trial was set up the app

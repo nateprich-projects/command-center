@@ -226,6 +226,29 @@ safety property when the signal is usually available; when it is **never**
 available it is an off switch. Codex was never affected: it writes `rate_limits`
 into its own session rollout, so its gate always worked.
 
+### Trial configuration, as actually set
+
+| | Claude | Codex |
+|---|---|---|
+| Model | `claude-opus-5`, per task | `gpt-5.6-sol`, `~/.codex/config.toml` |
+| Effort | `high`, global `effortLevel` | `high`, `model_reasoning_effort` |
+| Permission mode | `auto`, per task | n/a |
+| Schedule | 3 tasks, 39 runs/week | not yet scheduled |
+| Budget source | local token estimate | its own `rate_limits` |
+
+**Permission mode is `auto`, not `default`.** A scheduled task defaults to
+`default`, which prompts on tool use and therefore waits for a human who is
+asleep. `auto` lets a classifier pass routine work while still stopping
+destructive or irreversible commands. `bypassPermissions` was rejected: this
+agent runs unattended with repo write access and GitHub credentials, and the
+routine prompt telling it what not to do is not a boundary — it is text the agent
+is free to reason around.
+
+Allow-rules in `.claude/settings.json` still cover the scripted steps, which are
+deterministic by construction. They cannot cover the rest: an agent reviewing a
+PR composes `gh search` calls, loops and scratch scripts that no rule can predict
+in advance. That is what the mode is for.
+
 ### What would count as failure
 
 - Breakdowns producing tickets too large to finish in one run, or built on

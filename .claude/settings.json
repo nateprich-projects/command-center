@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "permissions": {
+    "allow": [
+      "Bash(python3 /Users/nateprich/.claude/command-center/*)",
+      "Bash(python3 -m pytest*)",
+      "Bash(gh pr *)",
+      "Bash(gh issue *)",
+      "Bash(gh api *)",
+      "Bash(gh search *)",
+      "Bash(gh auth status*)",
+      "Bash(git status*)",
+      "Bash(git log*)",
+      "Bash(git diff*)",
+      "Bash(git show*)",
+      "Bash(git fetch*)",
+      "Bash(git branch*)",
+      "Bash(git checkout*)",
+      "Read",
+      "Grep",
+      "Glob"
+    ]
+  }
+}

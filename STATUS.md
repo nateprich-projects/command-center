@@ -165,6 +165,35 @@ was on **`claude-opus-5`, effort `high`**.
 Worth watching, because model and effort bear directly on the two jobs least
 verified by tests: breakdown quality and review judgement.
 
+### First run, 2026-09-05 — two findings
+
+The first scheduled Claude run fired, recorded **both** heartbeats correctly, and
+exited `skipped-usage-unknown`. The trial found two problems on night one.
+
+**1. Permission prompts (fixed).** The task runs in `permissionMode: default`, so
+it prompted on tool use and waited for a human. The folder grant Nate accepted
+persists (`hasTrustDialogAccepted: true`), but the per-tool "allow once" clicks
+did not — `allowedTools` stayed empty. `.claude/settings.json` in this repo now
+allows exactly what the routine runs and nothing else: the Command Center
+scripts, pytest, read-only git, and the `gh` verbs for issues and PRs. Not
+allowed: `git push`, `Edit`/`Write`, and `gh repo *`.
+
+**2. The Claude budget gate cannot pass — unresolved, and it blocks everything.**
+`usage.py gate claude` reads the cache written by `statusline.sh`, and a
+scheduled run never writes it: the desktop app does not render a status line, so
+the file does not exist at all. Claude transcripts do not carry `rate_limits`
+either, and nothing else on disk persists it. So the gate fails closed on every
+run, forever.
+
+This is the deadlock `plan.md` already rejected in another form — *"avoids the
+deadlock a fail-closed pre-session gate would create, where a stale cache
+prevents the very run that would refresh it."* Fail-closed is a safety property
+when the signal is usually available. When it is **never** available it is not
+safety, it is an off switch, and the routine can never run.
+
+Awaiting a decision. Codex is unaffected: it writes `rate_limits` into its own
+session rollout, so its gate works.
+
 ### What would count as failure
 
 - Breakdowns producing tickets too large to finish in one run, or built on

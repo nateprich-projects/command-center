@@ -2,3 +2,4 @@
 {"agent": "claude", "merged": null, "note": "usage.py gate claude exited 2: no reading available for claude", "outcome": "skipped-usage-unknown", "phase": "finish", "run": "20898ce321ae", "ts": 1788621899, "usage": null}
 {"agent": "claude", "phase": "start", "run": "bdecf23aea60", "ticket": null, "ts": 1788628689, "usage": null}
 {"agent": "claude", "merged": null, "note": "no ticket/* PR open, nothing to review; broke down #16 into 2 tickets (#19, #20)", "outcome": "done", "phase": "finish", "run": "bdecf23aea60", "ts": 1788629495, "usage": null}
+{"agent": "claude", "phase": "start", "run": "e36820fc1b25", "ticket": null, "ts": 1788630166, "usage": null}

@@ -427,3 +427,31 @@ def test_an_unbroken_plan_never_reaches_codex():
     awaiting its breakdown, not waiting to be worked — treating it as both is
     what put an issue in two queues at once."""
     assert startable([item(1, "Ready", "New", children_total=0)]) == []
+
+
+# -- the Ideas stage: what feeds everything else ---------------------------
+
+
+def test_flagged_ideas_come_first_then_oldest():
+    """`needs-shaping` means Nate already decided it is worth thinking through."""
+    rows = [
+        item(1, "Ideas", None, days=1),
+        item(2, "Ideas", None, days=30),
+        item(3, "Ideas", None, days=5, labels=["needs-shaping"]),
+    ]
+    assert [i.number for i in funnel.ideas(rows)] == [3, 2, 1]
+
+
+def test_only_open_ideas_are_listed():
+    rows = [item(1, "Ideas", None), item(2, "Ideas", None, state="CLOSED"),
+            item(3, "Shaped", "New")]
+    assert [i.number for i in funnel.ideas(rows)] == [1]
+
+
+def test_ideas_are_listed_but_never_counted_as_waiting():
+    """Unbounded and guilt-free: askable on request, absent from every gate
+    count, and never a decision pending on Nate."""
+    rows = [item(n, "Ideas", None) for n in range(1, 20)]
+    assert len(funnel.ideas(rows)) == 19
+    assert awaiting_decision(rows) == []
+    assert [i for i in rows if needs_class(i)] == []

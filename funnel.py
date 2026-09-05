@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pathlib
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -200,6 +201,25 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
         return (depth, not item.is_blocked, since, item.repo, item.number)
 
     return sorted((i for i in items if gate_question(i)), key=key)
+
+
+def ideas(items: Iterable[Item]) -> List[Item]:
+    """Captured ideas, those flagged worth thinking through first.
+
+    `brief` deliberately excludes Ideas from its counts — it is unbounded and
+    guilt-free, and counting it turns it into pressure. But grilling is what
+    feeds everything downstream, so there has to be *some* way to ask what is
+    waiting to be shaped. This is it, and it is asked for rather than pushed.
+    """
+    return sorted(
+        (i for i in items if i.state == "OPEN" and i.status == "Ideas"),
+        key=lambda i: (
+            "needs-shaping" not in i.labels,   # flagged ones first
+            i.status_since or datetime.max.replace(tzinfo=timezone.utc),
+            i.repo,
+            i.number,
+        ),
+    )
 
 
 def awaiting_breakdown(items: Iterable[Item]) -> List[Item]:
@@ -892,6 +912,85 @@ def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -
     return 0
 
 
+def cmd_ideas(items: List[Item], now: datetime) -> int:
+    rows = ideas(items)
+    flagged = [i for i in rows if "needs-shaping" in i.labels]
+    print("Ideas ({} total, {} flagged as worth shaping):".format(len(rows), len(flagged)))
+    if not rows:
+        print("  nothing captured")
+    for item in rows:
+        print("  {:<3} {:<34} {:<14} {}".format(
+            "*" if "needs-shaping" in item.labels else " ",
+            item.ref, humanise(item.waited(now)), item.title))
+    if rows:
+        print("\n  * = labelled needs-shaping. Grilling is interactive and is the"
+              "\n      throttle on everything downstream — one at a time.")
+    return 0
+
+
+def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
+                repo: str, shaping: bool) -> int:
+    """Capture an idea. Unbounded and guilt-free, by design."""
+    body = note or "Captured from chat. Not yet thought through."
+    args = ["gh", "issue", "create", "--repo", repo, "--title", title, "--body", body]
+    if shaping:
+        args += ["--label", "needs-shaping"]
+    out = subprocess.run(args, capture_output=True, text=True)
+    if out.returncode != 0:
+        raise GitHubError(out.stderr.strip())
+    url = out.stdout.strip().splitlines()[-1]
+
+    add = subprocess.run(
+        ["gh", "project", "item-add", str(PROJECT_NUMBER), "--owner", PROJECT_OWNER,
+         "--url", url, "--format", "json"],
+        capture_output=True, text=True,
+    )
+    if add.returncode == 0:
+        item_id = json.loads(add.stdout)["id"]
+        gh_graphql(SET_FIELD, project=PROJECT_ID, item=item_id,
+                   field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Ideas"))
+        print("{}  → Ideas{}".format(url, " (needs-shaping)" if shaping else ""))
+    else:
+        print("{}\nnote: created, but not added to the Project".format(url),
+              file=sys.stderr)
+    return 0
+
+
+def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str) -> int:
+    """Record that an idea has been grilled and a plan now exists.
+
+    Writes the plan into the issue body — `plan.md` puts it there through Ideas
+    and Shaped, and it only becomes a repo's own `plan.md` at the Ready gate —
+    then moves the item to `Shaped`, which is what asks Nate the next gate: is
+    the plan good?
+    """
+    item = find(items, ref)
+    try:
+        plan = pathlib.Path(plan_file).read_text()
+    except OSError as exc:
+        raise GitHubError("cannot read {}: {}".format(plan_file, exc))
+    if not plan.strip():
+        raise GitHubError("the plan is empty; nothing to record")
+
+    out = subprocess.run(
+        ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
+         "--body-file", plan_file],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        raise GitHubError(out.stderr.strip())
+
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
+    gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
+               field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Shaped"))
+    subprocess.run(["gh", "issue", "edit", str(item.number), "--repo", item.repo,
+                    "--remove-label", "needs-shaping"], capture_output=True)
+    print("{} → Shaped\n{}".format(item.ref, item.url))
+    print("\nIt now waits on you: is the plan good? Answer by moving it to Ready.")
+    return 0
+
+
 def cmd_release(items: List[Item], now: datetime, ref: str) -> int:
     write_lock(find(items, ref), "")
     return 0
@@ -903,6 +1002,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub.add_parser("queue", help="everything, ordered")
     sub.add_parser("next", help="the single next ticket Codex should work, or nothing")
     sub.add_parser("brief", help="JSON for the /funnel skill and the morning brief")
+    sub.add_parser("ideas", help="captured ideas, flagged ones first")
+    capture = sub.add_parser("capture", help="capture an idea into the funnel")
+    capture.add_argument("title")
+    capture.add_argument("--note", default=None, help="anything worth keeping now")
+    capture.add_argument("--repo", default=REPO)
+    capture.add_argument("--needs-shaping", action="store_true", dest="shaping",
+                         help="flag it as worth thinking through")
+    shaped = sub.add_parser("shaped", help="record a grilled plan and move to Shaped")
+    shaped.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    shaped.add_argument("--plan", required=True, help="file holding the plan")
     claim = sub.add_parser("claim", help="take the single-in-motion lock on a ticket")
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
     release = sub.add_parser("release", help="give up the lock on a ticket")
@@ -927,6 +1036,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_release(items, now, args.ref)
         if args.command == "reject":
             return cmd_reject(items, now, args.pr, args.note)
+        if args.command == "ideas":
+            return cmd_ideas(items, now)
+        if args.command == "capture":
+            return cmd_capture(items, now, args.title, args.note, args.repo,
+                               args.shaping)
+        if args.command == "shaped":
+            return cmd_shaped(items, now, args.ref, args.plan)
         return {"queue": cmd_queue, "next": cmd_next, "brief": cmd_brief}[args.command](
             items, now
         )

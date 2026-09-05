@@ -382,7 +382,19 @@ is waiting on Nate" is computed from observable facts. A maintained blocker list
 stale; a derived one is correct by construction.
 
 **Capture** is by chat ("add this idea to my command center backlog") or directly in
-GitHub. **Not TickTick** — that is the do-list, and ideas there would compete with real
+GitHub. The `shape` skill implements that surface: `funnel ideas` lists what is waiting,
+`funnel capture` takes one down, and `funnel shaped` writes a grilled plan into the issue
+body and moves the item to `Shaped`.
+
+That last step is deliberately not approval. It records that a plan now exists; the gate
+*is the plan good?* stays Nate's, answered by moving the item to `Ready`. Nothing else in
+the system may write `Ready`, because the breakdown routine treats it as authorisation to
+create tickets.
+
+`funnel brief` still excludes Ideas from every count — it is unbounded and guilt-free, and
+counting it turns it into pressure — so `funnel ideas` is **asked for, never pushed**.
+This was left out of v0 and should not have been: grilling is what feeds the funnel, so
+with no way to ask what needs shaping, nothing real ever reaches Codex. **Not TickTick** — that is the do-list, and ideas there would compete with real
 tasks and erode its trustworthiness. TickTick receives exactly one thing: operational
 failure alerts, which are genuine tasks.
 

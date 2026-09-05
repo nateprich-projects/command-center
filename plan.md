@@ -332,6 +332,12 @@ against fixtures.
 **GitHub is the state.** No persistence, no locking, no journal — there is no shared
 mutable state to protect.
 
+**Local state, deliberately kept out of GitHub.** Two things live only on the Mac mini:
+the statusline usage cache, because the numbers are readable only from inside a live
+session, and the agents' own session transcripts, which `prior_run.py` reads to recover a
+dead run's intent. Both are **recovery aids, never state of record** — lose them and the
+funnel is unaffected.
+
 **Retired from v1:** `$COPILOT_HOME` runtime state, checkouts, coordinators, Run Map,
 the canvas extension, the operation engine with its claims and recovery, safety
 validation, and the migration protocol. All of it exists to make concurrent mutation

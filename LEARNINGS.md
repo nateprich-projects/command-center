@@ -8,6 +8,33 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Codex desktop gives every session a fresh working directory
+
+**2026-09-05 · Codex desktop · measured**
+
+**A run's local work is not inherited by the next run. Push as you go, or the work is
+effectively gone.** Codex desktop clones into `~/Documents/Codex/<date>/<slug>`, where the
+slug is derived from the prompt, and a new session gets a new directory:
+
+```
+Codex Desktop   /Users/nateprich/Documents/Codex/2026-09-05/wh
+Codex Desktop   /Users/nateprich/Documents/Codex/2026-09-05/ple
+Codex Desktop   /Users/nateprich/Documents/Codex/2026-09-02/can
+```
+
+So a run killed mid-work leaves its uncommitted changes somewhere a resuming run will
+never look. Committing and pushing after each meaningful step is what makes the work
+survive, and it is why the branch name must be derivable from the ticket rather than
+recorded anywhere.
+
+The directories do persist, so stranded work is *rescuable* if you know where to look —
+which is why `prior_run.py` reports the dead session's `cwd` along with how many
+uncommitted files and unpushed commits are sitting in it.
+
+The full transcript also survives, in `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`:
+`session_meta`, every message, reasoning, and tool call with its output. That is what
+makes a dead run's *intent* recoverable, which no diff can carry.
+
 ### Codex acts as the account holder, so assignment cannot identify it
 
 **2026-09-05 · Codex desktop · measured**

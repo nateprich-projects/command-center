@@ -1,1 +1,2 @@
 {"agent": "claude", "phase": "start", "run": "20898ce321ae", "ticket": null, "ts": 1788621883, "usage": null}
+{"agent": "claude", "merged": null, "note": "usage.py gate claude exited 2: no reading available for claude", "outcome": "skipped-usage-unknown", "phase": "finish", "run": "20898ce321ae", "ts": 1788621899, "usage": null}

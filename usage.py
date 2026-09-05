@@ -31,7 +31,59 @@ import time
 from typing import Dict, Optional
 
 CLAUDE_CACHE = os.path.expanduser("~/.claude/command-center-usage.json")
+CLAUDE_TRANSCRIPTS = os.path.expanduser("~/.claude/projects/*/*.jsonl")
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/*/*/*/*.jsonl")
+
+# -- The local token estimate -------------------------------------------------
+#
+# Claude's real usage percentages are only readable through the statusline
+# cache, and a scheduled run never writes one — the desktop app renders no
+# status line. So for scheduled work the real signal is never available, and a
+# gate that fails closed on it is not a safety property but an off switch.
+#
+# The fallback measures what Claude Code itself actually spent, from the
+# transcripts it writes anyway, and converts that to a percentage of an observed
+# capacity.
+#
+# **This undercounts.** It cannot see claude.ai or mobile usage on the same
+# subscription, which is exactly the objection plan.md raised against estimating
+# from these files. That objection stands: this is an estimate, it errs low, and
+# it carries an explicit haircut below to lean the other way. It is used only
+# when the real reading is unavailable.
+
+#: Output tokens dominate what a session costs, and Opus costs far more per
+#: token than Sonnet against a subscription limit. 5x is a placeholder, not a
+#: published ratio.
+MODEL_WEIGHTS = {"opus": 5.0, "sonnet": 1.0, "haiku": 0.2, "fable": 1.0}
+DEFAULT_WEIGHT = 5.0  # unknown model: assume expensive
+
+#: Capacity, in weighted output tokens, derived from observation on 2026-09-05:
+#: a 5-hour window carrying 757k output tokens (3.6M weighted, nearly all Opus)
+#: took the account to the edge of its 5-hour limit. The weekly figure is the
+#: measured 7-day total at a reported 67% used, with the +50% promo removed —
+#: that promo expires 2026-09-13, so the un-promoted number is the safe one.
+#: Both are estimates from single observations. Re-derive them from real data.
+FIVE_HOUR_CAPACITY = 3_600_000.0
+
+#: The weekly capacity is currently inflated by a "+50% weekly limits" promo
+#: that ends 2026-09-13. Encoding both values and the date stops the estimate
+#: silently over-spending by half on the day it expires.
+WEEKLY_CAPACITY_PROMO = 12_500_000.0
+WEEKLY_CAPACITY_BASE = 8_400_000.0
+PROMO_ENDS = 1789286400.0  # 2026-09-13T00:00:00Z
+
+#: Because the estimate cannot see claude.ai or mobile, inflate it before
+#: judging. Erring high costs a refused run; erring low costs the week.
+#:
+#: Calibrated rather than guessed: on 2026-09-05 this estimate put the weekly
+#: window at 67.7% against a reported 67%, so the blind spot is small. The
+#: trailing-7-day count is itself conservative — the real window resets, so the
+#: trailing total is always at least what the live window holds.
+ESTIMATE_HAIRCUT = 1.10
+
+
+def weekly_capacity(now: float) -> float:
+    return WEEKLY_CAPACITY_PROMO if now < PROMO_ENDS else WEEKLY_CAPACITY_BASE
 
 #: A reading older than this is not trusted. Both sources are refreshed by the
 #: reading session itself, so anything older than a few minutes means the gate
@@ -65,6 +117,84 @@ FIVE_HOUR_RESERVE = 30.0
 
 FIVE_HOUR = 300 * 60
 SEVEN_DAY = 10080 * 60
+
+
+def _weight(model: Optional[str]) -> float:
+    name = (model or "").lower()
+    for key, value in MODEL_WEIGHTS.items():
+        if key in name:
+            return value
+    return DEFAULT_WEIGHT
+
+
+def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
+    """Estimate Claude usage from Claude Code's own transcripts.
+
+    Counts weighted output tokens in the trailing 5-hour and 7-day windows and
+    expresses them as a percentage of observed capacity. Sessions record their
+    own consumption, so this works for a scheduled run — unlike the statusline
+    cache, which such a run never writes.
+    """
+    now = time.time() if now is None else now
+    cutoff = now - SEVEN_DAY
+    five_hour = weekly = 0.0
+    seen = False
+
+    for path in glob.glob(CLAUDE_TRANSCRIPTS):
+        try:
+            # A file untouched since before the window cannot hold a record
+            # inside it. Skipping those keeps this cheap as transcripts pile up.
+            if os.path.getmtime(path) < cutoff:
+                continue
+            with open(path, errors="replace") as fh:
+                for line in fh:
+                    if '"usage"' not in line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    message = record.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    tokens = (message.get("usage") or {}).get("output_tokens")
+                    stamp = _epoch(record.get("timestamp") or "")
+                    if not tokens or stamp is None or stamp < cutoff:
+                        continue
+                    seen = True
+                    cost = tokens * _weight(message.get("model"))
+                    weekly += cost
+                    if stamp >= now - FIVE_HOUR:
+                        five_hour += cost
+        except OSError:
+            continue
+
+    if not seen:
+        return None
+
+    return {
+        "source": "claude-local-estimate",
+        "captured_at": now,
+        "estimated": True,
+        "windows": {
+            "five_hour": {
+                "used_percent": min(
+                    100.0, 100.0 * five_hour * ESTIMATE_HAIRCUT / FIVE_HOUR_CAPACITY
+                ),
+                # A rolling estimate has no reset instant to report. The weekly
+                # pace line needs one, so give it the end of the trailing window.
+                "resets_at": now + FIVE_HOUR,
+            },
+            "seven_day": {
+                "used_percent": min(
+                    100.0,
+                    100.0 * weekly * ESTIMATE_HAIRCUT / weekly_capacity(now),
+                ),
+                "resets_at": now + SEVEN_DAY,
+            },
+        },
+        "weighted_output_tokens": {"five_hour": five_hour, "seven_day": weekly},
+    }
 
 
 def read_claude() -> Optional[Dict]:
@@ -198,16 +328,25 @@ def pace(reading: Dict, now: float) -> Dict:
 
     seven = windows.get("seven_day") or {}
     if seven.get("used_percent") is not None and seven.get("resets_at"):
-        remaining = max(0.0, float(seven["resets_at"]) - now)
-        elapsed_fraction = max(0.0, min(1.0, 1.0 - remaining / SEVEN_DAY))
-        allowed = WEEKLY_TARGET * elapsed_fraction
+        if reading.get("estimated"):
+            # A trailing-window estimate has no cycle position, so the
+            # proportional line is meaningless — it would read "0% allowed"
+            # forever. A rolling total gets a flat ceiling instead.
+            elapsed_fraction = None
+            allowed = WEEKLY_TARGET
+        else:
+            remaining = max(0.0, float(seven["resets_at"]) - now)
+            elapsed_fraction = max(0.0, min(1.0, 1.0 - remaining / SEVEN_DAY))
+            allowed = WEEKLY_TARGET * elapsed_fraction
         verdicts.append(
             {
                 "window": "seven_day",
                 "used_percent": seven["used_percent"],
                 "reserve": WEEKLY_RESERVE,
                 "allowed_percent": round(allowed, 1),
-                "elapsed_fraction": round(elapsed_fraction, 3),
+                "elapsed_fraction": (
+                    round(elapsed_fraction, 3) if elapsed_fraction is not None else None
+                ),
                 "over": seven["used_percent"] + WEEKLY_RESERVE > allowed,
             }
         )
@@ -218,6 +357,24 @@ def pace(reading: Dict, now: float) -> Dict:
         # No window read at all is not "under pace" — it is unknown.
         "known": bool(verdicts),
     }
+
+
+def read_agent(agent: str, now: float) -> Optional[Dict]:
+    """Best available reading for an agent, preferring a real measurement.
+
+    Codex records its own rate limits, so it always has one. Claude does not in
+    a scheduled run, so a fresh statusline cache is used when it exists — which
+    it will on days Nate has worked in a terminal — and the local token estimate
+    fills in otherwise. The estimate is never preferred over a real reading.
+    """
+    if agent == "codex":
+        return read_codex()
+
+    cached = read_claude()
+    age = now - cached["captured_at"] if cached and cached.get("captured_at") else None
+    if age is not None and -60 <= age <= MAX_AGE:
+        return cached
+    return read_claude_local(now) or cached
 
 
 def main(argv=None) -> int:
@@ -231,7 +388,7 @@ def main(argv=None) -> int:
 
     now = time.time()
     agent = args.agent if args.command == "gate" else args.command
-    reading = read_claude() if agent == "claude" else read_codex()
+    reading = read_agent(agent, now)
 
     if reading is None:
         print("usage: no reading available for {}".format(agent), file=sys.stderr)
@@ -265,6 +422,13 @@ def main(argv=None) -> int:
     if not verdict["known"]:
         print("usage: no usable window for {}".format(agent), file=sys.stderr)
         return 2
+
+    if reading.get("estimated"):
+        print(
+            "usage: no real reading for {}; using the local token estimate "
+            "(undercounts claude.ai and mobile)".format(agent),
+            file=sys.stderr,
+        )
 
     for window in verdict["windows"]:
         print(

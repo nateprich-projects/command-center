@@ -269,10 +269,33 @@ if the pace line is exceeded. A no-op session costs nothing; the work is what co
 also avoids the deadlock a fail-closed pre-session gate would create, where a stale cache
 prevents the very run that would refresh it.
 
-_Rejected: estimating usage from `~/.claude/projects/**/*.jsonl` token counts. Those
-record Claude Code's own consumption only, and Nate uses the same subscription on
-claude.ai and mobile — so the estimate would undercount exactly in the direction that
-burns his week._
+_Rejected as the **primary** source: estimating usage from
+`~/.claude/projects/**/*.jsonl` token counts. Those record Claude Code's own consumption
+only, and Nate uses the same subscription on claude.ai and mobile — so the estimate
+undercounts exactly in the direction that burns his week._
+
+**Reinstated as the fallback, 2026-09-05, on evidence.** The premise above — that the
+statusline path works — is false for scheduled runs: the desktop app renders no status
+line, so the cache is never written and the real reading is *never* available. A gate
+that fails closed on a signal that never arrives is not a safety property, it is an off
+switch, and it kept the Claude routine from ever running.
+
+So: **a fresh real reading is preferred whenever one exists**; the token estimate fills
+in otherwise. The undercount objection stands and is handled explicitly — a 1.10 haircut,
+and a trailing-7-day count that is inherently conservative because the real window resets.
+The haircut is calibrated rather than guessed: on 2026-09-05 the estimate put the weekly
+window at 67.7% against a reported 67%.
+
+Two shapes must not be confused. A **resetting** window gets the proportional pace line,
+because its `resets_at` says how far through the cycle it is. A **rolling** estimate has
+no cycle position, so it gets a flat ceiling — applying the pace line to it computes
+"0% allowed" forever.
+
+Capacity is measured, not assumed: a 5-hour window carrying 757k output tokens took the
+account to the edge of its limit, and the weekly figure comes from the observed 7-day
+total at a known percentage. **The weekly capacity is currently inflated by a +50% promo
+that ends 2026-09-13**, so both values are encoded with that date — otherwise the
+estimate would silently permit half again as much spending on the day it lapses.
 
 **Codex's equivalent is not yet verified.** The same early-exit pattern applies whatever
 the mechanism turns out to be: start, read, exit if over pace.

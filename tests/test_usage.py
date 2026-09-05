@@ -186,7 +186,10 @@ def test_a_missing_claude_cache_reads_as_none(tmp_path, monkeypatch):
 
 
 def test_gate_exits_2_when_nothing_can_be_read(tmp_path, monkeypatch):
+    """Unknown still fails closed — but unknown now means neither the real
+    reading nor the local estimate is available."""
     monkeypatch.setattr(usage, "CLAUDE_CACHE", str(tmp_path / "absent.json"))
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "none/*.jsonl"))
     assert usage.main(["gate", "claude"]) == 2
 
 
@@ -200,6 +203,7 @@ def test_gate_exits_2_on_a_stale_reading(tmp_path, monkeypatch):
         "five_hour": {"used_percentage": 1.0, "resets_at": int(_time.time()) + 600},
     }))
     monkeypatch.setattr(usage, "CLAUDE_CACHE", str(cache))
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "none/*.jsonl"))
     assert usage.main(["gate", "claude"]) == 2
 
 
@@ -212,4 +216,131 @@ def test_gate_exits_2_on_a_reading_from_the_future(tmp_path, monkeypatch):
         "five_hour": {"used_percentage": 1.0, "resets_at": int(_time.time()) + 600},
     }))
     monkeypatch.setattr(usage, "CLAUDE_CACHE", str(cache))
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "none/*.jsonl"))
     assert usage.main(["gate", "claude"]) == 2
+
+
+# -- the local token estimate ----------------------------------------------
+
+
+def transcript(path, entries, ts="2026-09-05T08:00:00.000Z"):
+    """entries: (model, output_tokens) or (model, output_tokens, timestamp)."""
+    lines = []
+    for e in entries:
+        model, out = e[0], e[1]
+        stamp = e[2] if len(e) > 2 else ts
+        lines.append(json.dumps({
+            "type": "assistant", "timestamp": stamp,
+            "message": {"role": "assistant", "model": model,
+                        "usage": {"output_tokens": out}},
+        }))
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def _at(now, hours_ago):
+    import datetime
+    t = datetime.datetime.utcfromtimestamp(now - hours_ago * 3600)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def test_opus_costs_more_than_sonnet_against_the_limit():
+    """Output tokens dominate cost, and Opus is far more expensive per token."""
+    assert usage._weight("claude-opus-5") > usage._weight("claude-sonnet-5")
+    assert usage._weight("claude-haiku-4-5") < usage._weight("claude-sonnet-5")
+
+
+def test_an_unknown_model_is_assumed_expensive():
+    """Guessing cheap on an unrecognised model errs low, and low burns the week."""
+    assert usage._weight("some-future-model") == usage.DEFAULT_WEIGHT
+    assert usage._weight(None) == usage.DEFAULT_WEIGHT
+
+
+def test_the_estimate_counts_weighted_output_tokens(tmp_path, monkeypatch):
+    import time as _time
+    now = _time.time()
+    transcript(tmp_path / "a.jsonl", [("claude-sonnet-5", 1000, _at(now, 1))])
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
+    r = usage.read_claude_local(now)
+    assert r["weighted_output_tokens"]["five_hour"] == 1000
+    assert r["estimated"] is True
+
+
+def test_records_outside_the_window_are_not_counted(tmp_path, monkeypatch):
+    import time as _time
+    now = _time.time()
+    transcript(tmp_path / "a.jsonl", [
+        ("claude-sonnet-5", 1000, _at(now, 1)),      # inside 5h
+        ("claude-sonnet-5", 500, _at(now, 20)),      # inside 7d, outside 5h
+        ("claude-sonnet-5", 9999, _at(now, 24 * 9)), # outside both
+    ])
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
+    w = usage.read_claude_local(now)["weighted_output_tokens"]
+    assert w["five_hour"] == 1000
+    assert w["seven_day"] == 1500
+
+
+def test_no_transcripts_reads_as_none_not_as_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "none/*.jsonl"))
+    assert usage.read_claude_local(NOW) is None
+
+
+def test_a_rolling_estimate_gets_a_flat_ceiling_not_a_pace_line():
+    """A trailing window has no cycle position, so the proportional line would
+    read 0% allowed forever — the failure that made the gate unusable."""
+    reading = {"estimated": True, "windows": {
+        "seven_day": {"used_percent": 50.0, "resets_at": NOW + WEEK}}}
+    verdict = usage.pace(reading, NOW)
+    assert verdict["windows"][0]["allowed_percent"] == usage.WEEKLY_TARGET
+    assert verdict["windows"][0]["elapsed_fraction"] is None
+
+
+def test_a_real_reading_still_gets_the_proportional_line():
+    verdict = usage.pace(seven_day(50.0, 0.5), NOW)
+    assert verdict["windows"][0]["allowed_percent"] < usage.WEEKLY_TARGET
+
+
+def test_weekly_capacity_drops_when_the_promo_expires():
+    """A +50% promo ends 2026-09-13. Not encoding that would silently
+    over-spend by half on the day it lapses."""
+    assert usage.weekly_capacity(usage.PROMO_ENDS - 1) == usage.WEEKLY_CAPACITY_PROMO
+    assert usage.weekly_capacity(usage.PROMO_ENDS + 1) == usage.WEEKLY_CAPACITY_BASE
+    assert usage.WEEKLY_CAPACITY_BASE < usage.WEEKLY_CAPACITY_PROMO
+
+
+def test_a_fresh_real_reading_beats_the_estimate(tmp_path, monkeypatch):
+    """The estimate is a fallback, never a preference."""
+    import time as _time
+    now = _time.time()
+    cache = tmp_path / "usage.json"
+    cache.write_text(json.dumps({"captured_at": int(now),
+                                 "five_hour": {"used_percentage": 3.0,
+                                               "resets_at": int(now + 600)}}))
+    transcript(tmp_path / "a.jsonl", [("claude-opus-5", 99999, _at(now, 1))])
+    monkeypatch.setattr(usage, "CLAUDE_CACHE", str(cache))
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
+    assert usage.read_agent("claude", now)["source"] == "claude"
+
+
+def test_a_stale_real_reading_falls_back_to_the_estimate(tmp_path, monkeypatch):
+    """Today's actual failure: no scheduled run ever writes the cache."""
+    import time as _time
+    now = _time.time()
+    cache = tmp_path / "usage.json"
+    cache.write_text(json.dumps({"captured_at": int(now) - usage.MAX_AGE - 600,
+                                 "five_hour": {"used_percentage": 3.0,
+                                               "resets_at": int(now)}}))
+    transcript(tmp_path / "a.jsonl", [("claude-opus-5", 1000, _at(now, 1))])
+    monkeypatch.setattr(usage, "CLAUDE_CACHE", str(cache))
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
+    assert usage.read_agent("claude", now)["source"] == "claude-local-estimate"
+
+
+def test_the_gate_can_now_pass_for_claude(tmp_path, monkeypatch):
+    """The whole point: a scheduled run must be able to proceed."""
+    import time as _time
+    now = _time.time()
+    monkeypatch.setattr(usage, "CLAUDE_CACHE", str(tmp_path / "absent.json"))
+    transcript(tmp_path / "a.jsonl", [("claude-sonnet-5", 100, _at(now, 1))])
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
+    assert usage.main(["gate", "claude"]) == 0

@@ -116,6 +116,21 @@ Until then every Codex run should record `skipped-over-pace` and do nothing. Tha
 is the budget gate working, not a failure — and it is itself the first thing
 under test.
 
+### Model and effort
+
+**The scheduled tasks do not set either.** `create_scheduled_task` has no parameter
+for model or effort, and nothing is recorded on the task — a run inherits whatever
+the app's default is at the moment it fires. Changing that default in the app
+changes how the routines behave, silently and mid-trial.
+
+Both are recoverable after the fact: Claude transcripts carry `effort` at the
+record level and `model` inside the message, and `prior_run.py` now surfaces both
+as `ran as: <model> (effort <level>)`. At the time the trial was set up the app
+was on **`claude-opus-5`, effort `high`**.
+
+Worth watching, because model and effort bear directly on the two jobs least
+verified by tests: breakdown quality and review judgement.
+
 ### What would count as failure
 
 - Breakdowns producing tickets too large to finish in one run, or built on

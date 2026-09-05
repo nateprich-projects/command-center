@@ -91,13 +91,17 @@ def test_a_ticket_url_is_accepted_as_well_as_a_number(tmp_path, monkeypatch):
 # -- the two vendors share no transcript structure -------------------------
 
 
-def claude_transcript(path, records, cwd="/tmp/work"):
+def claude_transcript(path, records, cwd="/tmp/work", model="claude-opus-5",
+                      effort="high"):
     lines = []
     for role, content in records:
+        message = {"role": role, "content": content}
+        if role == "assistant":
+            message["model"] = model
         lines.append(json.dumps({
             "type": role, "cwd": cwd, "sessionId": "s1", "gitBranch": "ticket/42",
-            "timestamp": "2026-09-05T08:00:00.000Z",
-            "message": {"role": role, "content": content},
+            "timestamp": "2026-09-05T08:00:00.000Z", "effort": effort,
+            "message": message,
         }))
     path.write_text("\n".join(lines) + "\n")
     return path
@@ -115,6 +119,19 @@ def test_a_claude_transcript_is_parsed(tmp_path):
     assert [m["text"] for m in d["messages"]] == [
         "Please review PR #42", "Reading the diff against plan.md."]
     assert d["meta"]["cwd"] == "/tmp/work"
+
+
+def test_the_model_and_effort_are_captured(tmp_path):
+    """A scheduled task sets neither — it inherits the app default at fire time,
+    and nothing else records which was used. Both bear on review and breakdown
+    quality, so a default changed mid-week must not be invisible."""
+    f = claude_transcript(tmp_path / "c.jsonl",
+                          [("assistant", [{"type": "text", "text": "hi"}])],
+                          model="claude-opus-5", effort="high")
+    d = prior_run.digest(str(f), shape="claude")
+    assert d["meta"]["model"] == "claude-opus-5"
+    assert d["meta"]["effort"] == "high"
+    assert "claude-opus-5 (effort high)" in prior_run.render(d, "42")
 
 
 def test_claude_tool_uses_are_collected(tmp_path):

@@ -162,13 +162,23 @@ def digest(path: str, shape: Optional[str] = None) -> Dict:
                 or (shape is None and isinstance(record.get("message"), dict))
             ) else _read_codex
 
+            # Model and effort are not set by a scheduled task — it inherits the
+            # app's default at fire time — and nothing else records which was
+            # used. They matter: both bear directly on review and breakdown
+            # quality, and a default changed mid-week would otherwise alter the
+            # routines' behaviour invisibly.
+            if record.get("effort") and "effort" not in meta:
+                meta["effort"] = record["effort"]
+            if isinstance(record.get("message"), dict) and record["message"].get("model"):
+                meta.setdefault("model", record["message"]["model"])
+
             # Claude carries cwd/gitBranch on every record instead of a header.
-            if not meta and record.get("cwd"):
-                meta = {
+            if not meta.get("cwd") and record.get("cwd"):
+                meta.update({
                     k: record.get(k)
                     for k in ("sessionId", "cwd", "timestamp", "gitBranch")
                     if record.get(k)
-                }
+                })
                 meta["id"] = meta.pop("sessionId", None)
 
             kind, value = reader(record)
@@ -244,6 +254,8 @@ def render(d: Dict, ticket: str) -> str:
         "session : {}".format(d["session"]),
         "started : {}".format(meta.get("timestamp", "unknown")),
         "cwd     : {}".format(meta.get("cwd", "unknown")),
+        "ran as  : {} (effort {})".format(
+            meta.get("model", "unknown"), meta.get("effort", "unknown")),
         "size    : {} messages, {} tool calls".format(
             d["total_messages"], d["total_tool_calls"]
         ),

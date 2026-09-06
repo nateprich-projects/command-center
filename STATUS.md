@@ -4,29 +4,32 @@
 
 ## Where this stands, in one place
 
-v0 is built and **not accepted** — deliberately, pending a trial. Three Claude routine
-runs have completed end to end; Codex has not been scheduled yet. 141 tests pass.
+v0 is built and **not accepted** — deliberately, pending evidence that the pipeline runs
+end to end. 171 tests pass.
 
-**Waiting on Nate, bottom-up:**
+**Waiting on Nate:** one item.
 
 | Item | Gate |
 |---|---|
 | #2 Command Center v0 | Accept it? |
-| #16 `funnel park` | Start now? |
-| #17 `funnel doctor` | Start now? |
-| #18 multi-repo support | Is the plan good? |
 
-Use `funnel show <n>` before answering — it assembles the plan, the tickets, what shipped
-and what the reviewer said. The answering commands are **dry runs unless `--yes`**.
+Held on purpose. Nate is waiting to watch work go all the way through — shaped, broken
+down, built by Codex, reviewed and merged — before accepting the thing that does it.
 
-**Seven ideas captured**, six flagged `needs-shaping`: #15 self-improvement and
-calibration, #25 reaching the funnel from general chat, #26 the heartbeat run-pointer
-clobber, #27 tracking Claude-only work, #28 manual priority override, #29 versioning and
-change logs, #30 public-repo findability.
+**In flight:** four projects at `Ready` (#16 `funnel park`, #17 `funnel doctor`, #18
+multi-repo, #26 heartbeat run ids, #32 `Broken` ordering, #34 the gate model), of which
+#18, #26, #32 and #34 await breakdown into tickets by the next Claude run. Five tickets
+are already startable; `funnel next` currently returns **#19**.
 
-**Not yet done:** Codex is not scheduled (its prompt is `routines/codex-work.md`);
-dependabot #13 is open and untriaged; `pytest` is absent from the cloud image, which only
-matters if cloud sessions are ever meant to run tests here.
+**Seven ideas captured**, two classed `Broken`: #15 self-improvement and calibration, #27
+tracking Claude-only work, #28 manual priority override, #29 versioning and change logs,
+#30 public-repo findability, **#31** agent-written content indistinguishable from Nate's,
+**#35** the watchdog alarming on silence rather than on a missed expected run.
+
+**Not yet done:** dependabot #13 is open and untriaged; `pytest` is absent from the cloud
+image, which only matters if cloud sessions are ever meant to run tests here; the
+automations run with `cwds = ["~"]`, so whether home is writable during a scheduled run is
+reasoned but not measured.
 
 ## The command surface
 
@@ -36,16 +39,43 @@ Nate's, from any Claude Code session on this Mac:
 |---|---|
 | `funnel brief` / `queue` | what is waiting, bottom-up |
 | `funnel show <n>` | the evidence for one item's gate |
-| `funnel approve\|start\|accept <n> --yes` | answer a gate — **his alone** |
+| `funnel approve\|start\|accept <n> --yes` | answer a gate — **his decision**, an agent may execute it on his explicit instruction |
 | `funnel ideas` | captured ideas, flagged first |
 | `funnel capture "<title>"` | take an idea down from chat |
 | `funnel shaped <n> --plan <file>` | record a grilled plan, → Shaped |
 | `funnel reject <pr>` | a merged PR was broken; undo and count it |
 
 The agents': `funnel next`, `claim`, `release`, `usage.py gate`, `heartbeat`,
-`prior_run`. **`park` is not built** — it is ticket #19, waiting on Codex.
+`prior_run`. **`park` is not built** — it is ticket #19, and it is what `funnel next`
+currently hands Codex.
+
+`scripts/sync_codex_automations.py --check` reports whether the five Codex automations
+still match `routines/codex-work.md`. Worth running before trusting an overnight schedule:
+the routine file is not what runs, and all five had drifted from it by 2026-09-06.
 
 v0 in progress. Target: shipped in under two weeks from 2026-09-05.
+
+## Verified on 2026-09-06, not merely built
+
+Measured in the wild, not in fixtures. Each of these had never actually run before.
+
+- **Codex reaches GitHub and records heartbeats.** Its history was empty since the system
+  was built; run `f0474353cee2` is its first surviving start/finish pair.
+- **The idle gate refuses correctly.** `37.0% of the five-hour window spent OVER — window
+  already in use when it began — Nate is working`, exit 1.
+- **The sandbox is scoped as intended.** The canonical checkout is not writable
+  (`Operation not permitted`); the heartbeat spool is. Both were exactly inverted earlier
+  the same day, and Codex had been doing ticket work directly in Nate's working tree.
+- **A lost heartbeat says so.** Two records were lost silently that morning while GitHub
+  was reachable, reported as "spooled locally". A record now goes straight to GitHub when
+  the spool cannot be written, and is called lost only when both routes fail.
+- **The run-id fix holds.** `#26` shipped outside the pipeline on Nate's explicit
+  instruction — recorded on the issue as a deliberate exception, since work closed without
+  a `ticket/*` PR is exactly what makes v0 hard to accept.
+
+**Still unverified, and the reason #2 is open:** no Codex run has worked a ticket, no PR
+has been reviewed, and nothing has been merged unattended. Breakdown is the only stage an
+agent has genuinely completed.
 
 ## Built and verified
 

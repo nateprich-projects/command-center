@@ -258,29 +258,60 @@ def test_a_closed_ticket_does_not_hold_the_lock():
     assert lock_holder([held], NOW) is None
 
 
-def test_next_returns_nothing_while_the_lock_is_held():
+def test_a_claim_below_the_limit_does_not_block_the_next_run():
+    """The cap was split from the claim on 2026-09-06. One ticket in motion no
+    longer stops another starting — that was policy hiding inside a correctness
+    check, and `WIP_LIMIT` now says it out loud."""
     rows = [project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(5)),
             project(3, "Building", "New"), ticket(4, 3)]
-    assert next_ticket(rows, NOW) is None
-
-
-def test_broken_preempts_a_held_lock():
-    """The one sanctioned preemption, and only because Broken is finite."""
-    rows = [project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(5)),
-            project(3, "Building", "Broken"), ticket(4, 3)]
     assert next_ticket(rows, NOW).number == 4
 
 
-def test_maintenance_does_not_preempt_a_held_lock():
-    """Maintenance may preempt in-flight *ranking*, but not seize a live lock."""
-    rows = [project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(5)),
-            project(3, "Building", "Maintenance"), ticket(4, 3)]
+def test_a_claimed_ticket_is_never_handed_out_twice():
+    """The half of the old lock that was correctness, and still is."""
+    rows = [project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(5))]
     assert next_ticket(rows, NOW) is None
 
 
-def test_broken_does_not_preempt_a_lock_already_held_for_broken_work():
-    rows = [project(1, "Building", "Broken"), ticket(2, 1, in_motion_since=claimed(5)),
+def test_next_returns_nothing_at_the_work_in_progress_limit():
+    rows = []
+    for k in range(funnel.WIP_LIMIT):
+        rows += [project(10 + k, "Building", "New"),
+                 ticket(20 + k, 10 + k, in_motion_since=claimed(5))]
+    rows += [project(1, "Building", "New"), ticket(2, 1)]
+    assert next_ticket(rows, NOW) is None
+
+
+def _at_limit(extra):
+    """Fill every WIP slot with ordinary work, then offer `extra`."""
+    rows = []
+    for k in range(funnel.WIP_LIMIT):
+        rows += [project(10 + k, "Building", "New"),
+                 ticket(20 + k, 10 + k, in_motion_since=claimed(5))]
+    return rows + extra
+
+
+def test_broken_preempts_the_limit():
+    """The one sanctioned preemption, and only because Broken is finite."""
+    rows = _at_limit([project(3, "Building", "Broken"), ticket(4, 3)])
+    assert next_ticket(rows, NOW).number == 4
+
+
+def test_maintenance_does_not_preempt_the_limit():
+    """Maintenance may preempt in-flight *ranking*, but not exceed the cap."""
+    rows = _at_limit([project(3, "Building", "Maintenance"), ticket(4, 3)])
+    assert next_ticket(rows, NOW) is None
+
+
+def test_broken_does_not_stack_on_broken_work_already_running():
+    """Preemption is for getting a fix moving, not for piling fixes on fixes."""
+    rows = [project(1, "Building", "Broken"),
+            ticket(2, 1, in_motion_since=claimed(5)),
             project(3, "Building", "Broken"), ticket(4, 3)]
+    while len(funnel.in_motion(rows, NOW)) < funnel.WIP_LIMIT:
+        k = 50 + len(rows)
+        rows += [project(k, "Building", "New"),
+                 ticket(k + 1, k, in_motion_since=claimed(5))]
     assert next_ticket(rows, NOW) is None
 
 

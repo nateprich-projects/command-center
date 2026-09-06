@@ -45,6 +45,37 @@ PROJECT_ID = "PVT_kwHOD7A-N84BihDg"
 #: single ticket should honestly take.
 LOCK_TTL = timedelta(hours=2)
 
+#: How many tickets may be worked at once, across the whole funnel.
+#:
+#: This used to be implicit in the claim: `cmd_claim` refused whenever *any*
+#: other ticket was claimed, so one mechanism did two jobs. Splitting them was
+#: Nate's call on 2026-09-06, and the reason is that they are different kinds of
+#: rule. **Two agents must never work one ticket** — that is correctness, and the
+#: claim still enforces it. **How many tickets run at once** is policy, and `1`
+#: was an arbitrary value hidden inside a correctness check.
+#:
+#: `plan.md`'s evidence for limiting work in flight — 15 concurrent projects, one
+#: ever parked — is about *authorising* too much, and the gates already bound
+#: that: nothing reaches `Building` without Nate passing a gate. This bounds
+#: something else, parallelism inside work he already approved.
+#:
+#: **It should track review capacity, not coding capacity.** Codex can produce
+#: PRs faster than Claude can review them, and review is the budget-starved
+#: stage: on 2026-09-06 Codex built #19 and then re-worked it twice because
+#: nothing could review it. Raising this above what review can clear buys a queue
+#: of unmergeable PRs, not throughput. Two is a deliberate first step up from one,
+#: not a measured number — raise it when review stops being the constraint.
+#:
+#: **Nate's condition for raising it, 2026-09-06:** *"As long as I'm personally
+#: reviewing the funnel consistently and starting at the bottom consistently,
+#: then the cap can go away or at least raise by a lot."* Worth keeping the two
+#: queues apart when that is judged. His consistency bounds how much work reaches
+#: `Building` at all. This bounds how fast approved work becomes **unreviewed
+#: PRs**, which land on the Claude reviewer rather than on him — `plan.md` moved
+#: his gate to the project level precisely so he would not see every PR. Clearing
+#: the bottom reliably does not drain that queue.
+WIP_LIMIT = 2
+
 #: Funnel order. Index is the stage's depth; later means further along.
 STAGES = ["Ideas", "Shaped", "Ready", "Building", "Done", "Parked"]
 
@@ -370,21 +401,32 @@ def startable(items: Sequence[Item],
     return sorted((i for i in items if eligible(i)), key=key)
 
 
-def lock_holder(items: Iterable[Item], now: datetime) -> Optional[Item]:
-    """The item currently holding the single-in-motion lock, if any.
+def in_motion(items: Iterable[Item], now: datetime) -> List[Item]:
+    """Every ticket currently claimed, oldest claim first.
 
-    The lock is an open ticket carrying a claim younger than the TTL. The claim
-    is written at run start, which is when the lock must exist — a PR or a
+    A claim is written at run start, which is when it must exist — a PR or a
     branch appears too late to cover the window in which a run most often dies.
     """
-    held = [
-        i
-        for i in items
-        if i.state == "OPEN"
-        and i.in_motion_since is not None
-        and now - i.in_motion_since < LOCK_TTL
-    ]
-    return sorted(held, key=lambda i: i.in_motion_since or now)[0] if held else None
+    return sorted(
+        (
+            i
+            for i in items
+            if i.state == "OPEN"
+            and i.in_motion_since is not None
+            and now - i.in_motion_since < LOCK_TTL
+        ),
+        key=lambda i: i.in_motion_since or now,
+    )
+
+
+def lock_holder(items: Iterable[Item], now: datetime) -> Optional[Item]:
+    """The oldest live claim, or None. Retained for callers that want one item."""
+    held = in_motion(items, now)
+    return held[0] if held else None
+
+
+def at_capacity(items: Iterable[Item], now: datetime) -> bool:
+    return len(in_motion(items, now)) >= WIP_LIMIT
 
 
 def stale_locks(items: Iterable[Item], now: datetime) -> List[Item]:
@@ -425,23 +467,30 @@ def next_ticket(items: Sequence[Item], now: datetime,
                 blocked: Optional[Set[str]] = None) -> Optional[Item]:
     """The single ticket Codex should work, or None.
 
-    Returns None when the lock is genuinely held. A Broken ticket may take the
-    lock before the TTL expires; that is the one sanctioned preemption.
+    Returns None when the funnel is at its work-in-progress limit. A Broken
+    ticket may start anyway; that is the one sanctioned preemption.
     """
     queue = startable(items, awaiting_review=blocked)
     if not queue:
         return None
 
-    holder = lock_holder(items, now)
-    if holder is None:
-        return queue[0]
+    claimed = {i.ref for i in in_motion(items, now)}
+    free = [i for i in queue if i.ref not in claimed]
+    if not free:
+        return None
+    if not at_capacity(items, now):
+        return free[0]
 
+    # At capacity. Only a Broken ticket may exceed it, and only when nothing
+    # already in motion is Broken — preemption is for getting a fix moving, not
+    # for stacking fixes on top of each other.
     by_ref = {i.ref: i for i in items}
-
-    if effective_class(holder, by_ref) != "Broken":
-        for candidate in queue:
-            if effective_class(candidate, by_ref) == "Broken" and candidate.ref != holder.ref:
-                return candidate
+    running = in_motion(items, now)
+    if any(effective_class(i, by_ref) == "Broken" for i in running):
+        return None
+    for candidate in free:
+        if effective_class(candidate, by_ref) == "Broken":
+            return candidate
     return None
 
 
@@ -852,7 +901,7 @@ def cmd_brief(items: List[Item], now: datetime) -> int:
             1 for i in items if i.status == stage and i.state == "OPEN"
         )
 
-    holder = lock_holder(items, now)
+    running = in_motion(items, now)
     brief = {
         "generated_at": now.isoformat(),
         "total_needing_nate": len(decisions),
@@ -862,7 +911,8 @@ def cmd_brief(items: List[Item], now: datetime) -> int:
         "awaiting_breakdown": [
             item_json(i, now, by_ref) for i in awaiting_breakdown(items)
         ],
-        "in_motion": holder.ref if holder else None,
+        "in_motion": [i.ref for i in running],
+        "wip_limit": WIP_LIMIT,
         "stale_locks_taken_over": [i.ref for i in stale_locks(items, now)],
         "maintenance_load": maintenance_load(items, now),
         "unattended_merges": unattended_merges(now),
@@ -901,18 +951,32 @@ def find(items: Sequence[Item], ref: str) -> Item:
 
 
 def cmd_claim(items: List[Item], now: datetime, ref: str) -> int:
-    """Take the single-in-motion lock, or refuse.
+    """Claim a ticket, or refuse. Two separate refusals, deliberately.
 
-    Refusing is the normal outcome and is not an error worth shouting about;
-    the caller distinguishes by exit code.
+    **Someone else already has this ticket** is correctness: two agents working
+    one ticket produce two branches, two PRs, and a `prior_run.py` that cannot
+    say what was intended.
+
+    **The funnel is at its limit** is policy, and is the `WIP_LIMIT` above.
+    Until 2026-09-06 these were one check, which is why raising the cap was
+    impossible without also dropping the guard.
+
+    Refusing is the normal outcome and is not an error worth shouting about; the
+    caller distinguishes by exit code.
     """
     target = find(items, ref)
-    holder = lock_holder(items, now)
-    if holder is not None and holder.ref != target.ref:
+    running = in_motion(items, now)
+
+    taken = next((i for i in running if i.ref == target.ref), None)
+    if taken is not None and taken.in_motion_since != target.in_motion_since:
+        print("refused — {} is already claimed".format(target.ref), file=sys.stderr)
+        return 1
+
+    if taken is None and len(running) >= WIP_LIMIT:
         print(
-            "refused — lock held by {} (claimed {} ago)".format(
-                holder.ref, humanise(now - holder.in_motion_since)
-            ),
+            "refused — {} tickets already in motion, limit is {} ({})".format(
+                len(running), WIP_LIMIT,
+                ", ".join(i.ref for i in running)),
             file=sys.stderr,
         )
         return 1

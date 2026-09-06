@@ -35,7 +35,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `waiting_on` | The question being asked. `Accept it?` · `Start now?` · `Is the plan good?` · `Unblock or park?` |
 | `waited` | Time at the current gate |
 | `needs_class` | Items with no `Class` set. Invalid and not startable — a one-word fix in the Project |
-| `in_motion` | The ticket Codex currently holds the lock on, or `null` |
+| `in_motion` | Tickets currently claimed, as a list. `wip_limit` is how many may run at once — the cap is policy, the per-ticket claim is correctness |
 | `stale_locks_taken_over` | Claims past the 2-hour TTL that were taken over |
 | `maintenance_load` | `upkeep_share` is the fraction of work closed in the last 30 days that was `Broken` or `Maintenance` |
 

@@ -30,7 +30,7 @@ import datetime
 import sys
 import time
 from datetime import timezone
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 CLAUDE_CACHE = os.path.expanduser("~/.claude/command-center-usage.json")
 CLAUDE_TRANSCRIPTS = os.path.expanduser("~/.claude/projects/*/*.jsonl")
@@ -576,6 +576,49 @@ def pace(reading: Dict, now: float) -> Dict:
     }
 
 
+# -- providers ----------------------------------------------------------------
+#
+# A budget belongs to a **provider**, not to an agent. Today the two look alike
+# because each agent has a pool to itself, which is exactly why the distinction is
+# easy to lose — and it stops being true the moment one subscription serves two
+# harnesses. z.ai's Coding Plan would do that: GLM implementing in Codex and GLM
+# reviewing in Claude Code draw the same 5-hour and weekly credits. Two agents,
+# one budget.
+#
+# Keyed by agent because that is what a caller has; the value is the pool it
+# spends. Adding a provider is this map plus a reader.
+
+PROVIDERS = {"claude": "anthropic", "codex": "openai"}
+
+#: Agents that spend a pool, keyed by the pool. The inverse of PROVIDERS, used to
+#: say who else is drawing on the same credits.
+def agents_on(provider: str) -> List[str]:
+    return sorted(a for a, p in PROVIDERS.items() if p == provider)
+
+
+#: Hold this share of a pool back from work that *creates* downstream work.
+#:
+#: An implementation run that spends the last of a shared pool leaves its own PR
+#: unreviewable, and an unreviewed PR is worse than an unstarted ticket: the
+#: quota is gone and nothing shipped. This is the same idea as the per-run
+#: reserves above, one level out — reserve for the stage that has to follow, not
+#: only for the run being authorised.
+#:
+#: Only bites when a provider serves more than one agent. With a pool to itself
+#: there is no downstream stage on the same credits to protect.
+DOWNSTREAM_RESERVE = 20.0
+
+
+def provider_of(agent: str) -> Optional[str]:
+    return PROVIDERS.get(agent)
+
+
+def shares_a_pool(agent: str) -> bool:
+    """Whether another agent spends the same credits as this one."""
+    provider = provider_of(agent)
+    return bool(provider) and len(agents_on(provider)) > 1
+
+
 def read_agent(agent: str, now: float) -> Optional[Dict]:
     """Best available reading for an agent, preferring a real measurement.
 
@@ -584,8 +627,18 @@ def read_agent(agent: str, now: float) -> Optional[Dict]:
     it will on days Nate has worked in a terminal — and the local token estimate
     fills in otherwise. The estimate is never preferred over a real reading.
     """
-    if agent == "codex":
+    provider = provider_of(agent)
+    if provider is None:
+        # An agent with no pool is a configuration error, not an empty budget.
+        # AGENTS.md: missing usage data fails closed.
+        return None
+    if provider == "openai":
         return read_codex()
+    if provider != "anthropic":
+        # A registered provider with no reader yet. Returning None fails the gate
+        # closed rather than waving work through on a budget nobody can see —
+        # which is the failure mode a provider registry invites.
+        return None
 
     cached = read_claude()
     age = now - cached["captured_at"] if cached and cached.get("captured_at") else None
@@ -637,6 +690,17 @@ def main(argv=None) -> int:
 
     verdict = pace(reading, now)
     idle = idle_verdict(agent, reading)
+
+    # A pool shared with another agent keeps headroom for the stage that follows.
+    if shares_a_pool(agent) and verdict.get("known"):
+        for window in verdict["windows"]:
+            allowed = window["allowed_percent"] - DOWNSTREAM_RESERVE
+            if window["used_percent"] + window["reserve"] > allowed:
+                window["over"] = True
+                window["allowed_percent"] = round(allowed, 1)
+                window["shared_with"] = [
+                    a for a in agents_on(provider_of(agent)) if a != agent]
+        verdict["over_pace"] = any(v["over"] for v in verdict["windows"])
     if not verdict["known"]:
         print("usage: no usable window for {}".format(agent), file=sys.stderr)
         return 2

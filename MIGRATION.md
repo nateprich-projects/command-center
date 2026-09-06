@@ -54,7 +54,18 @@ Owner is **C** (Claude, this session) or **N** (Nate). A phase blocks only what 
       change, or the first multi-model runs are unmeasurable and routing goes back to
       being decided by public benchmarks.
       *Blocks: P3, P5.*
-- [ ] **0.2 Per-provider budgets in `usage.py`.** `read_agent` and the gate hardcode
+- [x] **0.2 Per-provider budgets in `usage.py`.** — done. `PROVIDERS` maps agent →
+      pool, `agents_on` inverts it, an unregistered agent or a registered provider
+      with no reader fails closed, and `DOWNSTREAM_RESERVE` holds back 20% of a
+      **shared** pool so implementation cannot spend the credits its own review
+      needs. Dormant today — neither agent shares a pool — and it is the shape
+      z.ai requires, since GLM in Codex and GLM in Claude Code would draw one
+      budget. `tests/test_providers.py`.
+
+      **Still needed for z.ai:** a reader. `usage.py` can only gate a provider it
+      can measure; whether z.ai exposes remaining credits is unconfirmed, and if
+      it does not, its budget state degrades to permanently fail-closed.
+      *Superseded:* `read_agent` and the gate hardcode
       `claude` and `codex` (`usage.py:568-592`). Generalise to a provider registry so a
       third pool has its own budget state. This is the half of Sol's §6 worth keeping, and
       it is what answers `plan.md`'s original objection that a cheaper routine would be

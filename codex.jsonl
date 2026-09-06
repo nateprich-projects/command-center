@@ -1,0 +1,1 @@
+{"agent": "codex", "phase": "start", "run": "f0474353cee2", "ticket": null, "ts": 1788689820, "usage": {"five_hour": {"resets_at": 1788704761, "used_percent": 37.0}, "seven_day": {"resets_at": 1789291561, "used_percent": 6.0}}}

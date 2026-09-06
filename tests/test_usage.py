@@ -63,9 +63,17 @@ def test_an_even_burn_is_under_pace():
 
 def test_the_gate_reserves_the_cost_of_the_run_it_authorises():
     """Without this the gate is a start check, not a bound on spend: it waves
-    through a run that then blows straight past the line."""
-    # allowed = 45%, and 44% used is under it — but not with a run's cost to come
-    assert usage.pace(seven_day(44.0, 0.5), NOW)["over_pace"]
+    through a run that then blows straight past the line.
+
+    Measured late in the cycle on purpose. `WEEKLY_FLOOR` rose to 50.0 on
+    2026-09-06, so for the first ~55% of the week the floor is above the
+    proportional line and the reserve cannot be what tips a run over. Only once
+    the proportional line clears the floor does this property hold again.
+    """
+    # 90% through the week: allowed = 81%, and 78% used is under it — but not
+    # with a run's cost to come.
+    assert usage.pace(seven_day(78.0, 0.9), NOW)["over_pace"]
+    assert not usage.pace(seven_day(70.0, 0.9), NOW)["over_pace"]
 
 
 def test_the_five_hour_reserve_applies_too():
@@ -102,8 +110,29 @@ def test_a_fresh_window_allows_the_floor_not_zero():
 
 
 def test_the_floor_does_not_license_spending_the_week_on_day_one():
-    """It permits a little early work, not a sprint."""
-    assert usage.pace(seven_day(40.0, 0.02), NOW)["over_pace"]
+    """It permits early work, not the whole week.
+
+    The bound moved. At `WEEKLY_FLOOR = 25.0` this refused 40% spent on day one;
+    at 50.0 it does not. That is the deliberate cost of the 2026-09-06 raise —
+    the floor was the binding constraint on every scheduled run, so nothing was
+    ever reviewed or merged. The property that survives is narrower: the floor is
+    still a bound, not an open cheque.
+    """
+    assert usage.pace(seven_day(60.0, 0.02), NOW)["over_pace"]
+    assert not usage.pace(seven_day(40.0, 0.02), NOW)["over_pace"]
+
+
+def test_the_floor_now_outranks_the_proportional_line_for_most_of_the_week():
+    """A consequence of the raise worth stating rather than discovering.
+
+    `allowed = max(WEEKLY_FLOOR, WEEKLY_TARGET * elapsed)`, so at 50.0 the floor
+    wins until the week is ~56% elapsed. For the first half of every cycle the
+    proportional pacing does nothing at all, and the floor is the whole gate.
+    """
+    early = usage.pace(seven_day(44.0, 0.3), NOW)["windows"][0]
+    assert early["allowed_percent"] == usage.WEEKLY_FLOOR
+    late = usage.pace(seven_day(44.0, 0.9), NOW)["windows"][0]
+    assert late["allowed_percent"] > usage.WEEKLY_FLOOR
 
 
 # -- the five-hour ceiling --------------------------------------------------

@@ -56,7 +56,7 @@ Owner is **C** (Claude, this session) or **N** (Nate). A phase blocks only what 
       it is what answers `plan.md`'s original objection that a cheaper routine would be
       "invisible to the gate governing it".
       *Blocks: P3b, P4.*
-- [ ] **0.3 Raise `WEEKLY_FLOOR`.** Currently 25.0. A scheduled Claude run refused at
+- [x] **0.3 Raise `WEEKLY_FLOOR`.** — done, 25.0 → 50.0 on Nate's instruction. Currently 25.0. A scheduled Claude run refused at
       25.1% on 2026-09-06 — one tenth of a point — because interactive use had crossed it.
       One constant, reversible, and it tells us whether contention was ever the real
       problem before any subscription is bought. *Needs N's number, or his say-so to pick.*

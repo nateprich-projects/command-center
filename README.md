@@ -20,6 +20,7 @@ ranks anything itself.
 | `funnel queue` | Everything, ordered |
 | `funnel next` | The single next ticket to work, or nothing |
 | `funnel brief` | What is waiting on a human decision, and for how long |
+| `funnel park <ref> --reason "<why>"` | Stop a project and preserve the reason |
 
 ## Documentation
 

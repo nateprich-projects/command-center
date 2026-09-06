@@ -89,6 +89,28 @@ Then run the tests. Both must hold:
 - the diff does what the ticket and `plan.md` say
 - the tests pass
 
+### Check what the diff *touches*, not only what it does
+
+A ticket PR that changes any of these fails review, whatever else is in it,
+unless its own ticket asked for the change:
+
+- `.claude/settings.json` — the permission rules every routine depends on
+- `routines/`, `skills/`, `AGENTS.md`, `plan.md` — how both agents behave
+- **any path spelling.** `/Users/nateprich/.claude/command-center` must never be
+  rewritten to the resolved external-volume path in a file an agent runs commands
+  from. That spelling is correct in Codex's sandbox configuration and nowhere
+  else: a permission rule matches the literal string, so normalising it starts a
+  prompt storm, and a scheduled run cannot answer a prompt.
+
+  (This bullet deliberately does not quote the forbidden spelling. The guardrail
+  test bans that string from every command file, including this one, and a check
+  strict enough to catch its own documentation is worth more than one with
+  exceptions carved into it.)
+
+`tests/test_guardrails.py` fails on the path case, so a green suite already covers
+it. **Read for it anyway.** A diff that edits the guardrail test alongside the file
+it guards passes its own check, and that is exactly the diff worth catching.
+
 ## 6. Decide
 
 **Both hold →** approve, merge, close the ticket, and comment on the parent if

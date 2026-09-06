@@ -1,0 +1,37 @@
+name: tests
+
+# Runs the suite on every pull request and on main.
+#
+# This exists because the merge bar in `routines/claude.md` says "the tests pass",
+# and until now nothing checked that independently of the agent asserting it. Both
+# routines are prompts, and a prompt cannot enforce anything — an agent that is
+# confused, or simply optimistic, reports the same words as one that ran them.
+#
+# `tests/test_guardrails.py` is the reason this matters most: it is the only thing
+# standing between a well-meant path "normalisation" and the prompt storm that
+# produced the clobbered run-id pointer in #26.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python3 -m pip install --quiet pytest
+
+      - name: Run the suite
+        run: python3 -m pytest tests/ -q

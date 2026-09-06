@@ -3,6 +3,23 @@
 Paste this into a **Codex Scheduled** task, hourly. It requires the Codex app to
 be open on the Mac mini.
 
+**Sandbox configuration — scope the write access.** Codex refuses a writable root
+that is a symlink, so it must be given the resolved path. Give it as little as the
+work needs:
+
+- **writable:** Codex's own per-session working directory, and
+  `~/.claude/command-center-heartbeat` — the heartbeat spool lives outside the
+  session directory, and a denied write there loses the record silently.
+- **read and execute:** `/Users/nateprich/.claude/command-center`. The scripts are
+  run, never edited. Ticket work belongs on a `ticket/<n>` branch pushed to the
+  remote, so **the canonical checkout never needs to be writable** — and a working
+  tree an agent cannot write is one it cannot damage. This repository is a private
+  org repo on the free plan, where rulesets are unavailable, so this is the only
+  structural protection there is.
+
+The resolved path belongs in that configuration and **nowhere else**. Every command
+below keeps its `~/.claude/command-center` spelling; see the note above step 1.
+
 **Never invoke the Codex CLI headlessly** — not from launchd, cron, CI, or any
 script. In-app scheduling is the only sanctioned path, and this is not
 negotiable.

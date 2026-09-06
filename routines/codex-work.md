@@ -39,7 +39,11 @@ no trace of having stopped, which is indistinguishable from never running.
 python3 /Users/nateprich/.claude/command-center/usage.py gate codex
 ```
 
-- **exit 1** — over pace. `heartbeat.py finish --agent codex --run <id> --outcome skipped-over-pace`, then **stop**. This is a healthy outcome, not a failure. Do not argue with it, do not do "just a small thing" first.
+- **exit 1** — refused. **Read the last line to see which refusal it was**, because they are different facts and the record should say which:
+  - an `idle` line reading `OVER` means Nate is using the five-hour window right now. Finish with `--outcome skipped-nate-active` and **stop**.
+  - otherwise it is the budget. Finish with `--outcome skipped-over-pace` and **stop**.
+
+  Both are healthy outcomes, not failures. Do not argue with either, and do not do "just a small thing" first. On an always-on hourly schedule most runs end here, and that is the design working.
 - **exit 2** — usage could not be read. Finish with `skipped-usage-unknown` and **stop**. A run that cannot read its budget does not work.
 - **exit 0** — continue.
 

@@ -180,6 +180,35 @@ _Rejected: strict ladder applied to in-flight work. Improve-existing never runs 
 so a half-finished project would be preempted forever — producing exactly the
 80%-complete "fix it in prod" situation the ladder exists to prevent._
 
+**Codex works only when Nate is away.** Added 2026-09-06. The pace gate answers
+"is there budget left" and permits Codex up to `FIVE_HOUR_CEILING`, which is right
+overnight and wrong at midday: it lets a scheduled run eat the window Nate is
+working in. So Codex carries a second, stricter condition — a **presence test**.
+Five-hour utilisation is the proxy: none spent means he is not at the keyboard.
+
+The reading is account-wide, taken from the `rate_limits` records ChatGPT writes
+into Codex's own session files, so **it cannot separate his usage from the
+agent's**. A literal "must read zero on every run" test would therefore self-block:
+the first run pushes the window above zero and every later one refuses, capping the
+funnel at one ticket per five hours. The test is on **entry** instead — a window
+that read zero when a run started is one he was absent for, and later runs may
+continue in it up to a low ceiling. He is never competed with at the moment that
+matters, and work can still chain overnight.
+
+Which window a run belonged to is derived from the heartbeat records, which already
+carry each run's reading; `resets_at` identifies the window. No new state.
+
+_Rejected: raising or lowering `FIVE_HOUR_CEILING` instead. A ceiling loose enough
+to be useful overnight is loose enough to compete with him at midday. The question
+is not how much budget remains, it is whether he is present._
+
+_Rejected: applying the same rule to Claude. A scheduled Claude run writes no
+statusline, so its reading falls back to a token estimate that cannot say "you spent
+none of this". There is no trustworthy zero to test._
+
+_Rejected: treating an unreadable record set as "the window was idle". Guessing that
+way is the single mistake that competes with him; not working is the healthy outcome._
+
 **Portfolio signal:** if maintenance load ever blocks new work, that is not a tuning
 problem. It is the signal to reassess how many plates are spinning. The brief carries
 share-of-runs on Broken + Maintenance over 30 days, and days since anything new

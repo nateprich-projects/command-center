@@ -204,6 +204,41 @@ FIVE_HOUR_CEILING = 80.0
 WEEKLY_RESERVE = 5.0
 FIVE_HOUR_RESERVE = 10.0
 
+# -- The idle rule, Codex only ------------------------------------------------
+#
+# The pace gate above answers "is there budget left". It permits Codex to climb
+# to FIVE_HOUR_CEILING, which is fine at three in the morning and wrong at three
+# in the afternoon: it lets a scheduled run eat the window Nate is actively
+# working in. He asked for the opposite of a ceiling — a **presence test**.
+#
+# Five-hour utilisation is the proxy. If none of the window has been spent, Nate
+# is not at the keyboard, and the machine may take a ticket. If any of it has, he
+# is, and it may not start.
+#
+# The reading is account-wide — it comes from the `rate_limits` records ChatGPT
+# writes into Codex's own session files — so **there is no way to tell his usage
+# from the agent's**. A literal "must read zero" test would therefore self-block:
+# the first run pushes the window above zero and every later run in that window
+# refuses, capping the funnel at one ticket per five hours.
+#
+# So the test is on *entry*, not on every run. A window that was already at zero
+# when a run started is a window Nate was absent for, and later runs may continue
+# in it up to a low ceiling. He is never competed with at the moment that matters,
+# and the funnel can still chain work overnight.
+#
+#: A window must read exactly this to be opened. Not "close to zero" — the point
+#: is that he has not touched it, and any figure above zero means he has.
+IDLE_WINDOW_START = 0.0
+
+#: Once opened, how far a chain of runs may take that window. A guess, and
+#: labelled as one: no Codex run has ever worked a funnel ticket, so nobody knows
+#: what one costs as a share of a five-hour window. Recalibrate from the
+#: heartbeat records once real numbers exist rather than defending this number.
+IDLE_WINDOW_CEILING = 15.0
+
+#: Two readings of the same window can report `resets_at` a little apart.
+IDLE_RESET_TOLERANCE = 120.0
+
 FIVE_HOUR = 300 * 60
 SEVEN_DAY = 10080 * 60
 
@@ -392,6 +427,87 @@ def _epoch(stamp: str) -> Optional[int]:
     return None
 
 
+def opened_idle(agent: str, resets_at: Optional[float]) -> Optional[bool]:
+    """Did a run start in *this* five-hour window while it still read zero?
+
+    Read from the heartbeat records, which already carry each run's usage
+    reading — no new state, and nothing to keep in step. `resets_at` is what
+    identifies the window: two runs share one when their recorded reset times
+    agree.
+
+    Returns None when the records cannot be read at all. The caller treats that
+    as "not opened" and skips: refusing to work is the healthy outcome here, and
+    guessing the window was idle is the one mistake that competes with Nate.
+    """
+    if resets_at is None:
+        return None
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import heartbeat
+
+        records = heartbeat.read(agent)
+    except Exception:
+        # Only a genuine failure to read is "unknown". No records at all is a
+        # definite answer — nothing has started in this window, so it was not
+        # opened — and saying so beats reporting a diagnosable state as a mystery.
+        return None
+    if not records:
+        return False
+
+    for record in records:
+        if record.get("phase") != "start":
+            continue
+        window = (record.get("usage") or {}).get("five_hour")
+        # Older records stored a bare percentage with no reset time, so they
+        # cannot be placed in a window and are ignored rather than guessed at.
+        if not isinstance(window, dict):
+            continue
+        was = window.get("used_percent")
+        when = window.get("resets_at")
+        if was is None or when is None:
+            continue
+        if abs(float(when) - float(resets_at)) > IDLE_RESET_TOLERANCE:
+            continue
+        if float(was) <= IDLE_WINDOW_START:
+            return True
+    return False
+
+
+def idle_verdict(agent: str, reading: Dict) -> Optional[Dict]:
+    """Whether Codex may work right now, on the presence test rather than budget.
+
+    `None` means the rule does not apply — it is Codex-only, because Claude has
+    no trustworthy signal to test: a scheduled Claude run writes no statusline,
+    so its reading falls back to a token estimate that cannot say "you spent
+    none of this".
+    """
+    if agent != "codex":
+        return None
+    five = (reading.get("windows") or {}).get("five_hour") or {}
+    used = five.get("used_percent")
+    if used is None:
+        return None
+
+    if float(used) <= IDLE_WINDOW_START:
+        return {"used_percent": float(used), "opened": True, "over": False,
+                "why": "window untouched — Nate is away, take a ticket"}
+
+    opened = opened_idle(agent, five.get("resets_at"))
+    if opened and float(used) <= IDLE_WINDOW_CEILING:
+        return {"used_percent": float(used), "opened": True, "over": False,
+                "why": "window was opened idle; continuing under {:.0f}%".format(
+                    IDLE_WINDOW_CEILING)}
+    if opened:
+        return {"used_percent": float(used), "opened": True, "over": True,
+                "why": "window was opened idle but is now over {:.0f}%".format(
+                    IDLE_WINDOW_CEILING)}
+    if opened is None:
+        return {"used_percent": float(used), "opened": None, "over": True,
+                "why": "cannot tell whether this window was opened idle"}
+    return {"used_percent": float(used), "opened": False, "over": True,
+            "why": "window already in use when it began — Nate is working"}
+
+
 def pace(reading: Dict, now: float) -> Dict:
     """Is this agent within its budget?
 
@@ -509,6 +625,7 @@ def main(argv=None) -> int:
         return 2
 
     verdict = pace(reading, now)
+    idle = idle_verdict(agent, reading)
     if not verdict["known"]:
         print("usage: no usable window for {}".format(agent), file=sys.stderr)
         return 2
@@ -533,7 +650,16 @@ def main(argv=None) -> int:
             ),
             file=sys.stderr,
         )
-    return 1 if verdict["over_pace"] else 0
+    if idle is not None:
+        print(
+            "idle       {:>5.1f}% of the five-hour window spent  {}  — {}".format(
+                idle["used_percent"],
+                "OVER" if idle["over"] else "ok",
+                idle["why"],
+            ),
+            file=sys.stderr,
+        )
+    return 1 if (verdict["over_pace"] or (idle or {}).get("over")) else 0
 
 
 if __name__ == "__main__":

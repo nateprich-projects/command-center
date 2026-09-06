@@ -63,6 +63,7 @@ OUTCOMES = [
     "nothing-to-do",       # the funnel was empty
     "skipped-locked",      # another run holds the single-in-motion lock
     "skipped-over-pace",   # budget gate refused
+    "skipped-nate-active",  # the five-hour window was already in use; Codex only
     "skipped-usage-unknown",  # could not read usage; failed closed
     "errored",             # tried and failed
 ]
@@ -210,8 +211,14 @@ def usage_snapshot(agent: str) -> Optional[Dict]:
         reading = usage.read_claude() if agent == "claude" else usage.read_codex()
         if not reading:
             return None
+        # Both figures, not just the percentage. `resets_at` is what identifies
+        # *which* five-hour window a run belonged to, and the idle gate in
+        # usage.py needs that to ask whether this window was already open.
         return {
-            name: window.get("used_percent")
+            name: {
+                "used_percent": window.get("used_percent"),
+                "resets_at": window.get("resets_at"),
+            }
             for name, window in reading.get("windows", {}).items()
         }
     except Exception:

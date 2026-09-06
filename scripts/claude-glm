@@ -1,0 +1,50 @@
+#!/bin/bash
+# Claude Code, backed by z.ai's GLM instead of Anthropic.
+#
+# Two launch paths on purpose. `claude` stays native so interactive shaping keeps
+# Opus, which plan.md wants for the judgement-heavy work; `claude-glm` points the
+# same harness at a separate quota pool for routine background work. Rewriting
+# ~/.claude/settings.json globally — which z.ai's own installer does — would take
+# the Opus sessions with it.
+#
+# The key is read from the macOS Keychain at run time. It is never in this file,
+# never in the repo, and never in a shell profile:
+#
+#   security add-generic-password -s ZAI_API_KEY -a "$USER" -w
+#
+# (that prompts for the value rather than taking it as an argument, so it does
+# not land in shell history). ZAI_API_KEY in the environment overrides, for a
+# throwaway test.
+
+set -euo pipefail
+
+if [[ -z "${ZAI_API_KEY:-}" ]]; then
+  ZAI_API_KEY="$(security find-generic-password -s ZAI_API_KEY -a "$USER" -w 2>/dev/null || true)"
+fi
+
+if [[ -z "${ZAI_API_KEY:-}" ]]; then
+  cat >&2 <<'MSG'
+claude-glm: no z.ai key found.
+
+Store one in the Keychain (it will prompt, so the key stays out of shell history):
+
+  security add-generic-password -s ZAI_API_KEY -a "$USER" -w
+
+Refusing to fall back to native Anthropic: a silent fallback would spend the
+Opus budget this launcher exists to protect, and look like it worked.
+MSG
+  exit 1
+fi
+
+export ANTHROPIC_AUTH_TOKEN="$ZAI_API_KEY"
+export ANTHROPIC_BASE_URL='https://api.z.ai/api/anthropic'
+
+export ANTHROPIC_DEFAULT_HAIKU_MODEL='glm-5.3-flash[1m]'
+export ANTHROPIC_DEFAULT_SONNET_MODEL='glm-5.3[1m]'
+export ANTHROPIC_DEFAULT_OPUS_MODEL='glm-5.3[1m]'
+
+export CLAUDE_CODE_AUTO_COMPACT_WINDOW='1000000'
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+export API_TIMEOUT_MS='3000000'
+
+exec claude "$@"

@@ -107,6 +107,21 @@ which the diff cannot. Three rules:
 
 ## 6. Do the work
 
+**Clone first. Never work in `~/.claude/command-center`.** That is Nate's own
+working tree, and your sandbox has no write access to it by design: this is a
+private org repo on the free plan, so rulesets are unavailable and the writable
+root is the only structural protection there is. Clone the repo named in the
+ticket JSON into your own session directory and work there:
+
+```bash
+gh repo clone <repo-from-the-ticket> work/repo
+cd work/repo
+```
+
+Keep invoking the Command Center scripts by their absolute
+`~/.claude/command-center` path — they are read and executed, never edited, and
+read access is unaffected.
+
 Branch **`ticket/<issue-number>`**, from `main`. If that branch already exists on
 the remote, decide from the evidence above whether to continue it or reset it,
 and say which in your PR body.

@@ -27,6 +27,7 @@ import argparse
 import base64
 import json
 import os
+import glob
 import subprocess
 import sys
 import time
@@ -67,6 +68,24 @@ OUTCOMES = [
     "skipped-usage-unknown",  # could not read usage; failed closed
     "errored",             # tried and failed
 ]
+
+
+#: Which pool an agent spends. Deliberately separate from the model: routing will
+#: put more than one model on a pool, and the budget is per pool.
+PROVIDERS = {"claude": "anthropic", "codex": "openai"}
+
+#: Where each agent records what it actually is. **Read, never asked.** A prompt
+#: that reports its own model reports what it believes, and one confident wrong
+#: answer silently poisons the routing dataset this exists to build.
+#:
+#: Both are files `usage.py` already globs for quota, so this adds no new source.
+MODEL_SOURCES = {
+    "claude": "~/.claude/projects/*/*.jsonl",
+    "codex": "~/.codex/sessions/*/*/*/*.jsonl",
+}
+
+#: Claude's transcripts record the model but not the effort level.
+CLAUDE_SETTINGS = "~/.claude/settings.json"
 
 
 class HeartbeatError(RuntimeError):
@@ -238,6 +257,59 @@ def _report(kept: str) -> None:
         )
 
 
+def detect_model(agent: str) -> Dict[str, Optional[str]]:
+    """What model is running, from the agent's own session file.
+
+    Best effort and never fatal — telemetry that can stop a run is worse than
+    telemetry that is occasionally absent. A missing value is recorded as null
+    rather than guessed.
+
+    The newest session file by mtime is taken to be this run's. That is an
+    inference: a run writes to its own transcript continuously, so it is almost
+    always the newest, but two agents of the same kind running at once could
+    cross. Recorded as `model_source: "detected"` so a later reader knows this
+    was observed rather than declared.
+    """
+    found = {"provider": PROVIDERS.get(agent), "model": None,
+             "reasoning_effort": None, "model_source": "detected"}
+    try:
+        paths = sorted(glob.glob(os.path.expanduser(MODEL_SOURCES[agent])),
+                       key=os.path.getmtime, reverse=True)
+        if not paths:
+            return found
+        for line in open(paths[0]):
+            if '"model"' not in line and '"effort"' not in line:
+                continue
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            payload = record.get("payload") or {}
+            message = record.get("message") or {}
+            model = (payload.get("model") or message.get("model")
+                     or record.get("model"))
+            if isinstance(model, str):
+                found["model"] = model
+            effort = payload.get("effort") or (
+                (payload.get("collaboration_mode") or {}).get("settings") or {}
+            ).get("reasoning_effort")
+            if isinstance(effort, str):
+                found["reasoning_effort"] = effort
+    except Exception:
+        pass
+
+    if agent == "claude" and found["reasoning_effort"] is None:
+        # Claude's transcripts do not carry effort; its settings file does.
+        try:
+            settings = json.load(open(os.path.expanduser(CLAUDE_SETTINGS)))
+            level = settings.get("effortLevel")
+            if isinstance(level, str):
+                found["reasoning_effort"] = level
+        except Exception:
+            pass
+    return found
+
+
 def usage_snapshot(agent: str) -> Optional[Dict]:
     """Best-effort usage reading. Never fatal — a heartbeat that cannot be
     written because usage was unreadable would hide the very run it documents."""
@@ -368,6 +440,10 @@ def main(argv=None) -> int:
     start = sub.add_parser("start", help="record that a run began")
     start.add_argument("--agent", required=True, choices=["codex", "claude"])
     start.add_argument("--ticket", default=None)
+    start.add_argument("--attempt", type=int, default=None,
+                       help="which attempt at this ticket this run is, from 1")
+    start.add_argument("--escalated-from", default=None,
+                       help="the model this run escalated from, if any")
 
     finish = sub.add_parser("finish", help="record how a run ended")
     finish.add_argument("--agent", required=True, choices=["codex", "claude"])
@@ -377,6 +453,14 @@ def main(argv=None) -> int:
              "and recorded as unattributable when more than one run is open",
     )
     finish.add_argument("--outcome", required=True, choices=OUTCOMES)
+    finish.add_argument("--attempt", type=int, default=None)
+    finish.add_argument("--escalated-from", default=None)
+    finish.add_argument("--ci-green", choices=["yes", "no", "unknown"],
+                        default=None)
+    finish.add_argument("--review-result",
+                        choices=["approved", "rejected", "none"], default=None)
+    finish.add_argument("--human-intervention", action="store_true",
+                        help="Nate had to step in for this run to progress")
     finish.add_argument("--note", default=None)
     finish.add_argument(
         "--merged", default=None,
@@ -402,6 +486,9 @@ def main(argv=None) -> int:
                 "ts": int(time.time()),
                 "ticket": args.ticket,
                 "usage": usage_snapshot(args.agent),
+                "attempt": args.attempt,
+                "escalated_from": args.escalated_from,
+                **detect_model(args.agent),
             })
             _report(kept)
             print(run_id)
@@ -427,6 +514,12 @@ def main(argv=None) -> int:
             # that has to be parsed out of prose is not a record.
             "merged": args.merged,
             "usage": usage_snapshot(args.agent),
+            "attempt": args.attempt,
+            "escalated_from": args.escalated_from,
+            "ci_green": args.ci_green,
+            "review_result": args.review_result,
+            "human_intervention_required": args.human_intervention or None,
+            **detect_model(args.agent),
         }
         if run_id is None:
             # The watchdog reads this as a finish, so a completed run is not

@@ -44,7 +44,7 @@ Owner is **C** (Claude, this session) or **N** (Nate). A phase blocks only what 
 
 ### P0 — Foundations · C · no dependencies
 
-- [ ] **0.1 Heartbeat telemetry.** Add `provider`, `model`, `reasoning_effort`,
+- [x] **0.1 Heartbeat telemetry.** — done, `tests/test_telemetry.py`, smoke-tested live. Add `provider`, `model`, `reasoning_effort`,
       `attempt`, `escalated_from`, `ci_green`, `review_result`,
       `human_intervention_required` to run records. Must land **before** any routing
       change, or the first multi-model runs are unmeasurable and routing goes back to

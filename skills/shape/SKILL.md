@@ -40,8 +40,15 @@ python3 /Users/nateprich/.claude/command-center/funnel.py capture "<title>" --no
 
 Capture is cheap and is meant to be. Write down what he actually said rather than
 a tidied version — the raw phrasing is often the part that reminds him what he
-meant. `--needs-shaping` marks it as worth thinking through; leave it off for a
-thought he is merely parking.
+meant.
+
+**Always pass `--needs-shaping`.** Every idea needs shaping, so the label is true of
+all of them; Nate keeps it because it is what makes an idea recognisable when he is
+browsing issues in GitHub. It is a stated fact, not a priority, and it is not yours to
+withhold. Leaving it off does not mark something as merely parked — it silently sinks
+that idea below every labelled one, because `funnel.py:217` still sorts on it. That is
+how #15 came to sit last despite waiting longest. Tracked as #32, which removes the
+flag entirely once it lands.
 
 Do not add it to TickTick. That is the do-list, and ideas there would compete
 with real tasks and erode its trustworthiness.
@@ -78,10 +85,24 @@ The plan must **separate the two**. "Decided from precedent (source)" and "Needs
 are different sections, and the second is what he actually reads at the Shaped gate. If
 the second list is empty, say so — that is a good outcome, not a suspicious one.
 
-If an idea genuinely turns on his judgement, **use the `grilling` skill** to do the
-work with him. Do not improvise a
-gentler version of it: the point is to find the weaknesses now, while the idea is
-cheap to change, rather than after Codex has built it.
+If an idea genuinely turns on his judgement, **use the local `grilling` skill**
+(`~/.claude/skills/grilling/`, the unscoped one — not `anthropic-skills:grilling`,
+which batches questions) to do the work with him. Do not improvise a gentler version
+of it: the point is to find the weaknesses now, while the idea is cheap to change,
+rather than after Codex has built it. Invoking it is not ceremony to be skipped
+because you think you already have the question — that judgement is exactly what the
+method exists to check.
+
+**What you settle from precedent never enters the grilling frontier.** The two rules
+above and the grilling method meet here, and the resolution is: `grilling` says work
+the tree until the frontier is empty and treats every decision as his, but the
+frontier is only ever the decisions in the *second* list above. Anything the first
+list covers is a fact you look up, settle, and cite — it is not a question, and
+putting it to him anyway spends the resource this whole system protects.
+
+Ask **one question at a time**, in a question box, each carrying your recommendation.
+That rule is his and lives in `~/.claude/CLAUDE.md`; the local `grilling` skill
+follows it.
 
 What the grilling has to produce, because the next stages depend on it:
 
@@ -116,7 +137,12 @@ greenlit.
 - **Do not set `Ready`.** That is his gate, and the breakdown routine treats
   `Ready` as his approval to create tickets. Setting it yourself starts work he
   never authorised.
-- **Do not set `Class`.** Ideas need none, and anything past Ideas is his call.
+- **Do not set `Class` on your own initiative, and never infer one** from a title or
+  body. Class is his. But *do* set it when he tells you to, naming the item and the
+  value — he decided on 2026-09-05 that `Broken` is settable at entry, by him, because
+  it is the one Class that carries consequence. Everything else stays unclassed through
+  Ideas. `funnel.py` has no `class` command; use `SET_FIELD` with `CLASS_FIELD_ID` the
+  way `cmd_reject` does, and record who decided it in a comment.
 - **Do not create repositories** or transfer issues. If the work looks like it
   needs its own repo, say so in the plan and leave it.
 - **Do not grill more than one idea per session** unless he asks. His decision

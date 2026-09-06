@@ -70,8 +70,30 @@ is exactly what he should know before saying yes.
 ## Answering a gate
 
 `funnel approve` / `start` / `accept` answer the three gates. They are **dry runs
-unless `--yes` is passed**, and they are **his alone** — never run one on his
-behalf, even to test it. Show him the command; let him run it.
+unless `--yes` is passed**.
+
+**The decision is always his. The typing does not have to be.** Nate authorised agents
+to run all three on his explicit instruction (2026-09-05), replacing an earlier rule
+here that no agent may run them at all. He often works these sessions by voice while
+driving, where handing him a command means the decision he already made goes
+unrecorded — three approved gates sat unexecuted for a whole session that way.
+
+That earlier rule was not his; an agent wrote it after accidentally running an approval,
+catching it, and walking it back. The accident was real, so the caution is earned — but
+what it should have forbidden was an agent *deciding*, not an agent *typing*.
+
+Run one only when **all** of these hold:
+
+- He gave an explicit instruction naming the item and the gate. Not "sounds good", not
+  "that makes sense", not inferred from approval of your analysis.
+- **The target is named, not inferred.** If you are working out which items he meant,
+  say your reading and wait. Confirm before moving anything, not after.
+- Never on your own initiative, and **never as a test.** The dry run exists for that.
+
+Then **post a comment recording that he decided and you executed**, naming the gate and
+the move. The Project shows only that `Status` changed, never who decided it — see
+issue #31. Without that comment an agent-run gate is indistinguishable from his own,
+which is the failure this permission would otherwise create.
 
 ## Say these things when they are true
 

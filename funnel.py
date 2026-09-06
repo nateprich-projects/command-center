@@ -20,7 +20,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 # --------------------------------------------------------------------------
 # Configuration. These are the only knobs; everything else is derived.
@@ -246,17 +246,28 @@ def awaiting_breakdown(items: Iterable[Item]) -> List[Item]:
     )
 
 
-def startable(items: Sequence[Item]) -> List[Item]:
+def startable(items: Sequence[Item],
+              awaiting_review: Optional[Set[str]] = None) -> List[Item]:
     """Tickets Codex may pick up, best-first.
 
     A ticket is an open issue with no children of its own, whose parent has
     passed the Ready gate. Tickets inherit their parent's Class — the ladder
     ranks projects, not individual tickets.
+
+    `awaiting_review` holds refs whose work is already done and sitting in an
+    open PR. A ticket's issue stays open until review merges it, so without this
+    Codex re-picks finished work every run: on 2026-09-06 it built #19 at 08:00
+    and then spent the 09:00 and 10:00 runs re-verifying the same branch, because
+    Claude's routine was over pace and could not review it. Passing it in rather
+    than querying here keeps this function pure and testable from fixtures.
     """
+    awaiting_review = awaiting_review or frozenset()
     by_ref = {i.ref: i for i in items}
 
     def eligible(item: Item) -> bool:
         if item.state != "OPEN" or item.is_blocked or item.children_total:
+            return False
+        if item.ref in awaiting_review:
             return False
         parent = by_ref.get(item.parent or "")
         if parent is None:
@@ -324,13 +335,33 @@ def stale_locks(items: Iterable[Item], now: datetime) -> List[Item]:
     )
 
 
-def next_ticket(items: Sequence[Item], now: datetime) -> Optional[Item]:
+def awaiting_review(items: Sequence[Item]) -> Set[str]:
+    """Tickets whose work is already in an open PR, waiting to be reviewed.
+
+    Found by the `ticket/<number>` branch name the routine guarantees, which is
+    the same handle `_ticket_pr` uses. One `gh pr list` per member repo, and only
+    for repos that actually have candidate tickets.
+    """
+    repos = {i.repo for i in items}
+    blocked: Set[str] = set()
+    for repo in sorted(repos):
+        rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "open",
+                        "--json", "headRefName", "--limit", "100") or []
+        for row in rows:
+            head = row.get("headRefName") or ""
+            if head.startswith("ticket/"):
+                blocked.add("{}#{}".format(repo, head.split("/", 1)[1]))
+    return blocked
+
+
+def next_ticket(items: Sequence[Item], now: datetime,
+                blocked: Optional[Set[str]] = None) -> Optional[Item]:
     """The single ticket Codex should work, or None.
 
     Returns None when the lock is genuinely held. A Broken ticket may take the
     lock before the TTL expires; that is the one sanctioned preemption.
     """
-    queue = startable(items)
+    queue = startable(items, awaiting_review=blocked)
     if not queue:
         return None
 
@@ -706,7 +737,8 @@ def cmd_queue(items: List[Item], now: datetime) -> int:
 
 
 def cmd_next(items: List[Item], now: datetime) -> int:
-    ticket = next_ticket(items, now)
+    blocked = awaiting_review(items)
+    ticket = next_ticket(items, now, blocked=blocked)
     if ticket is None:
         holder = lock_holder(items, now)
         if holder is not None:

@@ -481,3 +481,25 @@ def test_every_gate_has_exactly_one_answering_command():
         assert frm in funnel.STAGES and to in funnel.STAGES
         # never skips a gate
         assert funnel.STAGES.index(to) == funnel.STAGES.index(frm) + 1
+
+
+# -- work already sitting in a PR ---------------------------------------------
+
+
+def test_a_ticket_with_an_open_pr_is_not_handed_out_again():
+    """Codex built #19 at 08:00 on 2026-09-06, then spent the 09:00 and 10:00
+    runs re-verifying the same branch. A ticket's issue stays open until review
+    merges it, and review was blocked by the budget gate, so `next` kept
+    returning finished work."""
+    items = [project(1, "Building", "Improve", children=2),
+             ticket(19, 1), ticket(20, 1)]
+    assert [i.number for i in startable(items)] == [19, 20]
+    assert [i.number for i in startable(
+        items, awaiting_review={"nateprich/beta#19"})] == [20]
+
+
+def test_every_ticket_awaiting_review_means_nothing_to_do():
+    items = [project(1, "Building", "Improve"), ticket(19, 1)]
+    blocked = {"nateprich/beta#19"}
+    assert startable(items, awaiting_review=blocked) == []
+    assert next_ticket(items, at(0), blocked=blocked) is None

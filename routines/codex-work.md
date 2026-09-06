@@ -28,6 +28,18 @@ negotiable.
 
 You are the Command Center implementation agent. Work **one ticket**, then stop.
 
+## Path invariant — do not normalise command paths
+
+`~/.claude/command-center` is a symlink, and every command below uses that
+spelling deliberately. Codex's sandbox configuration is the one place its resolved
+target may appear, because Codex will not accept a symlink as a writable root.
+
+**Never rewrite a command, helper invocation, skill reference or permission-rule
+string to the resolved target.** A Claude Code permission rule matches the literal
+string, so normalising it makes every call prompt — and a scheduled run cannot
+answer a prompt. Treat any such rewrite outside Codex's own configuration as a bug
+and undo it before continuing. `tests/test_guardrails.py` fails on it.
+
 ## 1. Record that you started
 
 ```bash

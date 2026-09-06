@@ -8,6 +8,49 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### z.ai remaps model ids server-side, and a Claude family name lands on Flash
+
+**2026-09-06 · z.ai Anthropic endpoint · measured**
+
+**The model id you send is not the model that answers.** Probed directly against
+`https://api.z.ai/api/anthropic/v1/messages`, reading the `model` field of each reply:
+
+```
+requested glm-4.7            ->  glm-5.3-flash
+requested glm-5.1            ->  glm-5.3
+requested glm-4.5-air        ->  glm-5.3-flash
+requested glm-5.3            ->  glm-5.3
+requested glm-5.3-flash      ->  glm-5.3-flash
+requested claude-sonnet-4-5  ->  glm-5.3-flash
+requested claude-opus-4-1    ->  glm-5.3-flash
+requested glm-5.3[1m]        ->  ERROR [1214][modelCode: does not exist]
+```
+
+**Two things that matter for Command Center.**
+
+`glm-5.3[1m]` **does not exist.** A handoff recommended it as the value for
+`ANTHROPIC_DEFAULT_OPUS_MODEL` / `SONNET_MODEL`, and `scripts/claude-glm` shipped with
+it before this was measured. The `[1m]` suffix is not part of a model id at this
+endpoint.
+
+**Anything that looks like a Claude model silently becomes Flash.** Both
+`claude-opus-4-1` and `claude-sonnet-4-5` resolved to `glm-5.3-flash`. So a harness that
+sends Claude family names — which is the default shape of the Anthropic protocol — gets
+the cheap model for every tier, including work you believe is running on the full one.
+Flash is roughly a third the credit cost (input 2.3 vs 6.9, output 8 vs 24), which is
+fine when chosen and misleading when not. **Name the models explicitly.**
+
+`glm-5.1` also resolves to full `glm-5.3`, so a mapping written against the older ids
+still reaches the current model — by remapping, not because those models are present.
+
+**How this was found:** the account's first key failed with 401 "token expired or
+incorrect" on every model. The stored value was 32 characters, alphanumeric, no dot; a
+working key is 49 characters containing a dot. The short value is the key's
+**identifier**, copied from the list view rather than the secret shown once at creation.
+A 401 that is identical across every model and both auth schemes is a credential-shape
+problem, not a model or plan problem — a plan that does not cover the endpoint returns
+403.
+
 ### Codex rejects a symlinked writable root, and the fix must not touch the command paths
 
 **2026-09-06 · Codex desktop · documented**

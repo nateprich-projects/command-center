@@ -39,11 +39,20 @@ fi
 export ANTHROPIC_AUTH_TOKEN="$ZAI_API_KEY"
 export ANTHROPIC_BASE_URL='https://api.z.ai/api/anthropic'
 
-export ANTHROPIC_DEFAULT_HAIKU_MODEL='glm-5.3-flash[1m]'
-export ANTHROPIC_DEFAULT_SONNET_MODEL='glm-5.3[1m]'
-export ANTHROPIC_DEFAULT_OPUS_MODEL='glm-5.3[1m]'
+# Measured against the endpoint on 2026-09-06, not taken from a handout.
+# `glm-5.3[1m]` — which the setup handoff recommended — does not exist:
+# "[1214][modelCode: does not exist]". The 1M-context suffix is not a model id
+# here, so CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000 went with it rather than
+# leaving the harness compacting against a window the model may not have.
+#
+# z.ai remaps server-side, so the id sent is not the model that answers. Asking
+# for a Claude family name silently lands on **flash**: claude-opus-4-1 and
+# claude-sonnet-4-5 both resolved to glm-5.3-flash. Naming the models explicitly
+# is what keeps the heavier work on the full model.
+export ANTHROPIC_DEFAULT_HAIKU_MODEL='glm-5.3-flash'
+export ANTHROPIC_DEFAULT_SONNET_MODEL='glm-5.3'
+export ANTHROPIC_DEFAULT_OPUS_MODEL='glm-5.3'
 
-export CLAUDE_CODE_AUTO_COMPACT_WINDOW='1000000'
 export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 export API_TIMEOUT_MS='3000000'
 

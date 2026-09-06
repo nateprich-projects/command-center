@@ -1,6 +1,49 @@
 # Status
 
-**Last updated: 2026-09-05**
+**Last updated: 2026-09-06**
+
+## Where this stands, in one place
+
+v0 is built and **not accepted** — deliberately, pending a trial. Three Claude routine
+runs have completed end to end; Codex has not been scheduled yet. 141 tests pass.
+
+**Waiting on Nate, bottom-up:**
+
+| Item | Gate |
+|---|---|
+| #2 Command Center v0 | Accept it? |
+| #16 `funnel park` | Start now? |
+| #17 `funnel doctor` | Start now? |
+| #18 multi-repo support | Is the plan good? |
+
+Use `funnel show <n>` before answering — it assembles the plan, the tickets, what shipped
+and what the reviewer said. The answering commands are **dry runs unless `--yes`**.
+
+**Seven ideas captured**, six flagged `needs-shaping`: #15 self-improvement and
+calibration, #25 reaching the funnel from general chat, #26 the heartbeat run-pointer
+clobber, #27 tracking Claude-only work, #28 manual priority override, #29 versioning and
+change logs, #30 public-repo findability.
+
+**Not yet done:** Codex is not scheduled (its prompt is `routines/codex-work.md`);
+dependabot #13 is open and untriaged; `pytest` is absent from the cloud image, which only
+matters if cloud sessions are ever meant to run tests here.
+
+## The command surface
+
+Nate's, from any Claude Code session on this Mac:
+
+| Command | What it does |
+|---|---|
+| `funnel brief` / `queue` | what is waiting, bottom-up |
+| `funnel show <n>` | the evidence for one item's gate |
+| `funnel approve\|start\|accept <n> --yes` | answer a gate — **his alone** |
+| `funnel ideas` | captured ideas, flagged first |
+| `funnel capture "<title>"` | take an idea down from chat |
+| `funnel shaped <n> --plan <file>` | record a grilled plan, → Shaped |
+| `funnel reject <pr>` | a merged PR was broken; undo and count it |
+
+The agents': `funnel next`, `claim`, `release`, `usage.py gate`, `heartbeat`,
+`prior_run`. **`park` is not built** — it is ticket #19, waiting on Codex.
 
 v0 in progress. Target: shipped in under two weeks from 2026-09-05.
 

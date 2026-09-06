@@ -41,14 +41,47 @@ gate unless an agent is actively working it.
 | Status | Meaning | Needs Nate |
 |---|---|---|
 | Ideas | Captured, undecided. Unbounded and guilt-free. | No |
-| Shaped | Grilled; a plan exists | **Is the plan good?** |
-| Ready | Broken into issues | **Start now?** |
+| Shaped | Grilled; a plan exists | **Only if the plan holds an open question** |
+| Ready | Broken into issues | No |
 | Building | Codex is working it | Only when all children close |
 | Done | Shipped and accepted (`state_reason: completed`) | No |
 | Parked | Stopped, **written reason required** (`state_reason: not_planned`) | No |
 
-Four gates, each requiring deliberate intent:
-**worth shaping? → is the plan good? → start now? → accept it?**
+**One unconditional gate, plus one that fires only when it has something to ask:**
+**worth shaping? → (is the plan good?) → accept it?**
+
+Revised 2026-09-05. The original four gates put roughly four decisions per project on
+Nate, and he named the mismatch: he is the **stakeholder**, Claude is the **project
+manager**, Codex is the **engineer**. A stakeholder describes what they need and accepts
+the result; specifying it, scheduling it and verifying it against the spec are the PM's
+job. The gate structure had him doing all four.
+
+The test for what stays his was already in this document: *"whether a diff matches a
+written spec is checkable; whether the tool is worth keeping is not."* Applied
+consistently:
+
+- **"Start now?" is deleted.** It asked Nate to re-decide a priority `funnel.py` already
+  computes deterministically from the ladder and oldest-at-gate. That is scheduling, and
+  scheduling is the PM's. `Ready → Building` is now written by Codex when it claims the
+  first ticket.
+- **"Is the plan good?" becomes conditional.** A plan produced by grilling Nate, with
+  everything else settled from written precedent, is a transcription of answers he already
+  gave — approving it is the same room with a different sign. It waits for him **only when
+  its "Needs you" section holds a question he has not yet answered**; otherwise `Shaped`
+  advances to `Ready` on its own.
+- **"Accept it?" is untouched**, and is now the only unconditional gate. Whether the thing
+  is worth keeping is not checkable, and no agent may decide it.
+
+_Rejected: a hold state — a flag or priority that keeps a good plan out of Building
+without parking it. That is "yes, but not now", which this document already rejected as a
+stage; smuggling it back as a field recreates the backlog, and a held item carries no
+reason line, so it goes stale invisibly. If a plan is good and nothing is open, it gets
+built; if Nate does not want it now, that is a park, and the reason is the artifact._
+
+_Rejected: keeping "start now?" for `Class: New` only, letting `Broken` and `Maintenance`
+advance unattended. It targets the gate where "is this worth doing now" genuinely bites,
+but it restores a gate on the class Nate creates most, which is most of the load he
+objected to._
 
 Done and Parked are distinct and must never merge. Parked requires a reason; Done
 does not. The reason line is the artifact that makes re-encountering an idea in four
@@ -62,9 +95,21 @@ solo system the decider at both is the same person. A gate whose decision and
 decider duplicate the previous gate's is the same room with a different sign._
 
 _Rejected: auto-expiry / default-kill on stalled items. Parking is itself a clearing
-action, and the ordering rule below forces the park decision. Auto-park would remove
-the forcing function and, worse, write the reason line for you — losing the only
+action, and Nate answering a gate is what forces the park decision. Auto-park would
+remove the forcing function and, worse, write the reason line for you — losing the only
 part with durable value._
+
+**The parking prompt rides on the accept gate.** Removing two gates removed the moments
+that surfaced a stalled item in front of Nate, and disposal is what this system is for —
+of 78 tasks in the system it replaces, exactly one was ever deliberately parked. So
+accepting a project also shows him the longest-waiting unstarted items and asks whether
+any should be parked. It costs no new interruption, and it ties disposal to the rhythm of
+finishing things rather than to a clock.
+
+_Rejected: a standing disposal review on a schedule. It fires even in a month when
+nothing shipped, which is its one advantage, but a scheduled interruption is the thing
+this document avoids everywhere else — and a prompt that arrives when Nate is not already
+engaged is one he learns to dismiss._
 
 ### Vocabulary
 
@@ -146,7 +191,7 @@ started.
 |---|---|---|
 | **Claude** | Grilling (produces the plan); breaking an approved plan into tickets; PR review against `plan.md` | Grilling interactive; breakdown and review on one routine |
 | **Codex** | Implementation, one ticket per run | Hourly poll, single-in-motion lock |
-| **Nate** | The four gates; accepting a project as Done | When available |
+| **Nate** | The accept gate; the plan gate when a plan holds an open question; parking | When available |
 
 Grilling is knowledge work and stays on Claude. It cannot be scheduled, which makes it
 a structural throttle on the whole funnel — no artificial cap is needed.
@@ -376,20 +421,31 @@ _Rejected: building the funnel's visibility into the morning brief. The brief is
 itself half-finished. Wiring a not-yet-working funnel into a not-yet-working briefing
 is precisely the failure this system exists to prevent._
 
-**Attention is derived, never maintained.** Stage is written explicitly at gates —
-four writes per item lifetime, each attached to a decision already being made. "What
-is waiting on Nate" is computed from observable facts. A maintained blocker list goes
-stale; a derived one is correct by construction.
+**Attention is derived, never maintained.** "What is waiting on Nate" is computed from
+observable facts. A maintained blocker list goes stale; a derived one is correct by
+construction.
+
+Stage is still written explicitly, but **no longer only at Nate's gates**. Since the 2026-09-05
+revision above, `Ready` is written by the funnel when a plan carries no open question, and
+`Building` is written by Codex when it claims the first ticket. Each write is still explicit
+and attached to an event — none of them is inferred or maintained — but only `Done` and
+`Parked` are now written by Nate answering a gate.
 
 **Capture** is by chat ("add this idea to my command center backlog") or directly in
 GitHub. The `shape` skill implements that surface: `funnel ideas` lists what is waiting,
 `funnel capture` takes one down, and `funnel shaped` writes a grilled plan into the issue
 body and moves the item to `Shaped`.
 
-That last step is deliberately not approval. It records that a plan now exists; the gate
-*is the plan good?* stays Nate's, answered by moving the item to `Ready`. Nothing else in
-the system may write `Ready`, because the breakdown routine treats it as authorisation to
-create tickets.
+That last step is not approval in itself. It records that a plan now exists. Whether it
+then waits for Nate depends on the plan: if its "Needs you" section holds a question he has
+not answered, it stops at `Shaped` and the gate *is the plan good?* is his. If nothing is
+open — everything either settled with him during grilling or decided from written precedent
+and cited — `funnel shaped` advances it to `Ready` itself.
+
+`Ready` remains authorisation to create tickets, and the breakdown routine still treats it
+that way. What changed is who may write it: the funnel may, on the narrow condition above,
+and an agent may never write it to bypass an open question. A plan with an unanswered
+question in it is the one thing that must stop.
 
 `funnel brief` still excludes Ideas from every count — it is unbounded and guilt-free, and
 counting it turns it into pressure — so `funnel ideas` is **asked for, never pushed**.

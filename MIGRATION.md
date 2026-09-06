@@ -92,9 +92,22 @@ keeps #2 unaccepted — unattended merges that cannot be audited.
       destructive ops, concurrency, large multi-component changes, weak acceptance
       criteria — and after one failed attempt. **The model must not decide its own
       escalation**; `funnel.py` or ticket metadata does.
-      **BLOCKED:** the only model ids present in Codex's state are `gpt-5.6-sol`,
-      `gpt-5-6-thinking`, `gpt-6-astra`. **No Luna.** N must confirm what is actually
-      selectable and its exact id.
+      **Unblocked 2026-09-06.** The earlier "no Luna" reading was wrong — it came from
+      grepping session transcripts rather than `~/.codex/models_cache.json`, which is the
+      actual model list. Selectable ids, with their max reasoning level:
+      `gpt-6-astra` (ultra), `gpt-5.6-sol` (ultra), `gpt-5.6-terra` (ultra),
+      `gpt-5.6-luna` (**max**, no ultra), `gpt-reserve` (max), `gpt-5.5`, `gpt-5.4-mini`.
+      Luna and `gpt-reserve` share the description "Fast and affordable agentic coding
+      model"; Sol is the "reliable agentic workhorse".
+
+      **Default switched on N's instruction:** `gpt-5.6-sol`/`high` → `gpt-5.6-luna`/`max`
+      ("Luna-maxing"). Previous config backed up alongside `~/.codex/config.toml`.
+
+      **Still open — the escalation half is not built.** Every ticket now goes to Luna,
+      including auth, migrations, concurrency and weak-acceptance-criteria work that this
+      phase says must escalate to Sol. Until `funnel.py` or ticket metadata carries the
+      escalation decision, the cheap default is running unguarded. This is the remaining
+      work in 3a, and it is now the *only* remaining work in it.
 - [ ] **3b. Claude-side routine work on a separate pool.** Move breakdown and routine
       review off Opus onto an independent quota pool inside the Claude Code harness.
       **BLOCKED:** needs N's decision on a Z.ai Lite subscription, and confirmation that
@@ -121,9 +134,9 @@ Ordered by how much they unblock, most first.
 
 1. **Leave the ChatGPT five-hour window alone for one window.** Zero effort, unblocks P1
    and the evidence #2 needs. Everything else can proceed while this happens.
-2. **Open the Codex model picker and report what is selectable, with exact ids.** P3a is
-   blocked on this and I cannot see it. If there is no Luna, P3a becomes "is
-   `gpt-5-6-thinking` the cheaper default" instead.
+2. ~~**Open the Codex model picker and report what is selectable.**~~ Done 2026-09-06 —
+   read from `~/.codex/models_cache.json` rather than needing N. Luna exists; default is
+   now `gpt-5.6-luna`/`max`. What remains is engineering (escalation), not N's account work.
 3. **Decide Z.ai Lite: buy or not.** If yes, subscribe and confirm Claude Code can run
    GLM-5.3 Max here. If no, P3b is dropped and 0.3 carries the contention fix alone.
 4. **Give a `WEEKLY_FLOOR` number, or say "you pick".** Recommendation: 40.0. It clears the

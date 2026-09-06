@@ -17,6 +17,14 @@ You are the Command Center implementation agent. Work **one ticket**, then stop.
 python3 /Users/nateprich/.claude/command-center/heartbeat.py start --agent codex
 ```
 
+**It prints a run id. Keep it, and pass it to every `finish` below as
+`--run <id>`.** Without it, `finish` has to work out which run it belongs to
+from the records, and when two runs overlap it cannot — it then records the
+outcome as unattributable rather than guessing, which is safe but loses which
+run this was. The id is a literal string, so the command still matches the
+permission rule; never wrap it in `RUN=$(...)`, which is unpredictable and
+caused a prompt storm.
+
 **Every exit path below finishes it.** A start without a finish is
 read by the watchdog as a run that died, so never leave one dangling on purpose.
 
@@ -31,7 +39,7 @@ no trace of having stopped, which is indistinguishable from never running.
 python3 /Users/nateprich/.claude/command-center/usage.py gate codex
 ```
 
-- **exit 1** — over pace. `heartbeat.py finish --agent codex --outcome skipped-over-pace`, then **stop**. This is a healthy outcome, not a failure. Do not argue with it, do not do "just a small thing" first.
+- **exit 1** — over pace. `heartbeat.py finish --agent codex --run <id> --outcome skipped-over-pace`, then **stop**. This is a healthy outcome, not a failure. Do not argue with it, do not do "just a small thing" first.
 - **exit 2** — usage could not be read. Finish with `skipped-usage-unknown` and **stop**. A run that cannot read its budget does not work.
 - **exit 0** — continue.
 
@@ -104,7 +112,7 @@ Do not merge it.
 
 ```bash
 python3 /Users/nateprich/.claude/command-center/funnel.py release <issue-number>
-python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent codex --outcome done --note "PR #<n>"
+python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent codex --run <id> --outcome done --note "PR #<n>"
 ```
 
 If anything went wrong, finish with `--outcome errored --note "<what broke>"`.

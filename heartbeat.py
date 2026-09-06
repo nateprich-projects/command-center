@@ -50,12 +50,6 @@ BRANCH = "heartbeat"
 #: state. Anything undrained is flushed by the next run that gets through.
 SPOOL_DIR = os.path.expanduser("~/.claude/command-center-heartbeat")
 
-#: The id of the run currently in progress, per agent. `start` writes it and
-#: `finish` reads it, so a routine never needs `RUN=$(...)` — a command
-#: substitution makes the command string unpredictable, and a permission rule
-#: can only match a string it can predict.
-CURRENT = os.path.join(SPOOL_DIR, "{}.current")
-
 #: Four attempts over roughly eleven seconds. Long enough to ride out a blip,
 #: short enough not to eat a run's time when GitHub is genuinely down.
 BACKOFF = [1, 3, 7]
@@ -120,23 +114,6 @@ def _ensure_branch() -> None:
                            "-f", "tree=" + tree["sha"]))
     gh("api", "-X", "POST", "repos/{}/git/refs".format(REPO),
        "-f", "ref=refs/heads/" + BRANCH, "-f", "sha=" + commit["sha"])
-
-
-def _remember(agent: str, run_id: str) -> None:
-    try:
-        os.makedirs(SPOOL_DIR, exist_ok=True)
-        with open(CURRENT.format(agent), "w") as fh:
-            fh.write(run_id)
-    except OSError:
-        pass
-
-
-def _current(agent: str) -> Optional[str]:
-    try:
-        with open(CURRENT.format(agent)) as fh:
-            return fh.read().strip() or None
-    except OSError:
-        return None
 
 
 def _spool_path(agent: str) -> str:
@@ -253,19 +230,90 @@ def read(agent: str) -> List[Dict]:
     return records + _spooled(agent)
 
 
+def open_starts(records: List[Dict]) -> List[Dict]:
+    """Starts with no finish, oldest first.
+
+    A finish naming a run clears that run. An *unresolved* finish — written when
+    the run id could not be determined — clears the **oldest** of its candidates.
+    It means one of them ended, and the run that finishes is usually the one that
+    started first. Clearing all of them would hide a run that really did die;
+    clearing none would report a completed run as a start that never came back,
+    which is the false alarm this whole mechanism exists to avoid.
+    """
+    starts = sorted(
+        (r for r in records if r.get("phase") == "start" and r.get("run")),
+        key=lambda r: r.get("ts") or 0,
+    )
+    named = {
+        r.get("run") for r in records
+        if r.get("phase") == "finish" and r.get("run")
+    }
+    opens = [r for r in starts if r.get("run") not in named]
+
+    for rec in sorted(
+        (r for r in records
+         if r.get("phase") == "finish" and r.get("unresolved")),
+        key=lambda r: r.get("ts") or 0,
+    ):
+        candidates = set(rec.get("candidates") or [])
+        for i, start in enumerate(opens):
+            if start.get("run") in candidates:
+                opens.pop(i)
+                break
+    return opens
+
+
+def resolve_run(records: List[Dict], requested: Optional[str]):
+    """Which run a `finish` belongs to: `(run_id, candidates)`.
+
+    A `run_id` means it is known. A `None` run_id with candidates means it could
+    not be determined, and the record must be written as unresolved rather than
+    guessed — attributing one run's outcome to another is worse than admitting
+    the ambiguity, because it makes one run look finished and leaves the other
+    looking dead.
+
+    Deliberately *not* "the most recent unfinished start". Replay the incident
+    this fixes: A starts at 10:42, B starts at 10:45, A finishes at 10:51. The
+    most recent open start is B, so A's outcome would land on B — the same bug
+    through a new mechanism. The run that finishes is usually the one that
+    started earlier, so there is no safe guess. Refusing to guess is the fix.
+    """
+    if requested:
+        starts = {r.get("run") for r in records if r.get("phase") == "start"}
+        # An empty set means the records could not be read at all — GitHub
+        # unreachable and nothing spooled. Instrumentation must not gate the
+        # thing it instruments, so trust the caller rather than refuse.
+        if starts and requested not in starts:
+            raise HeartbeatError(
+                "no start recorded for run {} — refusing to record a finish "
+                "against a run that never began".format(requested)
+            )
+        finished = {
+            r.get("run") for r in records
+            if r.get("phase") == "finish" and r.get("run")
+        }
+        if requested in finished:
+            raise HeartbeatError(
+                "run {} already finished — refusing to record a second "
+                "finish for it".format(requested)
+            )
+        return requested, None
+
+    opens = open_starts(records)
+    if len(opens) == 1:
+        return opens[0].get("run"), None
+    return None, [r.get("run") for r in opens]
+
+
 def unfinished(records: List[Dict], now: float, ttl_seconds: int) -> List[Dict]:
     """Runs that started, never finished, and are past the point of plausibility.
 
     This is the rate-limit death signature, and the reason start and finish are
     recorded separately.
     """
-    finished = {r.get("run") for r in records if r.get("phase") == "finish"}
     return [
-        r
-        for r in records
-        if r.get("phase") == "start"
-        and r.get("run") not in finished
-        and now - (r.get("ts") or 0) > ttl_seconds
+        r for r in open_starts(records)
+        if now - (r.get("ts") or 0) > ttl_seconds
     ]
 
 
@@ -281,7 +329,8 @@ def main(argv=None) -> int:
     finish.add_argument("--agent", required=True, choices=["codex", "claude"])
     finish.add_argument(
         "--run", default=None,
-        help="defaults to the run id recorded by the matching `start`",
+        help="the id printed by `start`; if omitted, resolved from the records, "
+             "and recorded as unattributable when more than one run is open",
     )
     finish.add_argument("--outcome", required=True, choices=OUTCOMES)
     finish.add_argument("--note", default=None)
@@ -302,7 +351,6 @@ def main(argv=None) -> int:
 
         if args.command == "start":
             run_id = uuid.uuid4().hex[:12]
-            _remember(args.agent, run_id)
             pushed = append(args.agent, {
                 "run": run_id,
                 "agent": args.agent,
@@ -320,14 +368,15 @@ def main(argv=None) -> int:
             print(run_id)
             return 0
 
-        run_id = args.run or _current(args.agent)
-        if not run_id:
+        run_id, candidates = resolve_run(read(args.agent), args.run)
+        if run_id is None:
             print(
-                "heartbeat: no run id given and none recorded by `start`",
+                "heartbeat: could not tell which run this finishes ({} open). "
+                "Recording it as unattributable rather than guessing.".format(
+                    len(candidates) if candidates else 0),
                 file=sys.stderr,
             )
-            return 2
-        pushed = append(args.agent, {
+        record = {
             "run": run_id,
             "agent": args.agent,
             "phase": "finish",
@@ -339,7 +388,14 @@ def main(argv=None) -> int:
             # that has to be parsed out of prose is not a record.
             "merged": args.merged,
             "usage": usage_snapshot(args.agent),
-        })
+        }
+        if run_id is None:
+            # The watchdog reads this as a finish, so a completed run is not
+            # reported as dying, while the record still says the id is unknown
+            # rather than asserting a wrong one.
+            record["unresolved"] = True
+            record["candidates"] = candidates
+        pushed = append(args.agent, record)
         if not pushed:
             print(
                 "heartbeat: GitHub unreachable; record spooled locally.",

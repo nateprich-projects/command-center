@@ -28,6 +28,15 @@ python3 /Users/nateprich/.claude/command-center/heartbeat.py start --agent claud
 
 Every exit path below finishes it.
 
+**It prints a run id. Keep it, and pass it to every `finish` below as
+`--run <id>`.** Without it, `finish` has to work out which run it belongs to
+from the records, and when two runs overlap it cannot — it then records the
+outcome as unattributable rather than guessing, which is safe but loses which
+run this was. The id is a literal string, so the command still matches the
+permission rule; never wrap it in `RUN=$(...)`, which is unpredictable and
+caused a prompt storm.
+
+
 **If the heartbeat prints a warning about GitHub being unreachable, keep going.**
 It spools the record locally and a later run pushes it. Instrumentation does not
 gate the work it instruments.
@@ -121,7 +130,7 @@ which is interactive and not yours to do.
 ## 8. Finish, always
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent claude --outcome done --merged <n> --note "merged PR #<n>; broke down #<m> into <k> tickets"
+python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent claude --run <id> --outcome done --merged <n> --note "merged PR #<n>; broke down #<m> into <k> tickets"
 ```
 
 `--merged` is a field, not prose: unattended merges have to appear in the brief

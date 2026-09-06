@@ -29,6 +29,13 @@ import sys
 import time
 from typing import Dict, List
 
+# One definition of "which runs are still open" — shared with `heartbeat.py`
+# rather than reimplemented here. Two copies of a rule drift, and the drift is
+# silent because both produce plausible-looking lists.
+sys.path.insert(0, str(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))))))
+import heartbeat  # noqa: E402
+
 REPO = os.environ.get("GITHUB_REPOSITORY", "nateprich-projects/command-center")
 BRANCH = "heartbeat"
 MARKER = "<!-- command-center-watchdog -->"
@@ -94,12 +101,12 @@ def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
             )
         )
 
-    finished = {r.get("run") for r in rows if r.get("phase") == "finish"}
+    # An unresolved finish counts as a finish for one of its candidates. A run
+    # that completed but could not name itself must not be reported as dying —
+    # that false alarm is the failure this signal exists to avoid.
     dying = [
-        r for r in rows
-        if r.get("phase") == "start"
-        and r.get("run") not in finished
-        and now - (r.get("ts") or 0) > UNFINISHED_SECONDS
+        r for r in heartbeat.open_starts(rows)
+        if now - (r.get("ts") or 0) > UNFINISHED_SECONDS
         and now - (r.get("ts") or 0) < WEEK
     ]
     if len(dying) >= DYING_THRESHOLD:

@@ -147,32 +147,52 @@ keeps #2 unaccepted — unattended merges that cannot be audited.
       escalation decision, the cheap default is running unguarded. This is the remaining
       work in 3a, and it is now the *only* remaining work in it.
 - [ ] **3b. Claude-side routine work on a separate pool. — THE CRITICAL PATH.**
-      Not a cost saving. The automations and Nate compete for one Anthropic subscription,
-      and every attempt to settle that inside one pool just picks a loser: at
-      `WEEKLY_FLOOR` 25 the routines starve, at 50 he does. A second provider with its own
-      quota is the only thing that adds capacity instead of reallocating it.
+      Not a cost saving. The automations and Nate compete for one Anthropic
+      subscription, and every attempt to settle that inside one pool just picks a
+      loser: at `WEEKLY_FLOOR` 25 the routines starve, at 50 he does. A second
+      provider with its own quota is the only thing that adds capacity.
 
-      **The obstacle is selectivity, not capability.** GLM runs in the Claude Code harness
-      via `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_DEFAULT_*_MODEL`.
-      Those are process-wide, scheduled tasks run inside the desktop app process, and the
-      scheduled-task schema carries no model, env or cwd field (verified against the tool
-      schema). So there is no switch for "routines on GLM, my grilling on Opus".
+      **Path found 2026-09-06: Claude Desktop's third-party inference gateway.**
+      Anthropic documents an in-app gateway — Developer → Configure Third-Party
+      Inference → Gateway, base URL `https://api.z.ai/api/anthropic`, Bearer auth,
+      **Apply locally**. This supersedes the headless-launchd plan and the rule-
+      scoping argument that went with it: `AGENTS.md:50` stands unamended.
 
-      **The headless rule is narrower than it reads.** `AGENTS.md:50` and `plan.md:248`
-      both forbid headless CLI invocation and both give the same reason: *"This is an
-      account-suspension risk."* That rationale is about the **subscription account**. A
-      routine running against z.ai's API on a z.ai key consumes no Anthropic subscription,
-      so the stated risk does not attach to it. The rule does not need overturning so much
-      as **scoping**: headless is forbidden against a subscription; separately-billed API
-      traffic is a different thing. That is still a deliberate `plan.md` revision, and it
-      is Nate's to make — but it is a much smaller decision than "overturn a
-      non-negotiable rule".
+      **Selectivity comes from Desktop and CLI configuring independently.**
+      Desktop → z.ai, which is where the scheduled routines run; CLI → Anthropic,
+      for interactive shaping on Opus. The cost is that interactive work moves to
+      a terminal.
 
-      Open questions for N: the model id (z.ai's docs list `glm-4.7` and `glm-4.5-air`;
-      "GLM-5.3 Max" appears nowhere and should be confirmed before subscribing), and
-      whether anything in Anthropic's terms restricts the CLI against a third-party
-      endpoint — the one part of the scoping argument that is reasoning rather than
-      evidence.
+      `scripts/claude-glm` remains useful as the CLI-side fallback and for any
+      CLI-only automation, but is **not** how the routines reach GLM.
+
+      **The gap in the research, and it is ours not theirs.** That handoff scopes
+      itself to *"interactive Claude Code experience—not CLI/headless operation"*,
+      and all seven of its acceptance tests are a human driving the app. Command
+      Center's need is unattended scheduled runs. Two of its own cautions bite
+      hardest exactly there:
+
+      - **"Desktop Auto permission mode is not available with third-party
+        providers."** A scheduled routine cannot answer a permission prompt. This
+        is the failure that caused the prompt storm and, downstream, #26. If
+        gateway mode forces Manual/Ask, the routines hang instead of running.
+        **Untested, and it is the acceptance criterion that actually matters.**
+      - **Prompt caching may not survive the gateway.** z.ai charges cached input
+        at 1.7 against 6.9 fresh. If `cache_control` is not preserved, credits
+        burn ~4x faster than the plan's sizing assumes.
+
+      **Acceptance test to add before trusting it:** let one *scheduled* Claude
+      task fire on the gateway with nobody at the keyboard, and confirm from the
+      heartbeat that it started, gated, did work and finished — not that a human
+      could drive a Code session. Everything else in their test list is
+      preparation for that one.
+
+      Also unconfirmed: whether the `glm-plan-usage` plugin runs in Desktop at
+      all (their confidence: medium), and whether its plan tier matches the
+      subscription. Automated gating still has no reader — but `usage.py` could
+      *compute* credits from local token counts using z.ai's published formula
+      (`(input×6.9 + cached×1.7 + output×24) / 10,000`), the same way
+      `read_claude_local` already estimates Anthropic usage from transcripts.
 
 ### P4 — Record it · C · after P3
 

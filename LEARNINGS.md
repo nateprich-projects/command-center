@@ -8,6 +8,58 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### A Claude Code web session cannot run `funnel.py` at all
+
+**2026-09-06 · Claude Code on the web · measured**
+
+**The cloud row in `STATUS.md` asked whether the environment supplies a token with
+`project` scope. It never gets that far — the human surface fails two steps earlier,
+and neither failure is fixable from inside the session.**
+
+First, there is no `gh` on the box:
+
+```
+$ python3 funnel.py brief
+  File "funnel.py", line 504, in gh_graphql
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+FileNotFoundError: [Errno 2] No such file or directory: 'gh'
+$ command -v gh
+gh: not found
+```
+
+The session's stated GitHub integration is the GitHub MCP server (`mcp__github__*`), not
+the CLI. Every `gh` call in `funnel.py` dies at exec, so `brief`, `ideas`, `show`,
+`capture`, `shaped` and the three gate answers are all equally dead.
+
+Second — and this is the part a shim cannot route around — `GH_TOKEN` *is* set in the
+environment, but the session's outbound proxy refuses arbitrary GraphQL:
+
+```
+$ curl -sS -X POST https://api.github.com/graphql \
+    -H "Authorization: bearer $GH_TOKEN" -d '{"query":"{viewer{login}}"}'
+403
+{"message":"This GraphQL query is not enabled for this session — only the pinned set
+of PR-review operations is served. Use REST via `gh api repos/{owner}/{repo}/...`
+instead."}
+```
+
+REST does work (`mcp__github__get_me` returns `nateprich`). But **ProjectV2 is
+GraphQL-only — it has no REST surface**, and `funnel.py` reads the board for everything:
+`member_repos()`, `load_items()`, status, `Class`, the lock field, time-at-gate. The
+proxy's suggested REST fallback does not exist for the data the funnel is made of.
+
+Third, even setting both aside, GitHub access in a web session is scoped to an explicit
+repo list — this one was `nateprich-projects/command-center` alone — while funnel
+membership is *every* repo carrying the `command-center` topic across two owners. A
+scoped session cannot see the funnel by construction, which is a direct conflict with
+"repos opt in by carrying the topic, never an allowlist".
+
+**So: skills and code travel with the checkout, and neither is the thing that was
+missing.** Writing the human surface against `gh`/GraphQL is what makes it local-only.
+Portability to cloud is not a token-scope fix; it would mean a second data path through
+REST that ProjectV2 does not offer. Treat the human surface as local-by-nature, the same
+way `usage.py gate`, `heartbeat` and `prior_run` already are.
+
 ### Codex desktop gives every session a fresh working directory
 
 **2026-09-05 · Codex desktop · measured**

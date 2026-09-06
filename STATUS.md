@@ -292,7 +292,7 @@ is open.
 |---|---|
 | Claude Code, session opened in this repo | **Yes** — skills load from `.claude/skills/`, allow-rules apply |
 | Claude Code, session anywhere else on this Mac | **Yes**, but prompts — the allow-rules are project-scoped |
-| Claude Code cloud session | **Untested.** Code and skills travel with the checkout; needs a token with `project` scope |
+| Claude Code cloud session | **No.** Code and skills travel with the checkout, but there is no `gh` and GraphQL is blocked — see [LEARNINGS](LEARNINGS.md) |
 | Desktop app general chat | **No** — see [#25](https://github.com/nateprich-projects/command-center/issues/25) |
 
 Skills live at `skills/` and are symlinked from `.claude/skills/`, so they load
@@ -302,14 +302,23 @@ in any local session. One source, two paths, no second copy to drift.
 
 **The agent-side commands are local by nature and should stay that way.**
 `usage.py gate` reads this machine's transcripts, `heartbeat` writes a local
-spool, and `prior_run` reads local session files. Only the human surface —
-`brief`, `ideas`, `show`, `capture`, `shaped`, and the three gate answers —
-is portable.
+spool, and `prior_run` reads local session files. The human surface — `brief`,
+`ideas`, `show`, `capture`, `shaped`, and the three gate answers — was assumed
+portable because it only talks to GitHub. Measurement says otherwise.
 
-**The open question for cloud** is whether the environment supplies a GitHub
-token carrying `project` scope. Everything the human surface does beyond reading
-issues writes Project fields, and without that scope it fails at the first write.
-Untested; try `python3 funnel.py brief` in a cloud session and see.
+**That open question for cloud is now answered, and the answer is worse than the
+question.** It was framed as token scope — whether the environment supplies a token
+carrying `project`. It never reaches a scope check. A web session has no `gh` binary, so
+every command dies at exec; and although `GH_TOKEN` is set, the session proxy serves only
+a pinned set of GraphQL operations and refuses the rest, while ProjectV2 has no REST
+surface to fall back to. Measured, with the output, in [LEARNINGS](LEARNINGS.md).
+
+The consequence for the design: **the human surface is local-by-nature too**, alongside
+`usage.py gate`, `heartbeat` and `prior_run` — not because of a missing credential, but
+because it is written against `gh` and ProjectV2 GraphQL. Making it portable would mean a
+second data path that GitHub does not offer. The recommendation — not a decision, since
+`plan.md` does not make one — is to stop carrying cloud as a surface the human surface is
+expected to work on, and to say so in `plan.md` rather than leaving it implied here.
 
 ### What would count as failure
 

@@ -180,18 +180,17 @@ WEEKLY_TARGET = 90.0
 #: the reserve alone exceeds it and nothing can run for the first day or so of
 #: every week — a dead zone at exactly the moment the budget is most free.
 #:
-#: Raised from 25.0 to 50.0 on 2026-09-06, by Nate. At 25.0 this was not an
-#: allowance, it was the binding constraint: his own interactive usage crossed it
-#: early in the week, so the scheduled routine refused every run — first at 25.1%
-#: against 25.0%, one tenth of a point. Nothing was ever reviewed or merged, and
-#: Codex re-worked the same ticket hourly because its PR could not be looked at.
+#: Raised to 50.0 on 2026-09-06 and **reverted the same day**. The raise did let
+#: the routines run — they reviewed and merged PR #36, the first end-to-end cycle
+#: — but it did not create bandwidth. It moved Nate's own weekly budget to the
+#: automations, which is the same contention pointed the other way. He does his
+#: real work on this subscription; the routines are not entitled to it.
 #:
-#: The accepted cost is that routines may spend more of the week early. The
-#: proportional line still governs later in the cycle, and `plan.md` measured
-#: these runs at ~2,700 output tokens, so the spend at stake is small next to the
-#: deadlock it clears. Recalibrate from the telemetry once real runs exist rather
-#: than defending this number.
-WEEKLY_FLOOR = 50.0
+#: The lesson is that this number cannot solve the problem. Routines competing
+#: with Nate for one pool is a *capacity* problem, and the only fix that adds
+#: capacity rather than reallocating it is a second provider with its own quota.
+#: Until that exists, the routines are correctly starved. See MIGRATION.md P3b.
+WEEKLY_FLOOR = 25.0
 
 #: Never burn a 5-hour window past this. The rolling 5-hour window, not the
 #: weekly one, is what actually locks Nate out of his own account.

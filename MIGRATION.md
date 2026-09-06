@@ -29,10 +29,14 @@ starting:
    asks "is Nate using the OpenAI pool right now" and declines to compete for that pool.
    That generalises correctly — GLM work never touches the OpenAI window, and if Nate stops
    using ChatGPT there is nothing to protect, so running is right rather than a failure.
-4. **Sol's cost case for Z.ai is weaker than stated.** `plan.md:683` measured these runs at
-   ~2,700 output tokens; breakdown and review are light. Z.ai buys *decoupling* from Nate's
-   interactive pool, not money. The observed bottleneck — a run refusing at 25.1% against
-   25.0% — is a constant, and changing it is free. Try that first.
+4. ~~**Sol's cost case for Z.ai is weaker than stated.**~~ **Withdrawn 2026-09-06.** The
+   original note said the bottleneck was a constant and changing it was free, so try that
+   before subscribing. That was wrong, and the experiment proved it: raising `WEEKLY_FLOOR`
+   to 50.0 did let the routines run, by spending Nate's own week on them. A floor does not
+   add capacity, it chooses who goes without. Sol's cost framing was imprecise but its
+   conclusion was right — **a second provider is the only thing that creates bandwidth**,
+   and that is what P3b is for. `plan.md:683`'s "~2,700 output tokens" still stands and
+   still means the money is small; the *quota* is what is scarce.
 
 Sol's §4 — splitting model review from a deterministic merge gate — is the most valuable
 item in the document and was underweighted at position four. It is promoted to P2 here.
@@ -56,7 +60,14 @@ Owner is **C** (Claude, this session) or **N** (Nate). A phase blocks only what 
       it is what answers `plan.md`'s original objection that a cheaper routine would be
       "invisible to the gate governing it".
       *Blocks: P3b, P4.*
-- [x] **0.3 Raise `WEEKLY_FLOOR`.** — done, 25.0 → 50.0 on Nate's instruction. Currently 25.0. A scheduled Claude run refused at
+- [x] **0.3 `WEEKLY_FLOOR`: raised to 50.0, then REVERTED to 25.0 the same day.**
+      It worked — the routines reviewed and merged PR #36, the first end-to-end
+      cycle — and it was still the wrong fix. **It did not create bandwidth; it
+      moved Nate's own weekly budget to the automations.** Same contention, pointed
+      the other way. He does his real work on this subscription and the routines are
+      not entitled to it. This number can never solve routine starvation, because
+      moving it only decides who goes without. That makes P3b the critical path
+      rather than an optional cost saving. Currently 25.0. A scheduled Claude run refused at
       25.1% on 2026-09-06 — one tenth of a point — because interactive use had crossed it.
       One constant, reversible, and it tells us whether contention was ever the real
       problem before any subscription is bought. *Needs N's number, or his say-so to pick.*
@@ -124,10 +135,33 @@ keeps #2 unaccepted — unattended merges that cannot be audited.
       phase says must escalate to Sol. Until `funnel.py` or ticket metadata carries the
       escalation decision, the cheap default is running unguarded. This is the remaining
       work in 3a, and it is now the *only* remaining work in it.
-- [ ] **3b. Claude-side routine work on a separate pool.** Move breakdown and routine
-      review off Opus onto an independent quota pool inside the Claude Code harness.
-      **BLOCKED:** needs N's decision on a Z.ai Lite subscription, and confirmation that
-      Claude Code can actually run GLM here.
+- [ ] **3b. Claude-side routine work on a separate pool. — THE CRITICAL PATH.**
+      Not a cost saving. The automations and Nate compete for one Anthropic subscription,
+      and every attempt to settle that inside one pool just picks a loser: at
+      `WEEKLY_FLOOR` 25 the routines starve, at 50 he does. A second provider with its own
+      quota is the only thing that adds capacity instead of reallocating it.
+
+      **The obstacle is selectivity, not capability.** GLM runs in the Claude Code harness
+      via `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_DEFAULT_*_MODEL`.
+      Those are process-wide, scheduled tasks run inside the desktop app process, and the
+      scheduled-task schema carries no model, env or cwd field (verified against the tool
+      schema). So there is no switch for "routines on GLM, my grilling on Opus".
+
+      **The headless rule is narrower than it reads.** `AGENTS.md:50` and `plan.md:248`
+      both forbid headless CLI invocation and both give the same reason: *"This is an
+      account-suspension risk."* That rationale is about the **subscription account**. A
+      routine running against z.ai's API on a z.ai key consumes no Anthropic subscription,
+      so the stated risk does not attach to it. The rule does not need overturning so much
+      as **scoping**: headless is forbidden against a subscription; separately-billed API
+      traffic is a different thing. That is still a deliberate `plan.md` revision, and it
+      is Nate's to make — but it is a much smaller decision than "overturn a
+      non-negotiable rule".
+
+      Open questions for N: the model id (z.ai's docs list `glm-4.7` and `glm-4.5-air`;
+      "GLM-5.3 Max" appears nowhere and should be confirmed before subscribing), and
+      whether anything in Anthropic's terms restricts the CLI against a third-party
+      endpoint — the one part of the scoping argument that is reasoning rather than
+      evidence.
 
 ### P4 — Record it · C · after P3
 

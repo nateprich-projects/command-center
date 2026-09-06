@@ -8,6 +8,44 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Codex rejects a symlinked writable root, and the fix must not touch the command paths
+
+**2026-09-06 · Codex desktop · documented**
+
+**Codex refuses to start a session whose writable root is a symlink — it must be given the
+link's real target.** Reported by Codex itself while its sandbox settings were being
+corrected, not verified independently, hence `documented`.
+
+That matters here because `~/.claude/command-center` **is** a symlink:
+
+```
+/Users/nateprich/.claude/command-center -> /Volumes/External SSD/Repositories/nateprich-projects_command-center
+```
+
+**The trap is the obvious fix.** Rewriting the routines to invoke the real target instead
+would break the Claude side, because a Claude Code permission rule matches the literal
+command string:
+
+```
+"Bash(python3 /Users/nateprich/.claude/command-center/*)"
+```
+
+A command beginning `/Volumes/External SSD/...` does not match it, so every heartbeat,
+gate and funnel call in the Claude routine would prompt. That is the prompt storm that
+produced `RUN=$(...)`'s removal and, downstream, the clobbered-pointer bug in #26.
+
+**These are two different settings and only one changes.** The *writable root* is Codex
+sandbox configuration and must be the real path. The *command strings* in the routines
+stay on the symlink path, which both agents can still execute through. Twenty occurrences
+of the symlink path exist across `routines/`, `skills/` and `.claude/settings.json`; none
+of them should move.
+
+**A second constraint falls out of this.** The real target is on `/Volumes/External SSD`,
+so the entire system — funnel, heartbeat, usage, skills, and both agents' working copies —
+depends on an external volume being mounted. Unattended overnight runs are exactly when a
+volume is most likely to be asleep or unmounted, and the failure would look like a dead
+agent rather than a missing disk.
+
 ### A Claude Code web session cannot run `funnel.py` at all
 
 **2026-09-06 · Claude Code on the web · measured**

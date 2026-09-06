@@ -10,3 +10,4 @@
 {"agent": "claude", "merged": null, "note": "seven_day 20.1% used + 5.0% reserved = 25.1% vs 25.0% allowed; no PR reviewed, no breakdown", "outcome": "skipped-over-pace", "phase": "finish", "run": "cc982c498de9", "ts": 1788685314, "usage": null}
 {"agent": "claude", "phase": "start", "run": "66c52a3ad727", "ticket": null, "ts": 1788686399, "usage": null}
 {"agent": "claude", "merged": null, "note": "smoke test: run-id resolution, command-center#26", "outcome": "nothing-to-do", "phase": "finish", "run": "66c52a3ad727", "ts": 1788686402, "usage": null}
+{"agent": "claude", "phase": "start", "run": "22d6d0a6be31", "ticket": null, "ts": 1788688904, "usage": null}

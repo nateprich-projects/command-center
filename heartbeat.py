@@ -177,28 +177,48 @@ def _push(agent: str) -> None:
             time.sleep(BACKOFF[attempt])
 
 
-def append(agent: str, record: Dict) -> bool:
+def append(agent: str, record: Dict) -> str:
     """Record one heartbeat. Never raises.
 
-    Returns True only if the record reached GitHub. False means it is spooled
-    for the next drain, or — if even the spool could not be written — lost.
-    Either way the caller proceeds: a run must not be stopped by its own
-    bookkeeping.
+    Returns `"pushed"`, `"spooled"` or `"lost"`. The caller proceeds either way —
+    a run must not be stopped by its own bookkeeping — but it must be told the
+    truth about what happened: `plan.md` requires that anything which cannot be
+    spooled is **reported as lost rather than as saved**. A run told its record
+    was kept when it was not is worse than a run told nothing, because the gap in
+    the record then looks like a run that never happened.
+
+    A record that could not be spooled is lost even if the push then succeeds:
+    `_push` drains the spool, so it can only send what reached the spool. That is
+    how two Codex runs on 2026-09-06 reported "spooled locally" while writing
+    nothing anywhere — the sandbox denied writes outside its working directory.
     """
-    recorded = True
     try:
         _spool(agent, record)
     except OSError:
-        # Even the fallback can fail — a full disk, a bad path. A run must not
-        # die because its bookkeeping could not be written, but it must not be
-        # told the record was kept either: an unspooled record is simply lost,
-        # and `_push` would otherwise find an empty spool and report success.
-        recorded = False
+        # A full disk, a bad path, or a sandbox that will not let us write here.
+        return "lost"
     try:
         _push(agent)
     except (HeartbeatError, OSError):
-        return False
-    return recorded
+        return "spooled"
+    return "pushed"
+
+
+def _report(kept: str) -> None:
+    """Say plainly where the record ended up. Silence means it reached GitHub."""
+    if kept == "spooled":
+        print(
+            "heartbeat: GitHub unreachable; record spooled locally and will be "
+            "pushed by a later run. Continuing.",
+            file=sys.stderr,
+        )
+    elif kept == "lost":
+        print(
+            "heartbeat: RECORD LOST — could not reach GitHub and could not write "
+            "the local spool at {}. Nothing will recover this one. Continuing, "
+            "but this run will look like it never happened.".format(SPOOL_DIR),
+            file=sys.stderr,
+        )
 
 
 def usage_snapshot(agent: str) -> Optional[Dict]:
@@ -358,7 +378,7 @@ def main(argv=None) -> int:
 
         if args.command == "start":
             run_id = uuid.uuid4().hex[:12]
-            pushed = append(args.agent, {
+            kept = append(args.agent, {
                 "run": run_id,
                 "agent": args.agent,
                 "phase": "start",
@@ -366,12 +386,7 @@ def main(argv=None) -> int:
                 "ticket": args.ticket,
                 "usage": usage_snapshot(args.agent),
             })
-            if not pushed:
-                print(
-                    "heartbeat: GitHub unreachable; record spooled locally and "
-                    "will be pushed by a later run. Continuing.",
-                    file=sys.stderr,
-                )
+            _report(kept)
             print(run_id)
             return 0
 
@@ -402,12 +417,7 @@ def main(argv=None) -> int:
             # rather than asserting a wrong one.
             record["unresolved"] = True
             record["candidates"] = candidates
-        pushed = append(args.agent, record)
-        if not pushed:
-            print(
-                "heartbeat: GitHub unreachable; record spooled locally.",
-                file=sys.stderr,
-            )
+        _report(append(args.agent, record))
         return 0
     except HeartbeatError as exc:
         print("heartbeat: {}".format(exc), file=sys.stderr)

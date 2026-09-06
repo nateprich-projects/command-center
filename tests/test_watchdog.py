@@ -172,7 +172,8 @@ def test_a_github_outage_does_not_stop_a_run(tmp_path, monkeypatch):
     the run stopped at step one, and the thing that failed *was* the record — so
     it left no trace of having stopped."""
     _isolate_spool(tmp_path, monkeypatch); _offline(monkeypatch)
-    assert heartbeat.append("codex", {"run": "a", "phase": "start", "ts": 1}) is False
+    assert heartbeat.append(
+        "codex", {"run": "a", "phase": "start", "ts": 1}) == "spooled"
 
 
 def test_a_record_survives_the_outage_locally(tmp_path, monkeypatch):
@@ -194,7 +195,8 @@ def test_the_spool_drains_when_github_returns(tmp_path, monkeypatch):
         return "{}"
     monkeypatch.setattr(heartbeat, "gh", ok)
 
-    assert heartbeat.append("codex", {"run": "c", "phase": "start", "ts": 3}) is True
+    assert heartbeat.append(
+        "codex", {"run": "c", "phase": "start", "ts": 3}) == "pushed"
     assert heartbeat._spooled("codex") == []
     body = [a for a in sent["args"] if a.startswith("content=")][0]
     import base64
@@ -210,9 +212,27 @@ def test_read_includes_records_not_yet_pushed(tmp_path, monkeypatch):
     assert [r["run"] for r in heartbeat.read("codex")] == ["a"]
 
 
-def test_a_spool_write_failure_is_still_not_fatal(tmp_path, monkeypatch):
-    """Even the fallback failing must not take the run down."""
+def test_a_spool_write_failure_is_reported_as_lost_not_saved(tmp_path, monkeypatch):
+    """Even the fallback failing must not take the run down — but it must not be
+    called saved either.
+
+    Two Codex runs on 2026-09-06 reported "spooled locally" while writing nothing
+    anywhere: the sandbox denied writes outside its working directory, and the old
+    boolean could not tell "on disk, awaiting a drain" from "gone". A gap in the
+    record that is believed to be safe looks exactly like a run that never
+    happened, which is the one state the heartbeat exists to rule out.
+    """
     monkeypatch.setattr(heartbeat, "SPOOL_DIR", "/proc/nonexistent/nope")
     monkeypatch.setattr(heartbeat, "BACKOFF", [])
     _offline(monkeypatch)
-    assert heartbeat.append("codex", {"run": "a", "phase": "start", "ts": 1}) is False
+    assert heartbeat.append(
+        "codex", {"run": "a", "phase": "start", "ts": 1}) == "lost"
+
+
+def test_an_unspoolable_record_is_lost_even_if_the_push_works(tmp_path, monkeypatch):
+    """`_push` drains the spool, so it can only send what reached the spool."""
+    monkeypatch.setattr(heartbeat, "SPOOL_DIR", "/proc/nonexistent/nope")
+    monkeypatch.setattr(heartbeat, "_fetch", lambda agent: (None, None))
+    monkeypatch.setattr(heartbeat, "gh", lambda *a, **k: "{}")
+    assert heartbeat.append(
+        "codex", {"run": "a", "phase": "start", "ts": 1}) == "lost"

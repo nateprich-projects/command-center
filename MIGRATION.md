@@ -103,7 +103,23 @@ keeps #2 unaccepted — unattended merges that cannot be audited.
       **Default switched on N's instruction:** `gpt-5.6-sol`/`high` → `gpt-5.6-luna`/`max`
       ("Luna-maxing"). Previous config backed up alongside `~/.codex/config.toml`.
 
-      **Still open — the escalation half is not built.** Every ticket now goes to Luna,
+      **Escalation half built 2026-09-06** (`funnel.py`: `escalation_reasons`,
+      `required_tier`, `funnel next --tier`). A ticket declares `Risk: standard`
+      or `Risk: escalated — <why>` in its body, written by Claude at breakdown;
+      the marker is authoritative and a deliberately narrow pattern list is the
+      safety net for tickets written before markers existed. The patterns are
+      narrow on purpose: this repo is *about* locks, gates and destructive
+      operations, so a broad list escalates every ticket and the cheap engine
+      never runs — the failure that looks like success. `tests/test_escalation.py`
+      pins that with real ticket text.
+
+      **Remaining, and it needs N:** two Codex automations, one per tier, each
+      passing `--tier` in its prompt — `standard` on the cheap default, an
+      `escalated` one on `gpt-5.6-sol`. Until both exist, `--tier` is available
+      and unused, and every ticket still goes to Luna. Also: breakdown must start
+      writing `Risk:` lines, which is a `routines/claude.md` change.
+
+      **Superseded — the escalation half is not built.** Every ticket now goes to Luna,
       including auth, migrations, concurrency and weak-acceptance-criteria work that this
       phase says must escalate to Sol. Until `funnel.py` or ticket metadata carries the
       escalation decision, the cheap default is running unguarded. This is the remaining

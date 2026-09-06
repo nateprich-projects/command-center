@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -248,6 +249,68 @@ def awaiting_breakdown(items: Iterable[Item]) -> List[Item]:
         key=lambda i: (i.status_since or datetime.max.replace(tzinfo=timezone.utc),
                        i.repo, i.number),
     )
+
+
+#: Tiers a ticket can require. `escalated` means the cheap default engineer must
+#: not take it — not that it is urgent. Deliberately not model ids: the ranking
+#: engine must not know which vendor is cheap this month, and a routine declares
+#: its own tier in its prompt.
+TIERS = ("standard", "escalated")
+
+#: A ticket declares its risk in its body, written by Claude at breakdown when
+#: the plan is in front of it. `funnel.py` reads it; the engineer never decides.
+#:
+#:     Risk: standard
+#:     Risk: escalated — concurrency, destructive
+RISK_LINE = re.compile(r"^\s*Risk:\s*(standard|escalated)\b(.*)$",
+                       re.IGNORECASE | re.MULTILINE)
+
+#: A safety net for tickets written before markers existed, or by someone who
+#: forgot. **Deliberately narrow.** This repository is *about* locks, gates and
+#: destructive operations — `park` closes issues on purpose — so a broad keyword
+#: list would escalate every ticket and the cheap default would never run. These
+#: match phrases that are hard to write by accident.
+ESCALATION_PATTERNS = {
+    "credentials": r"\b(api[- ]key|access token|client secret|credential store|"
+                   r"password|private key)\b",
+    "authorisation": r"\b(authoris\w+|authoriz\w+|permission model|access control|"
+                     r"oauth|scope grant)\b",
+    "data-migration": r"\b(data migration|schema migration|backfill|"
+                      r"irreversible migration)\b",
+    "destructive": r"\b(force[- ]push|hard delete|permanently delete|"
+                   r"drop the (table|branch)|rewrite history)\b",
+    "concurrency": r"\b(race condition|deadlock|thread[- ]safe|mutex|"
+                   r"atomic (write|commit))\b",
+}
+
+
+def escalation_reasons(title: str, body: str,
+                       failed_before: bool = False) -> List[str]:
+    """Why the cheap default engineer must not take this ticket.
+
+    An explicit `Risk:` marker wins outright, in both directions — a ticket that
+    says `Risk: standard` is standard even if its prose mentions a race
+    condition, because the person who wrote the plan knew what it meant and a
+    regex does not.
+    """
+    text = "{}\n{}".format(title or "", body or "")
+    marker = RISK_LINE.search(text)
+    if marker:
+        if marker.group(1).lower() == "standard":
+            return ["prior attempt failed"] if failed_before else []
+        stated = marker.group(2).strip(" —-:").strip()
+        reasons = ["declared: " + stated] if stated else ["declared"]
+        return reasons + (["prior attempt failed"] if failed_before else [])
+
+    found = [name for name, pattern in sorted(ESCALATION_PATTERNS.items())
+             if re.search(pattern, text, re.IGNORECASE)]
+    if failed_before:
+        found.append("prior attempt failed")
+    return found
+
+
+def required_tier(title: str, body: str, failed_before: bool = False) -> str:
+    return "escalated" if escalation_reasons(title, body, failed_before) else "standard"
 
 
 def startable(items: Sequence[Item],
@@ -740,9 +803,30 @@ def cmd_queue(items: List[Item], now: datetime) -> int:
     return 0
 
 
-def cmd_next(items: List[Item], now: datetime) -> int:
+def cmd_next(items: List[Item], now: datetime, tier: Optional[str] = None) -> int:
     blocked = awaiting_review(items)
     ticket = next_ticket(items, now, blocked=blocked)
+
+    # A caller declaring a tier gets the best ticket *it* may work. Walking the
+    # queue rather than refusing outright matters: a `standard` run that stopped
+    # at the first escalated ticket would do nothing until the escalated engine's
+    # schedule came round, and the queue would stall behind one ticket.
+    reasons: List[str] = []
+    if ticket is not None and tier:
+        by_ref = {i.ref: i for i in items}
+        for candidate in startable(items, awaiting_review=blocked):
+            if lock_holder(items, now) is not None and candidate.ref != ticket.ref:
+                break
+            found = escalation_reasons(
+                candidate.title, _ticket_body(candidate.repo, candidate.number))
+            if not found or tier == "escalated":
+                ticket, reasons = candidate, found
+                break
+        else:
+            print("nothing — every startable ticket needs the escalated engine",
+                  file=sys.stderr)
+            return 1
+
     if ticket is None:
         holder = lock_holder(items, now)
         if holder is not None:
@@ -1102,6 +1186,13 @@ def _gh_json(*args: str):
         return None
 
 
+def _ticket_body(repo: str, number: int) -> str:
+    """One issue body, fetched only for a candidate about to be handed out."""
+    row = _gh_json("gh", "issue", "view", str(number), "--repo", repo,
+                   "--json", "body") or {}
+    return row.get("body") or ""
+
+
 def _ticket_pr(repo: str, number: int) -> Optional[Dict]:
     """The PR for a ticket, found by the branch name the routine guarantees."""
     rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "all",
@@ -1263,7 +1354,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("queue", help="everything, ordered")
-    sub.add_parser("next", help="the single next ticket Codex should work, or nothing")
+    nxt = sub.add_parser(
+        "next", help="the single next ticket Codex should work, or nothing")
+    nxt.add_argument(
+        "--tier", choices=TIERS, default=None,
+        help="what this engine is allowed to work. `standard` skips tickets "
+             "needing the escalated engine; `escalated` may take anything. "
+             "Declared by the routine, never by the model.")
     sub.add_parser("brief", help="JSON for the /funnel skill and the morning brief")
     sub.add_parser("ideas", help="captured ideas, flagged ones first")
     show = sub.add_parser("show", help="everything needed to answer an item's gate")
@@ -1329,7 +1426,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                args.shaping)
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan)
-        return {"queue": cmd_queue, "next": cmd_next, "brief": cmd_brief}[args.command](
+        if args.command == "next":
+            return cmd_next(items, now, tier=getattr(args, "tier", None))
+        return {"queue": cmd_queue, "brief": cmd_brief}[args.command](
             items, now
         )
     except GitHubError as exc:

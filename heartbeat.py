@@ -135,15 +135,21 @@ def _spooled(agent: str) -> List[Dict]:
         return []
 
 
-def _push(agent: str) -> None:
+def _push(agent: str, extra: Optional[List[Dict]] = None) -> None:
     """Drain the spool to GitHub. Raises if it cannot.
+
+    `extra` carries records that never reached the spool — a full disk, or a
+    sandbox that will not let us write there. The spool is a write-ahead buffer,
+    not a prerequisite: when the buffer fails and the destination is up, send the
+    record straight to the destination rather than losing it.
 
     The Contents API is compare-and-swap on the blob sha, so a concurrent write
     is rejected rather than silently lost, and the retry re-reads before
     rewriting. Both agents can be running at once, even though only one Codex
     run can.
     """
-    pending = _spooled(agent)
+    from_spool = _spooled(agent)
+    pending = from_spool + list(extra or [])
     if not pending:
         return
     _ensure_branch()
@@ -164,12 +170,19 @@ def _push(agent: str) -> None:
             args += ["-f", "sha=" + sha]
         try:
             gh(*args)
-            # Only clear what was actually sent; a record spooled while this was
-            # in flight must survive to the next drain.
-            remaining = _spooled(agent)[len(pending):]
-            with open(_spool_path(agent), "w") as fh:
-                for r in remaining:
-                    fh.write(json.dumps(r, sort_keys=True) + "\n")
+            # Only clear what came *from the spool*: a record spooled while this
+            # was in flight must survive to the next drain, and an `extra` was
+            # never in the spool to begin with.
+            #
+            # Skip it entirely when nothing came from the spool — which is exactly
+            # the unwritable-spool case that `extra` exists for. Rewriting the file
+            # there raises, and a push that already succeeded would be reported as
+            # a lost record.
+            if from_spool:
+                remaining = _spooled(agent)[len(from_spool):]
+                with open(_spool_path(agent), "w") as fh:
+                    for r in remaining:
+                        fh.write(json.dumps(r, sort_keys=True) + "\n")
             return
         except HeartbeatError:
             if attempt >= len(BACKOFF):
@@ -192,15 +205,18 @@ def append(agent: str, record: Dict) -> str:
     how two Codex runs on 2026-09-06 reported "spooled locally" while writing
     nothing anywhere — the sandbox denied writes outside its working directory.
     """
+    spooled = True
     try:
         _spool(agent, record)
     except OSError:
         # A full disk, a bad path, or a sandbox that will not let us write here.
-        return "lost"
+        # Not fatal on its own: try GitHub directly, since the spool exists to
+        # survive GitHub being down, not the other way round.
+        spooled = False
     try:
-        _push(agent)
+        _push(agent, extra=None if spooled else [record])
     except (HeartbeatError, OSError):
-        return "spooled"
+        return "spooled" if spooled else "lost"
     return "pushed"
 
 
@@ -214,9 +230,10 @@ def _report(kept: str) -> None:
         )
     elif kept == "lost":
         print(
-            "heartbeat: RECORD LOST — could not reach GitHub and could not write "
-            "the local spool at {}. Nothing will recover this one. Continuing, "
-            "but this run will look like it never happened.".format(SPOOL_DIR),
+            "heartbeat: RECORD LOST — the local spool at {} could not be written "
+            "AND GitHub could not be reached. Nothing will recover this one. "
+            "Continuing, but this run will look like it never happened.".format(
+                SPOOL_DIR),
             file=sys.stderr,
         )
 

@@ -229,10 +229,34 @@ def test_a_spool_write_failure_is_reported_as_lost_not_saved(tmp_path, monkeypat
         "codex", {"run": "a", "phase": "start", "ts": 1}) == "lost"
 
 
-def test_an_unspoolable_record_is_lost_even_if_the_push_works(tmp_path, monkeypatch):
-    """`_push` drains the spool, so it can only send what reached the spool."""
+def test_an_unspoolable_record_goes_straight_to_github(tmp_path, monkeypatch):
+    """The spool is a write-ahead buffer, not a prerequisite.
+
+    Codex's sandbox denied writes to the spool on 2026-09-06 while GitHub was
+    perfectly reachable, and two records were lost for no reason. When the buffer
+    fails and the destination is up, use the destination.
+    """
+    sent = {}
+
+    def ok(*args, **k):
+        sent["args"] = args
+        return "{}"
+
     monkeypatch.setattr(heartbeat, "SPOOL_DIR", "/proc/nonexistent/nope")
     monkeypatch.setattr(heartbeat, "_fetch", lambda agent: (None, None))
-    monkeypatch.setattr(heartbeat, "gh", lambda *a, **k: "{}")
+    monkeypatch.setattr(heartbeat, "gh", ok)
+    assert heartbeat.append(
+        "codex", {"run": "a", "phase": "start", "ts": 1}) == "pushed"
+
+    import base64
+    body = [a for a in sent["args"] if a.startswith("content=")][0]
+    text = base64.b64decode(body.split("=", 1)[1]).decode()
+    assert [json.loads(l)["run"] for l in text.splitlines()] == ["a"]
+
+
+def test_a_record_is_lost_only_when_both_routes_fail(tmp_path, monkeypatch):
+    monkeypatch.setattr(heartbeat, "SPOOL_DIR", "/proc/nonexistent/nope")
+    monkeypatch.setattr(heartbeat, "BACKOFF", [])
+    _offline(monkeypatch)
     assert heartbeat.append(
         "codex", {"run": "a", "phase": "start", "ts": 1}) == "lost"

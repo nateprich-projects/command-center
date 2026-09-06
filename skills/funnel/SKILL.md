@@ -103,8 +103,9 @@ Do not pad the answer with the ladder, the gate counts, or what Codex is doing.
 **Parking is a real option, every time.** The bottom-up ordering exists to force disposal,
 so the longest-waiting item is surfaced first precisely because it is the most likely
 park candidate. When something has waited a long time, say so and name parking as a
-choice — `Parked` requires a written reason, and that reason is the artifact that makes
-re-encountering the idea in four months a 30-second decision.
+choice. Record that choice with `python3 /Users/nateprich/.claude/command-center/funnel.py
+park <ref> --reason "<why>"`; `Parked` requires a written reason, and that reason is the
+artifact that makes re-encountering the idea in four months a 30-second decision.
 
 **Flag the portfolio signal, do not tune it.** If `upkeep_share` is above roughly 0.5, or
 `days_since_anything_new_started` is large, that is not a scheduling problem to fix. It

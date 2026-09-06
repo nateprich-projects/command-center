@@ -68,6 +68,10 @@ MAINTENANCE_WINDOW = timedelta(days=30)
 #: counter — GitHub is the state, so there is nothing else to keep in step.
 REGRESSION_PREFIX = "Regression from PR #"
 
+#: Reasons are durable parking artifacts. The sibling brief command reads this
+#: fixed marker back from issue comments, so it is a shared contract.
+PARK_COMMENT_PREFIX = "**Parked:** "
+
 #: Three rejected merges in a week means the auto-merge bar has failed. That is
 #: not "there are bugs" — it is a different and more serious fact, and the
 #: response is to stop auto-merging and fix the review prompt.
@@ -833,6 +837,43 @@ def _option_id(field_id: str, name: str) -> str:
     raise GitHubError("no option {} on that field".format(name))
 
 
+def cmd_park(items: List[Item], now: datetime, ref: str, reason: str) -> int:
+    """Park a project with its durable reason attached to the issue."""
+    item = find(items, ref)
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
+
+    # Done and Parked must remain distinguishable. Set the Project status first,
+    # then close with NOT_PLANNED, then leave the reason where it can be read
+    # without opening the Project.
+    gh_graphql(
+        SET_FIELD,
+        project=PROJECT_ID,
+        item=item.item_id,
+        field=STATUS_FIELD_ID,
+        option=_option_id(STATUS_FIELD_ID, "Parked"),
+    )
+
+    close = subprocess.run(
+        ["gh", "issue", "close", str(item.number), "--repo", item.repo,
+         "--reason", "not planned"],
+        capture_output=True, text=True,
+    )
+    if close.returncode != 0:
+        raise GitHubError(close.stderr.strip())
+
+    comment = subprocess.run(
+        ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+         "--body", PARK_COMMENT_PREFIX + reason],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+
+    print("{} → Parked\n{}{}".format(item.ref, PARK_COMMENT_PREFIX, reason))
+    return 0
+
+
 def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -> int:
     """Record that a merged PR turned out to be broken.
 
@@ -841,8 +882,8 @@ def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -
     feedback loop on letting Claude merge unattended. One action does all four
     steps, rather than leaving them to be remembered.
 
-    This is also the single case in the design where `Class` is written by code
-    rather than by Nate.
+    This is one of two commands that write `Status` by code rather than by Nate;
+    it remains the single case that also writes `Class`.
     """
     number = pr.rstrip("/").split("/")[-1].lstrip("#")
     repo = REPO
@@ -1178,6 +1219,14 @@ def cmd_release(items: List[Item], now: datetime, ref: str) -> int:
     return 0
 
 
+def _parking_reason(value: str) -> str:
+    """Reject blank reasons during argument parsing, before GitHub is read."""
+    reason = value.strip()
+    if not reason:
+        raise argparse.ArgumentTypeError("a non-empty parking reason is required")
+    return reason
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1209,6 +1258,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
     release = sub.add_parser("release", help="give up the lock on a ticket")
     release.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    park = sub.add_parser("park", help="stop a project and record why")
+    park.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    park.add_argument(
+        "--reason", required=True, type=_parking_reason,
+        help="why this project is being stopped (required)",
+    )
     reject = sub.add_parser(
         "reject", help="a merged PR turned out to be broken: undo and record it")
     reject.add_argument("pr", help="PR number or URL")
@@ -1227,6 +1282,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_claim(items, now, args.ref)
         if args.command == "release":
             return cmd_release(items, now, args.ref)
+        if args.command == "park":
+            return cmd_park(items, now, args.ref, args.reason)
         if args.command == "reject":
             return cmd_reject(items, now, args.pr, args.note)
         if args.command in ANSWERS:

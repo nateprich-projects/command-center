@@ -85,9 +85,13 @@ The plan must **separate the two**. "Decided from precedent (source)" and "Needs
 are different sections, and the second is what he actually reads at the Shaped gate. If
 the second list is empty, say so — that is a good outcome, not a suspicious one.
 
-If an idea genuinely turns on his judgement, **use the local `grilling` skill**
-(`~/.claude/skills/grilling/`, the unscoped one — not `anthropic-skills:grilling`,
-which batches questions) to do the work with him. Do not improvise a gentler version
+If an idea genuinely turns on his judgement, **grill him** rather than writing the
+plan at him. Prefer his local `grilling` skill if it is installed
+(`~/.claude/skills/grilling/`, the unscoped one); it is personal and deliberately
+not carried in this repo, so on a fresh checkout it may be absent. Fall back to
+`anthropic-skills:grilling` — but override its batching: the rules below and in
+`~/.claude/CLAUDE.md` win over anything a skill says about asking several questions
+at once. Do not improvise a gentler version
 of it: the point is to find the weaknesses now, while the idea is cheap to change,
 rather than after Codex has built it. Invoking it is not ceremony to be skipped
 because you think you already have the question — that judgement is exactly what the

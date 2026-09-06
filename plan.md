@@ -657,6 +657,34 @@ unattended is authority this system does not grant an agent, and a mistake
 scatters work into places the funnel then has to find. The routine says so in a
 comment and leaves it to Nate.
 
+### Cloud is not a surface for the human half
+
+Measured 2026-09-06, in `LEARNINGS.md`. A Claude Code web session cannot run `funnel.py`
+at all: there is no `gh` binary, and although `GH_TOKEN` is set the session proxy serves
+only a pinned set of GraphQL operations and refuses the rest. **ProjectV2 has no REST
+surface**, so the proxy's suggested REST fallback does not exist for the data this system
+is made of — membership, `Status`, `Class`, the lock field, time-at-gate.
+
+So **the human surface is local-by-nature too** — `brief`, `ideas`, `show`, `capture`,
+`shaped` and the three gate answers, alongside `usage.py gate`, `heartbeat` and
+`prior_run`. The reason differs: those three read local machine state, whereas this one is
+written against `gh` and ProjectV2 GraphQL. It was assumed portable because it only talks
+to GitHub. That assumption was never tested until it was.
+
+A web session also scopes GitHub access to an explicit repo list, which **conflicts with
+topic membership by construction** — the funnel spans every repo carrying the topic, and a
+scoped session cannot see them.
+
+_Rejected: hand-reconstructing a brief from REST and the GitHub MCP server. One shared
+program computes all ordering and neither agent ranks anything itself; a
+hand-assembled brief is precisely the silent drift that rule exists to prevent._
+
+**This does not close the general-chat question ([#25](https://github.com/nateprich-projects/command-center/issues/25)).**
+What is blocked is running `funnel.py` *inside Anthropic's cloud sandbox*, under that
+sandbox's proxy policy. A connector running on Nate's own infrastructure uses his own
+credentials and reaches GraphQL normally, so the MCP route is unaffected by this finding —
+and is now the only route to a non-Claude-Code surface, rather than one of two.
+
 ## Verification status
 
 **Resolved 2026-09-05:**

@@ -1,9 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  The escalated reviewer. Canonical copy lives here in the repo and is symlinked
-  into ~/Library/LaunchAgents, so it is versioned and reviewable rather than a
-  hand-made file nothing can see — which is the drift #52 exists for.
+  The escalated reviewer. The canonical copy lives here in the repo.
+
+  It was meant to be symlinked into ~/Library/LaunchAgents so drift would be
+  impossible. **launchd refuses a symlinked plist** — `Bootstrap failed: 5:
+  Input/output error`, measured 2026-09-07 — so the installed file is a copy,
+  and a copy drifts. `tests/test_launchd_drift.py` compares them and blocks a
+  merge when they differ, which is the same treatment the Codex automations get.
+
+  After editing this file, re-install it:
+    cp launchd/com.nateprich.command-center-muse-review.plist ~/Library/LaunchAgents/
+    launchctl bootout gui/$(id -u)/com.nateprich.command-center-muse-review
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nateprich.command-center-muse-review.plist
 
   Meta ships `muse exec` as its own headless mode and Muse Code has no scheduler,
   so launchd is the sanctioned way to run this. AGENTS.md carries the carve-out:

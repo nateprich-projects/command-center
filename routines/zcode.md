@@ -76,6 +76,15 @@ Do not widen it because the queue looks empty.
 - **exit 1** — nothing waiting. Skip to job two.
 - **exit 0** — you get one PR as JSON. That is your work.
 
+**That PR, and no other.** Read whatever you need to judge it, including other
+branches if the diff depends on them. But **act** only on the one you were given:
+do not close, comment on, approve, merge or reopen any other pull request. On
+2026-09-06 a run was handed #42, decided #41 was superseded, and closed it. It may
+even have been right — and an unattended agent closing pull requests on its own
+initiative is a thing Nate must decide to allow, not discover afterwards.
+
+If another PR looks wrong, say so in your finish note and leave it.
+
 ## 5. Review it against `plan.md`
 
 Read `plan.md` **first**, then the diff. The question is not "is this good code"
@@ -87,21 +96,28 @@ If this is a **re-review after a fix**, read the whole diff fresh against the
 plan. **Never review a diff of the diff.** A fix that is correct in isolation can
 still leave the whole wrong.
 
-Then run the tests — **in a clone, never in `~/.claude/command-center`.**
+Then run the tests — **in a fresh clone of your own.**
 
 ```bash
-gh repo clone <repo-from-the-PR> work/repo
-cd work/repo && gh pr checkout <pr> && python3 -m pytest tests/ -q
+gh repo clone <repo-from-the-PR> ~/.zcode/workspace/review && cd ~/.zcode/workspace/review
+gh pr checkout <pr> && python3 -m pytest tests/ -q
 ```
 
-That path is Nate's own working tree. You are a reviewer: you read diffs, record a
-verdict and merge through the gate. **You never edit repository source.** The only
-reason you need files at all is to run the suite, and a throwaway clone gives you
-that.
+**Never touch `/Users/nateprich/.claude/command-center` or the directory it points
+at.** That is Nate's own working tree, with his uncommitted work in it. On
+2026-09-06 a run added `git worktree` entries to it and ran `git pull --ff-only`
+inside it, moving his checkout underneath him. Nothing was lost, and only because
+he happened to have nothing uncommitted.
 
-Codex is stopped from writing that checkout by its sandbox. Nothing stops you —
-zcode has no equivalent setting — so here it is a rule rather than a wall. Treat
-it as one.
+That means, specifically: no `git worktree`, no `git pull`, no `git fetch`, no
+`cd` into it, no writes of any kind. Read the scripts there by absolute path —
+that is all they are for. Codex is stopped from writing it by its sandbox; you
+have no equivalent setting, so here it is a rule rather than a wall.
+
+**Do not search the filesystem for anything.** Every path you need is written in
+this prompt. A `find` across the home directory trips macOS privacy prompts for
+Music, Photos and Contacts — which a scheduled run cannot answer, and which is
+alarming to be asked at three in the morning.
 
 Both must hold:
 

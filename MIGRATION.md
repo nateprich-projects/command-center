@@ -106,10 +106,10 @@ ChatGPT window alone for one window.** *Blocks: trusting P3's results, and accep
 
 ### P2 — Deterministic merge gate · C · after P0.1
 
-- [ ] **2a. Structured review artifact.** The reviewing model writes a verdict — ticket
+- [x] **2a. Structured review artifact.** — `funnel review`, verdict as JSON behind a marker in a PR comment, stamped with the head commit read. The reviewing model writes a verdict — ticket
       satisfied y/n, CI status, blocking findings, non-blocking findings, risk class,
       approve/reject — rather than prose plus an action.
-- [ ] **2b. Merge gate in Python.** Checks branch matches ticket, CI green, review artifact
+- [x] **2b. Merge gate in Python.** — `funnel merge`, dry run without `--yes`. Also closes #39: a rejected verdict hands the ticket back to the engineer. Checks branch matches ticket, CI green, review artifact
       exists and approves, lock state valid, no policy gate violated. Then it merges.
 
 A model judging a change is doing what only a model can. A model typing `gh pr merge` is a

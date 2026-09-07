@@ -83,7 +83,16 @@ Owner is **C** (Claude, this session) or **N** (Nate). A phase blocks only what 
       One constant, reversible, and it tells us whether contention was ever the real
       problem before any subscription is bought. *Needs N's number, or his say-so to pick.*
       *Blocks: nothing. Unblocks Claude routines immediately.*
-- [ ] **0.4 Make the drift check blocking.** `scripts/sync_codex_automations.py --check`
+- [x] **0.4 Make the drift check blocking.** — done. `tests/test_automation_drift.py`
+      fails when any Codex automation no longer matches `routines/codex-work.md`,
+      and skips where the automations do not exist (CI, a fresh clone) so it is a
+      real check on the machine that runs the schedules. `routines/claude.md`'s
+      merge bar already requires the tests to pass, so drift now blocks a merge
+      without anyone remembering to look. CI cannot do this — the automations live
+      in `~/.codex`, not the repo. Proved its worth immediately: all five had
+      drifted again within hours of the last sync, silently, because the routine
+      was edited afterwards.
+      *Superseded:* `scripts/sync_codex_automations.py --check`
       exists but nothing runs it. Add it to CI and to the Claude routine's review step.
       Sol's §5 asked for "loud and blocking"; today it is neither.
 

@@ -223,6 +223,16 @@ and the engineer does not. Do not leave it out and rely on the pattern matching 
 gates and destructive operations, so a broad list would escalate every ticket and
 the cheap engine would never run.
 
+**Pass ticket bodies inline with `--body`, never `--body-file`.** Creating an
+issue is a network write and needs no disk; a temp file for a long body is the one
+way this job would ask for filesystem permission, and a scheduled run cannot
+answer that. Quote it and pass it directly, however long it is.
+
+The complete list of local writes this routine makes is: **the heartbeat spool at
+`~/.claude/command-center-heartbeat`, twice per run.** Everything else — reviews,
+verdicts, merges, comments, tickets — goes to GitHub over the network. If you find
+yourself about to write anywhere else, you have misread this prompt.
+
 If the plan is too vague to size, **do not invent the missing decisions.** Say what
 is undecided in a comment and leave it. It needs another grilling pass, which is
 interactive and not yours to do.

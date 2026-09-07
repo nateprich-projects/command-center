@@ -113,11 +113,33 @@ it guards passes its own check, and that is exactly the diff worth catching.
 
 ## 6. Decide
 
-**Both hold →** approve, merge, close the ticket, and comment on the parent if
-that was its last open child. Nate accepts the *project*, not each PR.
+**Record the verdict either way — you do not merge by hand.**
 
-**Either fails →** leave a review saying exactly what does not match, and do not
-merge. Be specific enough that the next Codex run can act on it without guessing.
+```bash
+python3 /Users/nateprich/.claude/command-center/funnel.py review <pr> --verdict approved --ci green
+python3 /Users/nateprich/.claude/command-center/funnel.py merge <pr> --yes
+```
+
+`review` stamps your verdict with the commit you actually read. `merge` then
+checks every condition itself — the branch matches a ticket whose project is
+`Building`, CI is green, a verdict exists, it says approved, and **the approved
+commit is still the head**. If anything fails it refuses and lists why.
+
+Your judgement is the part only you can do. Typing `gh pr merge` is not, and
+doing it by hand is what makes an unattended merge impossible to audit later.
+
+**Both hold →** review `approved`, merge, close the ticket, and comment on the
+parent if that was its last open child. Nate accepts the *project*, not each PR.
+
+**Either fails →** record it:
+
+```bash
+python3 /Users/nateprich/.claude/command-center/funnel.py review <pr> --verdict rejected --ci <state> --blocking "<what does not match>"
+```
+
+Be specific enough that the next Codex run can act on it without guessing — and
+it will be offered the ticket again, because a rejected verdict hands it back to
+the engineer instead of stranding it (#39).
 
 **Unsure →** do not merge. Say what you are unsure about and leave it for Nate.
 An unattended merge you were not confident in is exactly the failure that

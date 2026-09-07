@@ -444,6 +444,48 @@ def stale_locks(items: Iterable[Item], now: datetime) -> List[Item]:
     )
 
 
+#: A review verdict lives in a PR comment behind this marker, as JSON. GitHub is
+#: the state, so it goes where the PR is rather than into a file only one machine
+#: can read.
+REVIEW_MARKER = "<!-- command-center-review -->"
+
+#: A reviewer that writes prose and then acts leaves nothing a later step can
+#: check. That is how a merge became something a model simply decided to do, and
+#: how a PR with requested changes ended up owned by nobody (#39).
+VERDICTS = ("approved", "rejected")
+CI_STATES = ("green", "red", "unknown")
+
+
+def parse_verdict(body: str) -> Optional[Dict]:
+    """The verdict carried by one comment, or None if it is not one."""
+    if REVIEW_MARKER not in body:
+        return None
+    _, _, rest = body.partition(REVIEW_MARKER)
+    start, end = rest.find("{"), rest.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        found = json.loads(rest[start:end + 1])
+    except ValueError:
+        return None
+    return found if isinstance(found, dict) else None
+
+
+def latest_verdict(repo: str, pr) -> Optional[Dict]:
+    """The newest verdict on a PR.
+
+    Newest wins: a re-review after a fix is a fresh read against the plan, and an
+    older verdict must never authorise a diff it did not see.
+    """
+    rows = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
+                     "--json", "comments") or {}).get("comments", [])
+    for row in reversed(rows):
+        found = parse_verdict(row.get("body") or "")
+        if found:
+            return found
+    return None
+
+
 def awaiting_review(items: Sequence[Item]) -> Set[str]:
     """Tickets whose work is already in an open PR, waiting to be reviewed.
 
@@ -455,11 +497,19 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
     blocked: Set[str] = set()
     for repo in sorted(repos):
         rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "open",
-                        "--json", "headRefName", "--limit", "100") or []
+                        "--json", "headRefName,number", "--limit", "100") or []
         for row in rows:
             head = row.get("headRefName") or ""
-            if head.startswith("ticket/"):
-                blocked.add("{}#{}".format(repo, head.split("/", 1)[1]))
+            if not head.startswith("ticket/"):
+                continue
+            # A PR whose review asked for changes is *not* blocked: its ticket
+            # goes back to the engineer to fix. Without this a rejected PR has no
+            # owner — the reviewer will not revisit it and the engineer is never
+            # offered it — so it waits for Nate. That is #39.
+            verdict = latest_verdict(repo, row.get("number"))
+            if verdict and verdict.get("verdict") == "rejected":
+                continue
+            blocked.add("{}#{}".format(repo, head.split("/", 1)[1]))
     return blocked
 
 
@@ -1265,6 +1315,132 @@ def _ticket_pr(repo: str, number: int) -> Optional[Dict]:
     return rows[0] if rows else None
 
 
+def cmd_review(repo: str, pr: int, verdict: str, ci: str,
+               blocking: List[str], note: Optional[str]) -> int:
+    """Record a structured review verdict on a PR.
+
+    The reviewer's judgement is the part only a model can do. Writing it as
+    prose and then acting on it is what leaves nothing checkable afterwards, so
+    the verdict is written here, in one shape, stamped with the commit it
+    actually reviewed.
+    """
+    head = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
+                     "--json", "headRefOid,state") or {})
+    if head.get("state") != "OPEN":
+        raise GitHubError("PR #{} is {}, not open".format(pr, head.get("state")))
+    sha = head.get("headRefOid")
+    if not sha:
+        raise GitHubError("could not read the head commit of PR #{}".format(pr))
+
+    body = {
+        "verdict": verdict,
+        "ci": ci,
+        "head_sha": sha,
+        "blocking": blocking,
+        "reviewed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if note:
+        body["note"] = note
+
+    comment = "{}\n\n**Review: {}** (CI {})\n\n```json\n{}\n```".format(
+        REVIEW_MARKER, verdict, ci, json.dumps(body, indent=2, sort_keys=True))
+    if blocking:
+        comment += "\n\nBlocking:\n" + "\n".join("- " + b for b in blocking)
+
+    out = subprocess.run(
+        ["gh", "pr", "comment", str(pr), "--repo", repo, "--body", comment],
+        capture_output=True, text=True)
+    if out.returncode != 0:
+        raise GitHubError(out.stderr.strip())
+    print("recorded {} on PR #{} against {}".format(verdict, pr, sha[:12]))
+    return 0
+
+
+def merge_blockers(repo: str, pr: int, items: List[Item],
+                   now: datetime) -> List[str]:
+    """Every reason this PR may not be merged. Empty means it may.
+
+    Deliberately a list rather than a bool: a gate that says only "no" makes the
+    caller guess, and the reviewer needs to know which condition to fix.
+    """
+    why: List[str] = []
+    data = _gh_json("gh", "pr", "view", str(pr), "--repo", repo, "--json",
+                    "state,headRefName,headRefOid,mergeable,statusCheckRollup") or {}
+    if not data:
+        return ["PR #{} could not be read".format(pr)]
+
+    if data.get("state") != "OPEN":
+        why.append("PR is {}, not open".format(data.get("state")))
+
+    branch = data.get("headRefName") or ""
+    if not branch.startswith("ticket/"):
+        why.append("branch {!r} is not a ticket/<n> branch".format(branch))
+    else:
+        ref = "{}#{}".format(repo, branch.split("/", 1)[1])
+        ticket = next((i for i in items if i.ref == ref), None)
+        if ticket is None:
+            why.append("no ticket {} in the funnel".format(ref))
+        else:
+            parent = next((i for i in items if i.ref == ticket.parent), None)
+            if parent is None or parent.status != "Building":
+                why.append("{}'s project is not Building".format(ref))
+
+    checks = data.get("statusCheckRollup") or []
+    failed = [c.get("name") or c.get("context") for c in checks
+              if (c.get("conclusion") or c.get("state")) not in
+              ("SUCCESS", "NEUTRAL", "SKIPPED", None)]
+    if failed:
+        why.append("CI not green: " + ", ".join(str(f) for f in failed))
+    elif not checks:
+        why.append("no CI checks reported — refusing to merge unverified work")
+
+    verdict = latest_verdict(repo, pr)
+    if verdict is None:
+        why.append("no review verdict recorded")
+    else:
+        if verdict.get("verdict") != "approved":
+            why.append("latest review says {!r}".format(verdict.get("verdict")))
+        # The decisive check. Without it, a push after approval merges on the
+        # strength of a review that never saw it.
+        if verdict.get("head_sha") != data.get("headRefOid"):
+            why.append(
+                "the approved commit {} is not the head {} — new commits since "
+                "the review".format(
+                    str(verdict.get("head_sha"))[:12],
+                    str(data.get("headRefOid"))[:12]))
+    return why
+
+
+def cmd_merge(items: List[Item], now: datetime, repo: str, pr: int,
+              confirmed: bool) -> int:
+    """Merge a PR, but only when every condition holds.
+
+    The model decides *approval*; this decides *merge*. A model adds value
+    judging whether a diff matches the plan. It adds none by being the component
+    that types `gh pr merge`, and being that component is what makes an
+    unattended merge impossible to audit — which is why v0 is still unaccepted.
+    """
+    why = merge_blockers(repo, pr, items, now)
+    if why:
+        print("refusing to merge PR #{}:".format(pr), file=sys.stderr)
+        for reason in why:
+            print("  - " + reason, file=sys.stderr)
+        return 1
+
+    if not confirmed:
+        print("PR #{} passes every merge condition.".format(pr))
+        print("Nothing was changed. Re-run with --yes to merge.")
+        return 0
+
+    out = subprocess.run(
+        ["gh", "pr", "merge", str(pr), "--repo", repo, "--squash",
+         "--delete-branch"], capture_output=True, text=True)
+    if out.returncode != 0:
+        raise GitHubError(out.stderr.strip())
+    print("merged PR #{}".format(pr))
+    return 0
+
+
 def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
     """Everything needed to answer this item's gate.
 
@@ -1460,6 +1636,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     reject = sub.add_parser(
         "reject", help="a merged PR turned out to be broken: undo and record it")
     reject.add_argument("pr", help="PR number or URL")
+
+    review = sub.add_parser(
+        "review", help="record a structured review verdict on a PR")
+    review.add_argument("pr", type=int)
+    review.add_argument("--repo", default=REPO)
+    review.add_argument("--verdict", required=True, choices=VERDICTS)
+    review.add_argument("--ci", required=True, choices=CI_STATES)
+    review.add_argument("--blocking", action="append", default=[],
+                        help="one blocking finding; repeat for more")
+    review.add_argument("--note", default=None)
+
+    merge = sub.add_parser(
+        "merge", help="merge a PR if every condition holds — dry run without --yes")
+    merge.add_argument("pr", type=int)
+    merge.add_argument("--repo", default=REPO)
+    merge.add_argument("--yes", action="store_true", dest="confirmed")
     reject.add_argument("--note", default=None, help="what is broken")
     args = parser.parse_args(argv)
 
@@ -1490,6 +1682,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                args.shaping)
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan)
+        if args.command == "review":
+            return cmd_review(args.repo, args.pr, args.verdict, args.ci,
+                              args.blocking, args.note)
+        if args.command == "merge":
+            return cmd_merge(items, now, args.repo, args.pr, args.confirmed)
         if args.command == "next":
             return cmd_next(items, now, tier=getattr(args, "tier", None))
         return {"queue": cmd_queue, "brief": cmd_brief}[args.command](

@@ -647,6 +647,29 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
 
 INSTALL_FIX = "bash scripts/install.sh"
 STATUSLINE_COMMAND = "~/.claude/statusline.sh"
+AUTH_LOGIN_FIX = "gh auth login"
+AUTH_SCOPE_FIX = "gh auth refresh -s project"
+TOPIC_FIX = "add the `command-center` topic to at least one repository"
+
+
+PROJECT_FIELDS_QUERY = """
+query($login: String!, $number: Int!) {
+  user(login: $login) {
+    projectV2(number: $number) {
+      fields(first: 100) {
+        nodes {
+          ... on ProjectV2Field { name }
+          ... on ProjectV2IterationField { name }
+          ... on ProjectV2SingleSelectField {
+            name
+            options { name }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 
 def _path(value: Optional[os.PathLike], default: pathlib.Path) -> pathlib.Path:
@@ -828,12 +851,209 @@ def check_settings(claude_dir: Optional[os.PathLike] = None) -> Check:
     )
 
 
+def gh_auth_status() -> dict:
+    """Read the active GitHub account without ever requesting its token."""
+    proc = subprocess.run(
+        ["gh", "auth", "status", "--active", "--hostname", "github.com",
+         "--json", "hosts"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise GitHubError(detail or "gh auth status exited {}".format(proc.returncode))
+    try:
+        return json.loads(proc.stdout)
+    except (TypeError, ValueError) as exc:
+        raise GitHubError("gh auth status returned invalid JSON: {}".format(exc))
+
+
+def _auth_scopes(entry: dict) -> List[str]:
+    """Normalise gh's current comma-separated output and test fixtures' lists."""
+    raw = entry.get("scopes") or []
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [str(scope).strip() for scope in raw if str(scope).strip()]
+
+
+def _auth_entry(payload: object) -> Optional[dict]:
+    """Select the active github.com account from `gh auth status --json hosts`."""
+    if not isinstance(payload, dict):
+        return None
+    hosts = payload.get("hosts")
+    if not isinstance(hosts, dict):
+        return None
+    entries = hosts.get("github.com")
+    if isinstance(entries, dict):
+        entries = [entries]
+    if not isinstance(entries, list) or not entries:
+        return None
+    accounts = [entry for entry in entries if isinstance(entry, dict)]
+    if not accounts:
+        return None
+    return next((entry for entry in accounts if entry.get("active")), accounts[0])
+
+
+def _auth_failure_is_missing_login(error: BaseException) -> bool:
+    text = str(error).lower()
+    return any(
+        phrase in text
+        for phrase in ("not logged in", "not authenticated", "no accounts",
+                       "authentication required", "login required")
+    )
+
+
+def check_auth_scope() -> Check:
+    """Check that the active gh token is authenticated and can write Projects."""
+    try:
+        entry = _auth_entry(gh_auth_status())
+    except Exception as exc:
+        if _auth_failure_is_missing_login(exc):
+            return Check(
+                "gh auth", False, "not authenticated to github.com", AUTH_LOGIN_FIX)
+        return Check(
+            "gh auth", False,
+            "gh auth status failed: {}".format(str(exc) or "unknown error"),
+            "restore gh access, then run {}".format(AUTH_LOGIN_FIX),
+        )
+
+    if entry is None or entry.get("state") not in (None, "success"):
+        return Check(
+            "gh auth", False, "not authenticated to github.com", AUTH_LOGIN_FIX)
+
+    scopes = _auth_scopes(entry)
+    shown_scopes = ", ".join(scopes) if scopes else "none"
+    account = entry.get("login") or "the active account"
+    found = "authenticated as {}; token scopes: {}".format(account, shown_scopes)
+    if "project" not in {scope.strip("'\"`").lower() for scope in scopes}:
+        return Check(
+            "gh auth", False, found + " (missing project scope)", AUTH_SCOPE_FIX)
+    return Check("gh auth", True, found, "")
+
+
+def _field_options(field: dict) -> Set[str]:
+    raw = field.get("options") or []
+    if isinstance(raw, dict):
+        raw = raw.get("nodes") or []
+    if not isinstance(raw, list):
+        return set()
+    return {
+        str(option.get("name"))
+        for option in raw
+        if isinstance(option, dict) and option.get("name") is not None
+    }
+
+
+def _project_fields(data: object) -> Optional[List[dict]]:
+    if not isinstance(data, dict):
+        return None
+    user = data.get("user")
+    if not isinstance(user, dict):
+        return None
+    project = user.get("projectV2")
+    if not isinstance(project, dict):
+        return None
+    fields = project.get("fields")
+    if not isinstance(fields, dict):
+        return None
+    nodes = fields.get("nodes")
+    if not isinstance(nodes, list):
+        return None
+    return [node for node in nodes if isinstance(node, dict)]
+
+
+def check_project_fields() -> Check:
+    """Check only the Project fields and options funnel.py writes by name."""
+    try:
+        data = gh_graphql(
+            PROJECT_FIELDS_QUERY, login=PROJECT_OWNER, number=PROJECT_NUMBER)
+        fields = _project_fields(data)
+        if fields is None:
+            return Check(
+                "Project fields", False,
+                "Project {}/{} is missing or not visible".format(
+                    PROJECT_OWNER, PROJECT_NUMBER),
+                "create or restore Project {}/{} with its required fields".format(
+                    PROJECT_OWNER, PROJECT_NUMBER),
+            )
+    except Exception as exc:
+        return Check(
+            "Project fields", False,
+            "GitHub Project query failed: {}".format(str(exc) or "unknown error"),
+            "restore GitHub access, then check Project {}/{}".format(
+                PROJECT_OWNER, PROJECT_NUMBER),
+        )
+
+    by_name: Dict[str, List[dict]] = {}
+    for field in fields:
+        name = field.get("name")
+        if name:
+            by_name.setdefault(str(name), []).append(field)
+
+    problems: List[str] = []
+    for field_name, expected_options in (("Status", STAGES), ("Class", LADDER)):
+        matching = by_name.get(field_name)
+        if not matching:
+            problems.append("missing field {}".format(field_name))
+            continue
+        actual_options = set().union(*(_field_options(field) for field in matching))
+        missing = [option for option in expected_options if option not in actual_options]
+        if missing:
+            problems.append(
+                "{} is missing option{} {}".format(
+                    field_name,
+                    "s" if len(missing) != 1 else "",
+                    ", ".join(missing),
+                )
+            )
+
+    if LOCK_FIELD not in by_name:
+        problems.append("missing field {}".format(LOCK_FIELD))
+
+    if problems:
+        return Check(
+            "Project fields", False,
+            "Project {}/{}: {}".format(
+                PROJECT_OWNER, PROJECT_NUMBER, "; ".join(problems)),
+            "restore the missing Project field or option",
+        )
+
+    return Check(
+        "Project fields", True,
+        "Project {}/{} has Status, Class and {} with the required options".format(
+            PROJECT_OWNER, PROJECT_NUMBER, LOCK_FIELD),
+        "",
+    )
+
+
+def check_topic() -> Check:
+    """Check the same opt-in topic search that supplies load_items()."""
+    try:
+        count = len(member_repos())
+    except Exception as exc:
+        return Check(
+            "command-center topic", False,
+            "GitHub topic search failed: {}".format(str(exc) or "unknown error"),
+            "restore GitHub access, then check the command-center topic",
+        )
+
+    found = "{} repos carry the `{}` topic".format(count, TOPIC)
+    if count == 0:
+        return Check("command-center topic", False, found, TOPIC_FIX)
+    return Check("command-center topic", True, found, "")
+
+
 def doctor_checks(claude_dir: Optional[os.PathLike] = None,
                   checkout_root: Optional[os.PathLike] = None) -> List[Check]:
-    """Run the fixed local checks, even when an earlier one is broken."""
+    """Run every fixed check, even when an earlier one is broken."""
     return [
         check_symlinks(claude_dir=claude_dir, checkout_root=checkout_root),
         check_settings(claude_dir=claude_dir),
+        check_auth_scope(),
+        check_project_fields(),
+        check_topic(),
     ]
 
 

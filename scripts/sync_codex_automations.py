@@ -58,6 +58,21 @@ SEPARATOR = "\n---\n"
 IDLE_RRULE_MARKER = "BYHOUR="
 
 GATE_LINE = "usage.py gate codex"
+TIER_LINE = "funnel.py next --tier standard"
+
+#: Which tier a schedule works, derived from when it fires — the same signal as
+#: the presence check, and for a related reason.
+#:
+#: A schedule that fires all day is the cheap continuous lane: bounded tickets,
+#: little and often. The hour-restricted schedules run while Nate is asleep or at
+#: work, which is when the expensive engine can be given room — nobody is waiting
+#: on the machine and a long, hard ticket costs nothing but time. So they take
+#: `escalated`, which may work anything: an escalated run finding no risky ticket
+#: takes an ordinary one rather than idling.
+#:
+#: The model itself is set per automation in the Codex app, not here.
+def tier_for(automation: str) -> str:
+    return "standard" if needs_presence_check(automation) else "escalated"
 
 
 def needs_presence_check(automation: str) -> bool:
@@ -90,6 +105,10 @@ def prompt_text(automation: str = "") -> str:
     runtime = body.split(SEPARATOR, 1)[1].strip()
     if needs_presence_check(automation):
         runtime = runtime.replace(GATE_LINE, GATE_LINE + " --idle", 1)
+    tier = tier_for(automation)
+    if tier != "standard":
+        runtime = runtime.replace(
+            TIER_LINE, TIER_LINE.replace("standard", tier), 1)
     return "{}\n\n{}\n".format(title, runtime)
 
 

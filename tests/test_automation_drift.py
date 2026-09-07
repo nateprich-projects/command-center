@@ -79,6 +79,20 @@ def test_only_the_schedules_that_need_it_get_the_presence_check():
             assert command.endswith("gate codex"), name
 
 
+def test_the_tier_follows_the_schedule_too():
+    """All-day schedules take the cheap continuous lane; the hour-restricted ones
+    run while Nate is asleep or at work, which is when the expensive engine can be
+    given room. An escalated run finding no risky ticket takes an ordinary one, so
+    those windows are never idle."""
+    for path in sorted(sync.AUTOMATIONS.glob(sync.GLOB)):
+        name = path.parent.name
+        want = "standard" if sync.needs_presence_check(name) else "escalated"
+        assert sync.tier_for(name) == want, name
+        command = [ln.strip() for ln in sync.prompt_text(name).splitlines()
+                   if ln.strip().startswith("python3") and "funnel.py next" in ln][0]
+        assert command.endswith("--tier " + want), name
+
+
 def test_a_schedule_restricted_to_hours_needs_no_presence_proxy(tmp_path, monkeypatch):
     """The clock already answers the question the proxy approximates.
 

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -32,7 +35,7 @@ def test_capture_stamps_the_created_body_as_agent(monkeypatch):
     monkeypatch.setattr(funnel.subprocess, "run", run)
 
     assert funnel.cmd_capture(
-        [], NOW, "An idea", "Raw note", "owner/repo", True,
+        [], NOW, "An idea", "Raw note", "owner/repo",
         run="capture-run", agent="claude",
     ) == 0
 
@@ -90,3 +93,46 @@ def test_shaped_preserves_plan_bytes_above_agent_stamp(tmp_path, monkeypatch):
         "run": "shape-run",
         "voice": "agent",
     }
+def test_capture_always_labels_the_issue_and_reports_it(monkeypatch, capsys):
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(args)
+        if args[1:3] == ["issue", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/nateprich-projects/command-center/issues/123\n",
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"id": "project-item-123"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "_option_id", lambda field_id, name: "ideas-option")
+    monkeypatch.setattr(funnel, "gh_graphql", lambda *args, **kwargs: {})
+
+    assert funnel.cmd_capture(
+        [], NOW, "An idea", "A note", funnel.REPO,
+        run="capture-run", agent="codex",
+    ) == 0
+
+    assert calls[0][-2:] == ["--label", "needs-shaping"]
+    assert capsys.readouterr().out == (
+        "https://github.com/nateprich-projects/command-center/issues/123"
+        "  → Ideas (needs-shaping)\n"
+    )
+
+
+def test_capture_flag_is_rejected_before_github_is_loaded(monkeypatch, capsys):
+    monkeypatch.setattr(
+        funnel, "load_items", lambda: pytest.fail("GitHub should not be loaded")
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        funnel.main(["capture", "An idea", "--needs-shaping"])
+
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err

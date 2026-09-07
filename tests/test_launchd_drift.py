@@ -56,6 +56,13 @@ def test_the_plist_points_at_the_stable_path():
     for the same reason `tests/test_guardrails.py` enforces everywhere else: the
     volume name is not stable and a moved checkout silently stops the schedule.
     """
-    text = REPO_COPY.read_text()
-    assert "/Users/nateprich/.claude/command-center/scripts/muse-review" in text
-    assert "/Volumes/" not in text
+    import plistlib
+
+    with REPO_COPY.open("rb") as handle:
+        plist = plistlib.load(handle)
+    args = plist["ProgramArguments"]
+    assert any(a.endswith("/scripts/muse-review") for a in args), args
+    # Checked against the arguments, not the file text: the header explains the
+    # TCC blocker and has to name `/Volumes/External SSD` to do so. Asserting on
+    # the whole file made a correct comment fail a test about a path.
+    assert not any(a.startswith("/Volumes/") for a in args), args

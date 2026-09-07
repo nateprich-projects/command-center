@@ -116,6 +116,11 @@ REGRESSION_PREFIX = "Regression from PR #"
 #: fixed marker back from issue comments, so it is a shared contract.
 PARK_COMMENT_PREFIX = "**Parked:** "
 
+#: Existing comments have no machine-readable provenance. Until the provenance
+#: marker lands, show must fail closed rather than treat the GitHub account as
+#: authorship.
+UNATTRIBUTED = "UNATTRIBUTED"
+
 #: Three rejected merges in a week means the auto-merge bar has failed. That is
 #: not "there are bugs" — it is a different and more serious fact, and the
 #: response is to stop auto-merging and fix the review prompt.
@@ -2423,7 +2428,7 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
         for c in comments[-4:]:
             text = " ".join((c.get("body") or "").split())
             print("  {}: {}".format(
-                (c.get("author") or {}).get("login", "?"), text[:200]))
+                UNATTRIBUTED, text[:200]))
         print("")
 
     if item.status == "Building":

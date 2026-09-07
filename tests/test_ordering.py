@@ -534,3 +534,20 @@ def test_every_ticket_awaiting_review_means_nothing_to_do():
     blocked = {"nateprich/beta#19"}
     assert startable(items, awaiting_review=blocked) == []
     assert next_ticket(items, at(0), blocked=blocked) is None
+
+
+def test_a_tier_takes_only_its_own_work_in_both_directions():
+    """`standard` walking past risky tickets is obvious. `escalated` walking past
+    ordinary ones is the same rule the other way: Sol idling beats Sol spending
+    its quota on bounded work the continuous cheap schedule already handles."""
+    assert funnel.required_tier("t", "Risk: escalated \u2014 concurrency") == "escalated"
+    assert funnel.required_tier("t", "Risk: standard") == "standard"
+
+    # An escalated caller wants tickets whose reasons are non-empty; a standard
+    # caller wants the opposite. That predicate is what cmd_next applies.
+    for body, tier, wanted in (("Risk: escalated", "escalated", True),
+                               ("Risk: escalated", "standard", False),
+                               ("Risk: standard", "escalated", False),
+                               ("Risk: standard", "standard", True)):
+        found = funnel.escalation_reasons("t", body)
+        assert (bool(found) if tier == "escalated" else not found) is wanted

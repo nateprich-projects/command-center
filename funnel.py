@@ -906,24 +906,25 @@ def cmd_next(items: List[Item], now: datetime, tier: Optional[str] = None) -> in
     blocked = awaiting_review(items)
     ticket = next_ticket(items, now, blocked=blocked)
 
-    # A caller declaring a tier gets the best ticket *it* may work. Walking the
-    # queue rather than refusing outright matters: a `standard` run that stopped
-    # at the first escalated ticket would do nothing until the escalated engine's
-    # schedule came round, and the queue would stall behind one ticket.
+    # A caller declaring a tier gets only work of that tier — in both directions.
+    #
+    # `standard` walks past escalated tickets rather than refusing outright, or
+    # the queue would stall behind one risky ticket until the other schedule came
+    # round. `escalated` walks past *ordinary* ones, which is the same rule
+    # applied the other way: the expensive engine is reserved for work that needs
+    # it, and idling costs nothing because the cheap continuous schedule is
+    # already working the ordinary queue, including overnight.
     reasons: List[str] = []
     if ticket is not None and tier:
-        by_ref = {i.ref: i for i in items}
         for candidate in startable(items, awaiting_review=blocked):
-            if lock_holder(items, now) is not None and candidate.ref != ticket.ref:
-                break
             found = escalation_reasons(
                 candidate.title, _ticket_body(candidate.repo, candidate.number))
-            if not found or tier == "escalated":
+            wanted = bool(found) if tier == "escalated" else not found
+            if wanted:
                 ticket, reasons = candidate, found
                 break
         else:
-            print("nothing — every startable ticket needs the escalated engine",
-                  file=sys.stderr)
+            print("nothing — no {} work waiting".format(tier), file=sys.stderr)
             return 1
 
     if ticket is None:

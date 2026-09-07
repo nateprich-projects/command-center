@@ -67,8 +67,10 @@ TIER_LINE = "funnel.py next --tier standard"
 #: little and often. The hour-restricted schedules run while Nate is asleep or at
 #: work, which is when the expensive engine can be given room — nobody is waiting
 #: on the machine and a long, hard ticket costs nothing but time. So they take
-#: `escalated`, which may work anything: an escalated run finding no risky ticket
-#: takes an ordinary one rather than idling.
+#: `escalated`, and **only** escalated: the expensive engine is reserved for work
+#: that needs it. Idling costs nothing, because the all-day schedule is already
+#: working the ordinary queue — including overnight, where its presence check
+#: passes while Nate is asleep.
 #:
 #: The model itself is set per automation in the Codex app, not here.
 def tier_for(automation: str) -> str:

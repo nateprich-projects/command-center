@@ -112,8 +112,11 @@ applying the rules from prose drift apart silently, and both produce
 plausible-looking lists.
 
 - **exit 1, "lock held"** — finish with `skipped-locked` and stop.
-- **exit 1, "every startable ticket needs the escalated engine"** — finish with
-  `nothing-to-do` and stop. Healthy: the work waiting is not yours to take.
+- **exit 1, "no ... work waiting"** — finish with `nothing-to-do` and stop.
+  Healthy: there is work, and none of it is yours to take. A tier means *only*
+  that tier in both directions — the cheap engine walks past risky tickets, and
+  the expensive one walks past ordinary ones rather than spending its quota on
+  work the cheap schedule is already doing.
 - **exit 1, no work** — finish with `nothing-to-do` and stop.
 - **exit 0** — you get one ticket as JSON. That is your work.
 

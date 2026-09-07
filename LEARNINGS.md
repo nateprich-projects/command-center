@@ -8,6 +8,28 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Editing a Codex automation in the app can write back a stale prompt
+
+**2026-09-06 · Codex desktop · measured**
+
+**Changing a scheduled task's model in the Codex app reverted its prompt to the version
+the app had loaded earlier**, discarding an out-of-band edit made minutes before.
+
+Observed: `scripts/sync_codex_automations.py` wrote a new prompt to all five Command
+Center automations. Nate then changed the model on four of them in the app. Three kept the
+new prompt; `command-center-tickets-weekday-mornings` came back carrying the *previous*
+wording of one section. Nothing else in that file changed.
+
+So the app holds its own copy of the prompt and writes the whole automation on save. Any
+edit made outside it — by the sync script, or by hand — is discarded if the app saves a
+version loaded before that edit. **Only one of four reverted**, so it is not every save;
+the mechanism is `inferred` even though the reversion is measured.
+
+**Practical rule: sync *after* editing automations in the app, never before.** And the
+drift test is what makes this survivable — `tests/test_automation_drift.py` caught this
+within minutes, on a change nobody would have noticed by eye, in a file only the running
+schedules read.
+
 ### z.ai remaps model ids server-side, and a Claude family name lands on Flash
 
 **2026-09-06 · z.ai Anthropic endpoint · measured**

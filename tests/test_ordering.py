@@ -94,6 +94,25 @@ def test_oldest_at_gate_wins_within_a_stage():
     assert [i.number for i in awaiting_decision(items)] == [2, 3, 1]
 
 
+def test_broken_does_not_outrank_a_deeper_gate():
+    items = [project(1, "Shaped", "Broken", days=30),
+             project(2, "Ready", "New", days=1)]
+    assert [i.number for i in awaiting_decision(items)] == [2, 1]
+
+
+def test_broken_outranks_older_work_at_the_same_gate():
+    items = [project(1, "Ready", "New", days=30),
+             project(2, "Ready", "Broken", days=1)]
+    assert [i.number for i in awaiting_decision(items)] == [2, 1]
+
+
+def test_ticket_inherits_broken_for_decision_ordering():
+    parent = project(1, "Ideas", "Broken")
+    child = item(2, "Shaped", None, days=1, parent=parent.ref)
+    older = project(3, "Shaped", "New", days=30)
+    assert [i.number for i in awaiting_decision([parent, child, older])] == [2, 3]
+
+
 def test_a_closed_item_waits_on_nobody():
     assert gate_question(item(1, "Ready", "New", state="CLOSED")) is None
 
@@ -476,14 +495,21 @@ def test_an_unbroken_plan_never_reaches_codex():
 # -- the Ideas stage: what feeds everything else ---------------------------
 
 
-def test_flagged_ideas_come_first_then_oldest():
-    """`needs-shaping` means Nate already decided it is worth thinking through."""
+def test_broken_ideas_come_first_then_oldest():
     rows = [
-        item(1, "Ideas", None, days=1),
-        item(2, "Ideas", None, days=30),
-        item(3, "Ideas", None, days=5, labels=["needs-shaping"]),
+        item(1, "Ideas", "New", days=1),
+        item(2, "Ideas", "New", days=30, labels=["needs-shaping"]),
+        item(3, "Ideas", "Broken", days=5, labels=["needs-shaping"]),
     ]
     assert [i.number for i in funnel.ideas(rows)] == [3, 2, 1]
+
+
+def test_needs_shaping_does_not_change_idea_order():
+    rows = [
+        item(1, "Ideas", "New", days=30),
+        item(2, "Ideas", "New", days=1, labels=["needs-shaping"]),
+    ]
+    assert [i.number for i in funnel.ideas(rows)] == [1, 2]
 
 
 def test_only_open_ideas_are_listed():

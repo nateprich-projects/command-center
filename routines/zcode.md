@@ -96,33 +96,46 @@ If this is a **re-review after a fix**, read the whole diff fresh against the
 plan. **Never review a diff of the diff.** A fix that is correct in isolation can
 still leave the whole wrong.
 
-Then run the tests — **in a fresh clone of your own.**
+**Do not run the tests yourself, and do not check the code out.**
+
+CI runs the full suite on every pull request, and `funnel merge` refuses unless
+those checks are green — it will not take your word for it. Read the result:
 
 ```bash
-gh repo clone <repo-from-the-PR> ~/.zcode/workspace/review && cd ~/.zcode/workspace/review
-gh pr checkout <pr> && python3 -m pytest tests/ -q
+gh pr checks <pr> --repo <repo>
+gh pr diff <pr> --repo <repo>
 ```
 
-**Never touch `/Users/nateprich/.claude/command-center` or the directory it points
-at.** That is Nate's own working tree, with his uncommitted work in it. On
-2026-09-06 a run added `git worktree` entries to it and ran `git pull --ff-only`
-inside it, moving his checkout underneath him. Nothing was lost, and only because
-he happened to have nothing uncommitted.
+`gh pr diff` gives you the whole change without a working copy. Between that, the
+ticket body, and `plan.md` read by absolute path, you have everything a review
+against the plan needs.
 
-That means, specifically: no `git worktree`, no `git pull`, no `git fetch`, no
-`cd` into it, no writes of any kind. Read the scripts there by absolute path —
-that is all they are for. Codex is stopped from writing it by its sandbox; you
-have no equivalent setting, so here it is a rule rather than a wall.
+**This is deliberate, and it is the difference between a routine that can run
+unattended and one that cannot.** Cloning, checking out and running tests means
+writing to disk, which means approval prompts a scheduled run cannot answer — and
+each prompt re-sends the whole context, so it costs credits as well as attention.
+Read-only work needs neither.
 
-**Do not search the filesystem for anything.** Every path you need is written in
-this prompt. A `find` across the home directory trips macOS privacy prompts for
-Music, Photos and Contacts — which a scheduled run cannot answer, and which is
-alarming to be asked at three in the morning.
+**So: no clone, no checkout, no `git` at all, no `/tmp`, no writing anywhere
+except the heartbeat spool.** In particular never touch
+`/Users/nateprich/.claude/command-center` or the directory it points at — that is
+Nate's own working tree, with his uncommitted work in it. On 2026-09-06 a run
+added `git worktree` entries to it and ran `git pull --ff-only` inside it, moving
+his checkout underneath him. Nothing was lost, and only because he happened to
+have nothing uncommitted at that moment.
+
+**Do not search the filesystem for anything.** Every path you need is in this
+prompt. A `find` across the home directory trips macOS privacy prompts for Music,
+Photos and Contacts — which a scheduled run cannot answer, and which is alarming
+to be asked at three in the morning.
+
+If CI has not run or is red, that is not yours to fix: record the verdict as
+`rejected` with `--ci red` and move on.
 
 Both must hold:
 
 - the diff does what the ticket and `plan.md` say
-- the tests pass
+- CI is green, as reported by `gh pr checks`
 
 ### Check what the diff *touches*, not only what it does
 

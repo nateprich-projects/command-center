@@ -82,6 +82,14 @@ def test_everything_in_order_merges(monkeypatch):
     assert funnel.merge_blockers(REPO, 5, items(), NOW) == []
 
 
+def test_a_mixed_review_and_provenance_comment_still_allows_merge(monkeypatch):
+    mixed = verdict() + "\n\n" + funnel.provenance_block(
+        "agent", at=NOW, run="run-review", agent="zcode"
+    )
+    wire(monkeypatch, pr(), [mixed])
+    assert funnel.merge_blockers(REPO, 5, items(), NOW) == []
+
+
 def test_a_commit_pushed_after_approval_blocks_the_merge(monkeypatch):
     """The decisive check. Without it an approval authorises a diff it never saw:
     approve, push anything, merge."""

@@ -564,7 +564,7 @@ def _heartbeat_context(run: Optional[str], agent: Optional[str]):
                     records.append(json.loads(line))
                 except ValueError:
                     continue
-    except OSError:
+    except (OSError, UnicodeError):
         return run, agent
 
     starts = {

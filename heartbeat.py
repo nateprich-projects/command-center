@@ -263,6 +263,34 @@ def _report(kept: str) -> None:
         )
 
 
+#: Nate's own working tree. No routine has any business writing it: the engineers
+#: work in their own clones and the reviewers are read-only. Codex is stopped by
+#: its sandbox; zcode has none, so for it this is a rule in a prompt.
+#:
+#: Recording the tree's state at both ends of a run does not prevent a violation —
+#: nothing available here can — but it makes one **visible**. Without this a
+#: routine could move his checkout and the only evidence would be his own
+#: surprise, weeks later.
+CANONICAL_REPO = "/Users/nateprich/.claude/command-center"
+
+
+def repo_state() -> Optional[Dict]:
+    """HEAD and dirtiness of the canonical checkout. Best effort, never fatal."""
+    try:
+        head = subprocess.run(
+            ["git", "-C", CANONICAL_REPO, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        dirt = subprocess.run(
+            ["git", "-C", CANONICAL_REPO, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=15)
+        if head.returncode != 0:
+            return None
+        changed = [ln for ln in dirt.stdout.splitlines() if ln.strip()]
+        return {"head": head.stdout.strip()[:12], "dirty": len(changed)}
+    except Exception:
+        return None
+
+
 def detect_model(agent: str) -> Dict[str, Optional[str]]:
     """What model is running, from the agent's own session file.
 
@@ -500,6 +528,7 @@ def main(argv=None) -> int:
                 "usage": usage_snapshot(args.agent),
                 "attempt": args.attempt,
                 "escalated_from": args.escalated_from,
+                "repo": repo_state(),
                 **detect_model(args.agent),
             })
             _report(kept)
@@ -531,6 +560,7 @@ def main(argv=None) -> int:
             "ci_green": args.ci_green,
             "review_result": args.review_result,
             "human_intervention_required": args.human_intervention or None,
+            "repo": repo_state(),
             **detect_model(args.agent),
         }
         if run_id is None:

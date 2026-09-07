@@ -580,6 +580,50 @@ def rejected_merges(items: Iterable[Item], now: datetime) -> Dict[str, object]:
     }
 
 
+def working_tree_touched(now: datetime) -> List[Dict[str, object]]:
+    """Runs during which Nate's own checkout changed underneath him.
+
+    No routine has business writing it — engineers work in their own clones and
+    reviewers are read-only — but only Codex is actually prevented, by its
+    sandbox. zcode has none, so this is detection where prevention is not
+    available.
+
+    It reports a *change*, not a crime: Nate committing while a run is in flight
+    looks identical from here. The point is that a routine moving his checkout
+    stops being invisible, which on 2026-09-06 it was — a run added worktrees and
+    ran `git pull` in it, and nothing recorded that but the transcript.
+    """
+    found: List[Dict[str, object]] = []
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import heartbeat
+
+        for agent in sorted(heartbeat.PROVIDERS):
+            rows = heartbeat.read(agent)
+            starts = {r.get("run"): r for r in rows if r.get("phase") == "start"}
+            for row in rows:
+                if row.get("phase") != "finish":
+                    continue
+                began = starts.get(row.get("run"))
+                before = (began or {}).get("repo")
+                after = row.get("repo")
+                if not before or not after or before == after:
+                    continue
+                if (row.get("ts") or 0) < (now - MAINTENANCE_WINDOW).timestamp():
+                    continue
+                found.append({
+                    "agent": agent,
+                    "run": row.get("run"),
+                    "at": datetime.fromtimestamp(
+                        row["ts"], timezone.utc).isoformat(),
+                    "before": before,
+                    "after": after,
+                })
+    except Exception:
+        return []
+    return sorted(found, key=lambda r: str(r["at"]))
+
+
 def unattended_merges(now: datetime) -> List[Dict[str, object]]:
     """Merges Claude made without Nate, read from its own heartbeat records.
 
@@ -1719,6 +1763,7 @@ def cmd_brief(items: List[Item], now: datetime) -> int:
         "stale_locks_taken_over": [i.ref for i in stale_locks(items, now)],
         "maintenance_load": maintenance_load(items, now),
         "unattended_merges": unattended_merges(now),
+        "working_tree_touched": working_tree_touched(now),
         "rejected_merges": rejected_merges(items, now),
     }
     print(json.dumps(brief, indent=2))

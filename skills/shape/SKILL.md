@@ -147,6 +147,7 @@ greenlit.
   it is the one Class that carries consequence. Everything else stays unclassed through
   Ideas. `funnel.py` has no `class` command; use `SET_FIELD` with `CLASS_FIELD_ID` the
   way `cmd_reject` does, and record who decided it in a comment.
+  _(confirmed by Nate 2026-09-05)_
 - **Do not create repositories** or transfer issues. If the work looks like it
   needs its own repo, say so in the plan and leave it.
 - **Do not grill more than one idea per session** unless he asks. His decision

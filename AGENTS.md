@@ -21,6 +21,18 @@ something else.
 **Most of what looks like a gap in `plan.md` is a decision that was deliberately
 deferred. Stop and ask rather than inventing one.**
 
+## Rule authority and provenance
+
+Agents may write normative rules, but an agent-written rule must carry the inline tag
+`_(agent rule, unconfirmed — advisory)_`. It remains advice until Nate confirms it. No
+agent may cite an unconfirmed agent rule to refuse Nate or block a gate.
+
+When Nate confirms a rule, replace that tag with
+`_(confirmed by Nate YYYY-MM-DD)_`; only then does the rule bind. The standing rule in
+this section is the safeguard when an older rule has no tag: refusing Nate still requires
+a confirmation that can be pointed to, rather than an assumption about who authored the
+prose. _(confirmed by Nate 2026-09-06)_
+
 ## The rule that is easy to skip
 
 **GitHub is the state.** No persistence, no state file, no locking, no journal. If you
@@ -36,6 +48,8 @@ are only readable from inside a live session. It is a cache, never a source of t
 its output; neither ever ranks anything itself.** You may recommend that a `Status` or
 `Class` value should change. You may not supply a score, alter a rank key, or reorder
 items.
+
+_(confirmed by Nate 2026-09-05)_
 
 Two vendors' agents sharing no session, no memory, and no runtime *will* drift if each
 implements the rules from prose — and the failure is silent, because both produce

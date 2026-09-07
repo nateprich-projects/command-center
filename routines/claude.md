@@ -226,10 +226,10 @@ which is interactive and not yours to do.
 ## 7. Finish, always
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent claude --run <id> --outcome done --merged <n> --note "merged PR #<n>; broke down #<m> into <k> tickets"
+python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent claude --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>; broke down #<m> into <k> tickets"
 ```
 
-`--merged` is a field, not prose: unattended merges have to appear in the brief
+`--merged` takes **the PR's number**, not a count of merges — `--merged 96`, never `--merged 1`. It is a field, not prose: unattended merges have to appear in the brief
 as a record, and a record that must be parsed out of a sentence is not one.
 
 Use `errored` with a note if something broke. Unattended merges must appear in

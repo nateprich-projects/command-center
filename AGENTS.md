@@ -61,11 +61,27 @@ wrong.
   and drift-checked, unlike zcode's prompt, which lives in an app UI and which nothing can
   see (#52).
 
-  **What makes an unattended Muse run safe is capability removal, not approval mode.**
-  Measured 2026-09-07: `--approval-mode never` does **not** fail closed. It means *never
-  ask*, and it auto-approved a shell command with no prompt. A scheduled Muse job must
-  therefore run `--disable-shell --disable-write`, so there is nothing dangerous to
-  approve, rather than relying on an approval setting to refuse.
+  **`--approval-mode never` is not a guard.** Measured 2026-09-07: it does **not** fail
+  closed. It means *never ask*, and it auto-approved a shell command with no prompt.
+
+  **And `--disable-shell` is not the answer either** — that was written here first and was
+  wrong. A reviewer *is* shell: `gh pr diff` to read the PR, `funnel review` to record the
+  verdict, `funnel begin` to record the heartbeat. Disable shell and it cannot take a step.
+
+  **The measured working shape is `--disable-write --sandbox-network enabled`.** The
+  network flag is not optional and its absence is silent: the sandbox defaults to
+  `proxy-only`, under which `gh` fails with `Post "https://api.github.com/graphql": context
+  deadline exceeded` after about a minute. A run without it does not refuse — it times out
+  and reports the PR as unreadable, which looks like a GitHub problem.
+
+  Safety therefore comes from what the job is told to do and from `--disable-write`, not
+  from an approval mode and not from the sandbox. That is the same place zcode ended up,
+  reached by measurement rather than by an 82-minute incident.
+
+  **Muse runs shell commands in the background and delivers output asynchronously** — a
+  tool result returns `background_running` with explicit guidance not to poll, because the
+  output "wakes you even after you end the turn". Codex and zcode are synchronous. A
+  routine written for them will misread its own results here.
 
   **And it has none of Codex's gates.** No presence check, no budget gate — Muse reports no
   usage anywhere in its CLI — and no idle rule. A launchd job fires whenever it is due. The

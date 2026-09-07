@@ -82,8 +82,20 @@ very session, and a stale reading always understates usage.
 ## 3. Ask what to work on. Do not decide yourself
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py next
+python3 /Users/nateprich/.claude/command-center/funnel.py next --tier standard
 ```
+
+**`--tier` says what this engine is allowed to work, and it is fixed by the
+schedule, not chosen by you.** This automation runs the cheap default engine, so
+it asks for `standard` work and the funnel walks past anything needing the
+escalated one — auth, credentials, migrations, destructive operations,
+concurrency, or a ticket a previous attempt already failed. A separate schedule
+runs the escalated engine and passes `--tier escalated`.
+
+**Do not change the tier, and do not argue that you could handle an escalated
+ticket.** A model asked whether a task is too hard for it answers from
+confidence rather than from risk, which is the whole reason this is decided
+outside the model.
 
 **You must not rank, reorder, or second-guess this.** If it looks wrong, say so
 in your finish note — do not quietly pick something else. Two agents each
@@ -91,6 +103,8 @@ applying the rules from prose drift apart silently, and both produce
 plausible-looking lists.
 
 - **exit 1, "lock held"** — finish with `skipped-locked` and stop.
+- **exit 1, "every startable ticket needs the escalated engine"** — finish with
+  `nothing-to-do` and stop. Healthy: the work waiting is not yours to take.
 - **exit 1, no work** — finish with `nothing-to-do` and stop.
 - **exit 0** — you get one ticket as JSON. That is your work.
 

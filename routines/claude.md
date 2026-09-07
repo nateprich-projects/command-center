@@ -145,6 +145,29 @@ than by layer; every project gets at least one ticket; do not set `Status` or
 `Class` on what you create; and **do not create repositories** — comment and
 leave that to Nate.
 
+### Every ticket body carries a `Risk:` line
+
+Write one of these into each ticket, on its own line:
+
+```
+Risk: standard
+Risk: escalated — concurrency, destructive
+```
+
+This decides which engine may take it. `standard` is the cheap default engineer;
+`escalated` reserves it for the stronger one. Mark it **escalated** when the work
+touches credentials or authorisation, data migration, destructive or irreversible
+operations, concurrency, or has acceptance criteria too weak to verify against.
+Everything else is `standard`, and most tickets are.
+
+You are the right one to decide this **because you have the plan in front of you**
+and the engineer does not. Do not leave it out and rely on the pattern matching in
+`funnel.py`: it is deliberately narrow, because this repository is *about* locks,
+gates and destructive operations, so a broad list would escalate every ticket and
+the cheap engine would never run. Your marker beats the patterns in both
+directions — a ticket you mark `standard` stays standard even if its prose
+mentions a race condition, because you knew what the words meant.
+
 If the plan is too vague to size, **do not invent the missing decisions.** Say
 what is undecided in a comment and leave it. It needs another grilling pass,
 which is interactive and not yours to do.

@@ -2320,7 +2320,7 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
 
 
 def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
-               confirmed: bool) -> int:
+               confirmed: bool, no_tickets: bool = False) -> int:
     """Answer a gate: move an item to the next stage.
 
     The brief shows what is waiting and asks the question; without this, the
@@ -2345,16 +2345,36 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
         raise GitHubError("{} is not in the Project".format(item.ref))
 
     if verb == "accept" and not item.children_all_closed:
-        raise GitHubError(
-            "{} still has open tickets ({}/{} closed). Accepting a project whose "
-            "work is unfinished is how a thing gets called shipped while a third "
-            "of it is missing.".format(
-                item.ref, item.children_done, item.children_total)
-        )
+        if item.children_total == 0 and no_tickets:
+            # Deliberate escape hatch, and narrow. A project with *open* tickets
+            # is never acceptable; a project with *no* tickets is a different
+            # thing, and the guard cannot tell "not broken down yet" from "the
+            # work shipped another way". #26 was the second: Nate had it built
+            # outside the pipeline, so it sat at Ready invisible to his queue,
+            # permanently in awaiting_breakdown burning a routine run every time,
+            # and refused by this very check. Asking him to say so explicitly
+            # keeps the guard honest for the normal case.
+            pass
+        elif item.children_total == 0:
+            raise GitHubError(
+                "{} has no tickets. If its work shipped outside the pipeline, say "
+                "so with --no-tickets; otherwise it is waiting to be broken down, "
+                "not waiting to be accepted.".format(item.ref)
+            )
+        else:
+            raise GitHubError(
+                "{} still has open tickets ({}/{} closed). Accepting a project "
+                "whose work is unfinished is how a thing gets called shipped "
+                "while a third of it is missing.".format(
+                    item.ref, item.children_done, item.children_total)
+            )
 
     if not confirmed:
         print("would move {} from {} to {} ({})".format(
             item.ref, expected, nxt, meaning))
+        if no_tickets:
+            print("accepting a project with no tickets — its work shipped "
+                  "outside the pipeline")
         if verb == "accept":
             print("and close it as completed")
         print("\nNothing was changed. Re-run with --yes to answer the gate.")
@@ -2418,6 +2438,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "--yes", action="store_true", dest="confirmed",
             help="actually do it; without this the command is a dry run",
         )
+        if verb == "accept":
+            answer.add_argument(
+                "--no-tickets", action="store_true",
+                help="accept a project that has no tickets, because its work "
+                     "shipped outside the pipeline. Refused without this: a "
+                     "project with no tickets is normally waiting to be broken "
+                     "down, not waiting to be accepted.",
+            )
     capture = sub.add_parser("capture", help="capture an idea into the funnel")
     capture.add_argument("title")
     capture.add_argument("--note", default=None, help="anything worth keeping now")
@@ -2488,7 +2516,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "reject":
             return cmd_reject(items, now, args.pr, args.note)
         if args.command in ANSWERS:
-            return cmd_answer(items, now, args.command, args.ref, args.confirmed)
+            return cmd_answer(items, now, args.command, args.ref, args.confirmed,
+                              getattr(args, "no_tickets", False))
         if args.command == "show":
             return cmd_show(items, now, args.ref)
         if args.command == "ideas":

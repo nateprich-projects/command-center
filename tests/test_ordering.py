@@ -551,3 +551,17 @@ def test_a_tier_takes_only_its_own_work_in_both_directions():
                                ("Risk: standard", "standard", True)):
         found = funnel.escalation_reasons("t", body)
         assert (bool(found) if tier == "escalated" else not found) is wanted
+
+
+def test_a_project_with_no_tickets_is_not_the_same_as_one_with_open_tickets():
+    """#26's work shipped outside the pipeline on Nate's instruction, so it sat
+    at Ready with no children: invisible to his queue because gate_question
+    returns None, permanently in awaiting_breakdown burning a routine run every
+    time, and refused by accept's own guard. The guard cannot tell "not broken
+    down yet" from "built another way", so accept asks him to say which."""
+    childless = project(1, "Building", "New", children=0)
+    with_open = project(2, "Building", "New", children=3, done=1)
+
+    assert not childless.children_all_closed   # unchanged: not vacuously complete
+    assert not with_open.children_all_closed
+    assert gate_question(childless) is None    # never reaches his queue on its own

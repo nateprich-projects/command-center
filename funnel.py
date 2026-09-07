@@ -20,6 +20,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Sequence, Set
@@ -647,6 +648,25 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
 
 INSTALL_FIX = "bash scripts/install.sh"
 STATUSLINE_COMMAND = "~/.claude/statusline.sh"
+
+# `usage.py:36` reads this cache, while `statusline.sh:24` writes it. Keep the
+# path here rather than importing usage.py: doctor has to diagnose a broken
+# install when that module is one of the links that is missing.
+USAGE_CACHE = pathlib.Path.home() / ".claude" / "command-center-usage.json"
+
+# `usage.py:174` uses fifteen minutes to decide whether one gate reading is
+# usable. Doctor answers a different question: has the status line stopped
+# writing altogether? Claude Code refreshes this file repeatedly while open, so
+# one hour (four missed gate intervals) distinguishes a stopped status line from
+# a single stale reading without calling a 20-minute gap a broken install.
+USAGE_CACHE_BROKEN_AFTER = timedelta(hours=1)
+USAGE_CACHE_FIX = "open Claude Code on the Mac mini"
+
+# These mirror `heartbeat.py:38` and `heartbeat.py:52`. They are intentionally
+# local constants so doctor still works when heartbeat.py itself is unavailable.
+HEARTBEAT_BRANCH = "heartbeat"
+HEARTBEAT_SPOOL = pathlib.Path.home() / ".claude" / "command-center-heartbeat"
+HEARTBEAT_FIX = "restore GitHub access so the heartbeat branch and local spool can drain"
 AUTH_LOGIN_FIX = "gh auth login"
 AUTH_SCOPE_FIX = "gh auth refresh -s project"
 TOPIC_FIX = "add the `command-center` topic to at least one repository"
@@ -851,6 +871,140 @@ def check_settings(claude_dir: Optional[os.PathLike] = None) -> Check:
     )
 
 
+def _timestamp(value: object) -> Optional[float]:
+    """Parse the cache timestamp without consulting usage.py."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        stamp = float(value)
+        return stamp if stamp == stamp and abs(stamp) != float("inf") else None
+    if not isinstance(value, str):
+        return None
+
+    try:
+        return float(value)
+    except ValueError:
+        pass
+    try:
+        iso = value.strip()
+        if iso.endswith("Z"):
+            iso = iso[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(iso)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _age_text(seconds: Optional[float]) -> str:
+    """Make an age readable without hiding a future or unavailable timestamp."""
+    if seconds is None:
+        return "age unavailable"
+    if seconds < 0:
+        return "age is in the future"
+    if seconds < 60:
+        return "age less than 1 minute"
+    if seconds < 3600:
+        return "age {} minutes".format(int(seconds // 60))
+    if seconds < 86400:
+        return "age {} hours".format(int(seconds // 3600))
+    return "age {} days".format(int(seconds // 86400))
+
+
+def _mtime_age(path: pathlib.Path, now: float) -> Optional[float]:
+    try:
+        return now - path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def check_usage_cache(cache_path: Optional[os.PathLike] = None,
+                      now: Optional[float] = None) -> Check:
+    """Check the Claude usage cache directly, including its writing age.
+
+    This intentionally does not import usage.py. Its tolerant readers are right
+    for a budget gate but would erase the distinction between a missing file,
+    malformed JSON, and a cache that simply stopped being refreshed.
+    """
+    cache = _path(cache_path, USAGE_CACHE)
+    now = time.time() if now is None else now
+
+    try:
+        exists = cache.exists()
+    except OSError:
+        exists = False
+    if not exists:
+        return Check(
+            "usage cache", False,
+            "{} is missing (age unavailable)".format(cache),
+            USAGE_CACHE_FIX,
+        )
+
+    file_age = _mtime_age(cache, now)
+    try:
+        with cache.open(encoding="utf-8") as stream:
+            data = json.load(stream)
+    except FileNotFoundError:
+        return Check(
+            "usage cache", False,
+            "{} is missing (age unavailable)".format(cache),
+            USAGE_CACHE_FIX,
+        )
+    except (OSError, UnicodeError) as exc:
+        return Check(
+            "usage cache", False,
+            "{} is present but cannot be read ({}; {})".format(
+                cache, exc, _age_text(file_age)),
+            USAGE_CACHE_FIX,
+        )
+    except ValueError:
+        return Check(
+            "usage cache", False,
+            "{} is present but unparseable ({})".format(
+                cache, _age_text(file_age)),
+            USAGE_CACHE_FIX,
+        )
+
+    if not isinstance(data, dict):
+        return Check(
+            "usage cache", False,
+            "{} is present but unparseable (top-level JSON is not an object; {})".format(
+                cache, _age_text(file_age)),
+            USAGE_CACHE_FIX,
+        )
+
+    captured_at = _timestamp(data.get("captured_at"))
+    if captured_at is None:
+        return Check(
+            "usage cache", False,
+            "{} is present but unparseable (captured_at is missing or invalid; {})".format(
+                cache, _age_text(file_age)),
+            USAGE_CACHE_FIX,
+        )
+
+    age = now - captured_at
+    if age < 0:
+        return Check(
+            "usage cache", False,
+            "{} is present but its timestamp is from the future ({})".format(
+                cache, _age_text(age)),
+            USAGE_CACHE_FIX,
+        )
+    if age >= USAGE_CACHE_BROKEN_AFTER.total_seconds():
+        return Check(
+            "usage cache", False,
+            "{} is present but stale ({}; health threshold is 1 hour)".format(
+                cache, _age_text(age)),
+            USAGE_CACHE_FIX,
+        )
+    return Check(
+        "usage cache", True,
+        "{} is present and fresh ({})".format(cache, _age_text(age)),
+        "",
+    )
+
+
 def gh_auth_status() -> dict:
     """Read the active GitHub account without ever requesting its token."""
     proc = subprocess.run(
@@ -1028,6 +1182,103 @@ def check_project_fields() -> Check:
     )
 
 
+def gh_branch_exists() -> bool:
+    """Return whether the heartbeat branch exists, or raise on other failures."""
+    try:
+        proc = subprocess.run(
+            ["gh", "api", "repos/{}/git/ref/heads/{}".format(
+                REPO, HEARTBEAT_BRANCH)],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise GitHubError("gh could not query the heartbeat branch: {}".format(exc))
+
+    if proc.returncode == 0:
+        return True
+    detail = (proc.stderr or proc.stdout or "").strip()
+    # A missing ref is a healthy answer to the query, not a failed query. gh's
+    # API output has used both `404` and `not found` wording across versions.
+    lowered = detail.lower()
+    if "404" in lowered or "not found" in lowered:
+        return False
+    raise GitHubError(
+        "gh heartbeat branch query failed: {}".format(
+            detail or "gh exited {}".format(proc.returncode))
+    )
+
+
+def _spool_files(spool_dir: pathlib.Path) -> List[pathlib.Path]:
+    """List pending spool files without importing heartbeat.py."""
+    try:
+        if not spool_dir.exists():
+            return []
+        if not spool_dir.is_dir():
+            raise OSError("{} is not a directory".format(spool_dir))
+        return sorted(
+            (entry for entry in spool_dir.iterdir() if entry.is_file()),
+            key=lambda entry: entry.name,
+        )
+    except FileNotFoundError:
+        return []
+
+
+def check_heartbeat(spool_dir: Optional[os.PathLike] = None,
+                    now: Optional[float] = None) -> Check:
+    """Check the remote heartbeat branch and any undrained local spool files."""
+    spool = _path(spool_dir, HEARTBEAT_SPOOL)
+    now = time.time() if now is None else now
+    findings: List[str] = []
+    branch_ok: Optional[bool]
+
+    try:
+        branch_ok = gh_branch_exists()
+    except Exception as exc:
+        branch_ok = None
+        findings.append(
+            "could not check heartbeat branch `{}` ({})".format(
+                HEARTBEAT_BRANCH, str(exc) or "unknown error")
+        )
+    else:
+        if branch_ok:
+            findings.append("heartbeat branch `{}` exists".format(HEARTBEAT_BRANCH))
+        else:
+            findings.append("heartbeat branch `{}` is absent".format(HEARTBEAT_BRANCH))
+
+    try:
+        files = _spool_files(spool)
+    except OSError as exc:
+        files = []
+        findings.append("local heartbeat spool {} cannot be read ({})".format(
+            spool, exc))
+    else:
+        if not files:
+            findings.append("local heartbeat spool {} is empty".format(spool))
+        else:
+            try:
+                oldest = min(path.stat().st_mtime for path in files)
+            except OSError as exc:
+                findings.append(
+                    "local heartbeat spool {} has {} file(s), but its age cannot "
+                    "be read ({})".format(spool, len(files), exc)
+                )
+            else:
+                age = _age_text(now - oldest)
+                findings.append(
+                    "local heartbeat spool {} has {} file(s); oldest is {} old".format(
+                        spool, len(files), age[4:] if age.startswith("age ") else age)
+                )
+
+    broken = (
+        branch_ok is not True
+        or bool(files)
+        or any("cannot be read" in finding for finding in findings)
+    )
+    if broken:
+        return Check("heartbeat branch", False, "; ".join(findings), HEARTBEAT_FIX)
+    return Check("heartbeat branch", True, "; ".join(findings), "")
+
+
 def check_topic() -> Check:
     """Check the same opt-in topic search that supplies load_items()."""
     try:
@@ -1046,7 +1297,9 @@ def check_topic() -> Check:
 
 
 def doctor_checks(claude_dir: Optional[os.PathLike] = None,
-                  checkout_root: Optional[os.PathLike] = None) -> List[Check]:
+                  checkout_root: Optional[os.PathLike] = None,
+                  usage_cache: Optional[os.PathLike] = None,
+                  heartbeat_spool: Optional[os.PathLike] = None) -> List[Check]:
     """Run every fixed check, even when an earlier one is broken."""
     return [
         check_symlinks(claude_dir=claude_dir, checkout_root=checkout_root),
@@ -1054,6 +1307,8 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         check_auth_scope(),
         check_project_fields(),
         check_topic(),
+        check_usage_cache(cache_path=usage_cache),
+        check_heartbeat(spool_dir=heartbeat_spool),
     ]
 
 

@@ -13,6 +13,7 @@ stored or passed by this program.
 from __future__ import annotations
 
 import argparse
+from collections import namedtuple
 import json
 import os
 import pathlib
@@ -32,6 +33,16 @@ PROJECT_NUMBER = 2
 TOPIC = "command-center"
 OWNERS = [("user", "nateprich"), ("organization", "nateprich-projects")]
 REPO = "nateprich-projects/command-center"
+
+# The local checks deliberately keep their paths as module-level values. Tests
+# can point them at a temporary checkout and home directory without ever
+# reading the real ~/.claude.
+CHECKOUT_ROOT = pathlib.Path(__file__).resolve().parent
+CLAUDE_DIR = pathlib.Path.home() / ".claude"
+
+# One small, shared shape for every doctor check. Later doctor tickets add
+# checks to the fixed list without changing the report contract.
+Check = namedtuple("Check", "name ok found fix")
 
 #: The single-in-motion lock. Codex acts as Nate through the gh CLI — no bot
 #: identity, no originating-app marker — so no GitHub write can identify it and
@@ -625,6 +636,220 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
         "upkeep_share": round(len(upkeep) / len(recent), 3) if recent else None,
         "days_since_anything_new_started": days_since_new,
     }
+
+
+# --------------------------------------------------------------------------
+# Local doctor checks. These deliberately do not import usage.py or
+# heartbeat.py: those modules are among the things a broken install can make
+# unreachable, and the doctor must still be able to report that failure.
+# --------------------------------------------------------------------------
+
+
+INSTALL_FIX = "bash scripts/install.sh"
+STATUSLINE_COMMAND = "~/.claude/statusline.sh"
+
+
+def _path(value: Optional[os.PathLike], default: pathlib.Path) -> pathlib.Path:
+    """Resolve an injectable path while keeping the production default local."""
+    return pathlib.Path(default if value is None else value)
+
+
+def _volume_for(path: pathlib.Path) -> Optional[str]:
+    """Return the mounted-volume path for a checkout under /Volumes, if any."""
+    try:
+        relative = path.absolute().relative_to(pathlib.Path("/Volumes"))
+    except ValueError:
+        return None
+    if not relative.parts:
+        return "/Volumes"
+    return "/Volumes/{}".format(relative.parts[0])
+
+
+def _checkout_readable(root: pathlib.Path) -> bool:
+    """Check the root itself, not just a child that may happen to exist."""
+    try:
+        if not root.is_dir():
+            return False
+        # Opening the directory catches an unmounted or otherwise inaccessible
+        # volume where a metadata-only exists() check can be misleading.
+        os.listdir(root)
+    except OSError:
+        return False
+    return True
+
+
+def _inside(path: pathlib.Path, root: pathlib.Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _expected_links(claude_dir: pathlib.Path,
+                    checkout_root: pathlib.Path) -> List[tuple]:
+    """Return every link created by scripts/install.sh, discovering skills."""
+    links = [
+        (claude_dir / "command-center", checkout_root),
+        (claude_dir / "statusline.sh", checkout_root / "statusline.sh"),
+    ]
+
+    skills = checkout_root / "skills"
+    try:
+        skill_dirs = sorted(
+            (entry for entry in skills.iterdir() if entry.is_dir()),
+            key=lambda entry: entry.name,
+        )
+    except OSError:
+        skill_dirs = []
+    links.extend(
+        (claude_dir / "skills" / skill.name, skill)
+        for skill in skill_dirs
+    )
+    return links
+
+
+def check_symlinks(claude_dir: Optional[os.PathLike] = None,
+                   checkout_root: Optional[os.PathLike] = None) -> Check:
+    """Check the install links and that each resolves into this checkout."""
+    claude = _path(claude_dir, CLAUDE_DIR)
+    root = _path(checkout_root, CHECKOUT_ROOT)
+
+    if not _checkout_readable(root):
+        volume = _volume_for(root)
+        if volume:
+            found = (
+                "checkout volume {} is unmounted; {} is not readable"
+                .format(volume, root)
+            )
+            fix = "mount {}, then run {}".format(volume, INSTALL_FIX)
+        else:
+            found = "checkout root {} is not readable".format(root)
+            fix = "restore access to the checkout, then run {}".format(INSTALL_FIX)
+        return Check("install symlinks", False, found, fix)
+
+    root_resolved = root.resolve(strict=False)
+    errors: List[str] = []
+    links = _expected_links(claude, root)
+
+    for link, expected in links:
+        try:
+            exists = os.path.lexists(link)
+        except OSError:
+            exists = False
+        shown = str(link)
+        if not exists:
+            errors.append("{} is missing".format(shown))
+            continue
+        if not link.is_symlink():
+            errors.append("{} is not a symlink".format(shown))
+            continue
+
+        try:
+            resolved = link.resolve(strict=True)
+        except (OSError, RuntimeError):
+            errors.append("{} does not resolve".format(shown))
+            continue
+
+        if not _inside(resolved, root_resolved):
+            errors.append("{} points outside the checkout ({})".format(
+                shown, resolved))
+            continue
+
+        # The install script has one intended target for each link. Checking
+        # it catches a link that points at a different, but still internal,
+        # file and would otherwise look healthy.
+        try:
+            expected_resolved = expected.resolve(strict=True)
+        except (OSError, RuntimeError):
+            expected_resolved = None
+        if expected_resolved is None or resolved != expected_resolved:
+            wanted = expected_resolved or expected
+            errors.append("{} points to {} (expected {})".format(
+                shown, resolved, wanted))
+
+    if errors:
+        return Check("install symlinks", False, "; ".join(errors), INSTALL_FIX)
+    return Check(
+        "install symlinks", True,
+        "{} links resolve inside {}".format(len(links), root_resolved),
+        "",
+    )
+
+
+def check_settings(claude_dir: Optional[os.PathLike] = None) -> Check:
+    """Check the JSON settings entry used to activate the status line."""
+    claude = _path(claude_dir, CLAUDE_DIR)
+    settings = claude / "settings.json"
+
+    if not settings.exists():
+        return Check(
+            "settings.json", False, "{} is missing".format(settings), INSTALL_FIX)
+
+    try:
+        with settings.open() as stream:
+            data = json.load(stream)
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        detail = exc.msg if isinstance(exc, json.JSONDecodeError) else str(exc)
+        return Check(
+            "settings.json", False,
+            "{} is not valid JSON ({})".format(settings, detail),
+            "repair the JSON syntax in {}".format(settings),
+        )
+    except OSError as exc:
+        return Check(
+            "settings.json", False,
+            "{} cannot be read ({})".format(settings, exc),
+            "restore read access to {}".format(settings),
+        )
+
+    status_line = data.get("statusLine") if isinstance(data, dict) else None
+    command = status_line.get("command") if isinstance(status_line, dict) else None
+    expected = {STATUSLINE_COMMAND, str(claude / "statusline.sh")}
+    if command not in expected:
+        if not isinstance(data, dict) or "statusLine" not in data:
+            found = "statusLine key is missing from {}".format(settings)
+        else:
+            found = "statusLine points to {!r}, not {}".format(
+                command, STATUSLINE_COMMAND)
+        return Check("settings.json", False, found, INSTALL_FIX)
+
+    if status_line.get("type") != "command":
+        return Check(
+            "settings.json", False,
+            "statusLine has type {!r}, not command".format(status_line.get("type")),
+            INSTALL_FIX,
+        )
+
+    return Check(
+        "settings.json", True,
+        "valid JSON with statusLine pointing to {}".format(STATUSLINE_COMMAND),
+        "",
+    )
+
+
+def doctor_checks(claude_dir: Optional[os.PathLike] = None,
+                  checkout_root: Optional[os.PathLike] = None) -> List[Check]:
+    """Run the fixed local checks, even when an earlier one is broken."""
+    return [
+        check_symlinks(claude_dir=claude_dir, checkout_root=checkout_root),
+        check_settings(claude_dir=claude_dir),
+    ]
+
+
+def render_checks(checks: Iterable[Check]) -> None:
+    """Render one stable, actionable line for each doctor check."""
+    for check in checks:
+        line = "{}: {}".format(check.name, check.found)
+        if not check.ok:
+            line += " — fix: {}".format(check.fix)
+        print(line)
+
+
+def cmd_doctor() -> int:
+    checks = doctor_checks()
+    render_checks(checks)
+    return 0 if all(check.ok for check in checks) else 1
 
 
 # --------------------------------------------------------------------------
@@ -1604,6 +1829,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
              "Declared by the routine, never by the model.")
     sub.add_parser("brief", help="JSON for the /funnel skill and the morning brief")
     sub.add_parser("ideas", help="captured ideas, flagged ones first")
+    sub.add_parser(
+        "doctor", help="check the local install and report actionable failures")
     show = sub.add_parser("show", help="everything needed to answer an item's gate")
     show.add_argument("ref", help="issue number, owner/repo#number, or URL")
     for verb, (frm, to, meaning) in ANSWERS.items():
@@ -1657,6 +1884,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     now = datetime.now(timezone.utc)
+    # Doctor is intentionally dispatched before load_items(). It must still
+    # report local failures when GitHub is unreachable, and it must not import
+    # the modules whose broken links it is meant to diagnose.
+    if args.command == "doctor":
+        return cmd_doctor()
+
     try:
         items = load_items()
     except GitHubError as exc:

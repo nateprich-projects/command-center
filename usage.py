@@ -665,12 +665,19 @@ PROVIDER_POLICY = {
     "zai": {"weekly_floor": 15.0, "weekly_reserve": 0.5},
 
     # Nate uses ChatGPT personally, so this pool is shared and keeps a weekly
-    # line. But it is the only pool with a **second** guard: the idle rule, which
-    # refuses to start unless the five-hour window is completely untouched. That
-    # is a far more precise protection than a weekly percentage, so the floor is
-    # looser here than Anthropic's — 25 was blocking work at moments Codex was
-    # provably not competing with him. Raised to 60 on 2026-09-06.
-    "openai": {"weekly_floor": 60.0},
+    # line. Raised to 60 on 2026-09-06 and lowered to 30 the same day on review.
+    #
+    # 60 was justified by the idle rule being a more precise guard than a weekly
+    # percentage. That is true, and it only covers **one of the five Codex
+    # schedules** — the all-day one. The four hour-restricted schedules have no
+    # presence check at all, so for them 60 was the whole protection, and at 60
+    # the proportional line does not apply until day 4.7 of 7: effectively flat
+    # for two thirds of the week.
+    #
+    # At 30 the line governs from day 2.3, so the pool paces itself the way the
+    # others do, and the idle rule keeps doing its narrower job on the schedule
+    # that fires while he might be working.
+    "openai": {"weekly_floor": 30.0},
 }
 
 

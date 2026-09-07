@@ -2151,8 +2151,8 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
     return found
 
 
-def cmd_begin(items: List[Item], now: datetime, agent: str,
-              tier: Optional[str], idle: bool) -> int:
+def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
+              idle: bool, breakdown: bool = False) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
     A polling routine spends most of its runs discovering there is nothing to
@@ -2199,7 +2199,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str,
     if queue:
         out.update(do="review", work=queue[0])
     else:
-        pending = awaiting_breakdown(items)
+        # Breakdown is opt-in per routine. Claude reviews only — its breakdown
+        # job moved to the cheaper pool — so offering it one would send the
+        # scarce reviewer off to do mechanical decomposition.
+        pending = awaiting_breakdown(items) if breakdown else []
         if pending:
             out.update(do="breakdown",
                        work={"ref": pending[0].ref, "url": pending[0].url,
@@ -2594,6 +2597,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     begin.add_argument("--agent", required=True)
     begin.add_argument("--tier", choices=TIERS, default=None)
     begin.add_argument("--idle", action="store_true")
+    begin.add_argument("--breakdown", action="store_true",
+                       help="also offer an approved plan to break down when "
+                            "there is nothing to review")
 
     nxr = sub.add_parser(
         "next-review", help="the single PR this reviewer should read, or nothing")
@@ -2638,7 +2644,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan)
         if args.command == "begin":
-            return cmd_begin(items, now, args.agent, args.tier, args.idle)
+            return cmd_begin(items, now, args.agent, args.tier, args.idle,
+                             args.breakdown)
         if args.command == "next-review":
             return cmd_next_review(items, args.tier)
         if args.command == "review":

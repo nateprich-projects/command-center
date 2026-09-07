@@ -20,39 +20,39 @@ is `Shaped`-to-`Ready`. Reviewing also *finishes* work where a breakdown
 finite class — bounded by what Codex can produce under the lock and the budget —
 and only finite classes may preempt.
 
-## 1. Record that you started
+## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/heartbeat.py start --agent claude
+python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent claude --tier escalated
 ```
 
-Every exit path below finishes it.
+**One call does all of it**: records the heartbeat, checks the budget, and names
+your work. It always prints JSON.
 
-**It prints a run id. Keep it, and pass it to every `finish` below as
-`--run <id>`.** Without it, `finish` has to work out which run it belongs to
-from the records, and when two runs overlap it cannot — it then records the
-outcome as unattributable rather than guessing, which is safe but loses which
-run this was. The id is a literal string, so the command still matches the
-permission rule; never wrap it in `RUN=$(...)`, which is unpredictable and
-caused a prompt storm.
+- `"do": "stop"` — finish with the outcome below and **stop immediately**. Do not
+  investigate, do not look around. **Most runs end here and that is the design** —
+  you exist for escalated reviews, and there usually are none.
+  - `"gate": "over"` → `--outcome skipped-over-pace`
+  - `"gate": "unknown"` → `--outcome skipped-usage-unknown`
+  - otherwise → `--outcome nothing-to-do`
+- `"do": "review"` — go on. `work` names the PR.
 
+**Keep `run`.** Every exit path finishes it: a start with no finish is read by the
+watchdog as a run that died. Pass it as `--run <id>`, and never wrap it in
+`RUN=$(...)` — command substitution cannot be permission-matched and caused a
+prompt storm.
 
-**If the heartbeat prints a warning about GitHub being unreachable, keep going.**
-It spools the record locally and a later run pushes it. Instrumentation does not
-gate the work it instruments.
+**Why one command rather than three.** This routine runs on Nate's own Anthropic
+subscription — the pool he does his real work on — and every separate tool call
+is another model turn carrying the whole context. An empty poll should cost
+almost nothing, because almost every poll is empty. Do not open the brief or list
+PRs to orient yourself first; `begin` has already answered the only question this
+run needs.
 
-## 2. Check the budget, and believe it
+**No breakdown.** `begin` will never hand you one — that job moved to the zcode
+routine on a separate pool. If there is nothing escalated to review, you are done.
 
-```bash
-python3 /Users/nateprich/.claude/command-center/usage.py gate claude
-```
-
-Exit 1 → finish `skipped-over-pace` and stop. Exit 2 → finish
-`skipped-usage-unknown` and stop. Both are healthy outcomes. Run this after your
-first turn, never before — the reading is refreshed by this very session, and a
-stale one always understates usage.
-
-## 3. Reconcile before you review
+## 2. Reconcile before you review
 
 Your own failure mode is not lost work — everything you produce is a GitHub
 artifact and is durable the moment you write it. It is a **half-applied
@@ -68,11 +68,9 @@ So before reviewing anything, check the open PRs for:
 `python3 /Users/nateprich/.claude/command-center/prior_run.py <issue-number> --agent claude` shows what a previous
 run intended, if you need it. Evidence of intent, never of truth.
 
-## 4. Pick one PR — and only an escalated one
+## 3. Your PR — escalated only
 
-```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py next-review --tier escalated
-```
+`begin` already named it. Do not call `next-review` again.
 
 **You review only what the ticket marked risky.** Routine review and ticket
 breakdown moved to the zcode routine on a separate quota pool
@@ -92,7 +90,7 @@ A PR needs review when no verdict covers its **current head**, which covers thre
 cases at once: never reviewed, reviewed and then pushed to, and rejected and
 since fixed.
 
-## 5. Review it against `plan.md`
+## 4. Review it against `plan.md`
 
 Read `plan.md` **first**, then the diff. The question is not "is this good code"
 but **"does this do what the plan says, and does it avoid what the plan
@@ -130,7 +128,7 @@ unless its own ticket asked for the change:
 it. **Read for it anyway.** A diff that edits the guardrail test alongside the file
 it guards passes its own check, and that is exactly the diff worth catching.
 
-## 6. Decide
+## 5. Decide
 
 **Record the verdict either way — you do not merge by hand.**
 
@@ -166,7 +164,7 @@ retires this whole arrangement.
 
 Do not change `Status` or `Class` on anything. Those are Nate's gates.
 
-## 7. Breakdown is not yours any more
+## 6. Breakdown is not yours any more
 
 Breaking approved plans into tickets moved to `routines/zcode.md`, which runs on
 z.ai's pool rather than Nate's Anthropic subscription. It is mechanical work
@@ -225,7 +223,7 @@ which is interactive and not yours to do.
 
 </details>
 
-## 8. Finish, always
+## 7. Finish, always
 
 ```bash
 python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent claude --run <id> --outcome done --merged <n> --note "merged PR #<n>; broke down #<m> into <k> tickets"

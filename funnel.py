@@ -1301,6 +1301,57 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
     }
 
 
+def parked_items(items: Iterable[Item]) -> List[Item]:
+    """Parked projects, newest first.
+
+    A parked item is closed and therefore absent from the gate queue, but its
+    reason is still useful context in the brief. ``status_since`` is the time
+    the Project item entered Parked; items with no matching timeline event are
+    retained and sorted last rather than disappearing.
+    """
+    def key(item: Item):
+        return (
+            item.status_since is None,
+            -(item.status_since.timestamp() if item.status_since else 0),
+            item.repo,
+            item.number,
+        )
+
+    return sorted((i for i in items if i.status == "Parked"), key=key)
+
+
+def _parked_item_json(item: Item) -> Dict[str, object]:
+    """Render one parked item and read its durable reason comment.
+
+    Comments are deliberately fetched here, rather than in ``ITEM_QUERY``:
+    parked items are uncommon and the normal Project load must not pay for a
+    comment request for every issue.
+    """
+    comments = (_gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "comments",
+    ) or {}).get("comments", [])
+    reason = None
+    for comment in reversed(comments):
+        body = comment.get("body") or ""
+        if body.startswith(PARK_COMMENT_PREFIX):
+            reason = body[len(PARK_COMMENT_PREFIX):].strip()
+            break
+
+    return {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "parked_at": item.status_since.isoformat() if item.status_since else None,
+        "reason": reason,
+    }
+
+
+def parked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """The brief's parked section, with one comment lookup per parked item."""
+    return [_parked_item_json(item) for item in parked_items(items)]
+
+
 def cmd_queue(items: List[Item], now: datetime) -> int:
     """Everything, ordered — both queues, each under its own heading.
 
@@ -1403,6 +1454,7 @@ def cmd_brief(items: List[Item], now: datetime) -> int:
         "total_needing_nate": len(decisions),
         "counts_by_gate": counts,
         "items": [item_json(i, now, by_ref) for i in decisions],
+        "parked": parked_json(items),
         "needs_class": [item_json(i, now, by_ref) for i in items if needs_class(i)],
         "awaiting_breakdown": [
             item_json(i, now, by_ref) for i in awaiting_breakdown(items)

@@ -6,12 +6,30 @@ import json
 import os
 import pathlib
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
+
+
+NOW = 1_788_600_000.0
+
+
+def stub_heartbeat_checks(monkeypatch):
+    """Keep local-path tests offline; heartbeat has focused tests below."""
+    monkeypatch.setattr(
+        funnel, "check_usage_cache",
+        lambda cache_path=None, now=None: funnel.Check(
+            "usage cache", True, "ok", ""),
+    )
+    monkeypatch.setattr(
+        funnel, "check_heartbeat",
+        lambda spool_dir=None, now=None: funnel.Check(
+            "heartbeat branch", True, "ok", ""),
+    )
 
 
 def install_fixture(tmp_path):
@@ -34,14 +52,17 @@ def install_fixture(tmp_path):
     return checkout, claude
 
 
-def test_all_local_checks_pass_and_discover_every_skill(tmp_path):
+def test_all_local_checks_pass_and_discover_every_skill(tmp_path, monkeypatch):
     checkout, claude = install_fixture(tmp_path)
     (checkout / "skills" / "shape").mkdir()
     os.symlink(checkout / "skills" / "shape", claude / "skills" / "shape")
+    stub_heartbeat_checks(monkeypatch)
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
-    assert [check.name for check in checks] == ["install symlinks", "settings.json"]
+    assert [check.name for check in checks] == [
+        "install symlinks", "settings.json", "usage cache", "heartbeat branch",
+    ]
     assert all(check.ok for check in checks)
     assert "4 links" in checks[0].found
 
@@ -130,13 +151,14 @@ def test_settings_missing_or_wrong_statusline_is_distinct(tmp_path, payload, phr
     assert result.fix == funnel.INSTALL_FIX
 
 
-def test_doctor_runs_after_a_broken_symlink_check(tmp_path):
+def test_doctor_runs_after_a_broken_symlink_check(tmp_path, monkeypatch):
     checkout, claude = install_fixture(tmp_path)
     (claude / "command-center").unlink()
+    stub_heartbeat_checks(monkeypatch)
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
-    assert len(checks) == 2
+    assert len(checks) == 4
     assert not checks[0].ok
     assert checks[1].ok
 
@@ -170,3 +192,122 @@ def test_doctor_renderer_puts_the_fix_only_on_broken_lines(capsys):
         "good: found it",
         "bad: missing it — fix: run the fix",
     ]
+
+
+# -- usage cache -------------------------------------------------------------
+
+
+def write_usage_cache(path, captured_at):
+    path.write_text(json.dumps({
+        "captured_at": captured_at,
+        "five_hour": {"used_percentage": 1.0, "resets_at": NOW + 600},
+    }))
+
+
+def test_missing_usage_cache_names_opening_claude_code(tmp_path):
+    result = funnel.check_usage_cache(tmp_path / "missing.json", now=NOW)
+
+    assert not result.ok
+    assert "missing" in result.found
+    assert "age unavailable" in result.found
+    assert result.fix == "open Claude Code on the Mac mini"
+
+
+def test_fresh_usage_cache_reports_its_age(tmp_path):
+    cache = tmp_path / "usage.json"
+    write_usage_cache(cache, NOW - 5 * 60)
+
+    result = funnel.check_usage_cache(cache, now=NOW)
+
+    assert result.ok
+    assert "present and fresh" in result.found
+    assert "age 5 minutes" in result.found
+
+
+def test_unparseable_usage_cache_is_distinct_from_missing(tmp_path):
+    cache = tmp_path / "usage.json"
+    cache.write_text("{not valid json")
+
+    result = funnel.check_usage_cache(cache, now=NOW)
+
+    assert not result.ok
+    assert "present but unparseable" in result.found
+    assert "missing" not in result.found
+    assert result.fix == "open Claude Code on the Mac mini"
+
+
+def test_old_usage_cache_reports_age_and_is_broken(tmp_path):
+    cache = tmp_path / "usage.json"
+    write_usage_cache(cache, NOW - 2 * 3600)
+
+    result = funnel.check_usage_cache(cache, now=NOW)
+
+    assert not result.ok
+    assert "stale" in result.found
+    assert "age 2 hours" in result.found
+    assert "open Claude Code on the Mac mini" == result.fix
+
+
+# -- heartbeat branch and spool --------------------------------------------
+
+
+def test_existing_heartbeat_branch_with_empty_spool_passes(tmp_path, monkeypatch):
+    monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
+
+    result = funnel.check_heartbeat(tmp_path / "spool", now=NOW)
+
+    assert result.ok
+    assert "heartbeat branch `heartbeat` exists" in result.found
+    assert "spool" in result.found and "empty" in result.found
+
+
+def test_absent_heartbeat_branch_is_broken(tmp_path, monkeypatch):
+    monkeypatch.setattr(funnel, "gh_branch_exists", lambda: False)
+
+    result = funnel.check_heartbeat(tmp_path / "spool", now=NOW)
+
+    assert not result.ok
+    assert "heartbeat branch `heartbeat` is absent" in result.found
+    assert result.fix
+
+
+def test_gh_reports_a_missing_ref_as_absent(monkeypatch):
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="HTTP 404: Not Found"),
+    )
+
+    assert funnel.gh_branch_exists() is False
+
+
+def test_heartbeat_query_failure_is_reported_not_raised(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="GitHub unreachable"),
+    )
+
+    result = funnel.check_heartbeat(tmp_path / "spool", now=NOW)
+
+    assert not result.ok
+    assert "could not check heartbeat branch" in result.found
+    assert "GitHub unreachable" in result.found
+
+
+def test_three_spool_files_report_count_and_oldest_age(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    for name, age in (("one.jsonl", 2 * 86400),
+                      ("two.jsonl", 3600),
+                      ("three.jsonl", 60)):
+        path = spool / name
+        path.write_text("record\n")
+        os.utime(path, (NOW - age, NOW - age))
+    monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
+
+    result = funnel.check_heartbeat(spool, now=NOW)
+
+    assert not result.ok
+    assert "3 file(s)" in result.found
+    assert "oldest is 2 days" in result.found

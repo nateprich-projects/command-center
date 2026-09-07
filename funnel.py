@@ -308,22 +308,24 @@ TIERS = ("standard", "escalated")
 RISK_LINE = re.compile(r"^\s*Risk:\s*(standard|escalated)\b(.*)$",
                        re.IGNORECASE | re.MULTILINE)
 
-#: A safety net for tickets written before markers existed, or by someone who
-#: forgot. **Deliberately narrow.** This repository is *about* locks, gates and
-#: destructive operations — `park` closes issues on purpose — so a broad keyword
-#: list would escalate every ticket and the cheap default would never run. These
-#: match phrases that are hard to write by accident.
+#: A safety boundary for tickets written before markers existed, or by someone
+#: who forgot. False positives cost one escalated review; false negatives can
+#: authorise risky work unattended, so these deliberately match the vocabulary
+#: plans use when discussing risk — including rejected alternatives. Do not make
+#: `lock`, `park`, `close` or `delete` alone risky: those are ordinary subject
+#: matter in this repository and would keep the standard engine from ever running.
 ESCALATION_PATTERNS = {
     "credentials": r"\b(api[- ]key|access token|client secret|credential store|"
-                   r"password|private key)\b",
-    "authorisation": r"\b(authoris\w+|authoriz\w+|permission model|access control|"
+                   r"credentials?|password|private key)\b",
+    "authorisation": r"\b(authoris\w+|authoriz\w+|permissions?|access control|"
                      r"oauth|scope grant)\b",
-    "data-migration": r"\b(data migration|schema migration|backfill|"
-                      r"irreversible migration)\b",
+    "data-migration": r"\b(migrat\w*|backfill)\b",
     "destructive": r"\b(force[- ]push|hard delete|permanently delete|"
-                   r"drop the (table|branch)|rewrite history)\b",
+                   r"drop the (table|branch)|rewrite history|destruct\w*|"
+                   r"irreversible)\b",
     "concurrency": r"\b(race condition|deadlock|thread[- ]safe|mutex|"
-                   r"atomic (write|commit))\b",
+                   r"atomic (write|commit)|concurr\w*|"
+                   r"overlap(?:s|ped|ping)?)\b",
 }
 
 

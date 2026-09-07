@@ -7,14 +7,12 @@ answers from confidence rather than from risk.
 
 The hard part is not the rule, it is the vocabulary. **This repository is about
 locks, gates and destructive operations** — `funnel park` closes issues on
-purpose, every routine takes a single-in-motion lock, and half the codebase
-discusses irreversible acts. A broad keyword list escalates every ticket here
-and the cheap engine never runs at all, which is the failure that looks like
-success.
+purpose and every routine takes a single-in-motion lock. Those ordinary terms
+must stay standard, while the vocabulary plans use to describe genuinely risky
+work must err toward escalation now that it is a safety boundary.
 
 So: an explicit `Risk:` marker written at breakdown is authoritative, and the
-pattern list is a deliberately narrow safety net for tickets written before
-markers existed.
+pattern list is a safety boundary for tickets written before markers existed.
 """
 
 from __future__ import annotations
@@ -46,13 +44,32 @@ def test_a_declared_standard_beats_the_patterns():
 
 # -- the safety net, and what it must NOT catch -------------------------------
 
-def test_the_net_catches_what_is_hard_to_write_by_accident():
-    assert "credentials" in escalation_reasons(
-        "Rotate the key", "Store the api-key in the credential store.")
-    assert "concurrency" in escalation_reasons(
-        "Fix the watchdog", "There is a race condition between two runs.")
-    assert "data-migration" in escalation_reasons(
-        "Move the spool", "Needs a data migration of existing records.")
+def test_the_net_catches_risk_in_this_repository_s_own_vocabulary():
+    risky = [
+        ("credentials", "Change the install",
+         "Read credentials from the environment."),
+        ("authorisation", "Change the unattended boundary",
+         "Broaden an agent's permissions to write the gate."),
+        ("data-migration", "Move the Project fields",
+         "Migrate every existing item to the new options."),
+        ("destructive", "Remove the command guard",
+         "Allow destructive or irreversible operations unattended."),
+        ("concurrency", "Repair heartbeat attribution",
+         "Handle overlapping runs that write the same record."),
+    ]
+    for reason, title, body in risky:
+        assert escalation_reasons(title, body) == [reason]
+
+
+def test_rejected_risky_alternatives_still_escalate_a_plan():
+    """A false escalation is safer than silently approving a risky plan."""
+    body = """## Decided
+Use the existing environment.
+
+## Rejected
+Store credentials in the checkout instead.
+"""
+    assert escalation_reasons("Keep setup local", body) == ["credentials"]
 
 
 def test_this_repository_s_own_vocabulary_does_not_escalate_everything():

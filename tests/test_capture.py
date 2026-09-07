@@ -1,0 +1,92 @@
+"""Issue-body writers stamp their agent-authored content."""
+
+from __future__ import annotations
+
+import pathlib
+import sys
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
+import funnel  # noqa: E402
+from funnel import Item  # noqa: E402
+
+
+NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
+
+
+def test_capture_stamps_the_created_body_as_agent(monkeypatch):
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        if args[:3] == ["gh", "issue", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/owner/repo/issues/42\n",
+                stderr="",
+            )
+        return SimpleNamespace(returncode=1, stdout="", stderr="not in project")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.cmd_capture(
+        [], NOW, "An idea", "Raw note", "owner/repo", True,
+        run="capture-run", agent="claude",
+    ) == 0
+
+    body = calls[0][calls[0].index("--body") + 1]
+    assert body.startswith("Raw note")
+    assert funnel.parse_provenance(body) == {
+        "agent": "claude",
+        "at": NOW.isoformat(),
+        "run": "capture-run",
+        "voice": "agent",
+    }
+    assert calls[0][-2:] == ("--label", "needs-shaping")
+
+
+def test_shaped_preserves_plan_bytes_above_agent_stamp(tmp_path, monkeypatch):
+    plan = "# Plan\n\nKeep this trailing newline exactly.\n"
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text(plan)
+    item = Item(
+        repo="owner/repo", number=42, title="An idea",
+        url="https://github.com/owner/repo/issues/42", state="OPEN",
+        status="Ideas", item_id="project-item-42",
+    )
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, variables))
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
+        return {"node": {"options": [{"id": "shaped-option", "name": "Shaped"}]}}
+
+    def run(args, capture_output, text=True):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file),
+        run="shape-run", agent="claude",
+    ) == 0
+
+    edit = calls[0][1]
+    assert edit[:6] == (
+        "gh", "issue", "edit", "42", "--repo", "owner/repo",
+    )
+    body = edit[-1]
+    assert body.startswith(plan)
+    assert funnel.parse_provenance(body) == {
+        "agent": "claude",
+        "at": NOW.isoformat(),
+        "run": "shape-run",
+        "voice": "agent",
+    }

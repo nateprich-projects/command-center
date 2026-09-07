@@ -640,9 +640,9 @@ def provenance_block(voice: str, at: Optional[datetime] = None,
 def append_provenance(body: str, voice: str, at: Optional[datetime] = None,
                       run: Optional[str] = None,
                       agent: Optional[str] = None) -> str:
-    """Append one provenance block to a comment body."""
+    """Append one provenance block without changing the supplied body."""
     return "{}\n\n{}".format(
-        body.rstrip(), provenance_block(voice, at=at, run=run, agent=agent)
+        body, provenance_block(voice, at=at, run=run, agent=agent)
     )
 
 
@@ -2210,9 +2210,13 @@ def cmd_ideas(items: List[Item], now: datetime) -> int:
 
 
 def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
-                repo: str, shaping: bool) -> int:
+                repo: str, shaping: bool, run: Optional[str] = None,
+                agent: Optional[str] = None) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
-    body = note or "Captured from chat. Not yet thought through."
+    body = append_provenance(
+        note or "Captured from chat. Not yet thought through.", "agent",
+        at=now, run=run, agent=agent,
+    )
     args = ["gh", "issue", "create", "--repo", repo, "--title", title, "--body", body]
     if shaping:
         args += ["--label", "needs-shaping"]
@@ -2237,7 +2241,8 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
     return 0
 
 
-def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str) -> int:
+def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
+               run: Optional[str] = None, agent: Optional[str] = None) -> int:
     """Record that an idea has been grilled and a plan now exists.
 
     Writes the plan into the issue body — `plan.md` puts it there through Ideas
@@ -2252,10 +2257,11 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str) -> in
         raise GitHubError("cannot read {}: {}".format(plan_file, exc))
     if not plan.strip():
         raise GitHubError("the plan is empty; nothing to record")
+    body = append_provenance(plan, "agent", at=now, run=run, agent=agent)
 
     out = subprocess.run(
         ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
-         "--body-file", plan_file],
+         "--body", body],
         capture_output=True, text=True,
     )
     if out.returncode != 0:
@@ -2776,9 +2782,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     capture.add_argument("--repo", default=REPO)
     capture.add_argument("--needs-shaping", action="store_true", dest="shaping",
                          help="flag it as worth thinking through")
+    capture.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    capture.add_argument(
+        "--agent", default=None,
+        help="agent that wrote the body; otherwise read the heartbeat spool",
+    )
     shaped = sub.add_parser("shaped", help="record a grilled plan and move to Shaped")
     shaped.add_argument("ref", help="issue number, owner/repo#number, or URL")
     shaped.add_argument("--plan", required=True, help="file holding the plan")
+    shaped.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    shaped.add_argument(
+        "--agent", default=None,
+        help="agent that wrote the body; otherwise read the heartbeat spool",
+    )
     claim = sub.add_parser("claim", help="take the single-in-motion lock on a ticket")
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
     release = sub.add_parser("release", help="give up the lock on a ticket")
@@ -2904,9 +2926,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_ideas(items, now)
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
-                               args.shaping)
+                               args.shaping, args.run, args.agent)
         if args.command == "shaped":
-            return cmd_shaped(items, now, args.ref, args.plan)
+            return cmd_shaped(items, now, args.ref, args.plan,
+                              args.run, args.agent)
         if args.command == "begin":
             return cmd_begin(items, now, args.agent, args.tier, args.idle,
                              args.breakdown)

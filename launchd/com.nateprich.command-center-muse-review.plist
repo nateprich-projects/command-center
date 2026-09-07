@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The escalated reviewer. Canonical copy lives here in the repo and is symlinked
+  into ~/Library/LaunchAgents, so it is versioned and reviewable rather than a
+  hand-made file nothing can see — which is the drift #52 exists for.
+
+  Meta ships `muse exec` as its own headless mode and Muse Code has no scheduler,
+  so launchd is the sanctioned way to run this. AGENTS.md carries the carve-out:
+  the never-headless rule is vendor-specific to Claude Code and Codex.
+
+  Interval is a starting point, not a measurement. Escalated work is rare — 2 of
+  30 startable tickets on 2026-09-07 — but the failure it fixes was two
+  merge-ready PRs idle for two hours. Fifteen minutes matches the other pollers.
+  Nate intends to calculate the real interval from usage once there is a few
+  weeks of it.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nateprich.command-center-muse-review</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/nateprich/.claude/command-center/scripts/muse-review</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <!-- Do not fire on load. A run at login competes with whatever Nate is
+         doing at the moment he sits down, and the queue is almost always
+         empty. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-muse-review.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-muse-review.err.log</string>
+
+    <!-- `gh` and `python3` are found on PATH; launchd's default PATH is minimal. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/nateprich/.local/bin</string>
+        <key>HOME</key>
+        <string>/Users/nateprich</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

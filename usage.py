@@ -601,7 +601,18 @@ def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:
 # Keyed by agent because that is what a caller has; the value is the pool it
 # spends. Adding a provider is this map plus a reader.
 
-PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai"}
+PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
+             "muse": "meta"}
+
+#: Providers that expose no usage anywhere, so there is nothing to gate on.
+#: **This is a standing exception, not a design** — `AGENTS.md` says missing
+#: usage data fails closed, and that rule would otherwise refuse Muse for ever.
+#: Nate's call, 2026-09-07: Muse's limits are generous, it takes only escalated
+#: work, and he reviews consumption through Meta's web portal. The distinction
+#: that matters is between *could not read* the budget, which still fails closed,
+#: and *there is no budget to read*, which proceeds knowingly. If Muse ever
+#: exposes usage, remove it from here rather than grandfathering the exception.
+UNMETERED_PROVIDERS = {"meta"}
 
 #: z.ai reports quota directly, so nothing here is estimated. Found by reading
 #: z.ai's own `glm-plan-usage` plugin rather than guessing endpoints; the token
@@ -815,6 +826,13 @@ def read_agent(agent: str, now: float) -> Optional[Dict]:
         return read_codex()
     if provider == "zai":
         return read_zai(now)
+    if provider in UNMETERED_PROVIDERS:
+        # Not a failure to read — there is nothing to read. Returned explicitly
+        # so callers can tell this apart from a reader that broke, and so the
+        # run's own output can say it was never gated rather than implying a
+        # budget was checked.
+        return {"source": provider, "captured_at": now,
+                "unmetered": True, "windows": {}}
     if provider != "anthropic":
         # A registered provider with no reader yet. Returning None fails the gate
         # closed rather than waving work through on a budget nobody can see —
@@ -888,6 +906,11 @@ def main(argv=None) -> int:
                 window["shared_with"] = [
                     a for a in agents_on(provider_of(agent)) if a != agent]
         verdict["over_pace"] = any(v["over"] for v in verdict["windows"])
+    if reading.get("unmetered"):
+        print("usage: {} is unmetered — {} exposes no usage, so nothing was "
+              "gated. See AGENTS.md.".format(agent, provider_of(agent)),
+              file=sys.stderr)
+        return 0
     if not verdict["known"]:
         print("usage: no usable window for {}".format(agent), file=sys.stderr)
         return 2

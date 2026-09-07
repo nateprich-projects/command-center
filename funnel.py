@@ -2206,6 +2206,12 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         return 0
 
     out["gate"] = "ok"
+    if reading.get("unmetered"):
+        # Say so rather than letting `gate: ok` imply a budget was checked. An
+        # unmetered provider is a standing exception recorded in AGENTS.md, and
+        # a run that never had a budget to check should not read like one that
+        # passed a check.
+        out["unmetered"] = True
     queue = review_queue(items, tier)
     if queue:
         out.update(do="review", work=queue[0])

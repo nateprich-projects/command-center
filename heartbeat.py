@@ -72,12 +72,14 @@ OUTCOMES = [
 
 #: Which pool an agent spends. Deliberately separate from the model: routing will
 #: put more than one model on a pool, and the budget is per pool.
-PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai"}
+PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
+             "muse": "meta"}
 
 #: Which application ran it. Distinct from provider and model: one provider can
 #: be reached through more than one harness, and harnesses differ in ways that
 #: change outcomes — agent loop, tool selection, context handling, retries.
-HARNESSES = {"claude": "claude-code", "codex": "codex", "zcode": "zcode"}
+HARNESSES = {"claude": "claude-code", "codex": "codex", "zcode": "zcode",
+             "muse": "muse-code"}
 
 #: Where each agent records what it actually is. **Read, never asked.** A prompt
 #: that reports its own model reports what it believes, and one confident wrong
@@ -88,6 +90,10 @@ MODEL_SOURCES = {
     "claude": "~/.claude/projects/*/*.jsonl",
     "codex": "~/.codex/sessions/*/*/*/*.jsonl",
     "zcode": "~/.zcode/cli/rollout/*.jsonl",
+    # Muse writes whole-file JSON snapshots rather than JSONL, so it is parsed
+    # by its own branch below. `HEAD.json` in the same directory carries no
+    # model, which is why this globs snapshots specifically.
+    "muse": "~/.local/share/muse/sessions/.msp-view-v1/*/snapshot-*.json",
 }
 
 #: Claude's transcripts record the model but not the effort level.
@@ -291,6 +297,35 @@ def repo_state() -> Optional[Dict]:
         return None
 
 
+def _merged_pr(value):
+    """A PR number, or nothing. Never a count.
+
+    `--merged` is documented as "PR number merged unattended", and two agents
+    read it as "how many": on 2026-09-07 zcode recorded `0` on runs that merged
+    nothing and Muse recorded `1` for PR #96. Every value in the dataset was
+    wrong, which makes the unattended-merge record `plan.md:156` requires
+    meaningless.
+
+    Coerced rather than rejected. This file's rule is that telemetry which can
+    stop a run is worse than telemetry that is occasionally absent, so a value
+    that cannot be a PR number is recorded as null with a warning, not raised.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        number = int(str(value).lstrip("#"))
+    except (TypeError, ValueError):
+        print("heartbeat: --merged {!r} is not a PR number; recording null"
+              .format(value), file=sys.stderr)
+        return None
+    if number <= 0:
+        print("heartbeat: --merged {} looks like a count, not a PR number. It "
+              "is the number of the PR that was merged; recording null."
+              .format(number), file=sys.stderr)
+        return None
+    return number
+
+
 def detect_model(agent: str) -> Dict[str, Optional[str]]:
     """What model is running, from the agent's own session file.
 
@@ -310,6 +345,24 @@ def detect_model(agent: str) -> Dict[str, Optional[str]]:
         paths = sorted(glob.glob(os.path.expanduser(MODEL_SOURCES[agent])),
                        key=os.path.getmtime, reverse=True)
         if not paths:
+            return found
+        if agent == "muse":
+            # Whole-file JSON, not JSONL, and the id is nested under `modelId`
+            # beside the token counts. Muse records no reasoning effort
+            # anywhere, so it stays null: this file's own rule is that a
+            # missing value is recorded rather than guessed, and the effort the
+            # runner passes is a declaration, not an observation.
+            snapshot = json.load(open(paths[0]))
+            stack = [snapshot]
+            while stack:
+                node = stack.pop()
+                if isinstance(node, dict):
+                    if isinstance(node.get("modelId"), str):
+                        found["model"] = node["modelId"]
+                        break
+                    stack.extend(node.values())
+                elif isinstance(node, list):
+                    stack.extend(node)
             return found
         for line in open(paths[0]):
             if '"model"' not in line and '"effort"' not in line:
@@ -553,7 +606,7 @@ def main(argv=None) -> int:
             # Recorded as a field, not scraped out of the note. plan.md requires
             # unattended merges to appear in the brief as a record, and a record
             # that has to be parsed out of prose is not a record.
-            "merged": args.merged,
+            "merged": _merged_pr(args.merged),
             "usage": usage_snapshot(args.agent),
             "attempt": args.attempt,
             "escalated_from": args.escalated_from,

@@ -50,6 +50,30 @@ that idea below every labelled one, because `funnel.py:217` still sorts on it. T
 how #15 came to sit last despite waiting longest. Tracked as #32, which removes the
 flag entirely once it lands.
 
+### Class it when you file it
+
+_(Confirmed by Nate 2026-09-07 — "I want you to class these yourself when you
+create them", replacing the 2026-09-05 rule that `Broken` was settable at entry
+by him alone.)_
+
+Class the item when you file it, using the ladder's own option names — `Broken`,
+`Maintenance`, `Improve`, `New`, `Replace`. Say in the capture note why you chose
+it, and say so plainly when you are unsure rather than guessing confidently; he
+overrides freely and a stated doubt is cheaper to correct than a confident error.
+`funnel.py` has no `class` command; use `SET_FIELD` with `CLASS_FIELD_ID` the way
+`cmd_reject` does, and record who decided it in a comment — your own name now,
+not his.
+
+**Still his:** the class on anything *he* raises, and any reclassification of
+something already filed. Propose, do not set.
+
+**Why this became safe to delegate.** Nothing acts on `Class` without him today,
+so setting it is a description rather than an authorisation. That changes when
+#59 lands and `Broken`/`Maintenance`/`Improve` become classes an agent may shape
+to `Ready` unattended — at which point an agent that both sets the class and acts
+on it is self-authorising. #59's brake is the escalation re-tune in its ticket 1,
+and it must land with that work, not after.
+
 Do not add it to TickTick. That is the do-list, and ideas there would compete
 with real tasks and erode its trustworthiness.
 
@@ -141,12 +165,9 @@ greenlit.
 - **Do not set `Ready`.** That is his gate, and the breakdown routine treats
   `Ready` as his approval to create tickets. Setting it yourself starts work he
   never authorised.
-- **Do not set `Class` on your own initiative, and never infer one** from a title or
-  body. Class is his. But *do* set it when he tells you to, naming the item and the
-  value — he decided on 2026-09-05 that `Broken` is settable at entry, by him, because
-  it is the one Class that carries consequence. Everything else stays unclassed through
-  Ideas. `funnel.py` has no `class` command; use `SET_FIELD` with `CLASS_FIELD_ID` the
-  way `cmd_reject` does, and record who decided it in a comment.
+- **Do not set a `Class` on anything *he* raised, and do not reclassify
+  something already filed.** Propose it instead. Setting `Class` on your own
+  captures is now expected — see "Class it when you file it" above.
 - **Do not create repositories** or transfer issues. If the work looks like it
   needs its own repo, say so in the plan and leave it.
 - **Do not grill more than one idea per session** unless he asks. His decision

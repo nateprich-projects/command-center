@@ -73,7 +73,10 @@ def test_park_sets_status_closes_not_planned_then_posts_the_reason(monkeypatch):
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
     monkeypatch.setattr(funnel.subprocess, "run", run)
 
-    assert funnel.main(["park", "42", "--reason", "No longer worth the cost"]) == 0
+    assert funnel.main([
+        "park", "42", "--reason", "No longer worth the cost",
+        "--run", "run-42", "--agent", "claude",
+    ]) == 0
 
     assert [event[0] for event in events] == [
         "read options", "set field", "close", "comment"
@@ -88,7 +91,10 @@ def test_park_sets_status_closes_not_planned_then_posts_the_reason(monkeypatch):
         "gh", "issue", "close", "42", "--repo", "nateprich/beta",
         "--reason", "not planned",
     )
-    assert events[3][1] == (
+    assert events[3][1][:6] == (
         "gh", "issue", "comment", "42", "--repo", "nateprich/beta",
-        "--body", funnel.PARK_COMMENT_PREFIX + "No longer worth the cost",
     )
+    posted = events[3][1][-1]
+    assert posted.startswith(funnel.PARK_COMMENT_PREFIX + "No longer worth the cost")
+    assert funnel.render_voice(posted) == "Nate (relayed by claude)"
+    assert funnel.parse_provenance(posted)["run"] == "run-42"

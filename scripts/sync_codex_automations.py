@@ -36,20 +36,44 @@ GLOB = "command-center-*/automation.toml"
 #: how to scope the sandbox. The agent at runtime needs what is below it.
 SEPARATOR = "\n---\n"
 
-#: Schedules that must also pass the presence test before working.
+#: Which schedules must also pass the presence test, **derived from when they
+#: fire** rather than from a list of names.
 #:
 #: The idle rule refuses to start unless Nate has not touched the five-hour
-#: window. Five-hour utilisation is a *proxy* for him being at the keyboard, and
-#: it is only worth paying for on a schedule that fires while he might be. The
-#: off-hours schedules already know he is away — the hour is the signal — and
-#: applying the proxy there refuses legitimate overnight work, because an evening
-#: ChatGPT session still shows in the window at 10pm.
+#: window. That is a *proxy* for him being at the keyboard, and it is only worth
+#: paying for on a schedule that fires while he might be. A schedule restricted
+#: to particular hours already encodes the answer — those are the hours he is
+#: asleep or at work — and applying the proxy there would refuse legitimate
+#: overnight work, since an evening ChatGPT session still shows in the window at
+#: 10pm.
 #:
-#: Keyed by automation id, so the difference lives with the schedule rather than
-#: in the routine, which all five share.
-IDLE_AUTOMATIONS = {"command-center-tickets-hourly"}
+#: So: a schedule with `BYHOUR` fires only in chosen windows and needs no proxy.
+#: One without it fires all day and does.
+#:
+#: This was a set of ids, keyed on `command-center-tickets-hourly`. That name is
+#: already wrong — the schedule runs every fifteen minutes — and worse, renaming
+#: it in the app would have silently switched the presence check off. Reading the
+#: rule the schedule already carries has no such trap, and a new all-day schedule
+#: gets the check without anyone remembering to add it.
+IDLE_RRULE_MARKER = "BYHOUR="
 
 GATE_LINE = "usage.py gate codex"
+
+
+def needs_presence_check(automation: str) -> bool:
+    """True when a schedule fires at any hour, so the clock cannot vouch for Nate
+    being away. Unknown schedules default to needing the check — the safe
+    direction is refusing to compete with him, not assuming he is out."""
+    if not automation:
+        return False
+    path = AUTOMATIONS / automation / "automation.toml"
+    try:
+        rule = re.search(r'^rrule = "(.*)"$', path.read_text(), re.MULTILINE)
+    except OSError:
+        return True
+    if not rule:
+        return True
+    return IDLE_RRULE_MARKER not in rule.group(1)
 
 
 def prompt_text(automation: str = "") -> str:
@@ -64,7 +88,7 @@ def prompt_text(automation: str = "") -> str:
         raise SystemExit("{}: no '---' separator; cannot tell setup notes from the "
                          "runtime prompt".format(ROUTINE))
     runtime = body.split(SEPARATOR, 1)[1].strip()
-    if automation in IDLE_AUTOMATIONS:
+    if needs_presence_check(automation):
         runtime = runtime.replace(GATE_LINE, GATE_LINE + " --idle", 1)
     return "{}\n\n{}\n".format(title, runtime)
 

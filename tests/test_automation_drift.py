@@ -70,12 +70,37 @@ def test_only_the_schedules_that_need_it_get_the_presence_check():
         return [ln.strip() for ln in text.splitlines()
                 if ln.strip().startswith("python3") and sync.GATE_LINE in ln][0]
 
-    for name in sync.IDLE_AUTOMATIONS:
-        assert gate_command(sync.prompt_text(name)).endswith("--idle")
+    for path in sorted(sync.AUTOMATIONS.glob(sync.GLOB)):
+        name = path.parent.name
+        command = gate_command(sync.prompt_text(name))
+        if sync.needs_presence_check(name):
+            assert command.endswith("--idle"), name
+        else:
+            assert command.endswith("gate codex"), name
 
-    plain = gate_command(
-        sync.prompt_text("command-center-tickets-weekend-early-mornings"))
-    assert plain.endswith("gate codex")
+
+def test_a_schedule_restricted_to_hours_needs_no_presence_proxy(tmp_path, monkeypatch):
+    """The clock already answers the question the proxy approximates.
+
+    Derived from the schedule rather than a list of names: the old version keyed
+    on `command-center-tickets-hourly`, so renaming that automation in the app
+    would have silently switched the presence check off.
+    """
+    monkeypatch.setattr(sync, "AUTOMATIONS", tmp_path)
+    def make(name, rrule):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "automation.toml").write_text('rrule = "RRULE:{}"\n'.format(rrule))
+        return name
+
+    allday = make("whenever", "FREQ=HOURLY;INTERVAL=1;BYMINUTE=0,15,30,45")
+    nights = make("nights", "FREQ=WEEKLY;BYDAY=SA;BYHOUR=2,3;BYMINUTE=0")
+
+    assert sync.needs_presence_check(allday)
+    assert not sync.needs_presence_check(nights)
+    # Unknown schedules default to checking: refusing to compete with him is the
+    # safe direction, assuming he is out is not.
+    assert sync.needs_presence_check("does-not-exist")
 
 
 def test_the_routine_still_separates_setup_notes_from_the_runtime_prompt():

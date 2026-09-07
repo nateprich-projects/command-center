@@ -146,6 +146,10 @@ def test_watchdog_does_not_report_an_unattributable_finish_as_dying():
         start("bbb", old + 3 * MIN),
         unresolved(old + 9 * MIN, ["aaa", "bbb"]),
         finish("bbb", old + 20 * MIN),
+        # Keep the silence check out of this test: its subject is the
+        # unattributable finish, not whether five hours have passed since the
+        # last record.
+        finish("recent", NOW - 20 * MIN),
     ]
     assert watchdog.assess("claude", records, NOW) == []
 

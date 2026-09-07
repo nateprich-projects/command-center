@@ -2151,6 +2151,65 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
     return found
 
 
+def cmd_begin(items: List[Item], now: datetime, agent: str,
+              tier: Optional[str], idle: bool) -> int:
+    """Start a run and say what — if anything — there is to do. One call.
+
+    A polling routine spends most of its runs discovering there is nothing to
+    do, and on a credit-metered pool that discovery is not free: every separate
+    tool call is another model turn carrying the whole context. Collapsing the
+    opening — heartbeat, budget gate, work lookup — into one command makes an
+    empty poll about as cheap as it can be, which is what lets the schedule run
+    often without the polling itself becoming the cost.
+
+    Always prints JSON, always starts the heartbeat first. A run that cannot be
+    recorded is one the watchdog reads as never having happened, so the record
+    comes before the decision, not after it.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import heartbeat
+    import usage
+
+    out: Dict[str, object] = {"agent": agent}
+    run = subprocess.run(
+        [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      "heartbeat.py"), "start", "--agent", agent],
+        capture_output=True, text=True)
+    out["run"] = (run.stdout or "").strip().splitlines()[-1] if run.stdout else None
+
+    reading = usage.read_agent(agent, now.timestamp())
+    if reading is None:
+        out.update(gate="unknown", do="stop",
+                   why="usage could not be read; a run that cannot read its "
+                       "budget does not work")
+        print(json.dumps(out, indent=2))
+        return 0
+
+    verdict = usage.pace(reading, now.timestamp(),
+                         provider=usage.provider_of(agent))
+    idle_verdict = usage.idle_verdict(agent, reading) if idle else None
+    if verdict.get("over_pace") or (idle_verdict or {}).get("over"):
+        out.update(gate="over", do="stop",
+                   why=(idle_verdict or {}).get("why") or "over pace")
+        print(json.dumps(out, indent=2))
+        return 0
+
+    out["gate"] = "ok"
+    queue = review_queue(items, tier)
+    if queue:
+        out.update(do="review", work=queue[0])
+    else:
+        pending = awaiting_breakdown(items)
+        if pending:
+            out.update(do="breakdown",
+                       work={"ref": pending[0].ref, "url": pending[0].url,
+                             "title": pending[0].title})
+        else:
+            out.update(do="stop", why="nothing to review and nothing to break down")
+    print(json.dumps(out, indent=2))
+    return 0
+
+
 def cmd_next_review(items: List[Item], tier: Optional[str]) -> int:
     """The single PR this reviewer should read, or nothing."""
     queue = review_queue(items, tier)
@@ -2530,6 +2589,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     merge.add_argument("--repo", default=REPO)
     merge.add_argument("--yes", action="store_true", dest="confirmed")
 
+    begin = sub.add_parser(
+        "begin", help="start a run and say what there is to do, in one call")
+    begin.add_argument("--agent", required=True)
+    begin.add_argument("--tier", choices=TIERS, default=None)
+    begin.add_argument("--idle", action="store_true")
+
     nxr = sub.add_parser(
         "next-review", help="the single PR this reviewer should read, or nothing")
     nxr.add_argument("--tier", choices=TIERS, default=None,
@@ -2572,6 +2637,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                args.shaping)
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan)
+        if args.command == "begin":
+            return cmd_begin(items, now, args.agent, args.tier, args.idle)
         if args.command == "next-review":
             return cmd_next_review(items, args.tier)
         if args.command == "review":

@@ -29,38 +29,38 @@ under their budgets, and only a finite class may preempt.
 the breakdown pays for the review's whole context on every call, and an agent
 carrying two jobs at once starts reaching for things neither asked of it.
 
-## 1. Record that you started
+## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/heartbeat.py start --agent zcode
+python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent zcode --tier standard
 ```
 
-**It prints a run id. Keep it, and pass it to every `finish` below as
-`--run <id>`.** Every exit path finishes the run it started: a start with no
-finish is read by the watchdog as a run that died.
+**One call does all of it**: records the heartbeat, checks the budget, and says
+what your work is. It always prints JSON:
 
-**If the heartbeat prints a warning about GitHub being unreachable, keep going.**
-It spools the record locally and a later run pushes it. Instrumentation does not
-gate the work it instruments. If it says `RECORD LOST`, say so in your finish
-note — that run will look like it never happened.
-
-## 2. Check the budget, and believe it
-
-```bash
-python3 /Users/nateprich/.claude/command-center/usage.py gate zcode
+```json
+{"agent": "zcode", "run": "9f03731c9536", "gate": "ok",
+ "do": "review", "work": {"pr": 43, "repo": "...", "ref": "...#23"}}
 ```
 
-- **exit 1** — over pace. Finish with `skipped-over-pace` and **stop**. Healthy,
-  not a failure. Do not argue with it and do not do "just a small thing" first.
-- **exit 2** — usage could not be read. Finish with `skipped-usage-unknown` and
-  **stop**. A run that cannot read its budget does not work.
-- **exit 0** — continue.
+- `"do": "stop"` — finish with the outcome below and **stop immediately**. Do not
+  investigate why, do not look around. Most runs end here and that is the design.
+  - `"gate": "over"` → `--outcome skipped-over-pace`
+  - `"gate": "unknown"` → `--outcome skipped-usage-unknown`
+  - otherwise → `--outcome nothing-to-do`
+- `"do": "review"` — go to step 3. `work` names the PR.
+- `"do": "breakdown"` — skip to step 6. `work` names the project.
 
-There is no `--idle` here. That flag exists to keep Codex from competing with
-Nate on a pool he also uses; this pool is bought for the automations and he does
-not work on it.
+**Keep `run`.** Every exit path finishes it: a start with no finish is read by the
+watchdog as a run that died.
 
-## 3. Reconcile before you review
+**Why one command rather than three.** Every separate tool call is another model
+turn carrying the whole context, and on a credit-metered pool an empty poll is
+not free. Collapsing the opening is what lets this run often without the polling
+itself becoming the expense. Do not "check the brief first" or look at open PRs
+to orient yourself — that is the habit this exists to prevent.
+
+## 2. Reconcile before you review
 
 Your failure mode is not lost work — everything you produce is a GitHub artifact,
 durable the moment you write it. It is a **half-applied sequence**: a run that
@@ -74,11 +74,9 @@ So check the open PRs for:
 - **merged but its ticket still open** — close the ticket, and check whether its
   parent has any children left.
 
-## 4. Job one: pick one PR
+## 3. Your PR
 
-```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py next-review --tier standard
-```
+`begin` already named it. Do not call `next-review` again.
 
 **You review only ordinary work.** Anything the ticket marked risky — auth,
 credentials, migrations, destructive operations, concurrency, weak acceptance
@@ -99,7 +97,7 @@ initiative is a thing Nate must decide to allow, not discover afterwards.
 
 If another PR looks wrong, say so in your finish note and leave it.
 
-## 5. Review it against `plan.md`
+## 4. Review it against `plan.md`
 
 Read `plan.md` **first**, then the diff. The question is not "is this good code"
 but **"does this do what the plan says, and does it avoid what the plan
@@ -164,7 +162,7 @@ unless its own ticket asked for the change:
   diff that edits the guardrail test alongside the file it guards passes its own
   check.
 
-## 6. Decide — record the verdict either way
+## 5. Decide — record the verdict either way
 
 ```bash
 python3 /Users/nateprich/.claude/command-center/funnel.py review <pr> --verdict approved --ci green
@@ -199,7 +197,7 @@ Nate fixes the review bar.
 
 Do not change `Status` or `Class` on anything. Those are Nate's gates.
 
-## 7. Only if there was no PR to review: break one approved plan into tickets
+## 6. Only if there was no PR to review: break one approved plan into tickets
 
 **If you reviewed a PR above, you are done — go to "Finish".** This section is for
 runs that found nothing to review.
@@ -254,7 +252,7 @@ If the plan is too vague to size, **do not invent the missing decisions.** Say w
 is undecided in a comment and leave it. It needs another grilling pass, which is
 interactive and not yours to do.
 
-## 8. Finish, always
+## 7. Finish, always
 
 ```bash
 python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent zcode --run <id> --outcome done --merged <n> --note "merged PR #<n>; broke down #<m> into <k> tickets"

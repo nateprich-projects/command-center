@@ -87,7 +87,23 @@ If this is a **re-review after a fix**, read the whole diff fresh against the
 plan. **Never review a diff of the diff.** A fix that is correct in isolation can
 still leave the whole wrong.
 
-Then run the tests. Both must hold:
+Then run the tests — **in a clone, never in `~/.claude/command-center`.**
+
+```bash
+gh repo clone <repo-from-the-PR> work/repo
+cd work/repo && gh pr checkout <pr> && python3 -m pytest tests/ -q
+```
+
+That path is Nate's own working tree. You are a reviewer: you read diffs, record a
+verdict and merge through the gate. **You never edit repository source.** The only
+reason you need files at all is to run the suite, and a throwaway clone gives you
+that.
+
+Codex is stopped from writing that checkout by its sandbox. Nothing stops you —
+zcode has no equivalent setting — so here it is a rule rather than a wall. Treat
+it as one.
+
+Both must hold:
 
 - the diff does what the ticket and `plan.md` say
 - the tests pass

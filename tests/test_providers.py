@@ -13,6 +13,7 @@ than an unstarted ticket — the quota is gone and nothing shipped.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 
@@ -42,9 +43,10 @@ def test_an_unregistered_agent_fails_closed():
 
 def test_a_registered_provider_with_no_reader_fails_closed(monkeypatch):
     """The failure a provider registry invites: a budget nobody can see waving
-    work through. z.ai is exactly this case until it has a reader."""
-    monkeypatch.setitem(usage.PROVIDERS, "glm", "zai")
-    assert usage.read_agent("glm", NOW) is None
+    work through. z.ai was this case until it got a reader on 2026-09-06; the
+    next provider added will be, until someone writes one."""
+    monkeypatch.setitem(usage.PROVIDERS, "someagent", "notyetimplemented")
+    assert usage.read_agent("someagent", NOW) is None
 
 
 def test_today_neither_agent_shares_a_pool():
@@ -53,10 +55,10 @@ def test_today_neither_agent_shares_a_pool():
 
 
 def test_two_agents_on_one_provider_share_it(monkeypatch):
-    monkeypatch.setitem(usage.PROVIDERS, "glm-codex", "zai")
-    monkeypatch.setitem(usage.PROVIDERS, "glm-review", "zai")
-    assert usage.shares_a_pool("glm-codex")
-    assert usage.agents_on("zai") == ["glm-codex", "glm-review"]
+    monkeypatch.setitem(usage.PROVIDERS, "one", "sharedpool")
+    monkeypatch.setitem(usage.PROVIDERS, "two", "sharedpool")
+    assert usage.shares_a_pool("one")
+    assert usage.agents_on("sharedpool") == ["one", "two"]
 
 
 def test_the_downstream_reserve_only_bites_on_a_shared_pool(monkeypatch):
@@ -74,3 +76,43 @@ def test_review_headroom_is_held_back_when_the_pool_is_shared():
     windows = usage.pace(seven_day(60.0, 0.9), NOW)["windows"]
     assert windows[0]["allowed_percent"] == 81.0
     assert 60.0 + windows[0]["reserve"] > 81.0 - usage.DOWNSTREAM_RESERVE
+
+
+# -- z.ai: read, never computed ----------------------------------------------
+
+def zai_payload(five_spent, week_spent, now):
+    return {"success": True, "data": {"level": "lite", "limits": [
+        {"type": "CREDIT_LIMIT", "usage": 2000, "currentValue": five_spent,
+         "nextResetTime": (now + 3 * 3600) * 1000},
+        {"type": "CREDIT_LIMIT", "usage": 10000, "currentValue": week_spent,
+         "nextResetTime": (now + 5 * 86400) * 1000},
+    ]}}
+
+
+def fake_curl(monkeypatch, payload):
+    class Out:
+        stdout = json.dumps(payload)
+    monkeypatch.setattr(usage.subprocess, "run", lambda *a, **k: Out())
+    monkeypatch.setattr(usage, "_zai_key", lambda: "k")
+
+
+def test_zai_quota_is_read_from_the_api(monkeypatch):
+    fake_curl(monkeypatch, zai_payload(200, 500, NOW))
+    r = usage.read_zai(NOW)
+    assert r["source"] == "zai"
+    assert r["windows"]["five_hour"]["used_percent"] == 10.0   # 200 / 2000
+    assert r["windows"]["seven_day"]["used_percent"] == 5.0    # 500 / 10000
+
+
+def test_zai_without_a_key_fails_closed(monkeypatch):
+    monkeypatch.setattr(usage, "_zai_key", lambda: None)
+    assert usage.read_zai(NOW) is None
+
+
+def test_zai_rejects_an_unsuccessful_payload(monkeypatch):
+    fake_curl(monkeypatch, {"success": False, "msg": "nope"})
+    assert usage.read_zai(NOW) is None
+
+
+def test_zcode_spends_the_zai_pool():
+    assert usage.provider_of("zcode") == "zai"

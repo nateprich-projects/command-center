@@ -72,7 +72,12 @@ OUTCOMES = [
 
 #: Which pool an agent spends. Deliberately separate from the model: routing will
 #: put more than one model on a pool, and the budget is per pool.
-PROVIDERS = {"claude": "anthropic", "codex": "openai"}
+PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai"}
+
+#: Which application ran it. Distinct from provider and model: one provider can
+#: be reached through more than one harness, and harnesses differ in ways that
+#: change outcomes — agent loop, tool selection, context handling, retries.
+HARNESSES = {"claude": "claude-code", "codex": "codex", "zcode": "zcode"}
 
 #: Where each agent records what it actually is. **Read, never asked.** A prompt
 #: that reports its own model reports what it believes, and one confident wrong
@@ -82,6 +87,7 @@ PROVIDERS = {"claude": "anthropic", "codex": "openai"}
 MODEL_SOURCES = {
     "claude": "~/.claude/projects/*/*.jsonl",
     "codex": "~/.codex/sessions/*/*/*/*.jsonl",
+    "zcode": "~/.zcode/cli/rollout/*.jsonl",
 }
 
 #: Claude's transcripts record the model but not the effort level.
@@ -270,8 +276,8 @@ def detect_model(agent: str) -> Dict[str, Optional[str]]:
     cross. Recorded as `model_source: "detected"` so a later reader knows this
     was observed rather than declared.
     """
-    found = {"provider": PROVIDERS.get(agent), "model": None,
-             "reasoning_effort": None, "model_source": "detected"}
+    found = {"provider": PROVIDERS.get(agent), "harness": HARNESSES.get(agent),
+             "model": None, "reasoning_effort": None, "model_source": "detected"}
     try:
         paths = sorted(glob.glob(os.path.expanduser(MODEL_SOURCES[agent])),
                        key=os.path.getmtime, reverse=True)
@@ -288,7 +294,13 @@ def detect_model(agent: str) -> Dict[str, Optional[str]]:
             message = record.get("message") or {}
             model = (payload.get("model") or message.get("model")
                      or record.get("model"))
-            if isinstance(model, str):
+            # zcode records the model as an object rather than a string.
+            if isinstance(model, dict):
+                if isinstance(model.get("modelId"), str):
+                    found["model"] = model["modelId"]
+                if isinstance(model.get("role"), str):
+                    found["model_role"] = model["role"]
+            elif isinstance(model, str):
                 found["model"] = model
             effort = payload.get("effort") or (
                 (payload.get("collaboration_mode") or {}).get("settings") or {}
@@ -438,7 +450,7 @@ def main(argv=None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     start = sub.add_parser("start", help="record that a run began")
-    start.add_argument("--agent", required=True, choices=["codex", "claude"])
+    start.add_argument("--agent", required=True, choices=sorted(PROVIDERS))
     start.add_argument("--ticket", default=None)
     start.add_argument("--attempt", type=int, default=None,
                        help="which attempt at this ticket this run is, from 1")
@@ -446,7 +458,7 @@ def main(argv=None) -> int:
                        help="the model this run escalated from, if any")
 
     finish = sub.add_parser("finish", help="record how a run ended")
-    finish.add_argument("--agent", required=True, choices=["codex", "claude"])
+    finish.add_argument("--agent", required=True, choices=sorted(PROVIDERS))
     finish.add_argument(
         "--run", default=None,
         help="the id printed by `start`; if omitted, resolved from the records, "
@@ -468,7 +480,7 @@ def main(argv=None) -> int:
     )
 
     show = sub.add_parser("read", help="print an agent's records as JSON")
-    show.add_argument("--agent", required=True, choices=["codex", "claude"])
+    show.add_argument("--agent", required=True, choices=sorted(PROVIDERS))
 
     args = parser.parse_args(argv)
 

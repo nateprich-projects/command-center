@@ -155,53 +155,43 @@ keeps #2 unaccepted — unattended merges that cannot be audited.
       phase says must escalate to Sol. Until `funnel.py` or ticket metadata carries the
       escalation decision, the cheap default is running unguarded. This is the remaining
       work in 3a, and it is now the *only* remaining work in it.
-- [ ] **3b. Claude-side routine work on a separate pool. — THE CRITICAL PATH.**
+- [ ] **3b. Routine work on a separate pool — THE CRITICAL PATH.** *Reader done
+      2026-09-06; scheduling and job assignment remain.*
+
       Not a cost saving. The automations and Nate compete for one Anthropic
-      subscription, and every attempt to settle that inside one pool just picks a
-      loser: at `WEEKLY_FLOOR` 25 the routines starve, at 50 he does. A second
-      provider with its own quota is the only thing that adds capacity.
+      subscription, and settling that inside one pool only picks a loser: at
+      `WEEKLY_FLOOR` 25 the routines starve, at 50 he does.
 
-      **Path found 2026-09-06: Claude Desktop's third-party inference gateway.**
-      Anthropic documents an in-app gateway — Developer → Configure Third-Party
-      Inference → Gateway, base URL `https://api.z.ai/api/anthropic`, Bearer auth,
-      **Apply locally**. This supersedes the headless-launchd plan and the rule-
-      scoping argument that went with it: `AGENTS.md:50` stands unamended.
+      **The harness is zcode, not the Claude Desktop gateway.** Nate chose z.ai
+      but declined to route Claude Desktop through it — that would have made his
+      interactive Opus work GLM too. zcode is a separate app with its own
+      in-app scheduling, so `AGENTS.md:50` stands unamended and nothing runs
+      headless. The Desktop gateway work is superseded; its findings survive in
+      `LEARNINGS.md`.
 
-      **Selectivity comes from Desktop and CLI configuring independently.**
-      Desktop → z.ai, which is where the scheduled routines run; CLI → Anthropic,
-      for interactive shaping on Opus. The cost is that interactive work moves to
-      a terminal.
+      **Done:** `PROVIDERS` maps `zcode → zai`; `read_zai()` reads real quota
+      from `https://api.z.ai/api/monitor/usage/quota/limit`; `detect_model`
+      reads `~/.zcode/cli/rollout/*.jsonl`, which carries `model.modelId`,
+      `model.role` and a full token breakdown including cache; heartbeat records
+      `harness`; both CLIs take their agent list from `PROVIDERS`, so a provider
+      brings its own surface.
 
-      `scripts/claude-glm` remains useful as the CLI-side fallback and for any
-      CLI-only automation, but is **not** how the routines reach GLM.
+      **Do not compute credits from z.ai's published multipliers.** Tried:
+      `(fresh x 6.9 + cached x 1.7 + output x 24) / 10,000` scored a session at
+      23.5 credits that the API scored at **3**. Roughly 8x wrong, in the
+      direction that starves the pool for nothing. Read the API.
 
-      **The gap in the research, and it is ours not theirs.** That handoff scopes
-      itself to *"interactive Claude Code experience—not CLI/headless operation"*,
-      and all seven of its acceptance tests are a human driving the app. Command
-      Center's need is unattended scheduled runs. Two of its own cautions bite
-      hardest exactly there:
+      **Measured, first data:** caching survives — 114,048 of 117,104 input
+      tokens were cache reads, a 97% hit rate, so the 4x-burn fear is dead. Plan
+      is `lite`: 2,000 credits per five hours, 10,000 weekly, and a whole
+      exploratory session cost 3.
 
-      - **"Desktop Auto permission mode is not available with third-party
-        providers."** A scheduled routine cannot answer a permission prompt. This
-        is the failure that caused the prompt storm and, downstream, #26. If
-        gateway mode forces Manual/Ask, the routines hang instead of running.
-        **Untested, and it is the acceptance criterion that actually matters.**
-      - **Prompt caching may not survive the gateway.** z.ai charges cached input
-        at 1.7 against 6.9 fresh. If `cache_control` is not preserved, credits
-        burn ~4x faster than the plan's sizing assumes.
-
-      **Acceptance test to add before trusting it:** let one *scheduled* Claude
-      task fire on the gateway with nobody at the keyboard, and confirm from the
-      heartbeat that it started, gated, did work and finished — not that a human
-      could drive a Code session. Everything else in their test list is
-      preparation for that one.
-
-      Also unconfirmed: whether the `glm-plan-usage` plugin runs in Desktop at
-      all (their confidence: medium), and whether its plan tier matches the
-      subscription. Automated gating still has no reader — but `usage.py` could
-      *compute* credits from local token counts using z.ai's published formula
-      (`(input×6.9 + cached×1.7 + output×24) / 10,000`), the same way
-      `read_claude_local` already estimates Anthropic usage from transcripts.
+      **Remaining, and it needs N:** a zcode schedule that runs the Claude
+      routine's jobs, and a decision about which jobs move — breakdown and
+      routine review are the candidates, per Sol's stage map. Then `plan.md`
+      675-701 is overturned honestly, because per-provider budgets now answer
+      its objection that a cheaper routine would be "invisible to the gate
+      governing it".
 
 ### P4 — Record it · C · after P3
 

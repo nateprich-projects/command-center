@@ -26,6 +26,7 @@ import argparse
 import glob
 import json
 import os
+import subprocess
 import datetime
 import sys
 import time
@@ -588,7 +589,21 @@ def pace(reading: Dict, now: float) -> Dict:
 # Keyed by agent because that is what a caller has; the value is the pool it
 # spends. Adding a provider is this map plus a reader.
 
-PROVIDERS = {"claude": "anthropic", "codex": "openai"}
+PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai"}
+
+#: z.ai reports quota directly, so nothing here is estimated. Found by reading
+#: z.ai's own `glm-plan-usage` plugin rather than guessing endpoints; the token
+#: is sent bare, without a `Bearer` prefix (either works).
+#:
+#: **Do not compute credits from the published multipliers.** That was tried:
+#: (fresh x 6.9 + cached x 1.7 + output x 24) / 10,000 estimated 23.5 credits for
+#: a session the API scored at 3. Roughly 8x wrong, in the direction that would
+#: have starved the pool for no reason. The API is authoritative; arithmetic from
+#: documentation is not.
+ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
+
+#: Where the key lives. Never in the repo, never in a shell profile.
+ZAI_KEYCHAIN_SERVICE = "ZAI_API_KEY"
 
 #: Agents that spend a pool, keyed by the pool. The inverse of PROVIDERS, used to
 #: say who else is drawing on the same credits.
@@ -619,6 +634,60 @@ def shares_a_pool(agent: str) -> bool:
     return bool(provider) and len(agents_on(provider)) > 1
 
 
+def _zai_key() -> Optional[str]:
+    try:
+        out = subprocess.run(
+            ["security", "find-generic-password", "-s", ZAI_KEYCHAIN_SERVICE,
+             "-a", os.environ.get("USER", ""), "-w"],
+            capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def read_zai(now: float) -> Optional[Dict]:
+    """Remaining z.ai Coding Plan quota, read rather than estimated.
+
+    Two windows come back as `CREDIT_LIMIT` entries carrying `usage` (the limit),
+    `currentValue` (spent) and `nextResetTime` in epoch milliseconds. They are
+    told apart by how far away that reset is, not by the `unit`/`number` enum,
+    whose meaning z.ai does not document — a shape that survives them renumbering
+    it.
+    """
+    key = _zai_key()
+    if not key:
+        return None
+    try:
+        out = subprocess.run(
+            ["curl", "-s", "--max-time", "20", ZAI_QUOTA_URL,
+             "-H", "Authorization: " + key,
+             "-H", "Accept-Language: en-US,en",
+             "-H", "Content-Type: application/json"],
+            capture_output=True, text=True, timeout=30)
+        payload = json.loads(out.stdout)
+    except Exception:
+        return None
+    if not payload.get("success"):
+        return None
+
+    windows = {}
+    for limit in (payload.get("data") or {}).get("limits", []):
+        cap = limit.get("usage")
+        spent = limit.get("currentValue")
+        reset = limit.get("nextResetTime")
+        if not cap or spent is None or not reset:
+            continue
+        resets_at = float(reset) / 1000.0
+        name = "five_hour" if (resets_at - now) <= 86400 else "seven_day"
+        windows[name] = {
+            "used_percent": round(100.0 * float(spent) / float(cap), 2),
+            "resets_at": resets_at,
+        }
+    if not windows:
+        return None
+    return {"source": "zai", "captured_at": now, "windows": windows}
+
+
 def read_agent(agent: str, now: float) -> Optional[Dict]:
     """Best available reading for an agent, preferring a real measurement.
 
@@ -634,6 +703,8 @@ def read_agent(agent: str, now: float) -> Optional[Dict]:
         return None
     if provider == "openai":
         return read_codex()
+    if provider == "zai":
+        return read_zai(now)
     if provider != "anthropic":
         # A registered provider with no reader yet. Returning None fails the gate
         # closed rather than waving work through on a budget nobody can see —
@@ -650,10 +721,11 @@ def read_agent(agent: str, now: float) -> Optional[Dict]:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("claude", "codex"):
+    # Driven by the registry, so adding a provider adds its CLI surface too.
+    for name in sorted(PROVIDERS):
         sub.add_parser(name, help="read {}'s usage".format(name))
     gate = sub.add_parser("gate", help="exit 1 if over pace, 2 if unknown")
-    gate.add_argument("agent", choices=["claude", "codex"])
+    gate.add_argument("agent", choices=sorted(PROVIDERS))
     args = parser.parse_args(argv)
 
     now = time.time()

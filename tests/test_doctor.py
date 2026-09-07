@@ -32,6 +32,19 @@ def stub_heartbeat_checks(monkeypatch):
     )
 
 
+def stub_github_checks(monkeypatch):
+    """Keep local-path tests local; GitHub checks have their own seams below."""
+    for function_name, check_name in (
+        ("check_auth_scope", "gh auth"),
+        ("check_project_fields", "Project fields"),
+        ("check_topic", "command-center topic"),
+    ):
+        monkeypatch.setattr(
+            funnel, function_name,
+            lambda name=check_name: funnel.Check(name, True, "ok", ""),
+        )
+
+
 def install_fixture(tmp_path):
     checkout = tmp_path / "checkout"
     (checkout / "skills" / "funnel").mkdir(parents=True)
@@ -57,11 +70,13 @@ def test_all_local_checks_pass_and_discover_every_skill(tmp_path, monkeypatch):
     (checkout / "skills" / "shape").mkdir()
     os.symlink(checkout / "skills" / "shape", claude / "skills" / "shape")
     stub_heartbeat_checks(monkeypatch)
+    stub_github_checks(monkeypatch)
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
     assert [check.name for check in checks] == [
-        "install symlinks", "settings.json", "usage cache", "heartbeat branch",
+        "install symlinks", "settings.json", "gh auth", "Project fields",
+        "command-center topic", "usage cache", "heartbeat branch",
     ]
     assert all(check.ok for check in checks)
     assert "4 links" in checks[0].found
@@ -155,12 +170,202 @@ def test_doctor_runs_after_a_broken_symlink_check(tmp_path, monkeypatch):
     checkout, claude = install_fixture(tmp_path)
     (claude / "command-center").unlink()
     stub_heartbeat_checks(monkeypatch)
+    stub_github_checks(monkeypatch)
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
-    assert len(checks) == 4
+    assert len(checks) == 7
     assert not checks[0].ok
     assert checks[1].ok
+
+
+# -- GitHub wiring ------------------------------------------------------------
+
+
+def auth_payload(scopes):
+    return {"hosts": {"github.com": [{
+        "state": "success",
+        "active": True,
+        "login": "nateprich",
+        "scopes": scopes,
+    }]}}
+
+
+def project_payload(status=None, klass=None, lock=True, extra_status=None):
+    status = funnel.STAGES if status is None else status
+    klass = funnel.LADDER if klass is None else klass
+    fields = [
+        {"name": "Status", "options": [{"name": option} for option in status]},
+        {"name": "Class", "options": [{"name": option} for option in klass]},
+    ]
+    if extra_status:
+        fields[0]["options"].append({"name": extra_status})
+    if lock:
+        fields.append({"name": funnel.LOCK_FIELD})
+    return {"user": {"projectV2": {"fields": {"nodes": fields}}}}
+
+
+def test_auth_with_project_scope_passes_and_reports_the_scopes(monkeypatch):
+    monkeypatch.setattr(funnel, "gh_auth_status",
+                        lambda: auth_payload("repo, project, read:org"))
+
+    result = funnel.check_auth_scope()
+
+    assert result.ok
+    assert "project" in result.found
+    assert "repo" in result.found
+
+
+def test_auth_without_project_scope_names_the_refresh_fix(monkeypatch):
+    monkeypatch.setattr(funnel, "gh_auth_status",
+                        lambda: auth_payload(["repo", "read:org"]))
+
+    result = funnel.check_auth_scope()
+
+    assert not result.ok
+    assert "missing project scope" in result.found
+    assert result.fix == "gh auth refresh -s project"
+
+
+def test_auth_without_an_account_names_the_login_fix(monkeypatch):
+    monkeypatch.setattr(funnel, "gh_auth_status", lambda: {"hosts": {}})
+
+    result = funnel.check_auth_scope()
+
+    assert not result.ok
+    assert "not authenticated" in result.found
+    assert result.fix == "gh auth login"
+
+
+def test_auth_command_failure_is_reported_not_raised(monkeypatch):
+    def fail():
+        raise funnel.GitHubError("could not resolve github.com")
+
+    monkeypatch.setattr(funnel, "gh_auth_status", fail)
+
+    result = funnel.check_auth_scope()
+
+    assert not result.ok
+    assert "gh auth status failed" in result.found
+    assert result.fix
+
+
+def test_all_project_fields_and_options_pass(monkeypatch):
+    monkeypatch.setattr(funnel, "gh_graphql",
+                        lambda query, **variables: project_payload())
+
+    result = funnel.check_project_fields()
+
+    assert result.ok
+    assert "Status" in result.found
+    assert funnel.LOCK_FIELD in result.found
+
+
+def test_missing_project_class_field_is_distinct_from_missing_options(monkeypatch):
+    # An empty option list still means the field exists; remove it for the
+    # field-missing case itself.
+    payload = project_payload()
+    payload["user"]["projectV2"]["fields"]["nodes"].pop(1)
+    monkeypatch.setattr(funnel, "gh_graphql",
+                        lambda query, **variables: payload)
+
+    result = funnel.check_project_fields()
+
+    assert not result.ok
+    assert "missing field Class" in result.found
+
+
+def test_missing_project_class_option_names_the_option(monkeypatch):
+    missing = [option for option in funnel.LADDER if option != "Broken"]
+    monkeypatch.setattr(
+        funnel, "gh_graphql",
+        lambda query, **variables: project_payload(klass=missing),
+    )
+
+    result = funnel.check_project_fields()
+
+    assert not result.ok
+    assert "Class is missing option Broken" in result.found
+    assert "missing field Class" not in result.found
+
+
+def test_extra_status_option_does_not_break_the_project_check(monkeypatch):
+    monkeypatch.setattr(
+        funnel, "gh_graphql",
+        lambda query, **variables: project_payload(extra_status="Later"),
+    )
+
+    assert funnel.check_project_fields().ok
+
+
+def test_renamed_lock_field_is_reported(monkeypatch):
+    monkeypatch.setattr(
+        funnel, "gh_graphql",
+        lambda query, **variables: project_payload(lock=False),
+    )
+
+    result = funnel.check_project_fields()
+
+    assert not result.ok
+    assert "missing field {}".format(funnel.LOCK_FIELD) in result.found
+
+
+def test_missing_project_is_reported(monkeypatch):
+    monkeypatch.setattr(funnel, "gh_graphql",
+                        lambda query, **variables: {"user": {"projectV2": None}})
+
+    result = funnel.check_project_fields()
+
+    assert not result.ok
+    assert "missing or not visible" in result.found
+
+
+def test_project_query_failure_is_reported_not_raised(monkeypatch):
+    def fail(*args, **kwargs):
+        raise funnel.GitHubError("rate limit or network failure")
+
+    monkeypatch.setattr(funnel, "gh_graphql", fail)
+
+    result = funnel.check_project_fields()
+
+    assert not result.ok
+    assert "Project query failed" in result.found
+    assert result.fix
+
+
+def test_topic_count_uses_the_member_search(monkeypatch):
+    monkeypatch.setattr(funnel, "member_repos",
+                        lambda: ["owner/one", "owner/two"])
+
+    result = funnel.check_topic()
+
+    assert result.ok
+    assert "2" in result.found
+
+
+def test_zero_topic_repos_is_broken_with_a_prose_fix(monkeypatch):
+    monkeypatch.setattr(funnel, "member_repos", lambda: [])
+
+    result = funnel.check_topic()
+
+    assert not result.ok
+    assert "0" in result.found
+    assert funnel.TOPIC in result.fix
+    assert "add" in result.fix
+    assert "gh " not in result.fix
+
+
+def test_topic_search_failure_is_reported_not_raised(monkeypatch):
+    def fail():
+        raise funnel.GitHubError("GitHub unreachable")
+
+    monkeypatch.setattr(funnel, "member_repos", fail)
+
+    result = funnel.check_topic()
+
+    assert not result.ok
+    assert "topic search failed" in result.found
+    assert result.fix
 
 
 def test_main_doctor_does_not_load_github(monkeypatch):

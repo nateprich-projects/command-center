@@ -86,6 +86,7 @@
   },
   {
     "comment": "Parked, so it needs no Class and waits on nobody.",
+    "park_comment": "**Parked:** The rewrite no longer earns its maintenance cost.",
     "status": {"name": "Parked"},
     "class": null,
     "content": {
@@ -96,7 +97,9 @@
       "assignees": {"nodes": []},
       "parent": null,
       "subIssuesSummary": {"total": 0, "completed": 0},
-      "timelineItems": {"nodes": []}
+      "timelineItems": {"nodes": [
+        {"__typename": "ProjectV2ItemStatusChangedEvent", "createdAt": "2026-09-03T00:00:00Z", "status": "Parked", "project": {"number": 2}}
+      ]}
     }
   },
   {

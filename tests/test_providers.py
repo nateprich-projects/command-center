@@ -120,12 +120,35 @@ def test_zcode_spends_the_zai_pool():
 
 # -- pacing policy is per provider, not global --------------------------------
 
-def test_the_weekly_floor_protecting_nate_does_not_cap_a_pool_he_never_uses():
-    """WEEKLY_FLOOR exists to leave Nate room on his own subscription. Applied to
-    a pool bought for the automations, it capped them at 25% of their own budget."""
-    reading = seven_day(40.0, 0.02)          # day one of the week, 40% spent
-    assert usage.pace(reading, NOW)["over_pace"]                      # shared pool
-    assert not usage.pace(reading, NOW, provider="zai")["over_pace"]  # theirs alone
+def test_the_dedicated_pool_has_its_own_policy_not_the_shared_default():
+    """`WEEKLY_FLOOR` exists to leave Nate room on a subscription he also works
+    on. A pool bought for the automations needs no such protection — what it
+    needs is pacing, so a week's credits are not spendable on Monday."""
+    early = usage.pace(seven_day(10.0, 0.05), NOW, provider="zai")["windows"][0]
+    assert early["allowed_percent"] == 15.0          # its own floor, not 25
+    assert early["reserve"] == 0.5                   # its own reserve, not 5
+
+
+def test_the_dedicated_pool_is_paced_rather_than_flat():
+    """At 90 the floor equalled the target, the rising line never applied, and
+    the whole week was spendable on day one. At 15 the line governs from about
+    day one onward."""
+    day_one = usage.pace(seven_day(40.0, 0.05), NOW, provider="zai")
+    assert day_one["over_pace"]                      # 40% on Monday is ahead
+
+    late = usage.pace(seven_day(40.0, 0.9), NOW, provider="zai")
+    assert not late["over_pace"]                     # the same 40% is fine by Sunday
+
+
+def test_the_dedicated_pool_reserve_is_sized_to_its_own_runs():
+    """5% is calibrated for Anthropic, where a run is ~1.5% of the window. A
+    measured z.ai run costs ~43 credits of 10,000 — 0.43% — so the shared
+    reserve would hold back 500 credits against a run costing forty."""
+    window = usage.pace(seven_day(44.0, 0.5), NOW, provider="zai")["windows"][0]
+    assert window["reserve"] == 0.5
+    assert not window["over"]                        # 44.5 < 45 allowed
+    # The shared default would have refused the same reading.
+    assert usage.pace(seven_day(44.0, 0.5), NOW)["windows"][0]["over"]
 
 
 def test_an_unknown_provider_gets_the_shared_defaults():
@@ -134,28 +157,4 @@ def test_an_unknown_provider_gets_the_shared_defaults():
     assert a["allowed_percent"] == b["allowed_percent"] == usage.WEEKLY_FLOOR
 
 
-def test_the_dedicated_pool_is_a_flat_cap_not_a_paced_one():
-    """What Nate traded away on 2026-09-06, stated rather than discovered.
-
-    At `weekly_floor` 90 the floor equals `WEEKLY_TARGET`, so the proportional
-    line can never exceed it and is inert. There is no early-week smoothing on
-    this pool: 80% spent on day one is allowed, where a paced pool would refuse
-    it. His reasoning was that he does not use the app by hand and 90% still
-    leaves 1,000 credits. The exposure is a runaway spending the week by Tuesday.
-    """
-    early = usage.pace(seven_day(80.0, 0.1), NOW, provider="zai")
-    assert not early["over_pace"]
-
-    # The cap itself still binds.
-    assert usage.pace(seven_day(95.0, 0.1), NOW, provider="zai")["over_pace"]
-
-
-def test_the_dedicated_pool_reserve_is_sized_to_its_own_runs():
-    """5% is calibrated for Anthropic, where a run is ~1.5% of the window. A
-    measured z.ai session cost 3 credits of 10,000 — 0.03% — so the shared
-    reserve would hold back 500 credits against a run costing three, and a 90 cap
-    would really bite at 85."""
-    window = usage.pace(seven_day(89.0, 0.5), NOW, provider="zai")["windows"][0]
-    assert window["reserve"] == 0.5
-    assert not window["over"]                     # 89.5 < 90
-    assert usage.pace(seven_day(89.0, 0.5), NOW)["windows"][0]["over"]  # shared: 94 > 45
+  # shared: 94 > 45

@@ -29,7 +29,21 @@ being re-synced. So this is not a one-off race: the app appears to hold a live c
 whichever automation is open in its editor and write it back periodically, overwriting
 anything changed underneath. The mechanism is still `inferred`; the repeat is measured.
 
-Practical: close the automation in the app before syncing, or expect to re-sync after.
+**Confirmed with timestamps, 2026-09-06 21:01.** Drift forensics added to
+`--check` record the file's mtime at the moment a mismatch is found. They caught a write
+at 21:01:51 — twelve minutes after the last sync, on a Sunday evening, to a schedule that
+only fires on weekday mornings. Nothing in `~/.codex/automations`, `.codex-global-state.json`,
+`goals_1.sqlite` or `logs_2.sqlite` holds a second copy of the prompt, so `automation.toml`
+*is* the store and the stale text came from the app's own memory being flushed over it.
+
+An earlier reading of `updated_at` seemed to show no app write. That was wrong: the field
+had been overwritten by the sync itself, so the evidence of the app's write was destroyed
+by the act of repairing it. Measuring at the moment of detection is what settled it.
+
+**Practical: quit the Codex app, sync, then relaunch.** While it is running with an
+automation loaded, external edits to that file are unreliable — the app periodically
+writes its in-memory copy over whatever is on disk. Re-syncing works but only until the
+next flush.
 
 **Practical rule: sync *after* editing automations in the app, never before.** And the
 drift test is what makes this survivable — `tests/test_automation_drift.py` caught this

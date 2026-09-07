@@ -20,6 +20,8 @@ are left exactly as the app wrote them.
 from __future__ import annotations
 
 import argparse
+import datetime
+import hashlib
 import json
 import pathlib
 import re
@@ -147,7 +149,31 @@ def main(argv=None) -> int:
             continue
         drifted.append(path.parent.name)
         if args.check:
+            # Record *when* it changed, not only that it did. Without this the
+            # only evidence is a mismatch, which cannot tell a file someone
+            # rewrote from an expected value that moved underneath it — and
+            # guessing between those produced a confident wrong explanation on
+            # 2026-09-06.
+            stat = path.stat()
             print("  DRIFTED  {}".format(path.parent.name))
+            print("           file written {}  ({} bytes, sha {})".format(
+                datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(
+                    timespec="seconds"),
+                stat.st_size,
+                hashlib.sha256(path.read_bytes()).hexdigest()[:12]))
+            print("           routine written {}  (expected prompt sha {})".format(
+                datetime.datetime.fromtimestamp(
+                    ROUTINE.stat().st_mtime).isoformat(timespec="seconds"),
+                hashlib.sha256(wanted.encode()).hexdigest()[:12]))
+            first = next((i for i, (a, b) in enumerate(
+                zip((existing or "").splitlines(), wanted.splitlines()))
+                if a != b), None)
+            if first is not None:
+                stored = (existing or "").splitlines()[first]
+                print("           first differing line {}:".format(first + 1))
+                print("             stored:   {}".format(stored[:88]))
+                print("             expected: {}".format(
+                    wanted.splitlines()[first][:88]))
             continue
 
         shutil.copy2(path, path.with_suffix(".toml.bak"))

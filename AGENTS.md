@@ -46,15 +46,46 @@ wrong.
 
 ## Execution rules — non-negotiable
 
-- **In-app scheduling only.** Claude Code Routines and Codex Scheduled. **Never invoke
-  either CLI headlessly** from launchd, cron, GitHub Actions, or any script. This is an
-  account-suspension risk.
+- **In-app scheduling only, for Claude Code and Codex.** Claude Code Routines and Codex
+  Scheduled. **Never invoke either of those CLIs headlessly** from launchd, cron, GitHub
+  Actions, or any script. This is an account-suspension risk.
+
+  **The rule is vendor-specific, not a general principle** — it is about what Anthropic
+  and OpenAI permit on these plans, and it has been misread as universal.
+  _(confirmed by Nate 2026-09-07.)_
+
+  **Muse Code is exempt, because Meta sanctions it.** `muse exec` is Meta's own documented
+  mode for scripts and CI, with `--json` streaming JSONL. Muse ships no scheduler of its
+  own, so a launchd job running `muse exec` is the only way to schedule it — and it is a
+  *better* surface than the alternative, because a plist is a file that can be versioned
+  and drift-checked, unlike zcode's prompt, which lives in an app UI and which nothing can
+  see (#52).
+
+  **What makes an unattended Muse run safe is capability removal, not approval mode.**
+  Measured 2026-09-07: `--approval-mode never` does **not** fail closed. It means *never
+  ask*, and it auto-approved a shell command with no prompt. A scheduled Muse job must
+  therefore run `--disable-shell --disable-write`, so there is nothing dangerous to
+  approve, rather than relying on an approval setting to refuse.
+
+  **And it has none of Codex's gates.** No presence check, no budget gate — Muse reports no
+  usage anywhere in its CLI — and no idle rule. A launchd job fires whenever it is due. The
+  reviewer being read-only by construction is what makes that acceptable.
 - **No Copilot automation.** Those are employer-provided tokens; personal use stays
   one-off and manual.
 - **Every routine starts, reads fresh usage, and exits immediately if over the pace
   line.** The gate lives inside the session, never before it — see `plan.md`,
   "Reading usage".
 - **Missing usage data fails closed.** A run that cannot read its budget does not work.
+
+  **Muse is the one exception, and it is deliberate.** Muse reports no usage through its
+  CLI, so this rule would refuse it permanently. Nate's call, 2026-09-07: its limits are
+  generous, it takes only escalated work, and he will review consumption through Meta's web
+  portal in a week or two rather than through a gate. _(confirmed by Nate 2026-09-07.)_
+
+  The exception is scoped to *reading* usage, not to the rest: a Muse run still records a
+  heartbeat, and it still stops if the funnel has nothing for it. If Muse ever exposes
+  usage, the exception should end rather than be grandfathered — an unmetered pool is a
+  standing exception, not a design.
 
 ## Repository hygiene is yours, not his
 

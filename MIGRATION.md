@@ -144,17 +144,18 @@ keeps #2 unaccepted — unattended merges that cannot be audited.
       never runs — the failure that looks like success. `tests/test_escalation.py`
       pins that with real ticket text.
 
-      **Remaining, and it needs N:** two Codex automations, one per tier, each
-      passing `--tier` in its prompt — `standard` on the cheap default, an
-      `escalated` one on `gpt-5.6-sol`. Until both exist, `--tier` is available
-      and unused, and every ticket still goes to Luna. Also: breakdown must start
-      writing `Risk:` lines, which is a `routines/claude.md` change.
+      **Wired 2026-09-06.** `routines/codex-work.md` asks `funnel next --tier
+      standard`, so the cheap default walks past work it may not take, with a new
+      exit case for "every startable ticket needs the escalated engine" — a
+      healthy skip, not an error. `routines/claude.md` now writes a `Risk:` line
+      into every ticket at breakdown, with the criteria and the reason it is
+      breakdown's job: it has the plan in front of it and the engineer does not.
+      All five automations synced.
 
-      **Superseded — the escalation half is not built.** Every ticket now goes to Luna,
-      including auth, migrations, concurrency and weak-acceptance-criteria work that this
-      phase says must escalate to Sol. Until `funnel.py` or ticket metadata carries the
-      escalation decision, the cheap default is running unguarded. This is the remaining
-      work in 3a, and it is now the *only* remaining work in it.
+      **The one part that needs N:** a second Codex schedule on `gpt-5.6-sol`
+      passing `--tier escalated`. Until it exists, escalated tickets are correctly
+      refused by Luna and worked by nobody — safe, but stalled.
+
 - [ ] **3b. Routine work on a separate pool — THE CRITICAL PATH.** *Reader done
       2026-09-06; scheduling and job assignment remain.*
 

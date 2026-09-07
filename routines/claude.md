@@ -1,4 +1,4 @@
-# Claude routine — review a PR, then break down an approved plan
+# Claude routine — review the risky pull requests
 
 Paste this into a **Claude Code Routine**. It requires Claude Code to be open on
 the Mac mini.
@@ -68,10 +68,29 @@ So before reviewing anything, check the open PRs for:
 `python3 /Users/nateprich/.claude/command-center/prior_run.py <issue-number> --agent claude` shows what a previous
 run intended, if you need it. Evidence of intent, never of truth.
 
-## 4. Job one: pick one PR
+## 4. Pick one PR — and only an escalated one
 
-Oldest open PR from a `ticket/*` branch that you have not already acted on.
-If there are none, skip to job two.
+```bash
+python3 /Users/nateprich/.claude/command-center/funnel.py next-review --tier escalated
+```
+
+**You review only what the ticket marked risky.** Routine review and ticket
+breakdown moved to the zcode routine on a separate quota pool
+(`routines/zcode.md`), so this run exists for the judgement Opus is worth paying
+for: auth and credentials, data migration, destructive or irreversible work,
+concurrency, and tickets whose acceptance criteria were too weak to verify.
+
+`--tier` is fixed by this routine, exactly as an engine's tier is fixed by its
+schedule. Do not widen it because the queue looks empty — an empty queue is the
+system working, and the cheap reviewer is already handling the rest.
+
+- **exit 1** — nothing escalated is waiting. Finish with `nothing-to-do` and
+  stop. This will be the common outcome, and it is the design.
+- **exit 0** — you get one PR as JSON. That is your work.
+
+A PR needs review when no verdict covers its **current head**, which covers three
+cases at once: never reviewed, reviewed and then pushed to, and rejected and
+since fixed.
 
 ## 5. Review it against `plan.md`
 
@@ -147,7 +166,17 @@ retires this whole arrangement.
 
 Do not change `Status` or `Class` on anything. Those are Nate's gates.
 
-## 7. Job two: break one approved plan into tickets
+## 7. Breakdown is not yours any more
+
+Breaking approved plans into tickets moved to `routines/zcode.md`, which runs on
+z.ai's pool rather than Nate's Anthropic subscription. It is mechanical work
+against a plan that already exists, and it was competing with him for the quota
+he does his own thinking on.
+
+If nothing escalated was waiting, this run has nothing to do. Finish and stop.
+
+<details>
+<summary>The old job two, kept until zcode has run it a few times</summary>
 
 ```bash
 python3 /Users/nateprich/.claude/command-center/funnel.py brief | jq '.awaiting_breakdown'
@@ -193,6 +222,8 @@ mentions a race condition, because you knew what the words meant.
 If the plan is too vague to size, **do not invent the missing decisions.** Say
 what is undecided in a comment and leave it. It needs another grilling pass,
 which is interactive and not yours to do.
+
+</details>
 
 ## 8. Finish, always
 

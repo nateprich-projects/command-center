@@ -1316,6 +1316,55 @@ def _ticket_pr(repo: str, number: int) -> Optional[Dict]:
     return rows[0] if rows else None
 
 
+def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict]:
+    """Open ticket PRs that need a review, best-first.
+
+    A PR needs review when no verdict covers its **current head**. That covers
+    three cases with one rule: never reviewed, reviewed and then pushed to, and
+    reviewed-and-rejected then fixed. The last is what hands a rejected PR back
+    to a reviewer once the engineer has acted on it.
+
+    `tier` filters by the *ticket's* risk, not the PR's size. A reviewer is
+    matched to the work the same way an engine is: the expensive judgement is
+    spent where the ticket says the stakes are, and nowhere else.
+    """
+    found: List[Dict] = []
+    for repo in sorted({i.repo for i in items}):
+        rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "open",
+                        "--json", "number,headRefName,headRefOid",
+                        "--limit", "100") or []
+        for row in rows:
+            head = row.get("headRefName") or ""
+            if not head.startswith("ticket/"):
+                continue
+            ref = "{}#{}".format(repo, head.split("/", 1)[1])
+            ticket = next((i for i in items if i.ref == ref), None)
+            if ticket is None:
+                continue
+            verdict = latest_verdict(repo, row.get("number"))
+            if verdict and verdict.get("head_sha") == row.get("headRefOid"):
+                continue  # this exact diff has already been judged
+            needed = required_tier(
+                ticket.title, _ticket_body(repo, ticket.number))
+            if tier and needed != tier:
+                continue
+            found.append({"pr": row.get("number"), "repo": repo, "ref": ref,
+                          "tier": needed, "url": ticket.url,
+                          "title": ticket.title})
+    return found
+
+
+def cmd_next_review(items: List[Item], tier: Optional[str]) -> int:
+    """The single PR this reviewer should read, or nothing."""
+    queue = review_queue(items, tier)
+    if not queue:
+        print("nothing — no {}review waiting".format(
+            (tier + " ") if tier else ""), file=sys.stderr)
+        return 1
+    print(json.dumps(queue[0], indent=2))
+    return 0
+
+
 def cmd_review(repo: str, pr: int, verdict: str, ci: str,
                blocking: List[str], note: Optional[str]) -> int:
     """Record a structured review verdict on a PR.
@@ -1653,6 +1702,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     merge.add_argument("pr", type=int)
     merge.add_argument("--repo", default=REPO)
     merge.add_argument("--yes", action="store_true", dest="confirmed")
+
+    nxr = sub.add_parser(
+        "next-review", help="the single PR this reviewer should read, or nothing")
+    nxr.add_argument("--tier", choices=TIERS, default=None,
+                     help="review only work of this risk tier. Declared by the "
+                          "routine, the same way an engine declares its own.")
     reject.add_argument("--note", default=None, help="what is broken")
     args = parser.parse_args(argv)
 
@@ -1683,6 +1738,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                args.shaping)
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan)
+        if args.command == "next-review":
+            return cmd_next_review(items, args.tier)
         if args.command == "review":
             return cmd_review(args.repo, args.pr, args.verdict, args.ci,
                               args.blocking, args.note)

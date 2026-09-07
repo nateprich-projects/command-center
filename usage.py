@@ -646,20 +646,23 @@ DOWNSTREAM_RESERVE = 20.0
 
 PROVIDER_POLICY = {
     # Bought for the automations and used for nothing else, so there is no
-    # interactive share to protect. Nate set the floor to 90 on 2026-09-06: he
-    # has no plans to use the app by hand, and 90% still leaves 1,000 credits.
+    # interactive share to protect. Set to 90 on 2026-09-06 and lowered to 15 the
+    # same day, once a real routine run was measured at ~43 credits rather than
+    # the ~3 a trivial session had suggested.
     #
-    # At 90 the floor equals `WEEKLY_TARGET`, so the proportional line is inert
-    # and this is a flat cap. That is deliberate and it is the trade: no early-week
-    # smoothing, so a runaway could spend the week by Tuesday. Acceptable while the
-    # queue is small and a run costs ~3 credits; revisit if a retry storm ever
-    # empties it.
+    # At 90 the floor equalled `WEEKLY_TARGET`, so the proportional line was inert
+    # and the whole week was spendable on Monday. At 15 the floor stops mattering
+    # after about a day and the rising line governs, which makes the schedule
+    # **self-limiting**: poll as often as you like and the gate simply refuses
+    # once the week is ahead of itself. Cadence stops being a number anyone has to
+    # choose. Below about 10 the floor stops doing its job and Monday morning
+    # becomes a dead zone again.
     #
     # The reserve moves with it. 5% of a weekly window is calibrated for Anthropic,
     # where one run is ~1.5% of the budget. Measured here, a whole session cost
     # **3 credits of 10,000** — 0.03% — so the shared reserve would hold back 500
     # credits against a run that costs three, and the cap would really bite at 85%.
-    "zai": {"weekly_floor": 90.0, "weekly_reserve": 0.5},
+    "zai": {"weekly_floor": 15.0, "weekly_reserve": 0.5},
 
     # Nate uses ChatGPT personally, so this pool is shared and keeps a weekly
     # line. But it is the only pool with a **second** guard: the idle rule, which

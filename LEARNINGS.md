@@ -8,6 +8,23 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### zcode reports `computer_asleep_or_app_not_running` for skips that are neither
+
+**2026-09-06 · zcode · measured**
+
+A scheduled run at 19:24 was recorded as `dispatch: skipped` with
+`error: computer_asleep_or_app_not_running`. Neither held.
+
+`pmset -g custom` shows `sleep 0` — the Mac is configured never to sleep — and
+`pmset -g log` shows no sleep or wake events all day, only "Display is turned off/on".
+The display was still on at 19:24; it did not go off until 19:30. ZCode's own process had
+been up since 17:38.
+
+The likeliest real cause is that the automation was **paused** at that moment. The point
+is not the cause but the label: it names two conditions, both checkable, and both false —
+so believing it sends you to power settings for a scheduling problem. Check `pmset -g log`
+before acting on it.
+
 ### Editing a Codex automation in the app can write back a stale prompt
 
 **2026-09-06 · Codex desktop · measured**

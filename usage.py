@@ -488,10 +488,17 @@ def opened_idle(agent: str, resets_at: Optional[float]) -> Optional[bool]:
 def idle_verdict(agent: str, reading: Dict) -> Optional[Dict]:
     """Whether Codex may work right now, on the presence test rather than budget.
 
-    `None` means the rule does not apply — it is Codex-only, because Claude has
-    no trustworthy signal to test: a scheduled Claude run writes no statusline,
-    so its reading falls back to a token estimate that cannot say "you spent
-    none of this".
+    `None` means the rule does not apply. It is Codex-only, because Claude has no
+    trustworthy signal to test: a scheduled Claude run writes no statusline, so
+    its reading falls back to a token estimate that cannot say "you spent none of
+    this".
+
+    **Asked for by the schedule, not applied to every run.** Five-hour
+    utilisation is a *proxy* for Nate being at the keyboard, and a schedule that
+    fires at 2am already knows he is not. Applying the proxy there blocks
+    legitimate overnight work — an evening ChatGPT session still shows in the
+    window at 10pm, long after he has gone to bed. So the frequent daytime
+    schedule passes `--idle` and the off-hours ones do not.
     """
     if agent != "codex":
         return None
@@ -653,6 +660,14 @@ PROVIDER_POLICY = {
     # **3 credits of 10,000** — 0.03% — so the shared reserve would hold back 500
     # credits against a run that costs three, and the cap would really bite at 85%.
     "zai": {"weekly_floor": 90.0, "weekly_reserve": 0.5},
+
+    # Nate uses ChatGPT personally, so this pool is shared and keeps a weekly
+    # line. But it is the only pool with a **second** guard: the idle rule, which
+    # refuses to start unless the five-hour window is completely untouched. That
+    # is a far more precise protection than a weekly percentage, so the floor is
+    # looser here than Anthropic's — 25 was blocking work at moments Codex was
+    # provably not competing with him. Raised to 60 on 2026-09-06.
+    "openai": {"weekly_floor": 60.0},
 }
 
 
@@ -762,6 +777,11 @@ def main(argv=None) -> int:
         sub.add_parser(name, help="read {}'s usage".format(name))
     gate = sub.add_parser("gate", help="exit 1 if over pace, 2 if unknown")
     gate.add_argument("agent", choices=sorted(PROVIDERS))
+    gate.add_argument(
+        "--idle", action="store_true",
+        help="also require that Nate has not touched the five-hour window. For "
+             "schedules that fire while he may be working; off-hours schedules "
+             "omit it, because the hour is already the presence signal.")
     args = parser.parse_args(argv)
 
     now = time.time()
@@ -797,7 +817,7 @@ def main(argv=None) -> int:
         return 2
 
     verdict = pace(reading, now, provider=provider_of(agent))
-    idle = idle_verdict(agent, reading)
+    idle = idle_verdict(agent, reading) if getattr(args, "idle", False) else None
 
     # A pool shared with another agent keeps headroom for the stage that follows.
     if shares_a_pool(agent) and verdict.get("known"):

@@ -41,9 +41,10 @@ def test_every_codex_automation_matches_the_routine():
                 sync.AUTOMATIONS)
         )
 
-    wanted = sync.prompt_text()
     drifted = []
     for path in files:
+        # Per automation: the idle flag differs by schedule.
+        wanted = sync.prompt_text(path.parent.name)
         _, existing = sync.current(path.read_text())
         if existing != wanted:
             drifted.append(path.parent.name)
@@ -56,6 +57,25 @@ def test_every_codex_automation_matches_the_routine():
         "  python3 scripts/sync_codex_automations.py".format(
             len(drifted), len(files), "\n  ".join(drifted))
     )
+
+
+def test_only_the_schedules_that_need_it_get_the_presence_check():
+    """`--idle` refuses to start unless Nate has not touched the five-hour
+    window. That proxy is worth paying for on a schedule firing while he might be
+    working, and wrong on one firing at 2am: an evening ChatGPT session still
+    shows in the window hours after he has gone to bed, so it would refuse
+    legitimate overnight work."""
+    def gate_command(text):
+        # The prose explains the flag, so only the command line is evidence.
+        return [ln.strip() for ln in text.splitlines()
+                if ln.strip().startswith("python3") and sync.GATE_LINE in ln][0]
+
+    for name in sync.IDLE_AUTOMATIONS:
+        assert gate_command(sync.prompt_text(name)).endswith("--idle")
+
+    plain = gate_command(
+        sync.prompt_text("command-center-tickets-weekend-early-mornings"))
+    assert plain.endswith("gate codex")
 
 
 def test_the_routine_still_separates_setup_notes_from_the_runtime_prompt():

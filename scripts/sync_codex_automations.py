@@ -36,14 +36,36 @@ GLOB = "command-center-*/automation.toml"
 #: how to scope the sandbox. The agent at runtime needs what is below it.
 SEPARATOR = "\n---\n"
 
+#: Schedules that must also pass the presence test before working.
+#:
+#: The idle rule refuses to start unless Nate has not touched the five-hour
+#: window. Five-hour utilisation is a *proxy* for him being at the keyboard, and
+#: it is only worth paying for on a schedule that fires while he might be. The
+#: off-hours schedules already know he is away — the hour is the signal — and
+#: applying the proxy there refuses legitimate overnight work, because an evening
+#: ChatGPT session still shows in the window at 10pm.
+#:
+#: Keyed by automation id, so the difference lives with the schedule rather than
+#: in the routine, which all five share.
+IDLE_AUTOMATIONS = {"command-center-tickets-hourly"}
 
-def prompt_text() -> str:
+GATE_LINE = "usage.py gate codex"
+
+
+def prompt_text(automation: str = "") -> str:
+    """The runtime prompt for one automation.
+
+    Everything above the `---` is setup documentation for Nate; below it is what
+    the agent runs. The only per-automation difference is the idle flag.
+    """
     body = ROUTINE.read_text()
     title = body.splitlines()[0].strip()
     if SEPARATOR not in body:
         raise SystemExit("{}: no '---' separator; cannot tell setup notes from the "
                          "runtime prompt".format(ROUTINE))
     runtime = body.split(SEPARATOR, 1)[1].strip()
+    if automation in IDLE_AUTOMATIONS:
+        runtime = runtime.replace(GATE_LINE, GATE_LINE + " --idle", 1)
     return "{}\n\n{}\n".format(title, runtime)
 
 
@@ -60,7 +82,6 @@ def main(argv=None) -> int:
                         help="report drift and change nothing")
     args = parser.parse_args(argv)
 
-    wanted = prompt_text()
     files = sorted(AUTOMATIONS.glob(GLOB))
     if not files:
         print("no Command Center automations found under {}".format(AUTOMATIONS),
@@ -69,6 +90,7 @@ def main(argv=None) -> int:
 
     drifted = []
     for path in files:
+        wanted = prompt_text(path.parent.name)
         text = path.read_text()
         raw, existing = current(text)
         if raw is None:

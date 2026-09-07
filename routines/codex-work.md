@@ -68,6 +68,15 @@ no trace of having stopped, which is indistinguishable from never running.
 python3 /Users/nateprich/.claude/command-center/usage.py gate codex
 ```
 
+**Some schedules append `--idle` to that line, and yours already says which.**
+It adds a second condition: Nate must not have touched the five-hour window at
+all. That is a *proxy* for him being at the keyboard, and it belongs only on
+schedules that fire while he might be — the frequent daytime one. A schedule that
+runs at 2am already knows he is away, and applying the proxy there would refuse
+legitimate overnight work, because an evening ChatGPT session still shows in the
+window hours after he has gone to bed. `scripts/sync_codex_automations.py` adds
+the flag to the schedules that need it; do not add or remove it yourself.
+
 - **exit 1** — refused. **Read the last line to see which refusal it was**, because they are different facts and the record should say which:
   - an `idle` line reading `OVER` means Nate is using the five-hour window right now. Finish with `--outcome skipped-nate-active` and **stop**.
   - otherwise it is the budget. Finish with `--outcome skipped-over-pace` and **stop**.

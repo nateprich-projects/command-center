@@ -237,6 +237,8 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
     likely park candidate, and surfacing it first is what makes this ordering
     do disposal work rather than merely sequencing.
     """
+    rows = list(items)
+    by_ref = {i.ref: i for i in rows}
 
     def key(item: Item):
         status = item.status or ""
@@ -246,23 +248,32 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
             depth = len(DECISION_ORDER)
         # Blocked items sort with their stage but ahead of it within the stage.
         since = item.status_since or datetime.max.replace(tzinfo=timezone.utc)
-        return (depth, not item.is_blocked, since, item.repo, item.number)
+        return (
+            depth,
+            not item.is_blocked,
+            0 if effective_class(item, by_ref) == "Broken" else 1,
+            since,
+            item.repo,
+            item.number,
+        )
 
-    return sorted((i for i in items if gate_question(i)), key=key)
+    return sorted((i for i in rows if gate_question(i)), key=key)
 
 
 def ideas(items: Iterable[Item]) -> List[Item]:
-    """Captured ideas, those flagged worth thinking through first.
+    """Captured ideas, with Broken items first and oldest items next.
 
     `brief` deliberately excludes Ideas from its counts — it is unbounded and
     guilt-free, and counting it turns it into pressure. But grilling is what
     feeds everything downstream, so there has to be *some* way to ask what is
     waiting to be shaped. This is it, and it is asked for rather than pushed.
     """
+    rows = list(items)
+    by_ref = {i.ref: i for i in rows}
     return sorted(
-        (i for i in items if i.state == "OPEN" and i.status == "Ideas"),
+        (i for i in rows if i.state == "OPEN" and i.status == "Ideas"),
         key=lambda i: (
-            "needs-shaping" not in i.labels,   # flagged ones first
+            0 if effective_class(i, by_ref) == "Broken" else 1,
             i.status_since or datetime.max.replace(tzinfo=timezone.utc),
             i.repo,
             i.number,

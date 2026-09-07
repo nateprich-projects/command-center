@@ -125,8 +125,16 @@ def test_the_dedicated_pool_has_its_own_policy_not_the_shared_default():
     on. A pool bought for the automations needs no such protection — what it
     needs is pacing, so a week's credits are not spendable on Monday."""
     early = usage.pace(seven_day(10.0, 0.05), NOW, provider="zai")["windows"][0]
-    assert early["allowed_percent"] == 15.0          # its own floor, not 25
-    assert early["reserve"] == 0.5                   # its own reserve, not 5
+    # Asserted against the policy rather than a literal: the property under test
+    # is that this pool reads *its own* entry, not that the entry holds any
+    # particular number. Pinning the literal made this fail on 2026-09-07 when
+    # Nate deliberately raised the floor to 22 to unstick zcode — a config
+    # decision, not a regression. `test_the_dedicated_pool_is_paced_rather_than_
+    # flat` below still pins the behaviour that actually matters.
+    assert early["allowed_percent"] == usage.PROVIDER_POLICY["zai"]["weekly_floor"]
+    assert early["allowed_percent"] != usage.WEEKLY_FLOOR    # not the shared 25
+    assert early["reserve"] == 0.5                           # its own reserve, not 5
+    assert early["reserve"] != usage.WEEKLY_RESERVE          # not the shared 5
 
 
 def test_the_dedicated_pool_is_paced_rather_than_flat():

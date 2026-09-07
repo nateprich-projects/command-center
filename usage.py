@@ -662,7 +662,28 @@ PROVIDER_POLICY = {
     # where one run is ~1.5% of the budget. Measured here, a whole session cost
     # **3 credits of 10,000** — 0.03% — so the shared reserve would hold back 500
     # credits against a run that costs three, and the cap would really bite at 85%.
-    "zai": {"weekly_floor": 15.0, "weekly_reserve": 0.5},
+    # **Temporarily 22, raised from 15 on 2026-09-07 by Nate's instruction.**
+    # zcode had been over pace for 35 consecutive runs since 00:38 — last real
+    # work 00:30, breaking #59 into #76-#81 — sitting at 19.1% used against 15.0
+    # allowed, 12.7% into a fresh weekly window. Proportional pacing would not
+    # have cleared it until 2026-09-08 00:33.
+    #
+    # This is a workaround for #93, not a revision of the reasoning below. The
+    # defect is that `allowed = max(floor, target * elapsed)` makes the floor a
+    # *plateau*: allowed stays exactly at the floor until the rising line
+    # overtakes it, so any pool that spends past its floor stalls until the
+    # calendar catches up. All three pools were blocked at once for that reason.
+    #
+    # The obvious fix — anchoring the line at the floor — was tried and reverted
+    # the same day: `floor + (target - floor) * elapsed` is **uniformly looser**,
+    # by `floor * (1 - elapsed)`, peaking around +17.5 points a third of the way
+    # through the week. Two tests correctly caught it. Removing the plateau
+    # without loosening is not possible, so the trade is real and belongs in #93.
+    #
+    # 22 clears the current 19.6% (used + reserve) with a little room. **Restore
+    # to 15 once #93 settles the model** — the measured reasoning for 15 is
+    # unchanged and is recorded below.
+    "zai": {"weekly_floor": 22.0, "weekly_reserve": 0.5},
 
     # Nate uses ChatGPT personally, so this pool is shared. Raised to 60 on
     # 2026-09-06, lowered to 30 the same day on review, and **raised to 90 on

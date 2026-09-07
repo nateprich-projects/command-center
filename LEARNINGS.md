@@ -22,8 +22,14 @@ wording of one section. Nothing else in that file changed.
 
 So the app holds its own copy of the prompt and writes the whole automation on save. Any
 edit made outside it — by the sync script, or by hand — is discarded if the app saves a
-version loaded before that edit. **Only one of four reverted**, so it is not every save;
-the mechanism is `inferred` even though the reversion is measured.
+version loaded before that edit. **Only one of four reverted**, so it is not every save.
+
+**It then reverted a second time**, same automation and same section, minutes after
+being re-synced. So this is not a one-off race: the app appears to hold a live copy of
+whichever automation is open in its editor and write it back periodically, overwriting
+anything changed underneath. The mechanism is still `inferred`; the repeat is measured.
+
+Practical: close the automation in the app before syncing, or expect to re-sync after.
 
 **Practical rule: sync *after* editing automations in the app, never before.** And the
 drift test is what makes this survivable — `tests/test_automation_drift.py` caught this

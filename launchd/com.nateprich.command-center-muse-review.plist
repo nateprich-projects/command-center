@@ -29,8 +29,38 @@
     <key>Label</key>
     <string>com.nateprich.command-center-muse-review</string>
 
+    <!--
+      **NOT ENABLED. This job is blocked and must not be loaded until the
+      blocker below is cleared — it fails every interval with exit 126.**
+
+      A launchd job cannot reach `/Volumes/External SSD` at all, where this
+      repository lives. Measured 2026-09-07 with a probe job: reading
+      `routines/muse.md`, reading this runner, running `funnel.py`, and even
+      `ls` on the repo all return `Operation not permitted`. macOS TCC does not
+      grant a launchd agent access to that volume, and a background job cannot
+      answer the prompt that would grant it.
+
+      Neither arrangement of this plist fixes it. Running the script directly
+      fails to exec; running it as `/bin/bash <script>` fails to read. Every
+      process in the job's tree inherits the same restriction, so putting a
+      launcher on the internal disk does not help either — whatever it spawns
+      still cannot read the repo.
+
+      This is why in-app scheduling worked for Codex and zcode without anyone
+      noticing the issue: those apps hold TCC grants Nate gave interactively.
+      The never-headless rule had a second, accidental benefit.
+
+      Clearing it needs Nate, and it is a choice rather than a fix:
+        - grant Full Disk Access to `/bin/bash` — works, and is broad enough
+          that every shell script on the machine gains it; or
+        - move the checkout to the internal disk, which removes the problem and
+          also removes the unmount risk an external volume carries.
+
+      Until then this file is a specification, not a running job.
+    -->
     <key>ProgramArguments</key>
     <array>
+        <string>/bin/bash</string>
         <string>/Users/nateprich/.claude/command-center/scripts/muse-review</string>
     </array>
 

@@ -564,12 +564,13 @@ def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:
             {
                 "window": "seven_day",
                 "used_percent": seven["used_percent"],
-                "reserve": WEEKLY_RESERVE,
+                "reserve": policy(provider, "weekly_reserve", WEEKLY_RESERVE),
                 "allowed_percent": round(allowed, 1),
                 "elapsed_fraction": (
                     round(elapsed_fraction, 3) if elapsed_fraction is not None else None
                 ),
-                "over": seven["used_percent"] + WEEKLY_RESERVE > allowed,
+                "over": seven["used_percent"] + policy(
+                    provider, "weekly_reserve", WEEKLY_RESERVE) > allowed,
             }
         )
 
@@ -638,10 +639,20 @@ DOWNSTREAM_RESERVE = 20.0
 
 PROVIDER_POLICY = {
     # Bought for the automations and used for nothing else, so there is no
-    # interactive share to protect. The only real failure is exhausting the week
-    # early — a retry storm on Monday leaving Thursday dead — so the proportional
-    # line stays and the floor rises to permit genuine overnight work.
-    "zai": {"weekly_floor": 70.0},
+    # interactive share to protect. Nate set the floor to 90 on 2026-09-06: he
+    # has no plans to use the app by hand, and 90% still leaves 1,000 credits.
+    #
+    # At 90 the floor equals `WEEKLY_TARGET`, so the proportional line is inert
+    # and this is a flat cap. That is deliberate and it is the trade: no early-week
+    # smoothing, so a runaway could spend the week by Tuesday. Acceptable while the
+    # queue is small and a run costs ~3 credits; revisit if a retry storm ever
+    # empties it.
+    #
+    # The reserve moves with it. 5% of a weekly window is calibrated for Anthropic,
+    # where one run is ~1.5% of the budget. Measured here, a whole session cost
+    # **3 credits of 10,000** — 0.03% — so the shared reserve would hold back 500
+    # credits against a run that costs three, and the cap would really bite at 85%.
+    "zai": {"weekly_floor": 90.0, "weekly_reserve": 0.5},
 }
 
 

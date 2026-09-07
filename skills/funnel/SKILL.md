@@ -23,6 +23,8 @@ ordering, and both agents act on its output. If the order looks wrong, say so �
 quietly fix it. A second opinion on ordering is how two agents drift apart while both
 produce plausible-looking lists.
 
+_(confirmed by Nate 2026-09-05)_
+
 If the command fails, show the error. Do not fall back to querying GitHub yourself.
 
 ## What the fields mean
@@ -78,6 +80,7 @@ to run all three on his explicit instruction (2026-09-05), replacing an earlier 
 here that no agent may run them at all. He often works these sessions by voice while
 driving, where handing him a command means the decision he already made goes
 unrecorded — three approved gates sat unexecuted for a whole session that way.
+_(confirmed by Nate 2026-09-05)_
 
 That earlier rule was not his; an agent wrote it after accidentally running an approval,
 catching it, and walking it back. The accident was real, so the caution is earned — but
@@ -91,10 +94,13 @@ Run one only when **all** of these hold:
   say your reading and wait. Confirm before moving anything, not after.
 - Never on your own initiative, and **never as a test.** The dry run exists for that.
 
+_(confirmed by Nate 2026-09-05)_
+
 Then **post a comment recording that he decided and you executed**, naming the gate and
 the move. The Project shows only that `Status` changed, never who decided it — see
 issue #31. Without that comment an agent-run gate is indistinguishable from his own,
 which is the failure this permission would otherwise create.
+_(confirmed by Nate 2026-09-05)_
 
 ## Say these things when they are true
 
@@ -123,4 +129,5 @@ healthy — do not report it as zero.
   with real tasks and erode its trustworthiness. It receives operational failure alerts
   only.
 - Do not change `Status` or `Class` unless he asks. Those are his gates.
+  _(confirmed by Nate 2026-09-05)_
 - Do not open, close, or comment on issues as part of rendering a brief.

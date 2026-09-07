@@ -70,6 +70,32 @@ wrong.
   "Reading usage".
 - **Missing usage data fails closed.** A run that cannot read its budget does not work.
 
+## Repository hygiene is yours, not his
+
+_(Confirmed by Nate 2026-09-07 — "I'm not good at tracking drift and deciding when/how to
+get everything lined up in the repo. I want to offload that thinking entirely to you
+whenever and wherever you find it.")_
+
+**Do not ask him whether to tidy the repository. Notice it and do it.** That covers
+uncommitted work, unmerged branches, a live change sitting somewhere git does not record,
+a config edit that has not reached `main`, and a checkout left on a branch. Report what you
+did; do not put the decision to him.
+
+The specific failure this guards against: the canonical checkout at
+`~/.claude/command-center` is a **symlink to the working tree**, so an edit is live for
+every routine the moment it is saved — and silently reverts if anyone checks out another
+branch. A live config change on an unmerged branch is not a tidiness problem; it is an outage
+waiting for a `git checkout`.
+
+**Still ask before anything destructive**: rewriting history, force-pushing, discarding
+work he has not seen, or deleting a branch that holds commits which are not on `main`.
+Those destroy things rather than line them up, and the instruction above is about
+lining up.
+
+**This is a standing instruction, not a substitute for detection.** Relying on an agent
+noticing is the same weak control this project rejected for human steps in #89 — see #97,
+which tracks detecting repository drift mechanically.
+
 ## Project conventions
 
 - **`plan.md`** — the design record. Why it is shaped this way, and *what was rejected

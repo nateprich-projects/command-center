@@ -116,3 +116,28 @@ def test_zai_rejects_an_unsuccessful_payload(monkeypatch):
 
 def test_zcode_spends_the_zai_pool():
     assert usage.provider_of("zcode") == "zai"
+
+
+# -- pacing policy is per provider, not global --------------------------------
+
+def test_the_weekly_floor_protecting_nate_does_not_cap_a_pool_he_never_uses():
+    """WEEKLY_FLOOR exists to leave Nate room on his own subscription. Applied to
+    a pool bought for the automations, it capped them at 25% of their own budget."""
+    reading = seven_day(40.0, 0.02)          # day one of the week, 40% spent
+    assert usage.pace(reading, NOW)["over_pace"]                      # shared pool
+    assert not usage.pace(reading, NOW, provider="zai")["over_pace"]  # theirs alone
+
+
+def test_an_unknown_provider_gets_the_shared_defaults():
+    a = usage.pace(seven_day(40.0, 0.02), NOW)["windows"][0]
+    b = usage.pace(seven_day(40.0, 0.02), NOW, provider="nosuchpool")["windows"][0]
+    assert a["allowed_percent"] == b["allowed_percent"] == usage.WEEKLY_FLOOR
+
+
+def test_the_proportional_line_still_governs_the_dedicated_pool():
+    """Raising the floor must not become 'spend it all whenever'. A runaway on
+    Monday still stops before it eats the week."""
+    early = usage.pace(seven_day(80.0, 0.1), NOW, provider="zai")
+    assert early["over_pace"]
+    late = usage.pace(seven_day(80.0, 0.95), NOW, provider="zai")
+    assert not late["over_pace"]

@@ -520,7 +520,7 @@ def idle_verdict(agent: str, reading: Dict) -> Optional[Dict]:
             "why": "window already in use when it began — Nate is working"}
 
 
-def pace(reading: Dict, now: float) -> Dict:
+def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:
     """Is this agent within its budget?
 
     The weekly line is proportional: by the time a fraction f of the 7-day
@@ -539,8 +539,10 @@ def pace(reading: Dict, now: float) -> Dict:
                 "window": "five_hour",
                 "used_percent": five["used_percent"],
                 "reserve": FIVE_HOUR_RESERVE,
-                "allowed_percent": FIVE_HOUR_CEILING,
-                "over": five["used_percent"] + FIVE_HOUR_RESERVE > FIVE_HOUR_CEILING,
+                "allowed_percent": policy(provider, "five_hour_ceiling",
+                                          FIVE_HOUR_CEILING),
+                "over": five["used_percent"] + FIVE_HOUR_RESERVE > policy(
+                    provider, "five_hour_ceiling", FIVE_HOUR_CEILING),
             }
         )
 
@@ -551,11 +553,13 @@ def pace(reading: Dict, now: float) -> Dict:
             # is meaningless — it would read "0% allowed" forever. A rolling
             # total gets a flat ceiling instead.
             elapsed_fraction = None
-            allowed = WEEKLY_TARGET
+            allowed = policy(provider, "weekly_target", WEEKLY_TARGET)
         else:
             remaining = max(0.0, float(seven["resets_at"]) - now)
             elapsed_fraction = max(0.0, min(1.0, 1.0 - remaining / SEVEN_DAY))
-            allowed = max(WEEKLY_FLOOR, WEEKLY_TARGET * elapsed_fraction)
+            allowed = max(policy(provider, "weekly_floor", WEEKLY_FLOOR),
+                          policy(provider, "weekly_target", WEEKLY_TARGET)
+                          * elapsed_fraction)
         verdicts.append(
             {
                 "window": "seven_day",
@@ -622,6 +626,27 @@ def agents_on(provider: str) -> List[str]:
 #: Only bites when a provider serves more than one agent. With a pool to itself
 #: there is no downstream stage on the same credits to protect.
 DOWNSTREAM_RESERVE = 20.0
+
+# -- pacing policy, per provider ----------------------------------------------
+#
+# The constants above were written for a pool Nate **shares**. `WEEKLY_FLOOR` in
+# particular exists to leave him room on his own subscription, and applying it to
+# a pool he never touches caps the automations at 25% of a budget bought for them.
+#
+# So policy is per provider, not global. State was already per provider (P0.2);
+# this is the half that was missed.
+
+PROVIDER_POLICY = {
+    # Bought for the automations and used for nothing else, so there is no
+    # interactive share to protect. The only real failure is exhausting the week
+    # early — a retry storm on Monday leaving Thursday dead — so the proportional
+    # line stays and the floor rises to permit genuine overnight work.
+    "zai": {"weekly_floor": 70.0},
+}
+
+
+def policy(provider: Optional[str], name: str, default: float) -> float:
+    return (PROVIDER_POLICY.get(provider or "", {}) or {}).get(name, default)
 
 
 def provider_of(agent: str) -> Optional[str]:
@@ -760,7 +785,7 @@ def main(argv=None) -> int:
         )
         return 2
 
-    verdict = pace(reading, now)
+    verdict = pace(reading, now, provider=provider_of(agent))
     idle = idle_verdict(agent, reading)
 
     # A pool shared with another agent keeps headroom for the stage that follows.

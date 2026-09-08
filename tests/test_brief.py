@@ -125,3 +125,80 @@ def test_parked_items_stay_out_of_gate_counts_and_maintenance_load(monkeypatch, 
     assert brief["total_needing_nate"] == len(funnel.awaiting_decision(without_parked))
     assert all(item["ref"] != "nateprich/beta#15" for item in brief["items"])
     assert brief["maintenance_load"] == funnel.maintenance_load(without_parked, NOW)
+
+
+def test_brief_surfaces_blocked_projects_and_tickets_oldest_first(
+    monkeypatch, capsys
+):
+    named_project = funnel.Item(
+        repo="nateprich/beta", number=30, title="Named project",
+        url="https://example.invalid/30", state="OPEN", status="Ready",
+        status_since=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        labels=["blocked"], block_references=["#84", "#90"],
+        block_reason="Wait for both decisions.",
+    )
+    silent_project = funnel.Item(
+        repo="nateprich/beta", number=31, title="Silent project",
+        url="https://example.invalid/31", state="OPEN", status="Ready",
+        status_since=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        labels=["blocked"], block_reason="Nate needs to decide.",
+    )
+    named_ticket = funnel.Item(
+        repo="nateprich/beta", number=32, title="Named ticket",
+        url="https://example.invalid/32", state="OPEN",
+        status_since=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        labels=["blocked"], block_references=["#84"],
+        block_reason="Wait for the parent decision.",
+        parent="nateprich/beta#29",
+    )
+    ordinary = funnel.Item(
+        repo="nateprich/beta", number=33, title="Ordinary issue",
+        url="https://example.invalid/33", state="OPEN", status="Ready",
+        status_since=datetime(2026, 9, 4, tzinfo=timezone.utc),
+    )
+    items = [ordinary, silent_project, named_ticket, named_project]
+
+    calls = []
+
+    def gh_json(*args):
+        calls.append(args)
+        raise AssertionError("brief fetched a block comment twice")
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief(items, NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert [row["ref"] for row in brief["blocked"]] == [
+        "nateprich/beta#30", "nateprich/beta#32", "nateprich/beta#31",
+    ]
+    assert brief["blocked"] == [
+        {
+            "ref": "nateprich/beta#30",
+            "title": "Named project",
+            "url": "https://example.invalid/30",
+            "reason": "Wait for both decisions.",
+            "conditions": ["#84", "#90"],
+            "blocked_at": "2026-09-01T00:00:00+00:00",
+        },
+        {
+            "ref": "nateprich/beta#32",
+            "title": "Named ticket",
+            "url": "https://example.invalid/32",
+            "reason": "Wait for the parent decision.",
+            "conditions": ["#84"],
+            "blocked_at": "2026-09-02T00:00:00+00:00",
+        },
+        {
+            "ref": "nateprich/beta#31",
+            "title": "Silent project",
+            "url": "https://example.invalid/31",
+            "reason": "Nate needs to decide.",
+            "conditions": [],
+            "blocked_at": "2026-09-03T00:00:00+00:00",
+        },
+    ]
+    assert [row["ref"] for row in brief["items"]] == ["nateprich/beta#31"]
+    assert all(row["ref"] != "nateprich/beta#33" for row in brief["blocked"])
+    assert calls == []

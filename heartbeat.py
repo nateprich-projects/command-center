@@ -66,6 +66,7 @@ OUTCOMES = [
     "skipped-over-pace",   # budget gate refused
     "skipped-nate-active",  # the five-hour window was already in use; Codex only
     "skipped-usage-unknown",  # could not read usage; failed closed
+    "prompt-drift",        # routine literal did not match the checked-in file
     "errored",             # tried and failed
 ]
 
@@ -249,6 +250,30 @@ def append(agent: str, record: Dict) -> str:
     except (HeartbeatError, OSError):
         return "spooled" if spooled else "lost"
     return "pushed"
+
+
+def record_event(agent: str, run: Optional[str], outcome: str,
+                 **fields) -> str:
+    """Record a non-terminal outcome attached to an already-running session.
+
+    `funnel begin` can discover prompt drift after the start record is written,
+    but the routine must still do its normal work and write its ordinary finish
+    record later. An event makes the fault visible to the watchdog without
+    closing the run or making a second finish race with the routine.
+    """
+    if outcome not in OUTCOMES:
+        raise ValueError("unknown heartbeat outcome: {}".format(outcome))
+    record = {
+        "run": run,
+        "agent": agent,
+        "phase": "event",
+        "ts": int(time.time()),
+        "outcome": outcome,
+    }
+    record.update(fields)
+    kept = append(agent, record)
+    _report(kept)
+    return kept
 
 
 def _report(kept: str) -> None:

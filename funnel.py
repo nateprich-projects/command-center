@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 from collections import namedtuple
+import hashlib
 import json
 import os
 import pathlib
@@ -40,6 +41,28 @@ REPO = "nateprich-projects/command-center"
 # reading the real ~/.claude.
 CHECKOUT_ROOT = pathlib.Path(__file__).resolve().parent
 CLAUDE_DIR = pathlib.Path.home() / ".claude"
+
+# The routine declares its own identity in the opening command. The argument
+# is deliberately removed rather than replaced with a placeholder: the file
+# with no literal and the same file after the literal is pasted must hash to
+# the same bytes. Keeping this normalisation here gives the paste helper and
+# `begin` one implementation to share.
+ROUTINE_SHA_ARGUMENT = re.compile(rb"(?:[ \t]+)?--routine-sha[ \t]+\S+")
+
+
+def normalized_routine(path: os.PathLike) -> bytes:
+    """Read a routine with its self-referential sha argument removed."""
+    return ROUTINE_SHA_ARGUMENT.sub(b"", pathlib.Path(path).read_bytes())
+
+
+def routine_sha(path: os.PathLike) -> str:
+    """Return the stable sha256 of a routine, ignoring its own literal."""
+    return hashlib.sha256(normalized_routine(path)).hexdigest()
+
+
+def routine_path(agent: str) -> pathlib.Path:
+    """The checked-in routine whose pasted copy identifies itself."""
+    return CHECKOUT_ROOT / "routines" / (agent + ".md")
 
 # One small, shared shape for every doctor check. Later doctor tickets add
 # checks to the fixed list without changing the report contract.
@@ -2163,7 +2186,8 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
 
 
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
-              idle: bool, breakdown: bool = False) -> int:
+              idle: bool, breakdown: bool = False,
+              routine_sha_literal: Optional[str] = None) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
     A polling routine spends most of its runs discovering there is nothing to
@@ -2187,6 +2211,34 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                                       "heartbeat.py"), "start", "--agent", agent],
         capture_output=True, text=True)
     out["run"] = (run.stdout or "").strip().splitlines()[-1] if run.stdout else None
+
+    if routine_sha_literal is not None:
+        path = routine_path(agent)
+        try:
+            actual = routine_sha(path)
+            status = "ok" if actual == routine_sha_literal else "drift"
+            check = {
+                "expected": routine_sha_literal,
+                "actual": actual,
+                "status": status,
+            }
+        except (OSError, UnicodeError) as exc:
+            check = {
+                "expected": routine_sha_literal,
+                "actual": None,
+                "status": "unreadable",
+                "error": str(exc),
+            }
+        out["routine_sha"] = check
+        if check["status"] != "ok":
+            heartbeat.record_event(
+                agent,
+                out["run"],
+                "prompt-drift",
+                note="{} routine {} does not match the pasted literal".format(
+                    agent, check["status"]),
+                routine_sha=check,
+            )
 
     reading = usage.read_agent(agent, now.timestamp())
     if reading is None:
@@ -2617,6 +2669,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     begin.add_argument("--breakdown", action="store_true",
                        help="also offer an approved plan to break down when "
                             "there is nothing to review")
+    begin.add_argument(
+        "--routine-sha", dest="routine_sha", default=None,
+        help="compare the checked-in routine's normalized sha256 to this literal",
+    )
 
     nxr = sub.add_parser(
         "next-review", help="the single PR this reviewer should read, or nothing")
@@ -2662,7 +2718,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_shaped(items, now, args.ref, args.plan)
         if args.command == "begin":
             return cmd_begin(items, now, args.agent, args.tier, args.idle,
-                             args.breakdown)
+                             args.breakdown, args.routine_sha)
         if args.command == "next-review":
             return cmd_next_review(items, args.tier)
         if args.command == "review":

@@ -89,7 +89,7 @@ def test_a_run_still_in_flight_is_not_counted_as_dying():
 # -- what must be reported --------------------------------------------------
 
 
-def test_silence_is_reported_because_a_closed_app_has_no_other_signal():
+def test_silence_reports_the_observed_gap_without_guessing_a_cause():
     rows = history([1] * 8, quiet_hours=6)
     problems = watchdog.assess("codex", rows, NOW)
     assert len(problems) == 1
@@ -99,6 +99,8 @@ def test_silence_is_reported_because_a_closed_app_has_no_other_signal():
     assert "6x normal" in problems[0]
     assert "alarm threshold 5x normal" in problems[0]
     assert "last at <t:" in problems[0]
+    assert "Mac mini" not in problems[0]
+    assert "probably" not in problems[0]
 
 
 def test_steady_rhythm_under_threshold_is_not_an_alarm():

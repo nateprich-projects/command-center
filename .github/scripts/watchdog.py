@@ -179,6 +179,7 @@ def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
                     ratio_text,
                     NORMAL_MULTIPLE,
                     int(latest),
+                )
             )
 
     # An unresolved finish counts as a finish for one of its candidates. A run

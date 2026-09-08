@@ -1793,6 +1793,14 @@ def launch_command(item: Item) -> str:
     return 'claude "Work {} — {}"'.format(item.url, item.title)
 
 
+def class_display(item: Item, by_ref: Dict[str, Item]) -> str:
+    """Show the effective Class without assigning one to an unclassed item."""
+    klass = effective_class(item, by_ref)
+    if not klass:
+        return "no class"
+    return klass if item.klass else "{} (inherited)".format(klass)
+
+
 def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = None) -> dict:
     by_ref = by_ref if by_ref is not None else {}
     return {
@@ -1873,10 +1881,12 @@ def cmd_queue(items: List[Item], now: datetime) -> int:
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
     if not decisions:
         print("  nothing")
+    by_ref = {i.ref: i for i in items}
     for item in decisions:
         print(
-            "  {:<10} {:<34} {:<18} {}".format(
+            "  {:<10} {:<24} {:<34} {:<18} {}".format(
                 item.status or "-",
+                class_display(item, by_ref),
                 item.ref,
                 humanise(item.waited(now)),
                 gate_question(item),
@@ -1886,18 +1896,17 @@ def cmd_queue(items: List[Item], now: datetime) -> int:
     print("\nStartable by Codex ({}), ladder order:".format(len(tickets)))
     if not tickets:
         print("  nothing")
-    by_ref = {i.ref: i for i in items}
     for item in tickets:
-        klass = effective_class(item, by_ref)
-        shown = (klass or "no class") + ("" if item.klass else " (inherited)" if klass else "")
-        print("  {:<24} {:<34} {}".format(shown, item.ref, item.title))
+        print("  {:<24} {:<34} {}".format(
+            class_display(item, by_ref), item.ref, item.title))
 
     pending = awaiting_breakdown(items)
     if pending:
         print("\nApproved, awaiting breakdown into tickets ({}):".format(len(pending)))
         for item in pending:
-            print("  {:<34} {:<18} {}".format(
-                item.ref, humanise(item.waited(now)), item.title))
+            print("  {:<24} {:<34} {:<18} {}".format(
+                class_display(item, by_ref), item.ref,
+                humanise(item.waited(now)), item.title))
 
     missing = [i for i in items if needs_class(i)]
     if missing:
@@ -2222,10 +2231,12 @@ def cmd_ideas(items: List[Item], now: datetime) -> int:
     print("Ideas ({} total, {} flagged as worth shaping):".format(len(rows), len(flagged)))
     if not rows:
         print("  nothing captured")
+    by_ref = {i.ref: i for i in items}
     for item in rows:
-        print("  {:<3} {:<34} {:<14} {}".format(
+        print("  {:<3} {:<24} {:<34} {:<14} {}".format(
             "*" if "needs-shaping" in item.labels else " ",
-            item.ref, humanise(item.waited(now)), item.title))
+            class_display(item, by_ref), item.ref,
+            humanise(item.waited(now)), item.title))
     if rows:
         print("\n  * = labelled needs-shaping. Grilling is interactive and is the"
               "\n      throttle on everything downstream — one at a time.")

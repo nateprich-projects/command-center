@@ -137,6 +137,10 @@ STAGES = ["Ideas", "Shaped", "Ready", "Building", "Done", "Parked"]
 LADDER = ["Broken", "Maintenance", "Improve", "New", "Replace"]
 PREEMPTING = {"Broken", "Maintenance"}
 
+#: Existing-work classes may take the unattended shaping path. Origin remains
+#: an independent condition: class describes the work, not who raised it.
+SELF_APPROVABLE_CLASSES = frozenset({"Broken", "Maintenance", "Improve"})
+
 #: Which stages are waiting on a human, and the question each one asks.
 GATES = {
     "Shaped": "Is the plan good?",
@@ -536,6 +540,43 @@ def needs_nate_signals(plan_body: str) -> List[str]:
     text = re.sub(r"\s+", " ", plan_body or "")
     return [name for name, pattern in sorted(NEEDS_NATE_PATTERNS.items())
             if re.search(pattern, text, re.IGNORECASE)]
+
+
+def effective_shape_owner(origin_voice: Optional[str],
+                          override_target: Optional[str] = None) -> Optional[str]:
+    """Return who should shape an item, or None when origin is untrusted.
+
+    Capture uses the provenance voice vocabulary: ``agent`` means observed by
+    an agent, while either Nate voice means he raised it. An authorised origin
+    override is already reduced by its parser to ``nate`` or ``agents`` and
+    supersedes that default. Missing or malformed origin fails closed here; the
+    backlog-wide default remains #151's concern.
+    """
+    if override_target is not None:
+        return override_target if override_target in ("nate", "agents") else None
+    if origin_voice == "agent":
+        return "agents"
+    if origin_voice in ("nate-direct", "nate-relayed"):
+        return "nate"
+    return None
+
+
+def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],
+                           override_target: Optional[str], *,
+                           needs_nate: bool, escalated: bool) -> bool:
+    """Whether all conditions permit one unattended shaping transition.
+
+    #77 supplies the plan booleans and #80 owns the transition. Keeping class,
+    origin, the Needs-Nate result (including #84's authority verifier), and
+    escalation in this one predicate prevents origin from becoming a second
+    gate that can drift from the existing self-approval rule.
+    """
+    return (
+        klass in SELF_APPROVABLE_CLASSES
+        and effective_shape_owner(origin_voice, override_target) == "agents"
+        and not needs_nate
+        and not escalated
+    )
 
 
 def required_tier(title: str, body: str, failed_before: bool = False) -> str:

@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -21,6 +23,12 @@ def fixture_items():
         item for item in (funnel._from_node(node) for node in json.loads(FIXTURE.read_text()))
         if item
     ]
+
+
+@pytest.fixture(autouse=True)
+def no_pr_network(monkeypatch):
+    """Keep the existing brief fixtures focused on rendering, not PR state."""
+    monkeypatch.setattr(funnel, "_ticket_pr_rows", lambda items: [])
 
 
 def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
@@ -283,3 +291,85 @@ def test_brief_flags_completed_access_plan_without_any_human_ticket(
         "access_signals": ["token", "tunnel"],
     }]
     assert brief["human_steps"] == []
+
+
+def test_brief_surfaces_stranded_work_without_changing_decision_count(
+    monkeypatch, capsys
+):
+    parent = funnel.Item(
+        repo="nateprich/beta", number=60, title="A live project",
+        url="https://example.invalid/60", state="OPEN", status="Building",
+        children_total=4,
+    )
+    conflicting = funnel.Item(
+        repo="nateprich/beta", number=61, title="Conflicting branch",
+        url="https://example.invalid/61", state="OPEN", parent=parent.ref,
+    )
+    expired = funnel.Item(
+        repo="nateprich/beta", number=62, title="Dead run",
+        url="https://example.invalid/62", state="OPEN", parent=parent.ref,
+        in_motion_since=NOW - funnel.LOCK_TTL - timedelta(minutes=1),
+    )
+    missing_blocker = funnel.Item(
+        repo="nateprich/beta", number=63, title="Missing prerequisite",
+        url="https://example.invalid/63", state="OPEN", parent=parent.ref,
+        open_blockers=["other/repo#99"],
+    )
+    ordinary = funnel.Item(
+        repo="nateprich/beta", number=64, title="Still actionable",
+        url="https://example.invalid/64", state="OPEN", parent=parent.ref,
+    )
+    childless = funnel.Item(
+        repo="nateprich/beta", number=65, title="Trap project",
+        url="https://example.invalid/65", state="OPEN", status="Building",
+        children_total=0,
+    )
+    items = [ordinary, childless, missing_blocker, expired, conflicting, parent]
+    prs = [{
+        "ticket_ref": conflicting.ref,
+        "state": "OPEN",
+        "mergeable": "CONFLICTING",
+        "pr_number": 701,
+        "verdict": {"verdict": "approved"},
+    }]
+    monkeypatch.setattr(funnel, "_ticket_pr_rows", lambda rows: prs)
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief(items, NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert [row["ref"] for row in brief["stranded"]] == [
+        "nateprich/beta#61",
+        "nateprich/beta#62",
+        "nateprich/beta#63",
+        "nateprich/beta#65",
+    ]
+    reasons = {row["ref"]: row["reason"] for row in brief["stranded"]}
+    assert "approved PR #701 has an unmergeable branch" in reasons[
+        "nateprich/beta#61"
+    ]
+    assert reasons["nateprich/beta#62"] == "claim expired without a PR"
+    assert "blocked on blocker that will never close" in reasons[
+        "nateprich/beta#63"
+    ]
+    assert reasons["nateprich/beta#65"] == "Building project has no tickets"
+    assert "nateprich/beta#64" not in reasons
+    assert brief["total_needing_nate"] == len(funnel.awaiting_decision(items))
+
+
+def test_stranded_work_does_not_guess_from_unknown_mergeability_or_ci():
+    item = funnel.Item(
+        repo="nateprich/beta", number=70, title="Pending checks",
+        url="https://example.invalid/70", state="OPEN",
+        parent="nateprich/beta#69",
+    )
+    rows = [{
+        "ticket_ref": item.ref,
+        "state": "OPEN",
+        "mergeable": "UNKNOWN",
+        "pr_number": 702,
+        "verdict": {"verdict": "approved"},
+        # No statusCheckRollup is intentional: this detector does not infer CI.
+    }]
+
+    assert funnel.stranded_work([item], NOW, rows) == []

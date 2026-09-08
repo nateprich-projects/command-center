@@ -2089,6 +2089,230 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
     }
 
 
+def _stranded_item_json(item: Item, reason: str) -> Dict[str, object]:
+    return {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "reason": reason,
+    }
+
+
+def _pr_ticket_ref(row: Dict[str, object]) -> Optional[str]:
+    """Return the funnel ticket ref represented by one PR row."""
+    explicit = row.get("ticket_ref")
+    if isinstance(explicit, str) and explicit:
+        return explicit
+
+    repo = row.get("repo")
+    branch = row.get("headRefName") or row.get("head_ref")
+    if not isinstance(repo, str) or not isinstance(branch, str):
+        return None
+    match = re.fullmatch(r"ticket/(\d+)", branch)
+    if not match:
+        return None
+    return "{}#{}".format(repo, match.group(1))
+
+
+def _pr_is_open(row: Dict[str, object]) -> bool:
+    return str(row.get("state") or "OPEN").upper() == "OPEN"
+
+
+def _pr_is_unmergeable(row: Dict[str, object]) -> bool:
+    """Only an explicit GitHub conflict is proof of an unmergeable branch.
+
+    ``UNKNOWN`` is a transient GitHub calculation state. The merge gate retries
+    it, and this detector must not turn an absent or incomplete mergeability
+    observation into a permanent alarm.
+    """
+    return str(row.get("mergeable") or "").upper() == "CONFLICTING"
+
+
+def _progress_possible(
+    ref: str,
+    by_ref: Dict[str, Item],
+    prs_by_ref: Dict[str, List[Dict[str, object]]],
+    children_by_parent: Dict[str, List[Item]],
+    visiting: Set[str],
+) -> bool:
+    """Whether some current agent or gate can still advance ``ref``.
+
+    This is deliberately conservative. Missing funnel state, a dependency cycle,
+    and a childless Building project all mean that no known actor has a path to
+    close the item. An open PR remains actionable unless it is the explicit
+    approved/conflicting shape that this ticket diagnoses.
+    """
+    item = by_ref.get(ref)
+    if item is None:
+        return False
+    if item.state != "OPEN":
+        return True
+    if ref in visiting:
+        return False
+
+    next_visiting = set(visiting)
+    next_visiting.add(ref)
+    prs = [pr for pr in prs_by_ref.get(ref, []) if _pr_is_open(pr)]
+    if prs:
+        # A reviewer or engineer can act on every ordinary open-PR shape. The
+        # only exception in this release is an approved branch GitHub says is
+        # conflicting, which no current routine can repair or merge.
+        if any(
+            not (
+                _pr_is_unmergeable(pr)
+                and isinstance(pr.get("verdict"), dict)
+                and pr["verdict"].get("verdict") == "approved"
+            )
+            for pr in prs
+        ):
+            return True
+        return False
+
+    if item.open_blockers and any(
+        not _progress_possible(
+            blocker, by_ref, prs_by_ref, children_by_parent, next_visiting
+        )
+        for blocker in item.open_blockers
+    ):
+        return False
+
+    if item.parent is not None:
+        # A label-blocked ticket with a named condition waits on the system, not
+        # on an agent. A silent block still has the explicit unblock gate.
+        if item.is_blocked and item.block_references:
+            return False
+        if item.is_blocked and not item.block_references:
+            return True
+        parent = by_ref.get(item.parent)
+        if parent is None or parent.state != "OPEN":
+            return False
+        return parent.status in ("Shaped", "Ready", "Building")
+
+    if item.status == "Building":
+        if item.children_total == 0:
+            return False
+        if item.children_done == item.children_total:
+            return True  # the accept gate can act
+        children = [
+            child for child in children_by_parent.get(item.ref, [])
+            if child.state == "OPEN"
+        ]
+        if not children:
+            return False
+        return all(
+            _progress_possible(
+                child.ref, by_ref, prs_by_ref, children_by_parent, next_visiting
+            )
+            for child in children
+        )
+    if item.status in ("Shaped", "Ready"):
+        return True  # a gate or breakdown agent can act
+    return False
+
+
+def stranded_work(
+    items: Iterable[Item],
+    now: datetime,
+    pr_rows: Optional[Sequence[Dict[str, object]]] = None,
+) -> List[Dict[str, object]]:
+    """Find open work with no current agent or gate that can advance it.
+
+    The result is diagnostic only. It does not alter the decision queue and it
+    deliberately does not infer from missing CI checks; check-run history is not
+    part of the facts this module loads.
+
+    ``pr_rows`` is injectable for fixture tests. Production callers omit it and
+    the rows are derived from GitHub's current PR state.
+    """
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    children_by_parent: Dict[str, List[Item]] = {}
+    for item in rows:
+        if item.parent is not None:
+            children_by_parent.setdefault(item.parent, []).append(item)
+
+    if pr_rows is None:
+        pr_rows = _ticket_pr_rows(rows)
+    normalized_prs: List[Dict[str, object]] = []
+    for row in pr_rows:
+        if not isinstance(row, dict):
+            continue
+        ref = _pr_ticket_ref(row)
+        if ref is None:
+            continue
+        normalized = dict(row)
+        normalized["ticket_ref"] = ref
+        normalized_prs.append(normalized)
+
+    prs_by_ref: Dict[str, List[Dict[str, object]]] = {}
+    for row in normalized_prs:
+        prs_by_ref.setdefault(str(row["ticket_ref"]), []).append(row)
+
+    reasons: Dict[str, List[str]] = {}
+
+    def add(item: Item, reason: str) -> None:
+        reasons.setdefault(item.ref, []).append(reason)
+
+    for item in rows:
+        if item.state != "OPEN":
+            continue
+
+        if (
+            item.parent is None
+            and item.status == "Building"
+            and item.children_total == 0
+        ):
+            add(item, "Building project has no tickets")
+
+        if (
+            item.parent is not None
+            and item.in_motion_since is not None
+            and now - item.in_motion_since >= LOCK_TTL
+            and not prs_by_ref.get(item.ref)
+        ):
+            add(item, "claim expired without a PR")
+
+        for pr in prs_by_ref.get(item.ref, []):
+            if not _pr_is_open(pr) or not _pr_is_unmergeable(pr):
+                continue
+            verdict = pr.get("verdict")
+            if isinstance(verdict, dict) and verdict.get("verdict") == "approved":
+                pr_number = pr.get("pr_number") or pr.get("number") or "?"
+                add(
+                    item,
+                    "approved PR #{} has an unmergeable branch".format(pr_number),
+                )
+
+        hopeless = [
+            blocker
+            for blocker in item.open_blockers
+            if not _progress_possible(
+                blocker, by_ref, prs_by_ref, children_by_parent, set()
+            )
+        ]
+        if hopeless:
+            add(
+                item,
+                "blocked on blocker that will never close: {}".format(
+                    ", ".join(hopeless)
+                ),
+            )
+
+    return [
+        _stranded_item_json(by_ref[ref], "; ".join(reasons[ref]))
+        for ref in sorted(reasons)
+    ]
+
+
+def stranded_json(
+    items: Iterable[Item],
+    now: datetime,
+    pr_rows: Optional[Sequence[Dict[str, object]]] = None,
+) -> List[Dict[str, object]]:
+    """Render the brief's stranded-work diagnostic."""
+    return stranded_work(items, now, pr_rows)
+
+
 def parked_items(items: Iterable[Item]) -> List[Item]:
     """Parked projects, newest first.
 
@@ -2385,6 +2609,7 @@ def cmd_brief(items: List[Item], now: datetime) -> int:
         "in_motion": [i.ref for i in running],
         "wip_limit": WIP_LIMIT,
         "stale_locks_taken_over": [i.ref for i in stale_locks(items, now)],
+        "stranded": stranded_json(items, now),
         "maintenance_load": maintenance_load(items, now),
         "unattended_merges": unattended_merges(now),
         "working_tree_touched": working_tree_touched(now),
@@ -2814,6 +3039,40 @@ def _ticket_pr(repo: str, number: int) -> Optional[Dict]:
                     "--head", "ticket/{}".format(number), "--json",
                     "number,state,url,mergedAt,reviews") or []
     return rows[0] if rows else None
+
+
+def _ticket_pr_rows(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """Read PR facts needed by the stranded-work diagnostic.
+
+    The all-state query lets the stale-claim check distinguish "no PR" from a
+    ticket whose old PR was already closed or merged. Missing CI information is
+    intentionally not requested here; this release only needs branch
+    mergeability and structured review verdicts.
+    """
+    repos = sorted({item.repo for item in items if item.state == "OPEN"})
+    found: List[Dict[str, object]] = []
+    for repo in repos:
+        rows = _gh_json(
+            "gh", "pr", "list", "--repo", repo, "--state", "all",
+            "--json", "number,headRefName,state,url,mergeable", "--limit", "100",
+        ) or []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            branch = row.get("headRefName") or ""
+            match = re.fullmatch(r"ticket/(\d+)", branch)
+            if not match:
+                continue
+            normalized: Dict[str, object] = dict(row)
+            normalized["repo"] = repo
+            normalized["ticket_ref"] = "{}#{}".format(repo, match.group(1))
+            normalized["pr_number"] = row.get("number")
+            if _pr_is_open(normalized) and _pr_is_unmergeable(normalized):
+                normalized["verdict"] = latest_verdict(repo, row.get("number"))
+            found.append(normalized)
+    return found
 
 
 def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict]:

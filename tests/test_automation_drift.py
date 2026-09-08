@@ -86,7 +86,10 @@ def test_the_tier_follows_the_schedule_too():
     its quota on bounded work the cheap engine is already handling."""
     for path in sorted(sync.AUTOMATIONS.glob(sync.GLOB)):
         name = path.parent.name
-        want = "standard" if sync.needs_presence_check(name) else "escalated"
+        # From the derivation, not the presence check: the two were the same
+        # function until 2026-09-07 and are deliberately not any more, because
+        # suspending the proxy must not move a schedule's tier.
+        want = "standard" if sync.fires_all_day(name) else "escalated"
         assert sync.tier_for(name) == want, name
         command = [ln.strip() for ln in sync.prompt_text(name).splitlines()
                    if ln.strip().startswith("python3") and "funnel.py next" in ln][0]
@@ -110,11 +113,28 @@ def test_a_schedule_restricted_to_hours_needs_no_presence_proxy(tmp_path, monkey
     allday = make("whenever", "FREQ=HOURLY;INTERVAL=1;BYMINUTE=0,15,30,45")
     nights = make("nights", "FREQ=WEEKLY;BYDAY=SA;BYHOUR=2,3;BYMINUTE=0")
 
-    assert sync.needs_presence_check(allday)
-    assert not sync.needs_presence_check(nights)
+    # Asserted against the derivation, not `needs_presence_check`, so this keeps
+    # testing the rule while `PRESENCE_CHECK_ENABLED` is temporarily off. The
+    # design has to come back intact rather than be rebuilt from memory.
+    assert sync.fires_all_day(allday)
+    assert not sync.fires_all_day(nights)
     # Unknown schedules default to checking: refusing to compete with him is the
     # safe direction, assuming he is out is not.
-    assert sync.needs_presence_check("does-not-exist")
+    assert sync.fires_all_day("does-not-exist")
+
+
+def test_the_presence_switch_does_not_change_which_tier_a_schedule_works():
+    """Both the tier and the idle flag are read off one fact — does this
+    schedule fire all day. Suspending the presence proxy must not touch the
+    tier: on 2026-09-07 an earlier version of the switch flipped the all-day
+    fifteen-minute schedule from `standard` to `escalated`, which would have
+    pointed the cheapest, most frequent poller at the riskiest work in the
+    queue. Nothing would have reported it."""
+    allday = "command-center-tickets-hourly"
+    if not (sync.AUTOMATIONS / allday / "automation.toml").exists():
+        pytest.skip("automations not present here")
+    assert sync.tier_for(allday) == "standard"
+    assert sync.fires_all_day(allday)
 
 
 def test_the_routine_still_separates_setup_notes_from_the_runtime_prompt():

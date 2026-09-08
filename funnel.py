@@ -214,6 +214,7 @@ class Item:
     labels: List[str] = field(default_factory=list)
     block_references: List[str] = field(default_factory=list)
     block_reason: Optional[str] = None
+    open_blockers: List[str] = field(default_factory=list)
     assignees: List[str] = field(default_factory=list)
     in_motion_since: Optional[datetime] = None
     item_id: Optional[str] = None  # the ProjectV2Item, needed to write the lock
@@ -2026,6 +2027,11 @@ def load_items() -> List[Item]:
             # Membership is the topic. An item whose repo has not opted in is
             # outside the funnel even though it sits in the Project.
             if item and item.repo in members:
+                # Native dependencies apply to tickets, not the parent project.
+                # Keep the read with the normal item load so pure queue
+                # functions can consume the state without making network calls.
+                if item.state == "OPEN" and item.parent:
+                    item.open_blockers = open_blockers(item.repo, item.number)
                 if item.state == "OPEN" and item.is_blocked:
                     _load_block_comment(item)
                 items.append(item)
@@ -2647,6 +2653,35 @@ def _gh_json(*args: str):
         return json.loads(out.stdout)
     except ValueError:
         return None
+
+
+def open_blockers(repo: str, number: int) -> List[str]:
+    """Return open native dependency blockers for one ticket.
+
+    GitHub's endpoint returns full issue objects for both open and closed
+    blockers. The funnel only needs stable refs for blockers that are still
+    open; keeping the repository in the ref also handles a cross-repository
+    dependency without guessing from the ticket's repo.
+    """
+    endpoint = "repos/{}/issues/{}/dependencies/blocked_by".format(repo, number)
+    blockers = _gh_json("gh", "api", endpoint)
+    if blockers is None:
+        raise GitHubError("could not read blockers for {}#{}".format(repo, number))
+    if not isinstance(blockers, list):
+        raise GitHubError("invalid blockers response for {}#{}".format(repo, number))
+
+    refs: List[str] = []
+    for blocker in blockers:
+        if not isinstance(blocker, dict):
+            continue
+        if str(blocker.get("state") or "").lower() != "open":
+            continue
+        blocker_number = blocker.get("number")
+        if not isinstance(blocker_number, int) or isinstance(blocker_number, bool):
+            continue
+        blocker_repo = (blocker.get("repository") or {}).get("full_name") or repo
+        refs.append("{}#{}".format(blocker_repo, blocker_number))
+    return refs
 
 
 def _load_block_comment(item: Item) -> None:

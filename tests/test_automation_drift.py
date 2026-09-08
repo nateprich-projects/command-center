@@ -46,7 +46,7 @@ def test_every_codex_automation_matches_the_routine():
         # Per automation: the idle flag differs by schedule.
         wanted = sync.prompt_text(path.parent.name)
         _, existing = sync.current(path.read_text())
-        if existing != wanted:
+        if not sync.same_prompt(existing, wanted):
             drifted.append(path.parent.name)
 
     assert not drifted, (
@@ -145,3 +145,26 @@ def test_the_routine_still_separates_setup_notes_from_the_runtime_prompt():
     body = sync.prompt_text()
     assert "Paste this into" not in body
     assert body.startswith("# Codex routine")
+
+
+def test_the_trailing_newline_the_codex_app_strips_is_not_drift():
+    """The app drops the final newline when it saves an automation.
+
+    Compared byte-exactly, every automation reads as drifted forever. That is
+    worse than no check at all: this is the only guard against a schedule
+    running a stale pasted prompt, and one that always fires cannot be told from
+    one that has caught something. Found 2026-09-07 with two of five automations
+    reporting drift whose whole difference was a single `\n`.
+    """
+    wanted = sync.prompt_text("command-center-tickets-hourly")
+    assert wanted.endswith("\n"), "prompt_text is expected to emit a trailing newline"
+    assert sync.same_prompt(wanted.rstrip("\n"), wanted)
+
+
+def test_same_prompt_still_catches_a_real_change():
+    """Only *trailing* whitespace is forgiven. Everything else is drift."""
+    wanted = sync.prompt_text("command-center-tickets-hourly")
+    assert not sync.same_prompt(wanted.replace("--tier standard", "--tier escalated"),
+                                wanted)
+    assert not sync.same_prompt(" " + wanted, wanted)
+    assert not sync.same_prompt(None, wanted)

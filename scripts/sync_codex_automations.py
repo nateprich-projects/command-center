@@ -28,6 +28,7 @@ import re
 import shutil
 import sys
 import time
+from typing import Optional
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 ROUTINE = ROOT / "routines" / "codex-work.md"
@@ -138,6 +139,24 @@ def prompt_text(automation: str = "") -> str:
     return "{}\n\n{}\n".format(title, runtime)
 
 
+def same_prompt(existing: Optional[str], wanted: str) -> bool:
+    """Whether a stored prompt matches the routine, ignoring the trailing newline.
+
+    The Codex app strips the final newline when it saves an automation, so a
+    byte-exact comparison reports drift on every automation forever. That is
+    worse than not checking: this is the only guard against a schedule running a
+    stale pasted prompt — the failure that left zcode's breakdown job dead for
+    seventy-five minutes on 2026-09-06 — and a check that always fires cannot be
+    told from one that has caught something real.
+
+    Only *trailing* whitespace is forgiven. Any difference in the prompt itself,
+    including leading or interior whitespace, is still drift.
+    """
+    if existing is None:
+        return False
+    return existing.rstrip("\n") == wanted.rstrip("\n")
+
+
 def current(text: str):
     match = re.search(r'^prompt = (".*")$', text, re.MULTILINE)
     if not match:
@@ -166,7 +185,7 @@ def main(argv=None) -> int:
             print("{}: no prompt field — skipped".format(path.parent.name),
                   file=sys.stderr)
             continue
-        if existing == wanted:
+        if same_prompt(existing, wanted):
             print("  ok       {}".format(path.parent.name))
             continue
         drifted.append(path.parent.name)

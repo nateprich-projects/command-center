@@ -223,6 +223,7 @@ class Item:
     parent: Optional[str] = None  # "owner/repo#123"
     children_total: int = 0
     children_done: int = 0
+    first_child_created_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
 
     @property
@@ -238,10 +239,11 @@ class Item:
         return self.children_total > 0 and self.children_done == self.children_total
 
     def waited(self, now: datetime) -> Optional[timedelta]:
-        """How long this item has sat at its current gate."""
-        if self.status_since is None:
+        """How long this item has waited on its current gate or work queue."""
+        since = question_since(self)
+        if since is None:
             return None
-        return now - self.status_since
+        return now - since
 
 
 # --------------------------------------------------------------------------
@@ -341,6 +343,21 @@ def gate_question(item: Item) -> Optional[str]:
     return GATES.get(item.status or "")
 
 
+def question_since(item: Item) -> Optional[datetime]:
+    """When the item's current question became live.
+
+    ``gate_question`` is the authority for which question is live. A Ready
+    project starts asking "Start now?" when its first sub-issue exists, not
+    when the project entered Ready. The status timestamp remains the fallback
+    for items whose current wait is not that gate and for older or partial
+    fixture data without child details.
+    """
+    question = gate_question(item)
+    if question == GATES["Ready"]:
+        return item.first_child_created_at or item.status_since
+    return item.status_since
+
+
 def awaiting_decision(items: Iterable[Item]) -> List[Item]:
     """Nate's queue: everything waiting on him, bottom-up, oldest first.
 
@@ -358,7 +375,7 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
         except ValueError:
             depth = len(DECISION_ORDER)
         # Blocked items sort with their stage but ahead of it within the stage.
-        since = item.status_since or datetime.max.replace(tzinfo=timezone.utc)
+        since = question_since(item) or datetime.max.replace(tzinfo=timezone.utc)
         return (
             depth,
             not item.is_blocked,
@@ -776,7 +793,7 @@ def startable(items: Sequence[Item],
         return (parent.status if parent else item.status) == "Building"
 
     def key(item: Item):
-        since = item.status_since or datetime.max.replace(tzinfo=timezone.utc)
+        since = question_since(item) or datetime.max.replace(tzinfo=timezone.utc)
         return (
             not in_flight(item),
             effective_rank[item.ref],
@@ -2058,6 +2075,9 @@ query($login: String!, $number: Int!, $cursor: String) {
               assignees(first: 10) { nodes { login } }
               parent { number repository { nameWithOwner } }
               subIssuesSummary { total completed }
+              subIssues(first: 50) {
+                nodes { createdAt }
+              }
               blockedBy(first: 50) {
                 nodes { number state stateReason repository { nameWithOwner } }
               }
@@ -2160,6 +2180,13 @@ def _from_node(node: dict) -> Optional[Item]:
     status = (node.get("status") or {}).get("name")
     parent = content.get("parent")
     summary = content.get("subIssuesSummary") or {}
+    child_times = []
+    for child in ((content.get("subIssues") or {}).get("nodes") or []):
+        if not isinstance(child, dict):
+            continue
+        created_at = parse_time(child.get("createdAt"))
+        if created_at is not None:
+            child_times.append(created_at)
 
     item = Item(
         repo=content["repository"]["nameWithOwner"],
@@ -2180,6 +2207,7 @@ def _from_node(node: dict) -> Optional[Item]:
         ),
         children_total=summary.get("total") or 0,
         children_done=summary.get("completed") or 0,
+        first_child_created_at=min(child_times) if child_times else None,
         closed_at=parse_time(content.get("closedAt")),
         item_id=node.get("id"),
         in_motion_since=parse_time((node.get("lock") or {}).get("text")),

@@ -24,6 +24,7 @@ from funnel import (  # noqa: E402
     maintenance_load,
     needs_class,
     next_ticket,
+    question_since,
     stale_locks,
     startable,
 )
@@ -38,6 +39,8 @@ def at(days_ago: float) -> datetime:
 
 def project(number, status, klass, days=1.0, children=1, done=0, **kw) -> Item:
     """A parentless item with tickets under it — what the gates act on."""
+    if status == "Ready" and children:
+        kw.setdefault("first_child_created_at", at(days))
     return item(number, status, klass, days=days,
                 children_total=children, children_done=done, **kw)
 
@@ -85,6 +88,36 @@ def test_building_waits_only_once_every_child_has_closed():
 def test_building_with_no_children_does_not_count_as_complete():
     """children_all_closed must not be vacuously true for a childless item."""
     assert gate_question(item(1, "Building", "New", children_total=0, children_done=0)) is None
+
+
+def test_ready_question_starts_when_the_first_ticket_is_created():
+    ready = project(
+        1, "Ready", "New", days=30, children=2,
+        first_child_created_at=NOW - timedelta(hours=1),
+    )
+
+    assert question_since(ready) == NOW - timedelta(hours=1)
+    assert ready.waited(NOW) == timedelta(hours=1)
+
+
+def test_shaped_question_starts_when_the_status_does():
+    shaped = project(1, "Shaped", "New", days=12, children=0)
+
+    assert question_since(shaped) == shaped.status_since
+    assert shaped.waited(NOW) == timedelta(days=12)
+
+
+def test_ready_decision_order_uses_question_start_not_status_start():
+    newer_question = project(
+        1, "Ready", "New", days=30, children=2,
+        first_child_created_at=at(1),
+    )
+    older_question = project(
+        2, "Ready", "New", days=2, children=2,
+        first_child_created_at=at(10),
+    )
+
+    assert [i.number for i in awaiting_decision([newer_question, older_question])] == [2, 1]
 
 
 def test_oldest_at_gate_wins_within_a_stage():
@@ -518,6 +551,7 @@ def test_time_at_gate_ignores_other_projects():
     nodes = json.loads(FIXTURE.read_text())
     beta11 = next(i for i in (funnel._from_node(n) for n in nodes) if i and i.number == 11)
     assert beta11.status_since == datetime(2026, 9, 1, tzinfo=timezone.utc)
+    assert beta11.first_child_created_at == datetime(2026, 9, 5, 11, tzinfo=timezone.utc)
 
 
 def test_time_at_gate_uses_the_last_move_into_the_current_status():

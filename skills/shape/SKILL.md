@@ -88,6 +88,12 @@ something precedent already settles spends his attention on nothing.
 
 So: **shape what precedent covers, and never invent a decision that is his.**
 
+Before applying the decision lists below, use the
+[capability boundary in `AGENTS.md`](../../AGENTS.md#capability-boundary) as a
+closed-world test: does the plan require anything outside what an agent can reach?
+The access cases named there are examples, not an exhaustive checklist; an unnamed
+capability gap still counts.
+
 Decide from precedent, and cite where it comes from:
 
 - anything `plan.md` or `AGENTS.md` already rules on

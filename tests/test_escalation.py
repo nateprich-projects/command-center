@@ -72,6 +72,25 @@ Store credentials in the checkout instead.
     assert escalation_reasons("Keep setup local", body) == ["credentials"]
 
 
+def test_safe_exposure_and_subject_matter_prose_do_not_trip_the_net():
+    """Category names and explicit absence are not descriptions of risky work."""
+    ordinary = [
+        ("No exposure change",
+         "Exposure: nothing. No credential, nothing internet-reachable. "
+         "This changes no credential and does not grant permissions."),
+        ("Document the rollout",
+         "Keep MIGRATION.md current and discuss migration as a topic."),
+        ("Split the plan",
+         "The tickets overlap in subject matter but touch different files."),
+        ("Repair an executable bit",
+         "Restore the file permissions in the checkout."),
+        ("Report portfolio load",
+         "There are 15 concurrent projects and one of 78 ever parked."),
+    ]
+    for title, body in ordinary:
+        assert escalation_reasons(title, body) == []
+
+
 def test_this_repository_s_own_vocabulary_does_not_escalate_everything():
     """The property the whole design turns on.
 

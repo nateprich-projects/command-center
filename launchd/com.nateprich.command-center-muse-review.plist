@@ -30,33 +30,25 @@
     <string>com.nateprich.command-center-muse-review</string>
 
     <!--
-      **NOT ENABLED. This job is blocked and must not be loaded until the
-      blocker below is cleared — it fails every interval with exit 126.**
+      `/bin/bash <script>`, not the script directly, because launchd cannot
+      execute a file it can only read.
 
-      A launchd job cannot reach `/Volumes/External SSD` at all, where this
-      repository lives. Measured 2026-09-07 with a probe job: reading
-      `routines/muse.md`, reading this runner, running `funnel.py`, and even
-      `ls` on the repo all return `Operation not permitted`. macOS TCC does not
-      grant a launchd agent access to that volume, and a background job cannot
-      answer the prompt that would grant it.
+      This job was blocked until 2026-09-07. A launchd agent could not reach
+      `/Volumes/External SSD`, where this repository used to live: reading a
+      file, running a script and even `ls` all returned `Operation not
+      permitted`, and a background job cannot answer the TCC prompt that would
+      grant access. Interactive sessions were never affected — they inherit the
+      grants of whatever launched them, which is why Muse worked by hand and
+      why Codex and zcode, scheduled inside their own apps, never met this.
 
-      Neither arrangement of this plist fixes it. Running the script directly
-      fails to exec; running it as `/bin/bash <script>` fails to read. Every
-      process in the job's tree inherits the same restriction, so putting a
-      launcher on the internal disk does not help either — whatever it spawns
-      still cannot read the repo.
+      Resolved by moving the checkout to `~/.claude/command-center` as a real
+      directory rather than a symlink into the volume. Verified: this job now
+      exits 0 on a scheduled run.
 
-      This is why in-app scheduling worked for Codex and zcode without anyone
-      noticing the issue: those apps hold TCC grants Nate gave interactively.
-      The never-headless rule had a second, accidental benefit.
-
-      Clearing it needs Nate, and it is a choice rather than a fix:
-        - grant Full Disk Access to `/bin/bash` — works, and is broad enough
-          that every shell script on the machine gains it; or
-        - move the checkout to the internal disk, which removes the problem and
-          also removes the unmount risk an external volume carries.
-
-      Until then this file is a specification, not a running job.
+      After editing this file, re-install it:
+        cp launchd/com.nateprich.command-center-muse-review.plist ~/Library/LaunchAgents/
+        launchctl bootout gui/$(id -u)/com.nateprich.command-center-muse-review
+        launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nateprich.command-center-muse-review.plist
     -->
     <key>ProgramArguments</key>
     <array>

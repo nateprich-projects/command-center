@@ -124,7 +124,7 @@ def test_capture_always_labels_the_issue_and_reports_it(monkeypatch, capsys):
     assert calls[0][-2:] == ["--label", "needs-shaping"]
     assert capsys.readouterr().out == (
         "https://github.com/nateprich-projects/command-center/issues/123"
-        "  → Ideas (needs-shaping)\n"
+        "  → Ideas (needs-shaping) in nateprich-projects/command-center\n"
     )
 
 

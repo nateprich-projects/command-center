@@ -93,6 +93,8 @@ def test_shaped_preserves_plan_bytes_above_agent_stamp(tmp_path, monkeypatch):
         "run": "shape-run",
         "voice": "agent",
     }
+
+
 def test_capture_always_labels_the_issue_and_reports_it(monkeypatch, capsys):
     calls = []
 

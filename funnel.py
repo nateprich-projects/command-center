@@ -646,7 +646,7 @@ def startable(items: Sequence[Item],
     by_ref = {i.ref: i for i in items}
 
     def eligible(item: Item) -> bool:
-        if item.state != "OPEN" or item.is_blocked or item.children_total:
+        if item.state != "OPEN" or item.is_blocked or item.open_blockers or item.children_total:
             return False
         if item.ref in awaiting_review:
             return False

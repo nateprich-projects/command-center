@@ -2002,6 +2002,44 @@ def parked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     return [_parked_item_json(item) for item in parked_items(items)]
 
 
+def blocked_items(items: Iterable[Item]) -> List[Item]:
+    """Open, label-blocked items, oldest first.
+
+    Block comments are loaded once while the Project items are read. This
+    renderer deliberately reuses the parsed state on ``Item`` so the brief
+    does not fetch each blocked issue a second time.
+    """
+    return sorted(
+        (
+            item for item in items
+            if item.state == "OPEN" and item.is_blocked
+        ),
+        key=lambda item: (
+            item.status_since is None,
+            item.status_since or datetime.max.replace(tzinfo=timezone.utc),
+            item.repo,
+            item.number,
+        ),
+    )
+
+
+def _blocked_item_json(item: Item) -> Dict[str, object]:
+    """Render one blocked item from the parsed block-comment state."""
+    return {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "reason": item.block_reason,
+        "conditions": item.block_references,
+        "blocked_at": item.status_since.isoformat() if item.status_since else None,
+    }
+
+
+def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """The brief's blocked section, reusing one load-time comment fetch."""
+    return [_blocked_item_json(item) for item in blocked_items(items)]
+
+
 def cmd_queue(items: List[Item], now: datetime) -> int:
     """Everything, ordered — both queues, each under its own heading.
 
@@ -2106,6 +2144,7 @@ def cmd_brief(items: List[Item], now: datetime) -> int:
         "counts_by_gate": counts,
         "items": [item_json(i, now, by_ref) for i in decisions],
         "parked": parked_json(items),
+        "blocked": blocked_json(items),
         "needs_class": [item_json(i, now, by_ref) for i in items if needs_class(i)],
         "awaiting_breakdown": [
             item_json(i, now, by_ref) for i in awaiting_breakdown(items)

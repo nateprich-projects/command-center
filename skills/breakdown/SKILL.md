@@ -56,6 +56,14 @@ is chained, the plan has not really been broken up: it has been sliced into
 stages, and the funnel will process them one hourly run at a time with no
 parallelism gained. Look for a different cut.
 
+## Capability boundary
+
+When deciding whether a plan step is within an agent's reach, use the
+[capability boundary in `AGENTS.md`](../../AGENTS.md#capability-boundary) as a
+closed-world test: does the step require anything outside what an agent can reach?
+The access cases named there are examples, not an exhaustive list, so an unnamed
+requirement outside the boundary counts too.
+
 ## Coverage
 
 Together, the tickets must cover the plan. Before finishing:

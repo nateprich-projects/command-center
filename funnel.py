@@ -2261,16 +2261,17 @@ def cmd_ideas(items: List[Item], now: datetime) -> int:
 
 
 def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
-                repo: str, shaping: bool, run: Optional[str] = None,
+                repo: str, run: Optional[str] = None,
                 agent: Optional[str] = None) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
     body = append_provenance(
         note or "Captured from chat. Not yet thought through.", "agent",
         at=now, run=run, agent=agent,
     )
-    args = ["gh", "issue", "create", "--repo", repo, "--title", title, "--body", body]
-    if shaping:
-        args += ["--label", "needs-shaping"]
+    args = [
+        "gh", "issue", "create", "--repo", repo, "--title", title,
+        "--body", body, "--label", "needs-shaping",
+    ]
     out = subprocess.run(args, capture_output=True, text=True)
     if out.returncode != 0:
         raise GitHubError(out.stderr.strip())
@@ -2285,7 +2286,7 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         item_id = json.loads(add.stdout)["id"]
         gh_graphql(SET_FIELD, project=PROJECT_ID, item=item_id,
                    field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Ideas"))
-        print("{}  → Ideas{}".format(url, " (needs-shaping)" if shaping else ""))
+        print("{}  → Ideas (needs-shaping)".format(url))
     else:
         print("{}\nnote: created, but not added to the Project".format(url),
               file=sys.stderr)
@@ -2864,8 +2865,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     capture.add_argument("title")
     capture.add_argument("--note", default=None, help="anything worth keeping now")
     capture.add_argument("--repo", default=REPO)
-    capture.add_argument("--needs-shaping", action="store_true", dest="shaping",
-                         help="flag it as worth thinking through")
     capture.add_argument(
         "--run", default=None,
         help="heartbeat run id; otherwise infer a unique open local start",
@@ -3014,7 +3013,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_ideas(items, now)
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
-                               args.shaping, args.run, args.agent)
+                               args.run, args.agent)
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan,
                               args.run, args.agent)

@@ -35,20 +35,17 @@ about its length.
 ## Capturing a new one
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py capture "<title>" --note "<anything worth keeping>" --needs-shaping
+python3 /Users/nateprich/.claude/command-center/funnel.py capture "<title>" --note "<anything worth keeping>"
 ```
 
 Capture is cheap and is meant to be. Write down what he actually said rather than
 a tidied version — the raw phrasing is often the part that reminds him what he
 meant.
 
-**Always pass `--needs-shaping`.** Every idea needs shaping, so the label is true of
-all of them; Nate keeps it because it is what makes an idea recognisable when he is
-browsing issues in GitHub. It is a stated fact, not a priority, and it is not yours to
-withhold. Leaving it off does not mark something as merely parked — it silently sinks
-that idea below every labelled one, because `funnel.py:217` still sorts on it. That is
-how #15 came to sit last despite waiting longest. Tracked as #32, which removes the
-flag entirely once it lands.
+Capture always applies `needs-shaping`. Every idea needs shaping, so the label is true
+of all of them; Nate keeps it because it is what makes an idea recognisable when he is
+browsing issues in GitHub. It is a stated fact, not a priority, and the capture command
+does not offer a way to omit it.
 
 ### Class it when you file it
 

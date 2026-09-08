@@ -284,6 +284,77 @@ def test_a_ticket_with_no_native_blockers_is_startable():
     assert [i.number for i in startable(rows)] == [2]
 
 
+def test_a_blocker_inherits_rank_from_a_higher_numbered_broken_ticket():
+    broken_parent = project(1, "Building", "Broken")
+    waiting = ticket(3, 1, open_blockers=["nateprich/beta#4"])
+    improve_parent = project(2, "Building", "Improve")
+    blocker = ticket(4, 2)
+    maintenance_parent = project(5, "Building", "Maintenance")
+    other = ticket(6, 5)
+
+    assert [i.number for i in startable(
+        [broken_parent, waiting, improve_parent, blocker,
+         maintenance_parent, other]
+    )] == [4, 6]
+
+
+def test_transitive_dependency_chain_lifts_the_deepest_rank():
+    broken_parent = project(1, "Building", "Broken")
+    waiting = ticket(10, 1, open_blockers=["nateprich/beta#20"])
+    improve_parent = project(2, "Building", "Improve")
+    middle = ticket(20, 2, open_blockers=["nateprich/beta#30"])
+    new_parent = project(3, "Building", "New")
+    deepest_blocker = ticket(30, 3)
+    maintenance_parent = project(4, "Building", "Maintenance")
+    other = ticket(40, 4)
+
+    assert [i.number for i in startable([
+        broken_parent, waiting, improve_parent, middle, new_parent,
+        deepest_blocker, maintenance_parent, other,
+    ])] == [30, 40]
+
+
+def test_dependency_cycle_terminates_while_ranking_reachable_work():
+    new_parent = project(1, "Building", "New")
+    root = ticket(11, 1)
+    improve_parent = project(2, "Building", "Improve")
+    cycle_a = ticket(21, 2, open_blockers=["nateprich/beta#31"])
+    broken_parent = project(3, "Building", "Broken")
+    cycle_b = ticket(31, 3, open_blockers=["nateprich/beta#21",
+                                           "nateprich/beta#11"])
+    maintenance_parent = project(4, "Building", "Maintenance")
+    other = ticket(41, 4)
+
+    assert [i.number for i in startable([
+        new_parent, root, improve_parent, cycle_a, broken_parent, cycle_b,
+        maintenance_parent, other,
+    ])] == [11, 41]
+
+
+def test_dependency_ranking_does_not_mutate_class_or_upkeep_share():
+    broken_parent = project(1, "Building", "Broken")
+    waiting = ticket(3, 1, open_blockers=["nateprich/beta#4"])
+    improve_parent = project(2, "Building", "Improve")
+    blocker = ticket(4, 2)
+    closed_broken = item(
+        90, "Done", "Broken", state="CLOSED", state_reason="COMPLETED",
+        closed_at=at(2),
+    )
+    closed_new = item(
+        91, "Done", "New", state="CLOSED", state_reason="COMPLETED",
+        closed_at=at(3),
+    )
+    rows = [broken_parent, waiting, improve_parent, blocker,
+            closed_broken, closed_new]
+    classes = {row.ref: row.klass for row in rows}
+    before = funnel.maintenance_load(rows, NOW)
+
+    startable(rows)
+
+    assert {row.ref: row.klass for row in rows} == classes
+    assert funnel.maintenance_load(rows, NOW) == before
+
+
 def test_oldest_at_gate_breaks_ties_in_the_ladder_too():
     items = [project(1, "Building", "New"), ticket(11, 1, days=3),
              project(2, "Building", "New"), ticket(12, 2, days=40)]

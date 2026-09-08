@@ -224,6 +224,8 @@ class Item:
     children_total: int = 0
     children_done: int = 0
     first_child_created_at: Optional[datetime] = None
+    last_child_closed_at: Optional[datetime] = None
+    blocked_since: Optional[datetime] = None
     closed_at: Optional[datetime] = None
 
     @property
@@ -348,11 +350,17 @@ def question_since(item: Item) -> Optional[datetime]:
 
     ``gate_question`` is the authority for which question is live. A Ready
     project starts asking "Start now?" when its first sub-issue exists, not
-    when the project entered Ready. The status timestamp remains the fallback
-    for items whose current wait is not that gate and for older or partial
-    fixture data without child details.
+    when the project entered Ready. A Building project starts asking "Accept
+    it?" when its last sub-issue closes. A blocked item starts asking its
+    unblock question when the ``blocked`` label is applied. The status
+    timestamp remains the fallback for older or partial fixture data without
+    the event details.
     """
     question = gate_question(item)
+    if item.is_blocked and question is not None:
+        return item.blocked_since or item.status_since
+    if question == GATES["Building"]:
+        return item.last_child_closed_at or item.status_since
     if question == GATES["Ready"]:
         return item.first_child_created_at or item.status_since
     return item.status_since
@@ -2099,15 +2107,19 @@ query($login: String!, $number: Int!, $cursor: String) {
               parent { number repository { nameWithOwner } }
               subIssuesSummary { total completed }
               subIssues(first: 50) {
-                nodes { createdAt }
+                nodes { createdAt closedAt }
               }
               blockedBy(first: 50) {
                 nodes { number state stateReason repository { nameWithOwner } }
               }
-              timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]) {
+              timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT]) {
                 nodes {
+                  __typename
                   ... on ProjectV2ItemStatusChangedEvent {
                     createdAt status project { number }
+                  }
+                  ... on LabeledEvent {
+                    createdAt label { name }
                   }
                 }
               }
@@ -2204,12 +2216,16 @@ def _from_node(node: dict) -> Optional[Item]:
     parent = content.get("parent")
     summary = content.get("subIssuesSummary") or {}
     child_times = []
+    child_close_times = []
     for child in ((content.get("subIssues") or {}).get("nodes") or []):
         if not isinstance(child, dict):
             continue
         created_at = parse_time(child.get("createdAt"))
         if created_at is not None:
             child_times.append(created_at)
+        closed_at = parse_time(child.get("closedAt"))
+        if closed_at is not None:
+            child_close_times.append(closed_at)
 
     item = Item(
         repo=content["repository"]["nameWithOwner"],
@@ -2231,6 +2247,7 @@ def _from_node(node: dict) -> Optional[Item]:
         children_total=summary.get("total") or 0,
         children_done=summary.get("completed") or 0,
         first_child_created_at=min(child_times) if child_times else None,
+        last_child_closed_at=max(child_close_times) if child_close_times else None,
         closed_at=parse_time(content.get("closedAt")),
         item_id=node.get("id"),
         in_motion_since=parse_time((node.get("lock") or {}).get("text")),
@@ -2250,7 +2267,13 @@ def _from_node(node: dict) -> Optional[Item]:
     # issue may sit in several projects — filtering on the project is what stops
     # time-at-gate being silently wrong.
     for event in content["timelineItems"]["nodes"]:
-        if not event or (event.get("project") or {}).get("number") != PROJECT_NUMBER:
+        if not event:
+            continue
+        label = (event.get("label") or {}).get("name")
+        if label == "blocked":
+            item.blocked_since = parse_time(event.get("createdAt"))
+            continue
+        if (event.get("project") or {}).get("number") != PROJECT_NUMBER:
             continue
         if event.get("status") == status:
             item.status_since = parse_time(event.get("createdAt"))

@@ -109,7 +109,26 @@ LOCK_TTL = timedelta(hours=2)
 #: PRs**, which land on the Claude reviewer rather than on him — `plan.md` moved
 #: his gate to the project level precisely so he would not see every PR. Clearing
 #: the bottom reliably does not drain that queue.
-WIP_LIMIT = 2
+#:
+#: **Raised 2 -> 4 on 2026-09-08, on the condition this comment already set.**
+#: "Raise it when review stops being the constraint" — review has stopped being
+#: the constraint, and it is measured rather than assumed: Muse reviews on a
+#: five-minute standard schedule plus an hourly escalated one, is unmetered, and
+#: finished 48 runs `nothing-to-do` in the six hours to 08:24 for want of a PR to
+#: look at. The premise that made two right — Codex outrunning a metered Claude
+#: reviewer — no longer holds.
+#:
+#: **What this does not fix, and what to watch.** Parallelism multiplies whatever
+#: the queue hands out. Six of the top twelve startable tickets carry a prose
+#: dependency `startable()` cannot read, so extra sessions can be handed chained
+#: work, decline it, and record `errored` (#175) only to be handed it again
+#: (#177) — on 2026-09-08 three runs opened within one minute and all three took
+#: the same unworkable ticket. More branches against a faster-moving `main` also
+#: means more conflicts, and `merge_blockers` still does not read the `mergeable`
+#: it fetches (#161), so the gate passes a conflicting branch and fails at
+#: `gh pr merge`. If this raise goes badly, those are the two reasons; #129's
+#: #153/#154 and #161 are the fixes, not a lower number.
+WIP_LIMIT = 4
 
 #: Funnel order. Index is the stage's depth; later means further along.
 STAGES = ["Ideas", "Shaped", "Ready", "Building", "Done", "Parked"]

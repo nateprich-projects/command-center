@@ -102,8 +102,11 @@ Decide from precedent, and cite where it comes from:
 
 Leave to Nate, and say so explicitly rather than guessing:
 
-- **anything that changes his exposure** — credentials, what is reachable from the
-  internet, what an agent may do unattended
+- **anything the agent cannot reach under the [capability boundary](../capability-boundary.md)**.
+  Treat that boundary as a closed-world test; its named access cases are examples,
+  not an exhaustive checklist.
+- **anything that changes his exposure** — how reachable the system becomes or what
+  an unattended run may touch
 - **anything touching a gate or who may write one**
 - **scope and priority**: whether to build it at all, and how much
 - anything where the plan would encode a preference rather than a deduction

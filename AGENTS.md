@@ -58,6 +58,8 @@ turn — go back and derive it from GitHub instead.
 The one exception is the statusline rate-limit cache, which exists because the numbers
 are only readable from inside a live session. It is a cache, never a source of truth.
 
+**Project single-select mutations replace the option set rather than appending to it.** Any `updateProjectV2Field` call carrying `singleSelectOptions` must include the existing `id` for every option being kept; submitting an option with `name`, `description`, and `color` but no `id` mints a new option and silently orphans every existing assignment. A backup of the option set is **not** a backup of the assignments. _(agent rule, unconfirmed — advisory)_
+
 ## Ranking is not yours to do
 
 **One shared program (`funnel.py`) computes all ordering. Both agents call it and act on

@@ -170,6 +170,25 @@ def test_never_having_run_is_still_reported_in_the_log():
     assert "only 0 gap(s)" in watchdog.note("codex", [start("a", 1)], NOW)
 
 
+def test_main_watches_every_registered_provider(monkeypatch):
+    """A new heartbeat provider must not be silently left out of coverage."""
+    providers = {
+        "claude": "anthropic",
+        "codex": "openai",
+        "zcode": "zai",
+        "future": "new-pool",
+    }
+    seen = []
+    monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", providers)
+    monkeypatch.setattr(
+        watchdog, "records", lambda agent: seen.append(agent) or []
+    )
+    monkeypatch.setattr(watchdog, "existing_issue", lambda: {})
+
+    assert watchdog.main() == 0
+    assert seen == sorted(providers)
+
+
 # -- the heartbeat's own view ----------------------------------------------
 
 

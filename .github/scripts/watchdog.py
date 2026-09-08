@@ -242,7 +242,7 @@ def existing_issue() -> Dict:
 def main() -> int:
     now = time.time()
     problems = []
-    for agent in ("codex", "claude"):
+    for agent in sorted(heartbeat.PROVIDERS):
         rows = records(agent)
         problems += assess(agent, rows, now)
         info = note(agent, rows, now)

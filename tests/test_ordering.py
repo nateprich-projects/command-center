@@ -125,6 +125,32 @@ def test_blocked_surfaces_as_its_own_question_and_leads_its_stage():
     assert gate_question(blocked) == "Unblock or park?"
 
 
+def test_a_blocked_ticket_asks_only_whether_to_unblock():
+    blocked = ticket(1, 9, labels=["blocked"])
+
+    assert gate_question(blocked) == "Unblock?"
+
+
+def test_a_named_block_condition_waits_on_the_system_for_projects_and_tickets():
+    project_with_condition = project(
+        1, "Ready", "New", labels=["blocked"], block_references=["#84"]
+    )
+    ticket_with_condition = ticket(
+        2, 1, labels=["blocked"], block_references=["#84"]
+    )
+
+    assert gate_question(project_with_condition) is None
+    assert gate_question(ticket_with_condition) is None
+    assert awaiting_decision([project_with_condition, ticket_with_condition]) == []
+
+
+def test_block_condition_state_does_not_change_non_blocked_questions():
+    ready = project(1, "Ready", "New", children=2,
+                    block_references=["#84"])
+
+    assert gate_question(ready) == "Start now?"
+
+
 def test_unknown_status_still_appears_rather_than_vanishing():
     """An item with an unrecognised Status must not be silently dropped."""
     items = [project(1, "Shaped", "New"), project(2, "Ready", "New")]

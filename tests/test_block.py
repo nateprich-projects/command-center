@@ -40,3 +40,63 @@ def test_embedded_block_prefix_does_not_match():
     assert funnel.parse_block_comment([
         "A sentence before **Blocked on #84:** is not a header.",
     ]) is None
+
+
+def test_load_items_fetches_comments_only_for_open_blocked_items(monkeypatch):
+    def node(number, repo="owner/repo", state="OPEN", labels=None):
+        return {
+            "status": {"name": "Ready"},
+            "class": {"name": "New"},
+            "content": {
+                "number": number,
+                "title": "issue {}".format(number),
+                "url": "https://github.com/{}/issues/{}".format(repo, number),
+                "state": state,
+                "stateReason": None,
+                "closedAt": None,
+                "repository": {"nameWithOwner": repo},
+                "labels": {"nodes": [{"name": label} for label in labels or []]},
+                "assignees": {"nodes": []},
+                "parent": None,
+                "subIssuesSummary": {"total": 0, "completed": 0},
+                "timelineItems": {"nodes": []},
+            },
+        }
+
+    nodes = [
+        node(1, labels=["blocked"]),
+        node(2),
+        node(3, state="CLOSED", labels=["blocked"]),
+        node(4, repo="outside/repo", labels=["blocked"]),
+    ]
+    monkeypatch.setattr(funnel, "member_repos", lambda: ["owner/repo"])
+    monkeypatch.setattr(
+        funnel,
+        "gh_graphql",
+        lambda *args, **kwargs: {
+            "user": {"projectV2": {"items": {
+                "nodes": nodes,
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}}
+        },
+    )
+    calls = []
+
+    def gh_json(*args):
+        calls.append(args)
+        return {"comments": [
+            {"body": "**Blocked on #84:** Wait for the decision."},
+        ]}
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+
+    items = funnel.load_items()
+
+    assert [item.number for item in items] == [1, 2, 3]
+    assert calls == [(
+        "gh", "issue", "view", "1", "--repo", "owner/repo",
+        "--json", "comments",
+    )]
+    blocked = items[0]
+    assert blocked.block_references == ["#84"]
+    assert blocked.block_reason == "Wait for the decision."

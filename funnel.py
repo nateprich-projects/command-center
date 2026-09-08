@@ -180,6 +180,12 @@ UNATTRIBUTED = "UNATTRIBUTED"
 PROVENANCE_MARKER = "<!-- command-center-provenance -->"
 PROVENANCE_VOICES = ("nate-direct", "nate-relayed", "agent")
 
+#: An origin is only a default for who shapes an idea. This marker records the
+#: explicit exception without rewriting that historical fact. Moving work back
+#: toward Nate is always safe; moving it toward agents requires Nate's voice.
+ORIGIN_OVERRIDE_MARKER = "<!-- command-center-origin-override -->"
+ORIGIN_OVERRIDE_TARGETS = ("nate", "agents")
+
 #: Three rejected merges in a week means the auto-merge bar has failed. That is
 #: not "there are bugs" — it is a different and more serious fact, and the
 #: response is to stop auto-merging and fix the review prompt.
@@ -780,6 +786,22 @@ def parse_provenance(body: str) -> Optional[Dict]:
     found = _marked_json(body, PROVENANCE_MARKER)
     if found is None or found.get("voice") not in PROVENANCE_VOICES:
         return None
+    return found
+
+
+def parse_origin_override(body: str) -> Optional[Dict]:
+    """Return an authorised origin override, or None when it fails closed.
+
+    Anyone may ask that an item be shaped with Nate. Only a marker carrying a
+    Nate provenance voice may hand an item to agents for unattended shaping.
+    """
+    found = _marked_json(body, ORIGIN_OVERRIDE_MARKER)
+    if found is None or found.get("target") not in ORIGIN_OVERRIDE_TARGETS:
+        return None
+    if found["target"] == "agents":
+        provenance = parse_provenance(body)
+        if provenance is None or provenance["voice"] == "agent":
+            return None
     return found
 
 

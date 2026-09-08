@@ -413,6 +413,66 @@ def escalation_reasons(title: str, body: str,
     return found
 
 
+NEEDS_NATE_PATTERNS = {
+    # A citation is only a signal when it is being used to ground authority,
+    # not when a plan happens to mention either instruction file.
+    "policy authority": (
+        r"\b(?:plan\.md|agents\.md)\b[^.!?]{0,160}"
+        r"\b(?:gate|membership|who\s+may\s+(?:write|set|change|edit|update)|"
+        r"what\s+(?:an\s+)?agent\s+may\s+(?:do|write|set|approve)|"
+        r"agents?\s+(?:may|can|must|may\s+not))\b|"
+        r"\b(?:gate|membership|who\s+may\s+(?:write|set|change|edit|update))\b"
+        r"[^.!?]{0,160}\b(?:plan\.md|agents\.md)\b"
+    ),
+    "unattended authority": (
+        r"\bself[- ]approv\w*\b|"
+        r"\b(?:unattended)\b[^.!?]{0,160}"
+        r"\b(?:approv\w*|merge\w*|agent|routine|automation|"
+        r"write\w*|set\w*|create\w*|act\w*)\b|"
+        r"\b(?:agent|agents|routine|automation)\b[^.!?]{0,160}"
+        r"\b(?:without\s+(?:Nate|him|human|a\s+human|review|approval)|"
+        r"on\s+its\s+own|by\s+itself|skip(?:s|ping)?\s+(?:Nate|him)|"
+        r"unattended)\b"
+    ),
+    "gate authority": (
+        r"\b(?:gate|gates)(?:'s)?[^.!?]{0,120}"
+        r"\b(?:question|answer|answered|who\s+answers|owner|owned|"
+        r"belongs|claim|decision)\b|"
+        r"\b(?:question|answer|answered|who\s+answers|owner|owned|belongs)\b"
+        r"[^.!?]{0,120}\b(?:gate|gates)\b|"
+        r"\b(?:add|adds|remove|removes|change|changes|replace|replaces|"
+        r"redefine\w*|move\w*|shift\w*|become\w*|turn\w*)\b"
+        r"[^.!?]{0,80}\b(?:a\s+)?(?:gate|gates)\b"
+    ),
+    "field authority": (
+        r"\b(?:who|which|only\s+Nate|Nate|agent|agents|routine|"
+        r"automation|human)\b[^.!?]{0,100}"
+        r"\b(?:may|can|must|is\s+(?:allowed|authori[sz]ed)\s+to|will)?\s*"
+        r"(?:set|write|change|edit|update|assign)\w*\b[^.!?]{0,120}"
+        r"\b(?:field|fields|status|class|label|labels|marker|markers|option|"
+        r"options)\b|"
+        r"\b(?:field|fields|status|class|label|labels|marker|markers|option|"
+        r"options)\b[^.!?]{0,120}"
+        r"\b(?:set|written|changed|edited|updated|assigned)\b[^.!?]{0,100}"
+        r"\b(?:by|who|agent|agents|Nate)\b"
+    ),
+}
+
+
+def needs_nate_signals(plan_body: str) -> List[str]:
+    """Return authority signals that contradict an all-clear Needs section.
+
+    The section parser owns whether a plan explicitly asks Nate a question.
+    This scan is the independent check against the plan's own prose: it reports
+    authority-shaped claims without judging how risky the plan is. Matching is
+    deliberately sentence-local so ordinary discussion of gates and fields
+    does not become an authority claim merely because the vocabulary appears.
+    """
+    text = re.sub(r"\s+", " ", plan_body or "")
+    return [name for name, pattern in sorted(NEEDS_NATE_PATTERNS.items())
+            if re.search(pattern, text, re.IGNORECASE)]
+
+
 def required_tier(title: str, body: str, failed_before: bool = False) -> str:
     return "escalated" if escalation_reasons(title, body, failed_before) else "standard"
 

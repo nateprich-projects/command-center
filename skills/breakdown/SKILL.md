@@ -48,8 +48,29 @@ Codex works **one ticket per run** and the ladder decides what to start, so
 tickets should be workable in any order where possible.
 
 Where order genuinely matters, say so in the ticket body — "depends on #N" — and
-put the dependency in the body rather than inventing a label. The label set is
-closed at two on purpose.
+write the same relationship to GitHub's native dependency graph. The body sentence
+is for the human reader; the graph is what the queue can enforce. Do not invent a
+label. The label set is closed at two on purpose.
+
+## Native dependency edges
+
+When a ticket depends on another ticket, create the edge in the same command that
+creates the ticket and writes its `Risk:` line. `gh issue create` accepts the
+blocker through `--blocked-by`; use that machine-readable flag first, then keep
+the human-readable dependency sentence in the body:
+
+```bash
+gh issue create --repo <repo> --parent <parent-number> \
+  --blocked-by <blocker-number> \
+  --title "<ticket title>" \
+  --body $'Parent: #<parent-number>.\n\nDepends on #<blocker-number> — <why>.\n\nWhat: <bounded work>.\n\nAccept: <proof it worked>.\n\nRisk: standard'
+```
+
+For multiple blockers, pass all blocker numbers to `--blocked-by` and name each
+one in the body sentence. Keep `Risk:` on its own line. Do not replace the native
+edge with a `Depends:` body marker, a label, or a later follow-up edit: malformed
+prose is silently unreadable by the queue, while the native relationship carries
+the blocker's live state.
 
 ## The capability boundary
 

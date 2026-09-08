@@ -105,9 +105,28 @@ Leave to Nate, and say so explicitly rather than guessing:
 - **scope and priority**: whether to build it at all, and how much
 - anything where the plan would encode a preference rather than a deduction
 
-The plan must **separate the two**. "Decided from precedent (source)" and "Needs you"
-are different sections, and the second is what he actually reads at the Shaped gate. If
-the second list is empty, say so — that is a good outcome, not a suspicious one.
+The plan must **separate the decision record from the open-question record**. "Decided
+from precedent (source)" and "Needs you" are different sections, and the latter is what
+he actually reads at the Shaped gate. If the plan also has a "Decided by the agent"
+section, keep that separate too; it records the agent's judgement and reasoning rather
+than laundering it into precedent.
+
+"Needs you" (or the existing "Needs Nate" spelling) is **not** answered by an empty
+section. Write one explicit answer under each category, even when the answer is that
+nothing is outstanding:
+
+- **Exposure** — credentials, internet-reachable surface, and what an unattended run may
+  touch.
+- **Gates** — anything touching a gate or who may write one.
+- **Scope and priority** — whether to build it at all, and how much.
+- **Preference** — anything the plan would encode as preference rather than deduction.
+
+An absent category is unanswered, not clear. State the open question instead of inventing
+an answer; otherwise write an explicit "nothing outstanding" answer. These four answers
+are claims for the verifier to check against the rest of the plan. If the plan implies a
+gate concern that the section says is clear, the agent has made a **recorded wrong claim**
+rather than a silent omission, which makes the miss findable afterwards. #84's own
+"Needs Nate" section is the worked example: use its four explicit answers as the model.
 
 If an idea genuinely turns on his judgement, **grill him** rather than writing the
 plan at him. Prefer his local `grilling` skill if it is installed

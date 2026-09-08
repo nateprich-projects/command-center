@@ -40,6 +40,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `needs_class` | Items with no `Class` set. Invalid and not startable — a one-word fix in the Project |
 | `in_motion` | Tickets currently claimed, as a list. `wip_limit` is how many may run at once — the cap is policy, the per-ticket claim is correctness |
 | `stale_locks_taken_over` | Claims past the 2-hour TTL that were taken over |
+| `stranded` | Open items for which no current agent or gate can make progress. Diagnostic only; it does not add to `total_needing_nate` |
 | `working_tree_touched` | Runs during which Nate's own checkout changed. No routine should write it — engineers use their own clones, reviewers are read-only. Reports a *change*, not a crime: him committing mid-run looks the same. Say it plainly when present |
 | `maintenance_load` | `upkeep_share` is the fraction of work closed in the last 30 days that was `Broken` or `Maintenance` |
 
@@ -50,7 +51,7 @@ and issue title as a link, and how long it has waited. Keep it scannable — thi
 decide, not to browse.
 
 Then the gate counts on one line. Then anything unusual, and only if present:
-`needs_class`, `stale_locks_taken_over`, and `in_motion`.
+`needs_class`, `stale_locks_taken_over`, `stranded`, and `in_motion`.
 
 Offer the `launch` command for the top item. Do not run it.
 

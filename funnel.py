@@ -216,6 +216,7 @@ class Item:
     block_references: List[str] = field(default_factory=list)
     block_reason: Optional[str] = None
     open_blockers: List[str] = field(default_factory=list)
+    dead_blockers: List[str] = field(default_factory=list)
     assignees: List[str] = field(default_factory=list)
     in_motion_since: Optional[datetime] = None
     item_id: Optional[str] = None  # the ProjectV2Item, needed to write the lock
@@ -2030,10 +2031,15 @@ def load_items() -> List[Item]:
             # outside the funnel even though it sits in the Project.
             if item and item.repo in members:
                 # Native dependencies apply to tickets, not the parent project.
-                # Keep the read with the normal item load so pure queue
-                # functions can consume the state without making network calls.
+                # Keep the read with the normal item load so pure queue and
+                # diagnostic functions can consume the state without making
+                # network calls. Keep closed `not_planned` blockers too: they
+                # no longer belong in `open_blockers`, but they are the one
+                # dependency state that can never resolve by itself.
                 if item.state == "OPEN" and item.parent:
-                    item.open_blockers = open_blockers(item.repo, item.number)
+                    dependencies = dependency_facts(item.repo, item.number)
+                    item.open_blockers = dependencies["open"]
+                    item.dead_blockers = dependencies["dead"]
                 if item.state == "OPEN" and item.is_blocked:
                     _load_block_comment(item)
                 items.append(item)
@@ -2269,6 +2275,127 @@ def closed_with_access_vocabulary_json(
     ]
 
 
+def _never_closing(item: Item) -> bool:
+    """Whether an issue cannot resolve the prerequisite it represents."""
+    reason = str(item.state_reason or "").lower().replace("-", "_").replace(" ", "_")
+    return item.status == "Parked" or reason == "not_planned"
+
+
+def _dependency_ref(item: Item, value: str) -> Optional[str]:
+    """Expand the block-comment shorthand without guessing cross-repo refs."""
+    value = str(value).strip()
+    if value.startswith("#"):
+        return item.repo + value
+    return value if "/" in value and "#" in value else None
+
+
+def _dead_dependency_refs(item: Item, by_ref: Dict[str, Item]) -> List[str]:
+    """Return blockers that are explicitly unable to close.
+
+    ``dead_blockers`` comes from the native dependency response and covers
+    blockers outside the Project too. The other two sources let fixture and
+    already-loaded Project data prove the same condition for a local blocker.
+    """
+    refs = set(getattr(item, "dead_blockers", []))
+    for value in list(item.open_blockers) + list(item.block_references):
+        ref = _dependency_ref(item, value)
+        blocker = by_ref.get(ref or "")
+        if blocker is not None and _never_closing(blocker):
+            refs.add(ref)
+    return sorted(refs)
+
+
+def _approved_current_head(pr: Optional[Dict[str, object]]) -> bool:
+    """Whether a PR carries approval for the head currently being inspected."""
+    if not isinstance(pr, dict):
+        return False
+    verdict = pr.get("verdict")
+    if isinstance(verdict, dict):
+        approved = verdict.get("verdict") == "approved"
+        reviewed_head = verdict.get("head_sha")
+    else:
+        approved = verdict == "approved"
+        reviewed_head = None
+    if not approved:
+        return False
+    head = pr.get("headRefOid")
+    # A fixture may omit the SHA when it is only testing the state pair. Live
+    # facts include both values, and a moved head must not be called stranded:
+    # it is waiting for a fresh review instead.
+    return not head or not reviewed_head or head == reviewed_head
+
+
+def stranded_items(
+    items: Iterable[Item],
+    now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> List[Dict[str, object]]:
+    """Render open items for which no current agent or gate can make progress.
+
+    This is deliberately a diagnostic, not a queue. The first release only
+    uses facts the funnel already knows how to read: an approved current-head
+    verdict on a conflicting PR, a stale claim with no PR, a childless
+    ``Building`` project, and a native or named dependency closed as
+    ``not_planned``. Missing CI history is intentionally absent; no fetched
+    fact distinguishes that from a PR whose first check is still pending.
+
+    ``pr_facts`` is optional so the function remains fixture-pure. ``None``
+    means the caller has not requested PR lookups and therefore treats a stale
+    claim as having no PR; a supplied mapping distinguishes a known no-PR
+    result from a fact that was not fetched.
+    """
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    stale = {item.ref for item in stale_locks(rows, now)}
+    found: List[Dict[str, object]] = []
+
+    for item in rows:
+        if item.state != "OPEN":
+            continue
+
+        reasons: List[str] = []
+        pr_known = pr_facts is None or item.ref in pr_facts
+        pr = None if pr_facts is None else pr_facts.get(item.ref)
+        if (
+            pr
+            and str(pr.get("state") or "").upper() == "OPEN"
+            and str(pr.get("mergeable") or "").upper() == "CONFLICTING"
+            and _approved_current_head(pr)
+        ):
+            reasons.append("approved verdict against an unmergeable branch")
+
+        if item.ref in stale and pr_known and pr is None:
+            reasons.append("claim past its TTL with no PR")
+
+        if item.parent is None and item.status == "Building" and not item.children_total:
+            reasons.append("Building project has no tickets")
+
+        dead = _dead_dependency_refs(item, by_ref)
+        if dead:
+            reasons.append(
+                "blocked on blocker that will never close: {}".format(
+                    ", ".join(dead))
+            )
+
+        if reasons:
+            found.append({
+                "ref": item.ref,
+                "title": item.title,
+                "url": item.url,
+                "reason": "; ".join(reasons),
+            })
+    return found
+
+
+def stranded_json(
+    items: Iterable[Item],
+    now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> List[Dict[str, object]]:
+    """The brief's stranded-work diagnostic array."""
+    return stranded_items(items, now, pr_facts=pr_facts)
+
+
 def cmd_queue(items: List[Item], now: datetime) -> int:
     """Everything, ordered — both queues, each under its own heading.
 
@@ -2355,7 +2482,11 @@ def cmd_next(items: List[Item], now: datetime, tier: Optional[str] = None) -> in
     return 0
 
 
-def cmd_brief(items: List[Item], now: datetime) -> int:
+def cmd_brief(
+    items: List[Item],
+    now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> int:
     decisions = awaiting_decision(items)
     by_ref = {i.ref: i for i in items}
     counts = {}
@@ -2382,6 +2513,7 @@ def cmd_brief(items: List[Item], now: datetime) -> int:
         "awaiting_breakdown": [
             item_json(i, now, by_ref) for i in awaiting_breakdown(items)
         ],
+        "stranded": stranded_json(items, now, pr_facts=pr_facts),
         "in_motion": [i.ref for i in running],
         "wip_limit": WIP_LIMIT,
         "stale_locks_taken_over": [i.ref for i in stale_locks(items, now)],
@@ -2752,13 +2884,14 @@ def _gh_json(*args: str):
         return None
 
 
-def open_blockers(repo: str, number: int) -> List[str]:
-    """Return open native dependency blockers for one ticket.
+def dependency_facts(repo: str, number: int) -> Dict[str, List[str]]:
+    """Return the dependency states that affect whether a ticket can finish.
 
     GitHub's endpoint returns full issue objects for both open and closed
-    blockers. The funnel only needs stable refs for blockers that are still
-    open; keeping the repository in the ref also handles a cross-repository
-    dependency without guessing from the ticket's repo.
+    blockers. Open blockers still belong in the queue's exclusion set. A
+    blocker closed as ``not_planned`` is different: it will never close as the
+    prerequisite the ticket names, so retain that ref for the stranded-work
+    diagnostic without treating it as an ordinary open blocker.
     """
     endpoint = "repos/{}/issues/{}/dependencies/blocked_by".format(repo, number)
     blockers = _gh_json("gh", "api", endpoint)
@@ -2767,18 +2900,34 @@ def open_blockers(repo: str, number: int) -> List[str]:
     if not isinstance(blockers, list):
         raise GitHubError("invalid blockers response for {}#{}".format(repo, number))
 
-    refs: List[str] = []
+    refs: Dict[str, List[str]] = {"open": [], "dead": []}
     for blocker in blockers:
         if not isinstance(blocker, dict):
-            continue
-        if str(blocker.get("state") or "").lower() != "open":
             continue
         blocker_number = blocker.get("number")
         if not isinstance(blocker_number, int) or isinstance(blocker_number, bool):
             continue
         blocker_repo = (blocker.get("repository") or {}).get("full_name") or repo
-        refs.append("{}#{}".format(blocker_repo, blocker_number))
+        ref = "{}#{}".format(blocker_repo, blocker_number)
+        state = str(blocker.get("state") or "").lower()
+        state_reason = str(
+            blocker.get("state_reason") or blocker.get("stateReason") or ""
+        ).lower().replace("-", "_").replace(" ", "_")
+        if state == "open":
+            refs["open"].append(ref)
+        elif state_reason == "not_planned":
+            refs["dead"].append(ref)
     return refs
+
+
+def open_blockers(repo: str, number: int) -> List[str]:
+    """Return open native dependency blockers for one ticket.
+
+    The public helper keeps its original narrow contract. ``load_items`` uses
+    ``dependency_facts`` directly so the same endpoint read can also preserve
+    blockers that were explicitly parked or marked not planned.
+    """
+    return dependency_facts(repo, number)["open"]
 
 
 def _load_block_comment(item: Item) -> None:
@@ -2812,8 +2961,31 @@ def _ticket_pr(repo: str, number: int) -> Optional[Dict]:
     """The PR for a ticket, found by the branch name the routine guarantees."""
     rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "all",
                     "--head", "ticket/{}".format(number), "--json",
-                    "number,state,url,mergedAt,reviews") or []
+                    "number,state,url,headRefOid,mergeable,mergedAt,reviews") or []
     return rows[0] if rows else None
+
+
+def ticket_pr_facts(
+    items: Sequence[Item],
+) -> Dict[str, Optional[Dict[str, object]]]:
+    """Read PR facts needed by the brief's stranded-work diagnostics.
+
+    Only open child tickets and claimed items need a PR lookup. The result is a
+    map with an explicit ``None`` for a known missing PR, so the pure detector
+    can distinguish that from a ticket omitted by a caller that did not fetch
+    PR facts at all.
+    """
+    facts: Dict[str, Optional[Dict[str, object]]] = {}
+    for item in items:
+        if item.state != "OPEN" or not (item.parent or item.in_motion_since is not None):
+            continue
+        pr = _ticket_pr(item.repo, item.number)
+        if pr and str(pr.get("state") or "").upper() == "OPEN":
+            pr = dict(pr)
+            if str(pr.get("mergeable") or "").upper() == "CONFLICTING":
+                pr["verdict"] = latest_verdict(item.repo, pr.get("number"))
+        facts[item.ref] = pr
+    return facts
 
 
 def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict]:
@@ -3473,6 +3645,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_merge(items, now, args.repo, args.pr, args.confirmed)
         if args.command == "next":
             return cmd_next(items, now, tier=getattr(args, "tier", None))
+        if args.command == "brief":
+            return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
         return {"queue": cmd_queue, "brief": cmd_brief}[args.command](
             items, now
         )

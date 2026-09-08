@@ -64,6 +64,63 @@ closed-world test: does the step require anything outside what an agent can reac
 The access cases named there are examples, not an exhaustive list, so an unnamed
 requirement outside the boundary counts too.
 
+## Boundary checklist at breakdown
+
+Run this checklist after reading the plan and before creating its tickets. It is a
+recall step: do not wait for a human step to announce itself. Start with every plan
+heading and trace its stated outcome to a usable end state, including setup,
+credentials, account configuration, and registration or connection steps that the
+plan forgot to name.
+
+For every concrete action or missing prerequisite found in that pass, answer each
+prompt below explicitly in the parent coverage comment. Write `no`; silence is not
+an all-clear.
+
+- **Application or browser UI:** does the action require a UI or other surface the
+  agent cannot reach? `yes`/`no`.
+- **Credential:** must a credential be created, entered, retrieved, or stored
+  outside the checkout? `yes`/`no`.
+- **Account or billing setting:** must an account, billing, or service setting be
+  changed? `yes`/`no`.
+- **Physical access:** must someone touch or access a machine or device? `yes`/`no`.
+- **Other boundary gap:** does it require anything else beyond the agent's shell,
+  `gh` and its token, and the checkout filesystem? `yes`/`no`; name it if `yes`.
+
+These prompts are examples, not a replacement for the closed-world test in
+`AGENTS.md`. A `no` means the action is reachable with the stated agent
+capabilities, not merely that the plan did not mention it. Difficulty, uncertainty,
+unfamiliarity, or a model's lack of skill is never a human-step reason. If an answer
+is `yes`, make that one action its own human-step ticket; do not mark a mixed
+engineering ticket in place. Record the ticket and its dependency edge in the same
+comment.
+
+Use this shape for the parent coverage comment so a later reader can see what was
+considered rather than only what was claimed:
+
+```text
+Boundary checklist
+
+- Plan action or missing prerequisite: <one action>
+  - Application/browser UI: yes/no
+  - Credential: yes/no
+  - Account or billing setting: yes/no
+  - Physical access: yes/no
+  - Other boundary gap: yes/no — <name if yes>
+  - Result: agent ticket #N / human-step ticket #N / no ticket
+
+Coverage: <plan heading or outcome> -> <ticket refs>
+Human-step dependencies: <ticket> depends on #N
+Deliberately left out: <omission and why, or “none”>
+```
+
+The checklist must be concrete enough to catch the known failure in #25. Its
+walkthrough must surface all three of these, even though the third was absent from
+the original plan: Cloudflare tunnel setup requires an account setting; the
+fine-grained token requires credential creation or entry; and registering the
+connector in Nate's account requires an application or account UI. Each is a
+separate human action to record and ticket, not an assumption hidden in an
+engineering ticket.
+
 ## Coverage
 
 Together, the tickets must cover the plan. Before finishing:

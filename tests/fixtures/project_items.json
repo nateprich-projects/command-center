@@ -28,7 +28,11 @@
       "labels": {"nodes": []},
       "assignees": {"nodes": []},
       "parent": null,
-      "subIssuesSummary": {"total": 0, "completed": 0},
+      "subIssuesSummary": {"total": 2, "completed": 0},
+      "subIssues": {"nodes": [
+        {"createdAt": "2026-09-05T11:30:00Z"},
+        {"createdAt": "2026-09-05T11:00:00Z"}
+      ]},
       "timelineItems": {"nodes": [
         {"__typename": "ProjectV2ItemStatusChangedEvent", "createdAt": "2026-09-01T00:00:00Z", "status": "Ready", "project": {"number": 2}},
         {"__typename": "ProjectV2ItemStatusChangedEvent", "createdAt": "2026-09-04T00:00:00Z", "status": "Ready", "project": {"number": 99}}

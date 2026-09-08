@@ -90,14 +90,14 @@ def test_a_run_still_in_flight_is_not_counted_as_dying():
 
 
 def test_silence_is_reported_because_a_closed_app_has_no_other_signal():
-    rows = history([1, 1, 1], quiet_hours=5)
+    rows = history([1] * 8, quiet_hours=6)
     problems = watchdog.assess("codex", rows, NOW)
     assert len(problems) == 1
     assert "normal gap 1h" in problems[0]
-    assert "p90 over 14 days, 4 records" in problems[0]
-    assert "Nothing recorded for 5h" in problems[0]
-    assert "5x normal" in problems[0]
-    assert "alarm threshold 4x normal" in problems[0]
+    assert "p90 over 14 days, 9 records" in problems[0]
+    assert "Nothing recorded for 6h" in problems[0]
+    assert "6x normal" in problems[0]
+    assert "alarm threshold 5x normal" in problems[0]
     assert "last at <t:" in problems[0]
 
 
@@ -107,8 +107,8 @@ def test_steady_rhythm_under_threshold_is_not_an_alarm():
 
 
 def test_a_tight_rhythm_alarms_where_a_loose_rhythm_does_not():
-    tight = history([0.25, 0.25, 0.25], quiet_hours=2)
-    loose = history([6, 6, 6], quiet_hours=2)
+    tight = history([0.25] * 8, quiet_hours=2)
+    loose = history([6] * 8, quiet_hours=2)
     assert watchdog.assess("codex", tight, NOW) != []
     assert watchdog.assess("claude", loose, NOW) == []
 

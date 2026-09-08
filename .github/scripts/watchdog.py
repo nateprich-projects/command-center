@@ -40,13 +40,12 @@ REPO = os.environ.get("GITHUB_REPOSITORY", "nateprich-projects/command-center")
 BRANCH = "heartbeat"
 MARKER = "<!-- command-center-watchdog -->"
 
-#: The provisional inference parameters. Ticket #69 calibrates these against
-#: the heartbeat branch's real history; they are named here so that calibration
-#: changes numbers without changing the inference mechanism.
+#: Calibrated by the offline replay in tests/test_watchdog_calibration.py against
+#: the heartbeat branch snapshot in tests/fixtures/heartbeat_history.json.
 NORMAL_PERCENTILE = 90
-NORMAL_MULTIPLE = 4
+NORMAL_MULTIPLE = 5
 SILENCE_FLOOR_SECONDS = 3600
-MINIMUM_HISTORY = 3
+MINIMUM_HISTORY = 8
 
 #: The normal rhythm is learned from the trailing fortnight. This is deliberately
 #: separate from the four provisional calibration parameters above: the ticket

@@ -434,6 +434,55 @@ def test_item_consistency_is_silent_for_a_consistent_board():
     assert result == funnel.Check("item consistency", True, "", "")
 
 
+def test_class_assignment_dump_is_sorted_and_skips_unassigned_items(monkeypatch):
+    items = [
+        funnel.Item(
+            repo="owner/zeta", number=7, title="Zeta", url="", state="OPEN",
+            klass="New",
+        ),
+        funnel.Item(
+            repo="owner/alpha", number=3, title="Alpha", url="", state="OPEN",
+            klass="Broken",
+        ),
+        funnel.Item(
+            repo="owner/alpha", number=4, title="Unset", url="", state="OPEN",
+        ),
+    ]
+    monkeypatch.setattr(
+        funnel, "gh_graphql",
+        lambda *args, **kwargs: pytest.fail(
+            "Class assignment dump must not write Project state"
+        ),
+    )
+
+    result = funnel.check_class_assignments(items)
+
+    assert result == funnel.Check(
+        "Class assignments",
+        True,
+        "owner/alpha#3 | issue number 3 | Class Broken\n"
+        "owner/zeta#7 | issue number 7 | Class New",
+        "",
+    )
+
+
+def test_doctor_includes_class_assignment_dump_with_loaded_items(monkeypatch):
+    stub_heartbeat_checks(monkeypatch)
+    stub_github_checks(monkeypatch)
+
+    checks = funnel.doctor_checks(items=[
+        funnel.Item(
+            repo="owner/repo", number=1, title="Broken", url="", state="OPEN",
+            klass="Broken",
+        ),
+    ])
+
+    assert [check.name for check in checks][-2:] == [
+        "item consistency", "Class assignments",
+    ]
+    assert checks[-1].found == "owner/repo#1 | issue number 1 | Class Broken"
+
+
 def test_main_doctor_loads_project_items_for_consistency(monkeypatch):
     loaded = []
 

@@ -1960,6 +1960,27 @@ def check_item_consistency(items: Iterable[Item]) -> Check:
     return Check("item consistency", not findings, "\n".join(findings), "")
 
 
+def class_assignment_lines(items: Iterable[Item]) -> List[str]:
+    """Return direct Class assignments in a stable, hand-retypable format."""
+    assigned = sorted(
+        (item for item in items if item.klass),
+        key=lambda item: (item.repo, item.number),
+    )
+    return [
+        "{} | issue number {} | Class {}".format(
+            item.ref, item.number, item.klass
+        )
+        for item in assigned
+    ]
+
+
+def check_class_assignments(items: Iterable[Item]) -> Check:
+    """Build the read-only Class-assignment dump for ``funnel doctor``."""
+    return Check("Class assignments", True, "\n".join(
+        class_assignment_lines(items)
+    ), "")
+
+
 def doctor_checks(claude_dir: Optional[os.PathLike] = None,
                   checkout_root: Optional[os.PathLike] = None,
                   usage_cache: Optional[os.PathLike] = None,
@@ -1980,7 +2001,9 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         check_heartbeat(spool_dir=heartbeat_spool),
     ]
     if items is not None:
+        items = list(items)
         checks.append(check_item_consistency(items))
+        checks.append(check_class_assignments(items))
     return checks
 
 

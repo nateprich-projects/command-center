@@ -215,8 +215,10 @@ fiftieth unattended breakdown is done the same way as the first.
 
 In short: one ticket is one engineer run ending in a PR; split by behaviour rather
 than by layer; every project gets at least one ticket; do not set `Status` or
-`Class` on what you create; and **do not create repositories** — comment and leave
-that to Nate.
+`Class` on what you create; and **do not create repositories** — post the
+explanation with `python3 /Users/nateprich/.claude/command-center/funnel.py
+comment <issue> --voice agent --body "<what is missing>"` and leave repository
+creation to Nate.
 
 ### Every ticket body carries a `Risk:` line
 
@@ -248,9 +250,10 @@ The complete list of local writes this routine makes is: **the heartbeat spool a
 verdicts, merges, comments, tickets — goes to GitHub over the network. If you find
 yourself about to write anywhere else, you have misread this prompt.
 
-If the plan is too vague to size, **do not invent the missing decisions.** Say what
-is undecided in a comment and leave it. It needs another grilling pass, which is
-interactive and not yours to do.
+If the plan is too vague to size, **do not invent the missing decisions.** Post
+what is undecided with `python3 /Users/nateprich/.claude/command-center/funnel.py
+comment <issue> --voice agent --body "<the undecided question>"` and leave it. It
+needs another grilling pass, which is interactive and not yours to do.
 
 ## 7. Finish, always
 

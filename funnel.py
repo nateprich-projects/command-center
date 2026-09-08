@@ -2011,6 +2011,23 @@ def member_repos() -> List[str]:
     return sorted(members)
 
 
+def resolve_repo(repo: Optional[str]) -> str:
+    """Choose a member repo only when that choice is unambiguous."""
+    if repo:
+        return repo
+
+    members = sorted(set(member_repos()))
+    if len(members) == 1:
+        return members[0]
+    if not members:
+        raise GitHubError("no member repos found; --repo is required")
+    raise GitHubError(
+        "multiple member repos: {}; --repo is required".format(
+            ", ".join(members)
+        )
+    )
+
+
 def _from_node(node: dict) -> Optional[Item]:
     content = node.get("content") or {}
     if not content.get("number"):
@@ -2833,9 +2850,10 @@ def cmd_ideas(items: List[Item], now: datetime) -> int:
 
 
 def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
-                repo: str, run: Optional[str] = None,
+                repo: Optional[str], run: Optional[str] = None,
                 agent: Optional[str] = None) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
+    repo = resolve_repo(repo)
     body = append_provenance(
         note or "Captured from chat. Not yet thought through.", "agent",
         at=now, run=run, agent=agent,
@@ -2858,9 +2876,10 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         item_id = json.loads(add.stdout)["id"]
         gh_graphql(SET_FIELD, project=PROJECT_ID, item=item_id,
                    field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Ideas"))
-        print("{}  → Ideas (needs-shaping)".format(url))
+        print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
     else:
-        print("{}\nnote: created, but not added to the Project".format(url),
+        print("{} in {}\nnote: created, but not added to the Project".format(
+                  url, repo),
               file=sys.stderr)
     return 0
 
@@ -3209,7 +3228,7 @@ def cmd_next_review(items: List[Item], tier: Optional[str]) -> int:
     return 0
 
 
-def cmd_review(repo: str, pr: int, verdict: str, ci: str,
+def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
                blocking: List[str], note: Optional[str],
                run: Optional[str] = None, agent: Optional[str] = None) -> int:
     """Record a structured review verdict on a PR.
@@ -3219,6 +3238,7 @@ def cmd_review(repo: str, pr: int, verdict: str, ci: str,
     the verdict is written here, in one shape, stamped with the commit it
     actually reviewed.
     """
+    repo = resolve_repo(repo)
     head = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
                      "--json", "headRefOid,state") or {})
     if head.get("state") != "OPEN":
@@ -3248,7 +3268,8 @@ def cmd_review(repo: str, pr: int, verdict: str, ci: str,
         capture_output=True, text=True)
     if out.returncode != 0:
         raise GitHubError(out.stderr.strip())
-    print("recorded {} on PR #{} against {}".format(verdict, pr, sha[:12]))
+    print("recorded {} on PR #{} against {} in {}".format(
+        verdict, pr, sha[:12], repo))
     return 0
 
 
@@ -3307,7 +3328,7 @@ def merge_blockers(repo: str, pr: int, items: List[Item],
     return why
 
 
-def cmd_merge(items: List[Item], now: datetime, repo: str, pr: int,
+def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
               confirmed: bool) -> int:
     """Merge a PR, but only when every condition holds.
 
@@ -3316,6 +3337,7 @@ def cmd_merge(items: List[Item], now: datetime, repo: str, pr: int,
     that types `gh pr merge`, and being that component is what makes an
     unattended merge impossible to audit — which is why v0 is still unaccepted.
     """
+    repo = resolve_repo(repo)
     why = merge_blockers(repo, pr, items, now)
     if why:
         print("refusing to merge PR #{}:".format(pr), file=sys.stderr)
@@ -3324,7 +3346,7 @@ def cmd_merge(items: List[Item], now: datetime, repo: str, pr: int,
         return 1
 
     if not confirmed:
-        print("PR #{} passes every merge condition.".format(pr))
+        print("PR #{} in {} passes every merge condition.".format(pr, repo))
         print("Nothing was changed. Re-run with --yes to merge.")
         return 0
 
@@ -3333,7 +3355,7 @@ def cmd_merge(items: List[Item], now: datetime, repo: str, pr: int,
          "--delete-branch"], capture_output=True, text=True)
     if out.returncode != 0:
         raise GitHubError(out.stderr.strip())
-    print("merged PR #{}".format(pr))
+    print("merged PR #{} in {}".format(pr, repo))
     return 0
 
 
@@ -3544,7 +3566,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     capture = sub.add_parser("capture", help="capture an idea into the funnel")
     capture.add_argument("title")
     capture.add_argument("--note", default=None, help="anything worth keeping now")
-    capture.add_argument("--repo", default=REPO)
+    capture.add_argument("--repo", default=None)
     capture.add_argument(
         "--run", default=None,
         help="heartbeat run id; otherwise infer a unique open local start",
@@ -3608,7 +3630,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     review = sub.add_parser(
         "review", help="record a structured review verdict on a PR")
     review.add_argument("pr", type=int)
-    review.add_argument("--repo", default=REPO)
+    review.add_argument("--repo", default=None)
     review.add_argument("--verdict", required=True, choices=VERDICTS)
     review.add_argument("--ci", required=True, choices=CI_STATES)
     review.add_argument("--blocking", action="append", default=[],
@@ -3626,7 +3648,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     merge = sub.add_parser(
         "merge", help="merge a PR if every condition holds — dry run without --yes")
     merge.add_argument("pr", type=int)
-    merge.add_argument("--repo", default=REPO)
+    merge.add_argument("--repo", default=None)
     merge.add_argument("--yes", action="store_true", dest="confirmed")
 
     begin = sub.add_parser(

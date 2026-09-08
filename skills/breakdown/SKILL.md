@@ -108,7 +108,9 @@ Boundary checklist
   - Other boundary gap: yes/no — <name if yes>
   - Result: agent ticket #N / human-step ticket #N / no ticket
 
-Coverage: <plan heading or outcome> -> <ticket refs>
+Coverage by plan heading: <plan heading> -> <ticket refs>
+Outcome coverage:
+- <plan's stated outcome or purpose>: <ticket refs> -> <usable end state>
 Human-step dependencies: <ticket> depends on #N
 Deliberately left out: <omission and why, or “none”>
 ```
@@ -151,9 +153,23 @@ are evidence to inspect, not proof that every mention requires Nate.
 
 ## Coverage
 
-Together, the tickets must cover the plan. Before finishing:
+Together, the tickets must cover the plan's stated outcome, not only its
+headings or ticket shape. A set of tickets can mirror every heading and still
+leave the thing unusable. Before finishing:
 
 - reread the plan's own headings and check each one is represented
+- state the plan's purpose and trace the ticket set from setup through its
+  dependencies, registration or connection steps, and final usable state
+- in the parent coverage comment, map each stated outcome to the tickets that
+  deliver it end to end. Include the usable end state, not only the component
+  that each ticket builds
+- use #25 as the worked failure: its six tickets can cover a running server and
+  connector while missing the outcome — reaching the funnel from general chat —
+  if no ticket registers the connector in Nate's account. That breakdown is
+  shape-complete but outcome-incomplete. Surface the missing registration as a
+  human-step ticket under the boundary checklist, or record the concrete reason
+  it is deliberately left out; do not claim coverage because every
+  implementation heading has a ticket
 - **anything you deliberately left out, say so in a comment on the parent** —
   silent omission is how a project looks finished while missing a third of itself
 

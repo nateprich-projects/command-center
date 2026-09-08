@@ -56,7 +56,7 @@ def test_the_weekly_window_is_anchored_to_a_known_reset():
 
 
 def test_an_even_burn_is_under_pace():
-    # allowed = 45%; 25 used + 15 reserved = 40
+    # allowed = 57.5%; 25 used + 5 reserved = 30
     verdict = usage.pace(seven_day(25.0, 0.5), NOW)
     assert not verdict["over_pace"]
 
@@ -64,8 +64,11 @@ def test_an_even_burn_is_under_pace():
 def test_the_gate_reserves_the_cost_of_the_run_it_authorises():
     """Without this the gate is a start check, not a bound on spend: it waves
     through a run that then blows straight past the line."""
-    # allowed = 45%, and 44% used is under it — but not with a run's cost to come
-    assert usage.pace(seven_day(44.0, 0.5), NOW)["over_pace"]
+    allowed = usage.WEEKLY_FLOOR + (usage.WEEKLY_TARGET - usage.WEEKLY_FLOOR) * 0.5
+    under_with_reserve = allowed - usage.WEEKLY_RESERVE - 0.1
+    ahead_with_reserve = allowed - usage.WEEKLY_RESERVE + 0.1
+    assert not usage.pace(seven_day(under_with_reserve, 0.5), NOW)["over_pace"]
+    assert usage.pace(seven_day(ahead_with_reserve, 0.5), NOW)["over_pace"]
 
 
 def test_the_five_hour_reserve_applies_too():
@@ -382,8 +385,19 @@ def test_a_rolling_estimate_gets_a_flat_ceiling_not_a_pace_line():
 
 
 def test_a_real_reading_still_gets_the_proportional_line():
-    verdict = usage.pace(seven_day(50.0, 0.5), NOW)
-    assert verdict["windows"][0]["allowed_percent"] < usage.WEEKLY_TARGET
+    elapsed = (0.0, 0.25, 0.5, 0.75, 1.0)
+    allowed = [
+        usage.pace(seven_day(50.0, fraction), NOW)["windows"][0]["allowed_percent"]
+        for fraction in elapsed
+    ]
+    assert allowed[0] == usage.WEEKLY_FLOOR
+    assert allowed[-1] == usage.WEEKLY_TARGET
+    assert all(left < right for left, right in zip(allowed, allowed[1:]))
+    assert allowed[2] == round(
+        usage.WEEKLY_FLOOR
+        + (usage.WEEKLY_TARGET - usage.WEEKLY_FLOOR) * 0.5,
+        1,
+    )
 
 
 def test_a_fresh_real_reading_beats_the_estimate(tmp_path, monkeypatch):

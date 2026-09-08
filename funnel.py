@@ -3531,13 +3531,16 @@ def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
         ["gh", "issue", "close", number, "--repo", repo, "--reason", "completed"],
         capture_output=True, text=True)
     if closed.returncode != 0:
-        # The merge landed, so this must not report failure — a caller that
-        # retries would find the PR already merged and error on that instead.
+        # Say plainly that the merge succeeded, then exit non-zero: a ticket
+        # left open is the exact failure this close exists to prevent, and a
+        # silent 0 hides it. Re-running is harmless — the gate refuses a PR
+        # that is no longer open — so the risk is only a visible retry, which
+        # is cheaper than an invisible stranded ticket. (#236's plan.)
         print("MERGED, but {} could not be closed: {}".format(
             ref, closed.stderr.strip()), file=sys.stderr)
-        print("close it by hand; it stays startable until you do.",
-              file=sys.stderr)
-        return 0
+        print("the merge succeeded; close {} by hand — it stays startable "
+              "until you do.".format(ref), file=sys.stderr)
+        return 1
     print("closed {}".format(ref))
     return 0
 

@@ -210,13 +210,16 @@ def test_merge_does_not_reclose_a_ticket_github_already_closed(monkeypatch):
     assert not [c for c in calls if c[:3] == ["gh", "issue", "close"]]
 
 
-def test_a_failed_close_reports_but_does_not_fail_the_merge(monkeypatch, capsys):
-    # The merge already landed. Returning non-zero would make a caller retry it
-    # and error on a PR that is no longer open, hiding the real problem.
+def test_a_failed_close_says_the_merge_landed_and_still_exits_non_zero(
+        monkeypatch, capsys):
+    # #236's plan: report loudly *and* exit non-zero. A ticket left open is the
+    # failure this close exists to prevent, so a silent 0 would hide it. A retry
+    # is harmless — the gate refuses a PR that is no longer open.
     rc, _ = _merge_wired(monkeypatch, close_rc=1, close_err="gh: nope")
-    assert rc == 0
+    assert rc == 1
     err = capsys.readouterr().err
     assert "could not be closed" in err and "owner/repo#9" in err
+    assert "the merge succeeded" in err
 
 
 def test_ticket_ref_from_branch_is_the_one_parser():

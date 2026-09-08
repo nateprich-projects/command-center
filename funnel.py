@@ -582,6 +582,70 @@ def needs_nate_signals(plan_body: str) -> List[str]:
             if re.search(pattern, text, re.IGNORECASE)]
 
 
+PLAN_HEADING = re.compile(r"^\s{0,3}(?P<marks>#{1,6})\s+(?P<title>.*?)\s*#*\s*$")
+NEEDS_NATE_HEADINGS = {"needs nate", "needs you"}
+EMPTY_NEEDS_NATE = {"", "nothing", "nothing."}
+
+
+def _needs_nate_sections(plan_body: str) -> List[str]:
+    """Return the contents of every recognised Needs section in a plan."""
+    if not isinstance(plan_body, str):
+        return []
+
+    sections: List[str] = []
+    lines = plan_body.splitlines()
+    index = 0
+    while index < len(lines):
+        match = PLAN_HEADING.match(lines[index])
+        if not match:
+            index += 1
+            continue
+
+        title = match.group("title").strip().lower().rstrip(":").strip()
+        if title not in NEEDS_NATE_HEADINGS:
+            index += 1
+            continue
+
+        level = len(match.group("marks"))
+        body: List[str] = []
+        index += 1
+        while index < len(lines):
+            next_heading = PLAN_HEADING.match(lines[index])
+            if next_heading and len(next_heading.group("marks")) <= level:
+                break
+            body.append(lines[index])
+            index += 1
+        sections.append("\n".join(body))
+
+    return sections
+
+
+def plan_needs_nate(plan_body: str) -> bool:
+    """Whether a plan's Needs Nate/Needs you section asks for Nate.
+
+    A missing section is not an all-clear: the section itself is the plan's
+    explicit evidence that Nate's questions were considered. Only a section
+    containing exactly ``Nothing`` (with optional punctuation and whitespace)
+    is empty. Multiple recognised sections fail closed if any one contains
+    content.
+    """
+    sections = _needs_nate_sections(plan_body)
+    if not sections:
+        return True
+    return any(section.strip().lower() not in EMPTY_NEEDS_NATE
+               for section in sections)
+
+
+def plan_is_escalated(plan_body: str) -> List[str]:
+    """Return escalation reasons found across the whole plan body.
+
+    Plans have no separate ticket title, so the plan is passed as the body to
+    the shared escalation machinery. The empty-list result is the all-clear
+    used by the self-approval condition.
+    """
+    return escalation_reasons("", plan_body)
+
+
 # These are evidence words, not a closed list of human-step categories. A plan
 # can use one while describing a rejected alternative or an already-automated
 # action, so the scan is a prompt to inspect the checklist rather than proof

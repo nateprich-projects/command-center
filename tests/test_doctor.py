@@ -368,20 +368,104 @@ def test_topic_search_failure_is_reported_not_raised(monkeypatch):
     assert result.fix
 
 
-def test_main_doctor_does_not_load_github(monkeypatch):
-    def fail_if_called():
-        raise AssertionError("doctor must run before load_items")
-
-    monkeypatch.setattr(funnel, "load_items", fail_if_called)
+def test_item_consistency_reports_each_contradiction_without_writing(monkeypatch):
+    items = [
+        funnel.Item(
+            repo="owner/repo", number=1, title="Closed idea", url="", state="CLOSED",
+            status="Ideas",
+        ),
+        funnel.Item(
+            repo="owner/repo", number=2, title="Closed done", url="", state="CLOSED",
+            status="Done",
+        ),
+        funnel.Item(
+            repo="owner/repo", number=3, title="Open done", url="", state="OPEN",
+            status="Done",
+        ),
+        funnel.Item(
+            repo="owner/repo", number=4, title="Flagged shaped", url="", state="OPEN",
+            status="Shaped", labels=["needs-shaping"],
+        ),
+        funnel.Item(
+            repo="owner/repo", number=5, title="Flagged idea", url="", state="OPEN",
+            status="Ideas", labels=["needs-shaping"],
+        ),
+        funnel.Item(
+            repo="owner/repo", number=6, title="Closed parked", url="", state="CLOSED",
+            status="Parked",
+        ),
+    ]
     monkeypatch.setattr(
-        funnel, "doctor_checks", lambda: [funnel.Check("local", True, "ok", "")])
+        funnel, "gh_graphql",
+        lambda *args, **kwargs: pytest.fail(
+            "consistency check must not write Project state"
+        ),
+    )
+
+    result = funnel.check_item_consistency(items)
+
+    assert not result.ok
+    assert result.fix == ""
+    assert result.found.splitlines() == [
+        "owner/repo#1: state is CLOSED but Status is Ideas",
+        "owner/repo#3: state is OPEN but Status is Done",
+        "owner/repo#4: label needs-shaping is present but Status is Shaped",
+    ]
+
+
+def test_item_consistency_is_silent_for_a_consistent_board():
+    items = [
+        funnel.Item(
+            repo="owner/repo", number=1, title="Idea", url="", state="OPEN",
+            status="Ideas", labels=["needs-shaping"],
+        ),
+        funnel.Item(
+            repo="owner/repo", number=2, title="Done", url="", state="CLOSED",
+            status="Done",
+        ),
+        funnel.Item(
+            repo="owner/repo", number=3, title="Parked", url="", state="CLOSED",
+            status="Parked",
+        ),
+    ]
+
+    result = funnel.check_item_consistency(items)
+
+    assert result == funnel.Check("item consistency", True, "", "")
+
+
+def test_main_doctor_loads_project_items_for_consistency(monkeypatch):
+    loaded = []
+
+    monkeypatch.setattr(
+        funnel, "doctor_checks",
+        lambda items=None: [funnel.Check("local", True, "ok", "")],
+    )
+    monkeypatch.setattr(funnel, "load_items", lambda: loaded)
 
     assert funnel.main(["doctor"]) == 0
 
 
+def test_main_doctor_reports_consistency_load_failure(monkeypatch, capsys):
+    monkeypatch.setattr(
+        funnel, "doctor_checks",
+        lambda items=None: [funnel.Check("local", True, "ok", "")],
+    )
+    monkeypatch.setattr(
+        funnel, "load_items",
+        lambda: (_ for _ in ()).throw(funnel.GitHubError("offline")),
+    )
+
+    assert funnel.main(["doctor"]) == 1
+    assert "Project items could not be loaded: offline" in capsys.readouterr().out
+
+
 def test_main_doctor_returns_one_when_any_check_is_broken(monkeypatch):
     monkeypatch.setattr(
-        funnel, "doctor_checks", lambda: [funnel.Check("local", False, "broken", "fix")])
+        funnel, "doctor_checks",
+        lambda items=None: [funnel.Check("local", False, "broken", "fix")],
+    )
+    monkeypatch.setattr(funnel, "load_items", lambda: [])
 
     assert funnel.main(["doctor"]) == 1
 
@@ -390,6 +474,7 @@ def test_doctor_renderer_puts_the_fix_only_on_broken_lines(capsys):
     funnel.render_checks([
         funnel.Check("good", True, "found it", ""),
         funnel.Check("bad", False, "missing it", "run the fix"),
+        funnel.Check("silent", True, "", ""),
     ])
 
     lines = capsys.readouterr().out.splitlines()

@@ -23,6 +23,8 @@ ordering, and both agents act on its output. If the order looks wrong, say so �
 quietly fix it. A second opinion on ordering is how two agents drift apart while both
 produce plausible-looking lists.
 
+_(confirmed by Nate 2026-09-05)_
+
 If the command fails, show the error. Do not fall back to querying GitHub yourself.
 
 ## What the fields mean
@@ -34,6 +36,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `items` | The decisions, **already ordered**. Bottom-up: closest to shipping first |
 | `waiting_on` | The question being asked. `Accept it?` · `Start now?` · `Is the plan good?` · `Unblock or park?` |
 | `waited` | Time at the current gate |
+| `class` | The item's Project `Class`; tickets inherit their parent's Class |
 | `needs_class` | Items with no `Class` set. Invalid and not startable — a one-word fix in the Project |
 | `in_motion` | Tickets currently claimed, as a list. `wip_limit` is how many may run at once — the cap is policy, the per-ticket claim is correctness |
 | `stale_locks_taken_over` | Claims past the 2-hour TTL that were taken over |
@@ -42,9 +45,9 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 
 ## How to render it
 
-Lead with the count and the ordered list. For each item: the question, the repo and issue
-title as a link, and how long it has waited. Keep it scannable — this is read to decide,
-not to browse.
+Lead with the count and the ordered list. For each item: its Class, the question, the repo
+and issue title as a link, and how long it has waited. Keep it scannable — this is read to
+decide, not to browse.
 
 Then the gate counts on one line. Then anything unusual, and only if present:
 `needs_class`, `stale_locks_taken_over`, and `in_motion`.
@@ -78,6 +81,7 @@ to run all three on his explicit instruction (2026-09-05), replacing an earlier 
 here that no agent may run them at all. He often works these sessions by voice while
 driving, where handing him a command means the decision he already made goes
 unrecorded — three approved gates sat unexecuted for a whole session that way.
+_(confirmed by Nate 2026-09-05)_
 
 That earlier rule was not his; an agent wrote it after accidentally running an approval,
 catching it, and walking it back. The accident was real, so the caution is earned — but
@@ -91,10 +95,13 @@ Run one only when **all** of these hold:
   say your reading and wait. Confirm before moving anything, not after.
 - Never on your own initiative, and **never as a test.** The dry run exists for that.
 
+_(confirmed by Nate 2026-09-05)_
+
 Then **post a comment recording that he decided and you executed**, naming the gate and
 the move. The Project shows only that `Status` changed, never who decided it — see
 issue #31. Without that comment an agent-run gate is indistinguishable from his own,
 which is the failure this permission would otherwise create.
+_(confirmed by Nate 2026-09-05)_
 
 ## Say these things when they are true
 
@@ -123,4 +130,5 @@ healthy — do not report it as zero.
   with real tasks and erode its trustworthiness. It receives operational failure alerts
   only.
 - Do not change `Status` or `Class` unless he asks. Those are his gates.
+  _(confirmed by Nate 2026-09-05)_
 - Do not open, close, or comment on issues as part of rendering a brief.

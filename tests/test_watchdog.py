@@ -37,6 +37,20 @@ def finish(run, ago_hours, outcome="done", note=None):
             "agent": "codex", "outcome": outcome, "note": note}
 
 
+def history(gaps_hours, quiet_hours):
+    """Return one heartbeat record per timestamp, in chronological order."""
+    latest = NOW - quiet_hours * HOUR
+    timestamps = [latest]
+    for gap in reversed(gaps_hours):
+        timestamps.append(timestamps[-1] - gap * HOUR)
+    timestamps.reverse()
+    return [
+        {"run": str(i), "phase": "finish", "ts": timestamp,
+         "agent": "codex", "outcome": "done"}
+        for i, timestamp in enumerate(timestamps)
+    ]
+
+
 # -- what must NOT be reported ---------------------------------------------
 
 
@@ -76,15 +90,40 @@ def test_a_run_still_in_flight_is_not_counted_as_dying():
 
 
 def test_silence_is_reported_because_a_closed_app_has_no_other_signal():
-    rows = [start("a", 9), finish("a", 9)]
+    rows = history([1] * 8, quiet_hours=6)
     problems = watchdog.assess("codex", rows, NOW)
-    assert len(problems) == 1 and "recorded nothing" in problems[0]
+    assert len(problems) == 1
+    assert "normal gap 1h" in problems[0]
+    assert "p90 over 14 days, 9 records" in problems[0]
+    assert "Nothing recorded for 6h" in problems[0]
+    assert "6x normal" in problems[0]
+    assert "alarm threshold 5x normal" in problems[0]
+    assert "last at <t:" in problems[0]
 
 
-def test_claude_is_allowed_to_be_quiet_far_longer_than_codex():
-    rows = [start("a", 6), finish("a", 6)]
-    assert watchdog.assess("codex", rows, NOW) != []
+def test_steady_rhythm_under_threshold_is_not_an_alarm():
+    rows = history([1, 1, 1, 1], quiet_hours=1)
+    assert watchdog.assess("codex", rows, NOW) == []
+
+
+def test_a_tight_rhythm_alarms_where_a_loose_rhythm_does_not():
+    tight = history([0.25] * 8, quiet_hours=2)
+    loose = history([6] * 8, quiet_hours=2)
+    assert watchdog.assess("codex", tight, NOW) != []
+    assert watchdog.assess("claude", loose, NOW) == []
+
+
+def test_recurring_long_gaps_are_absorbed_by_the_high_percentile():
+    rows = history([1] * 16 + [8] * 4, quiet_hours=8)
     assert watchdog.assess("claude", rows, NOW) == []
+
+
+def test_thin_history_declines_to_alarm_and_prints_a_note():
+    rows = history([1], quiet_hours=1)
+    assert watchdog.assess("codex", rows, NOW) == []
+    message = watchdog.note("codex", rows, NOW)
+    assert "only 1 gap(s)" in message
+    assert "silence threshold not inferred" in message
 
 
 def test_three_unfinished_runs_are_reported_as_dying():
@@ -128,7 +167,26 @@ def test_never_having_run_does_not_file_an_issue():
 def test_never_having_run_is_still_reported_in_the_log():
     """Silent about it in the issue tracker, not silent altogether."""
     assert "never recorded a run" in watchdog.note("codex", [])
-    assert watchdog.note("codex", [start("a", 1)]) == ""
+    assert "only 0 gap(s)" in watchdog.note("codex", [start("a", 1)], NOW)
+
+
+def test_main_watches_every_registered_provider(monkeypatch):
+    """A new heartbeat provider must not be silently left out of coverage."""
+    providers = {
+        "claude": "anthropic",
+        "codex": "openai",
+        "zcode": "zai",
+        "future": "new-pool",
+    }
+    seen = []
+    monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", providers)
+    monkeypatch.setattr(
+        watchdog, "records", lambda agent: seen.append(agent) or []
+    )
+    monkeypatch.setattr(watchdog, "existing_issue", lambda: {})
+
+    assert watchdog.main() == 0
+    assert seen == sorted(providers)
 
 
 # -- the heartbeat's own view ----------------------------------------------

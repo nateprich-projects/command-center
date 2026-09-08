@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The standard reviewer: one Muse run, one standard PR, then stop.
+
+  The canonical copy lives here in the repo. launchd refuses a symlinked plist
+  (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the
+  installed file is a copy and `tests/test_launchd_drift.py` compares them.
+
+  `/bin/bash <script>`, not the script directly: this repository used to live on
+  an external volume that a launchd job could not read at all. It now lives on
+  the internal disk, but invoking through bash costs nothing and survives a move.
+
+  Note for editors: XML forbids a double hyphen inside a comment. Use an em dash
+  or a semicolon; plutil accepts the double hyphen and plistlib rejects it, so a
+  file can lint clean and still be unparseable.
+
+  After editing, re-install:
+    cp launchd/com.nateprich.command-center-muse-review-standard.plist ~/Library/LaunchAgents/
+    launchctl bootout gui/$(id -u)/com.nateprich.command-center-muse-review-standard
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nateprich.command-center-muse-review-standard.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nateprich.command-center-muse-review-standard</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/nateprich/.claude/command-center/scripts/muse-review</string>
+        <string>standard</string>
+        <string>high</string>
+    </array>
+
+    <!--
+      Every five minutes, deliberately offset from the escalated schedule at :07
+      (no multiple of five is 7).
+
+      Was fifteen minutes. Raised 2026-09-07 because review had become the
+      bottleneck: measured over two hours, Codex produced 3.5 PRs/hour and Muse
+      reviewed 3.0, so the queue grew slowly and never drained. Muse was at 1% of
+      its five-hour window and 0% of its week, so the capacity was already paid
+      for and idle.
+
+      This is a cadence chosen against a measured rate, not a guess. If Codex is
+      ever paced again (#92, #125) the rate changes and this should be revisited
+      rather than left at whatever cleared one backlog.
+    -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Minute</key><integer>5</integer></dict>
+        <dict><key>Minute</key><integer>10</integer></dict>
+        <dict><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Minute</key><integer>20</integer></dict>
+        <dict><key>Minute</key><integer>25</integer></dict>
+        <dict><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Minute</key><integer>35</integer></dict>
+        <dict><key>Minute</key><integer>40</integer></dict>
+        <dict><key>Minute</key><integer>45</integer></dict>
+        <dict><key>Minute</key><integer>50</integer></dict>
+        <dict><key>Minute</key><integer>55</integer></dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-muse-review-standard.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-muse-review-standard.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/nateprich/.local/bin</string>
+        <key>HOME</key>
+        <string>/Users/nateprich</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

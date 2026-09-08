@@ -142,11 +142,74 @@ stay on the symlink path, which both agents can still execute through. Twenty oc
 of the symlink path exist across `routines/`, `skills/` and `.claude/settings.json`; none
 of them should move.
 
-**A second constraint falls out of this.** The real target is on `/Volumes/External SSD`,
-so the entire system — funnel, heartbeat, usage, skills, and both agents' working copies —
-depends on an external volume being mounted. Unattended overnight runs are exactly when a
-volume is most likely to be asleep or unmounted, and the failure would look like a dead
-agent rather than a missing disk.
+**A second constraint falls out of this.** ~~The real target is on `/Volumes/External
+SSD`, so the entire system — funnel, heartbeat, usage, skills, and both agents' working
+copies — depends on an external volume being mounted.~~ **Superseded 2026-09-07:** the
+checkout was moved onto the internal disk and `~/.claude/command-center` is now a real
+directory rather than a symlink, so neither the mount dependency nor the
+symlink-vs-real-target problem above applies any more. The reasoning is kept because it
+explains why twenty occurrences of that path exist and why they were correct at the time.
+See "A launchd job cannot read an external volume" below for what forced the move.
+
+### The Claude routine was retired, and its schedules recorded
+
+**2026-09-07 · scheduled-tasks · documented**
+
+**Claude's three scheduled tasks were deleted** on Nate's instruction, once Muse took
+both review tiers. The routine did escalated review and nothing else, and it had been
+refused on budget continuously since 2026-09-06 10:40 — its pool is the one Nate
+competes with, which is why the work moved.
+
+The `SKILL.md` files remain at `~/.claude/scheduled-tasks/<id>/SKILL.md`; only the
+schedules were removed. Recorded here because the cron expressions are not in the repo
+and would otherwise have to be reconstructed from memory:
+
+| task | cron | meaning |
+|---|---|---|
+| `command-center-claude-nights` | `0 22,23 * * 0-4` | 10pm and 11pm, Sun–Thu |
+| `command-center-claude-weekdays` | `0 0,1,9,10,11 * * 1-5` | midnight, 1am, 9am, 10am, 11am, Mon–Fri |
+| `command-center-claude-weekend-early` | `0 2,3 * * 0,6` | 2am and 3am, Sat/Sun |
+
+**What this leaves.** Codex engineers on five app schedules; Muse reviews both tiers on
+two launchd schedules; zcode reviews standard and breaks plans down, when its budget
+allows. No Claude routine runs unattended at all — Claude is now only what Nate talks to.
+
+### A launchd job cannot read an external volume
+
+**2026-09-07 · macOS TCC · measured**
+
+**A LaunchAgent gets no access to `/Volumes/External SSD`, and the failure is silent.**
+Probed with a job on the internal disk: reading a file, running a script, and even `ls`
+on the repository all returned `Operation not permitted`. The scheduled Muse reviewer
+failed every interval with exit 126 and an empty log — nothing said *why*, and the error
+reads as a broken script rather than an absent permission.
+
+**Interactive sessions were never affected.** A process inherits the privacy grants of
+whatever launched it. Terminal has them, so `muse` by hand read the same files fine. A
+LaunchAgent has no parent to inherit from and cannot answer the prompt that would grant
+access, so it gets nothing.
+
+**This is why Codex and zcode never met it.** They are scheduled inside their own
+applications, which hold grants Nate gave interactively. The never-headless rule in
+`AGENTS.md` — written about vendor terms — had a second, accidental benefit nobody had
+noticed: in-app scheduling inherits permissions that launchd does not.
+
+**Two probes, and the first one lied.** An earlier check using `[ -r path ]` reported the
+volume readable. `[ -r ]` answers from metadata without opening the file. Only a real
+`head -c` showed the denial. A permission probe that does not perform the operation is
+not a probe.
+
+**Resolved by moving the checkout**, not by granting permission. `~/.claude/command-center`
+is now a real directory on the internal disk rather than a symlink to the volume, and the
+five other symlinks that pointed into the volume were repointed at that canonical path.
+The alternative — Full Disk Access for `/bin/bash` — would have given every shell script
+on the machine full disk access permanently, to save moving 6.6 MB.
+
+**Member repositories did not have to move and never will.** Engineers clone fresh each
+run (`gh repo clone`), reviewers read pull requests through the API, and adopting a repo
+means applying a GitHub topic rather than putting anything on this machine. The constraint
+touches the tooling only — as long as headless work stays API-shaped, which is already the
+design.
 
 ### A Claude Code web session cannot run `funnel.py` at all
 

@@ -145,8 +145,10 @@ commit is still the head**. If anything fails it refuses and lists why.
 Your judgement is the part only you can do. Typing `gh pr merge` is not, and
 doing it by hand is what makes an unattended merge impossible to audit later.
 
-**Both hold →** review `approved`, merge, close the ticket, and comment on the
-parent if that was its last open child. Nate accepts the *project*, not each PR.
+**Both hold →** review `approved`, merge, close the ticket, and if that was its
+last open child, post the parent completion note with
+`python3 /Users/nateprich/.claude/command-center/funnel.py comment <parent> --voice agent --body "<what shipped>"`.
+Nate accepts the *project*, not each PR.
 
 **Either fails →** record it:
 
@@ -191,8 +193,10 @@ first — the same reason `funnel.py` owns ranking rather than each agent.
 
 In short: one ticket is one Codex run ending in a PR; split by behaviour rather
 than by layer; every project gets at least one ticket; do not set `Status` or
-`Class` on what you create; and **do not create repositories** — comment and
-leave that to Nate.
+`Class` on what you create; and **do not create repositories** — post the
+explanation with `python3 /Users/nateprich/.claude/command-center/funnel.py
+comment <issue> --voice agent --body "<what is missing>"` and leave repository
+creation to Nate.
 
 ### Every ticket body carries a `Risk:` line
 
@@ -217,19 +221,20 @@ the cheap engine would never run. Your marker beats the patterns in both
 directions — a ticket you mark `standard` stays standard even if its prose
 mentions a race condition, because you knew what the words meant.
 
-If the plan is too vague to size, **do not invent the missing decisions.** Say
-what is undecided in a comment and leave it. It needs another grilling pass,
-which is interactive and not yours to do.
+If the plan is too vague to size, **do not invent the missing decisions.** Post
+what is undecided with `python3 /Users/nateprich/.claude/command-center/funnel.py
+comment <issue> --voice agent --body "<the undecided question>"` and leave it.
+It needs another grilling pass, which is interactive and not yours to do.
 
 </details>
 
 ## 7. Finish, always
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent claude --run <id> --outcome done --merged <n> --note "merged PR #<n>; broke down #<m> into <k> tickets"
+python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent claude --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>; broke down #<m> into <k> tickets"
 ```
 
-`--merged` is a field, not prose: unattended merges have to appear in the brief
+`--merged` takes **the PR's number**, not a count of merges — `--merged 96`, never `--merged 1`. It is a field, not prose: unattended merges have to appear in the brief
 as a record, and a record that must be parsed out of a sentence is not one.
 
 Use `errored` with a note if something broke. Unattended merges must appear in

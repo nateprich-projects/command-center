@@ -59,6 +59,7 @@ SEPARATOR = "\n---\n"
 #: gets the check without anyone remembering to add it.
 IDLE_RRULE_MARKER = "BYHOUR="
 
+
 GATE_LINE = "usage.py gate codex"
 TIER_LINE = "funnel.py next --tier standard"
 
@@ -75,14 +76,18 @@ TIER_LINE = "funnel.py next --tier standard"
 #: passes while Nate is asleep.
 #:
 #: The model itself is set per automation in the Codex app, not here.
-def tier_for(automation: str) -> str:
-    return "standard" if needs_presence_check(automation) else "escalated"
-
-
-def needs_presence_check(automation: str) -> bool:
+def fires_all_day(automation: str) -> bool:
     """True when a schedule fires at any hour, so the clock cannot vouch for Nate
-    being away. Unknown schedules default to needing the check — the safe
-    direction is refusing to compete with him, not assuming he is out."""
+    being away. Unknown schedules default to True — the safe direction is
+    refusing to compete with him, not assuming he is out.
+
+    **The derivation, kept separate from the switch above.** Two different things
+    are read off this one fact: which tier a schedule works, and whether it pays
+    the presence proxy. `PRESENCE_CHECK_ENABLED` suspends the second. It must not
+    touch the first — turning the proxy off once flipped the all-day schedule to
+    `escalated`, which would have pointed the cheap fifteen-minute poller at the
+    riskiest work in the queue. Caught before it shipped, 2026-09-07.
+    """
     if not automation:
         return False
     path = AUTOMATIONS / automation / "automation.toml"
@@ -93,6 +98,23 @@ def needs_presence_check(automation: str) -> bool:
     if not rule:
         return True
     return IDLE_RRULE_MARKER not in rule.group(1)
+
+
+def tier_for(automation: str) -> str:
+    """Which tier this schedule works. Derived from when it fires, and
+    **deliberately not** from `needs_presence_check` — see `fires_all_day`."""
+    return "standard" if fires_all_day(automation) else "escalated"
+
+
+def needs_presence_check(automation: str) -> bool:
+    """Whether this schedule pays the presence proxy.
+
+    Kept separate from `tier_for` even though both read one fact: the two were
+    the same function until 2026-09-07, and suspending the proxy silently moved
+    a schedule's tier. The suspension itself now lives in `usage.py`, because
+    the Codex app rewrites this prompt and a switch it can overwrite is not one.
+    """
+    return fires_all_day(automation)
 
 
 def prompt_text(automation: str = "") -> str:

@@ -1,0 +1,86 @@
+"""The opening command reports only queues it actually consulted."""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+import funnel  # noqa: E402
+import usage  # noqa: E402
+
+
+NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _allow_begin(monkeypatch):
+    monkeypatch.setattr(
+        funnel.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="run-id\n"),
+    )
+    monkeypatch.setattr(
+        usage,
+        "read_agent",
+        lambda agent, timestamp: {"windows": {}},
+    )
+    monkeypatch.setattr(
+        usage,
+        "pace",
+        lambda reading, timestamp, provider: {"over_pace": False},
+    )
+
+
+def _begin(monkeypatch, capsys, *, breakdown):
+    _allow_begin(monkeypatch)
+    assert funnel.cmd_begin([], NOW, "zcode", "standard", False, breakdown) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_begin_stop_reason_omits_breakdown_when_it_was_not_requested(
+    monkeypatch, capsys
+):
+    calls = []
+
+    def unexpected_breakdown_lookup(items):
+        calls.append(items)
+        raise AssertionError("breakdown queue was consulted without --breakdown")
+
+    monkeypatch.setattr(funnel, "awaiting_breakdown", unexpected_breakdown_lookup)
+
+    result = _begin(monkeypatch, capsys, breakdown=False)
+
+    assert result["do"] == "stop"
+    assert result["why"] == "nothing to review"
+    assert "break down" not in result["why"]
+    assert calls == []
+
+
+def test_begin_stop_reason_names_both_empty_queues_when_both_were_consulted(
+    monkeypatch, capsys
+):
+    result = _begin(monkeypatch, capsys, breakdown=True)
+
+    assert result["do"] == "stop"
+    assert result["why"] == "nothing to review and nothing to break down"
+
+
+def test_begin_does_not_consult_breakdown_when_review_work_exists(monkeypatch, capsys):
+    work = {"pr": 7, "repo": "nateprich/beta", "ref": "nateprich/beta#19"}
+    monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [work])
+
+    def unexpected_breakdown_lookup(items):
+        raise AssertionError("breakdown queue was consulted after review work was found")
+
+    monkeypatch.setattr(funnel, "awaiting_breakdown", unexpected_breakdown_lookup)
+
+    result = _begin(monkeypatch, capsys, breakdown=True)
+
+    assert result["do"] == "review"
+    assert result["work"] == work
+

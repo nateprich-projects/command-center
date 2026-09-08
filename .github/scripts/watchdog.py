@@ -27,7 +27,7 @@ import os
 import subprocess
 import sys
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 # One definition of "which runs are still open" — shared with `heartbeat.py`
 # rather than reimplemented here. Two copies of a rule drift, and the drift is
@@ -40,11 +40,17 @@ REPO = os.environ.get("GITHUB_REPOSITORY", "nateprich-projects/command-center")
 BRANCH = "heartbeat"
 MARKER = "<!-- command-center-watchdog -->"
 
-#: How long an agent may go without recording anything. Codex polls hourly and
-#: Claude reviews on its own routine; three hours allows for a missed run, a
-#: reboot, or a laptop lid, without waiting so long that a dead system looks
-#: healthy all day.
-SILENCE_SECONDS = {"codex": 3 * 3600, "claude": 12 * 3600}
+#: Calibrated by the offline replay in tests/test_watchdog_calibration.py against
+#: the heartbeat branch snapshot in tests/fixtures/heartbeat_history.json.
+NORMAL_PERCENTILE = 90
+NORMAL_MULTIPLE = 5
+SILENCE_FLOOR_SECONDS = 3600
+MINIMUM_HISTORY = 8
+
+#: The normal rhythm is learned from the trailing fortnight. This is deliberately
+#: separate from the four provisional calibration parameters above: the ticket
+#: calls for the window shown in the alarm evidence, "p90 over 14 days".
+HISTORY_WINDOW_SECONDS = 14 * 86400
 
 #: A run still unfinished after this long is presumed dead. Matches the lock TTL
 #: in funnel.py — the same two hours after which its claim becomes takeable.
@@ -78,6 +84,67 @@ def records(agent: str) -> List[Dict]:
     return out
 
 
+def _history(rows: List[Dict], now: float) -> Tuple[List[float], List[float]]:
+    """Return recent record timestamps and their positive consecutive gaps."""
+    cutoff = now - HISTORY_WINDOW_SECONDS
+    timestamps = sorted(
+        float(row["ts"])
+        for row in rows
+        if isinstance(row.get("ts"), (int, float))
+        and cutoff <= float(row["ts"]) <= now
+    )
+    gaps = [later - earlier for earlier, later in zip(timestamps, timestamps[1:])
+            if later > earlier]
+    return timestamps, gaps
+
+
+def _percentile(values: List[float], percentile: float) -> float:
+    """Return a linearly interpolated percentile without a third-party library."""
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * percentile / 100.0
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def _normal_gap(rows: List[Dict], now: float) -> Optional[Tuple[float, float, int]]:
+    """Return ``(normal gap, latest record, record count)`` when inferable."""
+    timestamps, gaps = _history(rows, now)
+    if len(gaps) < MINIMUM_HISTORY:
+        return None
+    return _percentile(gaps, NORMAL_PERCENTILE), timestamps[-1], len(timestamps)
+
+
+def _duration(seconds: float) -> str:
+    """Render a duration compactly enough to scan in an issue body."""
+    total = max(0, int(round(seconds)))
+    if total < 60:
+        return "{}s".format(total)
+    minutes, seconds = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    parts = []
+    if days:
+        parts.append("{}d".format(days))
+    if hours:
+        parts.append("{}h".format(hours))
+    if minutes:
+        parts.append("{}m".format(minutes))
+    if not parts:
+        parts.append("0m")
+    return "".join(parts)
+
+
+def _window_label() -> str:
+    days = HISTORY_WINDOW_SECONDS / 86400
+    if days.is_integer():
+        return "{} days".format(int(days))
+    return _duration(HISTORY_WINDOW_SECONDS)
+
+
 def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
     """Problems worth filing an issue about. Empty means healthy.
 
@@ -91,15 +158,29 @@ def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
     if not rows:
         return []
 
-    latest = max(r.get("ts") or 0 for r in rows)
-    quiet_for = now - latest
-    if quiet_for > SILENCE_SECONDS[agent]:
-        problems.append(
-            "`{}` has recorded nothing for {:.1f} hours (last at <t:{}:f>). "
-            "Its app is probably not running on the Mac mini.".format(
-                agent, quiet_for / 3600, int(latest)
+    inferred = _normal_gap(rows, now)
+    if inferred is not None:
+        normal, latest, record_count = inferred
+        quiet_for = now - latest
+        threshold = max(SILENCE_FLOOR_SECONDS, NORMAL_MULTIPLE * normal)
+        if quiet_for > threshold:
+            ratio = quiet_for / normal if normal else float("inf")
+            ratio_text = "{:.0f}x normal".format(ratio) if ratio != float("inf") else "unbounded"
+            problems.append(
+                "`{}`: normal gap {} (p{} over {}, {} records). "
+                "Nothing recorded for {} — {} (alarm threshold {}x normal; "
+                "last at <t:{}:f>).".format(
+                    agent,
+                    _duration(normal),
+                    NORMAL_PERCENTILE,
+                    _window_label(),
+                    record_count,
+                    _duration(quiet_for),
+                    ratio_text,
+                    NORMAL_MULTIPLE,
+                    int(latest),
+                )
             )
-        )
 
     # An unresolved finish counts as a finish for one of its candidates. A run
     # that completed but could not name itself must not be reported as dying —
@@ -135,10 +216,18 @@ def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
     return problems
 
 
-def note(agent: str, rows: List[Dict]) -> str:
+def note(agent: str, rows: List[Dict], now: Optional[float] = None) -> str:
     """Informational only — printed to the run log, never filed as an issue."""
     if not rows:
         return "`{}` has never recorded a run (not scheduled yet?)".format(agent)
+    if now is None:
+        now = time.time()
+    timestamps, gaps = _history(rows, now)
+    if len(gaps) < MINIMUM_HISTORY:
+        return (
+            "`{}` has only {} gap(s) in the trailing {} history; "
+            "silence threshold not inferred yet"
+        ).format(agent, len(gaps), _window_label())
     return ""
 
 
@@ -153,10 +242,10 @@ def existing_issue() -> Dict:
 def main() -> int:
     now = time.time()
     problems = []
-    for agent in ("codex", "claude"):
+    for agent in sorted(heartbeat.PROVIDERS):
         rows = records(agent)
         problems += assess(agent, rows, now)
-        info = note(agent, rows)
+        info = note(agent, rows, now)
         if info:
             print("note: " + info)
 

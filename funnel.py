@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 from collections import namedtuple
+import hashlib
 import json
 import os
 import pathlib
@@ -40,6 +41,28 @@ REPO = "nateprich-projects/command-center"
 # reading the real ~/.claude.
 CHECKOUT_ROOT = pathlib.Path(__file__).resolve().parent
 CLAUDE_DIR = pathlib.Path.home() / ".claude"
+
+# The routine declares its own identity in the opening command. The argument
+# is deliberately removed rather than replaced with a placeholder: the file
+# with no literal and the same file after the literal is pasted must hash to
+# the same bytes. Keeping this normalisation here gives the paste helper and
+# `begin` one implementation to share.
+ROUTINE_SHA_ARGUMENT = re.compile(rb"(?:[ \t]+)?--routine-sha[ \t]+\S+")
+
+
+def normalized_routine(path: os.PathLike) -> bytes:
+    """Read a routine with its self-referential sha argument removed."""
+    return ROUTINE_SHA_ARGUMENT.sub(b"", pathlib.Path(path).read_bytes())
+
+
+def routine_sha(path: os.PathLike) -> str:
+    """Return the stable sha256 of a routine, ignoring its own literal."""
+    return hashlib.sha256(normalized_routine(path)).hexdigest()
+
+
+def routine_path(agent: str) -> pathlib.Path:
+    """The checked-in routine whose pasted copy identifies itself."""
+    return CHECKOUT_ROOT / "routines" / (agent + ".md")
 
 # One small, shared shape for every doctor check. Later doctor tickets add
 # checks to the fixed list without changing the report contract.
@@ -115,6 +138,16 @@ REGRESSION_PREFIX = "Regression from PR #"
 #: Reasons are durable parking artifacts. The sibling brief command reads this
 #: fixed marker back from issue comments, so it is a shared contract.
 PARK_COMMENT_PREFIX = "**Parked:** "
+
+#: Existing comments have no machine-readable provenance. Until the provenance
+#: marker lands, show must fail closed rather than treat the GitHub account as
+#: authorship.
+UNATTRIBUTED = "UNATTRIBUTED"
+
+#: Issue comments carry the voice that GitHub's author field cannot establish.
+#: Keep this in the same HTML-comment-plus-JSON shape as REVIEW_MARKER below.
+PROVENANCE_MARKER = "<!-- command-center-provenance -->"
+PROVENANCE_VOICES = ("nate-direct", "nate-relayed", "agent")
 
 #: Three rejected merges in a week means the auto-merge bar has failed. That is
 #: not "there are bugs" — it is a different and more serious fact, and the
@@ -237,6 +270,8 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
     likely park candidate, and surfacing it first is what makes this ordering
     do disposal work rather than merely sequencing.
     """
+    rows = list(items)
+    by_ref = {i.ref: i for i in rows}
 
     def key(item: Item):
         status = item.status or ""
@@ -246,23 +281,32 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
             depth = len(DECISION_ORDER)
         # Blocked items sort with their stage but ahead of it within the stage.
         since = item.status_since or datetime.max.replace(tzinfo=timezone.utc)
-        return (depth, not item.is_blocked, since, item.repo, item.number)
+        return (
+            depth,
+            not item.is_blocked,
+            0 if effective_class(item, by_ref) == "Broken" else 1,
+            since,
+            item.repo,
+            item.number,
+        )
 
-    return sorted((i for i in items if gate_question(i)), key=key)
+    return sorted((i for i in rows if gate_question(i)), key=key)
 
 
 def ideas(items: Iterable[Item]) -> List[Item]:
-    """Captured ideas, those flagged worth thinking through first.
+    """Captured ideas, with Broken items first and oldest items next.
 
     `brief` deliberately excludes Ideas from its counts — it is unbounded and
     guilt-free, and counting it turns it into pressure. But grilling is what
     feeds everything downstream, so there has to be *some* way to ask what is
     waiting to be shaped. This is it, and it is asked for rather than pushed.
     """
+    rows = list(items)
+    by_ref = {i.ref: i for i in rows}
     return sorted(
-        (i for i in items if i.state == "OPEN" and i.status == "Ideas"),
+        (i for i in rows if i.state == "OPEN" and i.status == "Ideas"),
         key=lambda i: (
-            "needs-shaping" not in i.labels,   # flagged ones first
+            0 if effective_class(i, by_ref) == "Broken" else 1,
             i.status_since or datetime.max.replace(tzinfo=timezone.utc),
             i.repo,
             i.number,
@@ -470,19 +514,185 @@ VERDICTS = ("approved", "rejected")
 CI_STATES = ("green", "red", "unknown")
 
 
+def _marked_json(body: str, marker: str) -> Optional[Dict]:
+    """Read the first JSON block owned by ``marker``.
+
+    A comment may carry both a review verdict and provenance. Parsing from one
+    marker to the last closing brace would join those two objects and make the
+    review gate silently lose a valid verdict. The first fenced JSON block (or
+    an immediately following bare object for compatibility with early markers)
+    belongs to the requested marker; another Command Center marker never does.
+    """
+    marker_at = body.find(marker)
+    if marker_at < 0:
+        return None
+
+    rest = body[marker_at + len(marker):]
+    next_marker = rest.find("<!-- command-center-")
+    if next_marker >= 0:
+        rest = rest[:next_marker]
+
+    fenced = re.search(
+        r"```json[ \t]*\r?\n(.*?)\r?\n```", rest, flags=re.DOTALL
+    )
+    if fenced:
+        raw = fenced.group(1)
+        try:
+            found = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+    else:
+        raw = rest.lstrip()
+        if not raw.startswith("{"):
+            return None
+        try:
+            found, _ = json.JSONDecoder().raw_decode(raw)
+        except (TypeError, ValueError):
+            return None
+
+    return found if isinstance(found, dict) else None
+
+
 def parse_verdict(body: str) -> Optional[Dict]:
     """The verdict carried by one comment, or None if it is not one."""
-    if REVIEW_MARKER not in body:
+    return _marked_json(body, REVIEW_MARKER)
+
+
+def parse_provenance(body: str) -> Optional[Dict]:
+    """The provenance fields carried by one comment, or None if malformed."""
+    found = _marked_json(body, PROVENANCE_MARKER)
+    if found is None or found.get("voice") not in PROVENANCE_VOICES:
         return None
-    _, _, rest = body.partition(REVIEW_MARKER)
-    start, end = rest.find("{"), rest.rfind("}")
-    if start < 0 or end <= start:
-        return None
+    return found
+
+
+def _heartbeat_context(run: Optional[str], agent: Optional[str]):
+    """Fill missing provenance metadata from the local heartbeat spool.
+
+    An explicit value wins. If no run is supplied, infer it only when the
+    spool has exactly one unfinished start; guessing among overlapping runs
+    would recreate the attribution bug the marker is meant to fix.
+    """
+    run = run or os.environ.get("COMMAND_CENTER_RUN")
+    agent = agent or os.environ.get("COMMAND_CENTER_AGENT")
+    if run and agent:
+        return run, agent
+
+    spool = pathlib.Path.home() / ".claude" / "command-center-heartbeat"
+    records = []
     try:
-        found = json.loads(rest[start:end + 1])
-    except ValueError:
-        return None
-    return found if isinstance(found, dict) else None
+        for path in sorted(spool.glob("*.jsonl")):
+            for line in path.read_text().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except ValueError:
+                    continue
+    except (OSError, UnicodeError):
+        return run, agent
+
+    starts = {
+        row.get("run"): row
+        for row in records
+        if row.get("phase") == "start" and row.get("run")
+    }
+    finished = {
+        row.get("run")
+        for row in records
+        if row.get("phase") == "finish" and row.get("run")
+    }
+    if run and run in starts:
+        agent = agent or starts[run].get("agent")
+    elif not run:
+        open_starts = [
+            row for key, row in starts.items()
+            if key not in finished and (not agent or row.get("agent") == agent)
+        ]
+        if len(open_starts) == 1:
+            run = open_starts[0].get("run")
+            agent = agent or open_starts[0].get("agent")
+
+    if run and agent:
+        return run, agent
+
+    # A healthy heartbeat is normally drained from the local spool to GitHub
+    # immediately. Read that durable copy as a fallback; failures here must
+    # never prevent the comment itself from being posted.
+    try:
+        import heartbeat
+
+        providers = sorted(heartbeat.PROVIDERS)
+        if agent and agent in heartbeat.PROVIDERS:
+            providers = [agent]
+        candidates = []
+        for provider in providers:
+            for row in heartbeat.open_starts(heartbeat.read(provider)):
+                if run and row.get("run") != run:
+                    continue
+                candidates.append(row)
+        if run and len(candidates) == 1:
+            agent = agent or candidates[0].get("agent")
+        elif not run and len(candidates) == 1:
+            run = candidates[0].get("run")
+            agent = agent or candidates[0].get("agent")
+    except Exception:
+        # Provenance is additive instrumentation. A broken or unreachable
+        # heartbeat must degrade to an unattributed marker, not lose the
+        # underlying issue comment.
+        pass
+    return run, agent
+
+
+def provenance_block(voice: str, at: Optional[datetime] = None,
+                     run: Optional[str] = None,
+                     agent: Optional[str] = None) -> str:
+    """Build the invisible, machine-readable provenance block."""
+    if voice not in PROVENANCE_VOICES:
+        raise ValueError("unknown provenance voice {!r}".format(voice))
+    run, agent = _heartbeat_context(run, agent)
+    fields = {
+        "agent": agent,
+        "at": (at or datetime.now(timezone.utc)).isoformat(),
+        "run": run,
+        "voice": voice,
+    }
+    return "{}\n\n```json\n{}\n```".format(
+        PROVENANCE_MARKER, json.dumps(fields, indent=2, sort_keys=True)
+    )
+
+
+def append_provenance(body: str, voice: str, at: Optional[datetime] = None,
+                      run: Optional[str] = None,
+                      agent: Optional[str] = None) -> str:
+    """Append one provenance block without changing the supplied body."""
+    return "{}\n\n{}".format(
+        body, provenance_block(voice, at=at, run=run, agent=agent)
+    )
+
+
+def render_voice(body: str) -> str:
+    """Render the four-value voice contract, failing closed when needed."""
+    found = parse_provenance(body)
+    if found is None:
+        return UNATTRIBUTED
+    voice = found["voice"]
+    if voice == "nate-direct":
+        return "Nate (direct)"
+    agent = found.get("agent")
+    if not isinstance(agent, str) or not agent.strip():
+        return UNATTRIBUTED
+    if voice == "nate-relayed":
+        return "Nate (relayed by {})".format(agent)
+    return agent
+
+
+def _visible_comment(body: str) -> str:
+    """Remove the invisible provenance trailer from a CLI preview."""
+    marker_at = body.find(PROVENANCE_MARKER)
+    if marker_at < 0:
+        return body
+    return body[:marker_at].rstrip()
 
 
 def latest_verdict(repo: str, pr) -> Optional[Dict]:
@@ -1585,6 +1795,14 @@ def launch_command(item: Item) -> str:
     return 'claude "Work {} — {}"'.format(item.url, item.title)
 
 
+def class_display(item: Item, by_ref: Dict[str, Item]) -> str:
+    """Show the effective Class without assigning one to an unclassed item."""
+    klass = effective_class(item, by_ref)
+    if not klass:
+        return "no class"
+    return klass if item.klass else "{} (inherited)".format(klass)
+
+
 def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = None) -> dict:
     by_ref = by_ref if by_ref is not None else {}
     return {
@@ -1665,10 +1883,12 @@ def cmd_queue(items: List[Item], now: datetime) -> int:
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
     if not decisions:
         print("  nothing")
+    by_ref = {i.ref: i for i in items}
     for item in decisions:
         print(
-            "  {:<10} {:<34} {:<18} {}".format(
+            "  {:<10} {:<24} {:<34} {:<18} {}".format(
                 item.status or "-",
+                class_display(item, by_ref),
                 item.ref,
                 humanise(item.waited(now)),
                 gate_question(item),
@@ -1678,18 +1898,17 @@ def cmd_queue(items: List[Item], now: datetime) -> int:
     print("\nStartable by Codex ({}), ladder order:".format(len(tickets)))
     if not tickets:
         print("  nothing")
-    by_ref = {i.ref: i for i in items}
     for item in tickets:
-        klass = effective_class(item, by_ref)
-        shown = (klass or "no class") + ("" if item.klass else " (inherited)" if klass else "")
-        print("  {:<24} {:<34} {}".format(shown, item.ref, item.title))
+        print("  {:<24} {:<34} {}".format(
+            class_display(item, by_ref), item.ref, item.title))
 
     pending = awaiting_breakdown(items)
     if pending:
         print("\nApproved, awaiting breakdown into tickets ({}):".format(len(pending)))
         for item in pending:
-            print("  {:<34} {:<18} {}".format(
-                item.ref, humanise(item.waited(now)), item.title))
+            print("  {:<24} {:<34} {:<18} {}".format(
+                class_display(item, by_ref), item.ref,
+                humanise(item.waited(now)), item.title))
 
     missing = [i for i in items if needs_class(i)]
     if missing:
@@ -1867,7 +2086,8 @@ def _option_id(field_id: str, name: str) -> str:
     raise GitHubError("no option {} on that field".format(name))
 
 
-def cmd_park(items: List[Item], now: datetime, ref: str, reason: str) -> int:
+def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
+             run: Optional[str] = None, agent: Optional[str] = None) -> int:
     """Park a project with its durable reason attached to the issue."""
     item = find(items, ref)
     if not item.item_id:
@@ -1894,13 +2114,33 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str) -> int:
 
     comment = subprocess.run(
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
-         "--body", PARK_COMMENT_PREFIX + reason],
+         "--body", append_provenance(
+             PARK_COMMENT_PREFIX + reason, "nate-relayed", at=now,
+             run=run, agent=agent)],
         capture_output=True, text=True,
     )
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
 
     print("{} → Parked\n{}{}".format(item.ref, PARK_COMMENT_PREFIX, reason))
+    return 0
+
+
+def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
+                voice: str, run: Optional[str] = None,
+                agent: Optional[str] = None) -> int:
+    """Post an issue comment with an explicit, stamped voice."""
+    if not body.strip():
+        raise GitHubError("a non-empty comment body is required")
+    item = find(items, ref)
+    comment = subprocess.run(
+        ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+         "--body", append_provenance(body, voice, at=now, run=run, agent=agent)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+    print("recorded {} comment on {}".format(voice, item.ref))
     return 0
 
 
@@ -1993,10 +2233,12 @@ def cmd_ideas(items: List[Item], now: datetime) -> int:
     print("Ideas ({} total, {} flagged as worth shaping):".format(len(rows), len(flagged)))
     if not rows:
         print("  nothing captured")
+    by_ref = {i.ref: i for i in items}
     for item in rows:
-        print("  {:<3} {:<34} {:<14} {}".format(
+        print("  {:<3} {:<24} {:<34} {:<14} {}".format(
             "*" if "needs-shaping" in item.labels else " ",
-            item.ref, humanise(item.waited(now)), item.title))
+            class_display(item, by_ref), item.ref,
+            humanise(item.waited(now)), item.title))
     if rows:
         print("\n  * = labelled needs-shaping. Grilling is interactive and is the"
               "\n      throttle on everything downstream — one at a time.")
@@ -2004,9 +2246,13 @@ def cmd_ideas(items: List[Item], now: datetime) -> int:
 
 
 def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
-                repo: str, shaping: bool) -> int:
+                repo: str, shaping: bool, run: Optional[str] = None,
+                agent: Optional[str] = None) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
-    body = note or "Captured from chat. Not yet thought through."
+    body = append_provenance(
+        note or "Captured from chat. Not yet thought through.", "agent",
+        at=now, run=run, agent=agent,
+    )
     args = ["gh", "issue", "create", "--repo", repo, "--title", title, "--body", body]
     if shaping:
         args += ["--label", "needs-shaping"]
@@ -2031,7 +2277,8 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
     return 0
 
 
-def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str) -> int:
+def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
+               run: Optional[str] = None, agent: Optional[str] = None) -> int:
     """Record that an idea has been grilled and a plan now exists.
 
     Writes the plan into the issue body — `plan.md` puts it there through Ideas
@@ -2046,10 +2293,11 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str) -> in
         raise GitHubError("cannot read {}: {}".format(plan_file, exc))
     if not plan.strip():
         raise GitHubError("the plan is empty; nothing to record")
+    body = append_provenance(plan, "agent", at=now, run=run, agent=agent)
 
     out = subprocess.run(
         ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
-         "--body-file", plan_file],
+         "--body", body],
         capture_output=True, text=True,
     )
     if out.returncode != 0:
@@ -2154,7 +2402,8 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
 
 
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
-              idle: bool, breakdown: bool = False) -> int:
+              idle: bool, breakdown: bool = False,
+              routine_sha_literal: Optional[str] = None) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
     A polling routine spends most of its runs discovering there is nothing to
@@ -2179,6 +2428,34 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         capture_output=True, text=True)
     out["run"] = (run.stdout or "").strip().splitlines()[-1] if run.stdout else None
 
+    if routine_sha_literal is not None:
+        path = routine_path(agent)
+        try:
+            actual = routine_sha(path)
+            status = "ok" if actual == routine_sha_literal else "drift"
+            check = {
+                "expected": routine_sha_literal,
+                "actual": actual,
+                "status": status,
+            }
+        except (OSError, UnicodeError) as exc:
+            check = {
+                "expected": routine_sha_literal,
+                "actual": None,
+                "status": "unreadable",
+                "error": str(exc),
+            }
+        out["routine_sha"] = check
+        if check["status"] != "ok":
+            heartbeat.record_event(
+                agent,
+                out["run"],
+                "prompt-drift",
+                note="{} routine {} does not match the pasted literal".format(
+                    agent, check["status"]),
+                routine_sha=check,
+            )
+
     reading = usage.read_agent(agent, now.timestamp())
     if reading is None:
         out.update(gate="unknown", do="stop",
@@ -2197,6 +2474,12 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         return 0
 
     out["gate"] = "ok"
+    if reading.get("unmetered"):
+        # Say so rather than letting `gate: ok` imply a budget was checked. An
+        # unmetered provider is a standing exception recorded in AGENTS.md, and
+        # a run that never had a budget to check should not read like one that
+        # passed a check.
+        out["unmetered"] = True
     queue = review_queue(items, tier)
     if queue:
         out.update(do="review", work=queue[0])
@@ -2204,13 +2487,17 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # Breakdown is opt-in per routine. Claude reviews only — its breakdown
         # job moved to the cheaper pool — so offering it one would send the
         # scarce reviewer off to do mechanical decomposition.
-        pending = awaiting_breakdown(items) if breakdown else []
-        if pending:
-            out.update(do="breakdown",
-                       work={"ref": pending[0].ref, "url": pending[0].url,
-                             "title": pending[0].title})
+        if breakdown:
+            pending = awaiting_breakdown(items)
+            if pending:
+                out.update(do="breakdown",
+                           work={"ref": pending[0].ref, "url": pending[0].url,
+                                 "title": pending[0].title})
+            else:
+                out.update(do="stop",
+                           why="nothing to review and nothing to break down")
         else:
-            out.update(do="stop", why="nothing to review and nothing to break down")
+            out.update(do="stop", why="nothing to review")
     print(json.dumps(out, indent=2))
     return 0
 
@@ -2227,7 +2514,8 @@ def cmd_next_review(items: List[Item], tier: Optional[str]) -> int:
 
 
 def cmd_review(repo: str, pr: int, verdict: str, ci: str,
-               blocking: List[str], note: Optional[str]) -> int:
+               blocking: List[str], note: Optional[str],
+               run: Optional[str] = None, agent: Optional[str] = None) -> int:
     """Record a structured review verdict on a PR.
 
     The reviewer's judgement is the part only a model can do. Writing it as
@@ -2257,6 +2545,7 @@ def cmd_review(repo: str, pr: int, verdict: str, ci: str,
         REVIEW_MARKER, verdict, ci, json.dumps(body, indent=2, sort_keys=True))
     if blocking:
         comment += "\n\nBlocking:\n" + "\n".join("- " + b for b in blocking)
+    comment = append_provenance(comment, "agent", run=run, agent=agent)
 
     out = subprocess.run(
         ["gh", "pr", "comment", str(pr), "--repo", repo, "--body", comment],
@@ -2406,9 +2695,10 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
     if comments:
         print("--- comments ({}) ---".format(len(comments)))
         for c in comments[-4:]:
-            text = " ".join((c.get("body") or "").split())
+            body = c.get("body") or ""
+            text = " ".join(_visible_comment(body).split())
             print("  {}: {}".format(
-                (c.get("author") or {}).get("login", "?"), text[:200]))
+                render_voice(body), text[:200]))
         print("")
 
     if item.status == "Building":
@@ -2561,9 +2851,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     capture.add_argument("--repo", default=REPO)
     capture.add_argument("--needs-shaping", action="store_true", dest="shaping",
                          help="flag it as worth thinking through")
+    capture.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    capture.add_argument(
+        "--agent", default=None,
+        help="agent that wrote the body; otherwise read the heartbeat spool",
+    )
     shaped = sub.add_parser("shaped", help="record a grilled plan and move to Shaped")
     shaped.add_argument("ref", help="issue number, owner/repo#number, or URL")
     shaped.add_argument("--plan", required=True, help="file holding the plan")
+    shaped.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    shaped.add_argument(
+        "--agent", default=None,
+        help="agent that wrote the body; otherwise read the heartbeat spool",
+    )
     claim = sub.add_parser("claim", help="take the single-in-motion lock on a ticket")
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
     release = sub.add_parser("release", help="give up the lock on a ticket")
@@ -2573,6 +2879,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     park.add_argument(
         "--reason", required=True, type=_parking_reason,
         help="why this project is being stopped (required)",
+    )
+    park.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    park.add_argument(
+        "--agent", default=None,
+        help="agent that wrote the comment; otherwise read the heartbeat spool",
+    )
+    comment = sub.add_parser(
+        "comment", help="post an issue comment with an explicit voice"
+    )
+    comment.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    comment.add_argument(
+        "--voice", required=True, choices=PROVENANCE_VOICES,
+        help="who the comment speaks for",
+    )
+    body = comment.add_mutually_exclusive_group(required=True)
+    body.add_argument("--body", help="comment text")
+    body.add_argument("--body-file", help="file containing the comment text")
+    comment.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    comment.add_argument(
+        "--agent", default=None,
+        help="agent that wrote the comment; otherwise read the heartbeat spool",
     )
     reject = sub.add_parser(
         "reject", help="a merged PR turned out to be broken: undo and record it")
@@ -2587,6 +2920,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     review.add_argument("--blocking", action="append", default=[],
                         help="one blocking finding; repeat for more")
     review.add_argument("--note", default=None)
+    review.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    review.add_argument(
+        "--agent", default=None,
+        help="agent that wrote the comment; otherwise read the heartbeat spool",
+    )
 
     merge = sub.add_parser(
         "merge", help="merge a PR if every condition holds — dry run without --yes")
@@ -2602,6 +2943,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     begin.add_argument("--breakdown", action="store_true",
                        help="also offer an approved plan to break down when "
                             "there is nothing to review")
+    begin.add_argument(
+        "--routine-sha", dest="routine_sha", default=None,
+        help="compare the checked-in routine's normalized sha256 to this literal",
+    )
 
     nxr = sub.add_parser(
         "next-review", help="the single PR this reviewer should read, or nothing")
@@ -2630,7 +2975,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "release":
             return cmd_release(items, now, args.ref)
         if args.command == "park":
-            return cmd_park(items, now, args.ref, args.reason)
+            return cmd_park(items, now, args.ref, args.reason,
+                            args.run, args.agent)
+        if args.command == "comment":
+            body = args.body
+            if args.body_file:
+                try:
+                    body = pathlib.Path(args.body_file).read_text()
+                except OSError as exc:
+                    raise GitHubError(
+                        "cannot read {}: {}".format(args.body_file, exc)
+                    )
+            return cmd_comment(items, now, args.ref, body or "", args.voice,
+                               args.run, args.agent)
         if args.command == "reject":
             return cmd_reject(items, now, args.pr, args.note)
         if args.command in ANSWERS:
@@ -2642,17 +2999,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_ideas(items, now)
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
-                               args.shaping)
+                               args.shaping, args.run, args.agent)
         if args.command == "shaped":
-            return cmd_shaped(items, now, args.ref, args.plan)
+            return cmd_shaped(items, now, args.ref, args.plan,
+                              args.run, args.agent)
         if args.command == "begin":
             return cmd_begin(items, now, args.agent, args.tier, args.idle,
-                             args.breakdown)
+                             args.breakdown, args.routine_sha)
         if args.command == "next-review":
             return cmd_next_review(items, args.tier)
         if args.command == "review":
             return cmd_review(args.repo, args.pr, args.verdict, args.ci,
-                              args.blocking, args.note)
+                              args.blocking, args.note, args.run, args.agent)
         if args.command == "merge":
             return cmd_merge(items, now, args.repo, args.pr, args.confirmed)
         if args.command == "next":

@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The escalated reviewer: one Muse run, one escalated PR, then stop.
+
+  The canonical copy lives here in the repo. launchd refuses a symlinked plist
+  (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the
+  installed file is a copy and `tests/test_launchd_drift.py` compares them.
+
+  `/bin/bash <script>`, not the script directly: this repository used to live on
+  an external volume that a launchd job could not read at all. It now lives on
+  the internal disk, but invoking through bash costs nothing and survives a move.
+
+  Note for editors: XML forbids a double hyphen inside a comment. Use an em dash
+  or a semicolon; plutil accepts the double hyphen and plistlib rejects it, so a
+  file can lint clean and still be unparseable.
+
+  After editing, re-install:
+    cp launchd/com.nateprich.command-center-muse-review.plist ~/Library/LaunchAgents/
+    launchctl bootout gui/$(id -u)/com.nateprich.command-center-muse-review
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nateprich.command-center-muse-review.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nateprich.command-center-muse-review</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/nateprich/.claude/command-center/scripts/muse-review</string>
+        <string>escalated</string>
+        <string>max</string>
+    </array>
+
+    <!--
+      Hourly at :07. Nate's call, 2026-09-07: escalated work is rare (two of
+      thirty startable tickets when measured, and the queue is usually empty),
+      so a quarter of the polls give the same practical latency. The failure
+      this fixes was two merge-ready PRs sitting two hours because nobody was
+      around; an hour still caps that well.
+
+      A calendar minute rather than an interval, so it cannot drift into the
+      standard schedule's slots. Both run as agent `muse`, and two open runs at
+      once make heartbeat attribution guesswork.
+    -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>7</integer>
+    </dict>
+
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-muse-review.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-muse-review.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/nateprich/.local/bin</string>
+        <key>HOME</key>
+        <string>/Users/nateprich</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

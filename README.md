@@ -22,6 +22,7 @@ ranks anything itself.
 | `funnel brief` | What is waiting on a human decision, and for how long |
 | `funnel doctor` | Check the local install and report actionable failures |
 | `funnel park <ref> --reason "<why>"` | Stop a project and preserve the reason |
+| `funnel comment <ref> --body "<text>" --voice <voice>` | Post a comment with explicit provenance |
 
 ## Documentation
 

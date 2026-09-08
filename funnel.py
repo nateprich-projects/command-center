@@ -352,22 +352,39 @@ TIERS = ("standard", "escalated")
 RISK_LINE = re.compile(r"^\s*Risk:\s*(standard|escalated)\b(.*)$",
                        re.IGNORECASE | re.MULTILINE)
 
-#: A safety net for tickets written before markers existed, or by someone who
-#: forgot. **Deliberately narrow.** This repository is *about* locks, gates and
-#: destructive operations — `park` closes issues on purpose — so a broad keyword
-#: list would escalate every ticket and the cheap default would never run. These
-#: match phrases that are hard to write by accident.
+#: A safety boundary for tickets written before markers existed, or by someone
+#: who forgot. False positives cost one escalated review; false negatives can
+#: authorise risky work unattended, so these deliberately match the vocabulary
+#: plans use when describing risky actions — including rejected alternatives.
+#: Category names and `lock`, `park`, `close` or `delete` alone stay ordinary
+#: subject matter: this repository discusses them even when no risky action is
+#: proposed, and matching them would keep the standard engine from ever running.
 ESCALATION_PATTERNS = {
-    "credentials": r"\b(api[- ]key|access token|client secret|credential store|"
-                   r"password|private key)\b",
-    "authorisation": r"\b(authoris\w+|authoriz\w+|permission model|access control|"
-                     r"oauth|scope grant)\b",
-    "data-migration": r"\b(data migration|schema migration|backfill|"
-                      r"irreversible migration)\b",
-    "destructive": r"\b(force[- ]push|hard delete|permanently delete|"
-                   r"drop the (table|branch)|rewrite history)\b",
-    "concurrency": r"\b(race condition|deadlock|thread[- ]safe|mutex|"
-                   r"atomic (write|commit))\b",
+    "credentials": r"(?<!no )\b(api[- ]key|access token|client secret|"
+                   r"credential store|password|private key)\b|"
+                   r"(?<!not )(?<!never )\b(?:access|chang|creat|enter|expos|"
+                   r"handl|load|read|replac|revok|rotat|stor|suppl|touch|"
+                   r"use|uses|used|using|writ)\w*"
+                   r"(?:\s+(?!(?:no|not|nothing)\b)[\w'’-]+){0,4}"
+                   r"\s+credentials?\b",
+    "authorisation": r"(?<!no )(?<!not )(?<!never )\b("
+                     r"authoris(?:e|es|ed|ing)|authoriz(?:e|es|ed|ing)|"
+                     r"permission model|access control|oauth|scope grant)\b|"
+                     r"(?<!not )(?<!never )\b(?:broaden|chang|elevat|expand|"
+                     r"grant|reduc|revok|tighten)\w*"
+                     r"(?:\s+(?!(?:no|not|nothing)\b)[\w'’-]+){0,4}"
+                     r"\s+permissions?\b",
+    "data-migration": r"(?<!no )\b(data migration|schema migration|backfill|"
+                      r"irreversible migration|migrat(?:e|es|ed|ing))\b",
+    "destructive": r"(?<!no )\b(force[- ]push|hard delete|permanently delete|"
+                   r"drop the (table|branch)|rewrite history|"
+                   r"(?:allow|enable|perform|permit|run)\w*"
+                   r"(?:\s+[\w'’-]+){0,4}\s+(?:destructive|irreversible)"
+                   r"\s+(?:actions?|changes?|commands?|operations?))\b",
+    "concurrency": r"(?<!no )\b(race condition|deadlock|thread[- ]safe|mutex|"
+                   r"atomic (write|commit)|"
+                   r"(?:concurrent|overlapping)\s+(?:mutations?|processes|runs?|"
+                   r"writers?|writes?))\b",
 }
 
 

@@ -23,7 +23,7 @@ and only finite classes may preempt.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent claude --tier escalated
+python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent claude --tier escalated --routine-sha 3994c12f3b2388cef22d27d7a05780f95fe3955e31d4a42b8d73a9fe0e7e396c
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and names

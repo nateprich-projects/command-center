@@ -90,6 +90,16 @@ def test_building_with_no_children_does_not_count_as_complete():
     assert gate_question(item(1, "Building", "New", children_total=0, children_done=0)) is None
 
 
+def test_building_question_starts_when_the_last_ticket_closes():
+    building = project(
+        1, "Building", "New", children=2, done=2,
+        last_child_closed_at=NOW - timedelta(hours=3),
+    )
+
+    assert question_since(building) == NOW - timedelta(hours=3)
+    assert building.waited(NOW) == timedelta(hours=3)
+
+
 def test_ready_question_starts_when_the_first_ticket_is_created():
     ready = project(
         1, "Ready", "New", days=30, children=2,
@@ -162,6 +172,18 @@ def test_a_blocked_ticket_asks_only_whether_to_unblock():
     blocked = ticket(1, 9, labels=["blocked"])
 
     assert gate_question(blocked) == "Unblock?"
+
+
+def test_blocked_ticket_without_status_starts_when_the_label_is_applied():
+    blocked = ticket(
+        1, 9, labels=["blocked"],
+        blocked_since=NOW - timedelta(hours=2),
+    )
+    blocked.status = None
+    blocked.status_since = None
+
+    assert question_since(blocked) == NOW - timedelta(hours=2)
+    assert blocked.waited(NOW) == timedelta(hours=2)
 
 
 def test_a_named_block_condition_waits_on_the_system_for_projects_and_tickets():
@@ -538,7 +560,7 @@ def test_days_since_anything_new_started():
 def test_fixture_parses_into_the_expected_items():
     nodes = json.loads(FIXTURE.read_text())
     items = [i for i in (funnel._from_node(n) for n in nodes) if i]
-    assert [i.number for i in items] == [10, 11, 12, 13, 14, 15]
+    assert [i.number for i in items] == [10, 11, 12, 13, 14, 15, 16]
 
 
 def test_a_draft_issue_is_skipped():
@@ -552,6 +574,23 @@ def test_time_at_gate_ignores_other_projects():
     beta11 = next(i for i in (funnel._from_node(n) for n in nodes) if i and i.number == 11)
     assert beta11.status_since == datetime(2026, 9, 1, tzinfo=timezone.utc)
     assert beta11.first_child_created_at == datetime(2026, 9, 5, 11, tzinfo=timezone.utc)
+
+
+def test_fixture_parses_the_last_child_close_time():
+    nodes = json.loads(FIXTURE.read_text())
+    alpha10 = next(i for i in (funnel._from_node(n) for n in nodes) if i and i.number == 10)
+
+    assert alpha10.last_child_closed_at == datetime(2026, 9, 3, tzinfo=timezone.utc)
+    assert question_since(alpha10) == alpha10.last_child_closed_at
+
+
+def test_fixture_parses_a_blocked_label_time_without_status():
+    nodes = json.loads(FIXTURE.read_text())
+    blocked16 = next(i for i in (funnel._from_node(n) for n in nodes) if i and i.number == 16)
+
+    assert blocked16.status is None
+    assert blocked16.blocked_since == datetime(2026, 9, 4, 11, tzinfo=timezone.utc)
+    assert blocked16.waited(datetime(2026, 9, 5, 12, tzinfo=timezone.utc)) == timedelta(days=1, hours=1)
 
 
 def test_time_at_gate_uses_the_last_move_into_the_current_status():

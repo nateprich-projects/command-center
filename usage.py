@@ -551,11 +551,10 @@ def idle_verdict(agent: str, reading: Dict) -> Optional[Dict]:
 def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:
     """Is this agent within its budget?
 
-    The weekly line is proportional: by the time a fraction f of the 7-day
-    window has elapsed, at most f x WEEKLY_TARGET should be spent. That keeps
-    the burn even instead of letting a routine spend the week's capacity on
-    Monday, and it needs no persistence — the window's own resets_at says how
-    far through it we are.
+    The weekly line runs from the provider's floor at the start of the 7-day
+    window to its target at the end. That keeps the burn even instead of
+    letting a routine spend the week's capacity on Monday, and it needs no
+    persistence — the window's own resets_at says how far through it we are.
     """
     verdicts = []
     windows = reading.get("windows", {})
@@ -585,9 +584,9 @@ def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:
         else:
             remaining = max(0.0, float(seven["resets_at"]) - now)
             elapsed_fraction = max(0.0, min(1.0, 1.0 - remaining / SEVEN_DAY))
-            allowed = max(policy(provider, "weekly_floor", WEEKLY_FLOOR),
-                          policy(provider, "weekly_target", WEEKLY_TARGET)
-                          * elapsed_fraction)
+            weekly_floor = policy(provider, "weekly_floor", WEEKLY_FLOOR)
+            weekly_target = policy(provider, "weekly_target", WEEKLY_TARGET)
+            allowed = weekly_floor + (weekly_target - weekly_floor) * elapsed_fraction
         verdicts.append(
             {
                 "window": "seven_day",

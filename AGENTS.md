@@ -124,10 +124,29 @@ wrong.
   "Reading usage".
 - **Missing usage data fails closed.** A run that cannot read its budget does not work.
 
-  **Muse is the one exception, and it is deliberate.** Muse reports no usage through its
-  CLI, so this rule would refuse it permanently. Nate's call, 2026-09-07: its limits are
-  generous, it takes only escalated work, and he will review consumption through Meta's web
-  portal in a week or two rather than through a gate. _(confirmed by Nate 2026-09-07.)_
+  **Muse is the one exception, and it is deliberate.** Nate's call, 2026-09-07: its limits
+  are generous and he reviews consumption himself rather than through a gate.
+  _(confirmed by Nate 2026-09-07.)_
+
+  **Stated precisely, because the first version of this was wrong.** It said Muse reports
+  no usage. It does: `/upgrade` in the TUI prints both windows in the shape this file
+  wants — *"Current 1% used · Resets at 4:58 PM / Weekly 0% used · Resets Sep 13 at 5:00
+  PM"*. What is true is narrower: **Muse exposes usage only to an interactive session,
+  fetched at startup and held in memory.** It is written to no file — checked across
+  `~/.local/share/muse` and `~/.config/muse` on 2026-09-07, where the only matches were
+  Muse's own tool output echoing this repo's numbers back.
+
+  So a scheduled run still has nothing to read, and the exception stands for that reason
+  rather than the one first given. Codex writes `rate_limits` into its rollout files and
+  z.ai answers a quota endpoint; Muse does neither.
+
+  **The end-condition changes with it.** Not "if Muse ever exposes usage" — that is
+  already met. End the exception when usage becomes *readable by a run*: a file it
+  writes, or a documented endpoint. There are signs of the latter — a `/subscription`
+  path and the status values `active / paused / blocked / usage_limited / budget_limited`
+  appear in the binary — but that is inferred from strings, needs Nate's Keychain
+  credential, and sits under terms nobody here has read. Three unknowns for a gate on a
+  pool measured at 1% of five hours and 0% of a week.
 
   The exception is scoped to *reading* usage, not to the rest: a Muse run still records a
   heartbeat, and it still stops if the funnel has nothing for it. If Muse ever exposes

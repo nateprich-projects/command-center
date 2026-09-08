@@ -33,13 +33,6 @@ this section is the safeguard when an older rule has no tag: refusing Nate still
 a confirmation that can be pointed to, rather than an assumption about who authored the
 prose. _(confirmed by Nate 2026-09-06)_
 
-## Project field mutation safety
-
-Any `updateProjectV2Field` mutation carrying `singleSelectOptions` must include the
-existing `id` for every option being kept. Omitting those ids silently replaces the
-option records and can orphan every existing assignment. A backup of the option set is
-not a backup of the assignments. _(agent rule, unconfirmed — advisory)_
-
 ## Capability boundary
 
 For the closed-world test of whether a plan or step needs Nate, an agent has:

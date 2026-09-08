@@ -2219,13 +2219,17 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # Breakdown is opt-in per routine. Claude reviews only — its breakdown
         # job moved to the cheaper pool — so offering it one would send the
         # scarce reviewer off to do mechanical decomposition.
-        pending = awaiting_breakdown(items) if breakdown else []
-        if pending:
-            out.update(do="breakdown",
-                       work={"ref": pending[0].ref, "url": pending[0].url,
-                             "title": pending[0].title})
+        if breakdown:
+            pending = awaiting_breakdown(items)
+            if pending:
+                out.update(do="breakdown",
+                           work={"ref": pending[0].ref, "url": pending[0].url,
+                                 "title": pending[0].title})
+            else:
+                out.update(do="stop",
+                           why="nothing to review and nothing to break down")
         else:
-            out.update(do="stop", why="nothing to review and nothing to break down")
+            out.update(do="stop", why="nothing to review")
     print(json.dumps(out, indent=2))
     return 0
 

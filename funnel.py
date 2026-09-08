@@ -3328,6 +3328,18 @@ def merge_blockers(repo: str, pr: int, items: List[Item],
     if data.get("state") != "OPEN":
         why.append("PR is {}, not open".format(data.get("state")))
 
+    mergeable = str(data.get("mergeable") or "").upper()
+    if mergeable == "CONFLICTING":
+        why.append(
+            "branch {!r} is conflicting with the base — an engineer rebase is required"
+            .format(data.get("headRefName") or "")
+        )
+    elif mergeable != "MERGEABLE":
+        why.append(
+            "mergeability for branch {!r} has not been computed yet — retry on the next run"
+            .format(data.get("headRefName") or "")
+        )
+
     branch = data.get("headRefName") or ""
     if not branch.startswith("ticket/"):
         why.append("branch {!r} is not a ticket/<n> branch".format(branch))

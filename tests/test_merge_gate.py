@@ -49,6 +49,7 @@ def wire(monkeypatch, pr_json, comments):
 
 def pr(**kw):
     data = {"state": "OPEN", "headRefName": "ticket/9", "headRefOid": SHA,
+            "mergeable": "MERGEABLE",
             "statusCheckRollup": [{"name": "tests", "conclusion": "SUCCESS"}]}
     data.update(kw)
     return data
@@ -80,6 +81,33 @@ def test_the_newest_verdict_wins(monkeypatch):
 def test_everything_in_order_merges(monkeypatch):
     wire(monkeypatch, pr(), [verdict()])
     assert funnel.merge_blockers(REPO, 5, items(), NOW) == []
+
+
+def test_a_conflicting_branch_blocks_with_a_rebase_reason(monkeypatch):
+    wire(monkeypatch, pr(mergeable="CONFLICTING"), [verdict()])
+    why = funnel.merge_blockers(REPO, 5, items(), NOW)
+    assert any(
+        "ticket/9" in reason
+        and "conflicting" in reason
+        and "base" in reason
+        and "rebase" in reason
+        for reason in why
+    )
+
+
+def test_unknown_mergeability_blocks_with_retry_reason(monkeypatch):
+    wire(monkeypatch, pr(mergeable="UNKNOWN"), [verdict()])
+    why = funnel.merge_blockers(REPO, 5, items(), NOW)
+    assert any("not been computed" in reason and "retry" in reason for reason in why)
+    assert not any("rebase" in reason for reason in why)
+
+
+def test_missing_mergeability_blocks_with_retry_reason(monkeypatch):
+    data = pr()
+    del data["mergeable"]
+    wire(monkeypatch, data, [verdict()])
+    why = funnel.merge_blockers(REPO, 5, items(), NOW)
+    assert any("not been computed" in reason and "retry" in reason for reason in why)
 
 
 def test_a_mixed_review_and_provenance_comment_still_allows_merge(monkeypatch):

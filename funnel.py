@@ -272,6 +272,37 @@ def effective_class(item: Item, by_ref: Dict[str, Item]) -> Optional[str]:
     return (parent.klass if parent else None) or item.klass
 
 
+def dependency_descendants(items: Sequence[Item]) -> Dict[str, Set[str]]:
+    """Return the tickets each item transitively blocks.
+
+    ``open_blockers`` points from the waiting ticket to its prerequisite. The
+    rank needs the reverse direction, so this builds that graph from the
+    native dependency facts already loaded on each item. The walk is
+    iterative on purpose: a malformed or manually-created cycle must not make
+    queue calculation recurse forever. References outside the loaded Project
+    are ignored because there is no item here that can be sorted.
+    """
+    by_ref = {item.ref: item for item in items}
+    downstream = {ref: set() for ref in by_ref}
+    for dependent in items:
+        for blocker_ref in dependent.open_blockers:
+            if blocker_ref in by_ref:
+                downstream[blocker_ref].add(dependent.ref)
+
+    descendants: Dict[str, Set[str]] = {}
+    for ref in by_ref:
+        found: Set[str] = set()
+        pending = list(downstream[ref])
+        while pending:
+            child = pending.pop()
+            if child == ref or child in found:
+                continue
+            found.add(child)
+            pending.extend(downstream.get(child, ()))
+        descendants[ref] = found
+    return descendants
+
+
 def needs_class(item: Item) -> bool:
     """Anything not in Ideas must carry a Class. Unset is invalid.
 
@@ -645,6 +676,14 @@ def startable(items: Sequence[Item],
     """
     awaiting_review = awaiting_review or frozenset()
     by_ref = {i.ref: i for i in items}
+    descendants = dependency_descendants(items)
+    effective_rank = {
+        ref: min(
+            ladder_index(effective_class(by_ref[related], by_ref))
+            for related in {ref} | descendants[ref]
+        )
+        for ref in by_ref
+    }
 
     def eligible(item: Item) -> bool:
         if item.state != "OPEN" or item.is_blocked or item.open_blockers or item.children_total:
@@ -676,7 +715,12 @@ def startable(items: Sequence[Item],
         since = item.status_since or datetime.max.replace(tzinfo=timezone.utc)
         return (
             not in_flight(item),
-            ladder_index(effective_class(item, by_ref)),
+            effective_rank[item.ref],
+            # A blocker with the same effective rank as its dependent still
+            # has to go first. An ancestor reaches every descendant, so this
+            # count is strictly larger for an acyclic dependency edge while
+            # remaining deterministic and finite for cycles.
+            -len(descendants[item.ref]),
             since,
             item.repo,
             item.number,

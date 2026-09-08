@@ -37,6 +37,11 @@ def finish(run, ago_hours, outcome="done", note=None):
             "agent": "codex", "outcome": outcome, "note": note}
 
 
+def event(run, ago_hours, outcome):
+    return {"run": run, "phase": "event", "ts": NOW - ago_hours * HOUR,
+            "agent": "codex", "outcome": outcome}
+
+
 def history(gaps_hours, quiet_hours):
     """Return one heartbeat record per timestamp, in chronological order."""
     latest = NOW - quiet_hours * HOUR
@@ -68,6 +73,21 @@ def test_an_empty_funnel_is_not_an_alarm():
 def test_a_held_lock_is_not_an_alarm():
     rows = [start("a", 1), finish("a", 1, "skipped-locked")]
     assert watchdog.assess("codex", rows, NOW) == []
+
+
+def test_nate_active_and_unknown_usage_skips_are_not_alarms():
+    rows = [
+        finish("a", 1, "skipped-nate-active"),
+        finish("b", 1, "skipped-usage-unknown"),
+    ]
+    assert watchdog.assess("codex", rows, NOW) == []
+
+
+def test_prompt_drift_is_reported_as_a_fault():
+    problems = watchdog.assess("codex", [event("a", 1, "prompt-drift")], NOW)
+    assert len(problems) == 1
+    assert "reported prompt drift 1 time(s)" in problems[0]
+    assert "checked-in file" in problems[0]
 
 
 def test_one_dying_run_is_noise_not_an_alarm():

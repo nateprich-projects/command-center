@@ -15,7 +15,12 @@ from funnel import access_signals  # noqa: E402
 
 PLAN_25 = """
 Run the service under Colima behind a Cloudflare Tunnel. Nate creates the
-fine-grained token and registers the connector in his account.
+fine-grained token and registers the connector in his account. The Cloudflare
+Tunnel and token are also named in the deployment checklist.
+"""
+
+ALL_CLEAR_PLAN = """
+Implement the parser, add fixtures, and run the full test suite.
 """
 
 
@@ -32,7 +37,7 @@ def test_issue_25_vocabulary_is_caught():
         ("settings", "settings"),
         ("billing", "billing"),
         ("API-key", "api key"),
-        ("signed in", "sign in"),
+        ("signed-in", "sign in"),
         ("verification", "verify"),
     ],
 )
@@ -41,9 +46,9 @@ def test_access_vocabulary_is_case_insensitive_and_handles_inflections(word, exp
 
 
 def test_a_plan_without_access_vocabulary_stays_clear():
-    assert access_signals(
-        "Implement the parser, add fixtures, and run the full test suite."
-    ) == []
+    # The all-clear answers live in the coverage comment; only the plan body
+    # is passed to this scan, so checklist labels cannot create their own hits.
+    assert access_signals(ALL_CLEAR_PLAN) == []
 
 
 def test_empty_or_missing_plan_has_no_signals():

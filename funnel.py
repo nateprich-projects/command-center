@@ -552,7 +552,7 @@ ACCESS_PATTERNS = {
     "oauth": r"\boauth\b",
     "register": r"\b(?:register|registrat)\w*\b",
     "settings": r"\bsettings?\b",
-    "sign in": r"\bsign(?:ed)?\s+in\b",
+    "sign in": r"\bsign(?:ed)?[\s-]+in\b",
     "token": r"\btokens?\b",
     "tunnel": r"\btunnels?\b",
     "verify": r"\bverif\w*\b",

@@ -43,7 +43,15 @@ def test_open_blockers_returns_none_for_a_ticket_without_dependencies(monkeypatc
 
 
 def test_load_items_attaches_dependencies_to_open_tickets(monkeypatch):
-    def node(number, *, parent=None, state="OPEN"):
+    """Dependencies ride in on the Project query, costing no extra request.
+
+    The loader used to call the REST endpoint once per open ticket, which
+    exhausted the API budget on 2026-09-08 and took `funnel brief` down. The
+    `calls == []` assertion below is the guard: a per-item read reintroduced
+    into `load_items` fails here.
+    """
+
+    def node(number, *, parent=None, state="OPEN", blocked_by=()):
         return {
             "status": {"name": "Building"},
             "class": {"name": "New"},
@@ -63,11 +71,31 @@ def test_load_items_attaches_dependencies_to_open_tickets(monkeypatch):
                     else None
                 ),
                 "subIssuesSummary": {"total": 0, "completed": 0},
+                "blockedBy": {"nodes": list(blocked_by)},
                 "timelineItems": {"nodes": []},
             },
         }
 
-    nodes = [node(1), node(2, parent=1), node(3, parent=1, state="CLOSED")]
+    # GraphQL's spelling, which is not REST's: upper-case state, `stateReason`,
+    # `nameWithOwner`. Feeding the real wire shape is the point of the fixture.
+    blocker = {
+        "number": 9,
+        "state": "OPEN",
+        "stateReason": None,
+        "repository": {"nameWithOwner": "owner/repo"},
+    }
+    dead = {
+        "number": 10,
+        "state": "CLOSED",
+        "stateReason": "NOT_PLANNED",
+        "repository": {"nameWithOwner": "other/repo"},
+    }
+
+    nodes = [
+        node(1),
+        node(2, parent=1, blocked_by=[blocker, dead]),
+        node(3, parent=1, state="CLOSED", blocked_by=[blocker]),
+    ]
     monkeypatch.setattr(funnel, "member_repos", lambda: ["owner/repo"])
     monkeypatch.setattr(
         funnel,
@@ -90,9 +118,8 @@ def test_load_items_attaches_dependencies_to_open_tickets(monkeypatch):
     items = funnel.load_items()
 
     assert [item.open_blockers for item in items] == [[], ["owner/repo#9"], []]
-    assert calls == [
-        ("gh", "api", "repos/owner/repo/issues/2/dependencies/blocked_by"),
-    ]
+    assert [item.dead_blockers for item in items] == [[], ["other/repo#10"], []]
+    assert calls == []
 
 
 def test_open_blockers_fails_closed_when_the_endpoint_cannot_be_read(monkeypatch):

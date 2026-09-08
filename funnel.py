@@ -1890,6 +1890,9 @@ query($login: String!, $number: Int!, $cursor: String) {
               assignees(first: 10) { nodes { login } }
               parent { number repository { nameWithOwner } }
               subIssuesSummary { total completed }
+              blockedBy(first: 50) {
+                nodes { number state stateReason repository { nameWithOwner } }
+              }
               timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]) {
                 nodes {
                   ... on ProjectV2ItemStatusChangedEvent {
@@ -1997,6 +2000,15 @@ def _from_node(node: dict) -> Optional[Item]:
         in_motion_since=parse_time((node.get("lock") or {}).get("text")),
     )
 
+    # Native dependencies apply to tickets, not the parent project, and the
+    # same open/dead split the REST helper produces. This comes out of the
+    # Project query that already ran, so it costs no extra request.
+    if item.state == "OPEN" and item.parent:
+        blockers = (content.get("blockedBy") or {}).get("nodes") or []
+        dependencies = classify_blockers(blockers, item.repo)
+        item.open_blockers = dependencies["open"]
+        item.dead_blockers = dependencies["dead"]
+
     # Time at the current gate: the last status change into the status the item
     # actually holds, in *this* project. Events arrive oldest-first, and an
     # issue may sit in several projects — filtering on the project is what stops
@@ -2030,16 +2042,12 @@ def load_items() -> List[Item]:
             # Membership is the topic. An item whose repo has not opted in is
             # outside the funnel even though it sits in the Project.
             if item and item.repo in members:
-                # Native dependencies apply to tickets, not the parent project.
-                # Keep the read with the normal item load so pure queue and
-                # diagnostic functions can consume the state without making
-                # network calls. Keep closed `not_planned` blockers too: they
-                # no longer belong in `open_blockers`, but they are the one
-                # dependency state that can never resolve by itself.
-                if item.state == "OPEN" and item.parent:
-                    dependencies = dependency_facts(item.repo, item.number)
-                    item.open_blockers = dependencies["open"]
-                    item.dead_blockers = dependencies["dead"]
+                # Dependencies are already on the item: `_from_node` reads them
+                # from `blockedBy` in the Project query. They used to be fetched
+                # here instead, one REST call per open ticket per command — ~78
+                # calls a run, ~1,800 an hour across the scheduled agents, which
+                # exhausted the API budget on 2026-09-08 and took `brief` down
+                # entirely. Do not restore a per-item read in this loop.
                 if item.state == "OPEN" and item.is_blocked:
                     _load_block_comment(item)
                 items.append(item)
@@ -2899,7 +2907,18 @@ def dependency_facts(repo: str, number: int) -> Dict[str, List[str]]:
         raise GitHubError("could not read blockers for {}#{}".format(repo, number))
     if not isinstance(blockers, list):
         raise GitHubError("invalid blockers response for {}#{}".format(repo, number))
+    return classify_blockers(blockers, repo)
 
+
+def classify_blockers(blockers: Iterable[dict], repo: str) -> Dict[str, List[str]]:
+    """Split blocker objects into the two states the funnel acts on.
+
+    Deliberately tolerant of both wire shapes. REST spells the fields
+    ``state_reason`` / ``full_name`` and lowercases the state; GraphQL spells
+    them ``stateReason`` / ``nameWithOwner`` and uppercases it. One classifier
+    for both is what keeps the batched Project read and the single-ticket REST
+    helper from drifting into two different definitions of "blocked".
+    """
     refs: Dict[str, List[str]] = {"open": [], "dead": []}
     for blocker in blockers:
         if not isinstance(blocker, dict):
@@ -2907,7 +2926,8 @@ def dependency_facts(repo: str, number: int) -> Dict[str, List[str]]:
         blocker_number = blocker.get("number")
         if not isinstance(blocker_number, int) or isinstance(blocker_number, bool):
             continue
-        blocker_repo = (blocker.get("repository") or {}).get("full_name") or repo
+        blocker_repo = (blocker.get("repository") or {}).get("full_name") \
+            or (blocker.get("repository") or {}).get("nameWithOwner") or repo
         ref = "{}#{}".format(blocker_repo, blocker_number)
         state = str(blocker.get("state") or "").lower()
         state_reason = str(

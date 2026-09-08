@@ -386,6 +386,37 @@ TIERS = ("standard", "escalated")
 RISK_LINE = re.compile(r"^\s*Risk:\s*(standard|escalated)\b(.*)$",
                        re.IGNORECASE | re.MULTILINE)
 
+#: A ticket declares a step that only Nate can perform in its body, written at
+#: breakdown. The reason is deliberately an allowlist: inability to figure out
+#: engineering work is not a reason to route that work to him.
+HUMAN_STEP_PREFIX = "Human step: "
+HUMAN_STEP_REASONS = (
+    "an app UI with no API",
+    "entering a credential",
+    "an account or billing setting",
+    "physical access to a machine",
+)
+HUMAN_STEP_LINE = re.compile(
+    r"^\s*" + re.escape(HUMAN_STEP_PREFIX)
+    + r"(?P<reason>"
+    + "|".join(re.escape(reason) for reason in HUMAN_STEP_REASONS)
+    + r")\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def parse_human_step(body: str) -> Optional[str]:
+    """Return an allowlisted human-step reason from a ticket body.
+
+    Like ``RISK_LINE``, the marker must begin a body line. Matching only the
+    stated access reasons keeps a ticket from becoming Nate's work merely
+    because an agent found it difficult.
+    """
+    if not isinstance(body, str):
+        return None
+    match = HUMAN_STEP_LINE.search(body)
+    return match.group("reason") if match else None
+
 #: A safety boundary for tickets written before markers existed, or by someone
 #: who forgot. False positives cost one escalated review; false negatives can
 #: authorise risky work unattended, so these deliberately match the vocabulary

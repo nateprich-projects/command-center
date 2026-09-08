@@ -35,4 +35,3 @@ def test_an_embedded_marker_does_not_match():
         funnel.HUMAN_STEP_PREFIX, funnel.HUMAN_STEP_REASONS[0]
     )
     assert funnel.parse_human_step(body) is None
-

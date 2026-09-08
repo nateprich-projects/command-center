@@ -207,6 +207,7 @@ class Item:
     title: str
     url: str
     state: str  # OPEN | CLOSED
+    body: Optional[str] = None
     state_reason: Optional[str] = None  # COMPLETED | NOT_PLANNED | REOPENED
     status: Optional[str] = None
     klass: Optional[str] = None
@@ -1881,7 +1882,7 @@ query($login: String!, $number: Int!, $cursor: String) {
           }
           content {
             ... on Issue {
-              number title url state stateReason closedAt
+              number title url body state stateReason closedAt
               repository { nameWithOwner }
               labels(first: 25) { nodes { name } }
               assignees(first: 10) { nodes { login } }
@@ -1976,6 +1977,7 @@ def _from_node(node: dict) -> Optional[Item]:
         title=content["title"],
         url=content["url"],
         state=content["state"],
+        body=content.get("body"),
         state_reason=content.get("stateReason"),
         status=status,
         klass=(node.get("class") or {}).get("name"),
@@ -2170,6 +2172,97 @@ def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     return [_blocked_item_json(item) for item in blocked_items(items)]
 
 
+def _item_human_step_reason(item: Item) -> Optional[str]:
+    """Return the parsed marker, tolerating fixture Items without a body."""
+    return parse_human_step(item.body or "")
+
+
+def human_step_items(items: Iterable[Item]) -> List[Item]:
+    """Open child issues that Nate must complete himself.
+
+    Human-step tickets are work, not decisions. They are therefore rendered in
+    their own brief section instead of being added to the decision queue.
+    Closed tickets remain in ``items`` so the completed-project backstop can
+    tell a project that carried a human step from one that never had one.
+    """
+    return sorted(
+        (
+            item for item in items
+            if item.state == "OPEN"
+            and item.parent is not None
+            and _item_human_step_reason(item) is not None
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+
+
+def _human_step_item_json(item: Item) -> Dict[str, object]:
+    return {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "reason": _item_human_step_reason(item),
+    }
+
+
+def human_step_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """Render the open human-step work owed by Nate."""
+    return [_human_step_item_json(item) for item in human_step_items(items)]
+
+
+def completed_projects_missing_human_steps(items: Iterable[Item]) -> List[Item]:
+    """Completed projects whose plans mention access but have no marker.
+
+    This is a detective signal, not proof that a human step was required. A
+    parked project is deliberately excluded: parking is not a claim that its
+    plan shipped. Any human-step ticket, including one already closed, clears
+    the flag because the backstop asks whether the project ever carried one.
+    """
+    rows = list(items)
+    human_step_parents = {
+        item.parent
+        for item in rows
+        if item.parent is not None and _item_human_step_reason(item) is not None
+    }
+    return sorted(
+        (
+            item for item in rows
+            if item.parent is None
+            and item.state == "CLOSED"
+            and item.state_reason != "NOT_PLANNED"
+            and item.status != "Parked"
+            and item.ref not in human_step_parents
+            and access_signals(item.body or "")
+        ),
+        key=lambda item: (
+            (item.closed_at or item.status_since) is None,
+            -((item.closed_at or item.status_since).timestamp()
+              if item.closed_at or item.status_since else 0),
+            item.repo,
+            item.number,
+        ),
+    )
+
+
+def _completed_project_missing_human_steps_json(item: Item) -> Dict[str, object]:
+    return {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "access_signals": access_signals(item.body or ""),
+    }
+
+
+def closed_with_access_vocabulary_json(
+    items: Iterable[Item],
+) -> List[Dict[str, object]]:
+    """Render the completed-project detective flags for the brief."""
+    return [
+        _completed_project_missing_human_steps_json(item)
+        for item in completed_projects_missing_human_steps(items)
+    ]
+
+
 def cmd_queue(items: List[Item], now: datetime) -> int:
     """Everything, ordered — both queues, each under its own heading.
 
@@ -2275,6 +2368,10 @@ def cmd_brief(items: List[Item], now: datetime) -> int:
         "items": [item_json(i, now, by_ref) for i in decisions],
         "parked": parked_json(items),
         "blocked": blocked_json(items),
+        "human_steps": human_step_json(items),
+        "closed_with_access_vocabulary": closed_with_access_vocabulary_json(
+            items
+        ),
         "needs_class": [item_json(i, now, by_ref) for i in items if needs_class(i)],
         "awaiting_breakdown": [
             item_json(i, now, by_ref) for i in awaiting_breakdown(items)

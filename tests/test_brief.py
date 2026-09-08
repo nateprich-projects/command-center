@@ -202,3 +202,84 @@ def test_brief_surfaces_blocked_projects_and_tickets_oldest_first(
     assert [row["ref"] for row in brief["items"]] == ["nateprich/beta#31"]
     assert all(row["ref"] != "nateprich/beta#33" for row in brief["blocked"])
     assert calls == []
+
+
+def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
+    monkeypatch, capsys
+):
+    human_step = funnel.Item(
+        repo="nateprich/beta", number=40, title="Create the account",
+        url="https://example.invalid/40", state="OPEN",
+        parent="nateprich/beta#39",
+        body="Part of the deployment.\n\nHuman step: an account or billing setting\n",
+    )
+    ordinary_ticket = funnel.Item(
+        repo="nateprich/beta", number=41, title="Deploy the service",
+        url="https://example.invalid/41", state="OPEN",
+        parent="nateprich/beta#39",
+    )
+
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([ordinary_ticket, human_step], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["human_steps"] == [{
+        "ref": "nateprich/beta#40",
+        "title": "Create the account",
+        "url": "https://example.invalid/40",
+        "reason": "an account or billing setting",
+    }]
+    assert brief["items"] == []
+    assert funnel.awaiting_decision([human_step]) == []
+
+
+def test_brief_flags_completed_access_plan_without_any_human_ticket(
+    monkeypatch, capsys
+):
+    missed = funnel.Item(
+        repo="nateprich/beta", number=50, title="Reach the funnel",
+        url="https://example.invalid/50", state="CLOSED",
+        state_reason="COMPLETED", status="Done",
+        closed_at=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        body="Deploy behind a Cloudflare Tunnel using a fine-grained token.",
+    )
+    carried = funnel.Item(
+        repo="nateprich/beta", number=51, title="A covered project",
+        url="https://example.invalid/51", state="CLOSED",
+        state_reason="COMPLETED", status="Done",
+        closed_at=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        body="Register the connector in the account.",
+    )
+    closed_human_step = funnel.Item(
+        repo="nateprich/beta", number=52, title="Register the connector",
+        url="https://example.invalid/52", state="CLOSED",
+        parent=carried.ref,
+        body="Human step: an app UI with no API",
+    )
+    quiet = funnel.Item(
+        repo="nateprich/beta", number=53, title="A quiet project",
+        url="https://example.invalid/53", state="CLOSED",
+        state_reason="COMPLETED", status="Done",
+        body="Add fixtures and run the test suite.",
+    )
+    parked = funnel.Item(
+        repo="nateprich/beta", number=54, title="A parked project",
+        url="https://example.invalid/54", state="CLOSED",
+        state_reason="NOT_PLANNED", status="Parked",
+        body="Use an account and token if this is resumed.",
+    )
+    items = [quiet, closed_human_step, parked, carried, missed]
+
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief(items, NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["closed_with_access_vocabulary"] == [{
+        "ref": "nateprich/beta#50",
+        "title": "Reach the funnel",
+        "url": "https://example.invalid/50",
+        "access_signals": ["token", "tunnel"],
+    }]
+    assert brief["human_steps"] == []

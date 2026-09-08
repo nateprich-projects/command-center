@@ -84,3 +84,23 @@ def test_begin_does_not_consult_breakdown_when_review_work_exists(monkeypatch, c
     assert result["do"] == "review"
     assert result["work"] == work
 
+
+def test_breakdown_work_carries_plan_access_signals(monkeypatch, capsys):
+    item = SimpleNamespace(
+        ref="nateprich-projects/command-center#25",
+        repo="nateprich-projects/command-center",
+        number=25,
+        url="https://github.com/nateprich-projects/command-center/issues/25",
+        title="Reach the funnel from general chat",
+    )
+    monkeypatch.setattr(funnel, "awaiting_breakdown", lambda items: [item])
+    monkeypatch.setattr(
+        funnel,
+        "_ticket_body",
+        lambda repo, number: "Cloudflare Tunnel and a fine-grained token",
+    )
+
+    result = _begin(monkeypatch, capsys, breakdown=True)
+
+    assert result["do"] == "breakdown"
+    assert result["work"]["access_signals"] == ["token", "tunnel"]

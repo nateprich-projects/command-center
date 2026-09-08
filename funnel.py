@@ -542,6 +542,42 @@ def needs_nate_signals(plan_body: str) -> List[str]:
             if re.search(pattern, text, re.IGNORECASE)]
 
 
+# These are evidence words, not a closed list of human-step categories. A plan
+# can use one while describing a rejected alternative or an already-automated
+# action, so the scan is a prompt to inspect the checklist rather than proof
+# that a human ticket is required. Keep the vocabulary in one place so real
+# misses can extend it without a second copy drifting in the breakdown skill.
+ACCESS_PATTERNS = {
+    "account": r"\baccounts?\b",
+    "api key": r"\bapi[\s-]+keys?\b",
+    "billing": r"\bbilling\b",
+    "dns": r"\bdns\b",
+    "enable": r"\benabl\w*\b",
+    "oauth": r"\boauth\b",
+    "register": r"\b(?:register|registrat)\w*\b",
+    "settings": r"\bsettings?\b",
+    "sign in": r"\bsign(?:ed)?[\s-]+in\b",
+    "token": r"\btokens?\b",
+    "tunnel": r"\btunnels?\b",
+    "verify": r"\bverif\w*\b",
+}
+
+
+def access_signals(plan_body: str) -> List[str]:
+    """Return access-shaped vocabulary found in a plan body.
+
+    This is the independent check used beside the breakdown boundary
+    checklist. It deliberately reports vocabulary only: matching a word does
+    not prove that the plan needs Nate, and no match does not prove that it
+    does not.
+    """
+    if not isinstance(plan_body, str):
+        return []
+    text = re.sub(r"\s+", " ", plan_body)
+    return [name for name, pattern in sorted(ACCESS_PATTERNS.items())
+            if re.search(pattern, text, re.IGNORECASE)]
+
+
 def effective_shape_owner(origin_voice: Optional[str],
                           override_target: Optional[str] = None) -> Optional[str]:
     """Return who should shape an item, or None when origin is untrusted.
@@ -2753,9 +2789,16 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         if breakdown:
             pending = awaiting_breakdown(items)
             if pending:
-                out.update(do="breakdown",
-                           work={"ref": pending[0].ref, "url": pending[0].url,
-                                 "title": pending[0].title})
+                item = pending[0]
+                work = {
+                    "ref": item.ref,
+                    "url": item.url,
+                    "title": item.title,
+                    "access_signals": access_signals(
+                        _ticket_body(item.repo, item.number)
+                    ),
+                }
+                out.update(do="breakdown", work=work)
             else:
                 out.update(do="stop",
                            why="nothing to review and nothing to break down")

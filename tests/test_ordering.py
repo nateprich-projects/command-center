@@ -265,6 +265,25 @@ def test_blocked_work_is_not_startable_at_either_level():
     assert startable([parent, ticket(4, 3)]) == []
 
 
+def test_a_ticket_with_an_open_native_blocker_is_not_startable():
+    rows = [project(1, "Building", "New"),
+            ticket(2, 1, open_blockers=["other/repo#9"])]
+
+    assert startable(rows) == []
+
+
+def test_a_ticket_with_a_closed_native_blocker_is_startable():
+    rows = [project(1, "Building", "New"), ticket(2, 1, open_blockers=[])]
+
+    assert [i.number for i in startable(rows)] == [2]
+
+
+def test_a_ticket_with_no_native_blockers_is_startable():
+    rows = [project(1, "Building", "New"), ticket(2, 1)]
+
+    assert [i.number for i in startable(rows)] == [2]
+
+
 def test_oldest_at_gate_breaks_ties_in_the_ladder_too():
     items = [project(1, "Building", "New"), ticket(11, 1, days=3),
              project(2, "Building", "New"), ticket(12, 2, days=40)]

@@ -2333,6 +2333,23 @@ def humanise(delta: Optional[timedelta]) -> str:
     return "under an hour"
 
 
+def breakdown_latency(item: Item) -> Optional[timedelta]:
+    """How long a Ready project waited for its first ticket.
+
+    This is a useful funnel-side measurement, but it is not time Nate spent
+    answering the current gate. Keep it separate from ``Item.waited`` and only
+    report a positive gap while the item's current status is still Ready; the
+    current Project timeline does not retain the earlier Ready timestamp after
+    a project advances.
+    """
+    if item.status != "Ready":
+        return None
+    if item.status_since is None or item.first_child_created_at is None:
+        return None
+    gap = item.first_child_created_at - item.status_since
+    return gap if gap > timedelta(0) else None
+
+
 def launch_command(item: Item) -> str:
     return 'claude "Work {} — {}"'.format(item.url, item.title)
 
@@ -2347,6 +2364,7 @@ def class_display(item: Item, by_ref: Dict[str, Item]) -> str:
 
 def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = None) -> dict:
     by_ref = by_ref if by_ref is not None else {}
+    breakdown = breakdown_latency(item)
     return {
         "ref": item.ref,
         "repo": item.repo,
@@ -2357,6 +2375,8 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
         "waiting_on": gate_question(item),
         "waited": humanise(item.waited(now)),
         "waited_days": item.waited(now).days if item.waited(now) else None,
+        "breakdown_latency": humanise(breakdown) if breakdown else None,
+        "breakdown_latency_days": breakdown.days if breakdown else None,
         "blocked": item.is_blocked,
         "launch": launch_command(item),
     }

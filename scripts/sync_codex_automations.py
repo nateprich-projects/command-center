@@ -59,25 +59,6 @@ SEPARATOR = "\n---\n"
 #: gets the check without anyone remembering to add it.
 IDLE_RRULE_MARKER = "BYHOUR="
 
-#: **Temporarily off.** Nate's instruction, 2026-09-07: "remove that limit for
-#: now while we force-move things through the pipe and I have those usage
-#: resets."
-#:
-#: The idle rule was blocking the every-fifteen-minutes schedule -- the only one
-#: it applies to -- and that schedule is the funnel's whole engineering
-#: throughput. He holds unused ChatGPT resets and has chosen to spend them
-#: clearing the backlog rather than have the proxy refuse runs on his behalf.
-#:
-#: The reasoning below is unchanged and still correct; this switch does not
-#: replace it. **Restore to True once the backlog is through and the resets are
-#: spent** -- the proxy exists so an automation does not compete with him for the
-#: five-hour window on a schedule that fires while he might be working, and that
-#: concern returns the moment the resets do not cover it.
-#:
-#: A single switch rather than an edit to the derivation: the rrule-derived
-#: version is the right design and should come back intact, not be rebuilt from
-#: memory.
-PRESENCE_CHECK_ENABLED = False
 
 GATE_LINE = "usage.py gate codex"
 TIER_LINE = "funnel.py next --tier standard"
@@ -126,9 +107,14 @@ def tier_for(automation: str) -> str:
 
 
 def needs_presence_check(automation: str) -> bool:
-    """Whether this schedule pays the presence proxy. The derivation, gated by
-    the temporary switch."""
-    return PRESENCE_CHECK_ENABLED and fires_all_day(automation)
+    """Whether this schedule pays the presence proxy.
+
+    Kept separate from `tier_for` even though both read one fact: the two were
+    the same function until 2026-09-07, and suspending the proxy silently moved
+    a schedule's tier. The suspension itself now lives in `usage.py`, because
+    the Codex app rewrites this prompt and a switch it can overwrite is not one.
+    """
+    return fires_all_day(automation)
 
 
 def prompt_text(automation: str = "") -> str:

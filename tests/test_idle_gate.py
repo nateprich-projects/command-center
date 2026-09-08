@@ -19,7 +19,35 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import pytest  # noqa: E402
+
 import usage  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _rule_active(monkeypatch):
+    """Exercise the rule even while it is suspended in production.
+
+    `IDLE_RULE_SUSPENDED` was set on 2026-09-07 to force a backlog through, and
+    it makes `idle_verdict` return `None` for everything. Left alone, every test
+    below would pass by doing nothing — the rule would be untested for as long
+    as the suspension lasts, which is exactly when it is most likely to be
+    changed by someone who cannot see it working.
+    """
+    monkeypatch.setattr(usage, "IDLE_RULE_SUSPENDED", False)
+
+
+def test_the_suspension_suppresses_the_rule_entirely(monkeypatch):
+    """The switch has to work regardless of what a run asks for. It lives in
+    `usage.py` rather than in the automation prompt because the Codex app
+    rewrites that prompt from its own copy — it did so at 18:14:50 on
+    2026-09-07, three minutes after the flag was removed there, and the next run
+    refused on the proxy again. A switch something else can overwrite is not a
+    switch."""
+    monkeypatch.setattr(usage, "IDLE_RULE_SUSPENDED", True)
+    reading = {"windows": {"five_hour": {"used_percent": 99.0,
+                                         "resets_at": 2_000_000_000}}}
+    assert usage.idle_verdict("codex", reading) is None
 
 RESETS = 1_788_700_000.0
 

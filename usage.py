@@ -485,6 +485,25 @@ def opened_idle(agent: str, resets_at: Optional[float]) -> Optional[bool]:
     return False
 
 
+#: **The idle rule is temporarily suspended.** Nate's instruction, 2026-09-07:
+#: "remove that limit for now while we force-move things through the pipe and I
+#: have those usage resets."
+#:
+#: It lives here rather than in `scripts/sync_codex_automations.py`, where it was
+#: first put, because that only stops the flag being *written* into the automation
+#: prompt — and the Codex app rewrites that prompt from its own copy. It did so at
+#: 18:14:50 on 2026-09-07, three minutes after the flag was removed, and the next
+#: run refused on the proxy again. A switch the app can overwrite is not a switch.
+#:
+#: So the suspension is enforced where the rule is *applied*: a run may still pass
+#: `--idle`, and it is ignored. Both call sites go through this function.
+#:
+#: **Restore to False once the backlog is through and the resets are spent** — see
+#: the restore issue filed 2026-09-07. The reasoning below is unchanged and the
+#: rule should come back intact.
+IDLE_RULE_SUSPENDED = True
+
+
 def idle_verdict(agent: str, reading: Dict) -> Optional[Dict]:
     """Whether Codex may work right now, on the presence test rather than budget.
 
@@ -500,6 +519,8 @@ def idle_verdict(agent: str, reading: Dict) -> Optional[Dict]:
     window at 10pm, long after he has gone to bed. So the frequent daytime
     schedule passes `--idle` and the off-hours ones do not.
     """
+    if IDLE_RULE_SUSPENDED:
+        return None
     if agent != "codex":
         return None
     five = (reading.get("windows") or {}).get("five_hour") or {}

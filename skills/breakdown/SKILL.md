@@ -152,6 +152,47 @@ connector in Nate's account requires an application or account UI. Each is a
 separate human action to record and ticket, not an assumption hidden in an
 engineering ticket.
 
+## Splitting a mixed ticket
+
+A ticket carries one marker and reality does not. When a plan item mixes agent
+work with a human step, marking it in place either blocks the agent work that
+could have proceeded, or hides the human step inside a ticket that looks
+complete once closed.
+
+**One human action per human-step ticket.** Never combine two. Account setup and
+credential creation are two tickets, not one — a ticket holding two human steps
+is half-done the moment one of them finishes, and half-done is indistinguishable
+from done once it is closed.
+
+### Worked example: #25's ticket 5
+
+The plan item *"Colima service, Cloudflare Tunnel, secrets via `--env-file`, and
+the fine-grained token"* is mostly agent work with two human steps buried in it.
+Do not put a `Human step:` line on that ticket. Split it into three:
+
+1. **Cloudflare tunnel setup** — human step; account or service setting.
+2. **Fine-grained GitHub token creation** — human step; credential creation.
+   Separate from the first: two actions, two tickets, even though Nate does both
+   in one sitting.
+3. **Colima service and `--env-file` wiring** — agent work, blocked by both.
+
+Create the agent ticket with the native edge, as
+[Native dependency edges](#native-dependency-edges) requires:
+
+```bash
+gh issue create --repo <repo> --parent 25 \
+  --blocked-by <cloudflare-number>,<token-number> \
+  --title "Colima service and --env-file secret wiring" \
+  --body $'Parent: #25.\n\nDepends on #<cloudflare-number> and #<token-number> — the tunnel and the token must exist before the service can be wired to them.\n\nWhat: <bounded work>.\n\nAccept: <proof it worked>.\n\nRisk: standard'
+```
+
+The native edge is what keeps the agent ticket out of `startable()` until Nate
+closes both human steps. The body sentence is for the reader, and never a
+substitute: prose alone is silently unreadable by the queue.
+
+If a human step instead waits on agent work, record that edge in the same way.
+Do not imply either direction with ordering or a label.
+
 ## Contradiction check for an all-clear
 
 The JSON from `funnel begin --breakdown` carries `work.access_signals`, the

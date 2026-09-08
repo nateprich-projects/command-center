@@ -51,6 +51,14 @@ Where order genuinely matters, say so in the ticket body — "depends on #N" —
 put the dependency in the body rather than inventing a label. The label set is
 closed at two on purpose.
 
+## The capability boundary
+
+Use the [capability boundary](../capability-boundary.md) as the closed-world test
+when deciding whether a planned step is work an agent can take on. Ask whether the
+step requires anything outside that boundary; the named access cases are examples,
+not an exhaustive checklist. Keep this test separate from ticket sizing: a step can
+be small and still be outside the agent's reach.
+
 If a ticket cannot start until another finishes, that is fine. If *every* ticket
 is chained, the plan has not really been broken up: it has been sliced into
 stages, and the funnel will process them one hourly run at a time with no

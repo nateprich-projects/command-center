@@ -1,5 +1,13 @@
 #!/bin/bash
-# The escalated reviewer: one Muse run, one PR, then stop.
+# A Muse reviewer: one run, one PR, then stop.
+#
+# Usage: muse-review [tier] [reasoning-effort]
+#   tier   -- escalated (default) or standard; substituted into the routine
+#   effort -- max (default) or high
+#
+# Two schedules use it: escalated hourly at max effort, standard every fifteen
+# minutes at high. One script and one routine rather than two of each, because a
+# second copy is a second thing to drift -- which is #52's whole subject.
 #
 # Invoked by launchd (com.nateprich.command-center-muse-review). Meta ships
 # `muse exec` as its own documented headless mode, and Muse Code has no
@@ -12,6 +20,13 @@
 # there is no second copy to fall out of step with the repo.
 
 set -uo pipefail
+
+TIER="${1:-escalated}"
+EFFORT="${2:-max}"
+case "$TIER" in
+  escalated|standard) ;;
+  *) echo "muse-review: tier must be escalated or standard, got '$TIER'" >&2; exit 1 ;;
+esac
 
 REPO="/Users/nateprich/.claude/command-center"
 ROUTINE="$REPO/routines/muse.md"
@@ -30,7 +45,11 @@ fi
 
 # Everything after the first `---` is the agent-facing prompt; the header above
 # it is written for a human reading the file. Same shape as the other routines.
-PROMPT="$(awk 'f{print} /^---$/{f=1}' "$ROUTINE")"
+PROMPT="$(awk 'f{print} /^---$/{f=1}' "$ROUTINE" | sed "s/TIER_PLACEHOLDER/$TIER/g")"
+if printf '%s' "$PROMPT" | grep -q TIER_PLACEHOLDER; then
+  echo "muse-review: the tier placeholder was not substituted" >&2
+  exit 1
+fi
 if [[ -z "${PROMPT// }" ]]; then
   echo "muse-review: $ROUTINE has no prompt after its --- separator" >&2
   exit 1
@@ -51,7 +70,7 @@ fi
 # --approval-mode never means *never ask*, not *never allow*.
 exec "$HOME/.local/bin/muse" exec \
   --model muse-spark-1.3 \
-  --reasoning-effort max \
+  --reasoning-effort "$EFFORT" \
   --disable-write \
   --sandbox-network enabled \
   --max-model-steps 60 \

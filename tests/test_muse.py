@@ -113,4 +113,22 @@ def test_the_prompt_is_the_routine_file_not_a_copy():
     routine = (ROOT / "routines" / "muse.md").read_text()
     assert "\n---\n" in routine, "the runner splits the prompt on the --- separator"
     prompt = routine.split("\n---\n", 1)[1]
-    assert "funnel.py begin --agent muse --tier escalated" in prompt
+    # The tier is a placeholder the runner substitutes, so one routine serves
+    # both schedules. A second routine would be a second thing to drift.
+    assert "funnel.py begin --agent muse --tier TIER_PLACEHOLDER" in prompt
+
+
+def test_the_runner_substitutes_the_tier_and_refuses_a_bad_one():
+    """The placeholder reaching the model would send it to `funnel begin` with a
+    tier that does not exist. The runner checks its own substitution rather than
+    trusting it, and rejects a tier that is neither of the two."""
+    import subprocess
+
+    runner = str(ROOT / "scripts" / "muse-review")
+    bad = subprocess.run(["bash", runner, "nonsense"], capture_output=True, text=True)
+    assert bad.returncode == 1
+    assert "escalated or standard" in bad.stderr
+
+    body = (ROOT / "scripts" / "muse-review").read_text()
+    assert "TIER_PLACEHOLDER" in body, "the runner must know the placeholder"
+    assert 'grep -q TIER_PLACEHOLDER' in body, "and must verify it was replaced"

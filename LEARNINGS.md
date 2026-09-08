@@ -151,6 +151,29 @@ symlink-vs-real-target problem above applies any more. The reasoning is kept bec
 explains why twenty occurrences of that path exist and why they were correct at the time.
 See "A launchd job cannot read an external volume" below for what forced the move.
 
+### The Claude routine was retired, and its schedules recorded
+
+**2026-09-07 · scheduled-tasks · documented**
+
+**Claude's three scheduled tasks were deleted** on Nate's instruction, once Muse took
+both review tiers. The routine did escalated review and nothing else, and it had been
+refused on budget continuously since 2026-09-06 10:40 — its pool is the one Nate
+competes with, which is why the work moved.
+
+The `SKILL.md` files remain at `~/.claude/scheduled-tasks/<id>/SKILL.md`; only the
+schedules were removed. Recorded here because the cron expressions are not in the repo
+and would otherwise have to be reconstructed from memory:
+
+| task | cron | meaning |
+|---|---|---|
+| `command-center-claude-nights` | `0 22,23 * * 0-4` | 10pm and 11pm, Sun–Thu |
+| `command-center-claude-weekdays` | `0 0,1,9,10,11 * * 1-5` | midnight, 1am, 9am, 10am, 11am, Mon–Fri |
+| `command-center-claude-weekend-early` | `0 2,3 * * 0,6` | 2am and 3am, Sat/Sun |
+
+**What this leaves.** Codex engineers on five app schedules; Muse reviews both tiers on
+two launchd schedules; zcode reviews standard and breaks plans down, when its budget
+allows. No Claude routine runs unattended at all — Claude is now only what Nate talks to.
+
 ### A launchd job cannot read an external volume
 
 **2026-09-07 · macOS TCC · measured**

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  The escalated reviewer: one Muse run, one escalated PR, then stop.
+  The standard reviewer: one Muse run, one standard PR, then stop.
 
   The canonical copy lives here in the repo. launchd refuses a symlinked plist
   (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the
@@ -16,48 +16,49 @@
   file can lint clean and still be unparseable.
 
   After editing, re-install:
-    cp launchd/com.nateprich.command-center-muse-review.plist ~/Library/LaunchAgents/
-    launchctl bootout gui/$(id -u)/com.nateprich.command-center-muse-review
-    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nateprich.command-center-muse-review.plist
+    cp launchd/com.nateprich.command-center-muse-review-standard.plist ~/Library/LaunchAgents/
+    launchctl bootout gui/$(id -u)/com.nateprich.command-center-muse-review-standard
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nateprich.command-center-muse-review-standard.plist
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.nateprich.command-center-muse-review</string>
+    <string>com.nateprich.command-center-muse-review-standard</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
         <string>/Users/nateprich/.claude/command-center/scripts/muse-review</string>
-        <string>escalated</string>
-        <string>max</string>
+        <string>standard</string>
+        <string>high</string>
     </array>
 
     <!--
-      Hourly at :07. Nate's call, 2026-09-07: escalated work is rare (two of
-      thirty startable tickets when measured, and the queue is usually empty),
-      so a quarter of the polls give the same practical latency. The failure
-      this fixes was two merge-ready PRs sitting two hours because nobody was
-      around; an hour still caps that well.
+      Every fifteen minutes, on the quarter, deliberately offset from the
+      escalated schedule at :07.
 
-      A calendar minute rather than an interval, so it cannot drift into the
-      standard schedule's slots. Both run as agent `muse`, and two open runs at
-      once make heartbeat attribution guesswork.
+      Added 2026-09-07 to take load off zcode: ten PRs were stacked in the
+      standard review queue while zcode sat over pace, refused on budget for
+      67 of its 89 runs. Muse is unmetered and was idle, so it takes the tier
+      it can help with. Escalated stays hourly at max effort; this runs at
+      high, which is the cheaper level for ordinary work.
     -->
     <key>StartCalendarInterval</key>
-    <dict>
-        <key>Minute</key>
-        <integer>7</integer>
-    </dict>
+    <array>
+        <dict><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Minute</key><integer>45</integer></dict>
+    </array>
 
 
     <key>RunAtLoad</key>
     <false/>
 
     <key>StandardOutPath</key>
-    <string>/Users/nateprich/Library/Logs/command-center-muse-review.log</string>
+    <string>/Users/nateprich/Library/Logs/command-center-muse-review-standard.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/nateprich/Library/Logs/command-center-muse-review.err.log</string>
+    <string>/Users/nateprich/Library/Logs/command-center-muse-review-standard.err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

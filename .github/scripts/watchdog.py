@@ -13,10 +13,11 @@ different fixes:
   outcome line could never have detected.
 - **Erroring.** Repeated `errored` outcomes. Something is broken in the run
   itself.
+- **Drifted.** A run reported that the prompt it received differs from the
+  checked-in routine.
 
-Deliberately *not* reported: `skipped-over-pace`, `skipped-locked`, and
-`nothing-to-do`. Those are the system working, and paging on them would train
-the alert to be ignored.
+Deliberately *not* reported: any `skipped-*` outcome and `nothing-to-do`. Those
+are the system working, and paging on them would train the alert to be ignored.
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ UNFINISHED_SECONDS = 2 * 3600
 DYING_THRESHOLD = 3
 ERROR_THRESHOLD = 3
 WEEK = 7 * 86400
+PROMPT_DRIFT_OUTCOME = "prompt-drift"
 
 
 def gh(*args: str) -> str:
@@ -201,6 +203,22 @@ def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
             )
         )
 
+    prompt_drift = [
+        r for r in rows
+        if r.get("outcome") == PROMPT_DRIFT_OUTCOME
+        and now - (r.get("ts") or 0) < WEEK
+    ]
+    if prompt_drift:
+        problems.append(
+            "`{}` reported prompt drift {} time(s) this week. The routine "
+            "prompt differs from the checked-in file; sync it before relying "
+            "on scheduled work. Most recent at <t:{}:f>.".format(
+                agent,
+                len(prompt_drift),
+                int(prompt_drift[-1].get("ts") or 0),
+            )
+        )
+
     errored = [
         r for r in rows
         if r.get("outcome") == "errored" and now - (r.get("ts") or 0) < WEEK
@@ -267,9 +285,9 @@ def main() -> int:
     body = "\n".join(
         [MARKER, "", "The watchdog found problems with the scheduled runs.", ""]
         + ["- " + p for p in problems]
-        + ["", "Healthy outcomes — over pace, locked, nothing to do — are not "
-              "reported here by design. This issue is only raised for silence, "
-              "dying runs, or repeated errors.",
+        + ["", "Healthy outcomes — any `skipped-*` result or `nothing-to-do` — "
+              "are not reported here by design. This issue is only raised for "
+              "silence, dying runs, prompt drift, or repeated errors.",
            "", "It closes itself once the heartbeats recover."]
     )
 

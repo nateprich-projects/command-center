@@ -1858,12 +1858,55 @@ def check_topic() -> Check:
     return Check("command-center topic", True, found, "")
 
 
+def _status_for_consistency(item: Item) -> str:
+    """Name an unset Project Status without inventing a value for it."""
+    return item.status or "unset"
+
+
+def item_consistency_findings(items: Iterable[Item]) -> List[str]:
+    """Return one read-only finding for each item with contradictory facts.
+
+    Issue state and Project Status are separate GitHub facts, as is the
+    descriptive ``needs-shaping`` label. The funnel reports disagreements but
+    never chooses which side to rewrite. Multiple disagreements on one item
+    stay on one line so the output remains one line per item.
+    """
+    findings: List[str] = []
+    for item in items:
+        status = _status_for_consistency(item)
+        reasons: List[str] = []
+
+        if item.state == "CLOSED" and item.status not in ("Done", "Parked"):
+            reasons.append("state is CLOSED but Status is {}".format(status))
+        if item.state == "OPEN" and item.status == "Done":
+            reasons.append("state is OPEN but Status is Done")
+        if "needs-shaping" in item.labels and item.status != "Ideas":
+            reasons.append(
+                "label needs-shaping is present but Status is {}".format(status)
+            )
+
+        if reasons:
+            findings.append("{}: {}".format(item.ref, "; ".join(reasons)))
+    return findings
+
+
+def check_item_consistency(items: Iterable[Item]) -> Check:
+    """Build the doctor check for contradictions already present in ``items``."""
+    findings = item_consistency_findings(items)
+    return Check("item consistency", not findings, "\n".join(findings), "")
+
+
 def doctor_checks(claude_dir: Optional[os.PathLike] = None,
                   checkout_root: Optional[os.PathLike] = None,
                   usage_cache: Optional[os.PathLike] = None,
-                  heartbeat_spool: Optional[os.PathLike] = None) -> List[Check]:
-    """Run every fixed check, even when an earlier one is broken."""
-    return [
+                  heartbeat_spool: Optional[os.PathLike] = None,
+                  items: Optional[Iterable[Item]] = None) -> List[Check]:
+    """Run every fixed check, even when an earlier one is broken.
+
+    ``items`` is supplied by ``cmd_doctor`` after the normal Project load. It
+    keeps the consistency check pure and lets fixture callers avoid GitHub.
+    """
+    checks = [
         check_symlinks(claude_dir=claude_dir, checkout_root=checkout_root),
         check_settings(claude_dir=claude_dir),
         check_auth_scope(),
@@ -1872,19 +1915,36 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         check_usage_cache(cache_path=usage_cache),
         check_heartbeat(spool_dir=heartbeat_spool),
     ]
+    if items is not None:
+        checks.append(check_item_consistency(items))
+    return checks
 
 
 def render_checks(checks: Iterable[Check]) -> None:
     """Render one stable, actionable line for each doctor check."""
     for check in checks:
-        line = "{}: {}".format(check.name, check.found)
-        if not check.ok:
-            line += " — fix: {}".format(check.fix)
-        print(line)
+        if not check.found:
+            continue
+        for finding in str(check.found).splitlines():
+            line = "{}: {}".format(check.name, finding)
+            if not check.ok and check.fix:
+                line += " — fix: {}".format(check.fix)
+            print(line)
 
 
 def cmd_doctor() -> int:
-    checks = doctor_checks()
+    try:
+        items = load_items()
+    except Exception as exc:
+        checks = doctor_checks()
+        checks.append(Check(
+            "item consistency", False,
+            "Project items could not be loaded: {}".format(
+                str(exc) or "unknown error"),
+            "restore GitHub access, then rerun funnel doctor",
+        ))
+    else:
+        checks = doctor_checks(items=items)
     render_checks(checks)
     return 0 if all(check.ok for check in checks) else 1
 
@@ -3651,9 +3711,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     now = datetime.now(timezone.utc)
-    # Doctor is intentionally dispatched before load_items(). It must still
-    # report local failures when GitHub is unreachable, and it must not import
-    # the modules whose broken links it is meant to diagnose.
+    # Doctor keeps its fixed checks runnable when the Project cannot be loaded;
+    # the data-dependent consistency check is added when that read succeeds.
     if args.command == "doctor":
         return cmd_doctor()
 

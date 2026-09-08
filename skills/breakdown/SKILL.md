@@ -56,6 +56,51 @@ is chained, the plan has not really been broken up: it has been sliced into
 stages, and the funnel will process them one hourly run at a time with no
 parallelism gained. Look for a different cut.
 
+## Human steps: split, do not mark
+
+Use the shared capability boundary as the test for a human step. Ask whether the
+step needs something outside what an agent can reach, rather than whether it looks
+hard. **Difficulty, uncertainty, unfamiliarity, or a cheaper model's lack of
+skill is never a human-step reason.** Work an agent does not know how to implement
+is still agent work; size or escalate it as agent work instead of handing it to
+Nate.
+
+A mixed ticket cannot express both kinds of work safely. **Split rather than
+mark:**
+
+- Make each human action its own atomic ticket. One `Human step:` ticket contains
+  one human step; never combine several actions such as account setup and
+  credential creation in one ticket.
+- Keep the surrounding agent work in its own ticket or tickets. Put the
+  `Human step:` marker on the new atomic human ticket, not on a mixed engineering
+  ticket. Marking the mixed ticket in place either blocks work an agent could do
+  or hides the human step inside work that looks complete.
+- Write the dependency edge in the ticket bodies with `Depends on #N`. An agent
+  ticket that needs the human step names that human-step issue and is not
+  startable until Nate closes it. If the human action itself waits for agent work
+  around it, record that edge too; do not imply either direction with ordering or
+  a label. Repeat the dependency in the coverage comment so the breakdown can be
+  checked without reconstructing the graph.
+
+### Worked example: #25's ticket 5
+
+The plan item *"Colima service, Cloudflare Tunnel, secrets via `--env-file`, and
+the fine-grained token"* is mixed work. Do not add a `Human step:` line to that
+one ticket. Split it into:
+
+1. Nate's Cloudflare account/tunnel setup as one atomic human-step ticket, marked
+   for the account or billing access it requires.
+2. Nate's fine-grained GitHub token creation as a separate atomic human-step
+   ticket, marked for entering a credential.
+3. The agent's Colima service and `--env-file` implementation as agent work,
+   with `Depends on #<Cloudflare ticket>` and `Depends on #<token ticket>` in its
+   body when those prerequisites are required.
+
+The two human actions must not be combined, and the agent ticket must not be
+treated as startable until its named prerequisites land. This is the difference
+between expressing the plan's real dependency graph and merely marking the
+original mixed ticket as Nate's work.
+
 ## Coverage
 
 Together, the tickets must cover the plan. Before finishing:

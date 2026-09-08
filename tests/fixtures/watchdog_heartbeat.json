@@ -1,0 +1,3578 @@
+{
+  "source": {
+    "branch": "heartbeat",
+    "commit": "57b4abbb87b45e0ae9b71ad769116ed519b4ea91",
+    "captured_at": "2026-09-07T17:02:28-07:00",
+    "projection": "watchdog-consumed JSONL fields only"
+  },
+  "agents": {
+    "claude": [
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "20898ce321ae",
+        "ts": 1788621883
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "20898ce321ae",
+        "ts": 1788621899,
+        "outcome": "skipped-usage-unknown",
+        "note": "usage.py gate claude exited 2: no reading available for claude"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "bdecf23aea60",
+        "ts": 1788628689
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "bdecf23aea60",
+        "ts": 1788629495,
+        "outcome": "done",
+        "note": "no ticket/* PR open, nothing to review; broke down #16 into 2 tickets (#19, #20)"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "e36820fc1b25",
+        "ts": 1788630166
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "986c14a37d11",
+        "ts": 1788630325,
+        "ticket": "0"
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "986c14a37d11",
+        "ts": 1788630327,
+        "outcome": "nothing-to-do",
+        "note": "deterministic-command smoke test"
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "e36820fc1b25",
+        "ts": 1788630670,
+        "outcome": "done",
+        "note": "no ticket/* PRs open, nothing to review; broke down #17 into 3 tickets (#21, #22, #23)"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "cc982c498de9",
+        "ts": 1788685302
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "cc982c498de9",
+        "ts": 1788685314,
+        "outcome": "skipped-over-pace",
+        "note": "seven_day 20.1% used + 5.0% reserved = 25.1% vs 25.0% allowed; no PR reviewed, no breakdown"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "66c52a3ad727",
+        "ts": 1788686399
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "66c52a3ad727",
+        "ts": 1788686402,
+        "outcome": "nothing-to-do",
+        "note": "smoke test: run-id resolution, command-center#26"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "22d6d0a6be31",
+        "ts": 1788688904
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "22d6d0a6be31",
+        "ts": 1788688914,
+        "outcome": "skipped-over-pace",
+        "note": "seven_day 28.5% used + 5.0% reserved = 33.5% vs 25.0% allowed; no PR reviewed, no breakdown"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "8a37a3c4973f",
+        "ts": 1788713317
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "8a37a3c4973f",
+        "ts": 1788713319,
+        "outcome": "nothing-to-do",
+        "note": "P0.1 telemetry smoke test"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "300e3c4be28d",
+        "ts": 1788716014
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "300e3c4be28d",
+        "ts": 1788716402,
+        "outcome": "done",
+        "note": "reviewed PR #36 (ticket/19): changes requested, not merged \u2014 cmd_reject docstring rewrite states a false Status count; broke down #18 into 2 tickets (#37, #38)"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "355005814074",
+        "ts": 1788757564
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "355005814074",
+        "ts": 1788757576,
+        "outcome": "skipped-over-pace",
+        "note": "funnel begin invoked by Claude while testing"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "5fc9f4acbfcc",
+        "ts": 1788757722
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "5fc9f4acbfcc",
+        "ts": 1788757728,
+        "outcome": "skipped-over-pace",
+        "note": "begin reported gate=over (over pace); stopped without reviewing"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "9c6cb4a8f5f6",
+        "ts": 1788761323
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "9c6cb4a8f5f6",
+        "ts": 1788761329,
+        "outcome": "skipped-over-pace",
+        "note": "begin returned gate=over, do=stop; no review attempted"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "0c103c3e33cf",
+        "ts": 1788764927
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "0c103c3e33cf",
+        "ts": 1788764934,
+        "outcome": "skipped-over-pace",
+        "note": "begin returned gate=over, do=stop; no review attempted"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "74232bd07c60",
+        "ts": 1788768529
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "74232bd07c60",
+        "ts": 1788768535,
+        "outcome": "skipped-over-pace",
+        "note": "begin gate=over: over pace; stopped without reviewing"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "34aab2c3744f",
+        "ts": 1788797325
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "34aab2c3744f",
+        "ts": 1788797330,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate over pace; stopped without reviewing"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "475252d8d08c",
+        "ts": 1788800933
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "475252d8d08c",
+        "ts": 1788800939,
+        "outcome": "skipped-over-pace",
+        "note": "begin returned gate=over, do=stop; no review attempted"
+      },
+      {
+        "agent": "claude",
+        "phase": "start",
+        "run": "4494e95e8258",
+        "ts": 1788804528
+      },
+      {
+        "agent": "claude",
+        "phase": "finish",
+        "run": "4494e95e8258",
+        "ts": 1788804533,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate over pace; no review attempted"
+      }
+    ],
+    "codex": [
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "f0474353cee2",
+        "ts": 1788689820
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "f0474353cee2",
+        "ts": 1788689821,
+        "outcome": "nothing-to-do",
+        "note": "sandbox diagnostic, not a work run"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "1c70d7ceccb0",
+        "ts": 1788692444
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "1c70d7ceccb0",
+        "ts": 1788692460,
+        "outcome": "skipped-nate-active",
+        "note": "idle gate OVER: Nate is using the current five-hour window"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "d8aa58be42c5",
+        "ts": 1788696111
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "d8aa58be42c5",
+        "ts": 1788696123,
+        "outcome": "skipped-nate-active"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "b27de97da739",
+        "ts": 1788699651
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "b27de97da739",
+        "ts": 1788699664,
+        "outcome": "skipped-nate-active"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "94744eef0b56",
+        "ts": 1788703283
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "94744eef0b56",
+        "ts": 1788703296,
+        "outcome": "skipped-nate-active"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "8df82dde8778",
+        "ts": 1788706851
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "8df82dde8778",
+        "ts": 1788707166,
+        "outcome": "done",
+        "note": "PR #36"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "51ab8d6f58f0",
+        "ts": 1788710416
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "51ab8d6f58f0",
+        "ts": 1788710495,
+        "outcome": "done",
+        "note": "PR #36; existing implementation verified, funnel re-selected open ticket"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "f5d487a11e5c",
+        "ts": 1788714046
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "f5d487a11e5c",
+        "ts": 1788714173,
+        "outcome": "done",
+        "note": "PR #36; continued existing branch and verified implementation"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "e94b642562e5",
+        "ts": 1788717712
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "e94b642562e5",
+        "ts": 1788717722,
+        "outcome": "skipped-nate-active"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "4cc13f545895",
+        "ts": 1788721277
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "4cc13f545895",
+        "ts": 1788721296,
+        "outcome": "skipped-nate-active"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "429adac82966",
+        "ts": 1788724942
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "429adac82966",
+        "ts": 1788724953,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate reported idle OVER; no ticket selected or claimed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "3f870460d30e",
+        "ts": 1788725789
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "3f870460d30e",
+        "ts": 1788725804,
+        "outcome": "skipped-nate-active",
+        "note": "Nate is actively using the five-hour window; no ticket claimed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "e5f4d569aa85",
+        "ts": 1788726632
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "e5f4d569aa85",
+        "ts": 1788726642,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate reported idle OVER; no ticket selected or claimed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "baaac376a28a",
+        "ts": 1788727595
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "baaac376a28a",
+        "ts": 1788727607,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle OVER; Nate is active"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "068d50bab0a9",
+        "ts": 1788728438
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "068d50bab0a9",
+        "ts": 1788728449,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle OVER; Nate is actively using the five-hour window"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "139ac181cf39",
+        "ts": 1788729358
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "139ac181cf39",
+        "ts": 1788729378,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle OVER; Nate is using the current five-hour window"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "fb8fbacba083",
+        "ts": 1788730261
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "fb8fbacba083",
+        "ts": 1788730276,
+        "outcome": "skipped-nate-active",
+        "note": "Budget gate reports Nate is actively using the five-hour window; no ticket claimed."
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "6e136d4f93ca",
+        "ts": 1788731219
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "6e136d4f93ca",
+        "ts": 1788731236,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle 32.0% OVER; Nate is active"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "c78890e8bf24",
+        "ts": 1788732073
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "c78890e8bf24",
+        "ts": 1788732085,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle 32.0% OVER; Nate is working"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "d2439cf9b099",
+        "ts": 1788733021
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "d2439cf9b099",
+        "ts": 1788733039,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle 32.0% OVER; Nate is using the five-hour window"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "27963fd26959",
+        "ts": 1788733897
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "27963fd26959",
+        "ts": 1788733907,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle OVER; no ticket selected or claimed."
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "724f056f4c38",
+        "ts": 1788734729
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "724f056f4c38",
+        "ts": 1788734746,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle OVER; no ticket selected or claimed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "6a8aba6ce676",
+        "ts": 1788735713
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "6a8aba6ce676",
+        "ts": 1788735724,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle 54.0% OVER; no ticket selected or claimed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "e99082320041",
+        "ts": 1788736564
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "e99082320041",
+        "ts": 1788736575,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle 54.0% OVER; Nate is using the current five-hour window"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "304bf1ce5a0c",
+        "ts": 1788737463
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "304bf1ce5a0c",
+        "ts": 1788737480,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle 54.0% OVER; no ticket selected or claimed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "d4f43877d571",
+        "ts": 1788738391
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "d4f43877d571",
+        "ts": 1788738408,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle 54.0% OVER; Nate is using the five-hour window"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "681a556525a3",
+        "ts": 1788739290
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "681a556525a3",
+        "ts": 1788739311,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle 54.0% OVER; Nate is actively using the five-hour window"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "2a5e1cbe226a",
+        "ts": 1788740168
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "2a5e1cbe226a",
+        "ts": 1788740181,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate: idle 55.0% OVER; seven-day budget also over pace"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "cd35c7cc3486",
+        "ts": 1788741065
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "cd35c7cc3486",
+        "ts": 1788741077,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate reported idle 55.0% OVER; Nate is using the five-hour window."
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "6bf69f420055",
+        "ts": 1788741970
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "6bf69f420055",
+        "ts": 1788741987,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate: idle 57.0% OVER; Nate active"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "84ba7e1e7e22",
+        "ts": 1788742929
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "84ba7e1e7e22",
+        "ts": 1788742944,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace; no ticket selected"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "6affc14d885c",
+        "ts": 1788743735
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "6affc14d885c",
+        "ts": 1788743749,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day budget over pace: 25.0% used + 5.0% reserved vs 25.0% allowed; no ticket selected or claimed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "d87883477b4a",
+        "ts": 1788744630
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "d87883477b4a",
+        "ts": 1788745102,
+        "outcome": "done",
+        "note": "PR #40; 215 tests passed, 1 local automation-drift check remains due installed prompt missing final newline"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "18ddeaa2d06c",
+        "ts": 1788745599
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "18ddeaa2d06c",
+        "ts": 1788746217,
+        "outcome": "done",
+        "note": "PR #41"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "a5e9d63f7238",
+        "ts": 1788746464
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "a5e9d63f7238",
+        "ts": 1788747148,
+        "outcome": "done",
+        "note": "PR #42"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "747992e0d00c",
+        "ts": 1788747458
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "747992e0d00c",
+        "ts": 1788748290,
+        "outcome": "done",
+        "note": "PR #43"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "8cb5133486be",
+        "ts": 1788748356
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "8cb5133486be",
+        "ts": 1788748441,
+        "outcome": "nothing-to-do",
+        "note": "No standard work waiting; funnel brief shows all current work gated on Nate, breakdown, or Class"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "329243537764",
+        "ts": 1788749225
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "329243537764",
+        "ts": 1788749283,
+        "outcome": "nothing-to-do",
+        "note": "standard tier returned no startable work"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "e16770944e88",
+        "ts": 1788750124
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "e16770944e88",
+        "ts": 1788750151,
+        "outcome": "nothing-to-do",
+        "note": "standard-tier funnel returned no startable work"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "3ca8a66a2408",
+        "ts": 1788750937
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "3ca8a66a2408",
+        "ts": 1788750961,
+        "outcome": "nothing-to-do",
+        "note": "standard-tier funnel returned no startable work"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "eab42621e0a4",
+        "ts": 1788751920
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "eab42621e0a4",
+        "ts": 1788751946,
+        "outcome": "nothing-to-do",
+        "note": "standard-tier funnel returned no startable work"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "578810c1d77d",
+        "ts": 1788752858
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "578810c1d77d",
+        "ts": 1788752880,
+        "outcome": "nothing-to-do",
+        "note": "standard-tier funnel returned no startable work"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "3703617278b2",
+        "ts": 1788753726
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "3703617278b2",
+        "ts": 1788754109,
+        "outcome": "done",
+        "note": "PR #43; continued ticket/23, merged current main, pushed edc5cb4, focused tests and CI green"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "7294bcba92f9",
+        "ts": 1788754632
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "7294bcba92f9",
+        "ts": 1788754772,
+        "outcome": "done",
+        "note": "PR #43 merged during verification; existing implementation verified; doctor 38 passed; full suite 268 passed plus pre-existing automation-drift failure"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "2589487e66c5",
+        "ts": 1788755500
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "2589487e66c5",
+        "ts": 1788755528,
+        "outcome": "nothing-to-do",
+        "note": "standard-tier funnel returned no work"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "3d5f8cbfcb12",
+        "ts": 1788756339
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "3d5f8cbfcb12",
+        "ts": 1788756362,
+        "outcome": "nothing-to-do",
+        "note": "standard-tier funnel returned no startable work"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "72a84de71f1d",
+        "ts": 1788757240
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "72a84de71f1d",
+        "ts": 1788757259,
+        "outcome": "nothing-to-do",
+        "note": "standard-tier funnel returned no startable work"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "691c653d0c99",
+        "ts": 1788757320
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "691c653d0c99",
+        "ts": 1788757340,
+        "outcome": "nothing-to-do",
+        "note": "No escalated work waiting"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "89b7d78abda9",
+        "ts": 1788758164
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "89b7d78abda9",
+        "ts": 1788758174,
+        "outcome": "skipped-over-pace"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "8ab4cfa3d38d",
+        "ts": 1788758226
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "8ab4cfa3d38d",
+        "ts": 1788758245,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 27.0% used + 5.0% reserved vs 30.0% allowed; idle check passed; no ticket selected"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "a4be7181bc7c",
+        "ts": 1788759093
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "663009ee0c98",
+        "ts": 1788759102
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "a4be7181bc7c",
+        "ts": 1788759104,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day usage 27% plus 5% reserved exceeds 30% allowance"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "663009ee0c98",
+        "ts": 1788759115,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day usage over pace: 27.0% used + 5.0% reserved versus 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "d7725163a330",
+        "ts": 1788759961
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "d7725163a330",
+        "ts": 1788759973,
+        "outcome": "skipped-over-pace"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "d79ef8e4ff29",
+        "ts": 1788759995
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "d79ef8e4ff29",
+        "ts": 1788760006,
+        "outcome": "skipped-nate-active",
+        "note": "five-hour idle proxy over: 19.0%"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "04693b509349",
+        "ts": 1788760892
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "435b4e11a6f6",
+        "ts": 1788760897
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "04693b509349",
+        "ts": 1788760904,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day usage 28% plus 5% reserved exceeds 30% allowance"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "435b4e11a6f6",
+        "ts": 1788760909,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate idle proxy OVER at 19%; seven-day budget also over pace; no ticket selected or changed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "d29f225797e5",
+        "ts": 1788761791
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "6b6002113ab7",
+        "ts": 1788761795
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "6b6002113ab7",
+        "ts": 1788761808,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day usage 28% plus 5% reserved exceeds 30% allowance"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "6b6002113ab7",
+        "ts": 1788761808,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day usage 28% plus 5% reserved exceeds 30% allowance"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "d29f225797e5",
+        "ts": 1788761809,
+        "outcome": "skipped-over-pace",
+        "note": "usage gate: seven-day budget 33.0% used+reserved versus 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "d130c68c9c5d",
+        "ts": 1788762636
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "d130c68c9c5d",
+        "ts": 1788762649,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 33.0% used plus reserved versus 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "45f390bf5a07",
+        "ts": 1788762749
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "45f390bf5a07",
+        "ts": 1788762764,
+        "outcome": "skipped-over-pace"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "3073c823f7f9",
+        "ts": 1788763563
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "3073c823f7f9",
+        "ts": 1788763578,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 28.0% used + 5.0% reserved versus 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "742b9996afe6",
+        "ts": 1788763588
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "742b9996afe6",
+        "ts": 1788763608,
+        "outcome": "skipped-over-pace"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "b8bea582fe25",
+        "ts": 1788764462
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "b8bea582fe25",
+        "ts": 1788764477,
+        "outcome": "skipped-over-pace"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "a2970d32bfee",
+        "ts": 1788764522
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "a2970d32bfee",
+        "ts": 1788764539,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 28.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "bdcc8adffa1d",
+        "ts": 1788765330
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "bdcc8adffa1d",
+        "ts": 1788765342,
+        "outcome": "skipped-over-pace"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "4c07b62f3b68",
+        "ts": 1788765402
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "4c07b62f3b68",
+        "ts": 1788765415,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day budget over pace: 28.0% used + 5.0% reserved versus 30.0% allowed; idle gate passed."
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "7815c3f073ab",
+        "ts": 1788766233
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "7815c3f073ab",
+        "ts": 1788766244,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day usage 28% plus 5% reserved = 33%, above 30% allowance; five-hour usage within pace"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "90f4d2aab7be",
+        "ts": 1788766293
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "90f4d2aab7be",
+        "ts": 1788766308,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 34.0% used + reserved versus 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "df184ac1efa2",
+        "ts": 1788767130
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "df184ac1efa2",
+        "ts": 1788767158,
+        "outcome": "skipped-over-pace"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "383d7fdf7ff3",
+        "ts": 1788767200
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "383d7fdf7ff3",
+        "ts": 1788767214,
+        "outcome": "skipped-over-pace",
+        "note": "usage gate: seven-day budget over pace (29.0% used + 5.0% reserved vs 30.0% allowed); five-hour and idle checks passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "0f48d252d2d4",
+        "ts": 1788768127
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "714d5ff53b66",
+        "ts": 1788768132
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "0f48d252d2d4",
+        "ts": 1788768140,
+        "outcome": "skipped-over-pace"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "714d5ff53b66",
+        "ts": 1788768142,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 29.0% used + 5.0% reserved versus 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "5b762a39b4f3",
+        "ts": 1788768963
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "5b762a39b4f3",
+        "ts": 1788768988,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 29.0% used + 5.0% reserved = 34.0% versus 30.0% allowed; no ticket selected"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "7289697e3674",
+        "ts": 1788768992
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "7289697e3674",
+        "ts": 1788769018,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day usage 29% plus 5% reserved = 34%, above 30% allowance; five-hour usage within pace"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "f706aa328227",
+        "ts": 1788769870
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "f706aa328227",
+        "ts": 1788769883,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 29.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "7461e16fc0ad",
+        "ts": 1788769924
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "7461e16fc0ad",
+        "ts": 1788769942,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day usage 29% plus 5% reserved = 34%, above 30% allowance; no ticket selected"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "31ea5556d01d",
+        "ts": 1788770763
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "31ea5556d01d",
+        "ts": 1788770786,
+        "outcome": "skipped-over-pace"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "6d23f078a6f8",
+        "ts": 1788770793
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "6d23f078a6f8",
+        "ts": 1788770816,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 29.0% used + 5.0% reserved vs 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "6ede356a1372",
+        "ts": 1788771671
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "6ede356a1372",
+        "ts": 1788771686,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "ae038d6b17d3",
+        "ts": 1788772562
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "ae038d6b17d3",
+        "ts": 1788772588,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved = 35.0% versus 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "1a0ea1688afc",
+        "ts": 1788773553
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "1a0ea1688afc",
+        "ts": 1788773577,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; no ticket selected or changed."
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "3d7fa74838e5",
+        "ts": 1788774390
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "3d7fa74838e5",
+        "ts": 1788774410,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed."
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "2a7b5fee7d56",
+        "ts": 1788775262
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "2a7b5fee7d56",
+        "ts": 1788775283,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "59909c4f1c36",
+        "ts": 1788776210
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "59909c4f1c36",
+        "ts": 1788776225,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed at 12.0%"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "cee5e18d7764",
+        "ts": 1788777096
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "cee5e18d7764",
+        "ts": 1788777124,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "d13f3277a33f",
+        "ts": 1788778033
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "d13f3277a33f",
+        "ts": 1788778045,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "e65aeb839569",
+        "ts": 1788778902
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "e65aeb839569",
+        "ts": 1788778914,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace; no ticket selected"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "eb1baaa05bb0",
+        "ts": 1788779768
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "eb1baaa05bb0",
+        "ts": 1788779780,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "345037bdc4d3",
+        "ts": 1788780660
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "345037bdc4d3",
+        "ts": 1788780679,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed. No ticket selected or changed."
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "e56bce31b24f",
+        "ts": 1788781540
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "e56bce31b24f",
+        "ts": 1788781552,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "3373303312cd",
+        "ts": 1788782561
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "3373303312cd",
+        "ts": 1788782572,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "7385eeb6d54b",
+        "ts": 1788783367
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "7385eeb6d54b",
+        "ts": 1788783379,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved vs 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "c418215de8dd",
+        "ts": 1788784272
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "c418215de8dd",
+        "ts": 1788784286,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; five-hour idle gate passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "80f041c8e7c8",
+        "ts": 1788785222
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "80f041c8e7c8",
+        "ts": 1788785241,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "4698d1b7d41a",
+        "ts": 1788786101
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "4698d1b7d41a",
+        "ts": 1788786114,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day usage over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed. No ticket selected or changed."
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "37705267b627",
+        "ts": 1788786993
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "37705267b627",
+        "ts": 1788787014,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved vs 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "2923932f324d",
+        "ts": 1788787872
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "2923932f324d",
+        "ts": 1788787886,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day usage gate over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed."
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "c672c5442e95",
+        "ts": 1788788796
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "c672c5442e95",
+        "ts": 1788788808,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "79ae9c1fcc8d",
+        "ts": 1788789675
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "79ae9c1fcc8d",
+        "ts": 1788789689,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed."
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "0428fa7cb3b4",
+        "ts": 1788790593
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "0428fa7cb3b4",
+        "ts": 1788790619,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved vs 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "fbaccde21811",
+        "ts": 1788791517
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "fbaccde21811",
+        "ts": 1788791530,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "2ad1675c7402",
+        "ts": 1788792400
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "2ad1675c7402",
+        "ts": 1788792413,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day usage over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "9164871023f7",
+        "ts": 1788793303
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "9164871023f7",
+        "ts": 1788793315,
+        "outcome": "skipped-over-pace",
+        "note": "Seven-day usage gate over pace; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "f23697668716",
+        "ts": 1788794166
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "f23697668716",
+        "ts": 1788794190,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day usage gate over pace: 30.0% used + 5.0% reserved versus 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "c2c8e755d12a",
+        "ts": 1788795070
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "c2c8e755d12a",
+        "ts": 1788795082,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved vs 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "554a4bc14558",
+        "ts": 1788795969
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "554a4bc14558",
+        "ts": 1788795990,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed; idle proxy passed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "53e2f9d5c232",
+        "ts": 1788796870
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "53e2f9d5c232",
+        "ts": 1788796882,
+        "outcome": "skipped-over-pace",
+        "note": "seven-day budget over pace: 30.0% used + 5.0% reserved versus 30.0% allowed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "5dbf91067619",
+        "ts": 1788796895
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "5dbf91067619",
+        "ts": 1788796918,
+        "outcome": "skipped-over-pace"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "d952e1fb0e40",
+        "ts": 1788797738
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "ce156df5cf9e",
+        "ts": 1788797747
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "d952e1fb0e40",
+        "ts": 1788797981,
+        "outcome": "done",
+        "note": "PR #94"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "ce156df5cf9e",
+        "ts": 1788798379,
+        "outcome": "done",
+        "note": "PR #96"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "7f3446a31a7d",
+        "ts": 1788798671
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "7f3446a31a7d",
+        "ts": 1788798685,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate idle OVER at 16.0%; no ticket selected or changed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "35a1196bb2da",
+        "ts": 1788798730
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "35a1196bb2da",
+        "ts": 1788799079,
+        "outcome": "done",
+        "note": "PR #98"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "04fe76f4c257",
+        "ts": 1788799539
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "d6e3ff860daa",
+        "ts": 1788799541
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "04fe76f4c257",
+        "ts": 1788799550,
+        "outcome": "skipped-nate-active",
+        "note": "idle 22.0% OVER; five-hour window is active"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "d6e3ff860daa",
+        "ts": 1788799577,
+        "outcome": "nothing-to-do"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "559e51f1fe97",
+        "ts": 1788800525
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "c7386aec644b",
+        "ts": 1788800533
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "c7386aec644b",
+        "ts": 1788800545,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate: idle 23.0% OVER; no ticket selected or changed"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "559e51f1fe97",
+        "ts": 1788800579,
+        "outcome": "nothing-to-do",
+        "note": "no escalated work waiting"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "2f2f26d5ab36",
+        "ts": 1788801395
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "ad59a5341da9",
+        "ts": 1788801399
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "ad59a5341da9",
+        "ts": 1788801411,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate idle 24.0% OVER"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "2f2f26d5ab36",
+        "ts": 1788801438,
+        "outcome": "nothing-to-do"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "5ea17a456e81",
+        "ts": 1788802277
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "5ea17a456e81",
+        "ts": 1788802316,
+        "outcome": "nothing-to-do"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "cc579edf18e0",
+        "ts": 1788802325
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "cc579edf18e0",
+        "ts": 1788802339,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate idle 26.0% OVER the 15% threshold; no ticket selected or changed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "6d2523dc8a92",
+        "ts": 1788803226
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "cad41dd7b256",
+        "ts": 1788803230
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "cad41dd7b256",
+        "ts": 1788803243,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate idle 27.0% OVER; no ticket selected or changed"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "6d2523dc8a92",
+        "ts": 1788803269,
+        "outcome": "nothing-to-do"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "5a91bfceca98",
+        "ts": 1788804127
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "5a91bfceca98",
+        "ts": 1788804127
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "7c13b3c06625",
+        "ts": 1788804128
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "5a91bfceca98",
+        "ts": 1788804150,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate refused: idle 28.0% OVER the 15% threshold; no ticket selected or changed"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "7c13b3c06625",
+        "ts": 1788804170,
+        "outcome": "nothing-to-do"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "b7cd8c05f96f",
+        "ts": 1788804939
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "629c4782913f",
+        "ts": 1788804975
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "629c4782913f",
+        "ts": 1788804975
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "b7cd8c05f96f",
+        "ts": 1788804976,
+        "outcome": "nothing-to-do"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "629c4782913f",
+        "ts": 1788804987,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate idle OVER (30.0% of five-hour window; threshold 15%); no ticket selected or claimed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "a86659ff8051",
+        "ts": 1788805842
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "a86659ff8051",
+        "ts": 1788805842
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "8a404ae05a80",
+        "ts": 1788805843
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "8a404ae05a80",
+        "ts": 1788805857,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate idle OVER (31.0% of five-hour window; threshold 15%)"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "a86659ff8051",
+        "ts": 1788806188,
+        "outcome": "done",
+        "note": "PR #96"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "065ce98fd072",
+        "ts": 1788806772
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "c2ad915876cc",
+        "ts": 1788806836
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "c2ad915876cc",
+        "ts": 1788806848,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate idle proxy OVER (41.0% of five-hour window; threshold 15%); no ticket selected or changed"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "065ce98fd072",
+        "ts": 1788806936,
+        "outcome": "done",
+        "note": "PR #96"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "086919745200",
+        "ts": 1788807694
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "086919745200",
+        "ts": 1788807717,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate idle 44.0% OVER 15% threshold"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "5023f8ab2179",
+        "ts": 1788808572
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "5023f8ab2179",
+        "ts": 1788808586,
+        "outcome": "skipped-nate-active",
+        "note": "idle 44.0% OVER; usage budgets within limits"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "92d2043d850a",
+        "ts": 1788809467
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "92d2043d850a",
+        "ts": 1788809484,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate refused: idle 44.0% OVER the 15% threshold; no ticket selected or changed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "406bbb74f456",
+        "ts": 1788810398
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "406bbb74f456",
+        "ts": 1788810410,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate idle proxy OVER at 45.0%; no ticket selected or changed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "d043bf11f19c",
+        "ts": 1788811301
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "d043bf11f19c",
+        "ts": 1788811315,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate idle proxy over threshold: 45.0% of five-hour window; no ticket selected or claimed."
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "8f76874c6ef6",
+        "ts": 1788812236
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "8f76874c6ef6",
+        "ts": 1788812249,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate idle 45.0% OVER 15% threshold; no ticket selected or changed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "3ad4259b4b77",
+        "ts": 1788813163
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "3ad4259b4b77",
+        "ts": 1788813176,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate idle 45.0% OVER 15% threshold; no ticket selected or claimed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "83186ece6c79",
+        "ts": 1788814027
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "83186ece6c79",
+        "ts": 1788814041,
+        "outcome": "skipped-nate-active",
+        "note": "usage gate idle 45.0% OVER 15%; no ticket selected or changed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "85984ee8d6c9",
+        "ts": 1788814895
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "85984ee8d6c9",
+        "ts": 1788814921,
+        "outcome": "skipped-nate-active",
+        "note": "Usage gate refused: idle 45.0% OVER the 15% threshold; no ticket selected or changed"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "de54a3332115",
+        "ts": 1788815794
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "de54a3332115",
+        "ts": 1788816154,
+        "outcome": "done",
+        "note": "PR #115"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "c975789d44c4",
+        "ts": 1788816730
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "c975789d44c4",
+        "ts": 1788816967,
+        "outcome": "done",
+        "note": "PR #116"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "6d9254d1c4c3",
+        "ts": 1788817634
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "6d9254d1c4c3",
+        "ts": 1788817847,
+        "outcome": "done",
+        "note": "PR #117"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "54d53a8bf46c",
+        "ts": 1788818472
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "673b03296974",
+        "ts": 1788819334
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "54d53a8bf46c",
+        "ts": 1788819437,
+        "outcome": "done",
+        "note": "PR #118"
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "673b03296974",
+        "ts": 1788819522,
+        "outcome": "done",
+        "note": "PR #118"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "cda43acee6e0",
+        "ts": 1788820295
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "cda43acee6e0",
+        "ts": 1788820758,
+        "outcome": "done",
+        "note": "PR #119"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "a246cf2e0e7d",
+        "ts": 1788821205
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "a246cf2e0e7d",
+        "ts": 1788821623,
+        "outcome": "done",
+        "note": "PR #120; carried open #61 prerequisite commits, routed routine comments through funnel, sync check clean; CI pending"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "1fe4c9f49380",
+        "ts": 1788822100
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "1fe4c9f49380",
+        "ts": 1788822610,
+        "outcome": "done",
+        "note": "PR #121"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "89a10060e826",
+        "ts": 1788822939
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "89a10060e826",
+        "ts": 1788823260,
+        "outcome": "done",
+        "note": "PR #122"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "9acef2e3a412",
+        "ts": 1788823842
+      },
+      {
+        "agent": "codex",
+        "phase": "finish",
+        "run": "9acef2e3a412",
+        "ts": 1788824078,
+        "outcome": "done",
+        "note": "PR #123"
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "c38953ab27c7",
+        "ts": 1788824796
+      },
+      {
+        "agent": "codex",
+        "phase": "start",
+        "run": "ca9fdc3094a5",
+        "ts": 1788825746
+      }
+    ],
+    "muse": [
+      {
+        "agent": "muse",
+        "phase": "start",
+        "run": "42beeaac390c",
+        "ts": 1788808543
+      },
+      {
+        "agent": "muse",
+        "phase": "finish",
+        "run": "42beeaac390c",
+        "ts": 1788808558,
+        "outcome": "nothing-to-do",
+        "note": "smoke test of the muse opening only; funnel begin returned do=review for PR #96 and the run stopped there without reviewing"
+      },
+      {
+        "agent": "muse",
+        "phase": "start",
+        "run": "927275e87d82",
+        "ts": 1788811423
+      },
+      {
+        "agent": "muse",
+        "phase": "finish",
+        "run": "927275e87d82",
+        "ts": 1788811532,
+        "outcome": "done",
+        "note": "merged PR #96"
+      },
+      {
+        "agent": "muse",
+        "phase": "start",
+        "run": "5a23876fbe36",
+        "ts": 1788813667
+      },
+      {
+        "agent": "muse",
+        "phase": "finish",
+        "run": "5a23876fbe36",
+        "ts": 1788813672,
+        "outcome": "nothing-to-do",
+        "note": "nothing to review"
+      }
+    ],
+    "zcode": [
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "13cfb557959f",
+        "ts": 1788747060
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "13cfb557959f",
+        "ts": 1788751776,
+        "outcome": "done",
+        "note": "merged PR #42 (funnel doctor GitHub-wiring checks; branch carried #21's local checks byte-identical, so #41 closed superseded and tickets #21/#22 closed); broke down #32 into 3 tickets (#44 ordering, #45 Class visibility, #46 capture labeling); #26 left ticketless \u2014 plan already shipped in 7ae8339 outside the pipeline, commented. Note: tests/test_automation_drift.py fails locally on main (Codex automation 'command-center-tickets-weekday-mornings' drifted; skips on CI) \u2014 pre-existing, unrelated to #42, fix is scripts/sync_codex_automations.py."
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "a3a13c8e61c5",
+        "ts": 1788752387
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "a3a13c8e61c5",
+        "ts": 1788753432,
+        "outcome": "done",
+        "note": "rejected PR #43 (ticket #23 usage/heartbeat doctor checks) \u2014 substance reviewed clean (captured_at field verified against usage.py/statusline.sh, 251 tests pass, CI green) but the branch was cut from pre-#42 main and hard-conflicts with the merged GitHub-wiring checks in funnel.py and tests/test_doctor.py (verified by three-way merge); blocking note tells the next run to rebase and unify doctor_checks to all seven checks, keeping substance unchanged. Broke down #34 into 4 tickets (#47 gate model, #48 shaped auto-advance, #49 claim\u2192Building, #50 accept parking prompt). PR #40 (ticket #20) still awaits review; #26 still shows in awaiting_breakdown as documented."
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "912eff5152e3",
+        "ts": 1788753456
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "912eff5152e3",
+        "ts": 1788753738,
+        "outcome": "done",
+        "note": "merged PR #40 (ticket #20 \u2014 parked items and their reasons surfaced in funnel brief; ticket returned closed by the merge flow). Review only, per one-job-per-run; no breakdown this run. Not acted on, for whoever sees them next: PR #43 still carries its rejected verdict awaiting the engineer's rebase; dependabot PR #13 remains open; ticket #23's parent #17 has no open children besides #23."
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "27da11f408ad",
+        "ts": 1788754423
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "27da11f408ad",
+        "ts": 1788754800,
+        "outcome": "done",
+        "note": "reviewed and merged PR #43 (ticket #23, funnel doctor usage-cache and heartbeat checks) \u2014 verdict approved against edc5cb4eaa8e, CI green; closed ticket #23 as completed; parent #17 now has all children done and waits on Nate's accept. No breakdown this run. Note: dependabot PR #13 (actions/checkout 4\u21927) is open and unreviewed \u2014 left alone, outside this run's ticket."
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "8691dd4bda47",
+        "ts": 1788755444
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "8691dd4bda47",
+        "ts": 1788755641,
+        "outcome": "done",
+        "note": "no review waiting (dependabot PR #13, actions/checkout 4->7, has no ticket branch so it is outside this routine's queue \u2014 left for Nate). Breakdown: #26 is the only awaiting plan; no tickets created \u2014 it already shipped outside the pipeline in 7ae8339 ('Fixes command-center#26'), verified on main: pointer/CURRENT/_remember/_current gone from heartbeat.py, resolve_run + open_starts + unresolved handling present, watchdog.py reads unresolved finishes, --run restored in routines/claude.md:231 and routines/codex-work.md:189, tests in test_heartbeat.py. Prior zcode comment on #26 (2026-09-06) already records this; it will keep appearing in awaiting_breakdown until Nate accepts or reworks \u2014 his call, not a breakdown gap."
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "9f03731c9536",
+        "ts": 1788756169
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "9f03731c9536",
+        "ts": 1788756868,
+        "outcome": "nothing-to-do",
+        "note": "funnel begin invoked by Claude while testing; no work done"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "d098e6d305cc",
+        "ts": 1788757606
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "d098e6d305cc",
+        "ts": 1788757626,
+        "outcome": "nothing-to-do",
+        "note": "funnel begin invoked by Claude while testing"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "457f0b908fe5",
+        "ts": 1788757676
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "457f0b908fe5",
+        "ts": 1788757683,
+        "outcome": "nothing-to-do",
+        "note": "gate ok; nothing to review and nothing to break down"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "c36b151e74b6",
+        "ts": 1788757728
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "c36b151e74b6",
+        "ts": 1788757737,
+        "outcome": "nothing-to-do",
+        "note": "funnel begin invoked by Claude while verifying #26"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "33e161d10827",
+        "ts": 1788758579
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "33e161d10827",
+        "ts": 1788758585,
+        "outcome": "nothing-to-do",
+        "note": "begin returned stop: nothing to review and nothing to break down"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "0806355ab22c",
+        "ts": 1788759477
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "0806355ab22c",
+        "ts": 1788759484,
+        "outcome": "nothing-to-do",
+        "note": "funnel reported nothing to review and nothing to break down"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "0b29476268bf",
+        "ts": 1788760376
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "0b29476268bf",
+        "ts": 1788760382,
+        "outcome": "nothing-to-do",
+        "note": "begin reported nothing to review and nothing to break down"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "a9cad8076c4a",
+        "ts": 1788761277
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "a9cad8076c4a",
+        "ts": 1788761287,
+        "outcome": "nothing-to-do",
+        "note": "funnel reported nothing to review and nothing to break down"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "4662754c4943",
+        "ts": 1788762178
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "4662754c4943",
+        "ts": 1788762872,
+        "outcome": "done",
+        "note": "no PR waiting for review; broke down #51 (accept-gate Class split) into 5 tickets #54-#58, linked as sub-issues, coverage comment posted on #51"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "74cc13f4169a",
+        "ts": 1788763078
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "74cc13f4169a",
+        "ts": 1788763514,
+        "outcome": "done",
+        "note": "no PR waiting; broke down #31 into 5 tickets (#60 renderer, #61 provenance marker + funnel comment, #62 body stamping, #63 routines + codex sync, #64 agent-rule authority, escalated); coverage comment on #31"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "e5ff6256aa26",
+        "ts": 1788763979
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "e5ff6256aa26",
+        "ts": 1788764428,
+        "outcome": "done",
+        "note": "broke down #35 into 4 tickets: #66 inference, #67 coverage from heartbeat.PROVIDERS, #68 honest alarm text, #69 calibration; coverage comment posted on #35"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "c3640447b168",
+        "ts": 1788764880
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "c3640447b168",
+        "ts": 1788765177,
+        "outcome": "done",
+        "note": "broke down #52 into 5 tickets (#70-#74): honest stop reasons, --routine-sha detection, paste script, watchdog drift alarm (behind #35), routine literals"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "d8ecb74d8d81",
+        "ts": 1788765780
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "d8ecb74d8d81",
+        "ts": 1788766250,
+        "outcome": "done",
+        "note": "no PR waiting; broke down #59 into 6 tickets (#76-#81)"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "4ea7b311f63e",
+        "ts": 1788766683
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "4ea7b311f63e",
+        "ts": 1788766690,
+        "outcome": "skipped-over-pace",
+        "note": "gate over: over pace, no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "717e2c16cea2",
+        "ts": 1788767579
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "717e2c16cea2",
+        "ts": 1788767587,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "dd3ad78008b8",
+        "ts": 1788768478
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "dd3ad78008b8",
+        "ts": 1788768486,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; nothing done"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "cdd956d3cc97",
+        "ts": 1788769379
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "cdd956d3cc97",
+        "ts": 1788769389,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; nothing to do"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "0309235d234d",
+        "ts": 1788770278
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "0309235d234d",
+        "ts": 1788770284,
+        "outcome": "skipped-over-pace"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "490781f09137",
+        "ts": 1788771180
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "490781f09137",
+        "ts": 1788771186,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "8e308283b36b",
+        "ts": 1788772079
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "8e308283b36b",
+        "ts": 1788772090,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate: over pace; no work attempted"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "2ff7731422d6",
+        "ts": 1788772981
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "2ff7731422d6",
+        "ts": 1788772991,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace at begin; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "91d35a999267",
+        "ts": 1788773880
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "91d35a999267",
+        "ts": 1788773887,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "7e96cdb17f60",
+        "ts": 1788774779
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "7e96cdb17f60",
+        "ts": 1788774786,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "43e6d8c94d05",
+        "ts": 1788775679
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "43e6d8c94d05",
+        "ts": 1788775685,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace; nothing done by design"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "1a846f194832",
+        "ts": 1788776581
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "1a846f194832",
+        "ts": 1788776592,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work done"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "4857778a1f07",
+        "ts": 1788777479
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "4857778a1f07",
+        "ts": 1788777485,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "60ac826e0209",
+        "ts": 1788778382
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "60ac826e0209",
+        "ts": 1788778392,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "9d79170f23a0",
+        "ts": 1788779279
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "9d79170f23a0",
+        "ts": 1788779287,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate reported over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "1949073e242b",
+        "ts": 1788780181
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "1949073e242b",
+        "ts": 1788780192,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace; nothing to do"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "33036ebda6b2",
+        "ts": 1788781080
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "33036ebda6b2",
+        "ts": 1788781090,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate reported over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "ce2514945fde",
+        "ts": 1788781980
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "ce2514945fde",
+        "ts": 1788781987,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate reported over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "ef7d313f90ea",
+        "ts": 1788782880
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "ef7d313f90ea",
+        "ts": 1788782891,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate reported over pace; no review or breakdown performed"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "f1a1f93bdbc5",
+        "ts": 1788783781
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "f1a1f93bdbc5",
+        "ts": 1788783794,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "c074241e765e",
+        "ts": 1788784680
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "c074241e765e",
+        "ts": 1788784690,
+        "outcome": "skipped-over-pace",
+        "note": "gate=over (over pace); no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "7f8446e3ca46",
+        "ts": 1788785580
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "7f8446e3ca46",
+        "ts": 1788785588,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "448f416e2643",
+        "ts": 1788786483
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "448f416e2643",
+        "ts": 1788786494,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "30de4871155a",
+        "ts": 1788787381
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "30de4871155a",
+        "ts": 1788787390,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate: over pace; no work started"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "c7eea7e6d704",
+        "ts": 1788788282
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "c7eea7e6d704",
+        "ts": 1788788289,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "d5f4511f8a70",
+        "ts": 1788789187
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "d5f4511f8a70",
+        "ts": 1788789197,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "8df6527f2b38",
+        "ts": 1788790082
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "8df6527f2b38",
+        "ts": 1788790088,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace; no work done this run"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "fdcec9332f97",
+        "ts": 1788790981
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "fdcec9332f97",
+        "ts": 1788790995,
+        "outcome": "skipped-over-pace",
+        "note": "gate=over: over pace, no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "ceab2cc64e50",
+        "ts": 1788791882
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "ceab2cc64e50",
+        "ts": 1788791894,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace at begin; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "acd36e4dbc37",
+        "ts": 1788792781
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "acd36e4dbc37",
+        "ts": 1788792789,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace \u2014 no review or breakdown run"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "11c5a4dbeae7",
+        "ts": 1788793682
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "11c5a4dbeae7",
+        "ts": 1788793694,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate over pace at begin; no review or breakdown performed"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "b93168e29f0e",
+        "ts": 1788794581
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "b93168e29f0e",
+        "ts": 1788794588,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace at begin; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "597087eeab54",
+        "ts": 1788795483
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "597087eeab54",
+        "ts": 1788795491,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate over pace; no work taken this run"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "496c8891fde1",
+        "ts": 1788796381
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "496c8891fde1",
+        "ts": 1788796389,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate: over pace; no review or breakdown performed"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "765d3a140232",
+        "ts": 1788797282
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "765d3a140232",
+        "ts": 1788797289,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate: over pace; no work attempted"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "1ddbc78ee510",
+        "ts": 1788798186
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "1ddbc78ee510",
+        "ts": 1788798197,
+        "outcome": "skipped-over-pace",
+        "note": "gate=over: over pace, no job this run"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "3c3c2bbc73be",
+        "ts": 1788799082
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "3c3c2bbc73be",
+        "ts": 1788799201,
+        "outcome": "done",
+        "note": "merged PR #94 (ticket #44: Broken sorts first within gates, needs-shaping out of ordering); diff matched ticket exactly, no rejected options reintroduced, CI green; no breakdown this run"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "088c8f45d4f7",
+        "ts": 1788799982
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "088c8f45d4f7",
+        "ts": 1788800244,
+        "outcome": "done",
+        "note": "broke down #15 into 7 tickets (#99-#105), all sub-issues; every ticket holds until #76/#80 land; #99 waits on #61, #105 on #64; one ticket escalated (#105)"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "9e8a39aa74b6",
+        "ts": 1788800881
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "9e8a39aa74b6",
+        "ts": 1788801179,
+        "outcome": "done",
+        "note": "broke down #84 into 4 tickets (#106-#109); no PRs merged; #80 left blocked per plan"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "25338c051b0a",
+        "ts": 1788801782
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "25338c051b0a",
+        "ts": 1788802168,
+        "outcome": "done",
+        "note": "broke down #85 into 4 tickets (#110 parser/convention, #111 gate_question rules, #112 brief blocked section, #113 rewrite #80's block comment); no PR was waiting, no merges"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "3fd591fb4d03",
+        "ts": 1788802682
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "3fd591fb4d03",
+        "ts": 1788802688,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate: over pace; no job started"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "aeb13e0d5240",
+        "ts": 1788803582
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "aeb13e0d5240",
+        "ts": 1788803589,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "d4de80c5b7e3",
+        "ts": 1788804482
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "d4de80c5b7e3",
+        "ts": 1788804487,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "8239713962cb",
+        "ts": 1788805382
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "8239713962cb",
+        "ts": 1788805388,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "22ec209df2cc",
+        "ts": 1788806284
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "22ec209df2cc",
+        "ts": 1788806289,
+        "outcome": "skipped-over-pace",
+        "note": "begin gate: over pace; no work done"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "39013ebe896b",
+        "ts": 1788807183
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "39013ebe896b",
+        "ts": 1788807190,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace \u2014 no review or breakdown performed"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "d769efd5b283",
+        "ts": 1788808083
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "d769efd5b283",
+        "ts": 1788808093,
+        "outcome": "skipped-over-pace",
+        "note": "gate=over (over pace); no work started"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "c406a97e8962",
+        "ts": 1788808983
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "c406a97e8962",
+        "ts": 1788808990,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "f15de2938bd6",
+        "ts": 1788809884
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "f15de2938bd6",
+        "ts": 1788809890,
+        "outcome": "skipped-over-pace",
+        "note": "gate reported over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "e02709e44203",
+        "ts": 1788810785
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "e02709e44203",
+        "ts": 1788810793,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace; no work attempted"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "eeb08efda65f",
+        "ts": 1788811683
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "eeb08efda65f",
+        "ts": 1788811689,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "3b83f9fd12d8",
+        "ts": 1788812583
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "3b83f9fd12d8",
+        "ts": 1788812590,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "9611c6e64e22",
+        "ts": 1788813485
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "9611c6e64e22",
+        "ts": 1788813494,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate over pace; no review or breakdown attempted"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "317c5adfc5b5",
+        "ts": 1788814383
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "317c5adfc5b5",
+        "ts": 1788814389,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no review or breakdown performed"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "2fd85d005faa",
+        "ts": 1788815283
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "2fd85d005faa",
+        "ts": 1788815290,
+        "outcome": "skipped-over-pace",
+        "note": "budget gate over pace at begin; nothing reviewed or broken down"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "80fcca8e042b",
+        "ts": 1788816183
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "80fcca8e042b",
+        "ts": 1788816195,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace at begin; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "e4e5109b90e5",
+        "ts": 1788817083
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "e4e5109b90e5",
+        "ts": 1788817092,
+        "outcome": "skipped-over-pace",
+        "note": "gate=over (over pace); no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "dc594e6aafec",
+        "ts": 1788817984
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "dc594e6aafec",
+        "ts": 1788817990,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "c72a818c76cb",
+        "ts": 1788818883
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "c72a818c76cb",
+        "ts": 1788818889,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "a26e1194fe29",
+        "ts": 1788819783
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "a26e1194fe29",
+        "ts": 1788819790,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work assigned, stopped immediately"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "8ac1bc9ba35f",
+        "ts": 1788820685
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "8ac1bc9ba35f",
+        "ts": 1788820693,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "87d39cb4ec5a",
+        "ts": 1788821585
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "87d39cb4ec5a",
+        "ts": 1788821592,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "c53b7695cf2b",
+        "ts": 1788822485
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "c53b7695cf2b",
+        "ts": 1788822491,
+        "outcome": "skipped-over-pace",
+        "note": "pace gate over at begin; no review or breakdown run"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "31f1928e24ee",
+        "ts": 1788823383
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "31f1928e24ee",
+        "ts": 1788823391,
+        "outcome": "skipped-over-pace",
+        "note": "gate reported over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "8f1f01ebfed9",
+        "ts": 1788824285
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "8f1f01ebfed9",
+        "ts": 1788824291,
+        "outcome": "skipped-over-pace",
+        "note": "gate: over pace; no work taken"
+      },
+      {
+        "agent": "zcode",
+        "phase": "start",
+        "run": "68d21031c3c0",
+        "ts": 1788825184
+      },
+      {
+        "agent": "zcode",
+        "phase": "finish",
+        "run": "68d21031c3c0",
+        "ts": 1788825192,
+        "outcome": "skipped-over-pace",
+        "note": "gate over pace; no work taken"
+      }
+    ]
+  }
+}
+

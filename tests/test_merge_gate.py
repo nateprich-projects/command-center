@@ -164,3 +164,62 @@ def test_every_failure_is_reported_not_just_the_first(monkeypatch):
     """A gate that says only 'no' makes the reviewer guess which one to fix."""
     wire(monkeypatch, pr(headRefName="nope", statusCheckRollup=[]), [])
     assert len(funnel.merge_blockers(REPO, 5, items(), NOW)) >= 3
+
+
+# -- closing the ticket the PR finished ---------------------------------------
+#
+# `gh pr merge` closes an issue only when the PR body carries a `Closes #N`
+# link, written by hand. On 2026-09-08 thirteen merged ticket PRs omitted it,
+# and each left its ticket open, startable, and re-served to the engineer on
+# every run — 38 of 176 Codex runs that day did nothing but re-verify a PR that
+# had already merged. These tests hold the close to the merge itself.
+
+def _merge_wired(monkeypatch, issue_state="OPEN", close_rc=0, close_err=""):
+    """Run cmd_merge past a clean gate, recording the subprocesses it runs."""
+    calls = []
+
+    def fake_gh_json(*args):
+        if "issue" in args and "view" in args:
+            return {"state": issue_state}
+        if "comments" in args:
+            return {"comments": [{"body": verdict()}]}
+        return pr()
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        rc = close_rc if argv[:2] == ["gh", "issue"] else 0
+        err = close_err if argv[:2] == ["gh", "issue"] else ""
+        return type("R", (), {"returncode": rc, "stdout": "", "stderr": err})()
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    monkeypatch.setattr(funnel.subprocess, "run", fake_run)
+    rc = funnel.cmd_merge(items(), NOW, REPO, 7, True)
+    return rc, calls
+
+
+def test_merge_closes_the_ticket_the_branch_names(monkeypatch):
+    rc, calls = _merge_wired(monkeypatch)
+    assert rc == 0
+    assert ["gh", "issue", "close", "9", "--repo", REPO,
+            "--reason", "completed"] in calls
+
+
+def test_merge_does_not_reclose_a_ticket_github_already_closed(monkeypatch):
+    rc, calls = _merge_wired(monkeypatch, issue_state="CLOSED")
+    assert rc == 0
+    assert not [c for c in calls if c[:3] == ["gh", "issue", "close"]]
+
+
+def test_a_failed_close_reports_but_does_not_fail_the_merge(monkeypatch, capsys):
+    # The merge already landed. Returning non-zero would make a caller retry it
+    # and error on a PR that is no longer open, hiding the real problem.
+    rc, _ = _merge_wired(monkeypatch, close_rc=1, close_err="gh: nope")
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "could not be closed" in err and "owner/repo#9" in err
+
+
+def test_ticket_ref_from_branch_is_the_one_parser():
+    assert funnel.ticket_ref_from_branch(REPO, "ticket/9") == REPO + "#9"
+    assert funnel.ticket_ref_from_branch(REPO, "main") is None
+    assert funnel.ticket_ref_from_branch(REPO, "ticket/not-a-number") is None

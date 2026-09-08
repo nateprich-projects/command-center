@@ -2902,8 +2902,8 @@ def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -
         )
 
     branch = data.get("headRefName") or ""
-    ticket_no = branch.split("/")[-1] if branch.startswith("ticket/") else None
-    ticket = next((i for i in items if str(i.number) == ticket_no), None) if ticket_no else None
+    ref = ticket_ref_from_branch(repo, branch)
+    ticket = next((i for i in items if i.ref == ref), None) if ref else None
 
     # 1. Reopen the ticket, so the work is visibly unfinished again.
     if ticket:
@@ -3397,6 +3397,20 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
     return 0
 
 
+def ticket_ref_from_branch(repo: str, branch: str) -> Optional[str]:
+    """The ticket a `ticket/<n>` branch belongs to, or None.
+
+    Pure, and shared, because "which issue does this PR finish" was being
+    derived independently in the merge gate, in `cmd_reject`, and — once the
+    post-merge close was added — in `cmd_merge`. Three parsers are three
+    definitions, and the one that disagrees stops a ticket from closing.
+    """
+    if not branch.startswith("ticket/"):
+        return None
+    tail = branch.split("/", 1)[1]
+    return "{}#{}".format(repo, tail) if tail.isdigit() else None
+
+
 def merge_blockers(repo: str, pr: int, items: List[Item],
                    now: datetime) -> List[str]:
     """Every reason this PR may not be merged. Empty means it may.
@@ -3426,10 +3440,10 @@ def merge_blockers(repo: str, pr: int, items: List[Item],
         )
 
     branch = data.get("headRefName") or ""
-    if not branch.startswith("ticket/"):
+    ref = ticket_ref_from_branch(repo, branch)
+    if ref is None:
         why.append("branch {!r} is not a ticket/<n> branch".format(branch))
     else:
-        ref = "{}#{}".format(repo, branch.split("/", 1)[1])
         ticket = next((i for i in items if i.ref == ref), None)
         if ticket is None:
             why.append("no ticket {} in the funnel".format(ref))
@@ -3486,12 +3500,45 @@ def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
         print("Nothing was changed. Re-run with --yes to merge.")
         return 0
 
+    # Read the branch before merging: `--delete-branch` removes it, and the
+    # branch is how the ticket is identified.
+    branch = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
+                       "--json", "headRefName") or {}).get("headRefName") or ""
+    ref = ticket_ref_from_branch(repo, branch)
+
     out = subprocess.run(
         ["gh", "pr", "merge", str(pr), "--repo", repo, "--squash",
          "--delete-branch"], capture_output=True, text=True)
     if out.returncode != 0:
         raise GitHubError(out.stderr.strip())
     print("merged PR #{} in {}".format(pr, repo))
+
+    # Close the ticket this PR finished. GitHub closes it only when the PR body
+    # carries a `Closes #N` link, which is written by hand and was missing on 13
+    # of the merged ticket PRs by 2026-09-08. A ticket left open stays startable
+    # and is re-served to the engineer every run: 38 of 176 Codex runs that day —
+    # 22% — did nothing but re-verify a PR that had already merged. Closing here
+    # makes the link a convenience rather than the mechanism.
+    if ref is None:
+        return 0
+    number = ref.split("#", 1)[1]
+    state = (_gh_json("gh", "issue", "view", number, "--repo", repo,
+                      "--json", "state") or {}).get("state")
+    if str(state).upper() == "CLOSED":
+        return 0
+
+    closed = subprocess.run(
+        ["gh", "issue", "close", number, "--repo", repo, "--reason", "completed"],
+        capture_output=True, text=True)
+    if closed.returncode != 0:
+        # The merge landed, so this must not report failure — a caller that
+        # retries would find the PR already merged and error on that instead.
+        print("MERGED, but {} could not be closed: {}".format(
+            ref, closed.stderr.strip()), file=sys.stderr)
+        print("close it by hand; it stays startable until you do.",
+              file=sys.stderr)
+        return 0
+    print("closed {}".format(ref))
     return 0
 
 

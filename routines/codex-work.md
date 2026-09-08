@@ -174,6 +174,58 @@ system exists to solve.
 
 Do not change `Status` or `Class` on anything. Those are Nate's gates.
 
+### Mid-work discovery: convert, record, stop
+
+Implementation can reveal a step outside the closed-world capability boundary
+after the ticket has started — for example, an OAuth application that must be
+created in a provider UI. That is a human step, not a reason to fake the result,
+add a placeholder, or write a documentation-only PR.
+
+If you discover one:
+
+1. Stop before performing the unavailable action. Do not make the engineering
+   ticket look complete by describing or simulating work that did not happen.
+2. File the missing action as its own sub-issue of the current ticket's parent,
+   in the same repository. One human action gets one ticket. Its body must carry
+   the exact marker from #138, with one of these allowlisted reasons on its own
+   line: `Human step: an app UI with no API`, `Human step: entering a
+   credential`, `Human step: an account or billing setting`, or `Human step:
+   physical access to a machine`. Difficulty or uncertainty is never a reason.
+   Capture the new issue number:
+
+   ```bash
+   gh issue create --repo <repo> --parent <parent-number> \
+     --title "Human step: <short action>" \
+     --body $'Part of #<parent-number>; discovered while implementing #<current-number>.\n\nHuman step: <one exact allowlisted reason>\n\nAction Nate must perform: <specific action>.\n\nRisk: standard'
+   ```
+
+3. Record that the engineering ticket depends on the new human ticket, and make
+   the engineering ticket non-startable while it waits. The native blocking
+   relationship is durable; the label and anchored comment are the existing
+   funnel convention that keeps the ticket out of the work queue and tells the
+   next reader why:
+
+   ```bash
+   gh issue edit <current-number> --add-blocked-by <human-number> --add-label blocked
+   python3 /Users/nateprich/.claude/command-center/funnel.py comment <current-number> --voice agent --body "**Blocked on #<human-number>:** Complete the human step before resuming this ticket."
+   ```
+
+   Do not change `Status` or `Class`. Do not close either issue; Nate closes the
+   human-step ticket after doing the action.
+4. Release the current claim and finish the run as stopped. Do not commit, push,
+   review, or open a PR for an incomplete implementation. A local branch or
+   partial work is not completion, and the durable record is the human ticket,
+   dependency, and blocked comment:
+
+   ```bash
+   python3 /Users/nateprich/.claude/command-center/funnel.py release <current-number>
+   python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent codex --run <id> --outcome errored --note "stopped: human step filed as #<human-number>; ticket blocked; no PR opened"
+   ```
+
+   This is the deliberate stop path. The `errored` outcome records that the
+   assigned engineering ticket was not completed; it does not authorize a
+   plausible artefact to merge.
+
 ## 7. Open a pull request
 
 Say what you did, what you deliberately did not do, and anything you are unsure

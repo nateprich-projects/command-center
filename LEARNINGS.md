@@ -8,6 +8,49 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### `gh api rate_limit` can report full headroom while a route is fully exhausted
+
+**2026-09-08 · GitHub API · measured**
+
+Three calls on the same `gh` credential, seconds apart, reported three different `core`
+counters — same 5,000 limit, three different resets:
+
+| call | used | remaining | resets |
+|---|---|---|---|
+| `repos/nateprich-projects/command-center` | 684 / 5000 | 4316 | 13:45:29 PDT |
+| `.../issues/38/dependencies/blocked_by` | 5000 / 5000 | 0 | 13:53:22 PDT |
+| `gh api rate_limit` | 0 / 5000 | 5000 | 14:38:33 PDT |
+
+All three carried `X-Ratelimit-Resource: core`. So **`gh api rate_limit` is not a reliable
+read of the budget a given route is actually spending** — it answered "full" while the
+route the funnel depended on was at zero and `funnel brief` was failing closed.
+
+Read the reset and remaining from the *failing call's own response headers* (`gh api ... -i`),
+not from the `rate_limit` endpoint.
+
+Why there are several counters is **inferred, not measured**: GitHub windows are
+per-credential and start on first use, so different windows imply the calls are counted
+against different principals. Nobody has verified that. #239 tracks measuring it.
+
+### GitHub GraphQL exposes `Issue.blockedBy`, so native dependencies need no REST call
+
+**2026-09-08 · GitHub API · measured**
+
+The native issue-dependency data is reachable from GraphQL as `Issue.blockedBy`, an
+`IssueConnection` with the usual pagination args. It returns `state`, `stateReason` and
+`repository { nameWithOwner }`, which is everything
+`repos/{repo}/issues/{n}/dependencies/blocked_by` returns that the funnel uses — including
+cross-repository blockers.
+
+That matters because it can be selected inside a Project items query that is already
+running, turning one REST call per open ticket into zero extra calls. Measured after
+ff35327: 182 items load with 10 REST calls, down from ~88, with identical results.
+
+**The two spellings disagree and silently produce wrong answers if you assume one.** REST
+returns `state: "open"`, `state_reason`, `full_name`; GraphQL returns `state: "OPEN"`,
+`stateReason`, `nameWithOwner`. Case and key both differ, and a missing `nameWithOwner`
+fallback quietly attributes a cross-repo blocker to the wrong repo rather than failing.
+
 ### zcode reports `computer_asleep_or_app_not_running` for skips that are neither
 
 **2026-09-06 · zcode · measured**

@@ -48,64 +48,198 @@ Codex works **one ticket per run** and the ladder decides what to start, so
 tickets should be workable in any order where possible.
 
 Where order genuinely matters, say so in the ticket body — "depends on #N" — and
-put the dependency in the body rather than inventing a label. The label set is
-closed at two on purpose.
+write the same relationship to GitHub's native dependency graph. The body sentence
+is for the human reader; the graph is what the queue can enforce. Do not invent a
+label. The label set is closed at two on purpose.
+
+## Native dependency edges
+
+When a ticket depends on another ticket, create the edge in the same command that
+creates the ticket and writes its `Risk:` line. `gh issue create` accepts the
+blocker through `--blocked-by`; use that machine-readable flag first, then keep
+the human-readable dependency sentence in the body:
+
+```bash
+gh issue create --repo <repo> --parent <parent-number> \
+  --blocked-by <blocker-number> \
+  --title "<ticket title>" \
+  --body $'Parent: #<parent-number>.\n\nDepends on #<blocker-number> — <why>.\n\nWhat: <bounded work>.\n\nAccept: <proof it worked>.\n\nRisk: standard'
+```
+
+For multiple blockers, pass all blocker numbers to `--blocked-by` and name each
+one in the body sentence. Keep `Risk:` on its own line. Do not replace the native
+edge with a `Depends:` body marker, a label, or a later follow-up edit: malformed
+prose is silently unreadable by the queue, while the native relationship carries
+the blocker's live state.
+
+## The capability boundary
+
+Use the [capability boundary](../capability-boundary.md) as the closed-world test
+when deciding whether a planned step is work an agent can take on. Ask whether the
+step requires anything outside that boundary; the named access cases are examples,
+not an exhaustive checklist. Keep this test separate from ticket sizing: a step can
+be small and still be outside the agent's reach.
 
 If a ticket cannot start until another finishes, that is fine. If *every* ticket
 is chained, the plan has not really been broken up: it has been sliced into
 stages, and the funnel will process them one hourly run at a time with no
 parallelism gained. Look for a different cut.
 
-## Human steps: split, do not mark
+## Capability boundary
 
-Use the shared capability boundary as the test for a human step. Ask whether the
-step needs something outside what an agent can reach, rather than whether it looks
-hard. **Difficulty, uncertainty, unfamiliarity, or a cheaper model's lack of
-skill is never a human-step reason.** Work an agent does not know how to implement
-is still agent work; size or escalate it as agent work instead of handing it to
-Nate.
+When deciding whether a plan step is within an agent's reach, use the
+[capability boundary in `AGENTS.md`](../../AGENTS.md#capability-boundary) as a
+closed-world test: does the step require anything outside what an agent can reach?
+The access cases named there are examples, not an exhaustive list, so an unnamed
+requirement outside the boundary counts too.
 
-A mixed ticket cannot express both kinds of work safely. **Split rather than
-mark:**
+## Boundary checklist at breakdown
 
-- Make each human action its own atomic ticket. One `Human step:` ticket contains
-  one human step; never combine several actions such as account setup and
-  credential creation in one ticket.
-- Keep the surrounding agent work in its own ticket or tickets. Put the
-  `Human step:` marker on the new atomic human ticket, not on a mixed engineering
-  ticket. Marking the mixed ticket in place either blocks work an agent could do
-  or hides the human step inside work that looks complete.
-- Write the dependency edge in the ticket bodies with `Depends on #N`. An agent
-  ticket that needs the human step names that human-step issue and is not
-  startable until Nate closes it. If the human action itself waits for agent work
-  around it, record that edge too; do not imply either direction with ordering or
-  a label. Repeat the dependency in the coverage comment so the breakdown can be
-  checked without reconstructing the graph.
+Run this checklist after reading the plan and before creating its tickets. It is a
+recall step: do not wait for a human step to announce itself. Start with every plan
+heading and trace its stated outcome to a usable end state, including setup,
+credentials, account configuration, and registration or connection steps that the
+plan forgot to name.
+
+For every concrete action or missing prerequisite found in that pass, answer each
+prompt below explicitly in the parent coverage comment. Write `no`; silence is not
+an all-clear.
+
+- **Application or browser UI:** does the action require a UI or other surface the
+  agent cannot reach? `yes`/`no`.
+- **Credential:** must a credential be created, entered, retrieved, or stored
+  outside the checkout? `yes`/`no`.
+- **Account or billing setting:** must an account, billing, or service setting be
+  changed? `yes`/`no`.
+- **Physical access:** must someone touch or access a machine or device? `yes`/`no`.
+- **Other boundary gap:** does it require anything else beyond the agent's shell,
+  `gh` and its token, and the checkout filesystem? `yes`/`no`; name it if `yes`.
+
+These prompts are examples, not a replacement for the closed-world test in
+`AGENTS.md`. A `no` means the action is reachable with the stated agent
+capabilities, not merely that the plan did not mention it. Difficulty, uncertainty,
+unfamiliarity, or a model's lack of skill is never a human-step reason. If an answer
+is `yes`, make that one action its own human-step ticket; do not mark a mixed
+engineering ticket in place. Record the ticket and its dependency edge in the same
+comment.
+
+Use this shape for the parent coverage comment so a later reader can see what was
+considered rather than only what was claimed:
+
+```text
+Boundary checklist
+
+- Plan action or missing prerequisite: <one action>
+  - Application/browser UI: yes/no
+  - Credential: yes/no
+  - Account or billing setting: yes/no
+  - Physical access: yes/no
+  - Other boundary gap: yes/no — <name if yes>
+  - Result: agent ticket #N / human-step ticket #N / no ticket
+
+Coverage by plan heading: <plan heading> -> <ticket refs>
+Outcome coverage:
+- <plan's stated outcome or purpose>: <ticket refs> -> <usable end state>
+Human-step dependencies: <ticket> depends on #N
+Deliberately left out: <omission and why, or “none”>
+```
+
+The checklist must be concrete enough to catch the known failure in #25. Its
+walkthrough must surface all three of these, even though the third was absent from
+the original plan: Cloudflare tunnel setup requires an account setting; the
+fine-grained token requires credential creation or entry; and registering the
+connector in Nate's account requires an application or account UI. Each is a
+separate human action to record and ticket, not an assumption hidden in an
+engineering ticket.
+
+## Splitting a mixed ticket
+
+A ticket carries one marker and reality does not. When a plan item mixes agent
+work with a human step, marking it in place either blocks the agent work that
+could have proceeded, or hides the human step inside a ticket that looks
+complete once closed.
+
+**One human action per human-step ticket.** Never combine two. Account setup and
+credential creation are two tickets, not one — a ticket holding two human steps
+is half-done the moment one of them finishes, and half-done is indistinguishable
+from done once it is closed.
 
 ### Worked example: #25's ticket 5
 
 The plan item *"Colima service, Cloudflare Tunnel, secrets via `--env-file`, and
-the fine-grained token"* is mixed work. Do not add a `Human step:` line to that
-one ticket. Split it into:
+the fine-grained token"* is mostly agent work with two human steps buried in it.
+Do not put a `Human step:` line on that ticket. Split it into three:
 
-1. Nate's Cloudflare account/tunnel setup as one atomic human-step ticket, marked
-   for the account or billing access it requires.
-2. Nate's fine-grained GitHub token creation as a separate atomic human-step
-   ticket, marked for entering a credential.
-3. The agent's Colima service and `--env-file` implementation as agent work,
-   with `Depends on #<Cloudflare ticket>` and `Depends on #<token ticket>` in its
-   body when those prerequisites are required.
+1. **Cloudflare tunnel setup** — human step; account or service setting.
+2. **Fine-grained GitHub token creation** — human step; credential creation.
+   Separate from the first: two actions, two tickets, even though Nate does both
+   in one sitting.
+3. **Colima service and `--env-file` wiring** — agent work, blocked by both.
 
-The two human actions must not be combined, and the agent ticket must not be
-treated as startable until its named prerequisites land. This is the difference
-between expressing the plan's real dependency graph and merely marking the
-original mixed ticket as Nate's work.
+Create the agent ticket with the native edge, as
+[Native dependency edges](#native-dependency-edges) requires:
+
+```bash
+gh issue create --repo <repo> --parent 25 \
+  --blocked-by <cloudflare-number>,<token-number> \
+  --title "Colima service and --env-file secret wiring" \
+  --body $'Parent: #25.\n\nDepends on #<cloudflare-number> and #<token-number> — the tunnel and the token must exist before the service can be wired to them.\n\nWhat: <bounded work>.\n\nAccept: <proof it worked>.\n\nRisk: standard'
+```
+
+The native edge is what keeps the agent ticket out of `startable()` until Nate
+closes both human steps. The body sentence is for the reader, and never a
+substitute: prose alone is silently unreadable by the queue.
+
+If a human step instead waits on agent work, record that edge in the same way.
+Do not imply either direction with ordering or a label.
+
+## Contradiction check for an all-clear
+
+The JSON from `funnel begin --breakdown` carries `work.access_signals`, the
+canonical scan of the parent plan's access-shaped vocabulary from `funnel.py`.
+Do not copy the vocabulary into this skill. The scan is a detector beside the
+checklist, not a second set of human-step categories:
+
+- If the signal list is non-empty and every boundary answer is `no`, flag an
+  all-clear contradiction before creating tickets. Re-read each matching plan
+  passage and trace it to a concrete action or missing prerequisite.
+- If a matching passage names an action outside the boundary, split that action
+  into its own human-step ticket. If it is only a rejected alternative, an
+  example, or an action already reachable to the agent, keep the all-clear and
+  record why the signal was cleared. A vocabulary match alone never creates a
+  human-step ticket.
+- If the signal list is empty, record that the contradiction check was not
+  triggered; an empty scan is not proof that the plan has no human step.
+
+Add these lines to the parent coverage comment alongside the checklist:
+
+```text
+Access vocabulary: <signals from work.access_signals, or “none”>
+All-clear contradiction: <not triggered / flagged — resolution>
+```
+
+The #25 walkthrough must surface at least `tunnel` and `token`; those signals
+are evidence to inspect, not proof that every mention requires Nate.
 
 ## Coverage
 
-Together, the tickets must cover the plan. Before finishing:
+Together, the tickets must cover the plan's stated outcome, not only its
+headings or ticket shape. A set of tickets can mirror every heading and still
+leave the thing unusable. Before finishing:
 
 - reread the plan's own headings and check each one is represented
+- state the plan's purpose and trace the ticket set from setup through its
+  dependencies, registration or connection steps, and final usable state
+- in the parent coverage comment, map each stated outcome to the tickets that
+  deliver it end to end. Include the usable end state, not only the component
+  that each ticket builds
+- use #25 as the worked failure: its six tickets can cover a running server and
+  connector while missing the outcome — reaching the funnel from general chat —
+  if no ticket registers the connector in Nate's account. That breakdown is
+  shape-complete but outcome-incomplete. Surface the missing registration as a
+  human-step ticket under the boundary checklist, or record the concrete reason
+  it is deliberately left out; do not claim coverage because every
+  implementation heading has a ticket
 - **anything you deliberately left out, say so in a comment on the parent** —
   silent omission is how a project looks finished while missing a third of itself
 

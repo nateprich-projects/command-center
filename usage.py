@@ -758,7 +758,19 @@ PROVIDER_POLICY = {
     # of the five Codex schedules — the all-day one. The four hour-restricted
     # schedules have no presence check, so for them the weekly floor is the whole
     # protection.
-    "openai": {"weekly_floor": 100.0, "weekly_reserve": 0.0},
+    "openai": {"weekly_floor": 100.0, "weekly_reserve": 0.0,
+               # Raised 80 -> 85 on 2026-09-08, on Nate's call: "These Luna
+               # sessions aren't crushing my capacity, just need enough space
+               # for the occasional Sol task." Scoped to openai deliberately —
+               # the shared 80 protects `anthropic`, which is his own account,
+               # and z.ai, whose weekly pool is scarce. Raising it globally
+               # would spend headroom he is not choosing to spend.
+               #
+               # Context: Codex ran 21 `done` runs in two hours after WIP_LIMIT
+               # went to 4 and hit the five-hour ceiling at 75% used + 10%
+               # reserved = 85% against 80% allowed. Its weekly window was fine
+               # at 24%. This buys back that headroom and leaves 15%.
+               "five_hour_ceiling": 85.0},
 }
 
 

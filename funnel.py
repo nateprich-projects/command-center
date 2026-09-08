@@ -137,6 +137,10 @@ STAGES = ["Ideas", "Shaped", "Ready", "Building", "Done", "Parked"]
 LADDER = ["Broken", "Maintenance", "Improve", "New", "Replace"]
 PREEMPTING = {"Broken", "Maintenance"}
 
+#: Existing-work classes may take the unattended shaping path. Origin remains
+#: an independent condition: class describes the work, not who raised it.
+SELF_APPROVABLE_CLASSES = frozenset({"Broken", "Maintenance", "Improve"})
+
 #: Which stages are waiting on a human, and the question each one asks.
 GATES = {
     "Shaped": "Is the plan good?",
@@ -176,6 +180,12 @@ UNATTRIBUTED = "UNATTRIBUTED"
 PROVENANCE_MARKER = "<!-- command-center-provenance -->"
 PROVENANCE_VOICES = ("nate-direct", "nate-relayed", "agent")
 
+#: An origin is only a default for who shapes an idea. This marker records the
+#: explicit exception without rewriting that historical fact. Moving work back
+#: toward Nate is always safe; moving it toward agents requires Nate's voice.
+ORIGIN_OVERRIDE_MARKER = "<!-- command-center-origin-override -->"
+ORIGIN_OVERRIDE_TARGETS = ("nate", "agents")
+
 #: Three rejected merges in a week means the auto-merge bar has failed. That is
 #: not "there are bugs" — it is a different and more serious fact, and the
 #: response is to stop auto-merging and fix the review prompt.
@@ -197,6 +207,7 @@ class Item:
     title: str
     url: str
     state: str  # OPEN | CLOSED
+    body: Optional[str] = None
     state_reason: Optional[str] = None  # COMPLETED | NOT_PLANNED | REOPENED
     status: Optional[str] = None
     klass: Optional[str] = None
@@ -204,6 +215,8 @@ class Item:
     labels: List[str] = field(default_factory=list)
     block_references: List[str] = field(default_factory=list)
     block_reason: Optional[str] = None
+    open_blockers: List[str] = field(default_factory=list)
+    dead_blockers: List[str] = field(default_factory=list)
     assignees: List[str] = field(default_factory=list)
     in_motion_since: Optional[datetime] = None
     item_id: Optional[str] = None  # the ProjectV2Item, needed to write the lock
@@ -538,6 +551,79 @@ def needs_nate_signals(plan_body: str) -> List[str]:
             if re.search(pattern, text, re.IGNORECASE)]
 
 
+# These are evidence words, not a closed list of human-step categories. A plan
+# can use one while describing a rejected alternative or an already-automated
+# action, so the scan is a prompt to inspect the checklist rather than proof
+# that a human ticket is required. Keep the vocabulary in one place so real
+# misses can extend it without a second copy drifting in the breakdown skill.
+ACCESS_PATTERNS = {
+    "account": r"\baccounts?\b",
+    "api key": r"\bapi[\s-]+keys?\b",
+    "billing": r"\bbilling\b",
+    "dns": r"\bdns\b",
+    "enable": r"\benabl\w*\b",
+    "oauth": r"\boauth\b",
+    "register": r"\b(?:register|registrat)\w*\b",
+    "settings": r"\bsettings?\b",
+    "sign in": r"\bsign(?:ed)?[\s-]+in\b",
+    "token": r"\btokens?\b",
+    "tunnel": r"\btunnels?\b",
+    "verify": r"\bverif\w*\b",
+}
+
+
+def access_signals(plan_body: str) -> List[str]:
+    """Return access-shaped vocabulary found in a plan body.
+
+    This is the independent check used beside the breakdown boundary
+    checklist. It deliberately reports vocabulary only: matching a word does
+    not prove that the plan needs Nate, and no match does not prove that it
+    does not.
+    """
+    if not isinstance(plan_body, str):
+        return []
+    text = re.sub(r"\s+", " ", plan_body)
+    return [name for name, pattern in sorted(ACCESS_PATTERNS.items())
+            if re.search(pattern, text, re.IGNORECASE)]
+
+
+def effective_shape_owner(origin_voice: Optional[str],
+                          override_target: Optional[str] = None) -> Optional[str]:
+    """Return who should shape an item, or None when origin is untrusted.
+
+    Capture uses the provenance voice vocabulary: ``agent`` means observed by
+    an agent, while either Nate voice means he raised it. An authorised origin
+    override is already reduced by its parser to ``nate`` or ``agents`` and
+    supersedes that default. Missing or malformed origin fails closed here; the
+    backlog-wide default remains #151's concern.
+    """
+    if override_target is not None:
+        return override_target if override_target in ("nate", "agents") else None
+    if origin_voice == "agent":
+        return "agents"
+    if origin_voice in ("nate-direct", "nate-relayed"):
+        return "nate"
+    return None
+
+
+def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],
+                           override_target: Optional[str], *,
+                           needs_nate: bool, escalated: bool) -> bool:
+    """Whether all conditions permit one unattended shaping transition.
+
+    #77 supplies the plan booleans and #80 owns the transition. Keeping class,
+    origin, the Needs-Nate result (including #84's authority verifier), and
+    escalation in this one predicate prevents origin from becoming a second
+    gate that can drift from the existing self-approval rule.
+    """
+    return (
+        klass in SELF_APPROVABLE_CLASSES
+        and effective_shape_owner(origin_voice, override_target) == "agents"
+        and not needs_nate
+        and not escalated
+    )
+
+
 def required_tier(title: str, body: str, failed_before: bool = False) -> str:
     return "escalated" if escalation_reasons(title, body, failed_before) else "standard"
 
@@ -561,7 +647,7 @@ def startable(items: Sequence[Item],
     by_ref = {i.ref: i for i in items}
 
     def eligible(item: Item) -> bool:
-        if item.state != "OPEN" or item.is_blocked or item.children_total:
+        if item.state != "OPEN" or item.is_blocked or item.open_blockers or item.children_total:
             return False
         if item.ref in awaiting_review:
             return False
@@ -703,6 +789,22 @@ def parse_provenance(body: str) -> Optional[Dict]:
     found = _marked_json(body, PROVENANCE_MARKER)
     if found is None or found.get("voice") not in PROVENANCE_VOICES:
         return None
+    return found
+
+
+def parse_origin_override(body: str) -> Optional[Dict]:
+    """Return an authorised origin override, or None when it fails closed.
+
+    Anyone may ask that an item be shaped with Nate. Only a marker carrying a
+    Nate provenance voice may hand an item to agents for unattended shaping.
+    """
+    found = _marked_json(body, ORIGIN_OVERRIDE_MARKER)
+    if found is None or found.get("target") not in ORIGIN_OVERRIDE_TARGETS:
+        return None
+    if found["target"] == "agents":
+        provenance = parse_provenance(body)
+        if provenance is None or provenance["voice"] == "agent":
+            return None
     return found
 
 
@@ -1782,12 +1884,15 @@ query($login: String!, $number: Int!, $cursor: String) {
           }
           content {
             ... on Issue {
-              number title url state stateReason closedAt
+              number title url body state stateReason closedAt
               repository { nameWithOwner }
               labels(first: 25) { nodes { name } }
               assignees(first: 10) { nodes { login } }
               parent { number repository { nameWithOwner } }
               subIssuesSummary { total completed }
+              blockedBy(first: 50) {
+                nodes { number state stateReason repository { nameWithOwner } }
+              }
               timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]) {
                 nodes {
                   ... on ProjectV2ItemStatusChangedEvent {
@@ -1877,6 +1982,7 @@ def _from_node(node: dict) -> Optional[Item]:
         title=content["title"],
         url=content["url"],
         state=content["state"],
+        body=content.get("body"),
         state_reason=content.get("stateReason"),
         status=status,
         klass=(node.get("class") or {}).get("name"),
@@ -1893,6 +1999,15 @@ def _from_node(node: dict) -> Optional[Item]:
         item_id=node.get("id"),
         in_motion_since=parse_time((node.get("lock") or {}).get("text")),
     )
+
+    # Native dependencies apply to tickets, not the parent project, and the
+    # same open/dead split the REST helper produces. This comes out of the
+    # Project query that already ran, so it costs no extra request.
+    if item.state == "OPEN" and item.parent:
+        blockers = (content.get("blockedBy") or {}).get("nodes") or []
+        dependencies = classify_blockers(blockers, item.repo)
+        item.open_blockers = dependencies["open"]
+        item.dead_blockers = dependencies["dead"]
 
     # Time at the current gate: the last status change into the status the item
     # actually holds, in *this* project. Events arrive oldest-first, and an
@@ -1927,6 +2042,12 @@ def load_items() -> List[Item]:
             # Membership is the topic. An item whose repo has not opted in is
             # outside the funnel even though it sits in the Project.
             if item and item.repo in members:
+                # Dependencies are already on the item: `_from_node` reads them
+                # from `blockedBy` in the Project query. They used to be fetched
+                # here instead, one REST call per open ticket per command — ~78
+                # calls a run, ~1,800 an hour across the scheduled agents, which
+                # exhausted the API budget on 2026-09-08 and took `brief` down
+                # entirely. Do not restore a per-item read in this loop.
                 if item.state == "OPEN" and item.is_blocked:
                     _load_block_comment(item)
                 items.append(item)
@@ -2071,6 +2192,218 @@ def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     return [_blocked_item_json(item) for item in blocked_items(items)]
 
 
+def _item_human_step_reason(item: Item) -> Optional[str]:
+    """Return the parsed marker, tolerating fixture Items without a body."""
+    return parse_human_step(item.body or "")
+
+
+def human_step_items(items: Iterable[Item]) -> List[Item]:
+    """Open child issues that Nate must complete himself.
+
+    Human-step tickets are work, not decisions. They are therefore rendered in
+    their own brief section instead of being added to the decision queue.
+    Closed tickets remain in ``items`` so the completed-project backstop can
+    tell a project that carried a human step from one that never had one.
+    """
+    return sorted(
+        (
+            item for item in items
+            if item.state == "OPEN"
+            and item.parent is not None
+            and _item_human_step_reason(item) is not None
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+
+
+def _human_step_item_json(item: Item) -> Dict[str, object]:
+    return {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "reason": _item_human_step_reason(item),
+    }
+
+
+def human_step_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """Render the open human-step work owed by Nate."""
+    return [_human_step_item_json(item) for item in human_step_items(items)]
+
+
+def completed_projects_missing_human_steps(items: Iterable[Item]) -> List[Item]:
+    """Completed projects whose plans mention access but have no marker.
+
+    This is a detective signal, not proof that a human step was required. A
+    parked project is deliberately excluded: parking is not a claim that its
+    plan shipped. Any human-step ticket, including one already closed, clears
+    the flag because the backstop asks whether the project ever carried one.
+    """
+    rows = list(items)
+    human_step_parents = {
+        item.parent
+        for item in rows
+        if item.parent is not None and _item_human_step_reason(item) is not None
+    }
+    return sorted(
+        (
+            item for item in rows
+            if item.parent is None
+            and item.state == "CLOSED"
+            and item.state_reason != "NOT_PLANNED"
+            and item.status != "Parked"
+            and item.ref not in human_step_parents
+            and access_signals(item.body or "")
+        ),
+        key=lambda item: (
+            (item.closed_at or item.status_since) is None,
+            -((item.closed_at or item.status_since).timestamp()
+              if item.closed_at or item.status_since else 0),
+            item.repo,
+            item.number,
+        ),
+    )
+
+
+def _completed_project_missing_human_steps_json(item: Item) -> Dict[str, object]:
+    return {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "access_signals": access_signals(item.body or ""),
+    }
+
+
+def closed_with_access_vocabulary_json(
+    items: Iterable[Item],
+) -> List[Dict[str, object]]:
+    """Render the completed-project detective flags for the brief."""
+    return [
+        _completed_project_missing_human_steps_json(item)
+        for item in completed_projects_missing_human_steps(items)
+    ]
+
+
+def _never_closing(item: Item) -> bool:
+    """Whether an issue cannot resolve the prerequisite it represents."""
+    reason = str(item.state_reason or "").lower().replace("-", "_").replace(" ", "_")
+    return item.status == "Parked" or reason == "not_planned"
+
+
+def _dependency_ref(item: Item, value: str) -> Optional[str]:
+    """Expand the block-comment shorthand without guessing cross-repo refs."""
+    value = str(value).strip()
+    if value.startswith("#"):
+        return item.repo + value
+    return value if "/" in value and "#" in value else None
+
+
+def _dead_dependency_refs(item: Item, by_ref: Dict[str, Item]) -> List[str]:
+    """Return blockers that are explicitly unable to close.
+
+    ``dead_blockers`` comes from the native dependency response and covers
+    blockers outside the Project too. The other two sources let fixture and
+    already-loaded Project data prove the same condition for a local blocker.
+    """
+    refs = set(getattr(item, "dead_blockers", []))
+    for value in list(item.open_blockers) + list(item.block_references):
+        ref = _dependency_ref(item, value)
+        blocker = by_ref.get(ref or "")
+        if blocker is not None and _never_closing(blocker):
+            refs.add(ref)
+    return sorted(refs)
+
+
+def _approved_current_head(pr: Optional[Dict[str, object]]) -> bool:
+    """Whether a PR carries approval for the head currently being inspected."""
+    if not isinstance(pr, dict):
+        return False
+    verdict = pr.get("verdict")
+    if isinstance(verdict, dict):
+        approved = verdict.get("verdict") == "approved"
+        reviewed_head = verdict.get("head_sha")
+    else:
+        approved = verdict == "approved"
+        reviewed_head = None
+    if not approved:
+        return False
+    head = pr.get("headRefOid")
+    # A fixture may omit the SHA when it is only testing the state pair. Live
+    # facts include both values, and a moved head must not be called stranded:
+    # it is waiting for a fresh review instead.
+    return not head or not reviewed_head or head == reviewed_head
+
+
+def stranded_items(
+    items: Iterable[Item],
+    now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> List[Dict[str, object]]:
+    """Render open items for which no current agent or gate can make progress.
+
+    This is deliberately a diagnostic, not a queue. The first release only
+    uses facts the funnel already knows how to read: an approved current-head
+    verdict on a conflicting PR, a stale claim with no PR, a childless
+    ``Building`` project, and a native or named dependency closed as
+    ``not_planned``. Missing CI history is intentionally absent; no fetched
+    fact distinguishes that from a PR whose first check is still pending.
+
+    ``pr_facts`` is optional so the function remains fixture-pure. ``None``
+    means the caller has not requested PR lookups and therefore treats a stale
+    claim as having no PR; a supplied mapping distinguishes a known no-PR
+    result from a fact that was not fetched.
+    """
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    stale = {item.ref for item in stale_locks(rows, now)}
+    found: List[Dict[str, object]] = []
+
+    for item in rows:
+        if item.state != "OPEN":
+            continue
+
+        reasons: List[str] = []
+        pr_known = pr_facts is None or item.ref in pr_facts
+        pr = None if pr_facts is None else pr_facts.get(item.ref)
+        if (
+            pr
+            and str(pr.get("state") or "").upper() == "OPEN"
+            and str(pr.get("mergeable") or "").upper() == "CONFLICTING"
+            and _approved_current_head(pr)
+        ):
+            reasons.append("approved verdict against an unmergeable branch")
+
+        if item.ref in stale and pr_known and pr is None:
+            reasons.append("claim past its TTL with no PR")
+
+        if item.parent is None and item.status == "Building" and not item.children_total:
+            reasons.append("Building project has no tickets")
+
+        dead = _dead_dependency_refs(item, by_ref)
+        if dead:
+            reasons.append(
+                "blocked on blocker that will never close: {}".format(
+                    ", ".join(dead))
+            )
+
+        if reasons:
+            found.append({
+                "ref": item.ref,
+                "title": item.title,
+                "url": item.url,
+                "reason": "; ".join(reasons),
+            })
+    return found
+
+
+def stranded_json(
+    items: Iterable[Item],
+    now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> List[Dict[str, object]]:
+    """The brief's stranded-work diagnostic array."""
+    return stranded_items(items, now, pr_facts=pr_facts)
+
+
 def cmd_queue(items: List[Item], now: datetime) -> int:
     """Everything, ordered — both queues, each under its own heading.
 
@@ -2157,7 +2490,11 @@ def cmd_next(items: List[Item], now: datetime, tier: Optional[str] = None) -> in
     return 0
 
 
-def cmd_brief(items: List[Item], now: datetime) -> int:
+def cmd_brief(
+    items: List[Item],
+    now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> int:
     decisions = awaiting_decision(items)
     by_ref = {i.ref: i for i in items}
     counts = {}
@@ -2176,10 +2513,15 @@ def cmd_brief(items: List[Item], now: datetime) -> int:
         "items": [item_json(i, now, by_ref) for i in decisions],
         "parked": parked_json(items),
         "blocked": blocked_json(items),
+        "human_steps": human_step_json(items),
+        "closed_with_access_vocabulary": closed_with_access_vocabulary_json(
+            items
+        ),
         "needs_class": [item_json(i, now, by_ref) for i in items if needs_class(i)],
         "awaiting_breakdown": [
             item_json(i, now, by_ref) for i in awaiting_breakdown(items)
         ],
+        "stranded": stranded_json(items, now, pr_facts=pr_facts),
         "in_motion": [i.ref for i in running],
         "wip_limit": WIP_LIMIT,
         "stale_locks_taken_over": [i.ref for i in stale_locks(items, now)],
@@ -2550,6 +2892,64 @@ def _gh_json(*args: str):
         return None
 
 
+def dependency_facts(repo: str, number: int) -> Dict[str, List[str]]:
+    """Return the dependency states that affect whether a ticket can finish.
+
+    GitHub's endpoint returns full issue objects for both open and closed
+    blockers. Open blockers still belong in the queue's exclusion set. A
+    blocker closed as ``not_planned`` is different: it will never close as the
+    prerequisite the ticket names, so retain that ref for the stranded-work
+    diagnostic without treating it as an ordinary open blocker.
+    """
+    endpoint = "repos/{}/issues/{}/dependencies/blocked_by".format(repo, number)
+    blockers = _gh_json("gh", "api", endpoint)
+    if blockers is None:
+        raise GitHubError("could not read blockers for {}#{}".format(repo, number))
+    if not isinstance(blockers, list):
+        raise GitHubError("invalid blockers response for {}#{}".format(repo, number))
+    return classify_blockers(blockers, repo)
+
+
+def classify_blockers(blockers: Iterable[dict], repo: str) -> Dict[str, List[str]]:
+    """Split blocker objects into the two states the funnel acts on.
+
+    Deliberately tolerant of both wire shapes. REST spells the fields
+    ``state_reason`` / ``full_name`` and lowercases the state; GraphQL spells
+    them ``stateReason`` / ``nameWithOwner`` and uppercases it. One classifier
+    for both is what keeps the batched Project read and the single-ticket REST
+    helper from drifting into two different definitions of "blocked".
+    """
+    refs: Dict[str, List[str]] = {"open": [], "dead": []}
+    for blocker in blockers:
+        if not isinstance(blocker, dict):
+            continue
+        blocker_number = blocker.get("number")
+        if not isinstance(blocker_number, int) or isinstance(blocker_number, bool):
+            continue
+        blocker_repo = (blocker.get("repository") or {}).get("full_name") \
+            or (blocker.get("repository") or {}).get("nameWithOwner") or repo
+        ref = "{}#{}".format(blocker_repo, blocker_number)
+        state = str(blocker.get("state") or "").lower()
+        state_reason = str(
+            blocker.get("state_reason") or blocker.get("stateReason") or ""
+        ).lower().replace("-", "_").replace(" ", "_")
+        if state == "open":
+            refs["open"].append(ref)
+        elif state_reason == "not_planned":
+            refs["dead"].append(ref)
+    return refs
+
+
+def open_blockers(repo: str, number: int) -> List[str]:
+    """Return open native dependency blockers for one ticket.
+
+    The public helper keeps its original narrow contract. ``load_items`` uses
+    ``dependency_facts`` directly so the same endpoint read can also preserve
+    blockers that were explicitly parked or marked not planned.
+    """
+    return dependency_facts(repo, number)["open"]
+
+
 def _load_block_comment(item: Item) -> None:
     """Populate one open blocked item's parsed comment state.
 
@@ -2581,8 +2981,31 @@ def _ticket_pr(repo: str, number: int) -> Optional[Dict]:
     """The PR for a ticket, found by the branch name the routine guarantees."""
     rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "all",
                     "--head", "ticket/{}".format(number), "--json",
-                    "number,state,url,mergedAt,reviews") or []
+                    "number,state,url,headRefOid,mergeable,mergedAt,reviews") or []
     return rows[0] if rows else None
+
+
+def ticket_pr_facts(
+    items: Sequence[Item],
+) -> Dict[str, Optional[Dict[str, object]]]:
+    """Read PR facts needed by the brief's stranded-work diagnostics.
+
+    Only open child tickets and claimed items need a PR lookup. The result is a
+    map with an explicit ``None`` for a known missing PR, so the pure detector
+    can distinguish that from a ticket omitted by a caller that did not fetch
+    PR facts at all.
+    """
+    facts: Dict[str, Optional[Dict[str, object]]] = {}
+    for item in items:
+        if item.state != "OPEN" or not (item.parent or item.in_motion_since is not None):
+            continue
+        pr = _ticket_pr(item.repo, item.number)
+        if pr and str(pr.get("state") or "").upper() == "OPEN":
+            pr = dict(pr)
+            if str(pr.get("mergeable") or "").upper() == "CONFLICTING":
+                pr["verdict"] = latest_verdict(item.repo, pr.get("number"))
+        facts[item.ref] = pr
+    return facts
 
 
 def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict]:
@@ -2712,9 +3135,16 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         if breakdown:
             pending = awaiting_breakdown(items)
             if pending:
-                out.update(do="breakdown",
-                           work={"ref": pending[0].ref, "url": pending[0].url,
-                                 "title": pending[0].title})
+                item = pending[0]
+                work = {
+                    "ref": item.ref,
+                    "url": item.url,
+                    "title": item.title,
+                    "access_signals": access_signals(
+                        _ticket_body(item.repo, item.number)
+                    ),
+                }
+                out.update(do="breakdown", work=work)
             else:
                 out.update(do="stop",
                            why="nothing to review and nothing to break down")
@@ -3235,6 +3665,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_merge(items, now, args.repo, args.pr, args.confirmed)
         if args.command == "next":
             return cmd_next(items, now, tier=getattr(args, "tier", None))
+        if args.command == "brief":
+            return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
         return {"queue": cmd_queue, "brief": cmd_brief}[args.command](
             items, now
         )

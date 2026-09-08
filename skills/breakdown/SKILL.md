@@ -121,6 +121,34 @@ connector in Nate's account requires an application or account UI. Each is a
 separate human action to record and ticket, not an assumption hidden in an
 engineering ticket.
 
+## Contradiction check for an all-clear
+
+The JSON from `funnel begin --breakdown` carries `work.access_signals`, the
+canonical scan of the parent plan's access-shaped vocabulary from `funnel.py`.
+Do not copy the vocabulary into this skill. The scan is a detector beside the
+checklist, not a second set of human-step categories:
+
+- If the signal list is non-empty and every boundary answer is `no`, flag an
+  all-clear contradiction before creating tickets. Re-read each matching plan
+  passage and trace it to a concrete action or missing prerequisite.
+- If a matching passage names an action outside the boundary, split that action
+  into its own human-step ticket. If it is only a rejected alternative, an
+  example, or an action already reachable to the agent, keep the all-clear and
+  record why the signal was cleared. A vocabulary match alone never creates a
+  human-step ticket.
+- If the signal list is empty, record that the contradiction check was not
+  triggered; an empty scan is not proof that the plan has no human step.
+
+Add these lines to the parent coverage comment alongside the checklist:
+
+```text
+Access vocabulary: <signals from work.access_signals, or “none”>
+All-clear contradiction: <not triggered / flagged — resolution>
+```
+
+The #25 walkthrough must surface at least `tunnel` and `token`; those signals
+are evidence to inspect, not proof that every mention requires Nate.
+
 ## Coverage
 
 Together, the tickets must cover the plan. Before finishing:

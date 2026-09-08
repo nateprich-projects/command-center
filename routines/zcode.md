@@ -32,7 +32,7 @@ carrying two jobs at once starts reaching for things neither asked of it.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent zcode --tier standard --breakdown
+python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha 64db74ff0968f34c44d585a6a9e58656819326b6a6f6e2fd5bc78354288ec7ed
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and says

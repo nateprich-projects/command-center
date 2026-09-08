@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -17,6 +20,24 @@ import usage  # noqa: E402
 
 
 NOW = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(params=("claude", "zcode"))
+def checked_in_routine(request):
+    path = funnel.routine_path(request.param)
+    command = next(
+        line for line in path.read_text(encoding="utf-8").splitlines()
+        if "funnel.py begin" in line
+    )
+    match = re.search(r"--routine-sha\s+([0-9a-f]{64})(?:\s|$)", command)
+    assert match, "{} must pin a 64-character routine sha".format(path)
+    return path, match.group(1)
+
+
+def test_checked_in_routine_literals_match_normalized_hash(checked_in_routine):
+    path, literal = checked_in_routine
+
+    assert literal == funnel.routine_sha(path)
 
 
 def _allow_begin(monkeypatch):

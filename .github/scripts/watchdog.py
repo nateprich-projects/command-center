@@ -6,8 +6,8 @@ Runs in GitHub Actions, outside the machine it watches.
 It reports three distinct conditions, because they have different causes and
 different fixes:
 
-- **Silent.** No record at all within the window. The app is closed, the Mac
-  mini is off or asleep, or the routine was never scheduled.
+- **Silent.** No record at all within the window. The watchdog can report that
+  absence and when the last record arrived, but cannot observe its cause.
 - **Dying.** Runs that started and never finished. That is the signature of a
   session killed mid-work by a rate limit, and it is the one condition a single
   outcome line could never have detected.

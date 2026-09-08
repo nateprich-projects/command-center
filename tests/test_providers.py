@@ -71,11 +71,16 @@ def test_the_downstream_reserve_only_bites_on_a_shared_pool(monkeypatch):
 
 
 def test_review_headroom_is_held_back_when_the_pool_is_shared():
-    """65% of a pool allowed to 81% is fine alone, and not fine when the reviewer
-    still has to run on the same credits: 81 - 20 = 61."""
+    """65% of a pool allowed to 83.5% is fine alone, and not fine when the
+    reviewer still has to run on the same credits: 83.5 - 20 = 63.5."""
     windows = usage.pace(seven_day(60.0, 0.9), NOW)["windows"]
-    assert windows[0]["allowed_percent"] == 81.0
-    assert 60.0 + windows[0]["reserve"] > 81.0 - usage.DOWNSTREAM_RESERVE
+    expected = round(
+        usage.WEEKLY_FLOOR
+        + (usage.WEEKLY_TARGET - usage.WEEKLY_FLOOR) * 0.9,
+        1,
+    )
+    assert windows[0]["allowed_percent"] == expected
+    assert 60.0 + windows[0]["reserve"] > expected - usage.DOWNSTREAM_RESERVE
 
 
 # -- z.ai: read, never computed ----------------------------------------------
@@ -124,23 +129,29 @@ def test_the_dedicated_pool_has_its_own_policy_not_the_shared_default():
     """`WEEKLY_FLOOR` exists to leave Nate room on a subscription he also works
     on. A pool bought for the automations needs no such protection — what it
     needs is pacing, so a week's credits are not spendable on Monday."""
-    early = usage.pace(seven_day(10.0, 0.05), NOW, provider="zai")["windows"][0]
-    # Asserted against the policy rather than a literal: the property under test
-    # is that this pool reads *its own* entry, not that the entry holds any
-    # particular number. Pinning the literal made this fail on 2026-09-07 when
-    # Nate deliberately raised the floor to 22 to unstick zcode — a config
-    # decision, not a regression. `test_the_dedicated_pool_is_paced_rather_than_
-    # flat` below still pins the behaviour that actually matters.
-    assert early["allowed_percent"] == usage.PROVIDER_POLICY["zai"]["weekly_floor"]
-    assert early["allowed_percent"] != usage.WEEKLY_FLOOR    # not the shared 25
-    assert early["reserve"] == 0.5                           # its own reserve, not 5
-    assert early["reserve"] != usage.WEEKLY_RESERVE          # not the shared 5
+    floor = usage.PROVIDER_POLICY["zai"]["weekly_floor"]
+    target = usage.PROVIDER_POLICY["zai"].get("weekly_target", usage.WEEKLY_TARGET)
+    allowed = [
+        usage.pace(seven_day(10.0, fraction), NOW, provider="zai")["windows"][0]
+        for fraction in (0.0, 0.05, 0.5, 1.0)
+    ]
+    assert allowed[0]["allowed_percent"] == floor
+    assert allowed[-1]["allowed_percent"] == target
+    assert all(
+        left["allowed_percent"] < right["allowed_percent"]
+        for left, right in zip(allowed, allowed[1:])
+    )
+    assert allowed[1]["allowed_percent"] == round(
+        floor + (target - floor) * 0.05, 1
+    )
+    assert allowed[1]["allowed_percent"] != usage.WEEKLY_FLOOR  # not the shared line
+    assert allowed[1]["reserve"] == 0.5                         # its own reserve, not 5
+    assert allowed[1]["reserve"] != usage.WEEKLY_RESERVE
 
 
 def test_the_dedicated_pool_is_paced_rather_than_flat():
-    """At 90 the floor equalled the target, the rising line never applied, and
-    the whole week was spendable on day one. At 15 the line governs from about
-    day one onward."""
+    """The dedicated pool rises from its own floor rather than staying flat
+    until the target line catches up."""
     day_one = usage.pace(seven_day(40.0, 0.05), NOW, provider="zai")
     assert day_one["over_pace"]                      # 40% on Monday is ahead
 
@@ -149,20 +160,24 @@ def test_the_dedicated_pool_is_paced_rather_than_flat():
 
 
 def test_the_dedicated_pool_reserve_is_sized_to_its_own_runs():
-    """5% is calibrated for Anthropic, where a run is ~1.5% of the window. A
-    measured z.ai run costs ~43 credits of 10,000 — 0.43% — so the shared
-    reserve would hold back 500 credits against a run costing forty."""
-    window = usage.pace(seven_day(44.0, 0.5), NOW, provider="zai")["windows"][0]
+    """The z.ai pool reserves 0.5%, while the shared default reserves 5%."""
+    window = usage.pace(seven_day(54.0, 0.5), NOW, provider="zai")["windows"][0]
     assert window["reserve"] == 0.5
-    assert not window["over"]                        # 44.5 < 45 allowed
-    # The shared default would have refused the same reading.
-    assert usage.pace(seven_day(44.0, 0.5), NOW)["windows"][0]["over"]
+    assert not window["over"]                        # 54.5 < 56 allowed
+    # The shared default refuses the same reading because its reserve is 5.
+    assert usage.pace(seven_day(54.0, 0.5), NOW)["windows"][0]["over"]
 
 
 def test_an_unknown_provider_gets_the_shared_defaults():
     a = usage.pace(seven_day(40.0, 0.02), NOW)["windows"][0]
     b = usage.pace(seven_day(40.0, 0.02), NOW, provider="nosuchpool")["windows"][0]
-    assert a["allowed_percent"] == b["allowed_percent"] == usage.WEEKLY_FLOOR
+    expected = round(
+        usage.WEEKLY_FLOOR
+        + (usage.WEEKLY_TARGET - usage.WEEKLY_FLOOR) * 0.02,
+        1,
+    )
+    assert a["allowed_percent"] == b["allowed_percent"] == expected
+    assert expected > usage.WEEKLY_FLOOR
 
 
   # shared: 94 > 45

@@ -34,23 +34,34 @@
     </array>
 
     <!--
-      Every fifteen minutes, on the quarter, deliberately offset from the
-      escalated schedule at :07.
+      Every five minutes, deliberately offset from the escalated schedule at :07
+      (no multiple of five is 7).
 
-      Added 2026-09-07 to take load off zcode: ten PRs were stacked in the
-      standard review queue while zcode sat over pace, refused on budget for
-      67 of its 89 runs. Muse is unmetered and was idle, so it takes the tier
-      it can help with. Escalated stays hourly at max effort; this runs at
-      high, which is the cheaper level for ordinary work.
+      Was fifteen minutes. Raised 2026-09-07 because review had become the
+      bottleneck: measured over two hours, Codex produced 3.5 PRs/hour and Muse
+      reviewed 3.0, so the queue grew slowly and never drained. Muse was at 1% of
+      its five-hour window and 0% of its week, so the capacity was already paid
+      for and idle.
+
+      This is a cadence chosen against a measured rate, not a guess. If Codex is
+      ever paced again (#92, #125) the rate changes and this should be revisited
+      rather than left at whatever cleared one backlog.
     -->
     <key>StartCalendarInterval</key>
     <array>
         <dict><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Minute</key><integer>5</integer></dict>
+        <dict><key>Minute</key><integer>10</integer></dict>
         <dict><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Minute</key><integer>20</integer></dict>
+        <dict><key>Minute</key><integer>25</integer></dict>
         <dict><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Minute</key><integer>35</integer></dict>
+        <dict><key>Minute</key><integer>40</integer></dict>
         <dict><key>Minute</key><integer>45</integer></dict>
+        <dict><key>Minute</key><integer>50</integer></dict>
+        <dict><key>Minute</key><integer>55</integer></dict>
     </array>
-
 
     <key>RunAtLoad</key>
     <false/>

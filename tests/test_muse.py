@@ -115,7 +115,7 @@ def test_the_prompt_is_the_routine_file_not_a_copy():
     prompt = routine.split("\n---\n", 1)[1]
     # The tier is a placeholder the runner substitutes, so one routine serves
     # both schedules. A second routine would be a second thing to drift.
-    assert "funnel.py begin --agent muse --tier TIER_PLACEHOLDER" in prompt
+    assert "funnel.py begin --agent muse OPENING_FLAGS" in prompt
 
 
 def test_the_runner_substitutes_the_tier_and_refuses_a_bad_one():
@@ -130,5 +130,35 @@ def test_the_runner_substitutes_the_tier_and_refuses_a_bad_one():
     assert "escalated or standard" in bad.stderr
 
     body = (ROOT / "scripts" / "muse-review").read_text()
-    assert "TIER_PLACEHOLDER" in body, "the runner must know the placeholder"
-    assert 'grep -q TIER_PLACEHOLDER' in body, "and must verify it was replaced"
+    assert "OPENING_FLAGS" in body, "the runner must know the placeholder"
+    assert "grep -q OPENING_FLAGS" in body, "and must verify it was replaced"
+
+
+def test_breakdown_rides_with_standard_and_not_with_escalated():
+    """Breakdown is mechanical, so it belongs on the frequent cheaper-effort
+    schedule rather than the hourly one at max effort — and the escalated
+    schedule exists so a rare risky review is never left waiting, which a
+    breakdown in the same run would delay.
+
+    Checked by running the runner's own flag logic rather than re-deriving it,
+    because a second copy of the rule is a second thing to get wrong."""
+    import subprocess
+
+    runner = ROOT / "scripts" / "muse-review"
+    for tier, expected in (("standard", True), ("escalated", False)):
+        out = subprocess.run(
+            ["bash", "-c",
+             'set -e; TIER={}; . /dev/stdin <<< "$(sed -n \'/^FLAGS=/,/^fi$/p\' {})"; '
+             'echo "$FLAGS"'.format(tier, runner)],
+            capture_output=True, text=True)
+        assert ("--breakdown" in out.stdout) is expected, (tier, out.stdout, out.stderr)
+
+
+def test_the_routine_describes_both_jobs_and_their_order():
+    """Review before breakdown, stated in the routine rather than left to the
+    JSON. A run that breaks something down while a PR waits inverts bottom-up
+    ordering, and the funnel cannot correct it after the fact."""
+    routine = (ROOT / "routines" / "muse.md").read_text()
+    assert "Reviews win because they are further down the funnel" in routine
+    assert "Never both in the same\nrun" in routine or "Never both in the same run" in routine
+    assert "skills/breakdown/SKILL.md" in routine

@@ -45,9 +45,18 @@ fi
 
 # Everything after the first `---` is the agent-facing prompt; the header above
 # it is written for a human reading the file. Same shape as the other routines.
-PROMPT="$(awk 'f{print} /^---$/{f=1}' "$ROUTINE" | sed "s/TIER_PLACEHOLDER/$TIER/g")"
-if printf '%s' "$PROMPT" | grep -q TIER_PLACEHOLDER; then
-  echo "muse-review: the tier placeholder was not substituted" >&2
+# Breakdown rides with the standard tier, not with escalated. It is mechanical
+# work, so it belongs on the frequent cheaper-effort schedule rather than the
+# hourly one at max effort -- and the escalated schedule exists so rare risky
+# reviews are never left waiting, which a breakdown would delay by minutes.
+FLAGS="--tier $TIER"
+if [[ "$TIER" == "standard" ]]; then
+  FLAGS="$FLAGS --breakdown"
+fi
+
+PROMPT="$(awk 'f{print} /^---$/{f=1}' "$ROUTINE" | sed "s/OPENING_FLAGS/$FLAGS/g")"
+if printf '%s' "$PROMPT" | grep -q OPENING_FLAGS; then
+  echo "muse-review: the opening-flags placeholder was not substituted" >&2
   exit 1
 fi
 if [[ -z "${PROMPT// }" ]]; then

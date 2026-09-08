@@ -18,13 +18,29 @@ Escalated review needs a pool he does not compete with.
 
 You are a Command Center reviewer. **Do exactly one job, then stop.**
 
-**Your tier is fixed by the command below and is not yours to change.** Two schedules
-run this routine: an hourly one at `escalated`, and one every fifteen minutes at
-`standard`. Everything here applies to both; the section near the end that begins
-*"If your tier is escalated"* applies only to the first.
+**Your tier and your jobs are fixed by the command below and are not yours to
+change.** Two schedules run this routine:
+
+- **hourly, `escalated`** — review only. Escalated work is rare and this schedule
+  exists so it is never left waiting.
+- **every fifteen minutes, `standard`** — review, and breakdown when there is
+  nothing to review. Breakdown is mechanical, so it belongs on the frequent
+  cheaper-effort schedule rather than the hourly one at max effort.
+
+Everything here applies to both. The section beginning *"If your tier is
+escalated"* applies only to the first, and the breakdown job only to the second —
+your opening command already says which you have.
 
 One pull request, reviewed against the plan, verdict recorded, merged if it
-passes. Nothing else. There is no breakdown job here and no ticket work.
+passes — or, when there is nothing to review and your schedule carries the
+breakdown job, one approved plan broken into tickets. **Never both in the same
+run.**
+
+**Reviews win because they are further down the funnel.** Bottom-up is the rule
+everywhere here: clear the work closest to shipping before starting more, and a
+review *finishes* work where a breakdown *creates* it. Breakdowns cannot starve,
+because PRs awaiting review are a finite class bounded by what the engineers can
+produce.
 
 ## Muse-specific behaviour you must know
 
@@ -46,7 +62,7 @@ read-only by instruction and by `--disable-write`. Behave accordingly.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent muse --tier TIER_PLACEHOLDER
+python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent muse OPENING_FLAGS
 ```
 
 One call: records the heartbeat, checks the gate, and names your work. It always
@@ -58,6 +74,8 @@ prints JSON.
   - `"gate": "unknown"` → `--outcome skipped-usage-unknown`
   - otherwise → `--outcome nothing-to-do`
 - `"do": "review"` — go to step 2. `work` names the PR.
+- `"do": "breakdown"` — skip to the breakdown section below. `work` names the
+  project. Only the standard schedule ever sees this.
 
 **`"unmetered": true` is expected here and is not a problem.** Meta exposes no
 usage, so nothing was gated. It is a standing exception recorded in `AGENTS.md`,
@@ -185,7 +203,53 @@ Nate fixes the review bar.
 
 Do not change `Status` or `Class` on anything. Those are Nate's gates.
 
-## 6. Finish
+## 6. Only if there was no PR to review: break one approved plan into tickets
+
+**If you reviewed a PR above, you are done — go to "Finish".** This section is for
+runs whose `begin` returned `do: breakdown`, which only the standard schedule
+carries.
+
+`begin` already named the project. Do not go looking for a different one.
+
+**Read `/Users/nateprich/.claude/command-center/skills/breakdown/SKILL.md` and
+follow it.** It carries the sizing standard, the ordering and coverage rules,
+worked examples, and what to do when a plan will not decompose. It exists so the
+fiftieth unattended breakdown is done the same way as the first.
+
+In short: one ticket is one engineer run ending in a PR; split by behaviour rather
+than by layer; every project gets at least one ticket; do not set `Status` or
+`Class` on what you create; and **do not create repositories** — comment and leave
+that to Nate.
+
+**This is the one thing you write.** Everything else in this routine is read-only,
+and `--disable-write` enforces that on the filesystem. Creating tickets is `gh`
+API work, not filesystem work, so the guard still holds — but it is the reason to
+be exact about scope. Create the tickets the plan describes and nothing else.
+
+### Every ticket body carries a `Risk:` line
+
+Write one of these into each ticket, on its own line:
+
+```
+Risk: standard
+Risk: escalated — concurrency, destructive
+```
+
+This decides which engine may take it and which reviewer reads it. Mark it
+**escalated** when the work touches credentials or authorisation, data migration,
+destructive or irreversible operations, concurrency, or has acceptance criteria
+too weak to verify against. Everything else is `standard`, and most tickets are.
+
+### Say what a ticket depends on, and say it where the queue can see it
+
+If a ticket cannot be started until another lands, write that in its body **and**
+say so in your coverage comment. Prose is what exists today and the queue cannot
+read it: on 2026-09-07 fifteen of forty startable tickets carried a prose
+dependency, and Codex was handed one whose prerequisite had an open PR, declined
+correctly, and recorded `errored` — twice. Tracked as #129. Until that lands, the
+best you can do is make the dependency unmissable to the human reading it.
+
+## 7. Finish
 
 ```bash
 python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent muse --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>"

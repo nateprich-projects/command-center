@@ -24,7 +24,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Sequence, Set
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 # --------------------------------------------------------------------------
 # Configuration. These are the only knobs; everything else is derived.
@@ -138,6 +138,14 @@ REGRESSION_PREFIX = "Regression from PR #"
 #: Reasons are durable parking artifacts. The sibling brief command reads this
 #: fixed marker back from issue comments, so it is a shared contract.
 PARK_COMMENT_PREFIX = "**Parked:** "
+
+#: A blocked comment names an optional, knowable condition after this marker.
+#: The parser below owns the rest of the fixed header shape.
+BLOCK_COMMENT_PREFIX = "**Blocked"
+BLOCK_COMMENT_RE = re.compile(
+    r"\A" + re.escape(BLOCK_COMMENT_PREFIX)
+    + r"(?: on (?P<references>#[0-9]+(?: and #[0-9]+)*))?:\*\*"
+)
 
 #: Existing comments have no machine-readable provenance. Until the provenance
 #: marker lands, show must fail closed rather than treat the GitHub account as
@@ -639,6 +647,26 @@ def parse_provenance(body: str) -> Optional[Dict]:
     if found is None or found.get("voice") not in PROVENANCE_VOICES:
         return None
     return found
+
+
+def parse_block_comment(bodies: Iterable[str]) -> Optional[Tuple[List[str], str]]:
+    """Return the newest parseable block comment's references and reason.
+
+    The header is deliberately strict and anchored at the start of the body so
+    an old or embedded mention cannot accidentally become a condition.
+    """
+    for body in reversed(list(bodies)):
+        if not isinstance(body, str):
+            continue
+        match = BLOCK_COMMENT_RE.match(body)
+        if not match:
+            continue
+        references = match.group("references")
+        return (
+            references.split(" and ") if references else [],
+            body[match.end():].strip(),
+        )
+    return None
 
 
 def _heartbeat_context(run: Optional[str], agent: Optional[str]):

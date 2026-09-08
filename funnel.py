@@ -183,6 +183,8 @@ class Item:
     klass: Optional[str] = None
     status_since: Optional[datetime] = None
     labels: List[str] = field(default_factory=list)
+    block_references: List[str] = field(default_factory=list)
+    block_reason: Optional[str] = None
     assignees: List[str] = field(default_factory=list)
     in_motion_since: Optional[datetime] = None
     item_id: Optional[str] = None  # the ProjectV2Item, needed to write the lock
@@ -258,7 +260,12 @@ def gate_question(item: Item) -> Optional[str]:
     if item.state != "OPEN":
         return None
     if item.is_blocked:
-        return "Unblock or park?"
+        # A named condition is knowable work for the system, not a question for
+        # Nate. A silent block still needs his attention, but only a project
+        # can be parked; a ticket can only be unblocked.
+        if item.block_references:
+            return None
+        return "Unblock?" if item.parent else "Unblock or park?"
     if item.status == "Building":
         # Building waits on Nate only once every child has closed.
         return GATES["Building"] if item.children_all_closed else None
@@ -1870,6 +1877,8 @@ def load_items() -> List[Item]:
             # Membership is the topic. An item whose repo has not opted in is
             # outside the funnel even though it sits in the Project.
             if item and item.repo in members:
+                if item.state == "OPEN" and item.is_blocked:
+                    _load_block_comment(item)
                 items.append(item)
         if not page["pageInfo"]["hasNextPage"]:
             break
@@ -2450,6 +2459,26 @@ def _gh_json(*args: str):
         return json.loads(out.stdout)
     except ValueError:
         return None
+
+
+def _load_block_comment(item: Item) -> None:
+    """Populate one open blocked item's parsed comment state.
+
+    Block comments are intentionally loaded outside the Project query. The
+    normal load pays for this only for open blocked items, and the parsed state
+    stays on ``Item`` for pure queue functions and the brief to reuse.
+    """
+    comments = (_gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "comments",
+    ) or {}).get("comments", [])
+    parsed = parse_block_comment([
+        comment.get("body") or ""
+        for comment in comments
+        if isinstance(comment, dict)
+    ])
+    if parsed is not None:
+        item.block_references, item.block_reason = parsed
 
 
 def _ticket_body(repo: str, number: int) -> str:

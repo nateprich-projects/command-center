@@ -68,12 +68,29 @@ wrong.
   and OpenAI permit on these plans, and it has been misread as universal.
   _(confirmed by Nate 2026-09-07.)_
 
-  **Muse Code is exempt, because Meta sanctions it.** `muse exec` is Meta's own documented
-  mode for scripts and CI, with `--json` streaming JSONL. Muse ships no scheduler of its
-  own, so a launchd job running `muse exec` is the only way to schedule it — and it is a
-  *better* surface than the alternative, because a plist is a file that can be versioned
-  and drift-checked, unlike zcode's prompt, which lives in an app UI and which nothing can
-  see (#52).
+  **Muse Code is treated as exempt. That is an inference, not a verified reading of
+  Meta's terms** — the distinction matters and an earlier version of this section
+  asserted sanction it had not established. _(corrected 2026-09-07.)_
+
+  What is actually established: `muse exec` is described in the CLI's own help as
+  running a prompt non-interactively (headless), with `--json` for machine-readable
+  output; Meta ships an SDK for controlling Muse Code programmatically; and the
+  subscriptions documentation places no restriction on automated, scheduled or headless
+  use, requiring only that a subscription is used *through the signed-in CLI*, which
+  these schedules satisfy. Separate API keys bill pay-as-you-go, so the runner
+  deliberately uses the account login and never sets `META_API_KEY`.
+
+  What is **not** established: the Meta Model API Terms of Service and Acceptable Use
+  Policy, which the subscriptions page names as the governing documents, returned no
+  readable content when fetched on 2026-09-07. Nobody here has read them. "No
+  restriction found" means "not in the pages that could be read", which is a weaker
+  claim than it looks. **If a fair-use or automated-workload clause exists, it lives
+  there, and the schedules are ~100 runs a day.**
+
+  Muse ships no scheduler of its own, so a launchd job is the only way to schedule it —
+  and it is a *better* surface than the alternative, because a plist is a file that can
+  be versioned and drift-checked, unlike zcode's prompt, which lives in an app UI where
+  nothing can see it (#52).
 
   **`--approval-mode never` is not a guard.** Measured 2026-09-07: it does **not** fail
   closed. It means *never ask*, and it auto-approved a shell command with no prompt.

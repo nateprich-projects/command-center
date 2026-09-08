@@ -68,9 +68,15 @@ wrong.
   and OpenAI permit on these plans, and it has been misread as universal.
   _(confirmed by Nate 2026-09-07.)_
 
-  **Muse Code is treated as exempt. That is an inference, not a verified reading of
-  Meta's terms** — the distinction matters and an earlier version of this section
-  asserted sanction it had not established. _(corrected 2026-09-07.)_
+  **Muse Code is exempt, on Nate's judgement.** Asked whether the schedules were within
+  Meta's terms, he answered *"I think we're good."* That settles it as a decision and
+  the schedules run. _(confirmed by Nate 2026-09-07.)_
+
+  **It remains his risk call on an inference, not a verified reading of Meta's terms**
+  — an earlier version of this section asserted sanction it had not established, and
+  his answer accepts the exposure rather than closing the gap. Do not upgrade the
+  wording below to "permitted" or "sanctioned" on the strength of this line.
+  _(corrected 2026-09-07.)_
 
   What is actually established: `muse exec` is described in the CLI's own help as
   running a prompt non-interactively (headless), with `--json` for machine-readable

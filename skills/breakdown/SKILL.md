@@ -75,23 +75,31 @@ the blocker's live state.
 ## The capability boundary
 
 Use the [capability boundary](../capability-boundary.md) as the closed-world test
-when deciding whether a planned step is work an agent can take on. Ask whether the
-step requires anything outside that boundary; the named access cases are examples,
-not an exhaustive checklist. Keep this test separate from ticket sizing: a step can
-be small and still be outside the agent's reach.
+when deciding whether a planned step is work an agent can take on. Classify the
+step by the boundary's three outcomes before sizing it; keep capability separate
+from ticket sizing, because a step can be small and still be outside an agent's
+reach.
+
+## Capability markers
+
+At breakdown, leave the capability marker out for work that is workable by any
+agent. When a step is workable only where the Claude Code environment is present,
+put this line in the ticket body, using the same line-anchored marker shape as the
+`Risk:` line:
+
+```text
+Human step: a Claude Code environment
+```
+
+This is the middle outcome, not a difficulty or uncertainty marker. For work that
+is workable by no agent, use one of the existing allowlisted `Human step:` reasons
+for the specific human action. Keep this metadata in the ticket body rather than
+adding a Project field or label; the ticket is the unit being routed.
 
 If a ticket cannot start until another finishes, that is fine. If *every* ticket
 is chained, the plan has not really been broken up: it has been sliced into
 stages, and the funnel will process them one hourly run at a time with no
 parallelism gained. Look for a different cut.
-
-## Capability boundary
-
-When deciding whether a plan step is within an agent's reach, use the
-[capability boundary in `AGENTS.md`](../../AGENTS.md#capability-boundary) as a
-closed-world test: does the step require anything outside what an agent can reach?
-The access cases named there are examples, not an exhaustive list, so an unnamed
-requirement outside the boundary counts too.
 
 ## Boundary checklist at breakdown
 

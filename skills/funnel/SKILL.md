@@ -47,6 +47,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `parked` | Stopped items with the written reason each carries. The reason is the artifact that makes re-encountering an idea a 30-second decision |
 | `awaiting_breakdown` | Approved plans with no tickets yet. Claude owes these a breakdown; they are not startable until it happens |
 | `unattended_merges` | Merges an agent made without him, read from heartbeat records. `plan.md` makes these appearing in the brief a condition of unattended merging being allowed at all |
+| `agent_health` | Raised watchdog conditions, each with the heartbeat agent and the watchdog's condition wording. Empty when all agents are healthy |
 | `rejected_merges` | Merges he checked and found broken, over `window_days`. `stop_auto_merging` true means three in a week — auto-merging stops until he fixes the review bar |
 | `closed_with_access_vocabulary` | Projects that closed with access-shaped words in the plan and no human-step ticket. The detective backstop for when every preventive layer missed one |
 
@@ -64,7 +65,8 @@ handed one, so an unrendered human step is invisible everywhere.
 
 Then the gate counts on one line. Then anything unusual, and only if present:
 `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`, `awaiting_breakdown`,
-`unattended_merges`, `rejected_merges`, and `closed_with_access_vocabulary`.
+`unattended_merges`, `agent_health`, `rejected_merges`, and
+`closed_with_access_vocabulary`.
 
 Offer the `launch` command for the top item. Do not run it.
 

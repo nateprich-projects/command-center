@@ -36,32 +36,25 @@ from typing import Dict, List, Optional, Tuple
 sys.path.insert(0, str(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))))))
 import heartbeat  # noqa: E402
+import agent_health as _agent_health  # noqa: E402
 
 REPO = os.environ.get("GITHUB_REPOSITORY", "nateprich-projects/command-center")
 BRANCH = "heartbeat"
 MARKER = "<!-- command-center-watchdog -->"
 
-#: Calibrated by the offline replay in tests/test_watchdog_calibration.py against
-#: the heartbeat branch snapshot in tests/fixtures/heartbeat_history.json.
-NORMAL_PERCENTILE = 90
-NORMAL_MULTIPLE = 5
-SILENCE_FLOOR_SECONDS = 3600
-MINIMUM_HISTORY = 8
-
-#: The normal rhythm is learned from the trailing fortnight. This is deliberately
-#: separate from the four provisional calibration parameters above: the ticket
-#: calls for the window shown in the alarm evidence, "p90 over 14 days".
-HISTORY_WINDOW_SECONDS = 14 * 86400
-
-#: A run still unfinished after this long is presumed dead. Matches the lock TTL
-#: in funnel.py — the same two hours after which its claim becomes takeable.
-UNFINISHED_SECONDS = 2 * 3600
-
-#: One dying run is noise. Three in a week means runs are dying.
-DYING_THRESHOLD = 3
-ERROR_THRESHOLD = 3
-WEEK = 7 * 86400
-PROMPT_DRIFT_OUTCOME = "prompt-drift"
+# Keep the existing watchdog names as compatibility hooks for its calibration
+# tests and callers. The values live in the shared module so the Actions job and
+# the local funnel cannot silently acquire different thresholds.
+NORMAL_PERCENTILE = _agent_health.NORMAL_PERCENTILE
+NORMAL_MULTIPLE = _agent_health.NORMAL_MULTIPLE
+SILENCE_FLOOR_SECONDS = _agent_health.SILENCE_FLOOR_SECONDS
+MINIMUM_HISTORY = _agent_health.MINIMUM_HISTORY
+HISTORY_WINDOW_SECONDS = _agent_health.HISTORY_WINDOW_SECONDS
+UNFINISHED_SECONDS = _agent_health.UNFINISHED_SECONDS
+DYING_THRESHOLD = _agent_health.DYING_THRESHOLD
+ERROR_THRESHOLD = _agent_health.ERROR_THRESHOLD
+WEEK = _agent_health.WEEK
+PROMPT_DRIFT_OUTCOME = _agent_health.PROMPT_DRIFT_OUTCOME
 
 
 def gh(*args: str) -> str:
@@ -87,151 +80,46 @@ def records(agent: str) -> List[Dict]:
 
 
 def _history(rows: List[Dict], now: float) -> Tuple[List[float], List[float]]:
-    """Return recent record timestamps and their positive consecutive gaps."""
-    cutoff = now - HISTORY_WINDOW_SECONDS
-    timestamps = sorted(
-        float(row["ts"])
-        for row in rows
-        if isinstance(row.get("ts"), (int, float))
-        and cutoff <= float(row["ts"]) <= now
+    return _agent_health._history(
+        rows, now, history_window_seconds=HISTORY_WINDOW_SECONDS
     )
-    gaps = [later - earlier for earlier, later in zip(timestamps, timestamps[1:])
-            if later > earlier]
-    return timestamps, gaps
 
 
-def _percentile(values: List[float], percentile: float) -> float:
-    """Return a linearly interpolated percentile without a third-party library."""
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    position = (len(ordered) - 1) * percentile / 100.0
-    lower = int(position)
-    upper = min(lower + 1, len(ordered) - 1)
-    fraction = position - lower
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+_percentile = _agent_health._percentile
+_duration = _agent_health._duration
 
 
 def _normal_gap(rows: List[Dict], now: float) -> Optional[Tuple[float, float, int]]:
-    """Return ``(normal gap, latest record, record count)`` when inferable."""
-    timestamps, gaps = _history(rows, now)
-    if len(gaps) < MINIMUM_HISTORY:
-        return None
-    return _percentile(gaps, NORMAL_PERCENTILE), timestamps[-1], len(timestamps)
-
-
-def _duration(seconds: float) -> str:
-    """Render a duration compactly enough to scan in an issue body."""
-    total = max(0, int(round(seconds)))
-    if total < 60:
-        return "{}s".format(total)
-    minutes, seconds = divmod(total, 60)
-    hours, minutes = divmod(minutes, 60)
-    days, hours = divmod(hours, 24)
-    parts = []
-    if days:
-        parts.append("{}d".format(days))
-    if hours:
-        parts.append("{}h".format(hours))
-    if minutes:
-        parts.append("{}m".format(minutes))
-    if not parts:
-        parts.append("0m")
-    return "".join(parts)
+    return _agent_health._normal_gap(
+        rows,
+        now,
+        normal_percentile=NORMAL_PERCENTILE,
+        minimum_history=MINIMUM_HISTORY,
+        history_window_seconds=HISTORY_WINDOW_SECONDS,
+    )
 
 
 def _window_label() -> str:
-    days = HISTORY_WINDOW_SECONDS / 86400
-    if days.is_integer():
-        return "{} days".format(int(days))
-    return _duration(HISTORY_WINDOW_SECONDS)
+    return _agent_health._window_label(HISTORY_WINDOW_SECONDS)
 
 
 def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
-    """Problems worth filing an issue about. Empty means healthy.
-
-    An agent that has *never* run is not a problem: it may simply not be
-    scheduled yet, and filing an alarm before the thing exists is how a watchdog
-    teaches its reader to ignore it. Silence only becomes meaningful once there
-    is a history to have gone quiet against. `note()` reports that case instead.
-    """
-    problems = []
-
-    if not rows:
-        return []
-
-    inferred = _normal_gap(rows, now)
-    if inferred is not None:
-        normal, latest, record_count = inferred
-        quiet_for = now - latest
-        threshold = max(SILENCE_FLOOR_SECONDS, NORMAL_MULTIPLE * normal)
-        if quiet_for > threshold:
-            ratio = quiet_for / normal if normal else float("inf")
-            ratio_text = "{:.0f}x normal".format(ratio) if ratio != float("inf") else "unbounded"
-            problems.append(
-                "`{}`: normal gap {} (p{} over {}, {} records). "
-                "Nothing recorded for {} — {} (alarm threshold {}x normal; "
-                "last at <t:{}:f>).".format(
-                    agent,
-                    _duration(normal),
-                    NORMAL_PERCENTILE,
-                    _window_label(),
-                    record_count,
-                    _duration(quiet_for),
-                    ratio_text,
-                    NORMAL_MULTIPLE,
-                    int(latest),
-                )
-            )
-
-    # An unresolved finish counts as a finish for one of its candidates. A run
-    # that completed but could not name itself must not be reported as dying —
-    # that false alarm is the failure this signal exists to avoid.
-    dying = [
-        r for r in heartbeat.open_starts(rows)
-        if now - (r.get("ts") or 0) > UNFINISHED_SECONDS
-        and now - (r.get("ts") or 0) < WEEK
-    ]
-    if len(dying) >= DYING_THRESHOLD:
-        problems.append(
-            "`{}` has {} runs this week that started and never finished — "
-            "tickets {}. That is what a session killed mid-work by a rate limit "
-            "looks like. Check whether the reserves in `usage.py` are too low.".format(
-                agent,
-                len(dying),
-                ", ".join(str(r.get("ticket")) for r in dying[-5:]),
-            )
-        )
-
-    prompt_drift = [
-        r for r in rows
-        if r.get("outcome") == PROMPT_DRIFT_OUTCOME
-        and now - (r.get("ts") or 0) < WEEK
-    ]
-    if prompt_drift:
-        problems.append(
-            "`{}` reported prompt drift {} time(s) this week. The routine "
-            "prompt differs from the checked-in file; sync it before relying "
-            "on scheduled work. Most recent at <t:{}:f>.".format(
-                agent,
-                len(prompt_drift),
-                int(prompt_drift[-1].get("ts") or 0),
-            )
-        )
-
-    errored = [
-        r for r in rows
-        if r.get("outcome") == "errored" and now - (r.get("ts") or 0) < WEEK
-    ]
-    if len(errored) >= ERROR_THRESHOLD:
-        notes = [r.get("note") for r in errored[-3:] if r.get("note")]
-        problems.append(
-            "`{}` errored {} times this week.{}".format(
-                agent, len(errored),
-                (" Most recent: " + "; ".join(notes)) if notes else "",
-            )
-        )
-    return problems
+    """Compatibility wrapper around the shared heartbeat assessment."""
+    return _agent_health.assess(
+        agent,
+        rows,
+        now,
+        normal_percentile=NORMAL_PERCENTILE,
+        normal_multiple=NORMAL_MULTIPLE,
+        silence_floor_seconds=SILENCE_FLOOR_SECONDS,
+        minimum_history=MINIMUM_HISTORY,
+        history_window_seconds=HISTORY_WINDOW_SECONDS,
+        unfinished_seconds=UNFINISHED_SECONDS,
+        dying_threshold=DYING_THRESHOLD,
+        week=WEEK,
+        prompt_drift_outcome=PROMPT_DRIFT_OUTCOME,
+        error_threshold=ERROR_THRESHOLD,
+    )
 
 
 def note(agent: str, rows: List[Dict], now: Optional[float] = None) -> str:

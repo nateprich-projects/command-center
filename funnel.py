@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from agent_health import assess as assess_agent_health
+
 # --------------------------------------------------------------------------
 # Configuration. These are the only knobs; everything else is derived.
 # --------------------------------------------------------------------------
@@ -1464,6 +1466,32 @@ def unattended_merges(now: datetime) -> List[Dict[str, object]]:
         for row in rows
         if row.get("merged") and (row.get("ts") or 0) >= cutoff
     ]
+
+
+def agent_health(now: datetime) -> List[Dict[str, str]]:
+    """Raised watchdog conditions, derived from the same heartbeat rows."""
+    try:
+        import heartbeat
+
+        providers = sorted(heartbeat.PROVIDERS)
+    except Exception:
+        return []
+
+    found: List[Dict[str, str]] = []
+    for agent in providers:
+        try:
+            conditions = assess_agent_health(
+                agent, heartbeat.read(agent), now.timestamp()
+            )
+        except Exception:
+            # The brief is a diagnostic surface. An unreachable heartbeat must
+            # not hide the rest of the funnel or turn rendering into a failure.
+            continue
+        found.extend(
+            {"agent": agent, "condition": condition}
+            for condition in conditions
+        )
+    return found
 
 
 def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
@@ -3282,6 +3310,7 @@ def cmd_brief(
         "stale_locks_taken_over": [i.ref for i in stale_locks(items, now)],
         "maintenance_load": maintenance_load(items, now),
         "unattended_merges": unattended_merges(now),
+        "agent_health": agent_health(now),
         "working_tree_touched": working_tree_touched(now),
         "rejected_merges": rejected_merges(items, now),
     }

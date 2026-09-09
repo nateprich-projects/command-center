@@ -223,7 +223,12 @@ def test_main_watches_every_registered_provider(monkeypatch):
     monkeypatch.setattr(watchdog, "existing_issue", lambda: {})
 
     assert watchdog.main() == 0
-    assert seen == sorted(providers)
+    # Every registered provider except the ones retired on purpose (#431):
+    # a stopped schedule is not a dying one, and a new pool is still covered.
+    assert seen == sorted(
+        a for a in providers if a not in watchdog.heartbeat.RETIRED_AGENTS
+    )
+    assert "future" in seen
 
 
 # -- the heartbeat's own view ----------------------------------------------

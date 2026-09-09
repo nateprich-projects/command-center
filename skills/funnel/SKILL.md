@@ -34,7 +34,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `total_needing_nate` | How many decisions are waiting |
 | `counts_by_gate` | Open items at each gate. `Ideas` is deliberately excluded — it is unbounded and guilt-free, and counting it turns it into pressure |
 | `items` | The decisions, **already ordered**. Bottom-up: closest to shipping first |
-| `waiting_on` | The question being asked. `Accept it?` · `Start now?` · `Is the plan good?` · `Unblock or park?` |
+| `waiting_on` | The question being asked. `Accept it?` · `Is the plan good?` · `Unblock or park?` |
 | `waited` | Time at the current gate |
 | `class` | The item's Project `Class`; tickets inherit their parent's Class |
 | `needs_class` | Items with no `Class` set. Invalid and not startable — a one-word fix in the Project |
@@ -74,7 +74,7 @@ is exactly what he should know before saying yes.
 
 ## Answering a gate
 
-`funnel approve` / `start` / `accept` answer the three gates. They are **dry runs
+`funnel approve` / `accept` answer the two gates. They are **dry runs
 unless `--yes` is passed**.
 
 **The decision is always his. The typing does not have to be.** Nate authorised agents

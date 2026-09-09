@@ -2630,7 +2630,7 @@ def gh_branch_exists() -> bool:
 
 
 def _spool_files(spool_dir: pathlib.Path) -> List[pathlib.Path]:
-    """List pending spool files without importing heartbeat.py."""
+    """List spool files without importing heartbeat.py."""
     try:
         if not spool_dir.exists():
             return []
@@ -2644,6 +2644,31 @@ def _spool_files(spool_dir: pathlib.Path) -> List[pathlib.Path]:
         return []
 
 
+def _spool_pending_records(files: Iterable[pathlib.Path]) -> List[object]:
+    """Read non-empty spool lines without importing heartbeat.py.
+
+    A drained spool file remains on disk as a zero-byte file. Count records
+    from its non-empty lines instead of treating the file itself as pending.
+    Keep the raw decoded values so a malformed line is still visible as a
+    pending record, while a well-formed heartbeat record can supply its own
+    timestamp for the age diagnostic.
+    """
+    records: List[object] = []
+    for path in files:
+        try:
+            with path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except ValueError:
+                        records.append(None)
+        except (OSError, UnicodeError) as exc:
+            raise OSError("{}: {}".format(path, exc)) from exc
+    return records
+
+
 def check_heartbeat(spool_dir: Optional[os.PathLike] = None,
                     now: Optional[float] = None) -> Check:
     """Check the remote heartbeat branch and any undrained local spool files."""
@@ -2651,6 +2676,8 @@ def check_heartbeat(spool_dir: Optional[os.PathLike] = None,
     now = time.time() if now is None else now
     findings: List[str] = []
     branch_ok: Optional[bool]
+    files: List[pathlib.Path] = []
+    pending_records: List[object] = []
 
     try:
         branch_ok = gh_branch_exists()
@@ -2669,7 +2696,6 @@ def check_heartbeat(spool_dir: Optional[os.PathLike] = None,
     try:
         files = _spool_files(spool)
     except OSError as exc:
-        files = []
         findings.append("local heartbeat spool {} cannot be read ({})".format(
             spool, exc))
     else:
@@ -2677,22 +2703,41 @@ def check_heartbeat(spool_dir: Optional[os.PathLike] = None,
             findings.append("local heartbeat spool {} is empty".format(spool))
         else:
             try:
-                oldest = min(path.stat().st_mtime for path in files)
+                pending_records = _spool_pending_records(files)
             except OSError as exc:
-                findings.append(
-                    "local heartbeat spool {} has {} file(s), but its age cannot "
-                    "be read ({})".format(spool, len(files), exc)
-                )
+                findings.append("local heartbeat spool {} cannot be read ({})".format(
+                    spool, exc))
             else:
-                age = _age_text(now - oldest)
-                findings.append(
-                    "local heartbeat spool {} has {} file(s); oldest is {} old".format(
-                        spool, len(files), age[4:] if age.startswith("age ") else age)
-                )
+                if not pending_records:
+                    findings.append(
+                        "local heartbeat spool {} has {} file(s), all drained "
+                        "(no pending records)".format(spool, len(files))
+                    )
+                else:
+                    timestamps = [
+                        _timestamp(record.get("ts"))
+                        for record in pending_records
+                        if isinstance(record, dict)
+                    ]
+                    valid_timestamps = [
+                        timestamp for timestamp in timestamps
+                        if timestamp is not None
+                    ]
+                    oldest = min(valid_timestamps) if valid_timestamps else None
+                    age = _age_text(None if oldest is None else now - oldest)
+                    findings.append(
+                        "local heartbeat spool {} has {} pending record(s) "
+                        "across {} file(s); oldest is {} old".format(
+                            spool,
+                            len(pending_records),
+                            len(files),
+                            age[4:] if age.startswith("age ") else age,
+                        )
+                    )
 
     broken = (
         branch_ok is not True
-        or bool(files)
+        or bool(pending_records)
         or any("cannot be read" in finding for finding in findings)
     )
     if broken:

@@ -226,6 +226,8 @@ class Item:
     labels: List[str] = field(default_factory=list)
     block_references: List[str] = field(default_factory=list)
     block_reason: Optional[str] = None
+    unparseable_block_comments: List[str] = field(default_factory=list)
+    block_comments_error: Optional[str] = None
     open_blockers: List[str] = field(default_factory=list)
     dead_blockers: List[str] = field(default_factory=list)
     assignees: List[str] = field(default_factory=list)
@@ -973,6 +975,21 @@ def parse_block_comment(bodies: Iterable[str]) -> Optional[Tuple[List[str], str]
             body[match.end():].strip(),
         )
     return None
+
+
+def unparseable_block_comment_lines(bodies: Iterable[str]) -> List[str]:
+    """Return first lines that look like block comments but fail the parser."""
+    findings: List[str] = []
+    for body in bodies:
+        if not isinstance(body, str):
+            continue
+        if not body.lstrip().startswith(BLOCK_COMMENT_PREFIX):
+            continue
+        if BLOCK_COMMENT_RE.match(body):
+            continue
+        lines = body.splitlines()
+        findings.append(lines[0] if lines else body)
+    return findings
 
 
 def _heartbeat_context(run: Optional[str], agent: Optional[str]):
@@ -2053,6 +2070,27 @@ def check_class_assignments(items: Iterable[Item]) -> Check:
     ), "")
 
 
+def unparseable_block_comment_findings(items: Iterable[Item]) -> List[str]:
+    """Return one finding for each malformed block comment on loaded items."""
+    return [
+        "{}: {}".format(item.ref, first_line)
+        for item in items
+        for first_line in item.unparseable_block_comments
+    ]
+
+
+def check_block_comments(items: Iterable[Item]) -> Check:
+    """Build the read-only block-comment syntax check for ``funnel doctor``."""
+    rows = list(items)
+    findings = unparseable_block_comment_findings(rows)
+    findings.extend(
+        "{}: {}".format(item.ref, item.block_comments_error)
+        for item in rows
+        if item.block_comments_error
+    )
+    return Check("block comments", not findings, "\n".join(findings), "")
+
+
 def doctor_checks(claude_dir: Optional[os.PathLike] = None,
                   checkout_root: Optional[os.PathLike] = None,
                   usage_cache: Optional[os.PathLike] = None,
@@ -2079,6 +2117,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
             items, merged_pr_facts=merged_pr_facts
         ))
         checks.append(check_class_assignments(items))
+        checks.append(check_block_comments(items))
     return checks
 
 
@@ -3328,15 +3367,20 @@ def _load_block_comment(item: Item) -> None:
     normal load pays for this only for open blocked items, and the parsed state
     stays on ``Item`` for pure queue functions and the brief to reuse.
     """
-    comments = (_gh_json(
+    payload = _gh_json(
         "gh", "issue", "view", str(item.number), "--repo", item.repo,
         "--json", "comments",
-    ) or {}).get("comments", [])
-    parsed = parse_block_comment([
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("comments"), list):
+        item.block_comments_error = "could not read comments"
+        return
+    bodies = [
         comment.get("body") or ""
-        for comment in comments
+        for comment in payload["comments"]
         if isinstance(comment, dict)
-    ])
+    ]
+    item.unparseable_block_comments = unparseable_block_comment_lines(bodies)
+    parsed = parse_block_comment(bodies)
     if parsed is not None:
         item.block_references, item.block_reason = parsed
 

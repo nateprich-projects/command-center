@@ -564,10 +564,10 @@ def test_doctor_includes_class_assignment_dump_with_loaded_items(monkeypatch):
         ),
     ])
 
-    assert [check.name for check in checks][-2:] == [
-        "item consistency", "Class assignments",
+    assert [check.name for check in checks][-3:] == [
+        "item consistency", "Class assignments", "block comments",
     ]
-    assert checks[-1].found == "owner/repo#1 | issue number 1 | Class Broken"
+    assert checks[-2].found == "owner/repo#1 | issue number 1 | Class Broken"
 
 
 def test_main_doctor_loads_project_items_for_consistency(monkeypatch):

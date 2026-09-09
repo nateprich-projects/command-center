@@ -104,6 +104,26 @@ def test_new_replace_and_unset_class_still_wait_for_acceptance():
         assert gate_question(finished) == "Accept it?"
 
 
+def test_drift_is_reported_without_changing_the_building_gate():
+    drifted = project(1, "Building", "New", children=2, done=2)
+    facts = funnel.DriftFacts(
+        ready_at=NOW - timedelta(days=2),
+        plan_edit_times=(NOW - timedelta(days=1),),
+        review_verdicts=({"verdict": "rejected"},),
+        regression_pr_numbers=(20,),
+        building_at=NOW - timedelta(hours=2),
+        ticket_created_at=(NOW - timedelta(hours=1),),
+    )
+
+    assert funnel.drift_since_approval(drifted, facts) == list(
+        funnel.DRIFT_SIGNAL_NAMES
+    )
+    assert gate_question(drifted) == "Accept it?"
+    assert gate_question(
+        project(2, "Building", "Broken", children=2, done=2)
+    ) is None
+
+
 def test_building_with_no_children_does_not_count_as_complete():
     """children_all_closed must not be vacuously true for a childless item."""
     assert gate_question(item(1, "Building", "New", children_total=0, children_done=0)) is None

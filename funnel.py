@@ -495,7 +495,7 @@ def question_since(item: Item) -> Optional[datetime]:
 
 
 def awaiting_decision(items: Iterable[Item]) -> List[Item]:
-    """Nate's queue: everything waiting on him, bottom-up, oldest first.
+    """Nate's queue: everything waiting on him, bottom-up, pinned then oldest.
 
     Bottom-up because the longest-stalled, furthest-along item is the most
     likely park candidate, and surfacing it first is what makes this ordering
@@ -516,6 +516,7 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
             depth,
             not item.is_blocked,
             0 if effective_class(item, by_ref) == "Broken" else 1,
+            0 if item.pinned else 1,
             since,
             item.repo,
             item.number,

@@ -192,6 +192,30 @@ def test_broken_outranks_older_work_at_the_same_gate():
     assert [i.number for i in awaiting_decision(items)] == [2, 1]
 
 
+def test_pinned_work_outranks_unpinned_work_at_the_same_gate():
+    items = [
+        project(1, "Shaped", "Improve", days=30),
+        project(2, "Shaped", "Improve", days=1, pinned=True),
+    ]
+    assert [i.number for i in awaiting_decision(items)] == [2, 1]
+
+
+def test_broken_work_outranks_pinned_work_at_the_same_gate():
+    items = [
+        project(1, "Shaped", "Improve", days=30, pinned=True),
+        project(2, "Shaped", "Broken", days=1),
+    ]
+    assert [i.number for i in awaiting_decision(items)] == [2, 1]
+
+
+def test_pinned_work_does_not_cross_decision_gates():
+    items = [
+        project(1, "Shaped", "Improve", days=30, pinned=True),
+        project(2, "Building", "New", children=1, done=1, days=1),
+    ]
+    assert [i.number for i in awaiting_decision(items)] == [2, 1]
+
+
 def test_ticket_inherits_broken_for_decision_ordering():
     parent = project(1, "Ideas", "Broken")
     child = item(2, "Shaped", None, days=1, parent=parent.ref)
@@ -313,6 +337,19 @@ def test_ladder_orders_what_to_start():
                      (5, "Improve")):
         items += [project(n, "Building", klass), ticket(10 + n, n)]
     assert [i.number for i in startable(items)] == [12, 14, 15, 13, 11]
+
+
+def test_pins_do_not_change_codex_startable_output():
+    unpinned = [
+        project(1, "Building", "New"), ticket(2, 1),
+        project(3, "Building", "Broken"), ticket(4, 3),
+    ]
+    pinned = [
+        project(1, "Building", "New", pinned=True), ticket(2, 1),
+        project(3, "Building", "Broken", pinned=True), ticket(4, 3),
+    ]
+
+    assert startable(unpinned) == startable(pinned)
 
 
 def test_in_flight_work_finishes_before_anything_new_starts():

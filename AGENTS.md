@@ -189,10 +189,13 @@ a config edit that has not reached `main`, and a checkout left on a branch. Repo
 did; do not put the decision to him.
 
 The specific failure this guards against: the canonical checkout at
-`~/.claude/command-center` is a **symlink to the working tree**, so an edit is live for
-every routine the moment it is saved — and silently reverts if anyone checks out another
-branch. A live config change on an unmerged branch is not a tidiness problem; it is an outage
-waiting for a `git checkout`.
+`~/.claude/command-center` is **Nate's working tree**, not a disposable agent clone. An
+edit or pull there is live for every routine that still invokes its `funnel.py`, and silently
+disappears if Nate checks out another branch. A live config change on an unmerged branch is
+not a tidiness problem; it is an outage waiting for a `git checkout`.
+
+Until the routines move to the maintained run clone, `funnel doctor` reports when this
+checkout falls behind `origin/main`; that check retires once no routine invokes the old path.
 
 **Still ask before anything destructive**: rewriting history, force-pushing, discarding
 work he has not seen, or deleting a branch that holds commits which are not on `main`.

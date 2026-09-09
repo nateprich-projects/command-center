@@ -257,6 +257,11 @@ BLOCK_COMMENT_RE = re.compile(
     + r"(?: on (?P<references>#[0-9]+(?: and #[0-9]+)*))?:\*\*"
 )
 
+#: A satisfied block is recorded before its label is removed. The structured
+#: payload makes a partial failure idempotent: the next run can retry the label
+#: write without posting a second provenance comment for the same block.
+SATISFIED_BLOCK_PREFIX = "**Satisfied block:** "
+
 #: Existing comments have no machine-readable provenance. Until the provenance
 #: marker lands, show must fail closed rather than treat the GitHub account as
 #: authorship.
@@ -290,6 +295,10 @@ REJECTED_MERGE_WINDOW = timedelta(days=7)
 #: brief is hourly, so a one-run window would make the record disappear before
 #: Nate could reasonably see it.
 CLOSED_ITSELF_WINDOW = timedelta(days=7)
+
+#: Keep mechanical block clears visible across several unattended brief runs,
+#: for the same reason funnel-closed projects remain visible for a week.
+CLEARED_BLOCK_WINDOW = timedelta(days=7)
 
 #: Drift is reported, never used as a gate. Keep these names short and stable:
 #: callers put them verbatim into comments and the brief.
@@ -330,6 +339,7 @@ class Item:
     block_reason: Optional[str] = None
     unparseable_block_comments: List[str] = field(default_factory=list)
     block_comments_error: Optional[str] = None
+    satisfied_block_record: Optional[Dict[str, object]] = None
     open_blockers: List[str] = field(default_factory=list)
     dead_blockers: List[str] = field(default_factory=list)
     assignees: List[str] = field(default_factory=list)
@@ -345,6 +355,7 @@ class Item:
     first_child_created_at: Optional[datetime] = None
     last_child_closed_at: Optional[datetime] = None
     blocked_since: Optional[datetime] = None
+    blocked_cleared_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
 
     @property
@@ -1417,6 +1428,28 @@ def parse_block_comment(bodies: Iterable[str]) -> Optional[Tuple[List[str], str]
             body[match.end():].strip(),
         )
     return None
+
+
+def parse_satisfied_block_comment(body: str) -> Optional[Dict[str, object]]:
+    """Return a valid agent-authored satisfied-block record, or ``None``.
+
+    Both markers are load-bearing. The first carries the mechanical facts;
+    the ordinary provenance marker says an agent, rather than Nate, recorded
+    the unattended action.
+    """
+    found = _marked_json(body, SATISFIED_BLOCK_PREFIX)
+    provenance = parse_provenance(body)
+    if found is None or provenance is None or provenance.get("voice") != "agent":
+        return None
+    conditions = found.get("conditions")
+    if (
+        not isinstance(conditions, list)
+        or not conditions
+        or not all(isinstance(value, str) and value for value in conditions)
+        or parse_time(found.get("found_closed_at")) is None
+    ):
+        return None
+    return found
 
 
 def unparseable_block_comment_lines(bodies: Iterable[str]) -> List[str]:
@@ -3135,13 +3168,16 @@ query($login: String!, $number: Int!, $cursor: String) {
               blockedBy(first: 50) {
                 nodes { number state stateReason repository { nameWithOwner } }
               }
-              timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT]) {
+              timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
                 nodes {
                   __typename
                   ... on ProjectV2ItemStatusChangedEvent {
                     createdAt status project { number }
                   }
                   ... on LabeledEvent {
+                    createdAt label { name }
+                  }
+                  ... on UnlabeledEvent {
                     createdAt label { name }
                   }
                 }
@@ -3347,8 +3383,11 @@ def _from_node(node: dict) -> Optional[Item]:
         if not event:
             continue
         label = (event.get("label") or {}).get("name")
-        if label == "blocked":
+        if label == "blocked" and event.get("__typename") == "LabeledEvent":
             item.blocked_since = parse_time(event.get("createdAt"))
+            continue
+        if label == "blocked" and event.get("__typename") == "UnlabeledEvent":
+            item.blocked_cleared_at = parse_time(event.get("createdAt"))
             continue
         if (event.get("project") or {}).get("number") != PROJECT_NUMBER:
             continue
@@ -3580,6 +3619,59 @@ def closed_itself_json(
     rows = []
     for item in closed_itself_items(items, now):
         row = _closed_itself_item_json(item)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
+def cleared_block_items(items: Iterable[Item], now: datetime) -> List[Item]:
+    """Recently unblocked issues that may carry a mechanical-clear record."""
+    cutoff = now - CLEARED_BLOCK_WINDOW
+    return sorted(
+        (
+            item for item in items
+            if not item.is_blocked
+            and item.blocked_cleared_at is not None
+            and item.blocked_cleared_at >= cutoff
+        ),
+        key=lambda item: (
+            -item.blocked_cleared_at.timestamp(), item.repo, item.number
+        ),
+    )
+
+
+def _cleared_block_item_json(item: Item) -> Optional[Dict[str, object]]:
+    """Render the newest valid satisfied-block record on one unblocked item."""
+    comments = (_gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "comments",
+    ) or {}).get("comments", [])
+    for comment in reversed(comments):
+        if not isinstance(comment, dict):
+            continue
+        record = parse_satisfied_block_comment(comment.get("body") or "")
+        if record is None:
+            continue
+        return {
+            "ref": item.ref,
+            "title": item.title,
+            "url": item.url,
+            "conditions": record["conditions"],
+            "cleared_at": (
+                item.blocked_cleared_at.isoformat()
+                if item.blocked_cleared_at else None
+            ),
+        }
+    return None
+
+
+def cleared_blocks_json(
+    items: Iterable[Item], now: datetime
+) -> List[Dict[str, object]]:
+    """The brief's recent provenance-backed mechanical block clears."""
+    rows = []
+    for item in cleared_block_items(items, now):
+        row = _cleared_block_item_json(item)
         if row is not None:
             rows.append(row)
     return rows
@@ -3859,6 +3951,109 @@ def satisfied_block_refs(
     return sorted(satisfied)
 
 
+def satisfied_block_comment(
+    conditions: Sequence[str], now: datetime,
+    run: Optional[str] = None, agent: Optional[str] = None,
+) -> str:
+    """Build the durable, provenance-marked record for one mechanical clear."""
+    refs = sorted(set(conditions))
+    found_closed_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload = {
+        "conditions": refs,
+        "found_closed_at": found_closed_at,
+    }
+    body = (
+        SATISFIED_BLOCK_PREFIX
+        + "all machine-readable conditions were found closed: {}.\n\n"
+          "Found closed at `{}`.\n\n```json\n{}\n```".format(
+              ", ".join(refs), found_closed_at,
+              json.dumps(payload, indent=2, sort_keys=True),
+          )
+    )
+    return append_provenance(
+        body, "agent", at=now, run=run, agent=agent
+    )
+
+
+def _record_covers_current_block(item: Item, conditions: Sequence[str]) -> bool:
+    """Whether the loaded record already covers this exact blocking episode."""
+    record = item.satisfied_block_record
+    if not isinstance(record, dict):
+        return False
+    if sorted(record.get("conditions") or []) != sorted(set(conditions)):
+        return False
+    recorded_at = parse_time(record.get("found_closed_at"))
+    return recorded_at is not None and (
+        item.blocked_since is None or recorded_at >= item.blocked_since
+    )
+
+
+def clear_satisfied_blocks(
+    items: Sequence[Item], now: datetime,
+    run: Optional[str] = None, agent: Optional[str] = None,
+) -> List[Dict[str, object]]:
+    """Clear every fully parsed satisfied block and return what moved.
+
+    The record is posted first. If removing the label then fails, a later run
+    sees that record on the still-blocked issue and retries only the label
+    write. A partial network failure therefore cannot erase the reason for an
+    unattended clear or manufacture duplicate comments.
+    """
+    by_ref = {item.ref: item for item in items}
+    cleared: List[Dict[str, object]] = []
+    candidates = sorted(
+        (
+            item for item in items
+            if item.state == "OPEN" and item.is_blocked
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+    for item in candidates:
+        conditions = satisfied_block_refs(item, by_ref)
+        if not conditions:
+            continue
+
+        if not _record_covers_current_block(item, conditions):
+            comment = subprocess.run(
+                [
+                    "gh", "issue", "comment", str(item.number),
+                    "--repo", item.repo,
+                    "--body", satisfied_block_comment(
+                        conditions, now, run=run, agent=agent
+                    ),
+                ],
+                capture_output=True, text=True,
+            )
+            if comment.returncode != 0:
+                raise GitHubError(
+                    "could not record satisfied block on {}: {}".format(
+                        item.ref, comment.stderr.strip()
+                    )
+                )
+
+        edit = subprocess.run(
+            [
+                "gh", "issue", "edit", str(item.number),
+                "--repo", item.repo, "--remove-label", "blocked",
+            ],
+            capture_output=True, text=True,
+        )
+        if edit.returncode != 0:
+            raise GitHubError(
+                "recorded satisfied block on {}, but could not remove its "
+                "blocked label: {}".format(item.ref, edit.stderr.strip())
+            )
+
+        item.labels = [label for label in item.labels if label != "blocked"]
+        item.blocked_cleared_at = now
+        cleared.append({
+            "ref": item.ref,
+            "conditions": conditions,
+            "cleared_at": now.isoformat(),
+        })
+    return cleared
+
+
 def _approved_current_head(pr: Optional[Dict[str, object]]) -> bool:
     """Whether a PR carries approval for the head currently being inspected."""
     if not isinstance(pr, dict):
@@ -4102,6 +4297,7 @@ def cmd_brief(
         "items": [item_json(i, now, by_ref) for i in decisions],
         "parked": parked_json(items),
         "closed_itself": closed_itself_json(items, now),
+        "cleared_blocks": cleared_blocks_json(items, now),
         "blocked": blocked_json(items),
         "suspected_human_steps": suspected_human_step_json(items),
         "human_steps": human_step_json(items),
@@ -4939,6 +5135,11 @@ def _load_block_comment(item: Item) -> None:
     parsed = parse_block_comment(bodies)
     if parsed is not None:
         item.block_references, item.block_reason = parsed
+    for body in reversed(bodies):
+        record = parse_satisfied_block_comment(body)
+        if record is not None:
+            item.satisfied_block_record = record
+            break
 
 
 def _ticket_body(repo: str, number: int) -> str:
@@ -5178,6 +5379,11 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         out["unmetered"] = True
 
     if agent == "codex":
+        cleared = clear_satisfied_blocks(
+            items, now, run=out.get("run"), agent=agent
+        )
+        if cleared:
+            out["cleared_blocks"] = cleared
         blocked = awaiting_review(items)
         ticket = next_ticket_for_tier(
             items, now, tier=tier, blocked=blocked

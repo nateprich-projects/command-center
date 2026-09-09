@@ -149,6 +149,8 @@ def main() -> int:
     now = time.time()
     problems = []
     for agent in sorted(heartbeat.PROVIDERS):
+        if agent in getattr(heartbeat, "RETIRED_AGENTS", ()):
+            continue  # a stopped schedule is not a dying one (#431)
         rows = records(agent)
         problems += assess(agent, rows, now)
         info = note(agent, rows, now)

@@ -1760,7 +1760,10 @@ def agent_health(now: datetime) -> List[Dict[str, str]]:
         return []
 
     found: List[Dict[str, str]] = []
+    retired = getattr(heartbeat, "RETIRED_AGENTS", frozenset())
     for agent in providers:
+        if agent in retired:
+            continue  # a stopped schedule is not a dying one (#431)
         try:
             conditions = assess_agent_health(
                 agent, heartbeat.read(agent), now.timestamp()

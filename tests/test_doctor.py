@@ -43,6 +43,10 @@ def stub_github_checks(monkeypatch):
             funnel, function_name,
             lambda name=check_name: funnel.Check(name, True, "ok", ""),
         )
+    monkeypatch.setattr(
+        funnel, "check_member_repos",
+        lambda: [funnel.Check("member repo owner/repo", True, "ok", "")],
+    )
 
 
 def install_fixture(tmp_path):
@@ -76,7 +80,7 @@ def test_all_local_checks_pass_and_discover_every_skill(tmp_path, monkeypatch):
 
     assert [check.name for check in checks] == [
         "install symlinks", "checkout staleness", "settings.json", "gh auth", "Project fields",
-        "command-center topic", "usage cache", "heartbeat branch",
+        "command-center topic", "member repo owner/repo", "usage cache", "heartbeat branch",
     ]
     assert all(check.ok for check in checks)
     assert "3 links" in checks[0].found
@@ -178,7 +182,7 @@ def test_doctor_does_not_require_a_self_referential_checkout_link(tmp_path, monk
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
-    assert len(checks) == 8
+    assert len(checks) == 9
     assert checks[0].ok
     assert checks[2].ok
 
@@ -443,6 +447,62 @@ def test_topic_search_failure_is_reported_not_raised(monkeypatch):
     assert not result.ok
     assert "topic search failed" in result.found
     assert result.fix
+
+
+def test_member_repo_readiness_reports_blocking_and_advisory_facts(monkeypatch):
+    def gh_json(*args):
+        endpoint = args[2]
+        if endpoint.endswith("owner/ready/actions/workflows"):
+            return {"workflows": [{"path": ".github/workflows/ci.yml"}]}
+        if endpoint.endswith("owner/ready/labels?per_page=100"):
+            return []
+        if endpoint.endswith("owner/ready/contents/.github/dependabot.yml"):
+            return {"type": "file"}
+        if endpoint.endswith("owner/no-ci/actions/workflows"):
+            return {"workflows": []}
+        if endpoint.endswith("owner/no-ci/labels?per_page=100"):
+            return [{"name": "bug"}]
+        if endpoint.endswith("owner/no-ci/contents/.github/dependabot.yml"):
+            return None
+        if endpoint.endswith("owner/no-ci/contents/.github/dependabot.yaml"):
+            return None
+        raise AssertionError("unexpected endpoint: {}".format(endpoint))
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+
+    checks = funnel.check_member_repos(["owner/no-ci", "owner/ready"])
+
+    assert [check.name for check in checks] == [
+        "member repo owner/no-ci", "member repo owner/ready",
+    ]
+    no_ci, ready = checks
+    assert not no_ci.ok
+    assert "CI workflow missing (blocking)" in no_ci.found
+    assert "stock GitHub labels remain: bug (advisory)" in no_ci.found
+    assert "Dependabot not configured (advisory)" in no_ci.found
+    assert no_ci.fix
+    assert ready.ok
+    assert ready.found == (
+        "CI workflow present; command-center topic applied; "
+        "stock GitHub labels removed; Dependabot configured"
+    )
+
+
+def test_member_repo_readiness_uses_topic_membership_as_the_filter(monkeypatch):
+    calls = []
+
+    def gh_json(*args):
+        calls.append(args[2])
+        return {"workflows": [{"path": ".github/workflows/ci.yml"}]} if \
+            args[2].endswith("actions/workflows") else []
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(funnel, "member_repos", lambda: ["owner/member"])
+
+    checks = funnel.check_member_repos()
+
+    assert [check.name for check in checks] == ["member repo owner/member"]
+    assert all("owner/outside" not in endpoint for endpoint in calls)
 
 
 def test_item_consistency_reports_each_contradiction_without_writing(monkeypatch):

@@ -83,6 +83,18 @@ def test_shaped_project_reaches_done_through_every_documented_transition(
 
     monkeypatch.setattr(funnel, "_option_id", lambda field, name: "opt-" + name)
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    # Accepting now reports drift (#57, PR #377), which reads three histories
+    # from GitHub. This walk is about the transitions, not drift, so hand it
+    # an empty, drift-free fact set rather than faking three query shapes
+    # (#412). `gh_graphql` above still refuses anything but SET_FIELD.
+    monkeypatch.setattr(
+        funnel, "fetch_drift_facts",
+        lambda item: funnel.DriftFacts(
+            ready_at=None, building_at=None, plan_edit_times=(),
+            review_verdicts=(), regression_pr_numbers=(),
+            ticket_created_at=(),
+        ),
+    )
     monkeypatch.setattr(funnel, "write_lock", write_lock)
     monkeypatch.setattr(funnel.subprocess, "run", run)
 

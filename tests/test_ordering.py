@@ -306,16 +306,15 @@ def test_a_parent_is_not_itself_a_startable_ticket():
     assert [i.number for i in startable([parent])] == []
 
 
-def test_ready_is_not_startable_until_nate_says_start_now():
-    """Ready means broken into issues and still waiting on his gate. Starting
-    there jumps it — he answers by moving the parent to Building."""
+def test_ready_is_not_startable_until_the_parent_is_building():
+    """Ready means broken into issues; only Building exposes tickets to Codex."""
     assert startable([project(1, "Ready", "New"), ticket(2, 1)]) == []
     assert [i.number for i in startable(
         [project(1, "Building", "New"), ticket(2, 1)])] == [2]
 
 
 def test_shaped_work_is_not_startable():
-    """Ready is the gate that says 'start now'. Shaped has not passed it."""
+    """Shaped has not been broken into tickets for Codex to work."""
     assert startable([project(1, "Shaped", "New"), ticket(2, 1)]) == []
 
 

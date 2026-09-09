@@ -78,10 +78,10 @@ is exactly what he should know before saying yes.
 unless `--yes` is passed**.
 
 **The decision is always his. The typing does not have to be.** Nate authorised agents
-to run all three on his explicit instruction (2026-09-05), replacing an earlier rule
+to run both on his explicit instruction (2026-09-05), replacing an earlier rule
 here that no agent may run them at all. He often works these sessions by voice while
 driving, where handing him a command means the decision he already made goes
-unrecorded — three approved gates sat unexecuted for a whole session that way.
+unrecorded — approved gates sat unexecuted for a whole session that way.
 _(confirmed by Nate 2026-09-05)_
 
 That earlier rule was not his; an agent wrote it after accidentally running an approval,

@@ -797,10 +797,9 @@ def startable(items: Sequence[Item],
             # not waiting to be worked. Treating it as both is what made an issue
             # appear in two queues at once.
             return False
-        # Only `Building`. `Ready` means "broken into issues" and is still
-        # waiting on Nate's "start now?" — treating it as startable lets Codex
-        # begin work he never authorised, jumping a gate. He answers that gate
-        # by moving the parent to `Building`.
+        # Only `Building`. `Ready` means "broken into issues"; treating it as
+        # startable would let Codex begin before a claim moves the parent to
+        # `Building`, which is the observable start of work.
         return parent.status == "Building" and not parent.is_blocked
 
     def in_flight(item: Item) -> bool:
@@ -2152,10 +2151,8 @@ def item_consistency_findings(
             and item.children_all_closed
         ):
             reasons.append(
-                "project has all children closed but Status is {}; run funnel "
-                "start {} --yes then funnel accept {} --yes".format(
-                    status, item.ref, item.ref
-                )
+                "project has all children closed but Status is {}; resolve the "
+                "Status before accepting it".format(status)
             )
         if (
             item.state == "OPEN"

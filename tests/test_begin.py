@@ -174,3 +174,146 @@ def test_shape_offers_only_the_first_idea_matching_the_run_tier(
         "title": candidates[1].title,
     }
     assert len(calls) == 1
+
+
+def _ticket_project(number, klass="New", *, in_motion_since=None):
+    return funnel.Item(
+        repo="nateprich/beta",
+        number=number,
+        title="project {}".format(number),
+        url="https://github.com/nateprich/beta/issues/{}".format(number),
+        state="OPEN",
+        status="Building",
+        klass=klass,
+        status_since=NOW,
+        children_total=1,
+        in_motion_since=in_motion_since,
+    )
+
+
+def _ticket(number, parent, body="Risk: standard", *, in_motion_since=None):
+    return funnel.Item(
+        repo="nateprich/beta",
+        number=number,
+        title="ticket {}".format(number),
+        url="https://github.com/nateprich/beta/issues/{}".format(number),
+        state="OPEN",
+        body=body,
+        parent="nateprich/beta#{}".format(parent),
+        in_motion_since=in_motion_since,
+    )
+
+
+def _allow_codex_begin(monkeypatch):
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
+
+
+def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
+    monkeypatch, capsys
+):
+    ticket = _ticket(2, 1)
+    rows = [_ticket_project(1), ticket]
+    events = []
+
+    def start(*args, **kwargs):
+        events.append("heartbeat")
+        return SimpleNamespace(stdout="run-id\n")
+
+    monkeypatch.setattr(funnel.subprocess, "run", start)
+    monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
+    monkeypatch.setattr(
+        funnel,
+        "next_ticket",
+        lambda items, now, **kwargs: events.append("next") or ticket,
+    )
+    monkeypatch.setattr(
+        funnel,
+        "write_lock",
+        lambda item, value: events.append(("claim", item.ref, value)),
+    )
+
+    assert funnel.cmd_begin(rows, NOW, "codex", "standard", False) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert events == [
+        "heartbeat",
+        "next",
+        ("claim", ticket.ref, "2026-09-05T12:00:00Z"),
+    ]
+
+
+def test_codex_begin_honours_the_run_tier(monkeypatch, capsys):
+    rows = [
+        _ticket_project(1),
+        _ticket(2, 1, body="Risk: escalated"),
+        _ticket_project(3),
+        _ticket(4, 3, body="Risk: standard"),
+    ]
+    claims = []
+    _allow_codex_begin(monkeypatch)
+    monkeypatch.setattr(
+        funnel, "write_lock", lambda item, value: claims.append(item.ref)
+    )
+
+    assert funnel.cmd_begin(rows, NOW, "codex", "standard", False) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == rows[3].ref
+    assert claims == [rows[3].ref]
+
+
+def test_codex_begin_stops_at_the_wip_limit(monkeypatch, capsys):
+    rows = []
+    claimed_at = NOW.replace(hour=11, minute=55)
+    for index in range(funnel.WIP_LIMIT):
+        parent = 100 + index
+        rows.extend([
+            _ticket_project(parent, in_motion_since=None),
+            _ticket(200 + index, parent, in_motion_since=claimed_at),
+        ])
+    rows.extend([_ticket_project(1), _ticket(2, 1)])
+    claims = []
+    _allow_codex_begin(monkeypatch)
+    monkeypatch.setattr(
+        funnel, "write_lock", lambda item, value: claims.append(item.ref)
+    )
+
+    assert funnel.cmd_begin(rows, NOW, "codex", "standard", False) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "stop"
+    assert "lock held by" in result["why"]
+    assert claims == []
+
+
+def test_codex_begin_allows_broken_preemption_at_the_wip_limit(
+    monkeypatch, capsys
+):
+    rows = []
+    claimed_at = NOW.replace(hour=11, minute=55)
+    for index in range(funnel.WIP_LIMIT):
+        parent = 100 + index
+        rows.extend([
+            _ticket_project(parent, in_motion_since=None),
+            _ticket(200 + index, parent, in_motion_since=claimed_at),
+        ])
+    rows.extend([
+        _ticket_project(1, klass="Broken"),
+        _ticket(2, 1, body="Risk: standard"),
+    ])
+    claims = []
+    _allow_codex_begin(monkeypatch)
+    monkeypatch.setattr(
+        funnel, "write_lock", lambda item, value: claims.append(item.ref)
+    )
+
+    assert funnel.cmd_begin(rows, NOW, "codex", "standard", False) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == rows[-1].ref
+    assert claims == [rows[-1].ref]

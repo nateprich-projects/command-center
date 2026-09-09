@@ -4052,6 +4052,34 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     return None
 
 
+def _next_ticket_for_tier(items: Sequence[Item], now: datetime,
+                          tier: Optional[str],
+                          blocked: Optional[Set[str]] = None) -> Optional[Item]:
+    """Return the shared next-ticket result for one engine tier.
+
+    ``next_ticket`` owns queue order, the WIP cap and Broken preemption. Tier
+    filtering is expressed as per-call exclusions so this path cannot grow a
+    second ordering implementation. ``blocked`` is supplied by callers that
+    already fetched the open-PR index; omitting it keeps the helper convenient
+    for the begin path.
+    """
+    if blocked is None:
+        blocked = awaiting_review(items)
+
+    excluded: Set[str] = set()
+    if tier is not None:
+        for candidate in startable(items, awaiting_review=blocked):
+            body = candidate.body
+            if body is None:
+                body = _ticket_body(candidate.repo, candidate.number)
+            reasons = escalation_reasons(candidate.title, body)
+            wanted = bool(reasons) if tier == "escalated" else not reasons
+            if not wanted:
+                excluded.add(candidate.ref)
+
+    return next_ticket(items, now, blocked=blocked, excluded=excluded)
+
+
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
               routine_sha_literal: Optional[str] = None) -> int:
@@ -4131,26 +4159,69 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # a run that never had a budget to check should not read like one that
         # passed a check.
         out["unmetered"] = True
-    queue = review_queue(items, tier)
-    if queue:
-        out.update(do="review", work=queue[0])
+    if agent == "codex":
+        # Codex is the implementation lane. Keep its selection on the shared
+        # next-ticket path, then claim the result in this same command so there
+        # is no model-turn gap between reading and locking a ticket.
+        blocked = awaiting_review(items)
+        ticket = _next_ticket_for_tier(items, now, tier, blocked=blocked)
+        if ticket is None:
+            holder = lock_holder(items, now)
+            out.update(
+                do="stop",
+                why=(
+                    "lock held by {} (claimed {} ago)".format(
+                        holder.ref, humanise(now - holder.in_motion_since)
+                    )
+                    if holder is not None
+                    else "nothing to work"
+                ),
+            )
+        else:
+            write_lock(ticket, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            out.update(
+                do="ticket",
+                work={
+                    "ref": ticket.ref,
+                    "repo": ticket.repo,
+                    "url": ticket.url,
+                    "title": ticket.title,
+                },
+            )
     else:
-        # Breakdown is opt-in per routine. Claude reviews only — its breakdown
-        # job moved to the cheaper pool — so offering it one would send the
-        # scarce reviewer off to do mechanical decomposition.
-        if breakdown:
-            pending = awaiting_breakdown(items)
-            if pending:
-                item = pending[0]
-                work = {
-                    "ref": item.ref,
-                    "url": item.url,
-                    "title": item.title,
-                    "access_signals": access_signals(
-                        _ticket_body(item.repo, item.number)
-                    ),
-                }
-                out.update(do="breakdown", work=work)
+        queue = review_queue(items, tier)
+        if queue:
+            out.update(do="review", work=queue[0])
+        else:
+            # Breakdown is opt-in per routine. Claude reviews only — its
+            # breakdown job moved to the cheaper pool — so offering it one
+            # would send the scarce reviewer off to do mechanical decomposition.
+            if breakdown:
+                pending = awaiting_breakdown(items)
+                if pending:
+                    item = pending[0]
+                    work = {
+                        "ref": item.ref,
+                        "url": item.url,
+                        "title": item.title,
+                        "access_signals": access_signals(
+                            _ticket_body(item.repo, item.number)
+                        ),
+                    }
+                    out.update(do="breakdown", work=work)
+                else:
+                    item = shapeable_idea(items, tier, reading)
+                    if item is not None:
+                        out.update(
+                            do="shape",
+                            work={"ref": item.ref, "url": item.url,
+                                  "title": item.title},
+                        )
+                    else:
+                        out.update(
+                            do="stop",
+                            why="nothing to review and nothing to break down",
+                        )
             else:
                 item = shapeable_idea(items, tier, reading)
                 if item is not None:
@@ -4162,18 +4233,8 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 else:
                     out.update(
                         do="stop",
-                        why="nothing to review and nothing to break down",
+                        why="nothing to review",
                     )
-        else:
-            item = shapeable_idea(items, tier, reading)
-            if item is not None:
-                out.update(
-                    do="shape",
-                    work={"ref": item.ref, "url": item.url,
-                          "title": item.title},
-                )
-            else:
-                out.update(do="stop", why="nothing to review")
 
     reserve = _reserve_verdict(out.get("do"))
     if reserve is not None:

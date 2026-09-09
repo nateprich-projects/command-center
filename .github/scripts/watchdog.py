@@ -121,9 +121,8 @@ def _main_head_timestamp(comparison: Dict) -> Optional[float]:
     if direct is not None:
         return direct
 
-    # The requested comparison is `<runtime>...main`, so `head_commit` is main.
-    # Keep `base_commit` as a fixture/API-shape fallback for older snapshots.
-    for name in ("head_commit", "base_commit"):
+    # `head_commit` keeps the helper compatible with compact fixture payloads.
+    for name in ("head_commit",):
         commit = comparison.get(name)
         if not isinstance(commit, dict):
             continue
@@ -137,6 +136,26 @@ def _main_head_timestamp(comparison: Dict) -> Optional[float]:
             timestamp = _timestamp(person.get("date"))
             if timestamp is not None:
                 return timestamp
+
+    # GitHub's compare response does not expose a top-level head_commit. For
+    # `<runtime>...main`, its commits list is the main-only side and ends at
+    # main's head, so use the newest listed commit rather than base_commit
+    # (which is the runtime checkout itself).
+    commits = comparison.get("commits")
+    if isinstance(commits, list):
+        for commit in reversed(commits):
+            if not isinstance(commit, dict):
+                continue
+            details = commit.get("commit")
+            if not isinstance(details, dict):
+                continue
+            for role in ("committer", "author"):
+                person = details.get(role)
+                if not isinstance(person, dict):
+                    continue
+                timestamp = _timestamp(person.get("date"))
+                if timestamp is not None:
+                    return timestamp
     return None
 
 

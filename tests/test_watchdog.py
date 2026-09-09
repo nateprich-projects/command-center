@@ -229,6 +229,30 @@ def test_three_old_runtime_heads_behind_main_are_reported(monkeypatch):
                for problem in problems)
 
 
+def test_runtime_grace_uses_the_real_compare_commits_shape(monkeypatch):
+    rows = [
+        runtime_start("a", NOW - 60 * 60),
+        runtime_start("b", NOW - 50 * 60),
+        runtime_start("c", NOW - 40 * 60),
+    ]
+    monkeypatch.setattr(
+        watchdog, "runtime_compare",
+        lambda head: {
+            "status": "behind",
+            "behind_by": 2,
+            "base_commit": {
+                "commit": {"committer": {"date": "2026-09-05T08:00:00Z"}}
+            },
+            "commits": [
+                {"commit": {"committer": {"date": "2026-09-09T21:59:00Z"}}}
+            ],
+        },
+    )
+
+    assert not any("checkout" in problem
+                   for problem in watchdog.assess("codex", rows, NOW))
+
+
 def test_recent_runtime_lag_is_within_the_grace_window(monkeypatch):
     rows = [
         runtime_start("a", NOW - 8 * 60),

@@ -70,6 +70,49 @@ def routine_path(agent: str) -> pathlib.Path:
 # checks to the fixed list without changing the report contract.
 Check = namedtuple("Check", "name ok found fix")
 
+# GitHub's default issue labels are deliberately not part of the funnel's
+# vocabulary.  Keep the names here rather than treating every label other than
+# `blocked` and `needs-shaping` as a problem: Dependabot and a repository's own
+# labels are outside this onboarding check.
+STOCK_GITHUB_LABELS = frozenset({
+    "bug",
+    "documentation",
+    "duplicate",
+    "enhancement",
+    "good first issue",
+    "help wanted",
+    "invalid",
+    "question",
+    "wontfix",
+})
+
+
+@dataclass(frozen=True)
+class MemberRepoReadiness:
+    """The checkable onboarding facts for one topic-bearing repository.
+
+    ``topic`` is retained in the record even though ``member_repos()`` filters
+    on it.  That makes the blocking predicate explicit for the queue ticket
+    that consumes this result, while keeping a non-member out of the doctor
+    report entirely.
+    """
+
+    repo: str
+    topic: bool
+    ci_workflow: bool
+    stock_labels: Tuple[str, ...]
+    dependabot: bool
+
+    @property
+    def blocking_reasons(self) -> Tuple[str, ...]:
+        """Return only requirements whose absence prevents a merge."""
+        reasons: List[str] = []
+        if not self.topic:
+            reasons.append("missing command-center topic")
+        if not self.ci_workflow:
+            reasons.append("no CI workflow")
+        return tuple(reasons)
+
 # `funnel doctor` only needs to know which ticket branches have merged. Keep
 # the scan result separate from the pure contradiction detector, and carry its
 # bounded-scan warning along with the refs that were found.
@@ -2396,6 +2439,152 @@ def check_topic() -> Check:
     return Check("command-center topic", True, found, "")
 
 
+def _workflow_rows(payload: object) -> List[dict]:
+    """Normalise the REST workflow response used by the repo doctor check."""
+    if isinstance(payload, dict):
+        payload = payload.get("workflows")
+    if not isinstance(payload, list):
+        return []
+    return [row for row in payload if isinstance(row, dict)]
+
+
+def _ci_workflow_present(payload: object) -> bool:
+    """Whether the response contains a workflow stored in `.github/workflows`."""
+    for row in _workflow_rows(payload):
+        path = row.get("path")
+        # `actions/workflows` normally supplies `path`.  Accept a pathless
+        # fixture row as a workflow too, while excluding GitHub's synthetic
+        # Dependabot workflow, whose path is `dynamic/dependabot/...`.
+        if path is None or str(path).startswith(".github/workflows/"):
+            return True
+    return False
+
+
+def _repo_label_names(payload: object) -> Tuple[str, ...]:
+    """Return label names from a repository-label REST response."""
+    if not isinstance(payload, list):
+        raise GitHubError("repository labels response was not a list")
+    names = {
+        str(row["name"])
+        for row in payload
+        if isinstance(row, dict) and row.get("name") is not None
+    }
+    return tuple(sorted(names, key=str.casefold))
+
+
+def _stock_label_names(labels: Iterable[str]) -> Tuple[str, ...]:
+    """Return remaining default GitHub labels, preserving displayed spelling."""
+    return tuple(sorted(
+        (label for label in labels
+         if label.casefold() in STOCK_GITHUB_LABELS),
+        key=str.casefold,
+    ))
+
+
+def _dependabot_configured(repo: str) -> bool:
+    """Whether either supported Dependabot config filename exists."""
+    for filename in ("dependabot.yml", "dependabot.yaml"):
+        payload = _gh_json(
+            "gh", "api", "repos/{}/contents/.github/{}".format(repo, filename)
+        )
+        if payload is not None:
+            return True
+    return False
+
+
+def member_repo_readiness(repo: str) -> MemberRepoReadiness:
+    """Read the checkable onboarding facts for one topic-bearing repository."""
+    workflows = _gh_json(
+        "gh", "api", "repos/{}/actions/workflows".format(repo)
+    )
+    labels = _gh_json(
+        "gh", "api", "repos/{}/labels?per_page=100".format(repo)
+    )
+    return MemberRepoReadiness(
+        repo=repo,
+        # `member_repos()` is the membership query and only returns repos with
+        # this topic.  Keep the fact explicit for the later queue predicate.
+        topic=True,
+        ci_workflow=_ci_workflow_present(workflows),
+        stock_labels=_stock_label_names(_repo_label_names(labels)),
+        dependabot=_dependabot_configured(repo),
+    )
+
+
+def _member_repo_found(readiness: MemberRepoReadiness) -> str:
+    """Render every onboarding fact, including advisory findings."""
+    ci = (
+        "CI workflow present"
+        if readiness.ci_workflow
+        else "CI workflow missing (blocking)"
+    )
+    topic = (
+        "command-center topic applied"
+        if readiness.topic
+        else "command-center topic missing (blocking)"
+    )
+    labels = (
+        "stock GitHub labels removed"
+        if not readiness.stock_labels
+        else "stock GitHub labels remain: {} (advisory)".format(
+            ", ".join(readiness.stock_labels)
+        )
+    )
+    dependabot = (
+        "Dependabot configured"
+        if readiness.dependabot
+        else "Dependabot not configured (advisory)"
+    )
+    return "; ".join((ci, topic, labels, dependabot))
+
+
+def check_member_repo(repo: str) -> Check:
+    """Build one doctor check for a topic-bearing member repository."""
+    try:
+        readiness = member_repo_readiness(repo)
+    except Exception as exc:
+        return Check(
+            "member repo {}".format(repo), False,
+            "{}: readiness query failed: {}".format(
+                repo, str(exc) or "unknown error"
+            ),
+            "restore GitHub access, then rerun funnel doctor",
+        )
+
+    blocking = readiness.blocking_reasons
+    fix = (
+        "add a CI workflow before starting work in {}".format(repo)
+        if blocking
+        and not readiness.ci_workflow
+        else ""
+    )
+    return Check(
+        "member repo {}".format(repo),
+        not blocking,
+        _member_repo_found(readiness),
+        fix,
+    )
+
+
+def check_member_repos(repos: Optional[Iterable[str]] = None) -> List[Check]:
+    """Return one readiness check for every topic-bearing member repository."""
+    try:
+        names = list(member_repos() if repos is None else repos)
+    except Exception as exc:
+        return [Check(
+            "member repos", False,
+            "GitHub member-repo search failed: {}".format(
+                str(exc) or "unknown error"
+            ),
+            "restore GitHub access, then rerun funnel doctor",
+        )]
+
+    return [
+        check_member_repo(repo)
+        for repo in sorted(set(names))
+    ]
+
+
 def _status_for_consistency(item: Item) -> str:
     """Name an unset Project Status without inventing a value for it."""
     return item.status or "unset"
@@ -2531,6 +2720,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         check_auth_scope(),
         check_project_fields(),
         check_topic(),
+        *check_member_repos(),
         check_usage_cache(cache_path=usage_cache),
         check_heartbeat(spool_dir=heartbeat_spool),
     ]

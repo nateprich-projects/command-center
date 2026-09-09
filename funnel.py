@@ -3773,6 +3773,82 @@ def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     return [_blocked_item_json(item) for item in blocked_items(items)]
 
 
+PROSE_DEPENDENCY_RE = re.compile(
+    r"\b(?:depends\s+on|blocked\s+on)\s+"
+    r"(?P<references>#[0-9]+(?:\s*(?:,|and)\s*#[0-9]+)*)"
+    r"|\bafter\s+(?P<after>#[0-9]+)\s+lands\b"
+    r"|\b(?:until|requires)\s+(?P<single>#[0-9]+)\b",
+    re.IGNORECASE,
+)
+
+
+def _prose_dependency_sentences(body: str) -> Iterable[Tuple[str, List[str]]]:
+    """Yield recognised dependency sentences and their named issue numbers."""
+    if not isinstance(body, str):
+        return
+
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        for sentence in re.split(r"(?<=[.!?])\s+", line):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            match = PROSE_DEPENDENCY_RE.search(sentence)
+            if match is None:
+                continue
+            references = (
+                match.group("references")
+                or match.group("after")
+                or match.group("single")
+            )
+            yield sentence, re.findall(r"#[0-9]+", references)
+
+
+def prose_dependencies(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """Report open prose dependencies that have no matching native edge.
+
+    This is deliberately pure over the Project items already loaded by the
+    funnel. A named issue is reportable only when it is present and open in
+    that set; resolving an absent issue would require a new API call and would
+    turn a diagnostic into a second dependency source.
+    """
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    found: List[Dict[str, object]] = []
+
+    for item in rows:
+        if item.state != "OPEN" or item.parent is None:
+            continue
+
+        native = {
+            _dependency_ref(item, value) or str(value).strip()
+            for value in item.open_blockers
+        }
+        for sentence, numbers in _prose_dependency_sentences(item.body or ""):
+            names: List[str] = []
+            for number in numbers:
+                ref = item.repo + number
+                blocker = by_ref.get(ref)
+                if (
+                    blocker is None
+                    or blocker.state != "OPEN"
+                    or ref in native
+                    or ref in names
+                ):
+                    continue
+                names.append(ref)
+            if names:
+                found.append({
+                    "ref": item.ref,
+                    "names": names,
+                    "sentence": sentence,
+                })
+
+    return sorted(found, key=lambda row: row["ref"])
+
+
 def suspected_human_step_reason(item: Item) -> Optional[str]:
     """Return a human-step reason hidden inside an unreadable block.
 
@@ -4359,6 +4435,7 @@ def cmd_brief(
         "closed_itself": closed_itself_json(items, now),
         "cleared_blocks": cleared_blocks_json(items, now),
         "blocked": blocked_json(items),
+        "prose_dependencies": prose_dependencies(items),
         "suspected_human_steps": suspected_human_step_json(items),
         "human_steps": human_step_json(items),
         "closed_with_access_vocabulary": closed_with_access_vocabulary_json(

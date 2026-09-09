@@ -50,6 +50,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `closed_itself` | Projects the funnel closed in the recent named window, newest first, with the drift recorded at close |
 | `cleared_blocks` | Tickets whose fully parsed conditions all closed and whose `blocked` label the funnel mechanically cleared in the last seven days |
 | `awaiting_breakdown` | Approved plans with no tickets yet. Claude owes these a breakdown; they are not startable until it happens |
+| `prose_dependencies` | Open tickets whose dependency sentence names an open issue without a matching native `blocked_by` edge. Each row carries the ticket `ref`, named issue `names`, and original `sentence`; diagnostic only |
 | `unattended_merges` | Merges an agent made without him, read from heartbeat records. `plan.md` makes these appearing in the brief a condition of unattended merging being allowed at all |
 | `agent_health` | Raised watchdog conditions, each with the heartbeat agent and the watchdog's condition wording. Empty when all agents are healthy |
 | `rejected_merges` | Merges he checked and found broken, over `window_days`. `stop_auto_merging` true means three in a week — auto-merging stops until he fixes the review bar |
@@ -78,10 +79,14 @@ Name the ticket, the conditions found closed, and the clear time. This is a reco
 mechanical move, not a decision request; never add it to `total_needing_nate`.
 
 Then the gate counts on one line. Then anything unusual, and only if present:
-`suspected_human_steps`, `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`,
+`prose_dependencies`, `suspected_human_steps`, `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`,
 `awaiting_breakdown`, `unattended_merges`, `agent_health`, `rejected_merges`, and
 `closed_with_access_vocabulary`. A suspected human step is report-only: do not clear its
 `blocked` label, restate it, or split it while rendering the brief.
+
+`prose_dependencies` is also report-only. For each row, show the ticket ref, the named
+open issue refs, and the sentence that produced them. Do not write a native edge while
+rendering the brief; the separate backfill ticket owns that action.
 
 Offer the `launch` command for the top item. Do not run it.
 

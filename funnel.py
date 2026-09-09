@@ -662,9 +662,18 @@ TIERS = ("standard", "escalated")
 RISK_LINE = re.compile(r"^\s*Risk:\s*(standard|escalated)\b(.*)$",
                        re.IGNORECASE | re.MULTILINE)
 
-#: A ticket declares a step that only Nate can perform in its body, written at
-#: breakdown. The reason is deliberately an allowlist: inability to figure out
-#: engineering work is not a reason to route that work to him.
+#: A ticket declares a step that is not workable in every agent environment in
+#: its body, written at breakdown. An unmarked ticket is workable by any agent;
+#: this reason is the middle outcome, workable only where Claude Code's local
+#: environment is present. It is deliberately an allowlist: a lack of access
+#: to the Claude Code environment is not the same as an engineer finding work
+#: difficult.
+MACHINE_LOCAL_REASON = "a Claude Code environment"
+MACHINE_LOCAL_REASONS = (MACHINE_LOCAL_REASON,)
+
+#: These reasons still mean that no agent can perform the step. Keep them
+#: separate from MACHINE_LOCAL_REASONS so the next capability-aware consumer
+#: can distinguish Claude-Code-only work from work Nate must perform.
 HUMAN_STEP_PREFIX = "Human step: "
 HUMAN_STEP_REASONS = (
     "an app UI with no API",
@@ -672,21 +681,24 @@ HUMAN_STEP_REASONS = (
     "an account or billing setting",
     "physical access to a machine",
 )
+HUMAN_STEP_MARKER_REASONS = MACHINE_LOCAL_REASONS + HUMAN_STEP_REASONS
 HUMAN_STEP_LINE = re.compile(
     r"^\s*" + re.escape(HUMAN_STEP_PREFIX)
     + r"(?P<reason>"
-    + "|".join(re.escape(reason) for reason in HUMAN_STEP_REASONS)
+    + "|".join(re.escape(reason) for reason in HUMAN_STEP_MARKER_REASONS)
     + r")\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 
 
 def parse_human_step(body: str) -> Optional[str]:
-    """Return an allowlisted human-step reason from a ticket body.
+    """Return an allowlisted capability reason from a ticket body.
 
     Like ``RISK_LINE``, the marker must begin a body line. Matching only the
-    stated access reasons keeps a ticket from becoming Nate's work merely
-    because an agent found it difficult.
+    stated access reasons keeps a ticket from becoming restricted merely
+    because an agent found it difficult. ``None`` means any agent may work the
+    ticket; ``MACHINE_LOCAL_REASON`` means only Claude Code may work it; and a
+    reason in ``HUMAN_STEP_REASONS`` means no agent may work it.
     """
     if not isinstance(body, str):
         return None
@@ -1075,13 +1087,14 @@ def access_signals(plan_body: str) -> List[str]:
 
 def effective_shape_owner(origin_voice: Optional[str],
                           override_target: Optional[str] = None) -> Optional[str]:
-    """Return who should shape an item, or None when origin is untrusted.
+    """Return who should shape an item, or None for an invalid override.
 
     Capture uses the provenance voice vocabulary: ``agent`` means observed by
     an agent, while either Nate voice means he raised it. An authorised origin
     override is already reduced by its parser to ``nate`` or ``agents`` and
-    supersedes that default. Missing or malformed origin fails closed here; the
-    backlog-wide default remains #151's concern.
+    supersedes that default. Missing or malformed origin resolves to Nate: the
+    existing backlog predates the marker, and the safe direction is to keep it
+    out of unattended shaping unless an authorised override says otherwise.
     """
     if override_target is not None:
         return override_target if override_target in ("nate", "agents") else None
@@ -1089,7 +1102,7 @@ def effective_shape_owner(origin_voice: Optional[str],
         return "agents"
     if origin_voice in ("nate-direct", "nate-relayed"):
         return "nate"
-    return None
+    return "nate"
 
 
 def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],

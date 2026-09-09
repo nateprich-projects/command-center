@@ -681,10 +681,11 @@ def test_doctor_includes_class_assignment_dump_with_loaded_items(monkeypatch):
         ),
     ])
 
-    assert [check.name for check in checks][-3:] == [
+    assert [check.name for check in checks][-4:] == [
         "item consistency", "Class assignments", "block comments",
+        "suspected human steps",
     ]
-    assert checks[-2].found == "owner/repo#1 | issue number 1 | Class Broken"
+    assert checks[-3].found == "owner/repo#1 | issue number 1 | Class Broken"
 
 
 def test_doctor_reports_unparseable_block_comments_with_loaded_items(monkeypatch):
@@ -701,10 +702,36 @@ def test_doctor_reports_unparseable_block_comments_with_loaded_items(monkeypatch
         ),
     ])
 
-    result = checks[-1]
+    result = checks[-2]
     assert result == funnel.Check(
         "block comments", False,
         "owner/repo#7: **Blocked on #77, 2026-09-07.** Legacy format.",
+        "",
+    )
+
+
+def test_doctor_reports_reference_less_human_step_without_writing(monkeypatch):
+    stub_heartbeat_checks(monkeypatch)
+    stub_github_checks(monkeypatch)
+
+    checks = funnel.doctor_checks(items=[
+        funnel.Item(
+            repo="owner/repo", number=8, title="Credential entry", url="",
+            state="OPEN", parent="owner/repo#7", labels=["blocked"],
+            block_reason="Human step: entering a credential",
+        ),
+        funnel.Item(
+            repo="owner/repo", number=9, title="Named condition", url="",
+            state="OPEN", parent="owner/repo#7", labels=["blocked"],
+            block_references=["#77"],
+            block_reason="Human step: entering a credential",
+        ),
+    ])
+
+    result = checks[-1]
+    assert result == funnel.Check(
+        "suspected human steps", False,
+        "owner/repo#8: suspected human step (entering a credential)",
         "",
     )
 

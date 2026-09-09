@@ -255,6 +255,36 @@ def test_brief_surfaces_blocked_projects_and_tickets_oldest_first(
     assert calls == []
 
 
+def test_brief_surfaces_suspected_human_steps_separately(
+    monkeypatch, capsys
+):
+    suspected = funnel.Item(
+        repo="nateprich/beta", number=34, title="Provision the token",
+        url="https://example.invalid/34", state="OPEN",
+        labels=["blocked"], parent="nateprich/beta#29",
+        block_reason="Human step: entering a credential",
+    )
+    named = funnel.Item(
+        repo="nateprich/beta", number=35, title="Wait for the token",
+        url="https://example.invalid/35", state="OPEN",
+        labels=["blocked"], parent="nateprich/beta#29",
+        block_references=["#77"],
+        block_reason="Human step: entering a credential",
+    )
+
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([named, suspected], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["suspected_human_steps"] == [{
+        "ref": "nateprich/beta#34",
+        "title": "Provision the token",
+        "url": "https://example.invalid/34",
+        "reason": "entering a credential",
+    }]
+
+
 def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
     monkeypatch, capsys
 ):

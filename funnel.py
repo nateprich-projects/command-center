@@ -3520,6 +3520,19 @@ query($owner: String!, $name: String!, $number: Int!) {
 """
 
 
+DRIFT_EDIT_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      userContentEdits(first: 100) {
+        nodes { editedAt }
+      }
+    }
+  }
+}
+"""
+
+
 def _gh_json(*args: str):
     out = subprocess.run(list(args), capture_output=True, text=True)
     if out.returncode != 0:
@@ -3528,17 +3541,6 @@ def _gh_json(*args: str):
         return json.loads(out.stdout)
     except ValueError:
         return None
-
-
-def _timeline_rows(payload: object) -> List[dict]:
-    """Flatten both a normal timeline response and ``--slurp`` pages."""
-    if not isinstance(payload, list):
-        return []
-    if payload and all(isinstance(page, list) for page in payload):
-        pages = payload
-    else:
-        pages = [payload]
-    return [row for page in pages for row in page if isinstance(row, dict)]
 
 
 def _project_status_times(item: Item) -> Dict[str, Optional[datetime]]:
@@ -3573,21 +3575,21 @@ def _project_status_times(item: Item) -> Dict[str, Optional[datetime]]:
 
 def _plan_edit_times(item: Item) -> Tuple[datetime, ...]:
     """Read issue body edits; title-only edits are not plan drift."""
-    payload = _gh_json(
-        "gh", "api",
-        "repos/{}/issues/{}/timeline".format(item.repo, item.number),
-        "--paginate", "--slurp",
+    try:
+        owner, name = item.repo.split("/", 1)
+    except ValueError:
+        raise GitHubError("invalid repository ref {}".format(item.repo))
+    data = gh_graphql(
+        DRIFT_EDIT_QUERY, owner=owner, name=name, number=item.number
     )
-    if payload is None:
-        raise GitHubError("could not read issue history for {}".format(item.ref))
+    issue = (data.get("repository") or {}).get("issue") if isinstance(data, dict) else None
+    if issue is None:
+        raise GitHubError("could not read issue edit history for {}".format(item.ref))
     edits: List[datetime] = []
-    for event in _timeline_rows(payload):
-        if event.get("event") != "edited":
+    for edit in ((issue.get("userContentEdits") or {}).get("nodes") or []):
+        if not isinstance(edit, dict):
             continue
-        changes = event.get("changes") or {}
-        if "body" not in changes:
-            continue
-        at = parse_time(event.get("created_at"))
+        at = parse_time(edit.get("editedAt"))
         if at is not None:
             edits.append(at)
     return tuple(edits)

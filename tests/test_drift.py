@@ -117,6 +117,12 @@ def test_fetch_drift_facts_reads_all_ticket_pr_verdicts_and_histories(monkeypatc
                     "project": {"number": funnel.PROJECT_NUMBER},
                 },
             ]}}}}
+        if query == funnel.DRIFT_EDIT_QUERY:
+            return {"repository": {"issue": {"userContentEdits": {"nodes": [
+                {
+                    "editedAt": "2026-09-01T12:00:00Z",
+                },
+            ]}}}}
         if query == funnel.SUB_ISSUES:
             return {"repository": {"issue": {"subIssues": {"nodes": [
                 {
@@ -141,21 +147,6 @@ def test_fetch_drift_facts_reads_all_ticket_pr_verdicts_and_histories(monkeypatc
 
     def gh_json(*args):
         calls.append(args)
-        if args[:3] == (
-            "gh", "api", "repos/owner/repo/issues/1/timeline"
-        ):
-            return [[
-                {
-                    "event": "edited",
-                    "created_at": "2026-09-01T12:00:00Z",
-                    "changes": {"body": {"from": "old"}},
-                },
-                {
-                    "event": "edited",
-                    "created_at": "2026-09-01T13:00:00Z",
-                    "changes": {"title": {"from": "old"}},
-                },
-            ]]
         if args[1:3] == ("pr", "list"):
             if "ticket/3" in args:
                 return []

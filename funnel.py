@@ -513,6 +513,36 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
     return sorted((i for i in rows if gate_question(i)), key=key)
 
 
+def parking_candidates(items: Iterable[Item]) -> List[Item]:
+    """Open projects that have not reached ``Building``, oldest first.
+
+    Parking is a project decision, not a way to close an individual ticket.
+    The candidate age is the time at the item's current pre-Building stage;
+    this keeps the prompt aligned with the funnel's oldest-at-gate ordering.
+    """
+    rows = list(items)
+    pre_building = set(STAGES[:STAGES.index("Building")])
+
+    def key(item: Item):
+        since = question_since(item)
+        return (
+            since is None,
+            since or datetime.max.replace(tzinfo=timezone.utc),
+            item.repo,
+            item.number,
+        )
+
+    return sorted(
+        (
+            item for item in rows
+            if item.state == "OPEN"
+            and item.parent is None
+            and item.status in pre_building
+        ),
+        key=key,
+    )
+
+
 def ideas(items: Iterable[Item]) -> List[Item]:
     """Captured ideas, with Broken items first and oldest items next.
 
@@ -2854,6 +2884,19 @@ def humanise(delta: Optional[timedelta]) -> str:
     return "under an hour"
 
 
+def print_parking_prompt(items: Iterable[Item], now: datetime) -> None:
+    """Print copy-ready parking commands for the oldest unstarted projects."""
+    candidates = parking_candidates(items)
+    if not candidates:
+        return
+
+    print("\nLongest-waiting unstarted projects — consider parking any that no longer earn their place:")
+    for item in candidates:
+        print("  {} — {} ({})".format(
+            item.ref, item.title, humanise(item.waited(now))))
+        print('    funnel park {} --reason "<why>"'.format(item.ref))
+
+
 def breakdown_latency(item: Item) -> Optional[timedelta]:
     """How long a Ready project waited for its first ticket.
 
@@ -4931,6 +4974,8 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
     print("{} → {}  ({})".format(item.ref, nxt, meaning))
     if verb == "approve":
         print("The next Claude run will break it into tickets.")
+    elif verb == "accept":
+        print_parking_prompt(items, now)
     return 0
 
 

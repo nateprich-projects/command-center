@@ -1,4 +1,4 @@
-"""The accept gate's completion output and refusal guard."""
+"""The accept gate's completion output, refusal guard, and drift report."""
 
 from __future__ import annotations
 
@@ -10,13 +10,16 @@ from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
+from funnel import Item  # noqa: E402
 
 
 NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "project_items.json"
+REPO = "owner/repo"
 
 
 def fixture_items():
@@ -24,6 +27,21 @@ def fixture_items():
         item for item in (funnel._from_node(node) for node in json.loads(FIXTURE.read_text()))
         if item
     ]
+
+
+def project(*, children_total=1, children_done=1, klass="New"):
+    return Item(
+        repo=REPO,
+        number=1,
+        title="Project",
+        url="https://example.invalid/1",
+        state="OPEN",
+        status="Building",
+        klass=klass,
+        item_id="project-id",
+        children_total=children_total,
+        children_done=children_done,
+    )
 
 
 def test_parking_candidates_are_oldest_open_projects_before_building():
@@ -41,6 +59,7 @@ def test_accept_prints_ages_and_copy_ready_parking_commands(monkeypatch, capsys)
     target.item_id = "project-item-10"
     writes = []
 
+    monkeypatch.setattr(funnel, "drift_since_approval", lambda item: [])
     monkeypatch.setattr(funnel, "_option_id", lambda field, name: "done-option")
     monkeypatch.setattr(
         funnel,
@@ -89,3 +108,79 @@ def test_accept_still_refuses_while_children_are_open(monkeypatch):
 
     with pytest.raises(funnel.GitHubError, match="still has open tickets"):
         funnel.cmd_answer(items, NOW, "accept", target.ref, True)
+
+
+def test_accept_dry_run_reports_each_drift_signal(monkeypatch, capsys):
+    item = project()
+    drift = [funnel.DRIFT_PLAN_EDIT, funnel.DRIFT_LATE_TICKET]
+    monkeypatch.setattr(funnel, "drift_since_approval", lambda target: drift)
+
+    assert funnel.cmd_answer([item], NOW, "accept", item.ref, False) == 1
+
+    output = capsys.readouterr().out
+    assert "drift since approval:" in output
+    for signal in drift:
+        assert signal in output
+    assert "would move {} from Building to Done".format(item.ref) in output
+
+
+def test_accept_without_drift_stays_quiet_about_drift(monkeypatch, capsys):
+    item = project()
+    monkeypatch.setattr(funnel, "drift_since_approval", lambda target: [])
+
+    assert funnel.cmd_answer([item], NOW, "accept", item.ref, False) == 1
+
+    output = capsys.readouterr().out
+    assert "drift since approval:" not in output
+    assert "would move {} from Building to Done".format(item.ref) in output
+
+
+def test_accept_executed_run_reports_drift_before_moving(monkeypatch, capsys):
+    item = project()
+    drift = [funnel.DRIFT_REJECTED_REVIEW]
+    calls = []
+    monkeypatch.setattr(funnel, "drift_since_approval", lambda target: drift)
+    monkeypatch.setattr(
+        funnel,
+        "gh_graphql",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(funnel, "_option_id", lambda field_id, name: "done-option")
+    monkeypatch.setattr(
+        funnel.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stderr=""),
+    )
+
+    assert funnel.cmd_answer([item], NOW, "accept", item.ref, True) == 0
+
+    output = capsys.readouterr().out
+    assert output.index("drift since approval:") < output.index("→ Done")
+    assert drift[0] in output
+    assert len(calls) == 1
+
+
+def test_accept_refuses_open_children_before_reading_drift(monkeypatch):
+    item = project(children_done=0)
+    monkeypatch.setattr(
+        funnel,
+        "drift_since_approval",
+        lambda target: pytest.fail("drift must not be read for a refusal"),
+    )
+
+    with pytest.raises(funnel.GitHubError, match="still has open tickets"):
+        funnel.cmd_answer([item], NOW, "accept", item.ref, False)
+
+
+def test_accept_refuses_no_tickets_without_override_before_reading_drift(
+    monkeypatch,
+):
+    item = project(children_total=0, children_done=0)
+    monkeypatch.setattr(
+        funnel,
+        "drift_since_approval",
+        lambda target: pytest.fail("drift must not be read for a refusal"),
+    )
+
+    with pytest.raises(funnel.GitHubError, match="no tickets"):
+        funnel.cmd_answer([item], NOW, "accept", item.ref, False)

@@ -4952,6 +4952,15 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
                     item.ref, item.children_done, item.children_total)
             )
 
+    drift = []
+    if verb == "accept" and gate_question(item) == GATES["Building"]:
+        drift = drift_since_approval(item)
+
+    if drift:
+        print("drift since approval:")
+        for signal in drift:
+            print("  {}".format(signal))
+
     if not confirmed:
         print("would move {} from {} to {} ({})".format(
             item.ref, expected, nxt, meaning))

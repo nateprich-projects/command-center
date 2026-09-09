@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 from collections import namedtuple
+import glob
 import hashlib
 import json
 import os
@@ -1948,12 +1949,22 @@ STATUSLINE_COMMAND = "~/.claude/statusline.sh"
 USAGE_CACHE = pathlib.Path.home() / ".claude" / "command-center-usage.json"
 
 # `usage.py:174` uses fifteen minutes to decide whether one gate reading is
-# usable. Doctor answers a different question: has the status line stopped
-# writing altogether? Claude Code refreshes this file repeatedly while open, so
-# one hour (four missed gate intervals) distinguishes a stopped status line from
-# a single stale reading without calling a 20-minute gap a broken install.
-USAGE_CACHE_BROKEN_AFTER = timedelta(hours=1)
-USAGE_CACHE_FIX = "open Claude Code on the Mac mini"
+# usable. Doctor reports the source the gate would choose, so it uses the same
+# freshness boundary before trying the transcript estimate.
+USAGE_CACHE_BROKEN_AFTER = timedelta(minutes=15)
+USAGE_CACHE_FIX = "run a Claude Code session so a transcript exists"
+
+# Keep the fallback's discovery local for the same reason the cache path lives
+# here: doctor must still be able to diagnose an install when usage.py is one of
+# the things that is missing. These mirror usage.py's estimate inputs without
+# making the doctor depend on that module.
+CLAUDE_TRANSCRIPTS = str(
+    pathlib.Path.home() / ".claude" / "projects" / "*" / "*.jsonl"
+)
+CLAUDE_ESTIMATE_FIVE_HOUR = timedelta(hours=5)
+CLAUDE_ESTIMATE_RESET_WEEKDAY = 5  # usage.py: Saturday, local time
+CLAUDE_ESTIMATE_RESET_HOUR = 12
+CLAUDE_ESTIMATE_MODEL = "opus"
 
 # These mirror `heartbeat.py:38` and `heartbeat.py:52`. They are intentionally
 # local constants so doctor still works when heartbeat.py itself is unavailable.
@@ -2340,26 +2351,105 @@ def _mtime_age(path: pathlib.Path, now: float) -> Optional[float]:
         return None
 
 
+def _claude_estimate_reset(now: float) -> float:
+    """Return the local-time weekly reset used by Claude's estimate."""
+    here = datetime.fromtimestamp(now)
+    candidate = here.replace(
+        hour=CLAUDE_ESTIMATE_RESET_HOUR, minute=0, second=0, microsecond=0
+    ) - timedelta(
+        days=(here.weekday() - CLAUDE_ESTIMATE_RESET_WEEKDAY) % 7
+    )
+    if candidate > here:
+        candidate -= timedelta(days=7)
+    return candidate.timestamp()
+
+
+def _latest_claude_estimate(transcript_glob: os.PathLike,
+                            now: float) -> Optional[Tuple[pathlib.Path, float]]:
+    """Find the newest transcript record the Claude estimate can read.
+
+    This is deliberately the small availability slice of
+    ``usage.read_claude_local``. It does not calculate a percentage; doctor only
+    needs to know whether that fallback source exists and how old its newest
+    usable record is.
+    """
+    cutoff = min(
+        _claude_estimate_reset(now),
+        now - CLAUDE_ESTIMATE_FIVE_HOUR.total_seconds(),
+    )
+    newest: Optional[Tuple[float, pathlib.Path]] = None
+
+    for name in glob.glob(os.path.expanduser(str(transcript_glob))):
+        path = pathlib.Path(name)
+        try:
+            with path.open(errors="replace") as stream:
+                for line in stream:
+                    if '"usage"' not in line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    message = record.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    model = str(message.get("model") or "").lower()
+                    if CLAUDE_ESTIMATE_MODEL not in model:
+                        continue
+                    usage = message.get("usage")
+                    tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
+                    if not isinstance(tokens, (int, float)) or isinstance(tokens, bool) or tokens <= 0:
+                        continue
+                    stamp = _timestamp(record.get("timestamp"))
+                    if stamp is None or stamp < cutoff:
+                        continue
+                    if newest is None or stamp > newest[0]:
+                        newest = (stamp, path)
+        except OSError:
+            continue
+
+    if newest is None:
+        return None
+    return newest[1], now - newest[0]
+
+
 def check_usage_cache(cache_path: Optional[os.PathLike] = None,
                       now: Optional[float] = None) -> Check:
-    """Check the Claude usage cache directly, including its writing age.
+    """Report the source the Claude usage gate would use.
 
-    This intentionally does not import usage.py. Its tolerant readers are right
-    for a budget gate but would erase the distinction between a missing file,
-    malformed JSON, and a cache that simply stopped being refreshed.
+    A fresh statusline cache is preferred. When it is absent or too old, the
+    same recent transcript records used by ``usage.read_claude_local`` are the
+    fallback. This intentionally does not import usage.py: doctor must diagnose
+    a broken install even when that module is one of the missing links.
     """
     cache = _path(cache_path, USAGE_CACHE)
     now = time.time() if now is None else now
+
+    def fallback(cache_finding: str) -> Check:
+        estimate = _latest_claude_estimate(CLAUDE_TRANSCRIPTS, now)
+        if estimate is not None:
+            transcript, age = estimate
+            return Check(
+                "usage cache", True,
+                "transcript estimate {} is readable ({})".format(
+                    transcript, _age_text(age)),
+                "",
+            )
+        return Check(
+            "usage cache", False,
+            "{}; transcript estimate is unavailable".format(cache_finding),
+            USAGE_CACHE_FIX,
+        )
 
     try:
         exists = cache.exists()
     except OSError:
         exists = False
     if not exists:
-        return Check(
-            "usage cache", False,
-            "{} is missing (age unavailable)".format(cache),
-            USAGE_CACHE_FIX,
+        return fallback(
+            "{} is missing (age unavailable)".format(cache)
         )
 
     file_age = _mtime_age(cache, now)
@@ -2367,61 +2457,48 @@ def check_usage_cache(cache_path: Optional[os.PathLike] = None,
         with cache.open(encoding="utf-8") as stream:
             data = json.load(stream)
     except FileNotFoundError:
-        return Check(
-            "usage cache", False,
-            "{} is missing (age unavailable)".format(cache),
-            USAGE_CACHE_FIX,
+        return fallback(
+            "{} is missing (age unavailable)".format(cache)
         )
     except (OSError, UnicodeError) as exc:
-        return Check(
-            "usage cache", False,
+        return fallback(
             "{} is present but cannot be read ({}; {})".format(
-                cache, exc, _age_text(file_age)),
-            USAGE_CACHE_FIX,
+                cache, exc, _age_text(file_age))
         )
     except ValueError:
-        return Check(
-            "usage cache", False,
+        return fallback(
             "{} is present but unparseable ({})".format(
-                cache, _age_text(file_age)),
-            USAGE_CACHE_FIX,
+                cache, _age_text(file_age))
         )
 
     if not isinstance(data, dict):
-        return Check(
-            "usage cache", False,
+        return fallback(
             "{} is present but unparseable (top-level JSON is not an object; {})".format(
-                cache, _age_text(file_age)),
-            USAGE_CACHE_FIX,
+                cache, _age_text(file_age))
         )
 
     captured_at = _timestamp(data.get("captured_at"))
     if captured_at is None:
-        return Check(
-            "usage cache", False,
+        return fallback(
             "{} is present but unparseable (captured_at is missing or invalid; {})".format(
-                cache, _age_text(file_age)),
-            USAGE_CACHE_FIX,
+                cache, _age_text(file_age))
         )
 
     age = now - captured_at
-    if age < 0:
-        return Check(
-            "usage cache", False,
+    if age < -60:
+        return fallback(
             "{} is present but its timestamp is from the future ({})".format(
-                cache, _age_text(age)),
-            USAGE_CACHE_FIX,
+                cache, _age_text(age))
         )
-    if age >= USAGE_CACHE_BROKEN_AFTER.total_seconds():
-        return Check(
-            "usage cache", False,
-            "{} is present but stale ({}; health threshold is 1 hour)".format(
-                cache, _age_text(age)),
-            USAGE_CACHE_FIX,
+    if age > USAGE_CACHE_BROKEN_AFTER.total_seconds():
+        return fallback(
+            "{} is present but stale ({}; freshness threshold is 15 minutes)".format(
+                cache, _age_text(age))
         )
     return Check(
         "usage cache", True,
-        "{} is present and fresh ({})".format(cache, _age_text(age)),
+        "statusline cache {} is present and fresh ({})".format(
+            cache, _age_text(age)),
         "",
     )
 

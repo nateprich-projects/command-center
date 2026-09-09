@@ -59,6 +59,7 @@ def test_accept_prints_ages_and_copy_ready_parking_commands(monkeypatch, capsys)
     target.item_id = "project-item-10"
     writes = []
 
+    monkeypatch.setattr(funnel, "drift_since_approval", lambda item: [])
     monkeypatch.setattr(funnel, "_option_id", lambda field, name: "done-option")
     monkeypatch.setattr(
         funnel,

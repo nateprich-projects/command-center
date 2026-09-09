@@ -3777,6 +3777,20 @@ def cmd_next(
     excluded: Optional[Set[str]] = None,
 ) -> int:
     excluded = excluded or frozenset()
+    # A ref reaches `--not` only from the run that was offered it, and `next`
+    # never offers a claimed ticket to a second run — so the caller holds the
+    # claim it is declining. Release it here rather than trusting the routine
+    # to: on 2026-09-09 five declined claims were left behind, filled the WIP
+    # cap within an hour, and stalled every engineer run behind them (#394).
+    for ref in sorted(excluded):
+        try:
+            declined = find(items, ref)
+        except (GitHubError, SystemExit, ValueError):
+            continue
+        if declined.in_motion_since:
+            write_lock(declined, "")
+            object.__setattr__(declined, "in_motion_since", None)
+            print("released {} (declined)".format(declined.ref), file=sys.stderr)
     blocked = awaiting_review(items)
     ticket = next_ticket_for_tier(
         items, now, tier=tier, blocked=blocked, excluded=excluded

@@ -257,6 +257,15 @@ BLOCK_COMMENT_RE = re.compile(
     + r"(?: on (?P<references>#[0-9]+(?: and #[0-9]+)*))?:\*\*"
 )
 
+#: A breakdown can leave a project waiting on Nate's answer. The header is
+#: deliberately strict and anchored just like the ordinary block header so a
+#: quoted or embedded sentence cannot become a gate question by accident.
+NEEDS_DECISION_PREFIX = "**Needs a decision:**"
+NEEDS_DECISION_RE = re.compile(
+    r"\A" + re.escape(NEEDS_DECISION_PREFIX)
+    + r"[ \t]+(?P<question>.+)", flags=re.DOTALL
+)
+
 #: A satisfied block is recorded before its label is removed. The structured
 #: payload makes a partial failure idempotent: the next run can retry the label
 #: write without posting a second provenance comment for the same block.
@@ -337,6 +346,7 @@ class Item:
     labels: List[str] = field(default_factory=list)
     block_references: List[str] = field(default_factory=list)
     block_reason: Optional[str] = None
+    needs_decision: Optional[str] = None
     unparseable_block_comments: List[str] = field(default_factory=list)
     block_comments_error: Optional[str] = None
     satisfied_block_record: Optional[Dict[str, object]] = None
@@ -522,6 +532,8 @@ def gate_question(item: Item) -> Optional[str]:
         # can be parked; a ticket can only be unblocked.
         if item.block_references:
             return None
+        if item.parent is None and item.needs_decision:
+            return "Answer the breakdown's question?"
         return "Unblock?" if item.parent else "Unblock or park?"
     if item.status == "Building":
         # New work and replacements always stop for acceptance. Upkeep closes
@@ -1427,6 +1439,20 @@ def parse_block_comment(bodies: Iterable[str]) -> Optional[Tuple[List[str], str]
             references.split(" and ") if references else [],
             body[match.end():].strip(),
         )
+    return None
+
+
+def parse_needs_decision_comment(bodies: Iterable[str]) -> Optional[str]:
+    """Return the newest parseable breakdown question, if one exists."""
+    for body in reversed(list(bodies)):
+        if not isinstance(body, str):
+            continue
+        match = NEEDS_DECISION_RE.match(body)
+        if not match:
+            continue
+        question = _visible_comment(match.group("question")).strip()
+        if question:
+            return question
     return None
 
 
@@ -3555,6 +3581,8 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
     }
     if item.pinned:
         rendered["pinned"] = True
+    if item.needs_decision is not None:
+        rendered["needs_decision"] = item.needs_decision
     return rendered
 
 
@@ -3743,7 +3771,7 @@ def blocked_items(items: Iterable[Item]) -> List[Item]:
 
 def _blocked_item_json(item: Item) -> Dict[str, object]:
     """Render one blocked item from the parsed block-comment state."""
-    return {
+    rendered = {
         "ref": item.ref,
         "title": item.title,
         "url": item.url,
@@ -3751,6 +3779,9 @@ def _blocked_item_json(item: Item) -> Dict[str, object]:
         "conditions": item.block_references,
         "blocked_at": item.status_since.isoformat() if item.status_since else None,
     }
+    if item.needs_decision is not None:
+        rendered["needs_decision"] = item.needs_decision
+    return rendered
 
 
 def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
@@ -4638,7 +4669,8 @@ def _set_pinned(items: List[Item], now: datetime, ref: str, pinned: bool,
 
 def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
                 voice: str, run: Optional[str] = None,
-                agent: Optional[str] = None) -> int:
+                agent: Optional[str] = None,
+                apply_blocked: bool = False) -> int:
     """Post an issue comment with an explicit, stamped voice."""
     if not body.strip():
         raise GitHubError("a non-empty comment body is required")
@@ -4650,6 +4682,21 @@ def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
     )
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
+    if apply_blocked:
+        edit = subprocess.run(
+            [
+                "gh", "issue", "edit", str(item.number), "--repo", item.repo,
+                "--add-label", "blocked",
+            ],
+            capture_output=True, text=True,
+        )
+        if edit.returncode != 0:
+            raise GitHubError(
+                "recorded needs-decision comment on {}, but could not add its "
+                "blocked label: {}".format(item.ref, edit.stderr.strip())
+            )
+        if not item.is_blocked:
+            item.labels.append("blocked")
     print("recorded {} comment on {}".format(voice, item.ref))
     return 0
 
@@ -5178,6 +5225,7 @@ def _load_block_comment(item: Item) -> None:
     parsed = parse_block_comment(bodies)
     if parsed is not None:
         item.block_references, item.block_reason = parsed
+    item.needs_decision = parse_needs_decision_comment(bodies)
     for body in reversed(bodies):
         record = parse_satisfied_block_comment(body)
         if record is not None:
@@ -5963,6 +6011,8 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
     print("=" * 72)
     question = gate_question(item)
     print("GATE: {}".format(question or "not waiting on you"))
+    if item.needs_decision is not None:
+        print("NEEDS DECISION: {}".format(item.needs_decision))
     print("")
 
     owner, name = item.repo.split("/")
@@ -6142,6 +6192,16 @@ def _comment_reason(value: str) -> str:
     return reason
 
 
+def _decision_question(value: str) -> str:
+    """Reject blank questions before loading GitHub."""
+    question = value.strip()
+    if not question:
+        raise argparse.ArgumentTypeError(
+            "a non-empty decision question is required"
+        )
+    return question
+
+
 def _blocked_reference(value: str) -> str:
     """Normalise one issue number for the strict block-comment header."""
     reference = value.strip()
@@ -6158,6 +6218,11 @@ def _blocked_comment_body(blocked_on: Sequence[str], because: str) -> str:
     """Render the block-comment header owned by ``BLOCK_COMMENT_RE``."""
     references = " and ".join("#{}".format(number) for number in blocked_on)
     return "**Blocked on {}:** {}".format(references, because)
+
+
+def _needs_decision_comment_body(question: str) -> str:
+    """Render the breakdown-question header owned by its parser."""
+    return "{} {}".format(NEEDS_DECISION_PREFIX, question)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -6277,6 +6342,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--blocked-on", action="append", type=_blocked_reference, metavar="N",
         help="post a canonical block header; repeat for multiple issue numbers",
     )
+    comment_body.add_argument(
+        "--needs-decision", type=_decision_question, metavar="QUESTION",
+        help="post a breakdown question and apply the blocked label",
+    )
     comment.add_argument(
         "--because", type=_comment_reason,
         help="reason appended to a canonical block header (requires --blocked-on)",
@@ -6371,7 +6440,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_park(items, now, args.ref, args.reason,
                             args.run, args.agent)
         if args.command == "comment":
-            if args.blocked_on:
+            if args.needs_decision is not None:
+                body = _needs_decision_comment_body(args.needs_decision)
+            elif args.blocked_on:
                 body = _blocked_comment_body(args.blocked_on, args.because)
             else:
                 body = args.body
@@ -6382,8 +6453,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     raise GitHubError(
                         "cannot read {}: {}".format(args.body_file, exc)
                     )
-            return cmd_comment(items, now, args.ref, body or "", args.voice,
-                               args.run, args.agent)
+            return cmd_comment(
+                items, now, args.ref, body or "", args.voice,
+                args.run, args.agent, apply_blocked=args.needs_decision is not None,
+            )
         if args.command == "reject":
             return cmd_reject(items, now, args.pr, args.note)
         if args.command in ANSWERS:

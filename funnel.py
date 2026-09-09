@@ -3300,6 +3300,60 @@ def _dead_dependency_refs(item: Item, by_ref: Dict[str, Item]) -> List[str]:
     return sorted(refs)
 
 
+def satisfied_block_refs(
+    item: Item, by_ref: Dict[str, Item]
+) -> Optional[List[str]]:
+    """Return the parsed block conditions that are all satisfied.
+
+    A missing parsed comment, an empty reference list, an unresolvable
+    reference, a missing blocker, an open blocker, or a blocker that is
+    explicitly unable to close all fail closed with ``None``. The checks are
+    deliberately separate so a caller can report which part of the
+    four-part satisfaction test failed without treating an empty list as
+    vacuously satisfied.
+
+    This mirrors ``_dead_dependency_refs`` over the already-loaded native and
+    comment dependency facts. It never fetches a blocker: a reference must be
+    present in ``by_ref`` before it can satisfy a block.
+    """
+    # ``block_reason`` is populated only when ``parse_block_comment`` found a
+    # matching header. An empty reason is still a parsed comment; ``None`` is
+    # the unparsed state and must not be treated as satisfied.
+    if item.block_reason is None:
+        return None
+
+    values = list(item.block_references)
+    if not values:
+        return None
+
+    resolved: List[str] = []
+    for value in values:
+        ref = _dependency_ref(item, value)
+        if ref is None:
+            return None
+        resolved.append(ref)
+
+    native_open = {
+        _dependency_ref(item, value) or str(value).strip()
+        for value in item.open_blockers
+    }
+    native_dead = set(getattr(item, "dead_blockers", []))
+    satisfied: Set[str] = set()
+    for ref in resolved:
+        blocker = by_ref.get(ref)
+        if (
+            blocker is None
+            or blocker.state != "CLOSED"
+            or ref in native_open
+            or ref in native_dead
+            or _never_closing(blocker)
+        ):
+            return None
+        satisfied.add(ref)
+
+    return sorted(satisfied)
+
+
 def _approved_current_head(pr: Optional[Dict[str, object]]) -> bool:
     """Whether a PR carries approval for the head currently being inspected."""
     if not isinstance(pr, dict):

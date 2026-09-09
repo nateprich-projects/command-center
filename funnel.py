@@ -1001,6 +1001,22 @@ def stale_locks(items: Iterable[Item], now: datetime) -> List[Item]:
 #: can read.
 REVIEW_MARKER = "<!-- command-center-review -->"
 
+#: The merge gate is software, not one of the model providers. Its verdicts
+#: still use the agent voice because they are neither Nate's words nor his
+#: relayed decision, but the agent field must say which component authored it.
+MERGE_GATE_AGENT = "gate"
+
+#: Shared wording for the blocker and for recognising the one refusal that
+#: writes a gate-authored rejection. Keeping the suffix separate lets the
+#: visible reason retain the branch name without making cmd_merge guess at it.
+CONFLICTING_BRANCH_SUFFIX = (
+    " is conflicting with the base — an engineer rebase is required"
+)
+
+#: A gate-authored verdict records only what the gate mechanically established.
+#: It did not inspect the diff and must not imply that it did.
+UNMERGEABLE_REJECTION_BLOCKING = "branch could not merge at this head"
+
 #: A reviewer that writes prose and then acts leaves nothing a later step can
 #: check. That is how a merge became something a model simply decided to do, and
 #: how a PR with requested changes ended up owned by nobody (#39).
@@ -4266,6 +4282,17 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
     if not sha:
         raise GitHubError("could not read the head commit of PR #{}".format(pr))
 
+    return _write_verdict(
+        repo, pr, sha, verdict, ci, blocking, note, run=run, agent=agent
+    )
+
+
+def _write_verdict(repo: str, pr: int, sha: str, verdict: str, ci: str,
+                   blocking: List[str], note: Optional[str],
+                   run: Optional[str] = None,
+                   agent: Optional[str] = None) -> int:
+    """Write the one structured verdict artifact shared by models and gates."""
+
     body = {
         "verdict": verdict,
         "ci": ci,
@@ -4290,6 +4317,56 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
     print("recorded {} on PR #{} against {} in {}".format(
         verdict, pr, sha[:12], repo))
     return 0
+
+
+def _conflicting_branch_blocker(data: Dict) -> Optional[str]:
+    """The mechanical conflict reason, or None for every other branch state."""
+    if str(data.get("mergeable") or "").upper() != "CONFLICTING":
+        return None
+    return "branch {!r}{}".format(
+        data.get("headRefName") or "", CONFLICTING_BRANCH_SUFFIX
+    )
+
+
+def _is_conflicting_branch_blocker(reason: str) -> bool:
+    return reason.startswith("branch ") and reason.endswith(
+        CONFLICTING_BRANCH_SUFFIX
+    )
+
+
+def _record_unmergeable_rejection(repo: str, pr: int) -> None:
+    """Reject an approved current head that the live merge gate finds conflicting.
+
+    Re-reading the head and mergeability keeps the verdict tied to the fact the
+    gate actually observed. Requiring an approval at that exact SHA excludes the
+    two self-resolving refusal shapes: no verdict and a verdict for an older head.
+    It also makes retries idempotent, because the newest verdict is then already
+    the gate-authored rejection rather than an approval.
+    """
+    data = _gh_json(
+        "gh", "pr", "view", str(pr), "--repo", repo, "--json",
+        "state,headRefName,headRefOid,mergeable",
+    ) or {}
+    if data.get("state") != "OPEN":
+        return
+    sha = data.get("headRefOid")
+    reason = _conflicting_branch_blocker(data)
+    if not sha or reason is None:
+        return
+
+    verdict = latest_verdict(repo, pr)
+    if (
+        verdict is None
+        or verdict.get("verdict") != "approved"
+        or verdict.get("head_sha") != sha
+    ):
+        return
+
+    _write_verdict(
+        repo, pr, sha, "rejected", "unknown",
+        [UNMERGEABLE_REJECTION_BLOCKING], None,
+        agent=MERGE_GATE_AGENT,
+    )
 
 
 def ticket_ref_from_branch(repo: str, branch: str) -> Optional[str]:
@@ -4362,11 +4439,9 @@ def merge_blockers(repo: str, pr: int, items: List[Item],
         why.append("PR is {}, not open".format(data.get("state")))
 
     mergeable = str(data.get("mergeable") or "").upper()
-    if mergeable == "CONFLICTING":
-        why.append(
-            "branch {!r} is conflicting with the base — an engineer rebase is required"
-            .format(data.get("headRefName") or "")
-        )
+    conflict = _conflicting_branch_blocker(data)
+    if conflict is not None:
+        why.append(conflict)
     elif mergeable != "MERGEABLE":
         why.append(
             "mergeability for branch {!r} has not been computed yet — retry on the next run"
@@ -4424,6 +4499,8 @@ def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
     repo = resolve_repo(repo)
     why = merge_blockers(repo, pr, items, now)
     if why:
+        if any(_is_conflicting_branch_blocker(reason) for reason in why):
+            _record_unmergeable_rejection(repo, pr)
         print("refusing to merge PR #{}:".format(pr), file=sys.stderr)
         for reason in why:
             print("  - " + reason, file=sys.stderr)

@@ -166,6 +166,77 @@ def test_every_failure_is_reported_not_just_the_first(monkeypatch):
     assert len(funnel.merge_blockers(REPO, 5, items(), NOW)) >= 3
 
 
+# -- a conflicting branch hands the ticket back -------------------------------
+
+def _gate_rejection_wired(monkeypatch, pr_json, comments):
+    posted = []
+
+    def fake_gh_json(*args):
+        if "list" in args:
+            return [{"headRefName": "ticket/9", "number": 5}]
+        if "comments" in args:
+            return {"comments": [
+                {"body": body} for body in comments + posted
+            ]}
+        return pr_json
+
+    def fake_run(argv, **kwargs):
+        if argv[:3] == ["gh", "pr", "comment"]:
+            posted.append(argv[-1])
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    monkeypatch.setattr(funnel.subprocess, "run", fake_run)
+    return posted
+
+
+def test_conflicting_approved_head_writes_one_gate_rejection_and_hands_back(
+        monkeypatch):
+    posted = _gate_rejection_wired(
+        monkeypatch, pr(mergeable="CONFLICTING"), [verdict()]
+    )
+
+    assert funnel.cmd_merge(items(), NOW, REPO, 5, False) == 1
+    assert len(posted) == 1
+    rejection = funnel.parse_verdict(posted[0])
+    assert rejection == {
+        "blocking": ["branch could not merge at this head"],
+        "ci": "unknown",
+        "head_sha": SHA,
+        "reviewed_at": rejection["reviewed_at"],
+        "verdict": "rejected",
+    }
+    provenance = funnel.parse_provenance(posted[0])
+    assert provenance["voice"] == "agent"
+    assert provenance["agent"] == funnel.MERGE_GATE_AGENT
+
+    blocked = funnel.awaiting_review(items())
+    assert [item.ref for item in funnel.startable(
+        items(), awaiting_review=blocked
+    )] == [REPO + "#9"]
+
+    assert funnel.cmd_merge(items(), NOW, REPO, 5, False) == 1
+    assert len(posted) == 1
+
+
+def test_no_verdict_refusal_does_not_write_a_gate_rejection(monkeypatch):
+    posted = _gate_rejection_wired(
+        monkeypatch, pr(mergeable="CONFLICTING"), []
+    )
+    assert funnel.cmd_merge(items(), NOW, REPO, 5, False) == 1
+    assert posted == []
+
+
+def test_moved_head_refusal_does_not_write_a_gate_rejection(monkeypatch):
+    posted = _gate_rejection_wired(
+        monkeypatch,
+        pr(mergeable="CONFLICTING", headRefOid="9999newcommit"),
+        [verdict()],
+    )
+    assert funnel.cmd_merge(items(), NOW, REPO, 5, False) == 1
+    assert posted == []
+
+
 # -- closing the ticket the PR finished ---------------------------------------
 #
 # `gh pr merge` closes an issue only when the PR body carries a `Closes #N`

@@ -193,7 +193,6 @@ LADDER = ["Broken", "Maintenance", "Improve", "New", "Replace"]
 #: `claim_ticket()` stays Broken-only: Maintenance may preempt ranking, not the
 #: cap (`test_maintenance_does_not_preempt_the_limit`).
 PREEMPTING_CLASSES = frozenset({"Broken", "Maintenance"})
-PREEMPTING_RANK = max(LADDER.index(klass) for klass in PREEMPTING_CLASSES)
 PREEMPTING = {"Broken", "Maintenance"}
 
 #: Existing-work classes may take the unattended shaping path. Origin remains
@@ -1179,6 +1178,17 @@ def startable(items: Sequence[Item],
         )
         for ref in by_ref
     }
+    # Membership, not a rank threshold: a class added above Broken in LADDER
+    # (#130's Investigate) must not acquire preemption rights by position.
+    # plan.md grants them only to the finite classes named in
+    # PREEMPTING_CLASSES; a ticket that blocks one preempts with it.
+    preempting = {
+        ref: any(
+            effective_class(by_ref[related], by_ref) in PREEMPTING_CLASSES
+            for related in {ref} | descendants[ref]
+        )
+        for ref in by_ref
+    }
 
     def eligible(item: Item) -> bool:
         if (
@@ -1226,7 +1236,7 @@ def startable(items: Sequence[Item],
             # 2026-09-09: six Broken projects at Ready sat behind ten in-flight
             # Improve tickets all afternoon. Read through `effective_rank` so a
             # ticket that blocks a Broken one preempts with it.
-            0 if effective_rank[item.ref] <= PREEMPTING_RANK else 1,
+            0 if preempting[item.ref] else 1,
             not in_flight(item),
             effective_rank[item.ref],
             # A blocker with the same effective rank as its dependent still

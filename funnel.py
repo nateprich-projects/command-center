@@ -248,6 +248,10 @@ class Item:
     parent: Optional[str] = None  # "owner/repo#123"
     children_total: int = 0
     children_done: int = 0
+    # Derived at load time from child ticket bodies. This is deliberately not
+    # a second GitHub record: the Human step marker remains the only source of
+    # truth, including after its ticket closes.
+    carried_human_step: bool = False
     first_child_created_at: Optional[datetime] = None
     last_child_closed_at: Optional[datetime] = None
     blocked_since: Optional[datetime] = None
@@ -419,8 +423,14 @@ def gate_question(item: Item) -> Optional[str]:
             return None
         return "Unblock?" if item.parent else "Unblock or park?"
     if item.status == "Building":
-        # Building waits on Nate only once every child has closed.
-        return GATES["Building"] if item.children_all_closed else None
+        # New work and replacements always stop for acceptance. Upkeep closes
+        # itself once #55 lands, except where Nate performed part of the work:
+        # a project that ever carried a human-step ticket must still reach him.
+        if not item.children_all_closed:
+            return None
+        if item.klass in ("Broken", "Maintenance", "Improve"):
+            return GATES["Building"] if item.carried_human_step else None
+        return GATES["Building"]
     if item.status == "Shaped":
         # A plan with no Needs section has not earned an all-clear. The shared
         # parser fails closed so a missing section still reaches Nate rather
@@ -566,6 +576,24 @@ def parse_human_step(body: str) -> Optional[str]:
         return None
     match = HUMAN_STEP_LINE.search(body)
     return match.group("reason") if match else None
+
+
+def mark_projects_that_carried_human_steps(items: Sequence[Item]) -> None:
+    """Derive project acceptance history from child ticket markers.
+
+    Closed child tickets remain in the Project item feed, so deriving this
+    after all pages load preserves "ever carried" without persisting a second
+    field that could drift from the marker.
+    """
+    parent_refs = {
+        item.parent
+        for item in items
+        if item.parent is not None
+        and parse_human_step(item.body or "") is not None
+    }
+    for item in items:
+        item.carried_human_step = item.ref in parent_refs
+
 
 #: A safety boundary for tickets written before markers existed, or by someone
 #: who forgot. False positives cost one escalated review; false negatives can
@@ -2649,6 +2677,7 @@ def load_items() -> List[Item]:
         if not page["pageInfo"]["hasNextPage"]:
             break
         cursor = page["pageInfo"]["endCursor"]
+    mark_projects_that_carried_human_steps(items)
     return items
 
 

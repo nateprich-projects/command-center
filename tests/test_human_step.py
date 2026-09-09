@@ -35,3 +35,28 @@ def test_an_embedded_marker_does_not_match():
         funnel.HUMAN_STEP_PREFIX, funnel.HUMAN_STEP_REASONS[0]
     )
     assert funnel.parse_human_step(body) is None
+
+
+def test_closed_human_step_marks_its_project_as_ever_carried():
+    project = funnel.Item(
+        repo="nateprich/beta", number=1, title="Project",
+        url="https://example.invalid/1", state="OPEN", status="Building",
+        klass="Broken",
+    )
+    closed_human_step = funnel.Item(
+        repo="nateprich/beta", number=2, title="Configure the account",
+        url="https://example.invalid/2", state="CLOSED", parent=project.ref,
+        body="Human step: an account or billing setting",
+    )
+    ordinary_project = funnel.Item(
+        repo="nateprich/beta", number=3, title="Other project",
+        url="https://example.invalid/3", state="OPEN", status="Building",
+        klass="Broken",
+    )
+
+    funnel.mark_projects_that_carried_human_steps(
+        [project, closed_human_step, ordinary_project]
+    )
+
+    assert project.carried_human_step
+    assert not ordinary_project.carried_human_step

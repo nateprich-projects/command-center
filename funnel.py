@@ -2980,7 +2980,7 @@ def class_display(item: Item, by_ref: Dict[str, Item]) -> str:
 def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = None) -> dict:
     by_ref = by_ref if by_ref is not None else {}
     breakdown = breakdown_latency(item)
-    return {
+    rendered = {
         "ref": item.ref,
         "repo": item.repo,
         "title": item.title,
@@ -2995,6 +2995,9 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
         "blocked": item.is_blocked,
         "launch": launch_command(item),
     }
+    if item.pinned:
+        rendered["pinned"] = True
+    return rendered
 
 
 def parked_items(items: Iterable[Item]) -> List[Item]:

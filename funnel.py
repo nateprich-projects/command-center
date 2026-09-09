@@ -130,6 +130,11 @@ PROJECT_ID = "PVT_kwHOD7A-N84BihDg"
 #: single ticket should honestly take.
 LOCK_TTL = timedelta(hours=2)
 
+#: A run that has not pushed its deterministic ticket branch within this
+#: window has left no durable work to protect. Branch absence is established
+#: from one bounded repository scan, never from a per-ticket lookup.
+CLAIM_BRANCH_GRACE = timedelta(minutes=30)
+
 #: How many tickets may be worked at once, across the whole funnel.
 #:
 #: This used to be implicit in the claim: `cmd_claim` refused whenever *any*
@@ -1187,11 +1192,72 @@ def startable(items: Sequence[Item],
     return sorted((i for i in items if eligible(i)), key=key)
 
 
-def in_motion(items: Iterable[Item], now: datetime) -> List[Item]:
+def _ticket_branch_exists(
+    item: Item,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]],
+) -> Optional[bool]:
+    """Return remote branch presence, or ``None`` when it was not established."""
+    if pr_facts is None or item.ref not in pr_facts:
+        return None
+    fact = pr_facts[item.ref]
+    if fact is None:
+        return False
+    value = fact.get("branch_exists")
+    return value if isinstance(value, bool) else None
+
+
+def in_motion(
+    items: Iterable[Item],
+    now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> List[Item]:
     """Every ticket currently claimed, oldest claim first.
 
-    A claim is written at run start, which is when it must exist — a PR or a
-    branch appears too late to cover the window in which a run most often dies.
+    The claim covers the opening before a branch exists. After the grace
+    period, only a confirmed remote branch keeps it live until the hard TTL.
+    """
+    rows = list(items)
+    stale = {item.ref for item in stale_locks(rows, now, pr_facts=pr_facts)}
+    return sorted(
+        (
+            i
+            for i in rows
+            if i.state == "OPEN"
+            and i.in_motion_since is not None
+            and i.ref not in stale
+        ),
+        key=lambda i: i.in_motion_since or now,
+    )
+
+
+def lock_holder(
+    items: Iterable[Item],
+    now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> Optional[Item]:
+    """The oldest live claim, or None. Retained for callers that want one item."""
+    held = in_motion(items, now, pr_facts=pr_facts)
+    return held[0] if held else None
+
+
+def at_capacity(
+    items: Iterable[Item],
+    now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> bool:
+    return len(in_motion(items, now, pr_facts=pr_facts)) >= WIP_LIMIT
+
+
+def stale_locks(
+    items: Iterable[Item],
+    now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> List[Item]:
+    """Claims past the TTL or branchless after the opening grace period.
+
+    Branch absence has to be explicit. Missing or truncated facts preserve the
+    claim, so a run that pushed anything can never lose its lock because a scan
+    could not see far enough.
     """
     return sorted(
         (
@@ -1199,32 +1265,13 @@ def in_motion(items: Iterable[Item], now: datetime) -> List[Item]:
             for i in items
             if i.state == "OPEN"
             and i.in_motion_since is not None
-            and now - i.in_motion_since < LOCK_TTL
-        ),
-        key=lambda i: i.in_motion_since or now,
-    )
-
-
-def lock_holder(items: Iterable[Item], now: datetime) -> Optional[Item]:
-    """The oldest live claim, or None. Retained for callers that want one item."""
-    held = in_motion(items, now)
-    return held[0] if held else None
-
-
-def at_capacity(items: Iterable[Item], now: datetime) -> bool:
-    return len(in_motion(items, now)) >= WIP_LIMIT
-
-
-def stale_locks(items: Iterable[Item], now: datetime) -> List[Item]:
-    """Claims past the TTL. The next run takes these over; each takeover is a
-    line in the brief, because three in a week means runs are dying."""
-    return sorted(
-        (
-            i
-            for i in items
-            if i.state == "OPEN"
-            and i.in_motion_since is not None
-            and now - i.in_motion_since >= LOCK_TTL
+            and (
+                now - i.in_motion_since >= LOCK_TTL
+                or (
+                    now - i.in_motion_since >= CLAIM_BRANCH_GRACE
+                    and _ticket_branch_exists(i, pr_facts) is False
+                )
+            )
         ),
         key=lambda i: i.in_motion_since or now,
     )
@@ -1569,7 +1616,10 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
 
 def next_ticket(items: Sequence[Item], now: datetime,
                 blocked: Optional[Set[str]] = None,
-                excluded: Optional[Set[str]] = None) -> Optional[Item]:
+                excluded: Optional[Set[str]] = None,
+                pr_facts: Optional[
+                    Dict[str, Optional[Dict[str, object]]]
+                ] = None) -> Optional[Item]:
     """The single ticket Codex should work, or None.
 
     Returns None when the funnel is at its work-in-progress limit. A Broken
@@ -1585,18 +1635,18 @@ def next_ticket(items: Sequence[Item], now: datetime,
     if not queue:
         return None
 
-    claimed = {i.ref for i in in_motion(items, now)}
+    claimed = {i.ref for i in in_motion(items, now, pr_facts=pr_facts)}
     free = [i for i in queue if i.ref not in claimed]
     if not free:
         return None
-    if not at_capacity(items, now):
+    if not at_capacity(items, now, pr_facts=pr_facts):
         return free[0]
 
     # At capacity. Only a Broken ticket may exceed it, and only when nothing
     # already in motion is Broken — preemption is for getting a fix moving, not
     # for stacking fixes on top of each other.
     by_ref = {i.ref: i for i in items}
-    running = in_motion(items, now)
+    running = in_motion(items, now, pr_facts=pr_facts)
     if any(effective_class(i, by_ref) == "Broken" for i in running):
         return None
     for candidate in free:
@@ -1608,7 +1658,10 @@ def next_ticket(items: Sequence[Item], now: datetime,
 def next_ticket_for_tier(items: Sequence[Item], now: datetime,
                          tier: Optional[str] = None,
                          blocked: Optional[Set[str]] = None,
-                         excluded: Optional[Set[str]] = None) -> Optional[Item]:
+                         excluded: Optional[Set[str]] = None,
+                         pr_facts: Optional[
+                             Dict[str, Optional[Dict[str, object]]]
+                         ] = None) -> Optional[Item]:
     """Return the first shared-order ticket belonging to ``tier``.
 
     Tier filtering has to happen by asking ``next_ticket`` repeatedly rather
@@ -1620,7 +1673,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
     excluded = set(excluded or ())
     while True:
         ticket = next_ticket(
-            items, now, blocked=blocked, excluded=excluded
+            items, now, blocked=blocked, excluded=excluded, pr_facts=pr_facts
         )
         if ticket is None or tier is None:
             return ticket
@@ -3752,7 +3805,9 @@ def stranded_items(
     """
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
-    stale = {item.ref for item in stale_locks(rows, now)}
+    stale = {
+        item.ref for item in stale_locks(rows, now, pr_facts=pr_facts)
+    }
     found: List[Dict[str, object]] = []
 
     for item in rows:
@@ -3854,6 +3909,7 @@ def cmd_next(
     now: datetime,
     tier: Optional[str] = None,
     excluded: Optional[Set[str]] = None,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
 ) -> int:
     excluded = excluded or frozenset()
     # A ref reaches `--not` only from the run that was offered it, and `next`
@@ -3872,11 +3928,12 @@ def cmd_next(
             print("released {} (declined)".format(declined.ref), file=sys.stderr)
     blocked = awaiting_review(items)
     ticket = next_ticket_for_tier(
-        items, now, tier=tier, blocked=blocked, excluded=excluded
+        items, now, tier=tier, blocked=blocked, excluded=excluded,
+        pr_facts=pr_facts,
     )
 
     if ticket is None:
-        holder = lock_holder(items, now)
+        holder = lock_holder(items, now, pr_facts=pr_facts)
         if holder is not None:
             print(
                 "nothing — lock held by {} (claimed {} ago)".format(
@@ -3906,7 +3963,7 @@ def cmd_brief(
             1 for i in items if i.status == stage and i.state == "OPEN"
         )
 
-    running = in_motion(items, now)
+    running = in_motion(items, now, pr_facts=pr_facts)
     brief = {
         "generated_at": now.isoformat(),
         "total_needing_nate": len(decisions),
@@ -3926,7 +3983,9 @@ def cmd_brief(
         "stranded": stranded_json(items, now, pr_facts=pr_facts),
         "in_motion": [i.ref for i in running],
         "wip_limit": WIP_LIMIT,
-        "stale_locks_taken_over": [i.ref for i in stale_locks(items, now)],
+        "stale_locks_taken_over": [
+            i.ref for i in stale_locks(items, now, pr_facts=pr_facts)
+        ],
         "maintenance_load": maintenance_load(items, now),
         "unattended_merges": unattended_merges(now),
         "agent_health": agent_health(now),
@@ -3976,9 +4035,14 @@ def find(items: Sequence[Item], ref: str) -> Item:
     raise GitHubError("no funnel item matches {}".format(ref))
 
 
-def claim_ticket(items: List[Item], now: datetime, target: Item) -> Optional[str]:
+def claim_ticket(
+    items: List[Item],
+    now: datetime,
+    target: Item,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> Optional[str]:
     """Write a ticket claim, or return the reason it must be refused."""
-    running = in_motion(items, now)
+    running = in_motion(items, now, pr_facts=pr_facts)
 
     taken = next((i for i in running if i.ref == target.ref), None)
     if taken is not None and taken.in_motion_since != target.in_motion_since:
@@ -3997,7 +4061,10 @@ def claim_ticket(items: List[Item], now: datetime, target: Item) -> Optional[str
                 len(running), WIP_LIMIT,
                 ", ".join(i.ref for i in running))
 
-    stale = [i for i in stale_locks(items, now) if i.ref != target.ref]
+    stale = [
+        i for i in stale_locks(items, now, pr_facts=pr_facts)
+        if i.ref != target.ref
+    ]
     for item in stale:
         # Self-correcting, no human in the loop. Every takeover is a line in the
         # brief: one is noise, three in a week means runs are dying.
@@ -4011,7 +4078,12 @@ def claim_ticket(items: List[Item], now: datetime, target: Item) -> Optional[str
     return None
 
 
-def cmd_claim(items: List[Item], now: datetime, ref: str) -> int:
+def cmd_claim(
+    items: List[Item],
+    now: datetime,
+    ref: str,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> int:
     """Claim a ticket, or refuse. Two separate refusals, deliberately.
 
     **Someone else already has this ticket** is correctness: two agents working
@@ -4026,7 +4098,7 @@ def cmd_claim(items: List[Item], now: datetime, ref: str) -> int:
     caller distinguishes by exit code.
     """
     target = find(items, ref)
-    refusal = claim_ticket(items, now, target)
+    refusal = claim_ticket(items, now, target, pr_facts=pr_facts)
     if refusal is not None:
         print(refusal, file=sys.stderr)
         return 1
@@ -4783,27 +4855,51 @@ def ticket_pr_index(repo: str) -> Tuple[Dict[str, Dict], bool]:
     return index, truncated
 
 
+def ticket_branch_index(repo: str) -> Tuple[Set[str], bool]:
+    """Remote ``ticket/<n>`` branches from one bounded repository scan."""
+    rows = _gh_json(
+        "gh", "api",
+        "repos/{}/git/matching-refs/heads/ticket?per_page={}".format(
+            repo, MERGED_PR_SCAN_LIMIT
+        ),
+    )
+    if rows is None:
+        raise GitHubError("could not read ticket branches for {}".format(repo))
+    if not isinstance(rows, list):
+        raise GitHubError("invalid ticket branch response for {}".format(repo))
+
+    # The endpoint caps a page at 100. At the cap, absent refs are unknown and
+    # must preserve their claims; positively returned refs remain safe to use.
+    truncated = len(rows) >= MERGED_PR_SCAN_LIMIT
+    refs: Set[str] = set()
+    for row in rows[:MERGED_PR_SCAN_LIMIT]:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("ref") or "")
+        if not name.startswith("refs/heads/"):
+            continue
+        ref = ticket_ref_from_branch(repo, name[len("refs/heads/"):])
+        if ref:
+            refs.add(ref)
+    return refs, truncated
+
+
 def ticket_pr_facts(
     items: Sequence[Item],
 ) -> Dict[str, Optional[Dict[str, object]]]:
     """Read PR facts needed by the brief's stranded-work diagnostics.
 
-    One bounded ``gh pr list`` per member repository, indexed by head branch —
-    not one lookup per ticket. The per-ticket form was the single largest
-    GraphQL consumer in the system: 68 requests on the board of 2026-09-08, 93
-    of a full brief's 110 points, and it grew with the board (#272). The scan is
-    the same query shape against the same endpoint, so lazily-computed fields
-    behave identically; this is a re-indexing, not a new data source.
+    Two bounded reads per member repository — one PR list and one remote ticket
+    branch list — never one lookup per ticket. The per-ticket PR form was the
+    single largest GraphQL consumer in the system: 68 requests on the board of
+    2026-09-08, 93 of a full brief's 110 points, and it grew with the board
+    (#272).
 
-    The map's contract is unchanged and load-bearing. An explicit ``None`` means
-    "looked up, no PR"; an **absent key** means "not fetched", which
-    ``stranded_items`` reads through ``pr_known``.
-
-    That distinction is why a ticket beyond the scan window is omitted rather
-    than recorded as ``None``. A truncated scan cannot tell "this ticket has no
-    PR" from "its PR is older than the window", and ``None`` would render the
-    scan's own blind spot as a defect in the work — a false "claim past its TTL
-    with no PR" that would grow as PR history grows.
+    An explicit ``None`` means both scans established no PR and no branch. A
+    dict carries PR data when present plus ``branch_exists``; a branch without
+    a PR is a minimal dict. An absent key means a bounded scan was truncated,
+    so callers must not infer absence. That distinction keeps a scan blind spot
+    from becoming either a false stranded diagnostic or an unsafe takeover.
     """
     wanted = {
         item.ref: item for item in items
@@ -4814,19 +4910,39 @@ def ticket_pr_facts(
 
     for repo in sorted({item.repo for item in wanted.values()}):
         index, truncated = ticket_pr_index(repo)
+        branch_refs, branches_truncated = ticket_branch_index(repo)
         for ref, item in wanted.items():
             if item.repo != repo:
                 continue
+            fact: Optional[Dict[str, object]]
             if ref in index:
-                pr = dict(index[ref])
-                if str(pr.get("state") or "").upper() == "OPEN":
-                    if str(pr.get("mergeable") or "").upper() == "CONFLICTING":
+                fact = dict(index[ref])
+                if str(fact.get("state") or "").upper() == "OPEN":
+                    if str(fact.get("mergeable") or "").upper() == "CONFLICTING":
                         # Kept conditional: a verdict lookup per ticket would
                         # undo the saving this scan exists for.
-                        pr["verdict"] = latest_verdict(item.repo, pr.get("number"))
-                facts[ref] = pr
+                        fact["verdict"] = latest_verdict(
+                            item.repo, fact.get("number")
+                        )
             elif not truncated:
-                facts[ref] = None
+                fact = None
+            else:
+                continue
+
+            if ref in branch_refs:
+                if fact is None:
+                    fact = {"headRefName": "ticket/{}".format(item.number)}
+                fact["branch_exists"] = True
+                facts[ref] = fact
+            elif not branches_truncated:
+                if fact is not None:
+                    fact["branch_exists"] = False
+                facts[ref] = fact
+            elif fact is not None:
+                # Preserve useful PR diagnostics while explicitly withholding
+                # the branch-absence conclusion from stale-lock detection.
+                fact["branch_exists"] = None
+                facts[ref] = fact
 
     return facts
 
@@ -4981,12 +5097,21 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         out["unmetered"] = True
 
     if agent == "codex":
+        try:
+            pr_facts = ticket_pr_facts(items)
+        except GitHubError as exc:
+            out.update(
+                do="stop",
+                why="could not establish ticket branch facts: {}".format(exc),
+            )
+            print(json.dumps(out, indent=2))
+            return 0
         blocked = awaiting_review(items)
         ticket = next_ticket_for_tier(
-            items, now, tier=tier, blocked=blocked
+            items, now, tier=tier, blocked=blocked, pr_facts=pr_facts
         )
         if ticket is None:
-            holder = lock_holder(items, now)
+            holder = lock_holder(items, now, pr_facts=pr_facts)
             if holder is not None:
                 why = "nothing — lock held by {} (claimed {} ago)".format(
                     holder.ref, humanise(now - holder.in_motion_since)
@@ -4997,7 +5122,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 why = "nothing to do"
             out.update(do="stop", why=why)
         else:
-            refusal = claim_ticket(items, now, ticket)
+            refusal = claim_ticket(items, now, ticket, pr_facts=pr_facts)
             if refusal is not None:
                 out.update(do="stop", why=refusal)
             else:
@@ -5912,7 +6037,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         if args.command == "claim":
-            return cmd_claim(items, now, args.ref)
+            return cmd_claim(
+                items, now, args.ref, pr_facts=ticket_pr_facts(items)
+            )
         if args.command == "release":
             return cmd_release(items, now, args.ref)
         if args.command == "pin":
@@ -5969,6 +6096,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 now,
                 tier=getattr(args, "tier", None),
                 excluded=set(getattr(args, "excluded", [])),
+                pr_facts=ticket_pr_facts(items),
             )
         if args.command == "brief":
             return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))

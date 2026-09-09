@@ -23,6 +23,38 @@ def fixture_items():
     ]
 
 
+def test_brief_removes_a_branchless_takeover_from_in_motion(
+    monkeypatch, capsys
+):
+    project = funnel.Item(
+        repo="nateprich/beta", number=1, title="Project",
+        url="https://example.invalid/1", state="OPEN", status="Building",
+        klass="Improve", children_total=2,
+    )
+    ghost = funnel.Item(
+        repo=project.repo, number=2, title="Ghost claim",
+        url="https://example.invalid/2", state="OPEN", parent=project.ref,
+        in_motion_since=NOW - timedelta(minutes=31),
+    )
+    live = funnel.Item(
+        repo=project.repo, number=3, title="Pushed work",
+        url="https://example.invalid/3", state="OPEN", parent=project.ref,
+        in_motion_since=NOW - timedelta(minutes=31),
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+    monkeypatch.setattr(funnel, "working_tree_touched", lambda now: [])
+
+    assert funnel.cmd_brief(
+        [project, ghost, live],
+        NOW,
+        pr_facts={ghost.ref: None, live.ref: {"branch_exists": True}},
+    ) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["in_motion"] == [live.ref]
+    assert brief["stale_locks_taken_over"] == [ghost.ref]
+
+
 def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
     monkeypatch, capsys
 ):

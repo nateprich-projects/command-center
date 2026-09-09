@@ -26,7 +26,10 @@ def item(number, status=None, klass=None, days=1.0, **kw):
 
 
 def test_queue_renders_classes_in_each_section(capsys):
-    waiting = item(1, "Building", "Broken", children_total=1, children_done=1)
+    waiting = item(
+        1, "Building", "Broken", children_total=1, children_done=1,
+        carried_human_step=True,
+    )
     unclassed = item(2, "Building", None, children_total=1, children_done=1)
     awaiting_breakdown = item(3, "Ready", "Maintenance", children_total=0)
     in_flight = item(4, "Building", "New", children_total=1, children_done=0)

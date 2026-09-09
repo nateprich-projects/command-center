@@ -8,6 +8,8 @@ import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -81,6 +83,163 @@ def _codex_begin(monkeypatch, capsys, items, *, tier="standard"):
     )
     assert funnel.cmd_begin(items, NOW, "codex", tier, False) == 0
     return json.loads(capsys.readouterr().out), writes
+
+
+def _completed_project(number, *, klass="Improve", children_done=2,
+                      carried_human_step=False):
+    repo = "nateprich/example"
+    project = funnel.Item(
+        repo=repo,
+        number=number,
+        title="Project {}".format(number),
+        url="https://github.com/{}/issues/{}".format(repo, number),
+        state="OPEN",
+        status="Building",
+        klass=klass,
+        item_id="project-{}".format(number),
+        children_total=2,
+        children_done=children_done,
+        carried_human_step=carried_human_step,
+    )
+    children = [
+        funnel.Item(
+            repo=repo,
+            number=number + offset,
+            title="Ticket {}".format(number + offset),
+            url="https://github.com/{}/issues/{}".format(repo, number + offset),
+            state="CLOSED",
+            parent=project.ref,
+        )
+        for offset in (1, 2)
+    ]
+    return [project] + children
+
+
+def _begin_with_reconcile_wired(monkeypatch, capsys, items):
+    calls = []
+    graphql_calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if "--agent" in argv:
+            return SimpleNamespace(stdout="run-id\n", returncode=0, stderr="")
+        return SimpleNamespace(stdout="", returncode=0, stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(
+        usage, "read_agent", lambda agent, timestamp: {"windows": {}}
+    )
+    monkeypatch.setattr(
+        usage, "pace", lambda reading, timestamp, provider: {"over_pace": False}
+    )
+    monkeypatch.setattr(funnel, "drift_since_approval", lambda item: [])
+    monkeypatch.setattr(funnel, "gh_graphql", lambda query, **variables: (
+        graphql_calls.append((query, variables)) or {}
+    ))
+    monkeypatch.setattr(funnel, "_option_id", lambda *args: "done-option")
+    monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+    monkeypatch.setattr(funnel, "next_ticket_for_tier", lambda *args, **kwargs: None)
+
+    assert funnel.cmd_begin(items, NOW, "codex", "standard", False) == 0
+    return json.loads(capsys.readouterr().out), calls, graphql_calls
+
+
+def test_begin_reconciles_a_completed_upkeep_project_and_records_marker(
+    monkeypatch, capsys
+):
+    items = _completed_project(200)
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert result["auto_closed"] == [items[0].ref]
+    assert items[0].state == "CLOSED"
+    assert items[0].status == "Done"
+    assert items[0].state_reason == "COMPLETED"
+    assert (funnel.SET_FIELD, {
+        "project": funnel.PROJECT_ID,
+        "item": "project-200",
+        "field": funnel.STATUS_FIELD_ID,
+        "option": "done-option",
+    }) in graphql_calls
+    assert [
+        "gh", "issue", "close", "200", "--repo", "nateprich/example",
+        "--reason", "completed",
+    ] in calls
+    comments = [
+        call[-1] for call in calls
+        if call[:3] == ["gh", "issue", "comment"]
+    ]
+    assert len(comments) == 1
+    assert comments[0].startswith(funnel.CLOSED_ITSELF_PREFIX)
+    payload = json.loads(
+        comments[0].split("```json\n", 1)[1].rsplit("\n```", 1)[0]
+    )
+    assert payload == {
+        "drift": [],
+        "tickets": [
+            {"ref": items[1].ref, "title": items[1].title},
+            {"ref": items[2].ref, "title": items[2].title},
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "klass,carried_human_step,children_done",
+    [
+        ("New", False, 2),
+        ("Broken", True, 2),
+        ("Improve", False, 1),
+    ],
+)
+def test_begin_leaves_non_reconcilable_projects_untouched(
+    monkeypatch, capsys, klass, carried_human_step, children_done
+):
+    items = _completed_project(
+        210,
+        klass=klass,
+        carried_human_step=carried_human_step,
+        children_done=children_done,
+    )
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert "auto_closed" not in result
+    assert items[0].state == "OPEN"
+    assert items[0].status == "Building"
+    assert not [
+        call for call in calls
+        if call[:3] in (["gh", "issue", "close"], ["gh", "issue", "comment"])
+    ]
+    assert not [
+        call for call in graphql_calls
+        if call[1].get("item") == "project-210"
+    ]
+
+
+def test_begin_reconcile_is_idempotent(monkeypatch, capsys):
+    items = _completed_project(220)
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+    assert result["auto_closed"] == [items[0].ref]
+
+    calls.clear()
+    graphql_calls.clear()
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert "auto_closed" not in result
+    assert not graphql_calls
+    assert not [
+        call for call in calls
+        if call[:3] in (["gh", "issue", "close"], ["gh", "issue", "comment"])
+    ]
 
 
 def test_codex_begin_records_heartbeat_before_selecting_and_claiming(

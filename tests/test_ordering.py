@@ -708,6 +708,22 @@ def test_next_releases_the_claim_held_on_a_declined_ref(monkeypatch, capsys):
     assert funnel.in_motion(rows, NOW) == []
 
 
+def test_next_excludes_a_declined_ticket_given_as_a_bare_number(monkeypatch, capsys):
+    """#436: the routine may pass the number it copied; it must still exclude."""
+    released = []
+    monkeypatch.setattr(funnel, "write_lock",
+                        lambda item, value: released.append((item.ref, value)))
+    rows = [
+        project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(60)),
+        project(3, "Building", "New"), ticket(4, 3),
+    ]
+
+    assert funnel.cmd_next(rows, NOW, excluded={"2"}) == 0
+
+    assert '"ref": "nateprich/beta#4"' in capsys.readouterr().out
+    assert released == [(rows[1].ref, "")]
+
+
 def test_next_leaves_an_unclaimed_declined_ref_alone(monkeypatch, capsys):
     released = []
     monkeypatch.setattr(funnel, "write_lock",

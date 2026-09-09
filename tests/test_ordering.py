@@ -290,15 +290,26 @@ def test_unset_class_sorts_last_and_never_preempts():
     assert ladder_index("nonsense") > ladder_index("Replace")
 
 
+def test_investigate_is_first_without_gaining_preemption_or_self_approval():
+    assert ladder_index("Investigate") == 0
+    assert funnel.PREEMPTING == {"Broken", "Maintenance"}
+    assert funnel.SELF_APPROVABLE_CLASSES == frozenset(
+        {"Broken", "Maintenance", "Improve"}
+    )
+
+
 def test_ladder_is_in_the_documented_order():
-    ranks = [ladder_index(c) for c in ["Broken", "Maintenance", "Improve", "New", "Replace"]]
-    assert ranks == sorted(ranks) and len(set(ranks)) == 5
+    ranks = [ladder_index(c) for c in [
+        "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"
+    ]]
+    assert ranks == sorted(ranks) and len(set(ranks)) == 6
 
 
 def test_anything_past_ideas_must_carry_a_class():
     assert needs_class(item(1, "Shaped", None))
     assert needs_class(item(2, "Ready", None))
     assert needs_class(item(3, "Building", None))
+    assert not needs_class(item(4, "Building", "Investigate"))
 
 
 def test_a_ticket_is_exempt_because_it_inherits():
@@ -334,9 +345,20 @@ def test_ideas_done_and_parked_are_exempt_from_class():
 def test_ladder_orders_what_to_start():
     items = []
     for n, klass in ((1, "Replace"), (2, "Broken"), (3, "New"), (4, "Maintenance"),
-                     (5, "Improve")):
+                     (5, "Improve"), (6, "Investigate")):
         items += [project(n, "Building", klass), ticket(10 + n, n)]
-    assert [i.number for i in startable(items)] == [12, 14, 15, 13, 11]
+    assert [i.number for i in startable(items)] == [16, 12, 14, 15, 13, 11]
+
+
+def test_an_investigate_ticket_is_startable_above_broken_work():
+    investigate_parent = project(1, "Building", "Investigate")
+    investigate_ticket = ticket(2, 1)
+    broken_parent = project(3, "Building", "Broken")
+    broken_ticket = ticket(4, 3)
+
+    assert [i.number for i in startable([
+        broken_parent, broken_ticket, investigate_parent, investigate_ticket,
+    ])] == [2, 4]
 
 
 def test_pins_do_not_change_codex_startable_output():
@@ -600,6 +622,11 @@ def test_broken_preempts_the_limit():
 def test_maintenance_does_not_preempt_the_limit():
     """Maintenance may preempt in-flight *ranking*, but not exceed the cap."""
     rows = _at_limit([project(3, "Building", "Maintenance"), ticket(4, 3)])
+    assert next_ticket(rows, NOW) is None
+
+
+def test_investigate_does_not_preempt_the_limit():
+    rows = _at_limit([project(3, "Building", "Investigate"), ticket(4, 3)])
     assert next_ticket(rows, NOW) is None
 
 

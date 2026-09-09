@@ -184,7 +184,7 @@ WIP_LIMIT = 4
 STAGES = ["Ideas", "Shaped", "Ready", "Building", "Done", "Parked"]
 
 #: The ladder, best-first. Only finite classes may preempt in-flight work.
-LADDER = ["Broken", "Maintenance", "Improve", "New", "Replace"]
+LADDER = ["Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"]
 PREEMPTING = {"Broken", "Maintenance"}
 
 #: Existing-work classes may take the unattended shaping path. Origin remains

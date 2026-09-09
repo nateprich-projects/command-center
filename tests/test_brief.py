@@ -59,7 +59,7 @@ def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
     )]
 
 
-def test_brief_reports_breakdown_latency_separately_from_ready_wait(monkeypatch, capsys):
+def test_brief_does_not_treat_ready_as_a_human_decision(monkeypatch, capsys):
     ready = funnel.Item(
         repo="nateprich/beta", number=22, title="Ready with breakdown delay",
         url="https://example.invalid/22", state="OPEN", status="Ready",
@@ -76,15 +76,12 @@ def test_brief_reports_breakdown_latency_separately_from_ready_wait(monkeypatch,
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
 
     assert funnel.cmd_brief([ready, no_gap], NOW) == 0
-    rows = {
-        row["ref"]: row for row in json.loads(capsys.readouterr().out)["items"]
-    }
+    brief = json.loads(capsys.readouterr().out)
 
-    assert rows[ready.ref]["waited"] == "1 hour"
-    assert rows[ready.ref]["breakdown_latency"] == "12 hours"
-    assert rows[ready.ref]["breakdown_latency_days"] == 0
-    assert rows[no_gap.ref]["breakdown_latency"] is None
-    assert rows[no_gap.ref]["breakdown_latency_days"] is None
+    assert brief["items"] == []
+    assert brief["counts_by_gate"]["Ready"] == 2
+    assert funnel.breakdown_latency(ready) == timedelta(hours=12)
+    assert funnel.breakdown_latency(no_gap) is None
 
 
 def test_parked_items_are_newest_first_and_missing_reason_is_null(monkeypatch):

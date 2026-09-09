@@ -941,6 +941,29 @@ def plan_overlap_candidates(
     return candidates
 
 
+SHAPING_PLAN_STATUSES = frozenset(("Shaped", "Ready", "Building"))
+
+
+def shaping_plan_overlap_candidates(
+    items: Iterable[Item], item: Item, plan_body: str
+) -> List[str]:
+    """Find advisory overlaps with the other open project plans in flight.
+
+    Status belongs to parent Project items, so child tickets are not plans even
+    if a fixture or a future API response gives one a status. Closed projects
+    are not in flight and must not keep influencing a newly shaped plan.
+    """
+    other_plans = (
+        (other.ref, other.body or "")
+        for other in items
+        if other.ref != item.ref
+        and other.parent is None
+        and other.state == "OPEN"
+        and other.status in SHAPING_PLAN_STATUSES
+    )
+    return plan_overlap_candidates(item.ref, plan_body, other_plans)
+
+
 # These are evidence words, not a closed list of human-step categories. A plan
 # can use one while describing a rejected alternative or an already-automated
 # action, so the scan is a prompt to inspect the checklist rather than proof
@@ -4007,6 +4030,7 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     if not plan.strip():
         raise GitHubError("the plan is empty; nothing to record")
     body = append_provenance(plan, "agent", at=now, run=run, agent=agent)
+    overlaps = shaping_plan_overlap_candidates(items, item, plan)
 
     out = subprocess.run(
         ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
@@ -4023,6 +4047,13 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     subprocess.run(["gh", "issue", "edit", str(item.number), "--repo", item.repo,
                     "--remove-label", "needs-shaping"], capture_output=True)
     print("{} → Shaped\n{}".format(item.ref, item.url))
+    print("\n--- plan overlap candidates (advisory) ---")
+    if overlaps:
+        print("Read each candidate and record the conclusion in the plan:")
+        for overlap in overlaps:
+            print("  {}".format(overlap))
+    else:
+        print("  none found")
     print("\nIt now waits on you: is the plan good? Answer by moving it to Ready.")
     return 0
 

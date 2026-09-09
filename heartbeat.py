@@ -68,6 +68,7 @@ OUTCOMES = [
     "skipped-nate-active",  # the five-hour window was already in use; Codex only
     "skipped-usage-unknown",  # could not read usage; failed closed
     "skipped-blocked",     # prerequisite has not landed; no change made
+    "skipped-human-step",   # paused for a required human action
     "skipped-api-reserve",  # GraphQL budget below the reserve floor (#273)
     "prompt-drift",        # routine literal did not match the checked-in file
     "errored",             # tried and failed

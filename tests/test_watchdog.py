@@ -117,6 +117,11 @@ def test_a_week_of_blocked_skips_is_healthy_but_three_errors_alarm():
     assert any("errored 3 times" in problem for problem in problems)
 
 
+def test_a_human_step_skip_is_healthy():
+    rows = [finish("human-step", 1, "skipped-human-step")]
+    assert watchdog.assess("codex", rows, NOW) == []
+
+
 def test_prompt_drift_is_reported_as_a_fault():
     problems = watchdog.assess("codex", [event("a", 1, "prompt-drift")], NOW)
     assert len(problems) == 1

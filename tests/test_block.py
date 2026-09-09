@@ -4,10 +4,20 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
+
+
+def comment_item():
+    return funnel.Item(
+        repo="nateprich/beta", number=42, title="A ticket",
+        url="https://github.com/nateprich/beta/issues/42", state="OPEN",
+    )
 
 
 def test_named_block_comment_returns_references_and_reason():
@@ -90,6 +100,81 @@ def test_comment_fetch_failure_is_reported_by_doctor(monkeypatch):
     assert funnel.check_block_comments([item]) == funnel.Check(
         "block comments", False,
         "owner/repo#7: could not read comments", "",
+    )
+
+
+def test_comment_posts_a_canonical_single_block_header(monkeypatch):
+    monkeypatch.setattr(funnel, "load_items", lambda: [comment_item()])
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.main([
+        "comment", "42", "--blocked-on", "77", "--because", "waiting on X",
+        "--voice", "agent", "--run", "run-block", "--agent", "codex",
+    ]) == 0
+
+    posted = calls[0][-1]
+    assert posted.startswith("**Blocked on #77:** waiting on X\n\n")
+    assert funnel.parse_block_comment([posted])[0] == ["#77"]
+
+
+def test_comment_joins_multiple_block_references(monkeypatch):
+    monkeypatch.setattr(funnel, "load_items", lambda: [comment_item()])
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.main([
+        "comment", "42", "--blocked-on", "77", "--blocked-on", "78",
+        "--because", "waiting on both", "--voice", "agent",
+        "--run", "run-block", "--agent", "codex",
+    ]) == 0
+
+    posted = calls[0][-1]
+    assert posted.startswith("**Blocked on #77 and #78:** waiting on both\n\n")
+    assert funnel.parse_block_comment([posted])[0] == ["#77", "#78"]
+
+
+def test_blocked_comment_requires_because_before_loading_github(monkeypatch, capsys):
+    called = []
+    monkeypatch.setattr(funnel, "load_items", lambda: called.append("loaded"))
+
+    with pytest.raises(SystemExit) as exc:
+        funnel.main([
+            "comment", "42", "--blocked-on", "77", "--voice", "agent",
+        ])
+
+    assert exc.value.code != 0
+    assert called == []
+    assert "--because" in capsys.readouterr().err
+
+
+def test_ordinary_body_comments_are_not_validated_as_block_comments(monkeypatch):
+    monkeypatch.setattr(funnel, "load_items", lambda: [comment_item()])
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.main([
+        "comment", "42", "--body", "**Blocked on #77, 2026-09-07.** legacy",
+        "--voice", "agent", "--run", "run-body", "--agent", "codex",
+    ]) == 0
+
+    assert calls[0][-1].startswith(
+        "**Blocked on #77, 2026-09-07.** legacy\n\n"
     )
 
 

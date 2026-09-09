@@ -120,6 +120,30 @@ plausible-looking lists.
 - **exit 1, no work** — finish with `nothing-to-do` and stop.
 - **exit 0** — you get one ticket as JSON. That is your work.
 
+If the ticket is not workable because a prerequisite named by the ticket has not
+landed, that is a **decline**, not a reason to stop the run. Keep the declined
+refs in this run's context only — do not write them anywhere — and release the
+ticket before asking again:
+
+```bash
+python3 /Users/nateprich/.claude/command-center/funnel.py release <declined-ref>
+python3 /Users/nateprich/.claude/command-center/funnel.py next --tier standard --not <declined-ref>
+```
+
+The `--not` list is a per-call filter. On the second re-ask, repeat every earlier
+declined ref, for example:
+
+```bash
+python3 /Users/nateprich/.claude/command-center/funnel.py next --tier standard --not <declined-ref-1> --not <declined-ref-2>
+```
+
+Count candidates, not re-asks: consider at most three candidates in one run. If
+the next call returns no candidate, or if all three candidates are declined, stop
+and finish with `skipped-blocked`, naming **every** declined ref in the note. Do
+not ask for a fourth candidate and do not persist a decline or reorder the queue.
+If a re-ask returns a workable ticket, claim that ticket and continue with it;
+the declined tickets receive no implementation work or PR in this run.
+
 ## 4. Take the lock
 
 ```bash
@@ -173,6 +197,13 @@ issue** — do not fix it here. Half-built projects are the problem this whole
 system exists to solve.
 
 Do not change `Status` or `Class` on anything. Those are Nate's gates.
+
+If, after starting work, you discover that the current ticket is blocked by a
+named prerequisite that has not landed and you made no change, release it and
+return to the decline-and-re-ask rule in step 3. Do not commit or open a PR for a
+declined ticket. The dedicated human-step handoff above is different: after
+filing that human ticket, release and finish as instructed there; do not continue
+past that handoff.
 
 ### Mid-work discovery: convert, record, stop
 
@@ -242,8 +273,14 @@ python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent code
 ```
 
 If the ticket named a prerequisite that has not landed and the result is **no
-change made**, finish with `--outcome skipped-blocked` and a note. This is an
-honest decline, not an error.
+change made**, finish with `--outcome skipped-blocked` and a note. When the run
+declined more than one candidate, the note must name each ref, for example:
+
+```bash
+python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent codex --run <id> --outcome skipped-blocked --note "declined <ref-1>; declined <ref-2>; declined <ref-3>"
+```
+
+This is an honest decline, not an error.
 
 If anything went wrong, finish with `--outcome errored --note "<what broke>"`.
 An honest `errored` is worth more than a run that vanishes: the watchdog can see

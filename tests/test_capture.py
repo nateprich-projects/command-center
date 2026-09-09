@@ -302,3 +302,80 @@ def test_shaped_reads_the_plan_from_stdin_when_asked(monkeypatch):
     edit = calls[0][1]
     body = edit[edit.index("--body") + 1]
     assert body.startswith(plan)
+
+
+def _shaped_status_fixture(monkeypatch, plan_file, plan, status_option):
+    plan_file.write_text(plan)
+    item = Item(
+        repo="owner/repo", number=44, title="An idea",
+        url="https://github.com/owner/repo/issues/44", state="OPEN",
+        status="Ideas", item_id="project-item-44",
+    )
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, variables))
+        return {"ok": True}
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel, "_option_id", lambda field_id, name: status_option[name]
+    )
+    return item, calls
+
+
+def test_shaped_advances_a_plan_that_declares_nothing_open(
+    tmp_path, monkeypatch, capsys
+):
+    plan_file = tmp_path / "plan.md"
+    plan = "# Plan\n\n## Needs you\nNothing.\n"
+    item, calls = _shaped_status_fixture(
+        monkeypatch, plan_file, plan, {"Ready": "ready-option"}
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file), run="shape-run", agent="claude"
+    ) == 0
+
+    status_writes = [
+        call for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+    ]
+    assert status_writes[0][2]["option"] == "ready-option"
+    output = capsys.readouterr().out
+    assert "advanced to Ready: plan declares nothing open" in output
+
+
+@pytest.mark.parametrize(
+    ("plan", "reason"),
+    (
+        ("# Plan\n\n## Needs you\nWhich repository should this use?\n",
+         "plan has an open question"),
+        ("# Plan\n\n## Decided\nUse the existing repository.\n",
+         "plan has no ## Needs you section"),
+    ),
+)
+def test_shaped_holds_when_the_plan_needs_nate(
+    tmp_path, monkeypatch, capsys, plan, reason
+):
+    plan_file = tmp_path / "plan.md"
+    item, calls = _shaped_status_fixture(
+        monkeypatch, plan_file, plan, {"Shaped": "shaped-option"}
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file), run="shape-run", agent="claude"
+    ) == 0
+
+    status_writes = [
+        call for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+    ]
+    assert status_writes[0][2]["option"] == "shaped-option"
+    output = capsys.readouterr().out
+    assert "held at Shaped: {}".format(reason) in output

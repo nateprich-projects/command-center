@@ -8,6 +8,30 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### The routines ran a ticket branch's funnel.py for hours, because the canonical checkout is a working tree
+
+**2026-09-09 · Mac mini · measured**
+
+Every routine invoked `/Users/nateprich/.claude/command-center/funnel.py`, and that
+checkout was on `ticket/346` — Nate's own fix for #343, unmerged. So for the hours it
+sat there, every unattended run executed code that *predated* #349 (`funnel begin`'s
+claim path) while `main` had it, and `funnel queue` from that tree reported 52 startable
+tickets that `main` could not have offered. The queue looked healthy *because of* the bug
+#171 describes.
+
+Two consequences worth keeping:
+
+- **A green suite from the wrong checkout is not evidence.** `test_launchd_drift.py` run
+  from that tree passed 10 tests and exercised nothing about the keeper plist, because
+  the tree predated the change that added it to the parametrised set. From the run
+  clone it ran 15 and actually compared the installed file.
+- **The fix had to be applied through the bug.** `funnel merge` refused PR #348 with
+  "project is not Building" — the exact defect #348 fixes — until `funnel claim` was run
+  from the ticket branch's own `funnel.py`, which already carried the promotion.
+
+Resolved by #205: routines now execute `~/.claude/command-center-run`, a read-only clone
+that launchd fast-forwards every five minutes. Nate's tree is his again.
+
 ### A brief's real cost was double the projection, because `gh pr list` was never counted
 
 **2026-09-09 · GitHub GraphQL · measured**

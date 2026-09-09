@@ -237,6 +237,32 @@ Repos opt in by carrying the topic `command-center`, across both `nateprich` and
 `braven112/mfl.football.v2` is explicitly out. No agent-authored PRs land in a
 collaborator's repo.
 
+## Member-repo entry standard
+
+Onboarding is a one-repo-at-a-time ritual. A repo meets the entry standard only when
+both of these **blocking** judgements are satisfied:
+
+- **Correct long-term home — Nate's judgement.** Nate decides that the repo is the
+  correct long-term home for its work. An agent must not infer or automate this
+  decision.
+- **Triaged backlog — Nate's judgement.** Nate decides that the repo's backlog has
+  been triaged. Backlog triage is not machine-checkable; an agent must not fake a
+  check for it.
+
+The onboarding steps are:
+
+- **`command-center` topic — blocking membership requirement.** The topic is the
+  membership state in GitHub; there is no allowlist or denylist for repos.
+- **CI workflow — blocking.** A member repo must have CI, because the merge gate
+  refuses to merge work when no CI checks are reported.
+- **Stock GitHub labels deleted — advisory.** Remove the ten stock labels so they do
+  not duplicate Command Center's vocabulary, but their presence does not block work.
+- **Dependabot swept — advisory.** Sweep Dependabot during onboarding, but an
+  outstanding sweep does not block work.
+
+The two entry-standard judgements remain Nate's even when the checkable onboarding
+steps are reported by tooling. _(confirmed by Nate 2026-09-08)_
+
 ## Secrets
 
 Credentials come from the environment or a gitignored `.env`. Never commit them, never

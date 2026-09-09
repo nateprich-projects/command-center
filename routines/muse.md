@@ -62,7 +62,7 @@ read-only by instruction and by `--disable-write`. Behave accordingly.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent muse OPENING_FLAGS
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent muse OPENING_FLAGS
 ```
 
 One call: records the heartbeat, checks the gate, and names your work. It always
@@ -171,8 +171,8 @@ plainly ask for exactly that, reject it.
 ## 5. Decide — record the verdict either way
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py review <pr> --verdict approved --ci green
-python3 /Users/nateprich/.claude/command-center/funnel.py merge <pr> --yes
+python3 /Users/nateprich/.claude/command-center-run/funnel.py review <pr> --verdict approved --ci green
+python3 /Users/nateprich/.claude/command-center-run/funnel.py merge <pr> --yes
 ```
 
 `review` stamps your verdict with the commit you actually read. `merge` then
@@ -186,7 +186,7 @@ doing it by hand is what makes an unattended merge impossible to audit later.
 **Does not meet the bar →** record it, do not merge:
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py review <pr> --verdict rejected --ci <state> --blocking "<what does not match>"
+python3 /Users/nateprich/.claude/command-center-run/funnel.py review <pr> --verdict rejected --ci <state> --blocking "<what does not match>"
 ```
 
 Be specific enough that the next engineer run can act on it without guessing — it
@@ -211,7 +211,7 @@ carries.
 
 `begin` already named the project. Do not go looking for a different one.
 
-**Read `/Users/nateprich/.claude/command-center/skills/breakdown/SKILL.md` and
+**Read `/Users/nateprich/.claude/command-center-run/skills/breakdown/SKILL.md` and
 follow it.** It carries the sizing standard, the ordering and coverage rules,
 worked examples, and what to do when a plan will not decompose. It exists so the
 fiftieth unattended breakdown is done the same way as the first.
@@ -252,7 +252,7 @@ best you can do is make the dependency unmissable to the human reading it.
 ## 7. Finish
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent muse --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>"
+python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent muse --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>"
 ```
 
 `--merged` takes **the PR's number**, not a count of merges — `--merged 96`, never `--merged 1`. It is a field, not prose: unattended merges have to appear in the brief as

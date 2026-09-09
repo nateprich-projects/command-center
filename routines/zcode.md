@@ -39,7 +39,7 @@ asked of it.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha 207e8f6232bc6ab5b80c301d98426e31d2c6791213919ccc8864d46d25c3571d
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha a67c9e59548f7c1cdc02f88d3725e0e5f8e8c87eddfc3b193c91ca02f28a90b6
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and says
@@ -173,8 +173,8 @@ unless its own ticket asked for the change:
 ## 5. Decide — record the verdict either way
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py review <pr> --verdict approved --ci green
-python3 /Users/nateprich/.claude/command-center/funnel.py merge <pr> --yes
+python3 /Users/nateprich/.claude/command-center-run/funnel.py review <pr> --verdict approved --ci green
+python3 /Users/nateprich/.claude/command-center-run/funnel.py merge <pr> --yes
 ```
 
 `review` stamps your verdict with the commit you actually read. `merge` then
@@ -188,7 +188,7 @@ doing it by hand is what makes an unattended merge impossible to audit later.
 **Does not meet the bar →** record it, do not merge:
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py review <pr> --verdict rejected --ci <state> --blocking "<what does not match>"
+python3 /Users/nateprich/.claude/command-center-run/funnel.py review <pr> --verdict rejected --ci <state> --blocking "<what does not match>"
 ```
 
 Be specific enough that the next engineer run can act on it without guessing — it
@@ -211,12 +211,12 @@ Do not change `Status` or `Class` on anything. Those are Nate's gates.
 runs that found nothing to review.
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py brief | jq '.awaiting_breakdown'
+python3 /Users/nateprich/.claude/command-center-run/funnel.py brief | jq '.awaiting_breakdown'
 ```
 
 These are plans Nate has approved that have no tickets yet. Take the oldest.
 
-**Read `/Users/nateprich/.claude/command-center/skills/breakdown/SKILL.md` and
+**Read `/Users/nateprich/.claude/command-center-run/skills/breakdown/SKILL.md` and
 follow it.** It carries the sizing standard, the ordering and coverage rules,
 worked examples, and what to do when a plan will not decompose. It exists so the
 fiftieth unattended breakdown is done the same way as the first.
@@ -224,7 +224,7 @@ fiftieth unattended breakdown is done the same way as the first.
 In short: one ticket is one engineer run ending in a PR; split by behaviour rather
 than by layer; every project gets at least one ticket; do not set `Status` or
 `Class` on what you create; and **do not create repositories** — post the
-explanation with `python3 /Users/nateprich/.claude/command-center/funnel.py
+explanation with `python3 /Users/nateprich/.claude/command-center-run/funnel.py
 comment <issue> --voice agent --body "<what is missing>"` and leave repository
 creation to Nate.
 
@@ -259,7 +259,7 @@ verdicts, merges, comments, tickets — goes to GitHub over the network. If you 
 yourself about to write anywhere else, you have misread this prompt.
 
 If the plan is too vague to size, **do not invent the missing decisions.** Post
-what is undecided with `python3 /Users/nateprich/.claude/command-center/funnel.py
+what is undecided with `python3 /Users/nateprich/.claude/command-center-run/funnel.py
 comment <issue> --voice agent --body "<the undecided question>"` and leave it. It
 needs another grilling pass, which is interactive and not yours to do.
 
@@ -269,7 +269,7 @@ needs another grilling pass, which is interactive and not yours to do.
 one. This is the third job, after review and breakdown, and it is one idea only.
 
 Read the issue first. Then use
-`/Users/nateprich/.claude/command-center/skills/shape/SKILL.md` for the plan
+`/Users/nateprich/.claude/command-center-run/skills/shape/SKILL.md` for the plan
 structure and the `funnel shaped` command. Its general on-demand guidance is
 intentionally superseded here: this scheduled job is the approved unattended
 shaping path for standard-tier ideas.
@@ -284,7 +284,7 @@ nothing is outstanding.
 Write the plan to a file, then run:
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py shaped <ref> --plan <file>
+python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --plan <file>
 ```
 
 Moving the item to `Shaped` records that a plan exists; **Shaped is not approval**.
@@ -293,7 +293,7 @@ Do not set `Ready`, answer the Shaped gate, or change `Status` or `Class` yourse
 ## 8. Finish, always
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent zcode --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>; broke down #<m> into <k> tickets"
+python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent zcode --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>; broke down #<m> into <k> tickets"
 ```
 
 `--merged` takes **the PR's number**, not a count of merges — `--merged 96`, never `--merged 1`. It is a field, not prose: unattended merges have to appear in the brief as

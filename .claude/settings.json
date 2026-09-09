@@ -3,6 +3,7 @@
   "permissions": {
     "allow": [
       "Bash(python3 /Users/nateprich/.claude/command-center/*)",
+      "Bash(python3 /Users/nateprich/.claude/command-center-run/*)",
       "Bash(python3 -m pytest*)",
       "Bash(gh pr *)",
       "Bash(gh issue *)",

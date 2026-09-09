@@ -219,6 +219,42 @@ def test_begin_does_not_consult_breakdown_when_review_work_exists(monkeypatch, c
     assert result["work"] == work
 
 
+def test_begin_offers_shape_when_needs_decision_blocks_breakdown(monkeypatch, capsys):
+    blocked = funnel.Item(
+        repo="nateprich/example",
+        number=38,
+        title="Blocked breakdown",
+        url="https://github.com/nateprich/example/issues/38",
+        state="OPEN",
+        status="Ready",
+        labels=["blocked"],
+        needs_decision="Where should this connector live?",
+    )
+    idea = funnel.Item(
+        repo="nateprich/example",
+        number=39,
+        title="A standard idea",
+        url="https://github.com/nateprich/example/issues/39",
+        state="OPEN",
+        status="Ideas",
+        klass="New",
+        body="Risk: standard",
+    )
+
+    monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [])
+    monkeypatch.setattr(funnel, "ideas", lambda items: [idea])
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+
+    _allow_begin(monkeypatch)
+    assert funnel.cmd_begin(
+        [blocked, idea], NOW, "zcode", "standard", False, True
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "shape"
+    assert result["work"]["ref"] == idea.ref
+
+
 def test_breakdown_work_carries_plan_access_signals(monkeypatch, capsys):
     item = SimpleNamespace(
         ref="nateprich-projects/command-center#25",

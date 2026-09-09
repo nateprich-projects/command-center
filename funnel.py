@@ -1358,6 +1358,7 @@ TOPIC_FIX = "add the `command-center` topic to at least one repository"
 
 PROJECT_FIELDS_QUERY = """
 query($login: String!, $number: Int!) {
+  rateLimit { cost remaining resetAt }
   user(login: $login) {
     projectV2(number: $number) {
       fields(first: 100) {
@@ -2321,6 +2322,7 @@ def cmd_doctor() -> int:
 
 REPO_QUERY = """
 query($cursor: String) {
+  rateLimit { cost remaining resetAt }
   OWNER_KIND(login: "OWNER_LOGIN") {
     repositories(first: 100, after: $cursor, ownerAffiliations: OWNER) {
       pageInfo { hasNextPage endCursor }
@@ -2336,6 +2338,7 @@ query($cursor: String) {
 
 ITEM_QUERY = """
 query($login: String!, $number: Int!, $cursor: String) {
+  rateLimit { cost remaining resetAt }
   user(login: $login) {
     projectV2(number: $number) {
       items(first: 50, after: $cursor) {
@@ -2391,6 +2394,13 @@ class GitHubError(RuntimeError):
 
 
 def gh_graphql(query: str, **variables) -> dict:
+    """Run a GraphQL query and preserve its top-level ``rateLimit`` field.
+
+    Read queries include ``rateLimit`` beside their existing root fields, so
+    callers can inspect the cost without changing the shape they already
+    index into. Mutations deliberately do not request it: GitHub exposes the
+    field on the query root, not the mutation root.
+    """
     cmd = ["gh", "api", "graphql", "-f", "query=" + query]
     for key, value in variables.items():
         flag = "-F" if isinstance(value, (int, bool)) else "-f"
@@ -3162,7 +3172,8 @@ STATUS_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhY1tc"
 
 def _option_id(field_id: str, name: str) -> str:
     data = gh_graphql(
-        '{node(id:"%s"){... on ProjectV2SingleSelectField{options{id name}}}}'
+        '{ rateLimit { cost remaining resetAt } '
+        'node(id:"%s"){... on ProjectV2SingleSelectField{options{id name}}}}'
         % field_id
     )
     for option in data["node"]["options"]:
@@ -3415,6 +3426,7 @@ ANSWERS = {
 
 SUB_ISSUES = """
 query($owner: String!, $name: String!, $number: Int!) {
+  rateLimit { cost remaining resetAt }
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
       subIssues(first: 50) {

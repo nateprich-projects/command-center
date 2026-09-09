@@ -35,19 +35,12 @@ prose. _(confirmed by Nate 2026-09-06)_
 
 ## Capability boundary
 
-For the closed-world test of whether a plan or step needs Nate, an agent has:
-
-- a shell
-- `gh`
-- a GitHub token available to `gh`
-- the filesystem of its checkout
-
-An agent does not have a browser session, application UIs, a credential store, account or
-billing settings, physical access, or an identity of its own. It acts through Nate's
-token. Ask whether the step requires anything outside this boundary. The named access
-cases — an app UI with no API, entering a credential, an account or billing setting, or
-physical access — are examples of the boundary, not an exhaustive checklist; an unnamed
-capability gap still counts. _(confirmed by Nate 2026-09-07)_
+For the closed-world test of whether a plan or step needs Nate, use the
+[shared capability boundary](skills/capability-boundary.md). It distinguishes work
+that is workable by any agent, workable only where the Claude Code environment is
+present, and workable by no agent. The named examples are illustrative rather than
+an exhaustive checklist; an unnamed capability gap still counts. _(confirmed by Nate
+2026-09-07)_
 
 ## The rule that is easy to skip
 

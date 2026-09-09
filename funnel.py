@@ -1165,8 +1165,9 @@ def required_tier(title: str, body: str, failed_before: bool = False) -> str:
 
 
 def startable(items: Sequence[Item],
-              awaiting_review: Optional[Set[str]] = None) -> List[Item]:
-    """Tickets Codex may pick up, best-first.
+              awaiting_review: Optional[Set[str]] = None,
+              agent: str = "codex") -> List[Item]:
+    """Tickets the requesting agent may pick up, best-first.
 
     A ticket is an open issue with no children of its own, whose parent has
     passed the Ready gate. Tickets inherit their parent's Class — the ladder
@@ -1202,12 +1203,22 @@ def startable(items: Sequence[Item],
     }
 
     def eligible(item: Item) -> bool:
+        capability_reason = parse_human_step(item.body or "")
+        machine_local = (
+            capability_reason is not None
+            and capability_reason.casefold() == MACHINE_LOCAL_REASON.casefold()
+        )
         if (
             item.state != "OPEN"
             or item.is_blocked
             or item.open_blockers
             or item.children_total
-            or parse_human_step(item.body or "") is not None
+            # A machine-local marker is the middle capability outcome: Claude
+            # Code may work it, while every other requester must leave it in
+            # the queue. All other parsed markers remain human steps and are
+            # excluded from every agent, as #141 established.
+            or (capability_reason is not None
+                and (not machine_local or agent != "claude"))
         ):
             return False
         if item.ref in awaiting_review:
@@ -1667,8 +1678,9 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
 
 def next_ticket(items: Sequence[Item], now: datetime,
                 blocked: Optional[Set[str]] = None,
-                excluded: Optional[Set[str]] = None) -> Optional[Item]:
-    """The single ticket Codex should work, or None.
+                excluded: Optional[Set[str]] = None,
+                agent: str = "codex") -> Optional[Item]:
+    """The single ticket the requesting agent should work, or None.
 
     Returns None when the funnel is at its work-in-progress limit. A Broken
     ticket may start anyway; that is the one sanctioned preemption. `excluded`
@@ -1677,7 +1689,9 @@ def next_ticket(items: Sequence[Item], now: datetime,
     """
     excluded = excluded or frozenset()
     queue = [
-        item for item in startable(items, awaiting_review=blocked)
+        item for item in startable(
+            items, awaiting_review=blocked, agent=agent
+        )
         if item.ref not in excluded
     ]
     if not queue:
@@ -1706,7 +1720,8 @@ def next_ticket(items: Sequence[Item], now: datetime,
 def next_ticket_for_tier(items: Sequence[Item], now: datetime,
                          tier: Optional[str] = None,
                          blocked: Optional[Set[str]] = None,
-                         excluded: Optional[Set[str]] = None) -> Optional[Item]:
+                         excluded: Optional[Set[str]] = None,
+                         agent: str = "codex") -> Optional[Item]:
     """Return the first shared-order ticket belonging to ``tier``.
 
     Tier filtering has to happen by asking ``next_ticket`` repeatedly rather
@@ -1718,7 +1733,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
     excluded = set(excluded or ())
     while True:
         ticket = next_ticket(
-            items, now, blocked=blocked, excluded=excluded
+            items, now, blocked=blocked, excluded=excluded, agent=agent
         )
         if ticket is None or tier is None:
             return ticket
@@ -3758,6 +3773,82 @@ def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     return [_blocked_item_json(item) for item in blocked_items(items)]
 
 
+PROSE_DEPENDENCY_RE = re.compile(
+    r"\b(?:depends\s+on|blocked\s+on)\s+"
+    r"(?P<references>#[0-9]+(?:\s*(?:,|and)\s*#[0-9]+)*)"
+    r"|\bafter\s+(?P<after>#[0-9]+)\s+lands\b"
+    r"|\b(?:until|requires)\s+(?P<single>#[0-9]+)\b",
+    re.IGNORECASE,
+)
+
+
+def _prose_dependency_sentences(body: str) -> Iterable[Tuple[str, List[str]]]:
+    """Yield recognised dependency sentences and their named issue numbers."""
+    if not isinstance(body, str):
+        return
+
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        for sentence in re.split(r"(?<=[.!?])\s+", line):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            match = PROSE_DEPENDENCY_RE.search(sentence)
+            if match is None:
+                continue
+            references = (
+                match.group("references")
+                or match.group("after")
+                or match.group("single")
+            )
+            yield sentence, re.findall(r"#[0-9]+", references)
+
+
+def prose_dependencies(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """Report open prose dependencies that have no matching native edge.
+
+    This is deliberately pure over the Project items already loaded by the
+    funnel. A named issue is reportable only when it is present and open in
+    that set; resolving an absent issue would require a new API call and would
+    turn a diagnostic into a second dependency source.
+    """
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    found: List[Dict[str, object]] = []
+
+    for item in rows:
+        if item.state != "OPEN" or item.parent is None:
+            continue
+
+        native = {
+            _dependency_ref(item, value) or str(value).strip()
+            for value in item.open_blockers
+        }
+        for sentence, numbers in _prose_dependency_sentences(item.body or ""):
+            names: List[str] = []
+            for number in numbers:
+                ref = item.repo + number
+                blocker = by_ref.get(ref)
+                if (
+                    blocker is None
+                    or blocker.state != "OPEN"
+                    or ref in native
+                    or ref in names
+                ):
+                    continue
+                names.append(ref)
+            if names:
+                found.append({
+                    "ref": item.ref,
+                    "names": names,
+                    "sentence": sentence,
+                })
+
+    return sorted(found, key=lambda row: row["ref"])
+
+
 def suspected_human_step_reason(item: Item) -> Optional[str]:
     """Return a human-step reason hidden inside an unreadable block.
 
@@ -4122,14 +4213,16 @@ def stranded_items(
     now: datetime,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
 ) -> List[Dict[str, object]]:
-    """Render open items for which no current agent or gate can make progress.
+    """Render items for which no current agent or gate can make progress.
 
     This is deliberately a diagnostic, not a queue. The first release only
     uses facts the funnel already knows how to read: an approved current-head
     verdict on a conflicting PR, a stale claim with no PR, a childless
-    ``Building`` project, and a native or named dependency closed as
-    ``not_planned``. Missing CI history is intentionally absent; no fetched
-    fact distinguishes that from a PR whose first check is still pending.
+    ``Building`` project, a native or named dependency closed as
+    ``not_planned``, and two PR-side strands when PR facts were requested:
+    an open PR on a closed ticket or an open PR whose project's Status is not
+    ``Building``. Missing CI history is intentionally absent; no fetched fact
+    distinguishes that from a PR whose first check is still pending.
 
     ``pr_facts`` is optional so the function remains fixture-pure. ``None``
     means the caller has not requested PR lookups and therefore treats a stale
@@ -4142,12 +4235,36 @@ def stranded_items(
     found: List[Dict[str, object]] = []
 
     for item in rows:
-        if item.state != "OPEN":
-            continue
-
         reasons: List[str] = []
         pr_known = pr_facts is None or item.ref in pr_facts
         pr = None if pr_facts is None else pr_facts.get(item.ref)
+
+        if (
+            isinstance(pr, dict)
+            and str(pr.get("state") or "").upper() == "OPEN"
+            and item.parent is not None
+        ):
+            if item.state == "CLOSED":
+                reasons.append("open PR on closed ticket")
+            elif item.state == "OPEN":
+                parent = by_ref.get(item.parent)
+                if parent is not None and parent.status != "Building":
+                    status = parent.status or "unset"
+                    reasons.append(
+                        "open PR on open ticket whose project Status is {}; "
+                        "merge gate will refuse it".format(status)
+                    )
+
+        if item.state != "OPEN":
+            if reasons:
+                found.append({
+                    "ref": item.ref,
+                    "title": item.title,
+                    "url": item.url,
+                    "reason": "; ".join(reasons),
+                })
+            continue
+
         if (
             pr
             and str(pr.get("state") or "").upper() == "OPEN"
@@ -4270,6 +4387,7 @@ def cmd_next(
     now: datetime,
     tier: Optional[str] = None,
     excluded: Optional[Set[str]] = None,
+    agent: str = "codex",
 ) -> int:
     # Accept bare numbers as well as refs (#436). The routine passes whatever
     # the model copied from the ticket JSON, and a bare number matched nothing
@@ -4298,7 +4416,8 @@ def cmd_next(
             print("released {} (declined)".format(declined.ref), file=sys.stderr)
     blocked = awaiting_review(items)
     ticket = next_ticket_for_tier(
-        items, now, tier=tier, blocked=blocked, excluded=excluded
+        items, now, tier=tier, blocked=blocked, excluded=excluded,
+        agent=agent,
     )
 
     if ticket is None:
@@ -4342,6 +4461,7 @@ def cmd_brief(
         "closed_itself": closed_itself_json(items, now),
         "cleared_blocks": cleared_blocks_json(items, now),
         "blocked": blocked_json(items),
+        "prose_dependencies": prose_dependencies(items),
         "suspected_human_steps": suspected_human_step_json(items),
         "human_steps": human_step_json(items),
         "closed_with_access_vocabulary": closed_with_access_vocabulary_json(
@@ -5248,8 +5368,7 @@ def ticket_pr_facts(
     """
     wanted = {
         item.ref: item for item in items
-        if item.state == "OPEN"
-        and (item.parent or item.in_motion_since is not None)
+        if item.parent or (item.state == "OPEN" and item.in_motion_since is not None)
     }
     facts: Dict[str, Optional[Dict[str, object]]] = {}
 
@@ -5260,7 +5379,10 @@ def ticket_pr_facts(
                 continue
             if ref in index:
                 pr = dict(index[ref])
-                if str(pr.get("state") or "").upper() == "OPEN":
+                if (
+                    item.state == "OPEN"
+                    and str(pr.get("state") or "").upper() == "OPEN"
+                ):
                     if str(pr.get("mergeable") or "").upper() == "CONFLICTING":
                         # Kept conditional: a verdict lookup per ticket would
                         # undo the saving this scan exists for.
@@ -5429,7 +5551,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             out["cleared_blocks"] = cleared
         blocked = awaiting_review(items)
         ticket = next_ticket_for_tier(
-            items, now, tier=tier, blocked=blocked
+            items, now, tier=tier, blocked=blocked, agent=agent
         )
         if ticket is None:
             holder = lock_holder(items, now)
@@ -6165,12 +6287,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("queue", help="everything, ordered")
     nxt = sub.add_parser(
-        "next", help="the single next ticket Codex should work, or nothing")
+        "next", help="the single next ticket this agent should work, or nothing")
     nxt.add_argument(
         "--tier", choices=TIERS, default=None,
         help="what this engine is allowed to work. `standard` skips tickets "
              "needing the escalated engine; `escalated` may take anything. "
              "Declared by the routine, never by the model.")
+    nxt.add_argument(
+        "--agent", default="codex",
+        help="agent whose capabilities filter the queue (default: codex)",
+    )
     nxt.add_argument(
         "--not", dest="excluded", action="append", default=[], metavar="<ref>",
         help="exclude a candidate for this call; repeat for multiple refs",
@@ -6415,6 +6541,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 now,
                 tier=getattr(args, "tier", None),
                 excluded=set(getattr(args, "excluded", [])),
+                agent=getattr(args, "agent", "codex"),
             )
         if args.command == "brief":
             return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))

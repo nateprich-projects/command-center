@@ -169,3 +169,74 @@ def test_conflicting_pr_with_a_moved_head_is_not_called_stranded():
             "verdict": {"verdict": "approved", "head_sha": "old-head"},
         }},
     ) == []
+
+
+def test_pr_side_strands_report_closed_and_non_building_tickets():
+    closed_ticket = issue(
+        338,
+        parent="{}#89".format(REPO),
+        state="CLOSED",
+    )
+    ready_project = issue(
+        343,
+        title="Ready project",
+        status="Ready",
+        children_total=1,
+    )
+    waiting_ticket = issue(
+        346,
+        title="Waiting ticket",
+        parent=ready_project.ref,
+    )
+    building_project = issue(
+        350,
+        title="Building project",
+        status="Building",
+        children_total=1,
+    )
+    healthy_ticket = issue(
+        351,
+        title="Healthy ticket",
+        parent=building_project.ref,
+    )
+
+    rows = funnel.stranded_json(
+        [closed_ticket, ready_project, waiting_ticket,
+         building_project, healthy_ticket],
+        NOW,
+        pr_facts={
+            closed_ticket.ref: {"state": "OPEN", "number": 341},
+            waiting_ticket.ref: {"state": "OPEN", "number": 348},
+            healthy_ticket.ref: {"state": "OPEN", "number": 349},
+        },
+    )
+
+    assert rows == [
+        {
+            "ref": closed_ticket.ref,
+            "title": "issue 338",
+            "url": "https://example.invalid/338",
+            "reason": "open PR on closed ticket",
+        },
+        {
+            "ref": waiting_ticket.ref,
+            "title": "Waiting ticket",
+            "url": "https://example.invalid/346",
+            "reason": "open PR on open ticket whose project Status is Ready; "
+                      "merge gate will refuse it",
+        },
+    ]
+
+
+def test_pr_side_strands_are_absent_without_pr_facts():
+    project = issue(355, status="Ready", children_total=1)
+    ticket = issue(356, parent=project.ref)
+    closed_ticket = issue(
+        357,
+        parent=project.ref,
+        state="CLOSED",
+    )
+
+    assert funnel.stranded_json(
+        [project, ticket, closed_ticket], NOW
+    ) == []

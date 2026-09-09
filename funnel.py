@@ -260,6 +260,7 @@ class Item:
     state_reason: Optional[str] = None  # COMPLETED | NOT_PLANNED | REOPENED
     status: Optional[str] = None
     klass: Optional[str] = None
+    pinned: bool = False
     status_since: Optional[datetime] = None
     labels: List[str] = field(default_factory=list)
     block_references: List[str] = field(default_factory=list)
@@ -2598,6 +2599,9 @@ query($login: String!, $number: Int!, $cursor: String) {
           class: fieldValueByName(name: "Class") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
+          pinned: fieldValueByName(name: "Pinned") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
           content {
             ... on Issue {
               number title url body state stateReason closedAt
@@ -2790,6 +2794,7 @@ def _from_node(node: dict) -> Optional[Item]:
         state_reason=content.get("stateReason"),
         status=status,
         klass=(node.get("class") or {}).get("name"),
+        pinned=(node.get("pinned") or {}).get("name") == "Pinned",
         labels=[n["name"] for n in content["labels"]["nodes"]],
         assignees=[n["login"] for n in content["assignees"]["nodes"]],
         parent=(
@@ -3499,6 +3504,16 @@ mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
 
 CLASS_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhY15k"
 STATUS_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhY1tc"
+PINNED_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhygHE"
+PINNED_OPTION = "Pinned"
+
+CLEAR_FIELD = """
+mutation($project: ID!, $item: ID!, $field: ID!) {
+  clearProjectV2ItemFieldValue(input: {
+    projectId: $project, itemId: $item, fieldId: $field
+  }) { projectV2Item { id } }
+}
+"""
 
 
 def _option_id(field_id: str, name: str) -> str:
@@ -3550,6 +3565,73 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
         raise GitHubError(comment.stderr.strip())
 
     print("{} → Parked\n{}{}".format(item.ref, PARK_COMMENT_PREFIX, reason))
+    return 0
+
+
+def _pinnable_item(items: Sequence[Item], ref: str) -> Item:
+    """Return a Project item suitable for a pin mutation."""
+    item = find(items, ref)
+    if item.parent:
+        raise GitHubError(
+            "{} is a ticket; only projects can be pinned".format(item.ref)
+        )
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
+    return item
+
+
+def cmd_pin(items: List[Item], now: datetime, ref: str, confirmed: bool,
+            run: Optional[str] = None, agent: Optional[str] = None) -> int:
+    """Pin a Project item, recording Nate's explicit decision."""
+    return _set_pinned(items, now, ref, True, confirmed, run=run, agent=agent)
+
+
+def cmd_unpin(items: List[Item], now: datetime, ref: str, confirmed: bool,
+              run: Optional[str] = None, agent: Optional[str] = None) -> int:
+    """Clear a Project item's pin, recording Nate's explicit decision."""
+    return _set_pinned(items, now, ref, False, confirmed, run=run, agent=agent)
+
+
+def _set_pinned(items: List[Item], now: datetime, ref: str, pinned: bool,
+                confirmed: bool, run: Optional[str] = None,
+                agent: Optional[str] = None) -> int:
+    """Write or preview one Project-level pin decision."""
+    item = _pinnable_item(items, ref)
+    verb = "pin" if pinned else "unpin"
+    state = "Pinned" if pinned else "Unpinned"
+
+    if not confirmed:
+        print("would {} {} ({})".format(verb, item.ref, item.title))
+        print("\nNothing was changed. Re-run with --yes to {} it.".format(verb))
+        return 1
+
+    if pinned:
+        gh_graphql(
+            SET_FIELD,
+            project=PROJECT_ID,
+            item=item.item_id,
+            field=PINNED_FIELD_ID,
+            option=_option_id(PINNED_FIELD_ID, PINNED_OPTION),
+        )
+    else:
+        gh_graphql(
+            CLEAR_FIELD,
+            project=PROJECT_ID,
+            item=item.item_id,
+            field=PINNED_FIELD_ID,
+        )
+
+    comment = subprocess.run(
+        ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+         "--body", append_provenance(
+             "**{}:** Nate decided to {} this project.".format(state, verb),
+             "nate-relayed", at=now, run=run, agent=agent)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+
+    print("{} → {}".format(item.ref, state))
     return 0
 
 
@@ -5096,6 +5178,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
     release = sub.add_parser("release", help="give up the lock on a ticket")
     release.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    for verb, help_text in (
+        ("pin", "pin a project within its current gate"),
+        ("unpin", "clear a project's pin"),
+    ):
+        pin = sub.add_parser(verb, help=help_text)
+        pin.add_argument("ref", help="issue number, owner/repo#number, or URL")
+        pin.add_argument(
+            "--yes", action="store_true", dest="confirmed",
+            help="actually do it; without this the command is a dry run",
+        )
+        pin.add_argument(
+            "--run", default=None,
+            help="heartbeat run id; otherwise infer a unique open local start",
+        )
+        pin.add_argument(
+            "--agent", default=None,
+            help="agent that wrote the comment; otherwise read the heartbeat spool",
+        )
     park = sub.add_parser("park", help="stop a project and record why")
     park.add_argument("ref", help="issue number, owner/repo#number, or URL")
     park.add_argument(
@@ -5209,6 +5309,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_claim(items, now, args.ref)
         if args.command == "release":
             return cmd_release(items, now, args.ref)
+        if args.command == "pin":
+            return cmd_pin(items, now, args.ref, args.confirmed,
+                           args.run, args.agent)
+        if args.command == "unpin":
+            return cmd_unpin(items, now, args.ref, args.confirmed,
+                             args.run, args.agent)
         if args.command == "park":
             return cmd_park(items, now, args.ref, args.reason,
                             args.run, args.agent)

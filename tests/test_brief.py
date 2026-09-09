@@ -23,6 +23,64 @@ def fixture_items():
     ]
 
 
+def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
+    monkeypatch, capsys
+):
+    def closed(number, title, at):
+        return funnel.Item(
+            repo="nateprich/beta", number=number, title=title,
+            url="https://example.invalid/{}".format(number), state="CLOSED",
+            state_reason="COMPLETED", status="Done", closed_at=at,
+        )
+
+    newest = closed(70, "Newest upkeep", NOW - timedelta(hours=1))
+    accepted = closed(71, "Nate accepted", NOW - timedelta(days=1))
+    older = closed(72, "Older upkeep", NOW - timedelta(days=2))
+    outside_window = closed(
+        73, "Too old", NOW - funnel.CLOSED_ITSELF_WINDOW - timedelta(minutes=1)
+    )
+    comments = {
+        newest.number: funnel.closed_itself_comment(
+            [], [funnel.DRIFT_PLAN_EDIT, funnel.DRIFT_LATE_TICKET]
+        ),
+        accepted.number: "Nate accepted this project at the gate.",
+        older.number: funnel.closed_itself_comment([], []),
+        outside_window.number: funnel.closed_itself_comment([], []),
+    }
+    calls = []
+
+    def gh_json(*args):
+        calls.append(args)
+        return {"comments": [{"body": comments[int(args[3])]}]}
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief(
+        [accepted, outside_window, older, newest], NOW
+    ) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["closed_itself"] == [
+        {
+            "ref": newest.ref,
+            "title": newest.title,
+            "url": newest.url,
+            "closed_at": newest.closed_at.isoformat(),
+            "drift": [funnel.DRIFT_PLAN_EDIT, funnel.DRIFT_LATE_TICKET],
+        },
+        {
+            "ref": older.ref,
+            "title": older.title,
+            "url": older.url,
+            "closed_at": older.closed_at.isoformat(),
+            "drift": [],
+        },
+    ]
+    assert brief["total_needing_nate"] == 0
+    assert [call[3] for call in calls] == ["70", "71", "72"]
+
+
 def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
     nodes = json.loads(FIXTURE.read_text())
     items = fixture_items()
@@ -31,6 +89,8 @@ def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
 
     def gh_json(*args):
         calls.append(args)
+        if args[3] == "14":
+            return {"comments": []}
         assert args == (
             "gh", "issue", "view", "15", "--repo", "nateprich/beta",
             "--json", "comments",
@@ -53,10 +113,16 @@ def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
         "parked_at": "2026-09-03T00:00:00+00:00",
         "reason": "The rewrite no longer earns its maintenance cost.",
     }]
-    assert calls == [(
-        "gh", "issue", "view", "15", "--repo", "nateprich/beta",
-        "--json", "comments",
-    )]
+    assert calls == [
+        (
+            "gh", "issue", "view", "14", "--repo", "nateprich/beta",
+            "--json", "comments",
+        ),
+        (
+            "gh", "issue", "view", "15", "--repo", "nateprich/beta",
+            "--json", "comments",
+        ),
+    ]
 
 
 def test_brief_does_not_treat_ready_as_a_human_decision(monkeypatch, capsys):
@@ -296,6 +362,7 @@ def test_brief_flags_completed_access_plan_without_any_human_ticket(
     )
     items = [quiet, closed_human_step, parked, carried, missed]
 
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: {"comments": []})
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
 
     assert funnel.cmd_brief(items, NOW) == 0

@@ -412,22 +412,43 @@ def test_blocked_work_is_not_startable_at_either_level():
     assert startable([parent, ticket(4, 3)]) == []
 
 
-def test_a_human_step_ticket_is_not_startable():
+def test_a_machine_local_ticket_is_startable_by_claude_only():
+    rows = [
+        project(1, "Building", "New"),
+        ticket(
+            2, 1,
+            body="Human step: {}".format(funnel.MACHINE_LOCAL_REASON),
+        ),
+    ]
+
+    assert startable(rows, agent="codex") == []
+    assert [candidate.number for candidate in startable(
+        rows, agent="claude"
+    )] == [2]
+
+
+def test_a_human_step_ticket_is_not_startable_by_any_agent():
     rows = [
         project(1, "Building", "New"),
         ticket(2, 1, body="Human step: entering a credential"),
     ]
 
-    assert startable(rows) == []
+    assert startable(rows, agent="codex") == []
+    assert startable(rows, agent="claude") == []
 
 
-def test_an_unmarked_ticket_is_still_startable():
+def test_an_unmarked_ticket_is_startable_by_both_agents():
     rows = [
         project(1, "Building", "New"),
         ticket(2, 1, body="Enter a value supplied through the environment."),
     ]
 
-    assert [candidate.number for candidate in startable(rows)] == [2]
+    assert [candidate.number for candidate in startable(
+        rows, agent="codex"
+    )] == [2]
+    assert [candidate.number for candidate in startable(
+        rows, agent="claude"
+    )] == [2]
 
 
 def test_a_ticket_with_an_open_native_blocker_is_not_startable():
@@ -700,6 +721,28 @@ def test_next_cli_accepts_repeatable_not_filters(monkeypatch, capsys):
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ref"] == rows[5].ref
+
+
+def test_next_cli_filters_machine_local_work_by_requesting_agent(
+    monkeypatch, capsys
+):
+    rows = [
+        project(1, "Building", "New"),
+        ticket(
+            2, 1,
+            body="Human step: {}".format(funnel.MACHINE_LOCAL_REASON),
+        ),
+    ]
+    monkeypatch.setattr(funnel, "load_items", lambda: rows)
+    monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
+    monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: rows[1].body)
+
+    assert funnel.main(["next", "--agent", "codex"]) == 1
+    capsys.readouterr()
+
+    assert funnel.main(["next", "--agent", "claude"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ref"] == rows[1].ref
 
 
 # -- The portfolio signal ---------------------------------------------------

@@ -4213,14 +4213,16 @@ def stranded_items(
     now: datetime,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
 ) -> List[Dict[str, object]]:
-    """Render open items for which no current agent or gate can make progress.
+    """Render items for which no current agent or gate can make progress.
 
     This is deliberately a diagnostic, not a queue. The first release only
     uses facts the funnel already knows how to read: an approved current-head
     verdict on a conflicting PR, a stale claim with no PR, a childless
-    ``Building`` project, and a native or named dependency closed as
-    ``not_planned``. Missing CI history is intentionally absent; no fetched
-    fact distinguishes that from a PR whose first check is still pending.
+    ``Building`` project, a native or named dependency closed as
+    ``not_planned``, and two PR-side strands when PR facts were requested:
+    an open PR on a closed ticket or an open PR whose project's Status is not
+    ``Building``. Missing CI history is intentionally absent; no fetched fact
+    distinguishes that from a PR whose first check is still pending.
 
     ``pr_facts`` is optional so the function remains fixture-pure. ``None``
     means the caller has not requested PR lookups and therefore treats a stale
@@ -4233,12 +4235,36 @@ def stranded_items(
     found: List[Dict[str, object]] = []
 
     for item in rows:
-        if item.state != "OPEN":
-            continue
-
         reasons: List[str] = []
         pr_known = pr_facts is None or item.ref in pr_facts
         pr = None if pr_facts is None else pr_facts.get(item.ref)
+
+        if (
+            isinstance(pr, dict)
+            and str(pr.get("state") or "").upper() == "OPEN"
+            and item.parent is not None
+        ):
+            if item.state == "CLOSED":
+                reasons.append("open PR on closed ticket")
+            elif item.state == "OPEN":
+                parent = by_ref.get(item.parent)
+                if parent is not None and parent.status != "Building":
+                    status = parent.status or "unset"
+                    reasons.append(
+                        "open PR on open ticket whose project Status is {}; "
+                        "merge gate will refuse it".format(status)
+                    )
+
+        if item.state != "OPEN":
+            if reasons:
+                found.append({
+                    "ref": item.ref,
+                    "title": item.title,
+                    "url": item.url,
+                    "reason": "; ".join(reasons),
+                })
+            continue
+
         if (
             pr
             and str(pr.get("state") or "").upper() == "OPEN"
@@ -5342,8 +5368,7 @@ def ticket_pr_facts(
     """
     wanted = {
         item.ref: item for item in items
-        if item.state == "OPEN"
-        and (item.parent or item.in_motion_since is not None)
+        if item.parent or (item.state == "OPEN" and item.in_motion_since is not None)
     }
     facts: Dict[str, Optional[Dict[str, object]]] = {}
 
@@ -5354,7 +5379,10 @@ def ticket_pr_facts(
                 continue
             if ref in index:
                 pr = dict(index[ref])
-                if str(pr.get("state") or "").upper() == "OPEN":
+                if (
+                    item.state == "OPEN"
+                    and str(pr.get("state") or "").upper() == "OPEN"
+                ):
                     if str(pr.get("mergeable") or "").upper() == "CONFLICTING":
                         # Kept conditional: a verdict lookup per ticket would
                         # undo the saving this scan exists for.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -57,6 +57,34 @@ def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
         "gh", "issue", "view", "15", "--repo", "nateprich/beta",
         "--json", "comments",
     )]
+
+
+def test_brief_reports_breakdown_latency_separately_from_ready_wait(monkeypatch, capsys):
+    ready = funnel.Item(
+        repo="nateprich/beta", number=22, title="Ready with breakdown delay",
+        url="https://example.invalid/22", state="OPEN", status="Ready",
+        status_since=NOW - timedelta(hours=13), children_total=1,
+        first_child_created_at=NOW - timedelta(hours=1),
+    )
+    no_gap = funnel.Item(
+        repo="nateprich/beta", number=23, title="Ready without breakdown delay",
+        url="https://example.invalid/23", state="OPEN", status="Ready",
+        status_since=NOW - timedelta(hours=1), children_total=1,
+        first_child_created_at=NOW - timedelta(hours=1),
+    )
+
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([ready, no_gap], NOW) == 0
+    rows = {
+        row["ref"]: row for row in json.loads(capsys.readouterr().out)["items"]
+    }
+
+    assert rows[ready.ref]["waited"] == "1 hour"
+    assert rows[ready.ref]["breakdown_latency"] == "12 hours"
+    assert rows[ready.ref]["breakdown_latency_days"] == 0
+    assert rows[no_gap.ref]["breakdown_latency"] is None
+    assert rows[no_gap.ref]["breakdown_latency_days"] is None
 
 
 def test_parked_items_are_newest_first_and_missing_reason_is_null(monkeypatch):

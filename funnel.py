@@ -68,6 +68,11 @@ def routine_path(agent: str) -> pathlib.Path:
 # checks to the fixed list without changing the report contract.
 Check = namedtuple("Check", "name ok found fix")
 
+# `funnel doctor` only needs to know which ticket branches have merged. Keep
+# the scan result separate from the pure contradiction detector, and carry its
+# bounded-scan warning along with the refs that were found.
+MergedPRFacts = namedtuple("MergedPRFacts", "ticket_refs truncated")
+
 #: The single-in-motion lock. Codex acts as Nate through the gh CLI — no bot
 #: identity, no originating-app marker — so no GitHub write can identify it and
 #: assignment cannot serve as the lock. See LEARNINGS.md. The marker is instead a
@@ -153,6 +158,12 @@ GATES = {
 DECISION_ORDER = ["Building", "Ready", "Shaped"]
 
 MAINTENANCE_WINDOW = timedelta(days=30)
+
+# A doctor run asks for one row beyond the bound so it can distinguish a full
+# result from a truncated one without an unbounded history scan. The bound is
+# per member repository; a hand merge older than the newest 100 PRs is outside
+# this diagnostic's deliberately finite window.
+MERGED_PR_SCAN_LIMIT = 100
 
 #: Regression issues opened by `funnel reject`. The issues themselves are the
 #: counter — GitHub is the state, so there is nothing else to keep in step.
@@ -1952,20 +1963,31 @@ def _status_for_consistency(item: Item) -> str:
     return item.status or "unset"
 
 
-def item_consistency_findings(items: Iterable[Item]) -> List[str]:
+def item_consistency_findings(
+    items: Iterable[Item],
+    merged_pr_facts: Optional[MergedPRFacts] = None,
+) -> List[str]:
     """Return one read-only finding for each item with contradictory facts.
 
     Issue state and Project Status are separate GitHub facts, as is the
     descriptive ``needs-shaping`` label. The funnel reports disagreements but
     never chooses which side to rewrite. Multiple disagreements on one item
-    stay on one line so the output remains one line per item.
+    stay on one line so the output remains one line per item. Merged PR facts
+    are passed in by the caller so this remains pure over fixture Items.
     """
+    merged_ticket_refs = (
+        merged_pr_facts.ticket_refs if merged_pr_facts else frozenset()
+    )
     findings: List[str] = []
     for item in items:
         status = _status_for_consistency(item)
         reasons: List[str] = []
 
-        if item.state == "CLOSED" and item.status not in ("Done", "Parked"):
+        if (
+            item.state == "CLOSED"
+            and not item.parent
+            and item.status not in ("Done", "Parked")
+        ):
             reasons.append("state is CLOSED but Status is {}".format(status))
         if item.state == "OPEN" and item.status == "Done":
             reasons.append("state is OPEN but Status is Done")
@@ -1973,15 +1995,30 @@ def item_consistency_findings(items: Iterable[Item]) -> List[str]:
             reasons.append(
                 "label needs-shaping is present but Status is {}".format(status)
             )
+        if (
+            item.state == "OPEN"
+            and item.parent
+            and item.ref in merged_ticket_refs
+        ):
+            finding = "open ticket has a merged PR"
+            if merged_pr_facts and merged_pr_facts.truncated:
+                finding += (
+                    " (merged PR scan truncated after newest {} entries)"
+                    .format(MERGED_PR_SCAN_LIMIT)
+                )
+            reasons.append(finding)
 
         if reasons:
             findings.append("{}: {}".format(item.ref, "; ".join(reasons)))
     return findings
 
 
-def check_item_consistency(items: Iterable[Item]) -> Check:
+def check_item_consistency(
+    items: Iterable[Item],
+    merged_pr_facts: Optional[MergedPRFacts] = None,
+) -> Check:
     """Build the doctor check for contradictions already present in ``items``."""
-    findings = item_consistency_findings(items)
+    findings = item_consistency_findings(items, merged_pr_facts=merged_pr_facts)
     return Check("item consistency", not findings, "\n".join(findings), "")
 
 
@@ -2010,7 +2047,8 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
                   checkout_root: Optional[os.PathLike] = None,
                   usage_cache: Optional[os.PathLike] = None,
                   heartbeat_spool: Optional[os.PathLike] = None,
-                  items: Optional[Iterable[Item]] = None) -> List[Check]:
+                  items: Optional[Iterable[Item]] = None,
+                  merged_pr_facts: Optional[MergedPRFacts] = None) -> List[Check]:
     """Run every fixed check, even when an earlier one is broken.
 
     ``items`` is supplied by ``cmd_doctor`` after the normal Project load. It
@@ -2027,7 +2065,9 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
     ]
     if items is not None:
         items = list(items)
-        checks.append(check_item_consistency(items))
+        checks.append(check_item_consistency(
+            items, merged_pr_facts=merged_pr_facts
+        ))
         checks.append(check_class_assignments(items))
     return checks
 
@@ -2056,7 +2096,37 @@ def cmd_doctor() -> int:
             "restore GitHub access, then rerun funnel doctor",
         ))
     else:
-        checks = doctor_checks(items=items)
+        try:
+            merged_facts = merged_pr_facts(items)
+        except GitHubError as exc:
+            # Keep the local and Project checks useful, but fail closed on the
+            # new remote fact rather than silently claiming consistency when
+            # the bounded merged-PR scan could not run.
+            checks = doctor_checks(items=items)
+            consistency = next(
+                (index for index, check in enumerate(checks)
+                 if check.name == "item consistency"),
+                None,
+            )
+            failure = "merged PR scan failed: {}".format(
+                str(exc) or "unknown error"
+            )
+            if consistency is None:
+                checks.append(Check(
+                    "item consistency", False, failure,
+                    "restore GitHub access, then rerun funnel doctor",
+                ))
+            else:
+                check = checks[consistency]
+                found = "\n".join(filter(None, [check.found, failure]))
+                checks[consistency] = Check(
+                    check.name, False, found,
+                    "restore GitHub access, then rerun funnel doctor",
+                )
+        else:
+            checks = doctor_checks(
+                items=items, merged_pr_facts=merged_facts
+            )
     render_checks(checks)
     return 0 if all(check.ok for check in checks) else 1
 
@@ -3503,6 +3573,45 @@ def ticket_ref_from_branch(repo: str, branch: str) -> Optional[str]:
         return None
     tail = branch.split("/", 1)[1]
     return "{}#{}".format(repo, tail) if tail.isdigit() else None
+
+
+def merged_pr_facts(items: Sequence[Item]) -> MergedPRFacts:
+    """Find open tickets whose convention-named PR has already merged.
+
+    The scan is one `gh pr list` request per member repository, independent of
+    the number of tickets. It asks for one row beyond
+    ``MERGED_PR_SCAN_LIMIT`` so a bounded result can report that it was
+    truncated. Only the branch name is needed; the pure detector receives the
+    intersected ticket refs rather than querying GitHub itself.
+    """
+    open_ticket_refs = {
+        item.ref for item in items
+        if item.state == "OPEN" and item.parent
+    }
+    repos = sorted({item.repo for item in items if item.ref in open_ticket_refs})
+    merged_ticket_refs: Set[str] = set()
+    truncated = False
+
+    for repo in repos:
+        rows = _gh_json(
+            "gh", "pr", "list", "--repo", repo, "--state", "merged",
+            "--json", "headRefName", "--limit", str(MERGED_PR_SCAN_LIMIT + 1),
+        )
+        if rows is None:
+            raise GitHubError("could not read merged PRs for {}".format(repo))
+        if not isinstance(rows, list):
+            raise GitHubError("invalid merged PR response for {}".format(repo))
+
+        if len(rows) > MERGED_PR_SCAN_LIMIT:
+            truncated = True
+        for row in rows[:MERGED_PR_SCAN_LIMIT]:
+            if not isinstance(row, dict):
+                continue
+            ref = ticket_ref_from_branch(repo, row.get("headRefName") or "")
+            if ref in open_ticket_refs:
+                merged_ticket_refs.add(ref)
+
+    return MergedPRFacts(frozenset(merged_ticket_refs), truncated)
 
 
 def merge_blockers(repo: str, pr: int, items: List[Item],

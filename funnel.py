@@ -202,6 +202,19 @@ ORIGIN_OVERRIDE_TARGETS = ("nate", "agents")
 REJECTED_MERGE_ALARM = 3
 REJECTED_MERGE_WINDOW = timedelta(days=7)
 
+#: Drift is reported, never used as a gate. Keep these names short and stable:
+#: callers put them verbatim into comments and the brief.
+DRIFT_PLAN_EDIT = "plan edited after Ready"
+DRIFT_REJECTED_REVIEW = "review verdict rejected"
+DRIFT_REGRESSION = "merge later rejected"
+DRIFT_LATE_TICKET = "ticket added after Building"
+DRIFT_SIGNAL_NAMES = (
+    DRIFT_PLAN_EDIT,
+    DRIFT_REJECTED_REVIEW,
+    DRIFT_REGRESSION,
+    DRIFT_LATE_TICKET,
+)
+
 
 # --------------------------------------------------------------------------
 # Model
@@ -258,6 +271,66 @@ class Item:
         if since is None:
             return None
         return now - since
+
+
+@dataclass(frozen=True)
+class DriftFacts:
+    """History fetched for one project before applying the drift rules.
+
+    The fields deliberately contain observations rather than pre-computed
+    booleans. ``drift_since_approval`` stays a pure decision function, and a
+    caller can fetch the same GitHub facts once for several consumers.
+    """
+
+    ready_at: Optional[datetime] = None
+    plan_edit_times: Tuple[datetime, ...] = ()
+    review_verdicts: Tuple[Dict[str, object], ...] = ()
+    regression_pr_numbers: Tuple[int, ...] = ()
+    building_at: Optional[datetime] = None
+    ticket_created_at: Tuple[datetime, ...] = ()
+
+
+def _after(value: object, boundary: Optional[datetime]) -> bool:
+    """Whether a timestamp is strictly after a known approval boundary."""
+    return isinstance(value, datetime) and boundary is not None and value > boundary
+
+
+def drift_since_approval(
+    item: Item, facts: Optional[DriftFacts] = None
+) -> List[str]:
+    """Return the stable drift signals that fired for ``item``.
+
+    ``facts`` is optional for consumers such as ``funnel answer`` and
+    ``funnel merge``; omitting it fetches the histories from GitHub. Tests and
+    callers that already have those histories should pass ``DriftFacts`` and
+    get a pure function over the supplied observations.
+
+    Missing approval timestamps do not count as drift. Guessing from the
+    current status would make a later state look like an earlier event and
+    would turn an incomplete history read into a false report.
+    """
+    facts = facts if facts is not None else fetch_drift_facts(item)
+    ready_at = facts.ready_at
+    building_at = facts.building_at
+
+    if ready_at is None and item.status == "Ready":
+        ready_at = item.status_since
+    if building_at is None and item.status == "Building":
+        building_at = item.status_since
+
+    signals: List[str] = []
+    if any(_after(at, ready_at) for at in facts.plan_edit_times):
+        signals.append(DRIFT_PLAN_EDIT)
+    if any(
+        isinstance(verdict, dict) and verdict.get("verdict") == "rejected"
+        for verdict in facts.review_verdicts
+    ):
+        signals.append(DRIFT_REJECTED_REVIEW)
+    if facts.regression_pr_numbers:
+        signals.append(DRIFT_REGRESSION)
+    if any(_after(at, building_at) for at in facts.ticket_created_at):
+        signals.append(DRIFT_LATE_TICKET)
+    return signals
 
 
 # --------------------------------------------------------------------------
@@ -3418,7 +3491,41 @@ query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
       subIssues(first: 50) {
-        nodes { number title state repository { nameWithOwner } }
+        nodes { number title state createdAt repository { nameWithOwner } }
+      }
+    }
+  }
+}
+"""
+
+
+DRIFT_STATUS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      timelineItems(last: 100, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]) {
+        nodes {
+          __typename
+          ... on ProjectV2ItemStatusChangedEvent {
+            createdAt
+            previousStatus
+            status
+            project { number }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+DRIFT_EDIT_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      userContentEdits(first: 100) {
+        nodes { editedAt }
       }
     }
   }
@@ -3434,6 +3541,173 @@ def _gh_json(*args: str):
         return json.loads(out.stdout)
     except ValueError:
         return None
+
+
+def _project_status_times(item: Item) -> Dict[str, Optional[datetime]]:
+    """Return the latest Ready and Building transitions for one Project item."""
+    try:
+        owner, name = item.repo.split("/", 1)
+    except ValueError:
+        raise GitHubError("invalid repository ref {}".format(item.repo))
+    data = gh_graphql(
+        DRIFT_STATUS_QUERY, owner=owner, name=name, number=item.number
+    )
+    issue = (data.get("repository") or {}).get("issue") if isinstance(data, dict) else None
+    if issue is None:
+        raise GitHubError("could not read Project history for {}".format(item.ref))
+    nodes = ((issue.get("timelineItems") or {}).get("nodes") or [])
+    found: Dict[str, List[datetime]] = {"Ready": [], "Building": []}
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        project = node.get("project") or {}
+        if project.get("number") != PROJECT_NUMBER:
+            continue
+        status = node.get("status")
+        at = parse_time(node.get("createdAt"))
+        if status in found and at is not None:
+            found[status].append(at)
+    return {
+        status: max(times) if times else None
+        for status, times in found.items()
+    }
+
+
+def _plan_edit_times(item: Item) -> Tuple[datetime, ...]:
+    """Read issue body edits; title-only edits are not plan drift."""
+    try:
+        owner, name = item.repo.split("/", 1)
+    except ValueError:
+        raise GitHubError("invalid repository ref {}".format(item.repo))
+    data = gh_graphql(
+        DRIFT_EDIT_QUERY, owner=owner, name=name, number=item.number
+    )
+    issue = (data.get("repository") or {}).get("issue") if isinstance(data, dict) else None
+    if issue is None:
+        raise GitHubError("could not read issue edit history for {}".format(item.ref))
+    edits: List[datetime] = []
+    for edit in ((issue.get("userContentEdits") or {}).get("nodes") or []):
+        if not isinstance(edit, dict):
+            continue
+        at = parse_time(edit.get("editedAt"))
+        if at is not None:
+            edits.append(at)
+    return tuple(edits)
+
+
+def _subissue_rows(item: Item) -> List[dict]:
+    """Fetch the child issues, including creation times, for one project."""
+    try:
+        owner, name = item.repo.split("/", 1)
+    except ValueError:
+        raise GitHubError("invalid repository ref {}".format(item.repo))
+    data = gh_graphql(SUB_ISSUES, owner=owner, name=name, number=item.number)
+    issue = (data.get("repository") or {}).get("issue") if isinstance(data, dict) else None
+    if issue is None:
+        raise GitHubError("could not read tickets for {}".format(item.ref))
+    nodes = (issue.get("subIssues") or {}).get("nodes") or []
+    return [node for node in nodes if isinstance(node, dict)]
+
+
+def _ticket_prs(repo: str, number: int) -> List[Tuple[str, int]]:
+    """Return every PR ever made from a ticket's convention-named branch."""
+    rows = _gh_json(
+        "gh", "pr", "list", "--repo", repo, "--state", "all",
+        "--head", "ticket/{}".format(number), "--json", "number",
+    )
+    if rows is None or not isinstance(rows, list):
+        raise GitHubError("could not read PRs for {}#{}".format(repo, number))
+    found: List[Tuple[str, int]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        pr_number = row.get("number")
+        if isinstance(pr_number, int) and not isinstance(pr_number, bool):
+            found.append((repo, pr_number))
+    return found
+
+
+def _review_verdicts(prs: Iterable[Tuple[str, int]]) -> Tuple[Dict[str, object], ...]:
+    """Read every structured verdict comment on every ticket PR."""
+    verdicts: List[Dict[str, object]] = []
+    for repo, number in prs:
+        payload = _gh_json(
+            "gh", "pr", "view", str(number), "--repo", repo,
+            "--json", "comments",
+        )
+        if payload is None or not isinstance(payload, dict):
+            raise GitHubError("could not read review history for {} PR #{}".format(
+                repo, number))
+        for comment in payload.get("comments") or []:
+            if not isinstance(comment, dict):
+                continue
+            verdict = parse_verdict(comment.get("body") or "")
+            if verdict is not None:
+                verdicts.append(verdict)
+    return tuple(verdicts)
+
+
+def _regression_pr_numbers(prs: Iterable[Tuple[str, int]]) -> Tuple[int, ...]:
+    """Match funnel-created regression records to the project's PRs."""
+    project_prs = set(prs)
+    if not project_prs:
+        return ()
+    rows = _gh_json(
+        "gh", "issue", "list", "--repo", REPO, "--state", "all",
+        "--search", "{} in:title".format(REGRESSION_PREFIX),
+        "--limit", "100", "--json", "title,body",
+    )
+    if rows is None or not isinstance(rows, list):
+        raise GitHubError("could not read regression records")
+
+    found: List[int] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = row.get("title") or ""
+        if not title.startswith(REGRESSION_PREFIX):
+            continue
+        match = re.match(
+            r"{}(?P<number>[0-9]+)".format(re.escape(REGRESSION_PREFIX)),
+            title,
+        )
+        if not match:
+            continue
+        pr_number = int(match.group("number"))
+        body = row.get("body") or ""
+        exact_url = any(
+            "https://github.com/{}/pull/{}".format(repo, number) in body
+            for repo, number in project_prs
+        )
+        central_pr = (REPO, pr_number) in project_prs
+        if central_pr or exact_url:
+            found.append(pr_number)
+    return tuple(found)
+
+
+def fetch_drift_facts(item: Item) -> DriftFacts:
+    """Fetch the GitHub histories used by ``drift_since_approval``."""
+    status_times = _project_status_times(item)
+    child_rows = _subissue_rows(item)
+    child_created: List[datetime] = []
+    prs: List[Tuple[str, int]] = []
+    for child in child_rows:
+        created_at = parse_time(child.get("createdAt"))
+        if created_at is not None:
+            child_created.append(created_at)
+        child_repo = (child.get("repository") or {}).get("nameWithOwner") or item.repo
+        child_number = child.get("number")
+        if isinstance(child_number, int) and not isinstance(child_number, bool):
+            prs.extend(_ticket_prs(child_repo, child_number))
+
+    return DriftFacts(
+        ready_at=status_times["Ready"],
+        plan_edit_times=_plan_edit_times(item),
+        review_verdicts=_review_verdicts(prs),
+        regression_pr_numbers=_regression_pr_numbers(prs),
+        building_at=status_times["Building"],
+        ticket_created_at=tuple(child_created),
+    )
 
 
 def dependency_facts(repo: str, number: int) -> Dict[str, List[str]]:

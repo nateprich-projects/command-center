@@ -520,6 +520,47 @@ def test_next_returns_nothing_when_there_is_nothing_to_do():
     assert next_ticket([item(1, "Ideas", None)], NOW) is None
 
 
+def test_next_excludes_declined_refs_without_changing_queue_order():
+    rows = [
+        project(1, "Building", "New"), ticket(2, 1),
+        project(3, "Building", "New"), ticket(4, 3),
+        project(5, "Building", "New"), ticket(6, 5),
+    ]
+
+    assert [candidate.number for candidate in startable(rows)] == [2, 4, 6]
+    assert next_ticket(rows, NOW).number == 2
+    assert next_ticket(rows, NOW, excluded={rows[1].ref}).number == 4
+    assert next_ticket(
+        rows, NOW, excluded={rows[1].ref, rows[3].ref}
+    ).number == 6
+
+
+def test_next_returns_nothing_when_every_candidate_is_excluded():
+    rows = [
+        project(1, "Building", "New"), ticket(2, 1),
+        project(3, "Building", "New"), ticket(4, 3),
+    ]
+
+    assert next_ticket(rows, NOW, excluded={rows[1].ref, rows[3].ref}) is None
+
+
+def test_next_cli_accepts_repeatable_not_filters(monkeypatch, capsys):
+    rows = [
+        project(1, "Building", "New"), ticket(2, 1),
+        project(3, "Building", "New"), ticket(4, 3),
+        project(5, "Building", "New"), ticket(6, 5),
+    ]
+    monkeypatch.setattr(funnel, "load_items", lambda: rows)
+    monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
+
+    assert funnel.main([
+        "next", "--not", rows[1].ref, "--not", rows[3].ref,
+    ]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ref"] == rows[5].ref
+
+
 # -- The portfolio signal ---------------------------------------------------
 
 

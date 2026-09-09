@@ -22,6 +22,8 @@ ranks anything itself.
 | `funnel brief` | What is waiting on a human decision, and for how long |
 | `funnel doctor` | Check the local install and report actionable failures |
 | `funnel park <ref> --reason "<why>"` | Stop a project and preserve the reason |
+| `funnel pin <ref> [--yes]` | Pin a project within its current gate; dry-run by default |
+| `funnel unpin <ref> [--yes]` | Clear a project's pin; dry-run by default |
 | `funnel comment <ref> --body "<text>" --voice <voice>` | Post a comment with explicit provenance |
 | `funnel comment <ref> --blocked-on N [--blocked-on M] --because "<reason>" --voice <voice>` | Post a canonical block comment |
 

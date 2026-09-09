@@ -84,6 +84,32 @@ def test_brief_does_not_treat_ready_as_a_human_decision(monkeypatch, capsys):
     assert funnel.breakdown_latency(no_gap) is None
 
 
+def test_brief_shows_pinned_items_without_marking_unpinned_items(
+    monkeypatch, capsys
+):
+    pinned = funnel.Item(
+        repo="nateprich/beta", number=24, title="Pinned project",
+        url="https://example.invalid/24", state="OPEN", status="Building",
+        klass="New", pinned=True, status_since=NOW - timedelta(days=2),
+        children_total=1, children_done=1,
+    )
+    unpinned = funnel.Item(
+        repo="nateprich/beta", number=25, title="Unpinned project",
+        url="https://example.invalid/25", state="OPEN", status="Building",
+        klass="New", status_since=NOW - timedelta(days=1),
+        children_total=1, children_done=1,
+    )
+
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([pinned, unpinned], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+    rows = {row["ref"]: row for row in brief["items"]}
+
+    assert rows[pinned.ref]["pinned"] is True
+    assert "pinned" not in rows[unpinned.ref]
+
+
 def test_parked_items_are_newest_first_and_missing_reason_is_null(monkeypatch):
     older = funnel.Item(
         repo="nateprich/beta", number=20, title="Older", url="https://example.invalid/20",

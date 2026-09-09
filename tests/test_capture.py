@@ -36,7 +36,7 @@ def test_capture_stamps_the_created_body_as_agent(monkeypatch):
 
     assert funnel.cmd_capture(
         [], NOW, "An idea", "Raw note", "owner/repo",
-        run="capture-run", agent="claude",
+        run="capture-run", agent="claude", origin="agent",
     ) == 0
 
     body = calls[0][calls[0].index("--body") + 1]
@@ -47,7 +47,48 @@ def test_capture_stamps_the_created_body_as_agent(monkeypatch):
         "run": "capture-run",
         "voice": "agent",
     }
+    assert funnel.parse_origin(body) == {
+        "agent": "claude",
+        "at": NOW.isoformat(),
+        "run": "capture-run",
+        "voice": "agent",
+    }
     assert calls[0][-2:] == ("--label", "needs-shaping")
+
+
+@pytest.mark.parametrize("origin", ["nate-relayed", "agent"])
+def test_capture_records_each_explicit_origin(monkeypatch, origin):
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        if args[:3] == ["gh", "issue", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/owner/repo/issues/42\n",
+                stderr="",
+            )
+        return SimpleNamespace(returncode=1, stdout="", stderr="not in project")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.cmd_capture(
+        [], NOW, "An idea", "Raw note", "owner/repo",
+        run="capture-run", agent="claude", origin=origin,
+    ) == 0
+
+    body = calls[0][calls[0].index("--body") + 1]
+    assert funnel.parse_origin(body)["voice"] == origin
+    assert funnel.parse_provenance(body)["voice"] == "agent"
+
+
+def test_capture_requires_an_explicit_origin_before_resolving_repo(monkeypatch):
+    monkeypatch.setattr(
+        funnel, "resolve_repo", lambda repo: pytest.fail("repo was resolved")
+    )
+
+    with pytest.raises(funnel.GitHubError, match="explicit --origin"):
+        funnel.cmd_capture([], NOW, "An idea", "Raw note", "owner/repo")
 
 
 def test_shaped_preserves_plan_bytes_above_agent_stamp(tmp_path, monkeypatch):
@@ -95,6 +136,80 @@ def test_shaped_preserves_plan_bytes_above_agent_stamp(tmp_path, monkeypatch):
     }
 
 
+def test_shaped_prints_advisory_overlap_candidates(tmp_path, monkeypatch, capsys):
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("Touch `funnel.py` and follow #91.\n")
+    item = Item(
+        repo="owner/repo", number=42, title="An idea",
+        url="https://github.com/owner/repo/issues/42", state="OPEN",
+        status="Ideas", item_id="project-item-42",
+    )
+    other = Item(
+        repo="owner/repo", number=89, title="Existing plan",
+        url="https://github.com/owner/repo/issues/89", state="OPEN",
+        body="Update `funnel.py` and cite #91.", status="Ready",
+    )
+
+    def graphql(query, **variables):
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
+        return {"node": {"options": [{"id": "shaped-option", "name": "Shaped"}]}}
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    assert funnel.cmd_shaped(
+        [item, other], NOW, item.ref, str(plan_file),
+        run="shape-run", agent="claude",
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "--- plan overlap candidates (advisory) ---" in output
+    assert "Read each candidate and record the conclusion in the plan:" in output
+    assert "owner/repo#42 and owner/repo#89 both touch `funnel.py`" in output
+    assert "owner/repo#42 and owner/repo#89 both reference #91" in output
+
+
+def test_shaped_without_overlap_still_succeeds_and_reports_none(tmp_path, monkeypatch,
+                                                                 capsys):
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("A plan with no shared signals.\n")
+    item = Item(
+        repo="owner/repo", number=42, title="An idea",
+        url="https://github.com/owner/repo/issues/42", state="OPEN",
+        status="Ideas", item_id="project-item-42",
+    )
+
+    def graphql(query, **variables):
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
+        return {"node": {"options": [{"id": "shaped-option", "name": "Shaped"}]}}
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file),
+        run="shape-run", agent="claude",
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "--- plan overlap candidates (advisory) ---" in output
+    assert "  none found" in output
+
+
 def test_capture_always_labels_the_issue_and_reports_it(monkeypatch, capsys):
     calls = []
 
@@ -118,7 +233,7 @@ def test_capture_always_labels_the_issue_and_reports_it(monkeypatch, capsys):
 
     assert funnel.cmd_capture(
         [], NOW, "An idea", "A note", funnel.REPO,
-        run="capture-run", agent="codex",
+        run="capture-run", agent="codex", origin="nate-relayed",
     ) == 0
 
     assert calls[0][-2:] == ["--label", "needs-shaping"]
@@ -134,10 +249,23 @@ def test_capture_flag_is_rejected_before_github_is_loaded(monkeypatch, capsys):
     )
 
     with pytest.raises(SystemExit) as exc:
-        funnel.main(["capture", "An idea", "--needs-shaping"])
+        funnel.main(["capture", "An idea", "--origin", "agent",
+                     "--needs-shaping"])
 
     assert exc.value.code == 2
     assert "unrecognized arguments" in capsys.readouterr().err
+
+
+def test_capture_origin_is_required_before_github_is_loaded(monkeypatch, capsys):
+    monkeypatch.setattr(
+        funnel, "load_items", lambda: pytest.fail("GitHub should not be loaded")
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        funnel.main(["capture", "An idea"])
+
+    assert exc.value.code == 2
+    assert "--origin" in capsys.readouterr().err
 
 
 def test_shaped_reads_the_plan_from_stdin_when_asked(monkeypatch):

@@ -104,6 +104,26 @@ def test_new_replace_and_unset_class_still_wait_for_acceptance():
         assert gate_question(finished) == "Accept it?"
 
 
+def test_drift_is_reported_without_changing_the_building_gate():
+    drifted = project(1, "Building", "New", children=2, done=2)
+    facts = funnel.DriftFacts(
+        ready_at=NOW - timedelta(days=2),
+        plan_edit_times=(NOW - timedelta(days=1),),
+        review_verdicts=({"verdict": "rejected"},),
+        regression_pr_numbers=(20,),
+        building_at=NOW - timedelta(hours=2),
+        ticket_created_at=(NOW - timedelta(hours=1),),
+    )
+
+    assert funnel.drift_since_approval(drifted, facts) == list(
+        funnel.DRIFT_SIGNAL_NAMES
+    )
+    assert gate_question(drifted) == "Accept it?"
+    assert gate_question(
+        project(2, "Building", "Broken", children=2, done=2)
+    ) is None
+
+
 def test_building_with_no_children_does_not_count_as_complete():
     """children_all_closed must not be vacuously true for a childless item."""
     assert gate_question(item(1, "Building", "New", children_total=0, children_done=0)) is None
@@ -168,6 +188,30 @@ def test_broken_outranks_older_work_at_the_same_gate():
     items = [
         project(1, "Shaped", "New", days=30),
         project(2, "Shaped", "Broken", days=1),
+    ]
+    assert [i.number for i in awaiting_decision(items)] == [2, 1]
+
+
+def test_pinned_work_outranks_unpinned_work_at_the_same_gate():
+    items = [
+        project(1, "Shaped", "Improve", days=30),
+        project(2, "Shaped", "Improve", days=1, pinned=True),
+    ]
+    assert [i.number for i in awaiting_decision(items)] == [2, 1]
+
+
+def test_broken_work_outranks_pinned_work_at_the_same_gate():
+    items = [
+        project(1, "Shaped", "Improve", days=30, pinned=True),
+        project(2, "Shaped", "Broken", days=1),
+    ]
+    assert [i.number for i in awaiting_decision(items)] == [2, 1]
+
+
+def test_pinned_work_does_not_cross_decision_gates():
+    items = [
+        project(1, "Shaped", "Improve", days=30, pinned=True),
+        project(2, "Building", "New", children=1, done=1, days=1),
     ]
     assert [i.number for i in awaiting_decision(items)] == [2, 1]
 
@@ -293,6 +337,19 @@ def test_ladder_orders_what_to_start():
                      (5, "Improve")):
         items += [project(n, "Building", klass), ticket(10 + n, n)]
     assert [i.number for i in startable(items)] == [12, 14, 15, 13, 11]
+
+
+def test_pins_do_not_change_codex_startable_output():
+    unpinned = [
+        project(1, "Building", "New"), ticket(2, 1),
+        project(3, "Building", "Broken"), ticket(4, 3),
+    ]
+    pinned = [
+        project(1, "Building", "New", pinned=True), ticket(2, 1),
+        project(3, "Building", "Broken", pinned=True), ticket(4, 3),
+    ]
+
+    assert startable(unpinned) == startable(pinned)
 
 
 def test_in_flight_work_finishes_before_anything_new_starts():
@@ -586,6 +643,37 @@ def test_next_excludes_declined_refs_without_changing_queue_order():
     assert next_ticket(
         rows, NOW, excluded={rows[1].ref, rows[3].ref}
     ).number == 6
+
+
+def test_next_releases_the_claim_held_on_a_declined_ref(monkeypatch, capsys):
+    """A declined ticket's claim is released by the decline itself (#395)."""
+    released = []
+    monkeypatch.setattr(funnel, "write_lock",
+                        lambda item, value: released.append((item.ref, value)))
+    rows = [
+        project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(60)),
+        project(3, "Building", "New"), ticket(4, 3),
+    ]
+
+    assert funnel.cmd_next(rows, NOW, excluded={rows[1].ref}) == 0
+
+    assert released == [(rows[1].ref, "")]
+    assert rows[1].in_motion_since is None
+    assert "released {} (declined)".format(rows[1].ref) in capsys.readouterr().err
+    assert funnel.in_motion(rows, NOW) == []
+
+
+def test_next_leaves_an_unclaimed_declined_ref_alone(monkeypatch, capsys):
+    released = []
+    monkeypatch.setattr(funnel, "write_lock",
+                        lambda item, value: released.append((item.ref, value)))
+    rows = [project(1, "Building", "New"), ticket(2, 1),
+            project(3, "Building", "New"), ticket(4, 3)]
+
+    assert funnel.cmd_next(rows, NOW, excluded={rows[1].ref}) == 0
+
+    assert released == []
+    capsys.readouterr()
 
 
 def test_next_returns_nothing_when_every_candidate_is_excluded():

@@ -3533,7 +3533,7 @@ def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -
     feedback loop on letting Claude merge unattended. One action does all four
     steps, rather than leaving them to be remembered.
 
-    This is one of two commands that write `Status` by code rather than by Nate;
+    This is one of three commands that write `Status` by code rather than by Nate;
     it remains the single case that also writes `Class`.
     """
     number = pr.rstrip("/").split("/")[-1].lstrip("#")

@@ -223,6 +223,11 @@ def test_checkout_staleness_is_silent_after_routines_move_to_the_run_clone(
     routines.mkdir()
     (routines / "codex.md").write_text(
         "python3 ~/.claude/command-center-run/funnel.py doctor\n")
+    (routines / "muse.md").write_text(
+        "Never touch {}/funnel.py.\n".format(
+            claude / "command-center"
+        )
+    )
     monkeypatch.setattr(
         funnel, "_git_ahead_behind",
         lambda root: pytest.fail("retired staleness check must not inspect git"),

@@ -1422,10 +1422,14 @@ def _symlink_fix(link: pathlib.Path, expected: pathlib.Path) -> str:
 
 def _legacy_invocation_count(checkout_root: pathlib.Path,
                              legacy_funnel_path: str) -> int:
-    """Count routine references to the old, human-owned funnel checkout."""
+    """Count commands that execute the old, human-owned funnel checkout."""
+    invocation = "python3 " + legacy_funnel_path
     count = 0
     for routine in sorted((checkout_root / "routines").glob("*.md")):
-        count += routine.read_text(encoding="utf-8").count(legacy_funnel_path)
+        # The routine files retain a prohibition saying never to touch this
+        # checkout even after #205 removes the commands. Count invocations,
+        # not bare path mentions, so that prose does not defeat retirement.
+        count += routine.read_text(encoding="utf-8").count(invocation)
     return count
 
 

@@ -30,7 +30,11 @@ esac
 
 # The maintained read-only clone (#171, #204), not Nate's working tree: the
 # routine text and the funnel it invokes must come from the same checkout.
-REPO="/Users/nateprich/.claude/command-center-run"
+REPO="${MUSE_REVIEW_REPO:-/Users/nateprich/.claude/command-center-run}"
+# The muse binary and the wall-clock bound are overridable for the test that
+# proves the bound kills a hung run; the defaults are what launchd runs.
+MUSE_BIN="${MUSE_BIN:-$HOME/.local/bin/muse}"
+BOUND_SECONDS="${MUSE_REVIEW_BOUND_SECONDS:-1200}"
 ROUTINE="$REPO/routines/muse.md"
 # An empty directory on purpose. Muse roots its workspace at the working
 # directory, so this is what it can see. Everything real is reached by absolute
@@ -79,7 +83,19 @@ fi
 # --disable-write blocks non-shell workspace writes. It is not the whole safety
 # story -- the routine being read-only by instruction is -- because
 # --approval-mode never means *never ask*, not *never allow*.
-exec "$HOME/.local/bin/muse" exec \
+#
+# Wall-clock bound (#392). `--max-model-steps` caps steps, not time: a hung
+# model stream or tool consumes no steps, and launchd runs one instance per
+# job, so a run that never ends skips every scheduled run after it. Measured
+# twice on 2026-09-09 — 1,128 minutes, then 2h31m — against a 0.3-minute
+# median. Twenty minutes is an order of magnitude past any legitimate job.
+# A killed run finishes `errored` with the kill in its note, resolved from the
+# one open start, so the watchdog sees a run that was stopped, not one that
+# vanished. Portable bash: macOS ships no coreutils `timeout`.
+# `perl setpgrp` gives the run its own process group, so the bound can kill
+# the whole tree (muse and any shell tool it spawned) with one signal. macOS
+# ships perl and no `setsid`.
+perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "$MUSE_BIN" exec \
   --model muse-spark-1.3 \
   --reasoning-effort "$EFFORT" \
   --disable-write \
@@ -88,4 +104,40 @@ exec "$HOME/.local/bin/muse" exec \
   --no-foreign-personal-context \
   --workspace "$WORKSPACE" \
   --json \
-  "$PROMPT"
+  "$PROMPT" &
+muse_pid=$!
+killed_marker="$(mktemp "${TMPDIR:-/tmp}/muse-review-killed.XXXXXX")"
+rm -f "$killed_marker"
+
+(
+  # Sleep in the background so a TERM to this subshell (the normal path, when
+  # the run finished inside the bound) takes the sleep with it instead of
+  # leaving an orphan holding the log pipe open for the rest of the bound.
+  sleep "$BOUND_SECONDS" &
+  sleep_pid=$!
+  trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM
+  wait "$sleep_pid"
+  if kill -0 "$muse_pid" 2>/dev/null; then
+    echo "muse-review: killing run after ${BOUND_SECONDS}s ($TIER schedule)" >&2
+    : > "$killed_marker"
+    # Record the kill before the hard kill, so a run that dies slowly still
+    # leaves an honest finish behind.
+    python3 "$REPO/heartbeat.py" finish --agent muse --outcome errored \
+      --note "killed after $((BOUND_SECONDS / 60)) minutes: $TIER schedule run exceeded the wall-clock bound (#392)" >&2
+    kill -TERM -- "-$muse_pid" 2>/dev/null
+    sleep 5
+    kill -KILL -- "-$muse_pid" 2>/dev/null
+  fi
+) &
+bound_pid=$!
+
+wait "$muse_pid"
+status=$?
+if [[ -e "$killed_marker" ]]; then
+  wait "$bound_pid" 2>/dev/null
+  rm -f "$killed_marker"
+  exit 124
+fi
+kill "$bound_pid" 2>/dev/null
+wait "$bound_pid" 2>/dev/null
+exit "$status"

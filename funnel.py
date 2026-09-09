@@ -3595,6 +3595,29 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
     return found
 
 
+def shapeable_idea(items: Sequence[Item], tier: Optional[str],
+                   reading: Dict) -> Optional[Item]:
+    """Return the first idea this run may shape, or ``None``.
+
+    Shaping starts new work, so it is the last optional job after review and
+    breakdown. The ordering itself stays in ``ideas()``; this function only
+    filters that shared order through the existing tier and headroom rules.
+    """
+    import usage
+
+    if not usage.shaping_allowed(reading):
+        return None
+
+    for item in ideas(items):
+        body = getattr(item, "body", None)
+        if body is None:
+            body = _ticket_body(item.repo, item.number)
+        if tier is not None and required_tier(item.title, body) != tier:
+            continue
+        return item
+    return None
+
+
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
               routine_sha_literal: Optional[str] = None) -> int:
@@ -3695,10 +3718,28 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 }
                 out.update(do="breakdown", work=work)
             else:
-                out.update(do="stop",
-                           why="nothing to review and nothing to break down")
+                item = shapeable_idea(items, tier, reading)
+                if item is not None:
+                    out.update(
+                        do="shape",
+                        work={"ref": item.ref, "url": item.url,
+                              "title": item.title},
+                    )
+                else:
+                    out.update(
+                        do="stop",
+                        why="nothing to review and nothing to break down",
+                    )
         else:
-            out.update(do="stop", why="nothing to review")
+            item = shapeable_idea(items, tier, reading)
+            if item is not None:
+                out.update(
+                    do="shape",
+                    work={"ref": item.ref, "url": item.url,
+                          "title": item.title},
+                )
+            else:
+                out.update(do="stop", why="nothing to review")
     print(json.dumps(out, indent=2))
     return 0
 

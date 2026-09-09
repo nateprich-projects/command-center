@@ -76,7 +76,7 @@ def test_only_the_schedules_that_need_it_get_the_presence_check():
         if sync.needs_presence_check(name):
             assert command.endswith("--idle"), name
         else:
-            assert command.endswith("gate codex"), name
+            assert command.endswith("--tier " + sync.tier_for(name)), name
 
 
 def test_the_tier_follows_the_schedule_too():
@@ -92,8 +92,8 @@ def test_the_tier_follows_the_schedule_too():
         want = "standard" if sync.fires_all_day(name) else "escalated"
         assert sync.tier_for(name) == want, name
         command = [ln.strip() for ln in sync.prompt_text(name).splitlines()
-                   if ln.strip().startswith("python3") and "funnel.py next" in ln][0]
-        assert command.endswith("--tier " + want), name
+                   if ln.strip().startswith("python3") and sync.GATE_LINE in ln][0]
+        assert "--tier " + want in command, name
 
 
 def test_a_schedule_restricted_to_hours_needs_no_presence_proxy(tmp_path, monkeypatch):

@@ -1008,6 +1008,22 @@ def stale_locks(items: Iterable[Item], now: datetime) -> List[Item]:
 #: can read.
 REVIEW_MARKER = "<!-- command-center-review -->"
 
+#: The merge gate is software, not one of the model providers. Its verdicts
+#: still use the agent voice because they are neither Nate's words nor his
+#: relayed decision, but the agent field must say which component authored it.
+MERGE_GATE_AGENT = "gate"
+
+#: Shared wording for the blocker and for recognising the one refusal that
+#: writes a gate-authored rejection. Keeping the suffix separate lets the
+#: visible reason retain the branch name without making cmd_merge guess at it.
+CONFLICTING_BRANCH_SUFFIX = (
+    " is conflicting with the base — an engineer rebase is required"
+)
+
+#: A gate-authored verdict records only what the gate mechanically established.
+#: It did not inspect the diff and must not imply that it did.
+UNMERGEABLE_REJECTION_BLOCKING = "branch could not merge at this head"
+
 #: A reviewer that writes prose and then acts leaves nothing a later step can
 #: check. That is how a merge became something a model simply decided to do, and
 #: how a PR with requested changes ended up owned by nobody (#39).
@@ -1325,6 +1341,35 @@ def next_ticket(items: Sequence[Item], now: datetime,
         if effective_class(candidate, by_ref) == "Broken":
             return candidate
     return None
+
+
+def next_ticket_for_tier(items: Sequence[Item], now: datetime,
+                         tier: Optional[str] = None,
+                         blocked: Optional[Set[str]] = None,
+                         excluded: Optional[Set[str]] = None) -> Optional[Item]:
+    """Return the first shared-order ticket belonging to ``tier``.
+
+    Tier filtering has to happen by asking ``next_ticket`` repeatedly rather
+    than by filtering its input first. The latter would hide other in-motion
+    tickets from the WIP cap and could let a standard caller exceed it while
+    walking past escalated work. Reusing ``next_ticket`` also keeps Broken
+    preemption and all other ordering rules in one place.
+    """
+    excluded = set(excluded or ())
+    while True:
+        ticket = next_ticket(
+            items, now, blocked=blocked, excluded=excluded
+        )
+        if ticket is None or tier is None:
+            return ticket
+
+        reasons = escalation_reasons(
+            ticket.title, _ticket_body(ticket.repo, ticket.number)
+        )
+        wanted = bool(reasons) if tier == "escalated" else not reasons
+        if wanted:
+            return ticket
+        excluded.add(ticket.ref)
 
 
 def rejected_merges(items: Iterable[Item], now: datetime) -> Dict[str, object]:
@@ -3180,32 +3225,9 @@ def cmd_next(
 ) -> int:
     excluded = excluded or frozenset()
     blocked = awaiting_review(items)
-    ticket = next_ticket(
-        items, now, blocked=blocked, excluded=excluded
+    ticket = next_ticket_for_tier(
+        items, now, tier=tier, blocked=blocked, excluded=excluded
     )
-
-    # A caller declaring a tier gets only work of that tier — in both directions.
-    #
-    # `standard` walks past escalated tickets rather than refusing outright, or
-    # the queue would stall behind one risky ticket until the other schedule came
-    # round. `escalated` walks past *ordinary* ones, which is the same rule
-    # applied the other way: the expensive engine is reserved for work that needs
-    # it, and idling costs nothing because the cheap continuous schedule is
-    # already working the ordinary queue, including overnight.
-    reasons: List[str] = []
-    if ticket is not None and tier:
-        for candidate in startable(items, awaiting_review=blocked):
-            if candidate.ref in excluded:
-                continue
-            found = escalation_reasons(
-                candidate.title, _ticket_body(candidate.repo, candidate.number))
-            wanted = bool(found) if tier == "escalated" else not found
-            if wanted:
-                ticket, reasons = candidate, found
-                break
-        else:
-            print("nothing — no {} work waiting".format(tier), file=sys.stderr)
-            return 1
 
     if ticket is None:
         holder = lock_holder(items, now)
@@ -3216,6 +3238,8 @@ def cmd_next(
                 ),
                 file=sys.stderr,
             )
+        elif tier:
+            print("nothing — no {} work waiting".format(tier), file=sys.stderr)
         return 1
     print(json.dumps(item_json(ticket, now, {i.ref: i for i in items}), indent=2))
     return 0
@@ -3293,6 +3317,41 @@ def find(items: Sequence[Item], ref: str) -> Item:
     raise GitHubError("no funnel item matches {}".format(ref))
 
 
+def claim_ticket(items: List[Item], now: datetime, target: Item) -> Optional[str]:
+    """Write a ticket claim, or return the reason it must be refused."""
+    running = in_motion(items, now)
+
+    taken = next((i for i in running if i.ref == target.ref), None)
+    if taken is not None and taken.in_motion_since != target.in_motion_since:
+        return "refused — {} is already claimed".format(target.ref)
+
+    if taken is None and len(running) >= WIP_LIMIT:
+        by_ref = {i.ref: i for i in items}
+        preempts = (
+            effective_class(target, by_ref) == "Broken"
+            and not any(
+                effective_class(item, by_ref) == "Broken" for item in running
+            )
+        )
+        if not preempts:
+            return "refused — {} tickets already in motion, limit is {} ({})".format(
+                len(running), WIP_LIMIT,
+                ", ".join(i.ref for i in running))
+
+    stale = [i for i in stale_locks(items, now) if i.ref != target.ref]
+    for item in stale:
+        # Self-correcting, no human in the loop. Every takeover is a line in the
+        # brief: one is noise, three in a week means runs are dying.
+        write_lock(item, "")
+        print("took over stale claim on {}".format(item.ref), file=sys.stderr)
+
+    write_lock(target, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    # `Ready -> Building` is written on the first claim, here in the shared
+    # implementation so `funnel begin` (#349) and `funnel claim` promote alike.
+    _begin_parent(items, target)
+    return None
+
+
 def cmd_claim(items: List[Item], now: datetime, ref: str) -> int:
     """Claim a ticket, or refuse. Two separate refusals, deliberately.
 
@@ -3308,31 +3367,10 @@ def cmd_claim(items: List[Item], now: datetime, ref: str) -> int:
     caller distinguishes by exit code.
     """
     target = find(items, ref)
-    running = in_motion(items, now)
-
-    taken = next((i for i in running if i.ref == target.ref), None)
-    if taken is not None and taken.in_motion_since != target.in_motion_since:
-        print("refused — {} is already claimed".format(target.ref), file=sys.stderr)
+    refusal = claim_ticket(items, now, target)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
         return 1
-
-    if taken is None and len(running) >= WIP_LIMIT:
-        print(
-            "refused — {} tickets already in motion, limit is {} ({})".format(
-                len(running), WIP_LIMIT,
-                ", ".join(i.ref for i in running)),
-            file=sys.stderr,
-        )
-        return 1
-
-    stale = [i for i in stale_locks(items, now) if i.ref != target.ref]
-    for item in stale:
-        # Self-correcting, no human in the loop. Every takeover is a line in the
-        # brief: one is noise, three in a week means runs are dying.
-        write_lock(item, "")
-        print("took over stale claim on {}".format(item.ref), file=sys.stderr)
-
-    write_lock(target, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
-    _begin_parent(items, target)
     print(target.url)
     return 0
 
@@ -4171,6 +4209,35 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # a run that never had a budget to check should not read like one that
         # passed a check.
         out["unmetered"] = True
+
+    if agent == "codex":
+        blocked = awaiting_review(items)
+        ticket = next_ticket_for_tier(
+            items, now, tier=tier, blocked=blocked
+        )
+        if ticket is None:
+            holder = lock_holder(items, now)
+            if holder is not None:
+                why = "nothing — lock held by {} (claimed {} ago)".format(
+                    holder.ref, humanise(now - holder.in_motion_since)
+                )
+            elif tier:
+                why = "nothing — no {} work waiting".format(tier)
+            else:
+                why = "nothing to do"
+            out.update(do="stop", why=why)
+        else:
+            refusal = claim_ticket(items, now, ticket)
+            if refusal is not None:
+                out.update(do="stop", why=refusal)
+            else:
+                out.update(
+                    do="ticket",
+                    work=item_json(ticket, now, {i.ref: i for i in items}),
+                )
+        print(json.dumps(out, indent=2))
+        return 0
+
     queue = review_queue(items, tier)
     if queue:
         out.update(do="review", work=queue[0])
@@ -4306,6 +4373,17 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
     if not sha:
         raise GitHubError("could not read the head commit of PR #{}".format(pr))
 
+    return _write_verdict(
+        repo, pr, sha, verdict, ci, blocking, note, run=run, agent=agent
+    )
+
+
+def _write_verdict(repo: str, pr: int, sha: str, verdict: str, ci: str,
+                   blocking: List[str], note: Optional[str],
+                   run: Optional[str] = None,
+                   agent: Optional[str] = None) -> int:
+    """Write the one structured verdict artifact shared by models and gates."""
+
     body = {
         "verdict": verdict,
         "ci": ci,
@@ -4330,6 +4408,56 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
     print("recorded {} on PR #{} against {} in {}".format(
         verdict, pr, sha[:12], repo))
     return 0
+
+
+def _conflicting_branch_blocker(data: Dict) -> Optional[str]:
+    """The mechanical conflict reason, or None for every other branch state."""
+    if str(data.get("mergeable") or "").upper() != "CONFLICTING":
+        return None
+    return "branch {!r}{}".format(
+        data.get("headRefName") or "", CONFLICTING_BRANCH_SUFFIX
+    )
+
+
+def _is_conflicting_branch_blocker(reason: str) -> bool:
+    return reason.startswith("branch ") and reason.endswith(
+        CONFLICTING_BRANCH_SUFFIX
+    )
+
+
+def _record_unmergeable_rejection(repo: str, pr: int) -> None:
+    """Reject an approved current head that the live merge gate finds conflicting.
+
+    Re-reading the head and mergeability keeps the verdict tied to the fact the
+    gate actually observed. Requiring an approval at that exact SHA excludes the
+    two self-resolving refusal shapes: no verdict and a verdict for an older head.
+    It also makes retries idempotent, because the newest verdict is then already
+    the gate-authored rejection rather than an approval.
+    """
+    data = _gh_json(
+        "gh", "pr", "view", str(pr), "--repo", repo, "--json",
+        "state,headRefName,headRefOid,mergeable",
+    ) or {}
+    if data.get("state") != "OPEN":
+        return
+    sha = data.get("headRefOid")
+    reason = _conflicting_branch_blocker(data)
+    if not sha or reason is None:
+        return
+
+    verdict = latest_verdict(repo, pr)
+    if (
+        verdict is None
+        or verdict.get("verdict") != "approved"
+        or verdict.get("head_sha") != sha
+    ):
+        return
+
+    _write_verdict(
+        repo, pr, sha, "rejected", "unknown",
+        [UNMERGEABLE_REJECTION_BLOCKING], None,
+        agent=MERGE_GATE_AGENT,
+    )
 
 
 def ticket_ref_from_branch(repo: str, branch: str) -> Optional[str]:
@@ -4402,11 +4530,9 @@ def merge_blockers(repo: str, pr: int, items: List[Item],
         why.append("PR is {}, not open".format(data.get("state")))
 
     mergeable = str(data.get("mergeable") or "").upper()
-    if mergeable == "CONFLICTING":
-        why.append(
-            "branch {!r} is conflicting with the base — an engineer rebase is required"
-            .format(data.get("headRefName") or "")
-        )
+    conflict = _conflicting_branch_blocker(data)
+    if conflict is not None:
+        why.append(conflict)
     elif mergeable != "MERGEABLE":
         why.append(
             "mergeability for branch {!r} has not been computed yet — retry on the next run"
@@ -4464,6 +4590,8 @@ def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
     repo = resolve_repo(repo)
     why = merge_blockers(repo, pr, items, now)
     if why:
+        if any(_is_conflicting_branch_blocker(reason) for reason in why):
+            _record_unmergeable_rejection(repo, pr)
         print("refusing to merge PR #{}:".format(pr), file=sys.stderr)
         for reason in why:
             print("  - " + reason, file=sys.stderr)

@@ -76,7 +76,8 @@ def test_each_command_refuses_ambiguous_repo_before_side_effects(monkeypatch):
     )
 
     calls = [
-        lambda: funnel.cmd_capture([], NOW, "idea", None, None),
+        lambda: funnel.cmd_capture([], NOW, "idea", None, None,
+                                    origin="agent"),
         lambda: funnel.cmd_review(None, 7, "approved", "green", [], None),
         lambda: funnel.cmd_merge([], NOW, None, 7, False),
     ]
@@ -111,7 +112,8 @@ def test_capture_uses_the_only_member_and_reports_it(monkeypatch, capsys):
     monkeypatch.setattr(funnel, "gh_graphql", lambda *args, **kwargs: {})
 
     assert funnel.cmd_capture(
-        [], NOW, "An idea", "A note", None, run="run", agent="codex"
+        [], NOW, "An idea", "A note", None, run="run", agent="codex",
+        origin="agent"
     ) == 0
 
     assert "--repo" in calls[0]
@@ -178,7 +180,8 @@ def test_all_commands_honor_explicit_repo_with_multiple_members(monkeypatch, cap
     monkeypatch.setattr(funnel, "_option_id", lambda field_id, name: "ideas")
     monkeypatch.setattr(funnel, "gh_graphql", lambda *args, **kwargs: {})
     assert funnel.cmd_capture(
-        [], NOW, "An idea", "A note", explicit, run="run", agent="codex"
+        [], NOW, "An idea", "A note", explicit, run="run", agent="codex",
+        origin="agent"
     ) == 0
     assert explicit in capsys.readouterr().out
 

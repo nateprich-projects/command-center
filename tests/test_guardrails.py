@@ -45,6 +45,16 @@ CAPTURE_EXCEPTION = (
     "thing observed."
 )
 
+# These are the load-bearing plan sections described by skills/shape. Keep the
+# canonical names here so a prose edit cannot silently drift away from the
+# vocabulary the plan parser and self-approval path understand.
+PLAN_SECTION_NAMES = (
+    "Decided from precedent",
+    "Decided by the agent",
+    "Needs Nate",
+)
+NEEDS_SECTION_ALIASES = ("Needs Nate", "Needs you")
+
 
 def command_files():
     """Files an agent reads and runs commands out of."""
@@ -117,3 +127,17 @@ def test_every_work_routine_captures_observed_defects_before_finishing():
             offenders.append("{} is missing the funnel capture command".format(filename))
 
     assert not offenders, "\n".join(offenders)
+
+def test_shape_skill_pins_plan_section_names():
+    skill = (ROOT / "skills" / "shape" / "SKILL.md").read_text()
+    missing = [name for name in PLAN_SECTION_NAMES if name not in skill]
+    assert not missing, (
+        "skills/shape/SKILL.md must keep the plan section names stable; missing: {}"
+        .format(", ".join(missing))
+    )
+
+    missing_aliases = [name for name in NEEDS_SECTION_ALIASES if name not in skill]
+    assert not missing_aliases, (
+        "skills/shape/SKILL.md must document both Needs-section spellings; missing: {}"
+        .format(", ".join(missing_aliases))
+    )

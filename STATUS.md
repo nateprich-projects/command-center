@@ -52,7 +52,7 @@ Nate's, from any Claude Code session on this Mac:
 | `funnel show <n>` | the evidence for one item's gate |
 | `funnel approve\|start\|accept <n> --yes` | answer a gate — **his decision**, an agent may execute it on his explicit instruction |
 | `funnel ideas` | captured ideas, flagged first |
-| `funnel capture "<title>"` | take an idea down from chat |
+| `funnel capture "<title>" --origin <nate-relayed|agent>` | take an idea down from chat with explicit origin |
 | `funnel shaped <n> --plan <file>` | record a grilled plan, → Shaped |
 | `funnel reject <pr>` | a merged PR was broken; undo and count it |
 

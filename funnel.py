@@ -70,6 +70,49 @@ def routine_path(agent: str) -> pathlib.Path:
 # checks to the fixed list without changing the report contract.
 Check = namedtuple("Check", "name ok found fix")
 
+# GitHub's default issue labels are deliberately not part of the funnel's
+# vocabulary.  Keep the names here rather than treating every label other than
+# `blocked` and `needs-shaping` as a problem: Dependabot and a repository's own
+# labels are outside this onboarding check.
+STOCK_GITHUB_LABELS = frozenset({
+    "bug",
+    "documentation",
+    "duplicate",
+    "enhancement",
+    "good first issue",
+    "help wanted",
+    "invalid",
+    "question",
+    "wontfix",
+})
+
+
+@dataclass(frozen=True)
+class MemberRepoReadiness:
+    """The checkable onboarding facts for one topic-bearing repository.
+
+    ``topic`` is retained in the record even though ``member_repos()`` filters
+    on it.  That makes the blocking predicate explicit for the queue ticket
+    that consumes this result, while keeping a non-member out of the doctor
+    report entirely.
+    """
+
+    repo: str
+    topic: bool
+    ci_workflow: bool
+    stock_labels: Tuple[str, ...]
+    dependabot: bool
+
+    @property
+    def blocking_reasons(self) -> Tuple[str, ...]:
+        """Return only requirements whose absence prevents a merge."""
+        reasons: List[str] = []
+        if not self.topic:
+            reasons.append("missing command-center topic")
+        if not self.ci_workflow:
+            reasons.append("no CI workflow")
+        return tuple(reasons)
+
 # `funnel doctor` only needs to know which ticket branches have merged. Keep
 # the scan result separate from the pure contradiction detector, and carry its
 # bounded-scan warning along with the refs that were found.
@@ -216,6 +259,13 @@ UNATTRIBUTED = "UNATTRIBUTED"
 PROVENANCE_MARKER = "<!-- command-center-provenance -->"
 PROVENANCE_VOICES = ("nate-direct", "nate-relayed", "agent")
 
+#: Captured ideas carry their origin separately from the voice that wrote the
+#: issue body. A Nate-raised idea is relayed by the capturing agent; an
+#: agent-raised idea was observed by it. Keep these two values aligned with
+#: the provenance convention, but do not overload the body-author marker.
+ORIGIN_MARKER = "<!-- command-center-origin -->"
+ORIGIN_VOICES = ("nate-relayed", "agent")
+
 #: An origin is only a default for who shapes an idea. This marker records the
 #: explicit exception without rewriting that historical fact. Moving work back
 #: toward Nate is always safe; moving it toward agents requires Nate's voice.
@@ -227,6 +277,11 @@ ORIGIN_OVERRIDE_TARGETS = ("nate", "agents")
 #: response is to stop auto-merging and fix the review prompt.
 REJECTED_MERGE_ALARM = 3
 REJECTED_MERGE_WINDOW = timedelta(days=7)
+
+#: Keep funnel-closed work visible across several unattended brief runs. A
+#: brief is hourly, so a one-run window would make the record disappear before
+#: Nate could reasonably see it.
+CLOSED_ITSELF_WINDOW = timedelta(days=7)
 
 #: Drift is reported, never used as a gate. Keep these names short and stable:
 #: callers put them verbatim into comments and the brief.
@@ -260,6 +315,7 @@ class Item:
     state_reason: Optional[str] = None  # COMPLETED | NOT_PLANNED | REOPENED
     status: Optional[str] = None
     klass: Optional[str] = None
+    pinned: bool = False
     status_since: Optional[datetime] = None
     labels: List[str] = field(default_factory=list)
     block_references: List[str] = field(default_factory=list)
@@ -487,7 +543,7 @@ def question_since(item: Item) -> Optional[datetime]:
 
 
 def awaiting_decision(items: Iterable[Item]) -> List[Item]:
-    """Nate's queue: everything waiting on him, bottom-up, oldest first.
+    """Nate's queue: everything waiting on him, bottom-up, pinned then oldest.
 
     Bottom-up because the longest-stalled, furthest-along item is the most
     likely park candidate, and surfacing it first is what makes this ordering
@@ -508,6 +564,7 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
             depth,
             not item.is_blocked,
             0 if effective_class(item, by_ref) == "Broken" else 1,
+            0 if item.pinned else 1,
             since,
             item.repo,
             item.number,
@@ -813,6 +870,28 @@ def _needs_nate_sections(plan_body: str) -> List[str]:
     return sections
 
 
+def shaped_plan_status(plan_body: str) -> Tuple[str, str]:
+    """Return the status and reason earned by a newly recorded plan.
+
+    The all-clear is deliberately narrow: a recognised Needs section must be
+    present, explicitly empty, and free of authority signals that contradict
+    its claim. Everything else stays at Shaped with a reason the caller can
+    print.
+    """
+    sections = _needs_nate_sections(plan_body)
+    if not sections:
+        return "Shaped", "plan has no ## Needs you section"
+    if any(section.strip().lower() not in EMPTY_NEEDS_NATE
+           for section in sections):
+        return "Shaped", "plan has an open question"
+    signals = needs_nate_signals(plan_body)
+    if signals:
+        return "Shaped", "plan contains authority signal: {}".format(
+            ", ".join(signals)
+        )
+    return "Ready", "plan declares nothing open"
+
+
 def plan_needs_nate(plan_body: str) -> bool:
     """Whether a plan's Needs Nate/Needs you section asks for Nate.
 
@@ -823,13 +902,7 @@ def plan_needs_nate(plan_body: str) -> bool:
     content. An otherwise empty section also fails closed when the plan body
     contains an authority signal that contradicts the section's claim.
     """
-    sections = _needs_nate_sections(plan_body)
-    if not sections:
-        return True
-    if any(section.strip().lower() not in EMPTY_NEEDS_NATE
-           for section in sections):
-        return True
-    return bool(needs_nate_signals(plan_body))
+    return shaped_plan_status(plan_body)[0] == "Shaped"
 
 
 def plan_is_escalated(plan_body: str) -> List[str]:
@@ -840,6 +913,119 @@ def plan_is_escalated(plan_body: str) -> List[str]:
     used by the self-approval condition.
     """
     return escalation_reasons("", plan_body)
+
+
+# Plans already cite implementation details in ordinary Markdown. Keep this
+# detector deliberately mechanical: it reports shared tokens for a reader to
+# judge, rather than trying to decide whether two plans really collide.
+PLAN_FUNCTION_RE = re.compile(
+    r"(?<![\w.])(?P<name>(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*)"
+    r"\s*\([^()\n]*\)"
+)
+PLAN_PATH_RE = re.compile(
+    r"(?<![\w/.-])(?P<path>"
+    r"(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+\."
+    r"(?:cpp|tsx|jsx|yaml|json|html|toml|xml|css|sql|ini|txt|js|md|py|sh|go|cc|ts|yml|h|c)"
+    r"(?![A-Za-z0-9])"
+    r")(?:\:\d+(?:-\d+)?)?(?:#L\d+(?:-L\d+)?)?"
+)
+PLAN_ISSUE_RE = re.compile(
+    r"(?<![\w./-])(?P<ref>"
+    r"(?:(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+)?#\d+\b)"
+)
+
+
+def _plan_overlap_signals(plan_body: object) -> Tuple[Set[str], Set[str], Set[str]]:
+    """Extract the three checkable overlap signals from one plan body."""
+    if not isinstance(plan_body, str):
+        return set(), set(), set()
+
+    functions = {
+        match.group("name")
+        for match in PLAN_FUNCTION_RE.finditer(plan_body)
+    }
+    paths = set()
+    for match in PLAN_PATH_RE.finditer(plan_body):
+        path = match.group("path")
+        if path.startswith("./"):
+            path = path[2:]
+        paths.add(path)
+    issues = {
+        match.group("ref")
+        for match in PLAN_ISSUE_RE.finditer(plan_body)
+    }
+    return functions, paths, issues
+
+
+def plan_overlap_candidates(
+    plan_ref: str,
+    plan_body: str,
+    other_plans: Iterable[Tuple[str, str]],
+) -> List[str]:
+    """Return advisory lines for mechanical overlap with other plans.
+
+    ``other_plans`` supplies ``(ref, body)`` pairs for the open plans the
+    caller wants to compare. Shared function calls, file paths and issue
+    references are intentionally the whole signal: a human decides whether a
+    candidate is a real collision. The output is deterministic so the shaping
+    surface can print it without adding state or doing its own ranking.
+    """
+    current = _plan_overlap_signals(plan_body)
+    candidates: List[str] = []
+    seen: Set[str] = set()
+    pairs = sorted(other_plans, key=lambda pair: pair[0])
+
+    for other_ref, other_body in pairs:
+        if other_ref == plan_ref:
+            continue
+        other = _plan_overlap_signals(other_body)
+
+        for function in sorted(current[0] & other[0]):
+            line = "{} and {} both name `{}()`".format(
+                plan_ref, other_ref, function
+            )
+            if line not in seen:
+                candidates.append(line)
+                seen.add(line)
+        for path in sorted(current[1] & other[1]):
+            line = "{} and {} both touch `{}`".format(
+                plan_ref, other_ref, path
+            )
+            if line not in seen:
+                candidates.append(line)
+                seen.add(line)
+        for issue in sorted(current[2] & other[2]):
+            line = "{} and {} both reference {}".format(
+                plan_ref, other_ref, issue
+            )
+            if line not in seen:
+                candidates.append(line)
+                seen.add(line)
+
+    return candidates
+
+
+SHAPING_PLAN_STATUSES = frozenset(("Shaped", "Ready", "Building"))
+
+
+def shaping_plan_overlap_candidates(
+    items: Iterable[Item], item: Item, plan_body: str
+) -> List[str]:
+    """Find advisory overlaps with the other open project plans in flight.
+
+    Status belongs to parent Project items, so child tickets are not plans even
+    if a fixture or a future API response gives one a status. Closed projects
+    are not in flight and must not keep influencing a newly shaped plan.
+    """
+    other_plans = (
+        (other.ref, other.body or "")
+        for other in items
+        if other.ref != item.ref
+        and other.parent is None
+        and other.state == "OPEN"
+        and other.status in SHAPING_PLAN_STATUSES
+    )
+    return plan_overlap_candidates(item.ref, plan_body, other_plans)
 
 
 # These are evidence words, not a closed list of human-step categories. A plan
@@ -1124,6 +1310,14 @@ def parse_provenance(body: str) -> Optional[Dict]:
     return found
 
 
+def parse_origin(body: str) -> Optional[Dict]:
+    """The explicit capture origin, or None when it is absent or malformed."""
+    found = _marked_json(body, ORIGIN_MARKER)
+    if found is None or found.get("voice") not in ORIGIN_VOICES:
+        return None
+    return found
+
+
 def parse_origin_override(body: str) -> Optional[Dict]:
     """Return an authorised origin override, or None when it fails closed.
 
@@ -1277,6 +1471,33 @@ def append_provenance(body: str, voice: str, at: Optional[datetime] = None,
     """Append one provenance block without changing the supplied body."""
     return "{}\n\n{}".format(
         body, provenance_block(voice, at=at, run=run, agent=agent)
+    )
+
+
+def origin_block(voice: str, at: Optional[datetime] = None,
+                 run: Optional[str] = None,
+                 agent: Optional[str] = None) -> str:
+    """Build the explicit origin block attached to a captured idea."""
+    if voice not in ORIGIN_VOICES:
+        raise ValueError("unknown capture origin {!r}".format(voice))
+    run, agent = _heartbeat_context(run, agent)
+    fields = {
+        "agent": agent,
+        "at": (at or datetime.now(timezone.utc)).isoformat(),
+        "run": run,
+        "voice": voice,
+    }
+    return "{}\n\n```json\n{}\n```".format(
+        ORIGIN_MARKER, json.dumps(fields, indent=2, sort_keys=True)
+    )
+
+
+def append_origin(body: str, voice: str, at: Optional[datetime] = None,
+                  run: Optional[str] = None,
+                  agent: Optional[str] = None) -> str:
+    """Append an explicit capture origin without changing the supplied body."""
+    return "{}\n\n{}".format(
+        body, origin_block(voice, at=at, run=run, agent=agent)
     )
 
 
@@ -2352,6 +2573,152 @@ def check_topic() -> Check:
     return Check("command-center topic", True, found, "")
 
 
+def _workflow_rows(payload: object) -> List[dict]:
+    """Normalise the REST workflow response used by the repo doctor check."""
+    if isinstance(payload, dict):
+        payload = payload.get("workflows")
+    if not isinstance(payload, list):
+        return []
+    return [row for row in payload if isinstance(row, dict)]
+
+
+def _ci_workflow_present(payload: object) -> bool:
+    """Whether the response contains a workflow stored in `.github/workflows`."""
+    for row in _workflow_rows(payload):
+        path = row.get("path")
+        # `actions/workflows` normally supplies `path`.  Accept a pathless
+        # fixture row as a workflow too, while excluding GitHub's synthetic
+        # Dependabot workflow, whose path is `dynamic/dependabot/...`.
+        if path is None or str(path).startswith(".github/workflows/"):
+            return True
+    return False
+
+
+def _repo_label_names(payload: object) -> Tuple[str, ...]:
+    """Return label names from a repository-label REST response."""
+    if not isinstance(payload, list):
+        raise GitHubError("repository labels response was not a list")
+    names = {
+        str(row["name"])
+        for row in payload
+        if isinstance(row, dict) and row.get("name") is not None
+    }
+    return tuple(sorted(names, key=str.casefold))
+
+
+def _stock_label_names(labels: Iterable[str]) -> Tuple[str, ...]:
+    """Return remaining default GitHub labels, preserving displayed spelling."""
+    return tuple(sorted(
+        (label for label in labels
+         if label.casefold() in STOCK_GITHUB_LABELS),
+        key=str.casefold,
+    ))
+
+
+def _dependabot_configured(repo: str) -> bool:
+    """Whether either supported Dependabot config filename exists."""
+    for filename in ("dependabot.yml", "dependabot.yaml"):
+        payload = _gh_json(
+            "gh", "api", "repos/{}/contents/.github/{}".format(repo, filename)
+        )
+        if payload is not None:
+            return True
+    return False
+
+
+def member_repo_readiness(repo: str) -> MemberRepoReadiness:
+    """Read the checkable onboarding facts for one topic-bearing repository."""
+    workflows = _gh_json(
+        "gh", "api", "repos/{}/actions/workflows".format(repo)
+    )
+    labels = _gh_json(
+        "gh", "api", "repos/{}/labels?per_page=100".format(repo)
+    )
+    return MemberRepoReadiness(
+        repo=repo,
+        # `member_repos()` is the membership query and only returns repos with
+        # this topic.  Keep the fact explicit for the later queue predicate.
+        topic=True,
+        ci_workflow=_ci_workflow_present(workflows),
+        stock_labels=_stock_label_names(_repo_label_names(labels)),
+        dependabot=_dependabot_configured(repo),
+    )
+
+
+def _member_repo_found(readiness: MemberRepoReadiness) -> str:
+    """Render every onboarding fact, including advisory findings."""
+    ci = (
+        "CI workflow present"
+        if readiness.ci_workflow
+        else "CI workflow missing (blocking)"
+    )
+    topic = (
+        "command-center topic applied"
+        if readiness.topic
+        else "command-center topic missing (blocking)"
+    )
+    labels = (
+        "stock GitHub labels removed"
+        if not readiness.stock_labels
+        else "stock GitHub labels remain: {} (advisory)".format(
+            ", ".join(readiness.stock_labels)
+        )
+    )
+    dependabot = (
+        "Dependabot configured"
+        if readiness.dependabot
+        else "Dependabot not configured (advisory)"
+    )
+    return "; ".join((ci, topic, labels, dependabot))
+
+
+def check_member_repo(repo: str) -> Check:
+    """Build one doctor check for a topic-bearing member repository."""
+    try:
+        readiness = member_repo_readiness(repo)
+    except Exception as exc:
+        return Check(
+            "member repo {}".format(repo), False,
+            "{}: readiness query failed: {}".format(
+                repo, str(exc) or "unknown error"
+            ),
+            "restore GitHub access, then rerun funnel doctor",
+        )
+
+    blocking = readiness.blocking_reasons
+    fix = (
+        "add a CI workflow before starting work in {}".format(repo)
+        if blocking
+        and not readiness.ci_workflow
+        else ""
+    )
+    return Check(
+        "member repo {}".format(repo),
+        not blocking,
+        _member_repo_found(readiness),
+        fix,
+    )
+
+
+def check_member_repos(repos: Optional[Iterable[str]] = None) -> List[Check]:
+    """Return one readiness check for every topic-bearing member repository."""
+    try:
+        names = list(member_repos() if repos is None else repos)
+    except Exception as exc:
+        return [Check(
+            "member repos", False,
+            "GitHub member-repo search failed: {}".format(
+                str(exc) or "unknown error"
+            ),
+            "restore GitHub access, then rerun funnel doctor",
+        )]
+
+    return [
+        check_member_repo(repo)
+        for repo in sorted(set(names))
+    ]
+
+
 def _status_for_consistency(item: Item) -> str:
     """Name an unset Project Status without inventing a value for it."""
     return item.status or "unset"
@@ -2468,6 +2835,70 @@ def check_block_comments(items: Iterable[Item]) -> Check:
     return Check("block comments", not findings, "\n".join(findings), "")
 
 
+def check_block_conditions(items: Iterable[Item]) -> Check:
+    """Report blocked items whose conditions are satisfied or unresolvable.
+
+    The loaded Project rows contain both the parsed block comments and the
+    native dependency facts. Keep this check pure so ``funnel doctor`` does not
+    pay for a second request per blocked ticket, and keep still-waiting items
+    visible without making an ordinary open dependency a doctor failure.
+    """
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    findings: List[str] = []
+    broken = False
+
+    candidates = sorted(
+        (
+            item for item in rows
+            if item.state == "OPEN"
+            and (
+                item.is_blocked
+                or item.block_reason is not None
+                or item.block_references
+                or item.open_blockers
+                or item.dead_blockers
+            )
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+
+    for item in candidates:
+        satisfied = satisfied_block_refs(item, by_ref)
+        if satisfied:
+            findings.append(
+                "{}: satisfied block conditions: {}".format(
+                    item.ref, ", ".join(satisfied)
+                )
+            )
+            broken = True
+            continue
+
+        dead = _dead_dependency_refs(item, by_ref)
+        if dead:
+            findings.append(
+                "{}: unresolvable block conditions: {}".format(
+                    item.ref, ", ".join(dead)
+                )
+            )
+            broken = True
+            continue
+
+        if item.block_reason is None:
+            detail = "block comment is not parseable"
+        elif not item.block_references:
+            detail = "no machine-readable conditions"
+        else:
+            resolved = [
+                _dependency_ref(item, value) or str(value).strip()
+                for value in item.block_references
+            ]
+            detail = "on {}".format(", ".join(resolved))
+        findings.append("{}: still-waiting ({})".format(item.ref, detail))
+
+    return Check("block conditions", not broken, "\n".join(findings), "")
+
+
 def doctor_checks(claude_dir: Optional[os.PathLike] = None,
                   checkout_root: Optional[os.PathLike] = None,
                   usage_cache: Optional[os.PathLike] = None,
@@ -2487,6 +2918,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         check_auth_scope(),
         check_project_fields(),
         check_topic(),
+        *check_member_repos(),
         check_usage_cache(cache_path=usage_cache),
         check_heartbeat(spool_dir=heartbeat_spool),
     ]
@@ -2497,6 +2929,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         ))
         checks.append(check_class_assignments(items))
         checks.append(check_block_comments(items))
+        checks.append(check_block_conditions(items))
     return checks
 
 
@@ -2596,6 +3029,9 @@ query($login: String!, $number: Int!, $cursor: String) {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           class: fieldValueByName(name: "Class") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          pinned: fieldValueByName(name: "Pinned") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           content {
@@ -2790,6 +3226,7 @@ def _from_node(node: dict) -> Optional[Item]:
         state_reason=content.get("stateReason"),
         status=status,
         klass=(node.get("class") or {}).get("name"),
+        pinned=(node.get("pinned") or {}).get("name") == "Pinned",
         labels=[n["name"] for n in content["labels"]["nodes"]],
         assignees=[n["login"] for n in content["assignees"]["nodes"]],
         parent=(
@@ -2932,7 +3369,7 @@ def class_display(item: Item, by_ref: Dict[str, Item]) -> str:
 def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = None) -> dict:
     by_ref = by_ref if by_ref is not None else {}
     breakdown = breakdown_latency(item)
-    return {
+    rendered = {
         "ref": item.ref,
         "repo": item.repo,
         "title": item.title,
@@ -2947,6 +3384,9 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
         "blocked": item.is_blocked,
         "launch": launch_command(item),
     }
+    if item.pinned:
+        rendered["pinned"] = True
+    return rendered
 
 
 def parked_items(items: Iterable[Item]) -> List[Item]:
@@ -2998,6 +3438,64 @@ def _parked_item_json(item: Item) -> Dict[str, object]:
 def parked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     """The brief's parked section, with one comment lookup per parked item."""
     return [_parked_item_json(item) for item in parked_items(items)]
+
+
+def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
+    """Closed projects recent enough to carry a funnel-close record."""
+    cutoff = now - CLOSED_ITSELF_WINDOW
+    return sorted(
+        (
+            item for item in items
+            if item.parent is None
+            and item.state == "CLOSED"
+            and item.status == "Done"
+            and item.closed_at is not None
+            and item.closed_at >= cutoff
+        ),
+        key=lambda item: (
+            -item.closed_at.timestamp(), item.repo, item.number
+        ),
+    )
+
+
+def _closed_itself_item_json(item: Item) -> Optional[Dict[str, object]]:
+    """Render one funnel-close marker, or omit an ordinary accepted close."""
+    comments = (_gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "comments",
+    ) or {}).get("comments", [])
+    for comment in reversed(comments):
+        if not isinstance(comment, dict):
+            continue
+        payload = _marked_json(
+            comment.get("body") or "", CLOSED_ITSELF_PREFIX
+        )
+        if payload is None:
+            continue
+        drift = payload.get("drift", [])
+        if not isinstance(drift, list):
+            drift = []
+        drift = [value for value in drift if isinstance(value, str)]
+        return {
+            "ref": item.ref,
+            "title": item.title,
+            "url": item.url,
+            "closed_at": item.closed_at.isoformat() if item.closed_at else None,
+            "drift": drift,
+        }
+    return None
+
+
+def closed_itself_json(
+    items: Iterable[Item], now: datetime
+) -> List[Dict[str, object]]:
+    """The brief's recent funnel-close records, newest first."""
+    rows = []
+    for item in closed_itself_items(items, now):
+        row = _closed_itself_item_json(item)
+        if row is not None:
+            rows.append(row)
+    return rows
 
 
 def blocked_items(items: Iterable[Item]) -> List[Item]:
@@ -3159,6 +3657,60 @@ def _dead_dependency_refs(item: Item, by_ref: Dict[str, Item]) -> List[str]:
     return sorted(refs)
 
 
+def satisfied_block_refs(
+    item: Item, by_ref: Dict[str, Item]
+) -> Optional[List[str]]:
+    """Return the parsed block conditions that are all satisfied.
+
+    A missing parsed comment, an empty reference list, an unresolvable
+    reference, a missing blocker, an open blocker, or a blocker that is
+    explicitly unable to close all fail closed with ``None``. The checks are
+    deliberately separate so a caller can report which part of the
+    four-part satisfaction test failed without treating an empty list as
+    vacuously satisfied.
+
+    This mirrors ``_dead_dependency_refs`` over the already-loaded native and
+    comment dependency facts. It never fetches a blocker: a reference must be
+    present in ``by_ref`` before it can satisfy a block.
+    """
+    # ``block_reason`` is populated only when ``parse_block_comment`` found a
+    # matching header. An empty reason is still a parsed comment; ``None`` is
+    # the unparsed state and must not be treated as satisfied.
+    if item.block_reason is None:
+        return None
+
+    values = list(item.block_references)
+    if not values:
+        return None
+
+    resolved: List[str] = []
+    for value in values:
+        ref = _dependency_ref(item, value)
+        if ref is None:
+            return None
+        resolved.append(ref)
+
+    native_open = {
+        _dependency_ref(item, value) or str(value).strip()
+        for value in item.open_blockers
+    }
+    native_dead = set(getattr(item, "dead_blockers", []))
+    satisfied: Set[str] = set()
+    for ref in resolved:
+        blocker = by_ref.get(ref)
+        if (
+            blocker is None
+            or blocker.state != "CLOSED"
+            or ref in native_open
+            or ref in native_dead
+            or _never_closing(blocker)
+        ):
+            return None
+        satisfied.add(ref)
+
+    return sorted(satisfied)
+
+
 def _approved_current_head(pr: Optional[Dict[str, object]]) -> bool:
     """Whether a PR carries approval for the head currently being inspected."""
     if not isinstance(pr, dict):
@@ -3304,6 +3856,20 @@ def cmd_next(
     excluded: Optional[Set[str]] = None,
 ) -> int:
     excluded = excluded or frozenset()
+    # A ref reaches `--not` only from the run that was offered it, and `next`
+    # never offers a claimed ticket to a second run — so the caller holds the
+    # claim it is declining. Release it here rather than trusting the routine
+    # to: on 2026-09-09 five declined claims were left behind, filled the WIP
+    # cap within an hour, and stalled every engineer run behind them (#394).
+    for ref in sorted(excluded):
+        try:
+            declined = find(items, ref)
+        except (GitHubError, SystemExit, ValueError):
+            continue
+        if declined.in_motion_since:
+            write_lock(declined, "")
+            object.__setattr__(declined, "in_motion_since", None)
+            print("released {} (declined)".format(declined.ref), file=sys.stderr)
     blocked = awaiting_review(items)
     ticket = next_ticket_for_tier(
         items, now, tier=tier, blocked=blocked, excluded=excluded
@@ -3347,6 +3913,7 @@ def cmd_brief(
         "counts_by_gate": counts,
         "items": [item_json(i, now, by_ref) for i in decisions],
         "parked": parked_json(items),
+        "closed_itself": closed_itself_json(items, now),
         "blocked": blocked_json(items),
         "human_steps": human_step_json(items),
         "closed_with_access_vocabulary": closed_with_access_vocabulary_json(
@@ -3392,9 +3959,20 @@ def write_lock(item: Item, value: str) -> None:
 
 
 def find(items: Sequence[Item], ref: str) -> Item:
+    """Resolve an exact ref or URL before considering a bare issue number."""
     for i in items:
-        if i.ref == ref or str(i.number) == ref or i.url == ref:
+        if i.ref == ref or i.url == ref:
             return i
+
+    matches = [i for i in items if str(i.number) == ref]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise GitHubError(
+            "ambiguous funnel item ref {} matches {}".format(
+                ref, ", ".join(i.ref for i in matches)
+            )
+        )
     raise GitHubError("no funnel item matches {}".format(ref))
 
 
@@ -3499,6 +4077,16 @@ mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
 
 CLASS_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhY15k"
 STATUS_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhY1tc"
+PINNED_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhygHE"
+PINNED_OPTION = "Pinned"
+
+CLEAR_FIELD = """
+mutation($project: ID!, $item: ID!, $field: ID!) {
+  clearProjectV2ItemFieldValue(input: {
+    projectId: $project, itemId: $item, fieldId: $field
+  }) { projectV2Item { id } }
+}
+"""
 
 
 def _option_id(field_id: str, name: str) -> str:
@@ -3550,6 +4138,73 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
         raise GitHubError(comment.stderr.strip())
 
     print("{} → Parked\n{}{}".format(item.ref, PARK_COMMENT_PREFIX, reason))
+    return 0
+
+
+def _pinnable_item(items: Sequence[Item], ref: str) -> Item:
+    """Return a Project item suitable for a pin mutation."""
+    item = find(items, ref)
+    if item.parent:
+        raise GitHubError(
+            "{} is a ticket; only projects can be pinned".format(item.ref)
+        )
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
+    return item
+
+
+def cmd_pin(items: List[Item], now: datetime, ref: str, confirmed: bool,
+            run: Optional[str] = None, agent: Optional[str] = None) -> int:
+    """Pin a Project item, recording Nate's explicit decision."""
+    return _set_pinned(items, now, ref, True, confirmed, run=run, agent=agent)
+
+
+def cmd_unpin(items: List[Item], now: datetime, ref: str, confirmed: bool,
+              run: Optional[str] = None, agent: Optional[str] = None) -> int:
+    """Clear a Project item's pin, recording Nate's explicit decision."""
+    return _set_pinned(items, now, ref, False, confirmed, run=run, agent=agent)
+
+
+def _set_pinned(items: List[Item], now: datetime, ref: str, pinned: bool,
+                confirmed: bool, run: Optional[str] = None,
+                agent: Optional[str] = None) -> int:
+    """Write or preview one Project-level pin decision."""
+    item = _pinnable_item(items, ref)
+    verb = "pin" if pinned else "unpin"
+    state = "Pinned" if pinned else "Unpinned"
+
+    if not confirmed:
+        print("would {} {} ({})".format(verb, item.ref, item.title))
+        print("\nNothing was changed. Re-run with --yes to {} it.".format(verb))
+        return 1
+
+    if pinned:
+        gh_graphql(
+            SET_FIELD,
+            project=PROJECT_ID,
+            item=item.item_id,
+            field=PINNED_FIELD_ID,
+            option=_option_id(PINNED_FIELD_ID, PINNED_OPTION),
+        )
+    else:
+        gh_graphql(
+            CLEAR_FIELD,
+            project=PROJECT_ID,
+            item=item.item_id,
+            field=PINNED_FIELD_ID,
+        )
+
+    comment = subprocess.run(
+        ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+         "--body", append_provenance(
+             "**{}:** Nate decided to {} this project.".format(state, verb),
+             "nate-relayed", at=now, run=run, agent=agent)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+
+    print("{} → {}".format(item.ref, state))
     return 0
 
 
@@ -3674,13 +4329,19 @@ def cmd_ideas(items: List[Item], now: datetime) -> int:
 
 def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
                 repo: Optional[str], run: Optional[str] = None,
-                agent: Optional[str] = None) -> int:
+                agent: Optional[str] = None,
+                origin: Optional[str] = None) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
+    if origin not in ORIGIN_VOICES:
+        raise GitHubError(
+            "capture requires an explicit --origin (nate-relayed or agent)"
+        )
     repo = resolve_repo(repo)
     body = append_provenance(
         note or "Captured from chat. Not yet thought through.", "agent",
         at=now, run=run, agent=agent,
     )
+    body = append_origin(body, origin, at=now, run=run, agent=agent)
     args = [
         "gh", "issue", "create", "--repo", repo, "--title", title,
         "--body", body, "--label", "needs-shaping",
@@ -3713,8 +4374,9 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
 
     Writes the plan into the issue body — `plan.md` puts it there through Ideas
     and Shaped, and it only becomes a repo's own `plan.md` at the Ready gate —
-    then moves the item to `Shaped`, which is what asks Nate the next gate: is
-    the plan good?
+    then moves the item to `Ready` only when the plan's explicit Needs section
+    declares nothing open. Otherwise it stays at `Shaped`, which asks Nate the
+    next gate: is the plan good?
     """
     item = find(items, ref)
     try:
@@ -3729,6 +4391,7 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     if not plan.strip():
         raise GitHubError("the plan is empty; nothing to record")
     body = append_provenance(plan, "agent", at=now, run=run, agent=agent)
+    overlaps = shaping_plan_overlap_candidates(items, item, plan)
 
     out = subprocess.run(
         ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
@@ -3740,12 +4403,25 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
 
     if not item.item_id:
         raise GitHubError("{} is not in the Project".format(item.ref))
+    status, reason = shaped_plan_status(plan)
     gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
-               field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Shaped"))
+               field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, status))
     subprocess.run(["gh", "issue", "edit", str(item.number), "--repo", item.repo,
                     "--remove-label", "needs-shaping"], capture_output=True)
-    print("{} → Shaped\n{}".format(item.ref, item.url))
-    print("\nIt now waits on you: is the plan good? Answer by moving it to Ready.")
+    print("{} → {}\n{}".format(item.ref, status, item.url))
+    if status == "Ready":
+        print("advanced to Ready: {}".format(reason))
+    else:
+        print("held at Shaped: {}".format(reason))
+    print("\n--- plan overlap candidates (advisory) ---")
+    if overlaps:
+        print("Read each candidate and record the conclusion in the plan:")
+        for overlap in overlaps:
+            print("  {}".format(overlap))
+    else:
+        print("  none found")
+    if status != "Ready":
+        print("\nIt now waits on you: is the plan good? Answer by moving it to Ready.")
     return 0
 
 
@@ -4170,7 +4846,7 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
     found: List[Dict] = []
     for repo in sorted({i.repo for i in items}):
         rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "open",
-                        "--json", "number,headRefName,headRefOid",
+                        "--json", "number,headRefName,headRefOid,createdAt",
                         "--limit", "100") or []
         for row in rows:
             head = row.get("headRefName") or ""
@@ -4189,7 +4865,15 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
                 continue
             found.append({"pr": row.get("number"), "repo": repo, "ref": ref,
                           "tier": needed, "url": ticket.url,
-                          "title": ticket.title})
+                          "title": ticket.title,
+                          "opened": row.get("createdAt") or ""})
+    # Oldest first. `gh pr list` returns newest first, and handing a reviewer
+    # `queue[0]` from that order starved the oldest PR indefinitely: on
+    # 2026-09-09 four PRs opened before 11:00 were still unreviewed at 15:17
+    # while every newer one merged, and the prerequisite one of them held fed
+    # the decline-and-leak loop in #394. Oldest-at-gate is the tiebreak in
+    # every other queue here (plan.md); a review is a gate too (#320).
+    found.sort(key=lambda entry: (entry.get("opened") or "", entry.get("pr") or 0))
     return found
 
 
@@ -4952,6 +5636,15 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
                     item.ref, item.children_done, item.children_total)
             )
 
+    drift = []
+    if verb == "accept" and gate_question(item) == GATES["Building"]:
+        drift = drift_since_approval(item)
+
+    if drift:
+        print("drift since approval:")
+        for signal in drift:
+            print("  {}".format(signal))
+
     if not confirmed:
         print("would move {} from {} to {} ({})".format(
             item.ref, expected, nxt, meaning))
@@ -5071,6 +5764,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--agent", default=None,
         help="agent that wrote the body; otherwise read the heartbeat spool",
     )
+    capture.add_argument(
+        "--origin", required=True, choices=ORIGIN_VOICES,
+        help="idea origin: nate-relayed if Nate raised it, agent if observed",
+    )
     shaped = sub.add_parser("shaped", help="record a grilled plan and move to Shaped")
     shaped.add_argument("ref", help="issue number, owner/repo#number, or URL")
     shaped.add_argument("--plan", required=True,
@@ -5087,6 +5784,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
     release = sub.add_parser("release", help="give up the lock on a ticket")
     release.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    for verb, help_text in (
+        ("pin", "pin a project within its current gate"),
+        ("unpin", "clear a project's pin"),
+    ):
+        pin = sub.add_parser(verb, help=help_text)
+        pin.add_argument("ref", help="issue number, owner/repo#number, or URL")
+        pin.add_argument(
+            "--yes", action="store_true", dest="confirmed",
+            help="actually do it; without this the command is a dry run",
+        )
+        pin.add_argument(
+            "--run", default=None,
+            help="heartbeat run id; otherwise infer a unique open local start",
+        )
+        pin.add_argument(
+            "--agent", default=None,
+            help="agent that wrote the comment; otherwise read the heartbeat spool",
+        )
     park = sub.add_parser("park", help="stop a project and record why")
     park.add_argument("ref", help="issue number, owner/repo#number, or URL")
     park.add_argument(
@@ -5200,6 +5915,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_claim(items, now, args.ref)
         if args.command == "release":
             return cmd_release(items, now, args.ref)
+        if args.command == "pin":
+            return cmd_pin(items, now, args.ref, args.confirmed,
+                           args.run, args.agent)
+        if args.command == "unpin":
+            return cmd_unpin(items, now, args.ref, args.confirmed,
+                             args.run, args.agent)
         if args.command == "park":
             return cmd_park(items, now, args.ref, args.reason,
                             args.run, args.agent)
@@ -5228,7 +5949,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_ideas(items, now)
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
-                               args.run, args.agent)
+                               args.run, args.agent, args.origin)
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan,
                               args.run, args.agent)

@@ -3879,9 +3879,20 @@ def write_lock(item: Item, value: str) -> None:
 
 
 def find(items: Sequence[Item], ref: str) -> Item:
+    """Resolve an exact ref or URL before considering a bare issue number."""
     for i in items:
-        if i.ref == ref or str(i.number) == ref or i.url == ref:
+        if i.ref == ref or i.url == ref:
             return i
+
+    matches = [i for i in items if str(i.number) == ref]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise GitHubError(
+            "ambiguous funnel item ref {} matches {}".format(
+                ref, ", ".join(i.ref for i in matches)
+            )
+        )
     raise GitHubError("no funnel item matches {}".format(ref))
 
 

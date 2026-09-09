@@ -190,3 +190,35 @@ def test_watchdog_still_reports_genuinely_dying_runs():
         records.append(start("run{}".format(i), old + i * MIN))
     found = watchdog.assess("claude", records, NOW)
     assert any("never finished" in p for p in found)
+
+
+def test_finish_accepts_skipped_api_reserve(monkeypatch):
+    """A GraphQL reserve decline is a refusal, not a failure (#273).
+
+    Recording it as `errored` would make the watchdog alarm on the system
+    working correctly.
+    """
+    records = []
+    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(
+        heartbeat,
+        "append",
+        lambda agent, record: records.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    assert heartbeat.main([
+        "finish", "--agent", "codex", "--run", "run-id",
+        "--outcome", "skipped-api-reserve",
+    ]) == 0
+    assert records[0]["outcome"] == "skipped-api-reserve"
+
+
+def test_the_reserve_decline_is_in_the_skipped_family():
+    """The watchdog ignores `skipped-*` by prefix, so the name carries the
+    healthy classification. A name outside that family would alarm."""
+    assert "skipped-api-reserve" in heartbeat.OUTCOMES
+    assert "skipped-api-reserve".startswith("skipped-")

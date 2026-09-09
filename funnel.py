@@ -4494,9 +4494,7 @@ def closed_itself_comment(tickets: Sequence[Item], drift: Sequence[str]) -> str:
     )
 
 
-def _auto_close_parent(
-    items: Sequence[Item], ticket: Item, now: datetime
-) -> bool:
+def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
     """Close a finished upkeep project after its last ticket merge.
 
     The class is the only decision here. Drift is fetched for the durable
@@ -4735,7 +4733,7 @@ def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
 
     ticket = next((item for item in items if item.ref == ref), None)
     if ticket is not None:
-        _auto_close_parent(items, ticket, now)
+        _auto_close_parent(items, ticket)
     return 0
 
 

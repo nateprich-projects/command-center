@@ -335,9 +335,13 @@ def test_last_upkeep_ticket_auto_closes_parent_and_records_drift(monkeypatch):
     assert len(comments) == 1
     assert comments[0].startswith(funnel.CLOSED_ITSELF_PREFIX)
     assert "owner/repo#9" in comments[0]
-    assert '"drift": [' in comments[0]
-    assert '"plan edited after Ready"' in comments[0]
-    assert '"merge later rejected"' in comments[0]
+    payload = json.loads(
+        comments[0].split("```json\n", 1)[1].rsplit("\n```", 1)[0]
+    )
+    assert payload == {
+        "drift": drift,
+        "tickets": [{"ref": REPO + "#9", "title": "t"}],
+    }
 
 
 @pytest.mark.parametrize("klass", ["Broken", "Maintenance", "Improve"])

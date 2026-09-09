@@ -214,7 +214,7 @@ capture using `skills/shape`'s "Class it when you file it" rule, and say why.
 Agents class their own captures, never his existing issues.
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --note "<observed evidence; chosen class and why>"
+python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --origin agent --class <Broken|Maintenance|Improve|New|Replace> --note "<observed evidence; say why you chose this class, and say plainly when you are unsure>"
 ```
 
 This is the sanctioned exception to the review rule to act only on the PR you were

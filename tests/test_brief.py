@@ -115,11 +115,11 @@ def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
     }]
     assert calls == [
         (
-            "gh", "issue", "view", "14", "--repo", "nateprich/beta",
+            "gh", "issue", "view", "15", "--repo", "nateprich/beta",
             "--json", "comments",
         ),
         (
-            "gh", "issue", "view", "15", "--repo", "nateprich/beta",
+            "gh", "issue", "view", "14", "--repo", "nateprich/beta",
             "--json", "comments",
         ),
     ]
@@ -188,7 +188,12 @@ def test_parked_items_are_newest_first_and_missing_reason_is_null(monkeypatch):
 
 
 def test_brief_does_not_fetch_comments_for_unparked_items(monkeypatch, capsys):
-    items = [item for item in fixture_items() if item.status != "Parked"]
+    # Closed Done projects are candidates for the closed_itself marker and
+    # therefore intentionally do need a comment lookup.
+    items = [
+        item for item in fixture_items()
+        if item.status != "Parked" and item.state != "CLOSED"
+    ]
     calls = []
 
     def gh_json(*args):

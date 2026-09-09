@@ -45,6 +45,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `maintenance_load` | `upkeep_share` is the fraction of work closed in the last 30 days that was `Broken` or `Maintenance` |
 | `human_steps` | Open tickets only Nate can do, with the `reason` each declares. **Work he owes, not a decision he owes** — deliberately outside `total_needing_nate`, the same distinction that keeps `blocked` out. No agent can pick these up: `startable()` excludes them, so this list is the only place they surface |
 | `parked` | Stopped items with the written reason each carries. The reason is the artifact that makes re-encountering an idea a 30-second decision |
+| `closed_itself` | Projects the funnel closed in the recent named window, newest first, with the drift recorded at close |
 | `awaiting_breakdown` | Approved plans with no tickets yet. Claude owes these a breakdown; they are not startable until it happens |
 | `unattended_merges` | Merges an agent made without him, read from heartbeat records. `plan.md` makes these appearing in the brief a condition of unattended merging being allowed at all |
 | `agent_health` | Raised watchdog conditions, each with the heartbeat agent and the watchdog's condition wording. Empty when all agents are healthy |
@@ -62,6 +63,12 @@ reason. Never fold it into the decision list and never count it in the total: it
 different question — not *what do you have to decide* but *what is waiting on you to go
 and do*. It needs its own line precisely because nothing else surfaces it; no agent can be
 handed one, so an unrendered human step is invisible everywhere.
+
+Then `closed_itself`, whenever it is non-empty, as its own short list, newest first. For
+each project show the title and closed-at time. Say **"closed itself with drift"** and
+name every drift signal when `drift` is non-empty; say **"closed itself cleanly"** when
+the list is empty. This distinction is the point of the section — do not collapse a
+drifted close into a generic completion line.
 
 Then the gate counts on one line. Then anything unusual, and only if present:
 `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`, `awaiting_breakdown`,

@@ -4132,6 +4132,70 @@ def _approved_current_head(pr: Optional[Dict[str, object]]) -> bool:
     return not head or not reviewed_head or head == reviewed_head
 
 
+def _block_cycle_reasons(
+    items: Sequence[Item], by_ref: Dict[str, Item]
+) -> Dict[str, List[str]]:
+    """Return one diagnostic reason for each detected open block cycle.
+
+    Edges point from a waiting item to its blocker. Native dependency facts and
+    parsed comment references are deliberately combined here: either source
+    can be stale or incomplete on its own, while a cycle may cross both. Only
+    open items in the loaded Project can participate in a stranded cycle;
+    missing or closed references are ignored just as they are by the other
+    derived dependency checks.
+
+    A cycle is searched from its lowest-numbered member, and candidate edges
+    back to an earlier member are skipped. That makes the displayed path
+    canonical and prevents the same loop from being reported once per member.
+    The walk is iterative so malformed dependency data cannot exhaust Python's
+    call stack while producing a diagnostic.
+    """
+    open_refs = {
+        item.ref for item in items if item.state == "OPEN"
+    }
+    graph: Dict[str, Set[str]] = {ref: set() for ref in open_refs}
+    for item in items:
+        if item.ref not in open_refs:
+            continue
+        for value in list(item.open_blockers) + list(item.block_references):
+            ref = _dependency_ref(item, value)
+            if ref in open_refs:
+                graph[item.ref].add(ref)
+
+    def order(ref: str) -> Tuple[int, str]:
+        item = by_ref[ref]
+        return item.number, item.repo
+
+    def display(refs: Sequence[str]) -> str:
+        cycle_items = [by_ref[ref] for ref in refs]
+        same_repo = len({item.repo for item in cycle_items}) == 1
+        labels = (
+            ["#{}".format(item.number) for item in cycle_items]
+            if same_repo
+            else list(refs)
+        )
+        return "block cycle: " + " → ".join(labels)
+
+    reasons: Dict[str, List[str]] = {}
+    for start in sorted(graph, key=order):
+        pending = [(start, [start])]
+        cycle = None
+        while pending:
+            current, path = pending.pop()
+            for target in sorted(graph[current], key=order, reverse=True):
+                if target == start:
+                    cycle = path + [start]
+                    break
+                if target in path or order(target) < order(start):
+                    continue
+                pending.append((target, path + [target]))
+            if cycle is not None:
+                break
+        if cycle is not None:
+            reasons.setdefault(start, []).append(display(cycle))
+    return reasons
+
+
 def stranded_items(
     items: Iterable[Item],
     now: datetime,
@@ -4143,8 +4207,9 @@ def stranded_items(
     uses facts the funnel already knows how to read: an approved current-head
     verdict on a conflicting PR, a stale claim with no PR, a childless
     ``Building`` project, and a native or named dependency closed as
-    ``not_planned``. Missing CI history is intentionally absent; no fetched
-    fact distinguishes that from a PR whose first check is still pending.
+    ``not_planned``, plus cycles formed by native or parsed block edges.
+    Missing CI history is intentionally absent; no fetched fact distinguishes
+    that from a PR whose first check is still pending.
 
     ``pr_facts`` is optional so the function remains fixture-pure. ``None``
     means the caller has not requested PR lookups and therefore treats a stale
@@ -4154,6 +4219,7 @@ def stranded_items(
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
     stale = {item.ref for item in stale_locks(rows, now)}
+    cycle_reasons = _block_cycle_reasons(rows, by_ref)
     found: List[Dict[str, object]] = []
 
     for item in rows:
@@ -4183,6 +4249,8 @@ def stranded_items(
                 "blocked on blocker that will never close: {}".format(
                     ", ".join(dead))
             )
+
+        reasons.extend(cycle_reasons.get(item.ref, []))
 
         if reasons:
             found.append({

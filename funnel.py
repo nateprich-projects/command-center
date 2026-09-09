@@ -812,6 +812,15 @@ NEEDS_NATE_PATTERNS = {
     ),
 }
 
+NEEDS_NATE_SIGNAL_REASONS = {
+    "policy authority": (
+        "cites plan.md or AGENTS.md on a gate, membership, or who may write"
+    ),
+    "unattended authority": "changes what an agent may do unattended",
+    "gate authority": "changes a gate's question, answer, or owner",
+    "field authority": "changes who may set a field that other rules act on",
+}
+
 
 def needs_nate_signals(plan_body: str) -> List[str]:
     """Return authority signals that contradict an all-clear Needs section.
@@ -4309,6 +4318,7 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
         raise GitHubError("cannot read {}: {}".format(plan_file, exc))
     if not plan.strip():
         raise GitHubError("the plan is empty; nothing to record")
+    authority_signals = needs_nate_signals(plan)
     body = append_provenance(plan, "agent", at=now, run=run, agent=agent)
     overlaps = shaping_plan_overlap_candidates(items, item, plan)
 
@@ -4334,6 +4344,13 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
             print("  {}".format(overlap))
     else:
         print("  none found")
+    if authority_signals:
+        print("\n--- self-approval refused ---")
+        print("The plan stays at Shaped for Nate because:")
+        for signal in authority_signals:
+            print("  {}: {}".format(
+                signal, NEEDS_NATE_SIGNAL_REASONS[signal]
+            ))
     print("\nIt now waits on you: is the plan good? Answer by moving it to Ready.")
     return 0
 

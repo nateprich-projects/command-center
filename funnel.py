@@ -4703,7 +4703,7 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
     found: List[Dict] = []
     for repo in sorted({i.repo for i in items}):
         rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "open",
-                        "--json", "number,headRefName,headRefOid",
+                        "--json", "number,headRefName,headRefOid,createdAt",
                         "--limit", "100") or []
         for row in rows:
             head = row.get("headRefName") or ""
@@ -4722,7 +4722,15 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
                 continue
             found.append({"pr": row.get("number"), "repo": repo, "ref": ref,
                           "tier": needed, "url": ticket.url,
-                          "title": ticket.title})
+                          "title": ticket.title,
+                          "opened": row.get("createdAt") or ""})
+    # Oldest first. `gh pr list` returns newest first, and handing a reviewer
+    # `queue[0]` from that order starved the oldest PR indefinitely: on
+    # 2026-09-09 four PRs opened before 11:00 were still unreviewed at 15:17
+    # while every newer one merged, and the prerequisite one of them held fed
+    # the decline-and-leak loop in #394. Oldest-at-gate is the tiebreak in
+    # every other queue here (plan.md); a review is a gate too (#320).
+    found.sort(key=lambda entry: (entry.get("opened") or "", entry.get("pr") or 0))
     return found
 
 

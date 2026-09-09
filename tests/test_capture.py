@@ -270,8 +270,8 @@ Nothing.
     assert "It now waits on you: is the plan good?" in output
 
 
-def test_shaped_all_clear_plan_keeps_existing_behavior(tmp_path, monkeypatch,
-                                                        capsys):
+def test_shaped_all_clear_plan_does_not_report_a_refusal(tmp_path, monkeypatch,
+                                                         capsys):
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("""
 The plan discusses a gate and a Status field as subject matter, but changes
@@ -294,7 +294,7 @@ Nothing.
             return {"updateProjectV2ItemFieldValue": {
                 "projectV2Item": {"id": item.item_id},
             }}
-        return {"node": {"options": [{"id": "shaped-option", "name": "Shaped"}]}}
+        return {"node": {"options": [{"id": "ready-option", "name": "Ready"}]}}
 
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
     monkeypatch.setattr(
@@ -310,14 +310,11 @@ Nothing.
 
     status_write = next(variables for query, variables in calls
                         if query == funnel.SET_FIELD)
-    assert status_write["option"] == "shaped-option"
+    assert status_write["option"] == "ready-option"
     output = capsys.readouterr().out
     assert "self-approval refused" not in output
-    assert "owner/repo#42 → Shaped" in output
-    assert (
-        "It now waits on you: is the plan good? Answer by moving it to Ready."
-        in output
-    )
+    assert "owner/repo#42 → Ready" in output
+    assert "It now waits on you: is the plan good?" not in output
 
 
 def test_capture_always_labels_the_issue_and_reports_it(monkeypatch, capsys):
@@ -412,3 +409,80 @@ def test_shaped_reads_the_plan_from_stdin_when_asked(monkeypatch):
     edit = calls[0][1]
     body = edit[edit.index("--body") + 1]
     assert body.startswith(plan)
+
+
+def _shaped_status_fixture(monkeypatch, plan_file, plan, status_option):
+    plan_file.write_text(plan)
+    item = Item(
+        repo="owner/repo", number=44, title="An idea",
+        url="https://github.com/owner/repo/issues/44", state="OPEN",
+        status="Ideas", item_id="project-item-44",
+    )
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, variables))
+        return {"ok": True}
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel, "_option_id", lambda field_id, name: status_option[name]
+    )
+    return item, calls
+
+
+def test_shaped_advances_a_plan_that_declares_nothing_open(
+    tmp_path, monkeypatch, capsys
+):
+    plan_file = tmp_path / "plan.md"
+    plan = "# Plan\n\n## Needs you\nNothing.\n"
+    item, calls = _shaped_status_fixture(
+        monkeypatch, plan_file, plan, {"Ready": "ready-option"}
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file), run="shape-run", agent="claude"
+    ) == 0
+
+    status_writes = [
+        call for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+    ]
+    assert status_writes[0][2]["option"] == "ready-option"
+    output = capsys.readouterr().out
+    assert "advanced to Ready: plan declares nothing open" in output
+
+
+@pytest.mark.parametrize(
+    ("plan", "reason"),
+    (
+        ("# Plan\n\n## Needs you\nWhich repository should this use?\n",
+         "plan has an open question"),
+        ("# Plan\n\n## Decided\nUse the existing repository.\n",
+         "plan has no ## Needs you section"),
+    ),
+)
+def test_shaped_holds_when_the_plan_needs_nate(
+    tmp_path, monkeypatch, capsys, plan, reason
+):
+    plan_file = tmp_path / "plan.md"
+    item, calls = _shaped_status_fixture(
+        monkeypatch, plan_file, plan, {"Shaped": "shaped-option"}
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file), run="shape-run", agent="claude"
+    ) == 0
+
+    status_writes = [
+        call for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+    ]
+    assert status_writes[0][2]["option"] == "shaped-option"
+    output = capsys.readouterr().out
+    assert "held at Shaped: {}".format(reason) in output

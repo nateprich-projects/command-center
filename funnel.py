@@ -278,6 +278,11 @@ ORIGIN_OVERRIDE_TARGETS = ("nate", "agents")
 REJECTED_MERGE_ALARM = 3
 REJECTED_MERGE_WINDOW = timedelta(days=7)
 
+#: Keep funnel-closed work visible across several unattended brief runs. A
+#: brief is hourly, so a one-run window would make the record disappear before
+#: Nate could reasonably see it.
+CLOSED_ITSELF_WINDOW = timedelta(days=7)
+
 #: Drift is reported, never used as a gate. Keep these names short and stable:
 #: callers put them verbatim into comments and the brief.
 DRIFT_PLAN_EDIT = "plan edited after Ready"
@@ -874,6 +879,28 @@ def _needs_nate_sections(plan_body: str) -> List[str]:
     return sections
 
 
+def shaped_plan_status(plan_body: str) -> Tuple[str, str]:
+    """Return the status and reason earned by a newly recorded plan.
+
+    The all-clear is deliberately narrow: a recognised Needs section must be
+    present, explicitly empty, and free of authority signals that contradict
+    its claim. Everything else stays at Shaped with a reason the caller can
+    print.
+    """
+    sections = _needs_nate_sections(plan_body)
+    if not sections:
+        return "Shaped", "plan has no ## Needs you section"
+    if any(section.strip().lower() not in EMPTY_NEEDS_NATE
+           for section in sections):
+        return "Shaped", "plan has an open question"
+    signals = needs_nate_signals(plan_body)
+    if signals:
+        return "Shaped", "plan contains authority signal: {}".format(
+            ", ".join(signals)
+        )
+    return "Ready", "plan declares nothing open"
+
+
 def plan_needs_nate(plan_body: str) -> bool:
     """Whether a plan's Needs Nate/Needs you section asks for Nate.
 
@@ -884,13 +911,7 @@ def plan_needs_nate(plan_body: str) -> bool:
     content. An otherwise empty section also fails closed when the plan body
     contains an authority signal that contradicts the section's claim.
     """
-    sections = _needs_nate_sections(plan_body)
-    if not sections:
-        return True
-    if any(section.strip().lower() not in EMPTY_NEEDS_NATE
-           for section in sections):
-        return True
-    return bool(needs_nate_signals(plan_body))
+    return shaped_plan_status(plan_body)[0] == "Shaped"
 
 
 def plan_is_escalated(plan_body: str) -> List[str]:
@@ -3428,6 +3449,64 @@ def parked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     return [_parked_item_json(item) for item in parked_items(items)]
 
 
+def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
+    """Closed projects recent enough to carry a funnel-close record."""
+    cutoff = now - CLOSED_ITSELF_WINDOW
+    return sorted(
+        (
+            item for item in items
+            if item.parent is None
+            and item.state == "CLOSED"
+            and item.status == "Done"
+            and item.closed_at is not None
+            and item.closed_at >= cutoff
+        ),
+        key=lambda item: (
+            -item.closed_at.timestamp(), item.repo, item.number
+        ),
+    )
+
+
+def _closed_itself_item_json(item: Item) -> Optional[Dict[str, object]]:
+    """Render one funnel-close marker, or omit an ordinary accepted close."""
+    comments = (_gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "comments",
+    ) or {}).get("comments", [])
+    for comment in reversed(comments):
+        if not isinstance(comment, dict):
+            continue
+        payload = _marked_json(
+            comment.get("body") or "", CLOSED_ITSELF_PREFIX
+        )
+        if payload is None:
+            continue
+        drift = payload.get("drift", [])
+        if not isinstance(drift, list):
+            drift = []
+        drift = [value for value in drift if isinstance(value, str)]
+        return {
+            "ref": item.ref,
+            "title": item.title,
+            "url": item.url,
+            "closed_at": item.closed_at.isoformat() if item.closed_at else None,
+            "drift": drift,
+        }
+    return None
+
+
+def closed_itself_json(
+    items: Iterable[Item], now: datetime
+) -> List[Dict[str, object]]:
+    """The brief's recent funnel-close records, newest first."""
+    rows = []
+    for item in closed_itself_items(items, now):
+        row = _closed_itself_item_json(item)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
 def blocked_items(items: Iterable[Item]) -> List[Item]:
     """Open, label-blocked items, oldest first.
 
@@ -3843,6 +3922,7 @@ def cmd_brief(
         "counts_by_gate": counts,
         "items": [item_json(i, now, by_ref) for i in decisions],
         "parked": parked_json(items),
+        "closed_itself": closed_itself_json(items, now),
         "blocked": blocked_json(items),
         "human_steps": human_step_json(items),
         "closed_with_access_vocabulary": closed_with_access_vocabulary_json(
@@ -4303,8 +4383,9 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
 
     Writes the plan into the issue body — `plan.md` puts it there through Ideas
     and Shaped, and it only becomes a repo's own `plan.md` at the Ready gate —
-    then moves the item to `Shaped`, which is what asks Nate the next gate: is
-    the plan good?
+    then moves the item to `Ready` only when the plan's explicit Needs section
+    declares nothing open. Otherwise it stays at `Shaped`, which asks Nate the
+    next gate: is the plan good?
     """
     item = find(items, ref)
     try:
@@ -4332,11 +4413,16 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
 
     if not item.item_id:
         raise GitHubError("{} is not in the Project".format(item.ref))
+    status, reason = shaped_plan_status(plan)
     gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
-               field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Shaped"))
+               field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, status))
     subprocess.run(["gh", "issue", "edit", str(item.number), "--repo", item.repo,
                     "--remove-label", "needs-shaping"], capture_output=True)
-    print("{} → Shaped\n{}".format(item.ref, item.url))
+    print("{} → {}\n{}".format(item.ref, status, item.url))
+    if status == "Ready":
+        print("advanced to Ready: {}".format(reason))
+    else:
+        print("held at Shaped: {}".format(reason))
     print("\n--- plan overlap candidates (advisory) ---")
     if overlaps:
         print("Read each candidate and record the conclusion in the plan:")
@@ -4351,7 +4437,8 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
             print("  {}: {}".format(
                 signal, NEEDS_NATE_SIGNAL_REASONS[signal]
             ))
-    print("\nIt now waits on you: is the plan good? Answer by moving it to Ready.")
+    if status != "Ready":
+        print("\nIt now waits on you: is the plan good? Answer by moving it to Ready.")
     return 0
 
 

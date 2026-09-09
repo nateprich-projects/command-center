@@ -53,6 +53,47 @@ def test_an_embedded_marker_does_not_match():
     assert funnel.parse_human_step(body) is None
 
 
+@pytest.mark.parametrize("reason", funnel.HUMAN_STEP_REASONS)
+def test_a_block_reason_can_match_the_allowlist(reason):
+    assert funnel.matching_human_step_reason(
+        "**Blocked:** Human step: {}".format(reason)
+    ) == reason
+
+
+def test_suspected_human_step_requires_a_blocked_child_without_references():
+    suspected = funnel.Item(
+        repo="nateprich/beta", number=10, title="Provision the token",
+        url="https://example.invalid/10", state="OPEN",
+        labels=["blocked"], parent="nateprich/beta#9",
+        block_reason="Human step: entering a credential",
+    )
+    named = funnel.Item(
+        repo="nateprich/beta", number=11, title="Wait for the token",
+        url="https://example.invalid/11", state="OPEN",
+        labels=["blocked"], parent="nateprich/beta#9",
+        block_references=["#77"],
+        block_reason="Human step: entering a credential",
+    )
+
+    assert funnel.suspected_human_step_reason(suspected) == \
+        "entering a credential"
+    assert funnel.suspected_human_step_reason(named) is None
+
+
+def test_an_unparseable_block_line_can_surface_a_human_step():
+    item = funnel.Item(
+        repo="nateprich/beta", number=12, title="Configure the account",
+        url="https://example.invalid/12", state="OPEN",
+        labels=["blocked"], parent="nateprich/beta#9",
+        unparseable_block_comments=[
+            "**Blocked on #77, 2026-09-07.** Human step: an account or billing setting"
+        ],
+    )
+
+    assert funnel.suspected_human_step_reason(item) == \
+        "an account or billing setting"
+
+
 def test_closed_human_step_marks_its_project_as_ever_carried():
     project = funnel.Item(
         repo="nateprich/beta", number=1, title="Project",

@@ -706,6 +706,24 @@ def parse_human_step(body: str) -> Optional[str]:
     return match.group("reason") if match else None
 
 
+def matching_human_step_reason(text: object) -> Optional[str]:
+    """Return an allowlisted human-step reason found in block-comment text.
+
+    A malformed block header may put the reason on the same line as the
+    header, so ``parse_human_step`` cannot read it directly. This narrower
+    scanner is used only on a parsed block reason or on the first line already
+    recorded for a malformed block comment. It returns the canonical spelling
+    from ``HUMAN_STEP_REASONS`` rather than trusting the comment's casing.
+    """
+    if not isinstance(text, str):
+        return None
+    for reason in HUMAN_STEP_REASONS:
+        pattern = r"(?<!\w){}(?!\w)".format(re.escape(reason))
+        if re.search(pattern, text, re.IGNORECASE):
+            return reason
+    return None
+
+
 def mark_projects_that_carried_human_steps(items: Sequence[Item]) -> None:
     """Derive project acceptance history from child ticket markers.
 
@@ -2860,6 +2878,24 @@ def check_block_comments(items: Iterable[Item]) -> Check:
     return Check("block comments", not findings, "\n".join(findings), "")
 
 
+def suspected_human_step_findings(items: Iterable[Item]) -> List[str]:
+    """Return blocked tickets whose human requirement is not machine-readable."""
+    return [
+        "{}: suspected human step ({})".format(
+            item.ref, suspected_human_step_reason(item)
+        )
+        for item in suspected_human_step_items(items)
+    ]
+
+
+def check_suspected_human_steps(items: Iterable[Item]) -> Check:
+    """Build the read-only suspected-human-step doctor check."""
+    findings = suspected_human_step_findings(items)
+    return Check(
+        "suspected human steps", not findings, "\n".join(findings), ""
+    )
+
+
 def check_block_conditions(items: Iterable[Item]) -> Check:
     """Report blocked items whose conditions are satisfied or unresolvable.
 
@@ -2955,6 +2991,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         checks.append(check_class_assignments(items))
         checks.append(check_block_comments(items))
         checks.append(check_block_conditions(items))
+        checks.append(check_suspected_human_steps(items))
     return checks
 
 
@@ -3561,6 +3598,67 @@ def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     return [_blocked_item_json(item) for item in blocked_items(items)]
 
 
+def suspected_human_step_reason(item: Item) -> Optional[str]:
+    """Return a human-step reason hidden inside an unreadable block.
+
+    This is deliberately narrower than ``human_step_items``. It only reports
+    open child issues that are already blocked and whose block has no
+    machine-readable references. A named block stays an ordinary machine
+    block, even when its prose happens to mention a human-step reason.
+    """
+    if (
+        item.state != "OPEN"
+        or item.parent is None
+        or not item.is_blocked
+        or item.block_references
+    ):
+        return None
+
+    reason = matching_human_step_reason(item.block_reason)
+    if reason is not None:
+        return reason
+
+    # ``_load_block_comment`` keeps the first line of malformed block comments
+    # so the existing doctor check can report it without another fetch. Use the
+    # newest recorded line first, and fail closed when it contains no exact
+    # allowlisted reason.
+    for first_line in reversed(item.unparseable_block_comments):
+        reason = matching_human_step_reason(first_line)
+        if reason is not None:
+            return reason
+    return None
+
+
+def suspected_human_step_items(items: Iterable[Item]) -> List[Item]:
+    """Return blocked child issues that may hide an unrecognised human step."""
+    return sorted(
+        (
+            item for item in items
+            if suspected_human_step_reason(item) is not None
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+
+
+def _suspected_human_step_item_json(item: Item) -> Dict[str, object]:
+    return {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "reason": suspected_human_step_reason(item),
+    }
+
+
+def suspected_human_step_json(
+    items: Iterable[Item],
+) -> List[Dict[str, object]]:
+    """Render suspected human steps without changing any GitHub state."""
+    return [
+        _suspected_human_step_item_json(item)
+        for item in suspected_human_step_items(items)
+    ]
+
+
 def _item_human_step_reason(item: Item) -> Optional[str]:
     """Return the parsed marker, tolerating fixture Items without a body."""
     return parse_human_step(item.body or "")
@@ -3970,6 +4068,7 @@ def cmd_brief(
         "parked": parked_json(items),
         "closed_itself": closed_itself_json(items, now),
         "blocked": blocked_json(items),
+        "suspected_human_steps": suspected_human_step_json(items),
         "human_steps": human_step_json(items),
         "closed_with_access_vocabulary": closed_with_access_vocabulary_json(
             items

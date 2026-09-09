@@ -179,20 +179,25 @@ Write the plan to a file, then:
 python3 /Users/nateprich/.claude/command-center/funnel.py shaped <issue> --plan <file>
 ```
 
-That writes the plan into the issue body, moves the item to `Shaped`, and clears
-`needs-shaping`. The plan lives in the issue body through Ideas and Shaped; it
-only becomes a repo's own `plan.md` at the Ready gate, if the work earns a repo.
+That writes the plan into the issue body, clears `needs-shaping`, and advances
+the item to `Ready` only when a present `## Needs you` section explicitly says
+that nothing is open. The shared command fails closed: a plan with an open
+question or no `## Needs you` section stays at `Shaped`, and the output says why.
+The plan lives in the issue body through Ideas and Shaped; it only becomes a
+repo's own `plan.md` at the Ready gate, if the work earns a repo.
 
 **Moving to `Shaped` is not approval.** It records that a plan now exists. The
-next gate — *is the plan good?* — is Nate's, and he answers it by moving the item
-to `Ready`. Say that plainly at the end rather than implying the idea is now
-greenlit.
+funnel may move an all-clear plan to `Ready` on that narrow, fail-closed
+condition, but an agent may never set `Ready` directly or use it to bypass an
+open question. A plan held at `Shaped` waits on Nate's *is the plan good?* gate;
+say that plainly rather than implying the idea is greenlit.
 
 ## Do not
 
-- **Do not set `Ready`.** That is his gate, and the breakdown routine treats
-  `Ready` as his approval to create tickets. Setting it yourself starts work he
-  never authorised.
+- **Do not set `Ready` directly.** `funnel shaped` may write it only when the
+  shared check finds a present `## Needs you` section that explicitly declares
+  nothing open. An agent must never use that path to bypass an open question;
+  plans that fail the check stay at `Shaped` for Nate.
 - **Do not set a `Class` on anything *he* raised, and do not reclassify
   something already filed.** Propose it instead. Setting `Class` on your own
   captures is now expected — see "Class it when you file it" above.

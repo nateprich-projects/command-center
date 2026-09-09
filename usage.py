@@ -548,6 +548,26 @@ def idle_verdict(agent: str, reading: Dict) -> Optional[Dict]:
             "why": "window already in use when it began — Nate is working"}
 
 
+def shaping_allowed(reading: Dict) -> bool:
+    """Whether an optional unattended shaping run has genuine headroom.
+
+    Shaping is safely skippable and must not consume the low five-hour reserve
+    needed by the committed review and breakdown jobs. Reuse the idle rule's
+    established 0%-to-15% boundary rather than adding a shaping-specific
+    threshold. Missing or malformed usage is not evidence of headroom, so it
+    refuses closed.
+    """
+    try:
+        five = (reading.get("windows") or {}).get("five_hour") or {}
+        used = five.get("used_percent")
+        if used is None or isinstance(used, bool):
+            return False
+        used = float(used)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return IDLE_WINDOW_START <= used <= IDLE_WINDOW_CEILING
+
+
 def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:
     """Is this agent within its budget?
 

@@ -4182,41 +4182,23 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     queue = review_queue(items, tier)
     if queue:
         out.update(do="review", work=queue[0])
-
     else:
-        queue = review_queue(items, tier)
-        if queue:
-            out.update(do="review", work=queue[0])
-        else:
-            # Breakdown is opt-in per routine. Claude reviews only — its
-            # breakdown job moved to the cheaper pool — so offering it one
-            # would send the scarce reviewer off to do mechanical decomposition.
-            if breakdown:
-                pending = awaiting_breakdown(items)
-                if pending:
-                    item = pending[0]
-                    work = {
-                        "ref": item.ref,
-                        "url": item.url,
-                        "title": item.title,
-                        "access_signals": access_signals(
-                            _ticket_body(item.repo, item.number)
-                        ),
-                    }
-                    out.update(do="breakdown", work=work)
-                else:
-                    item = shapeable_idea(items, tier, reading)
-                    if item is not None:
-                        out.update(
-                            do="shape",
-                            work={"ref": item.ref, "url": item.url,
-                                  "title": item.title},
-                        )
-                    else:
-                        out.update(
-                            do="stop",
-                            why="nothing to review and nothing to break down",
-                        )
+        # Breakdown is opt-in per routine. Claude reviews only — its breakdown
+        # job moved to the cheaper pool — so offering it one would send the
+        # scarce reviewer off to do mechanical decomposition.
+        if breakdown:
+            pending = awaiting_breakdown(items)
+            if pending:
+                item = pending[0]
+                work = {
+                    "ref": item.ref,
+                    "url": item.url,
+                    "title": item.title,
+                    "access_signals": access_signals(
+                        _ticket_body(item.repo, item.number)
+                    ),
+                }
+                out.update(do="breakdown", work=work)
             else:
                 item = shapeable_idea(items, tier, reading)
                 if item is not None:
@@ -4228,8 +4210,18 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 else:
                     out.update(
                         do="stop",
-                        why="nothing to review",
+                        why="nothing to review and nothing to break down",
                     )
+        else:
+            item = shapeable_idea(items, tier, reading)
+            if item is not None:
+                out.update(
+                    do="shape",
+                    work={"ref": item.ref, "url": item.url,
+                          "title": item.title},
+                )
+            else:
+                out.update(do="stop", why="nothing to review")
 
     reserve = _reserve_verdict(out.get("do"))
     if reserve is not None:

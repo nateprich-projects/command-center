@@ -8,7 +8,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from funnel import plan_overlap_candidates  # noqa: E402
+from funnel import Item, plan_overlap_candidates, shaping_plan_overlap_candidates  # noqa: E402
 
 
 def candidates(current, others):
@@ -71,3 +71,45 @@ def test_current_plan_is_not_compared_with_itself():
         ("#27", "Use `startable()` and `funnel.py`."),
         [("#27", "Use `startable()` and `funnel.py`.")],
     ) == []
+
+
+def _item(number, *, status, body, state="OPEN", parent=None):
+    return Item(
+        repo="owner/repo",
+        number=number,
+        title="Item {}".format(number),
+        url="https://github.com/owner/repo/issues/{}".format(number),
+        state=state,
+        status=status,
+        body=body,
+        parent=parent,
+    )
+
+
+def test_shaping_scan_uses_other_open_project_plans_in_flight():
+    current = _item(27, status="Ideas", body="Use `startable()` and #91.")
+    others = [
+        _item(89, status="Shaped", body="Change `startable()` and see #91."),
+        _item(90, status="Ready", body="Change `startable()`."),
+        _item(91, status="Building", body="See #91."),
+    ]
+
+    assert shaping_plan_overlap_candidates([current] + others, current,
+                                           current.body) == [
+        "owner/repo#27 and owner/repo#89 both name `startable()`",
+        "owner/repo#27 and owner/repo#89 both reference #91",
+        "owner/repo#27 and owner/repo#90 both name `startable()`",
+        "owner/repo#27 and owner/repo#91 both reference #91",
+    ]
+
+
+def test_shaping_scan_ignores_closed_ideas_and_child_tickets():
+    current = _item(27, status="Ideas", body="Use `startable()`. ")
+    ignored = [
+        _item(89, status="Done", body="Use `startable()`."),
+        _item(90, status="Shaped", body="Use `startable()`. ", state="CLOSED"),
+        _item(91, status="Building", body="Use `startable()`. ", parent=current.ref),
+    ]
+
+    assert shaping_plan_overlap_candidates([current] + ignored, current,
+                                           current.body) == []

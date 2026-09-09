@@ -278,6 +278,11 @@ ORIGIN_OVERRIDE_TARGETS = ("nate", "agents")
 REJECTED_MERGE_ALARM = 3
 REJECTED_MERGE_WINDOW = timedelta(days=7)
 
+#: Keep funnel-closed work visible across several unattended brief runs. A
+#: brief is hourly, so a one-run window would make the record disappear before
+#: Nate could reasonably see it.
+CLOSED_ITSELF_WINDOW = timedelta(days=7)
+
 #: Drift is reported, never used as a gate. Keep these names short and stable:
 #: callers put them verbatim into comments and the brief.
 DRIFT_PLAN_EDIT = "plan edited after Ready"
@@ -657,9 +662,18 @@ TIERS = ("standard", "escalated")
 RISK_LINE = re.compile(r"^\s*Risk:\s*(standard|escalated)\b(.*)$",
                        re.IGNORECASE | re.MULTILINE)
 
-#: A ticket declares a step that only Nate can perform in its body, written at
-#: breakdown. The reason is deliberately an allowlist: inability to figure out
-#: engineering work is not a reason to route that work to him.
+#: A ticket declares a step that is not workable in every agent environment in
+#: its body, written at breakdown. An unmarked ticket is workable by any agent;
+#: this reason is the middle outcome, workable only where Claude Code's local
+#: environment is present. It is deliberately an allowlist: a lack of access
+#: to the Claude Code environment is not the same as an engineer finding work
+#: difficult.
+MACHINE_LOCAL_REASON = "a Claude Code environment"
+MACHINE_LOCAL_REASONS = (MACHINE_LOCAL_REASON,)
+
+#: These reasons still mean that no agent can perform the step. Keep them
+#: separate from MACHINE_LOCAL_REASONS so the next capability-aware consumer
+#: can distinguish Claude-Code-only work from work Nate must perform.
 HUMAN_STEP_PREFIX = "Human step: "
 HUMAN_STEP_REASONS = (
     "an app UI with no API",
@@ -667,21 +681,24 @@ HUMAN_STEP_REASONS = (
     "an account or billing setting",
     "physical access to a machine",
 )
+HUMAN_STEP_MARKER_REASONS = MACHINE_LOCAL_REASONS + HUMAN_STEP_REASONS
 HUMAN_STEP_LINE = re.compile(
     r"^\s*" + re.escape(HUMAN_STEP_PREFIX)
     + r"(?P<reason>"
-    + "|".join(re.escape(reason) for reason in HUMAN_STEP_REASONS)
+    + "|".join(re.escape(reason) for reason in HUMAN_STEP_MARKER_REASONS)
     + r")\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 
 
 def parse_human_step(body: str) -> Optional[str]:
-    """Return an allowlisted human-step reason from a ticket body.
+    """Return an allowlisted capability reason from a ticket body.
 
     Like ``RISK_LINE``, the marker must begin a body line. Matching only the
-    stated access reasons keeps a ticket from becoming Nate's work merely
-    because an agent found it difficult.
+    stated access reasons keeps a ticket from becoming restricted merely
+    because an agent found it difficult. ``None`` means any agent may work the
+    ticket; ``MACHINE_LOCAL_REASON`` means only Claude Code may work it; and a
+    reason in ``HUMAN_STEP_REASONS`` means no agent may work it.
     """
     if not isinstance(body, str):
         return None
@@ -865,6 +882,28 @@ def _needs_nate_sections(plan_body: str) -> List[str]:
     return sections
 
 
+def shaped_plan_status(plan_body: str) -> Tuple[str, str]:
+    """Return the status and reason earned by a newly recorded plan.
+
+    The all-clear is deliberately narrow: a recognised Needs section must be
+    present, explicitly empty, and free of authority signals that contradict
+    its claim. Everything else stays at Shaped with a reason the caller can
+    print.
+    """
+    sections = _needs_nate_sections(plan_body)
+    if not sections:
+        return "Shaped", "plan has no ## Needs you section"
+    if any(section.strip().lower() not in EMPTY_NEEDS_NATE
+           for section in sections):
+        return "Shaped", "plan has an open question"
+    signals = needs_nate_signals(plan_body)
+    if signals:
+        return "Shaped", "plan contains authority signal: {}".format(
+            ", ".join(signals)
+        )
+    return "Ready", "plan declares nothing open"
+
+
 def plan_needs_nate(plan_body: str) -> bool:
     """Whether a plan's Needs Nate/Needs you section asks for Nate.
 
@@ -875,13 +914,7 @@ def plan_needs_nate(plan_body: str) -> bool:
     content. An otherwise empty section also fails closed when the plan body
     contains an authority signal that contradicts the section's claim.
     """
-    sections = _needs_nate_sections(plan_body)
-    if not sections:
-        return True
-    if any(section.strip().lower() not in EMPTY_NEEDS_NATE
-           for section in sections):
-        return True
-    return bool(needs_nate_signals(plan_body))
+    return shaped_plan_status(plan_body)[0] == "Shaped"
 
 
 def plan_is_escalated(plan_body: str) -> List[str]:
@@ -984,6 +1017,29 @@ def plan_overlap_candidates(
     return candidates
 
 
+SHAPING_PLAN_STATUSES = frozenset(("Shaped", "Ready", "Building"))
+
+
+def shaping_plan_overlap_candidates(
+    items: Iterable[Item], item: Item, plan_body: str
+) -> List[str]:
+    """Find advisory overlaps with the other open project plans in flight.
+
+    Status belongs to parent Project items, so child tickets are not plans even
+    if a fixture or a future API response gives one a status. Closed projects
+    are not in flight and must not keep influencing a newly shaped plan.
+    """
+    other_plans = (
+        (other.ref, other.body or "")
+        for other in items
+        if other.ref != item.ref
+        and other.parent is None
+        and other.state == "OPEN"
+        and other.status in SHAPING_PLAN_STATUSES
+    )
+    return plan_overlap_candidates(item.ref, plan_body, other_plans)
+
+
 # These are evidence words, not a closed list of human-step categories. A plan
 # can use one while describing a rejected alternative or an already-automated
 # action, so the scan is a prompt to inspect the checklist rather than proof
@@ -1022,13 +1078,14 @@ def access_signals(plan_body: str) -> List[str]:
 
 def effective_shape_owner(origin_voice: Optional[str],
                           override_target: Optional[str] = None) -> Optional[str]:
-    """Return who should shape an item, or None when origin is untrusted.
+    """Return who should shape an item, or None for an invalid override.
 
     Capture uses the provenance voice vocabulary: ``agent`` means observed by
     an agent, while either Nate voice means he raised it. An authorised origin
     override is already reduced by its parser to ``nate`` or ``agents`` and
-    supersedes that default. Missing or malformed origin fails closed here; the
-    backlog-wide default remains #151's concern.
+    supersedes that default. Missing or malformed origin resolves to Nate: the
+    existing backlog predates the marker, and the safe direction is to keep it
+    out of unattended shaping unless an authorised override says otherwise.
     """
     if override_target is not None:
         return override_target if override_target in ("nate", "agents") else None
@@ -1036,7 +1093,7 @@ def effective_shape_owner(origin_voice: Optional[str],
         return "agents"
     if origin_voice in ("nate-direct", "nate-relayed"):
         return "nate"
-    return None
+    return "nate"
 
 
 def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],
@@ -3493,6 +3550,64 @@ def parked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     return [_parked_item_json(item) for item in parked_items(items)]
 
 
+def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
+    """Closed projects recent enough to carry a funnel-close record."""
+    cutoff = now - CLOSED_ITSELF_WINDOW
+    return sorted(
+        (
+            item for item in items
+            if item.parent is None
+            and item.state == "CLOSED"
+            and item.status == "Done"
+            and item.closed_at is not None
+            and item.closed_at >= cutoff
+        ),
+        key=lambda item: (
+            -item.closed_at.timestamp(), item.repo, item.number
+        ),
+    )
+
+
+def _closed_itself_item_json(item: Item) -> Optional[Dict[str, object]]:
+    """Render one funnel-close marker, or omit an ordinary accepted close."""
+    comments = (_gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "comments",
+    ) or {}).get("comments", [])
+    for comment in reversed(comments):
+        if not isinstance(comment, dict):
+            continue
+        payload = _marked_json(
+            comment.get("body") or "", CLOSED_ITSELF_PREFIX
+        )
+        if payload is None:
+            continue
+        drift = payload.get("drift", [])
+        if not isinstance(drift, list):
+            drift = []
+        drift = [value for value in drift if isinstance(value, str)]
+        return {
+            "ref": item.ref,
+            "title": item.title,
+            "url": item.url,
+            "closed_at": item.closed_at.isoformat() if item.closed_at else None,
+            "drift": drift,
+        }
+    return None
+
+
+def closed_itself_json(
+    items: Iterable[Item], now: datetime
+) -> List[Dict[str, object]]:
+    """The brief's recent funnel-close records, newest first."""
+    rows = []
+    for item in closed_itself_items(items, now):
+        row = _closed_itself_item_json(item)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
 def blocked_items(items: Iterable[Item]) -> List[Item]:
     """Open, label-blocked items, oldest first.
 
@@ -3863,6 +3978,20 @@ def cmd_next(
     repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
 ) -> int:
     excluded = excluded or frozenset()
+    # A ref reaches `--not` only from the run that was offered it, and `next`
+    # never offers a claimed ticket to a second run — so the caller holds the
+    # claim it is declining. Release it here rather than trusting the routine
+    # to: on 2026-09-09 five declined claims were left behind, filled the WIP
+    # cap within an hour, and stalled every engineer run behind them (#394).
+    for ref in sorted(excluded):
+        try:
+            declined = find(items, ref)
+        except (GitHubError, SystemExit, ValueError):
+            continue
+        if declined.in_motion_since:
+            write_lock(declined, "")
+            object.__setattr__(declined, "in_motion_since", None)
+            print("released {} (declined)".format(declined.ref), file=sys.stderr)
     blocked = awaiting_review(items)
     ticket = next_ticket_for_tier(
         items, now, tier=tier, blocked=blocked, excluded=excluded,
@@ -3914,6 +4043,7 @@ def cmd_brief(
         "counts_by_gate": counts,
         "items": [item_json(i, now, by_ref) for i in decisions],
         "parked": parked_json(items),
+        "closed_itself": closed_itself_json(items, now),
         "blocked": blocked_json(items),
         "human_steps": human_step_json(items),
         "closed_with_access_vocabulary": closed_with_access_vocabulary_json(
@@ -3959,9 +4089,20 @@ def write_lock(item: Item, value: str) -> None:
 
 
 def find(items: Sequence[Item], ref: str) -> Item:
+    """Resolve an exact ref or URL before considering a bare issue number."""
     for i in items:
-        if i.ref == ref or str(i.number) == ref or i.url == ref:
+        if i.ref == ref or i.url == ref:
             return i
+
+    matches = [i for i in items if str(i.number) == ref]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise GitHubError(
+            "ambiguous funnel item ref {} matches {}".format(
+                ref, ", ".join(i.ref for i in matches)
+            )
+        )
     raise GitHubError("no funnel item matches {}".format(ref))
 
 
@@ -4363,8 +4504,9 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
 
     Writes the plan into the issue body — `plan.md` puts it there through Ideas
     and Shaped, and it only becomes a repo's own `plan.md` at the Ready gate —
-    then moves the item to `Shaped`, which is what asks Nate the next gate: is
-    the plan good?
+    then moves the item to `Ready` only when the plan's explicit Needs section
+    declares nothing open. Otherwise it stays at `Shaped`, which asks Nate the
+    next gate: is the plan good?
     """
     item = find(items, ref)
     try:
@@ -4379,6 +4521,7 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     if not plan.strip():
         raise GitHubError("the plan is empty; nothing to record")
     body = append_provenance(plan, "agent", at=now, run=run, agent=agent)
+    overlaps = shaping_plan_overlap_candidates(items, item, plan)
 
     out = subprocess.run(
         ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
@@ -4390,12 +4533,25 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
 
     if not item.item_id:
         raise GitHubError("{} is not in the Project".format(item.ref))
+    status, reason = shaped_plan_status(plan)
     gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
-               field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Shaped"))
+               field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, status))
     subprocess.run(["gh", "issue", "edit", str(item.number), "--repo", item.repo,
                     "--remove-label", "needs-shaping"], capture_output=True)
-    print("{} → Shaped\n{}".format(item.ref, item.url))
-    print("\nIt now waits on you: is the plan good? Answer by moving it to Ready.")
+    print("{} → {}\n{}".format(item.ref, status, item.url))
+    if status == "Ready":
+        print("advanced to Ready: {}".format(reason))
+    else:
+        print("held at Shaped: {}".format(reason))
+    print("\n--- plan overlap candidates (advisory) ---")
+    if overlaps:
+        print("Read each candidate and record the conclusion in the plan:")
+        for overlap in overlaps:
+            print("  {}".format(overlap))
+    else:
+        print("  none found")
+    if status != "Ready":
+        print("\nIt now waits on you: is the plan good? Answer by moving it to Ready.")
     return 0
 
 

@@ -695,6 +695,37 @@ def test_next_excludes_declined_refs_without_changing_queue_order():
     ).number == 6
 
 
+def test_next_releases_the_claim_held_on_a_declined_ref(monkeypatch, capsys):
+    """A declined ticket's claim is released by the decline itself (#395)."""
+    released = []
+    monkeypatch.setattr(funnel, "write_lock",
+                        lambda item, value: released.append((item.ref, value)))
+    rows = [
+        project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(60)),
+        project(3, "Building", "New"), ticket(4, 3),
+    ]
+
+    assert funnel.cmd_next(rows, NOW, excluded={rows[1].ref}) == 0
+
+    assert released == [(rows[1].ref, "")]
+    assert rows[1].in_motion_since is None
+    assert "released {} (declined)".format(rows[1].ref) in capsys.readouterr().err
+    assert funnel.in_motion(rows, NOW) == []
+
+
+def test_next_leaves_an_unclaimed_declined_ref_alone(monkeypatch, capsys):
+    released = []
+    monkeypatch.setattr(funnel, "write_lock",
+                        lambda item, value: released.append((item.ref, value)))
+    rows = [project(1, "Building", "New"), ticket(2, 1),
+            project(3, "Building", "New"), ticket(4, 3)]
+
+    assert funnel.cmd_next(rows, NOW, excluded={rows[1].ref}) == 0
+
+    assert released == []
+    capsys.readouterr()
+
+
 def test_next_returns_nothing_when_every_candidate_is_excluded():
     rows = [
         project(1, "Building", "New"), ticket(2, 1),

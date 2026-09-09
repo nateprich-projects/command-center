@@ -15,6 +15,8 @@ different fixes:
   itself.
 - **Drifted.** A run reported that the prompt it received differs from the
   checked-in routine.
+- **Stale runtime.** Three consecutive scheduled runs used a checkout that
+  GitHub reports behind `main` after the normal keeper lag.
 
 Deliberately *not* reported: any `skipped-*` outcome and `nothing-to-do`. Those
 are the system working, and paging on them would train the alert to be ignored.
@@ -23,6 +25,7 @@ are the system working, and paging on them would train the alert to be ignored.
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
 import json
 import os
 import subprocess
@@ -56,12 +59,131 @@ ERROR_THRESHOLD = _agent_health.ERROR_THRESHOLD
 WEEK = _agent_health.WEEK
 PROMPT_DRIFT_OUTCOME = _agent_health.PROMPT_DRIFT_OUTCOME
 
+RUNTIME_WATCHED_AGENTS = frozenset({"codex", "muse", "zcode"})
+RUNTIME_RUN_COUNT = 3
+RUNTIME_GRACE_SECONDS = 15 * 60
+
 
 def gh(*args: str) -> str:
     proc = subprocess.run(["gh"] + list(args), capture_output=True, text=True)
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip())
     return proc.stdout
+
+
+def runtime_compare(head: str) -> Optional[Dict]:
+    """Return GitHub's comparison for one recorded runtime head."""
+    try:
+        payload = json.loads(
+            gh("api", "repos/{}/compare/{}...main".format(REPO, head))
+        )
+    except (RuntimeError, TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _row_timestamp(row: Dict) -> Optional[float]:
+    value = row.get("ts")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _runtime_head(row: Dict) -> Optional[str]:
+    runtime = row.get("runtime")
+    if not isinstance(runtime, dict):
+        return None
+    head = runtime.get("head")
+    if not isinstance(head, str) or not head.strip():
+        return None
+    return head.strip()
+
+
+def _timestamp(value) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _main_head_timestamp(comparison: Dict) -> Optional[float]:
+    """Read the main head date from a compare response."""
+    direct = _timestamp(comparison.get("main_head_date"))
+    if direct is not None:
+        return direct
+
+    # The requested comparison is `<runtime>...main`, so `head_commit` is main.
+    # Keep `base_commit` as a fixture/API-shape fallback for older snapshots.
+    for name in ("head_commit", "base_commit"):
+        commit = comparison.get(name)
+        if not isinstance(commit, dict):
+            continue
+        details = commit.get("commit")
+        if not isinstance(details, dict):
+            continue
+        for role in ("committer", "author"):
+            person = details.get(role)
+            if not isinstance(person, dict):
+                continue
+            timestamp = _timestamp(person.get("date"))
+            if timestamp is not None:
+                return timestamp
+    return None
+
+
+def _runtime_lag_problem(agent: str, rows: List[Dict], now: float) -> Optional[str]:
+    if agent not in RUNTIME_WATCHED_AGENTS:
+        return None
+
+    starts = sorted(
+        (row for row in rows
+         if row.get("phase") == "start" and _row_timestamp(row) is not None),
+        key=lambda row: _row_timestamp(row),
+    )
+    recent = starts[-RUNTIME_RUN_COUNT:]
+    if len(recent) < RUNTIME_RUN_COUNT:
+        return None
+
+    heads = [_runtime_head(row) for row in recent]
+    if any(head is None for head in heads):
+        return None
+
+    comparisons = {}
+    for head in set(heads):
+        comparison = runtime_compare(head)
+        if not isinstance(comparison, dict) or comparison.get("status") != "behind":
+            return None
+        behind_by = comparison.get("behind_by")
+        if isinstance(behind_by, bool) or not isinstance(behind_by, int) or behind_by <= 0:
+            return None
+        main_head = _main_head_timestamp(comparison)
+        if main_head is None:
+            return None
+        comparisons[head] = (behind_by, main_head)
+
+    latest_start = _row_timestamp(recent[-1])
+    if latest_start is None:
+        return None
+    main_head = max(value[1] for value in comparisons.values())
+    if latest_start - main_head <= RUNTIME_GRACE_SECONDS:
+        return None
+
+    behind_by = max(value[0] for value in comparisons.values())
+    unit = "commit" if behind_by == 1 else "commits"
+    return (
+        "`{}` has run from a checkout {} {} behind `main` for its last three "
+        "runs. The most recent started more than fifteen minutes after `main`'s "
+        "head commit; refresh the runtime checkout."
+    ).format(agent, behind_by, unit)
 
 
 def records(agent: str) -> List[Dict]:
@@ -105,7 +227,7 @@ def _window_label() -> str:
 
 def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
     """Compatibility wrapper around the shared heartbeat assessment."""
-    return _agent_health.assess(
+    problems = _agent_health.assess(
         agent,
         rows,
         now,
@@ -120,6 +242,10 @@ def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
         prompt_drift_outcome=PROMPT_DRIFT_OUTCOME,
         error_threshold=ERROR_THRESHOLD,
     )
+    runtime_problem = _runtime_lag_problem(agent, rows, now)
+    if runtime_problem:
+        problems.append(runtime_problem)
+    return problems
 
 
 def note(agent: str, rows: List[Dict], now: Optional[float] = None) -> str:
@@ -176,8 +302,9 @@ def main() -> int:
         [MARKER, "", "The watchdog found problems with the scheduled runs.", ""]
         + ["- " + p for p in problems]
         + ["", "Healthy outcomes — any `skipped-*` result or `nothing-to-do` — "
-              "are not reported here by design. This issue is only raised for "
-              "silence, dying runs, prompt drift, or repeated errors.",
+           "are not reported here by design. This issue is only raised for "
+              "silence, dying runs, prompt drift, repeated errors, or a stale "
+              "runtime checkout.",
            "", "It closes itself once the heartbeats recover."]
     )
 

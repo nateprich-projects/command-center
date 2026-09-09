@@ -42,6 +42,25 @@ def event(run, ago_hours, outcome):
             "agent": "codex", "outcome": outcome}
 
 
+def runtime_start(run, timestamp, head="stale", agent="codex", ticket=1):
+    return {
+        "run": run,
+        "phase": "start",
+        "ts": timestamp,
+        "agent": agent,
+        "ticket": ticket,
+        "runtime": {"root": "/runtime/checkout", "head": head},
+    }
+
+
+def comparison(status="behind", behind_by=3, main_date="2026-09-09T10:00:00Z"):
+    return {
+        "status": status,
+        "behind_by": behind_by,
+        "head_commit": {"commit": {"committer": {"date": main_date}}},
+    }
+
+
 def history(gaps_hours, quiet_hours):
     """Return one heartbeat record per timestamp, in chronological order."""
     latest = NOW - quiet_hours * HOUR
@@ -186,6 +205,74 @@ def test_repeated_errors_are_reported_with_their_notes():
     problems = watchdog.assess("codex", rows, NOW)
     assert any("errored 3 times" in p for p in problems)
     assert any("boom 2" in p for p in problems)
+
+
+def test_three_old_runtime_heads_behind_main_are_reported(monkeypatch):
+    rows = [
+        runtime_start("a", NOW - 60 * 60),
+        runtime_start("b", NOW - 50 * 60),
+        runtime_start("c", NOW - 40 * 60),
+    ]
+    monkeypatch.setattr(
+        watchdog, "runtime_compare",
+        lambda head: comparison(behind_by=4, main_date="2026-09-05T08:00:00Z"),
+    )
+
+    problems = watchdog.assess("codex", rows, NOW)
+
+    assert any("codex" in problem and "4 commits behind" in problem
+               for problem in problems)
+
+
+def test_recent_runtime_lag_is_within_the_grace_window(monkeypatch):
+    rows = [
+        runtime_start("a", NOW - 8 * 60),
+        runtime_start("b", NOW - 6 * 60),
+        runtime_start("c", NOW - 4 * 60),
+    ]
+    monkeypatch.setattr(
+        watchdog, "runtime_compare",
+        lambda head: comparison(behind_by=1, main_date="2026-09-05T09:10:00Z"),
+    )
+
+    assert not any("checkout" in problem
+                   for problem in watchdog.assess("codex", rows, NOW))
+
+
+def test_one_current_runtime_head_suppresses_the_alarm(monkeypatch):
+    rows = [
+        runtime_start("a", NOW - 60 * 60, head="stale"),
+        runtime_start("b", NOW - 50 * 60, head="stale"),
+        runtime_start("c", NOW - 40 * 60, head="current"),
+    ]
+
+    def compare(head):
+        if head == "current":
+            return comparison(status="identical", behind_by=0)
+        return comparison(behind_by=5, main_date="2026-09-05T08:00:00Z")
+
+    monkeypatch.setattr(watchdog, "runtime_compare", compare)
+
+    assert not any("checkout" in problem
+                   for problem in watchdog.assess("codex", rows, NOW))
+
+
+def test_runtime_alarm_ignores_claude_and_rows_without_runtime(monkeypatch):
+    rows = [
+        {"run": "a", "phase": "start", "ts": NOW - 60 * 60,
+         "agent": "claude"},
+        {"run": "b", "phase": "start", "ts": NOW - 50 * 60,
+         "agent": "claude"},
+        {"run": "c", "phase": "start", "ts": NOW - 40 * 60,
+         "agent": "claude"},
+    ]
+    monkeypatch.setattr(
+        watchdog, "runtime_compare",
+        lambda head: (_ for _ in ()).throw(AssertionError("unexpected API call")),
+    )
+
+    assert watchdog.assess("claude", rows, NOW) == []
+    assert watchdog.assess("codex", rows, NOW) == []
 
 
 def test_old_failures_age_out_of_the_weekly_count():

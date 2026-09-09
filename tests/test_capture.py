@@ -136,6 +136,80 @@ def test_shaped_preserves_plan_bytes_above_agent_stamp(tmp_path, monkeypatch):
     }
 
 
+def test_shaped_prints_advisory_overlap_candidates(tmp_path, monkeypatch, capsys):
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("Touch `funnel.py` and follow #91.\n")
+    item = Item(
+        repo="owner/repo", number=42, title="An idea",
+        url="https://github.com/owner/repo/issues/42", state="OPEN",
+        status="Ideas", item_id="project-item-42",
+    )
+    other = Item(
+        repo="owner/repo", number=89, title="Existing plan",
+        url="https://github.com/owner/repo/issues/89", state="OPEN",
+        body="Update `funnel.py` and cite #91.", status="Ready",
+    )
+
+    def graphql(query, **variables):
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
+        return {"node": {"options": [{"id": "shaped-option", "name": "Shaped"}]}}
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    assert funnel.cmd_shaped(
+        [item, other], NOW, item.ref, str(plan_file),
+        run="shape-run", agent="claude",
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "--- plan overlap candidates (advisory) ---" in output
+    assert "Read each candidate and record the conclusion in the plan:" in output
+    assert "owner/repo#42 and owner/repo#89 both touch `funnel.py`" in output
+    assert "owner/repo#42 and owner/repo#89 both reference #91" in output
+
+
+def test_shaped_without_overlap_still_succeeds_and_reports_none(tmp_path, monkeypatch,
+                                                                 capsys):
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("A plan with no shared signals.\n")
+    item = Item(
+        repo="owner/repo", number=42, title="An idea",
+        url="https://github.com/owner/repo/issues/42", state="OPEN",
+        status="Ideas", item_id="project-item-42",
+    )
+
+    def graphql(query, **variables):
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
+        return {"node": {"options": [{"id": "shaped-option", "name": "Shaped"}]}}
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file),
+        run="shape-run", agent="claude",
+    ) == 0
+
+    output = capsys.readouterr().out
+    assert "--- plan overlap candidates (advisory) ---" in output
+    assert "  none found" in output
+
+
 def test_capture_always_labels_the_issue_and_reports_it(monkeypatch, capsys):
     calls = []
 

@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # install.sh — wire Command Center into ~/.claude.
 #
-# Idempotent: safe to re-run after every pull. Everything is symlinked back to
-# the checkout, so editing the repo takes effect immediately and there is never
-# a second copy to drift.
+# Idempotent: safe to re-run after every pull. The user-global entry points are
+# symlinked back to the checkout, so editing the repo takes effect immediately
+# and there is never a second copy to drift. The canonical checkout itself may
+# already be ~/.claude/command-center, in which case that directory is the
+# source rather than another link.
 #
 # Run with --dry-run to see what it would do.
 
@@ -50,7 +52,12 @@ esac
 # The whole checkout, not individual scripts: the routines call funnel.py,
 # usage.py, heartbeat.py and prior_run.py, and linking them one by one means a
 # new script silently does not exist until someone remembers to add it here.
-if [ -d "$CLAUDE/command-center" ] && [ ! -L "$CLAUDE/command-center" ]; then
+# After the checkout moved onto the internal disk, it may already be the
+# canonical directory itself. That is healthy and must not trip the old
+# non-empty-directory guard; only a different real directory is refused.
+if [ "$REPO" = "$CLAUDE/command-center" ]; then
+  say "ok: $CLAUDE/command-center is this checkout"
+elif [ -d "$CLAUDE/command-center" ] && [ ! -L "$CLAUDE/command-center" ]; then
   if [ -z "$(find "$CLAUDE/command-center" -mindepth 1 ! -type l 2>/dev/null)" ]; then
     $DRY || rm -rf "$CLAUDE/command-center"
     say "replaced the old per-script directory with a single link"
@@ -59,7 +66,9 @@ if [ -d "$CLAUDE/command-center" ] && [ ! -L "$CLAUDE/command-center" ]; then
     exit 1
   fi
 fi
-link "$REPO"               "$CLAUDE/command-center"
+if [ "$REPO" != "$CLAUDE/command-center" ]; then
+  link "$REPO"               "$CLAUDE/command-center"
+fi
 link "$REPO/statusline.sh" "$CLAUDE/statusline.sh"
 # Every skill in the checkout, not a hardcoded list: naming them one by one is
 # how a new skill silently does not exist until someone remembers this file.

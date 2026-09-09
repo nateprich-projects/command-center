@@ -1336,6 +1336,7 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
 
 
 INSTALL_FIX = "bash scripts/install.sh"
+CHECKOUT_STALENESS_FIX = "git -C ~/.claude/command-center pull --ff-only"
 STATUSLINE_COMMAND = "~/.claude/statusline.sh"
 
 # `usage.py:36` reads this cache, while `statusline.sh:24` writes it. Keep the
@@ -1418,11 +1419,126 @@ def _inside(path: pathlib.Path, root: pathlib.Path) -> bool:
         return False
 
 
+def _symlink_fix(link: pathlib.Path, expected: pathlib.Path) -> str:
+    """Suggest only a repair that ``scripts/install.sh`` can perform."""
+    try:
+        expected_exists = expected.exists()
+    except OSError:
+        expected_exists = False
+    if not expected_exists:
+        return "restore {}, then run {}".format(expected, INSTALL_FIX)
+
+    try:
+        is_real_path = link.exists() and not link.is_symlink()
+    except OSError:
+        is_real_path = False
+    if is_real_path:
+        return "move {} aside, then run {}".format(link, INSTALL_FIX)
+    return INSTALL_FIX
+
+
+def _legacy_invocation_count(checkout_root: pathlib.Path,
+                             legacy_funnel_path: str) -> int:
+    """Count commands that execute the old, human-owned funnel checkout."""
+    invocation = "python3 " + legacy_funnel_path
+    count = 0
+    for routine in sorted((checkout_root / "routines").glob("*.md")):
+        # The routine files retain a prohibition saying never to touch this
+        # checkout even after #205 removes the commands. Count invocations,
+        # not bare path mentions, so that prose does not defeat retirement.
+        count += routine.read_text(encoding="utf-8").count(invocation)
+    return count
+
+
+def _git_ahead_behind(root: pathlib.Path) -> Tuple[int, int]:
+    """Return commits ahead/behind ``origin/main`` without changing the tree."""
+    proc = subprocess.run(
+        ["git", "-C", str(root), "rev-list", "--left-right", "--count",
+         "HEAD...origin/main"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise OSError(detail or "git exited {}".format(proc.returncode))
+    fields = proc.stdout.split()
+    if len(fields) != 2:
+        raise OSError("git returned an invalid ahead/behind count")
+    try:
+        return int(fields[0]), int(fields[1])
+    except ValueError as exc:
+        raise OSError("git returned an invalid ahead/behind count") from exc
+
+
+def check_checkout_staleness(
+    claude_dir: Optional[os.PathLike] = None,
+    checkout_root: Optional[os.PathLike] = None,
+) -> Check:
+    """Check Nate's checkout only while routines still execute it.
+
+    The check is intentionally self-retiring. Once the routines point at the
+    maintained run clone, this checkout may remain stale or dirty without
+    affecting an unattended run, so the doctor says nothing about it.
+    """
+    claude = _path(claude_dir, CLAUDE_DIR)
+    source = _path(checkout_root, CHECKOUT_ROOT)
+    canonical = claude / "command-center"
+    legacy_funnel_path = str(canonical / "funnel.py")
+
+    try:
+        invocations = _legacy_invocation_count(source, legacy_funnel_path)
+    except OSError as exc:
+        return Check(
+            "checkout staleness", False,
+            "could not inspect routines for {} ({})".format(
+                legacy_funnel_path, str(exc) or "unknown error"),
+            "restore the checkout and rerun funnel doctor",
+        )
+
+    if not invocations:
+        return Check("checkout staleness", True, "", "")
+
+    try:
+        ahead, behind = _git_ahead_behind(canonical)
+    except OSError as exc:
+        return Check(
+            "checkout staleness", False,
+            "{} routine invocation(s) still use {}; could not compare {} "
+            "with origin/main ({})".format(
+                invocations, legacy_funnel_path, canonical,
+                str(exc) or "unknown error"),
+            "restore the checkout and rerun funnel doctor",
+        )
+
+    if behind:
+        detail = "{} is {} commit(s) behind origin/main".format(
+            canonical, behind)
+        if ahead:
+            detail += " and {} commit(s) ahead".format(ahead)
+        return Check(
+            "checkout staleness", False,
+            "{} while {} routine invocation(s) still use {}".format(
+                detail, invocations, legacy_funnel_path),
+            CHECKOUT_STALENESS_FIX,
+        )
+
+    if ahead:
+        found = "{} is {} commit(s) ahead of origin/main".format(
+            canonical, ahead)
+    else:
+        found = "{} matches origin/main".format(canonical)
+    return Check(
+        "checkout staleness", True,
+        "{}; {} routine invocation(s) still use {}".format(
+            found, invocations, legacy_funnel_path),
+        "",
+    )
+
+
 def _expected_links(claude_dir: pathlib.Path,
                     checkout_root: pathlib.Path) -> List[tuple]:
-    """Return every link created by scripts/install.sh, discovering skills."""
+    """Return links into the checkout that scripts/install.sh creates."""
     links = [
-        (claude_dir / "command-center", checkout_root),
         (claude_dir / "statusline.sh", checkout_root / "statusline.sh"),
     ]
 
@@ -1462,6 +1578,7 @@ def check_symlinks(claude_dir: Optional[os.PathLike] = None,
 
     root_resolved = root.resolve(strict=False)
     errors: List[str] = []
+    fixes: List[str] = []
     links = _expected_links(claude, root)
 
     for link, expected in links:
@@ -1472,20 +1589,28 @@ def check_symlinks(claude_dir: Optional[os.PathLike] = None,
         shown = str(link)
         if not exists:
             errors.append("{} is missing".format(shown))
+            if not fixes:
+                fixes.append(_symlink_fix(link, expected))
             continue
         if not link.is_symlink():
             errors.append("{} is not a symlink".format(shown))
+            if not fixes:
+                fixes.append(_symlink_fix(link, expected))
             continue
 
         try:
             resolved = link.resolve(strict=True)
         except (OSError, RuntimeError):
             errors.append("{} does not resolve".format(shown))
+            if not fixes:
+                fixes.append(_symlink_fix(link, expected))
             continue
 
         if not _inside(resolved, root_resolved):
             errors.append("{} points outside the checkout ({})".format(
                 shown, resolved))
+            if not fixes:
+                fixes.append(_symlink_fix(link, expected))
             continue
 
         # The install script has one intended target for each link. Checking
@@ -1499,9 +1624,12 @@ def check_symlinks(claude_dir: Optional[os.PathLike] = None,
             wanted = expected_resolved or expected
             errors.append("{} points to {} (expected {})".format(
                 shown, resolved, wanted))
+            if not fixes:
+                fixes.append(_symlink_fix(link, expected))
 
     if errors:
-        return Check("install symlinks", False, "; ".join(errors), INSTALL_FIX)
+        return Check("install symlinks", False, "; ".join(errors),
+                     "; ".join(fixes) or INSTALL_FIX)
     return Check(
         "install symlinks", True,
         "{} links resolve inside {}".format(len(links), root_resolved),
@@ -2104,6 +2232,8 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
     """
     checks = [
         check_symlinks(claude_dir=claude_dir, checkout_root=checkout_root),
+        check_checkout_staleness(
+            claude_dir=claude_dir, checkout_root=checkout_root),
         check_settings(claude_dir=claude_dir),
         check_auth_scope(),
         check_project_fields(),

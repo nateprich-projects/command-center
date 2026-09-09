@@ -75,11 +75,11 @@ def test_all_local_checks_pass_and_discover_every_skill(tmp_path, monkeypatch):
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
     assert [check.name for check in checks] == [
-        "install symlinks", "settings.json", "gh auth", "Project fields",
+        "install symlinks", "checkout staleness", "settings.json", "gh auth", "Project fields",
         "command-center topic", "usage cache", "heartbeat branch",
     ]
     assert all(check.ok for check in checks)
-    assert "4 links" in checks[0].found
+    assert "3 links" in checks[0].found
 
 
 @pytest.mark.parametrize("kind", ["missing", "real file", "outside", "dangling"])
@@ -101,7 +101,11 @@ def test_each_bad_link_is_reported_with_an_install_fix(tmp_path, kind):
 
     assert not result.ok
     assert "statusline.sh" in result.found
-    assert result.fix == funnel.INSTALL_FIX
+    if kind == "real file":
+        assert result.fix == "move {} aside, then run {}".format(
+            link, funnel.INSTALL_FIX)
+    else:
+        assert result.fix == funnel.INSTALL_FIX
 
 
 def test_a_second_skill_is_checked_without_doctor_changes(tmp_path):
@@ -166,7 +170,7 @@ def test_settings_missing_or_wrong_statusline_is_distinct(tmp_path, payload, phr
     assert result.fix == funnel.INSTALL_FIX
 
 
-def test_doctor_runs_after_a_broken_symlink_check(tmp_path, monkeypatch):
+def test_doctor_does_not_require_a_self_referential_checkout_link(tmp_path, monkeypatch):
     checkout, claude = install_fixture(tmp_path)
     (claude / "command-center").unlink()
     stub_heartbeat_checks(monkeypatch)
@@ -174,9 +178,82 @@ def test_doctor_runs_after_a_broken_symlink_check(tmp_path, monkeypatch):
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
-    assert len(checks) == 7
-    assert not checks[0].ok
-    assert checks[1].ok
+    assert len(checks) == 8
+    assert checks[0].ok
+    assert checks[2].ok
+
+
+def test_missing_checkout_target_gets_manual_restore_steps(tmp_path):
+    checkout, claude = install_fixture(tmp_path)
+    (checkout / "statusline.sh").unlink()
+
+    result = funnel.check_symlinks(claude_dir=claude, checkout_root=checkout)
+
+    assert not result.ok
+    assert "does not resolve" in result.found
+    assert result.fix == "restore {}, then run {}".format(
+        checkout / "statusline.sh", funnel.INSTALL_FIX)
+
+
+def test_checkout_staleness_reports_a_legacy_routine_while_behind(
+    tmp_path, monkeypatch
+):
+    checkout, claude = install_fixture(tmp_path)
+    routines = checkout / "routines"
+    routines.mkdir()
+    old_funnel = str(claude / "command-center" / "funnel.py")
+    (routines / "codex.md").write_text("python3 " + old_funnel + " doctor\n")
+    (routines / "claude.md").write_text("python3 " + old_funnel + " brief\n")
+    monkeypatch.setattr(funnel, "_git_ahead_behind", lambda root: (0, 3))
+
+    result = funnel.check_checkout_staleness(
+        claude_dir=claude, checkout_root=checkout)
+
+    assert not result.ok
+    assert "3 commit(s) behind origin/main" in result.found
+    assert "2 routine invocation(s)" in result.found
+    assert result.fix == funnel.CHECKOUT_STALENESS_FIX
+
+
+def test_checkout_staleness_is_silent_after_routines_move_to_the_run_clone(
+    tmp_path, monkeypatch
+):
+    checkout, claude = install_fixture(tmp_path)
+    routines = checkout / "routines"
+    routines.mkdir()
+    (routines / "codex.md").write_text(
+        "python3 ~/.claude/command-center-run/funnel.py doctor\n")
+    (routines / "muse.md").write_text(
+        "Never touch {}/funnel.py.\n".format(
+            claude / "command-center"
+        )
+    )
+    monkeypatch.setattr(
+        funnel, "_git_ahead_behind",
+        lambda root: pytest.fail("retired staleness check must not inspect git"),
+    )
+
+    result = funnel.check_checkout_staleness(
+        claude_dir=claude, checkout_root=checkout)
+
+    assert result == funnel.Check("checkout staleness", True, "", "")
+
+
+def test_checkout_staleness_reports_current_legacy_checkout(
+    tmp_path, monkeypatch
+):
+    checkout, claude = install_fixture(tmp_path)
+    routines = checkout / "routines"
+    routines.mkdir()
+    old_funnel = str(claude / "command-center" / "funnel.py")
+    (routines / "codex.md").write_text("python3 " + old_funnel + " doctor\n")
+    monkeypatch.setattr(funnel, "_git_ahead_behind", lambda root: (0, 0))
+
+    result = funnel.check_checkout_staleness(
+        claude_dir=claude, checkout_root=checkout)
+
+    assert result.ok
+    assert "matches origin/main" in result.found
 
 
 # -- GitHub wiring ------------------------------------------------------------

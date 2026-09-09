@@ -43,6 +43,12 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `stranded` | Open items for which no current agent or gate can make progress. Diagnostic only; it does not add to `total_needing_nate` |
 | `working_tree_touched` | Runs during which Nate's own checkout changed. No routine should write it — engineers use their own clones, reviewers are read-only. Reports a *change*, not a crime: him committing mid-run looks the same. Say it plainly when present |
 | `maintenance_load` | `upkeep_share` is the fraction of work closed in the last 30 days that was `Broken` or `Maintenance` |
+| `human_steps` | Open tickets only Nate can do, with the `reason` each declares. **Work he owes, not a decision he owes** — deliberately outside `total_needing_nate`, the same distinction that keeps `blocked` out. No agent can pick these up: `startable()` excludes them, so this list is the only place they surface |
+| `parked` | Stopped items with the written reason each carries. The reason is the artifact that makes re-encountering an idea a 30-second decision |
+| `awaiting_breakdown` | Approved plans with no tickets yet. Claude owes these a breakdown; they are not startable until it happens |
+| `unattended_merges` | Merges an agent made without him, read from heartbeat records. `plan.md` makes these appearing in the brief a condition of unattended merging being allowed at all |
+| `rejected_merges` | Merges he checked and found broken, over `window_days`. `stop_auto_merging` true means three in a week — auto-merging stops until he fixes the review bar |
+| `closed_with_access_vocabulary` | Projects that closed with access-shaped words in the plan and no human-step ticket. The detective backstop for when every preventive layer missed one |
 
 ## How to render it
 
@@ -50,8 +56,15 @@ Lead with the count and the ordered list. For each item: its Class, the question
 and issue title as a link, and how long it has waited. Keep it scannable — this is read to
 decide, not to browse.
 
+**Then `human_steps`, whenever it is non-empty**, as its own short list with each item's
+reason. Never fold it into the decision list and never count it in the total: it answers a
+different question — not *what do you have to decide* but *what is waiting on you to go
+and do*. It needs its own line precisely because nothing else surfaces it; no agent can be
+handed one, so an unrendered human step is invisible everywhere.
+
 Then the gate counts on one line. Then anything unusual, and only if present:
-`needs_class`, `stale_locks_taken_over`, `stranded`, and `in_motion`.
+`needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`, `awaiting_breakdown`,
+`unattended_merges`, `rejected_merges`, and `closed_with_access_vocabulary`.
 
 Offer the `launch` command for the top item. Do not run it.
 

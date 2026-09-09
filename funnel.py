@@ -922,10 +922,17 @@ def startable(items: Sequence[Item],
             # not waiting to be worked. Treating it as both is what made an issue
             # appear in two queues at once.
             return False
-        # Only `Building`. `Ready` means "broken into issues"; treating it as
-        # startable would let Codex begin before a claim moves the parent to
-        # `Building`, which is the observable start of work.
-        return parent.status == "Building" and not parent.is_blocked
+        # `Ready` or `Building`. `plan.md`: "Codex draws tickets from any
+        # `Ready` or `Building` parent, so it stalls only if every parent lacks
+        # tickets." `Building` is not a precondition for work but the record
+        # that work began — `cmd_claim` writes it on the first claim.
+        #
+        # This read `Building` only, and #287 deleted the `start` gate that was
+        # the sole writer of it. Nothing replaced it, so every `Ready` project
+        # was unstartable and the accept gate unreachable: nine of them on
+        # 2026-09-09, failing silently and worsening as the pre-#287 backlog
+        # drained (#343).
+        return parent.status in ("Ready", "Building") and not parent.is_blocked
 
     def in_flight(item: Item) -> bool:
         """Once a project is Building, its remaining tickets finish first.
@@ -3325,8 +3332,41 @@ def cmd_claim(items: List[Item], now: datetime, ref: str) -> int:
         print("took over stale claim on {}".format(item.ref), file=sys.stderr)
 
     write_lock(target, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    _begin_parent(items, target)
     print(target.url)
     return 0
+
+
+def _begin_parent(items: Sequence[Item], ticket: Item) -> None:
+    """Move a claimed ticket's project to `Building`, once.
+
+    `plan.md`: "`Ready → Building` is now written by Codex when it claims the
+    first ticket. Each write is still explicit and attached to an event." This
+    is that write, and it is the only one — `#287` deleted the `start` gate
+    deliberately, because it asked Nate to re-decide a priority `funnel.py`
+    already computes. The stage is the record that work began, not a permission
+    to begin it.
+
+    Only from `Ready`, so a later claim on the same project does not rewrite a
+    stage that is already correct, and so nothing can drag a project backwards
+    out of `Done` or `Parked`.
+
+    Deliberately not fatal. The claim is the correctness-bearing write and it
+    has already succeeded; a project left at `Ready` is visibly wrong and the
+    next claim fixes it, whereas an exception here would lose a lock that is
+    already held.
+    """
+    parent = next((i for i in items if i.ref == ticket.parent), None)
+    if parent is None or parent.status != "Ready" or not parent.item_id:
+        return
+    try:
+        gh_graphql(SET_FIELD, project=PROJECT_ID, item=parent.item_id,
+                   field=STATUS_FIELD_ID,
+                   option=_option_id(STATUS_FIELD_ID, "Building"))
+        print("{} -> Building".format(parent.ref), file=sys.stderr)
+    except GitHubError as exc:
+        print("note: claimed {} but could not move {} to Building: {}".format(
+            ticket.ref, parent.ref, exc), file=sys.stderr)
 
 
 SET_FIELD = """

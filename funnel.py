@@ -164,6 +164,24 @@ MAINTENANCE_WINDOW = timedelta(days=30)
 # this diagnostic's deliberately finite window.
 MERGED_PR_SCAN_LIMIT = 100
 
+#: GraphQL reserve floors, expressed in **loads remaining** rather than raw
+#: points so they stay correct as the per-load cost changes — #272 is about to
+#: change it by roughly a factor of six.
+#:
+#: Two tiers, on Nate's call 2026-09-08: **reviewers keep going.** New work
+#: consumes budget and adds in-flight PRs; review drains the lane and is cheap.
+#: One floor for everything risks a stall where approved PRs sit unmerged until
+#: the hour resets, and the undrained backlog makes the next hour worse than the
+#: one that triggered it — the same instinct as `plan.md`'s "once a project is
+#: Building, its remaining tickets finish first".
+#:
+#: Accepted knowingly: reviewers can still drive the budget to actual zero, so
+#: the last review runs of a bad hour may crash rather than decline cleanly.
+#: Two tiers make that rarer; they do not abolish it. Do not "fix" it by
+#: collapsing the tiers.
+ENGINEERING_RESERVE_LOADS = 20
+REVIEW_RESERVE_LOADS = 5
+
 #: Regression issues opened by `funnel reject`. The issues themselves are the
 #: counter — GitHub is the state, so there is nothing else to keep in step.
 REGRESSION_PREFIX = "Regression from PR #"
@@ -4121,8 +4139,57 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 )
             else:
                 out.update(do="stop", why="nothing to review")
+
+    reserve = _reserve_verdict(out.get("do"))
+    if reserve is not None:
+        out.update(reserve)
+        heartbeat.record_event(agent, out["run"], "skipped-api-reserve",
+                               note=out["why"])
     print(json.dumps(out, indent=2))
     return 0
+
+
+def _reserve_verdict(do: object) -> Optional[Dict[str, object]]:
+    """Decline this run if the GraphQL budget is below its tier's floor.
+
+    Returns ``None`` to proceed. A run that was already stopping is left alone:
+    relabelling "nothing to review" as a budget decline would report a refusal
+    the system never had to make.
+
+    ``review`` takes the lower floor; ``breakdown`` and ``shape`` take the
+    engineering one. The split is consumers versus drainers — both of the
+    latter open new work, while review drains the lane and is cheap. Keyed on
+    what the run would do rather than on which agent asked, so there is no list
+    of agent names to keep in step.
+
+    Coast to a stop rather than seize. Retry was rejected as the mechanism —
+    waiting out a reset that can be fifty minutes away either sleeps through the
+    run's own schedule or fails anyway, and spends the run's credits sitting
+    still. Declining cleanly *is* the backoff; the schedule supplies it.
+    """
+    if do not in ("review", "breakdown", "shape"):
+        return None
+
+    spend = graphql_spend()
+    remaining = spend.get("remaining")
+    load_cost = spend.get("cost") or 0
+
+    if not spend.get("calls") or remaining is None:
+        # Fail closed, matching the unreadable-usage branch above.
+        return {"gate": "reserve", "do": "stop",
+                "why": "GraphQL budget could not be read; a run that cannot "
+                       "read its budget does not work"}
+
+    loads = (REVIEW_RESERVE_LOADS if do == "review"
+             else ENGINEERING_RESERVE_LOADS)
+    floor = loads * int(load_cost)
+    if int(remaining) < floor:
+        return {"gate": "reserve", "do": "stop",
+                "why": "GraphQL budget {} is below the {} floor of {} "
+                       "({} loads at {} points)".format(
+                           remaining, "review" if do == "review"
+                           else "engineering", floor, loads, load_cost)}
+    return None
 
 
 def cmd_next_review(items: List[Item], tier: Optional[str]) -> int:

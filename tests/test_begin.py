@@ -201,6 +201,37 @@ def test_codex_begin_reports_repo_readiness_when_work_is_withheld(
     assert writes == []
 
 
+def test_main_supplies_repo_readiness_to_the_codex_begin_path(monkeypatch):
+    project, ticket = _ticket(74, 75)
+    rows = [project, ticket]
+    readiness = {
+        ticket.repo: funnel.MemberRepoReadiness(
+            ticket.repo, topic=True, ci_workflow=True,
+            stock_labels=(), dependabot=True,
+        ),
+    }
+    received = []
+    monkeypatch.setattr(funnel, "load_items", lambda: rows)
+    monkeypatch.setattr(
+        funnel,
+        "repo_readiness_for_items",
+        lambda items: received.append(items) or readiness,
+    )
+    monkeypatch.setattr(
+        funnel,
+        "cmd_begin",
+        lambda items, now, agent, tier, idle, breakdown=False,
+        routine_sha_literal=None, repo_readiness=None: (
+            received.append(repo_readiness) or 0
+        ),
+    )
+
+    assert funnel.main([
+        "begin", "--agent", "codex", "--tier", "standard",
+    ]) == 0
+    assert received == [rows, readiness]
+
+
 def test_begin_stop_reason_omits_breakdown_when_it_was_not_requested(
     monkeypatch, capsys
 ):

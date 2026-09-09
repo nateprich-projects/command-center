@@ -712,6 +712,16 @@ def test_next_cli_accepts_repeatable_not_filters(monkeypatch, capsys):
     ]
     monkeypatch.setattr(funnel, "load_items", lambda: rows)
     monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
+    monkeypatch.setattr(
+        funnel,
+        "repo_readiness_for_items",
+        lambda items: {
+            "nateprich/beta": funnel.MemberRepoReadiness(
+                "nateprich/beta", topic=True, ci_workflow=True,
+                stock_labels=(), dependabot=True,
+            ),
+        },
+    )
 
     assert funnel.main([
         "next", "--not", rows[1].ref, "--not", rows[3].ref,

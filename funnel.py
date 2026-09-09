@@ -184,7 +184,7 @@ WIP_LIMIT = 4
 STAGES = ["Ideas", "Shaped", "Ready", "Building", "Done", "Parked"]
 
 #: The ladder, best-first. Only finite classes may preempt in-flight work.
-LADDER = ["Broken", "Maintenance", "Improve", "New", "Replace"]
+LADDER = ["Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"]
 PREEMPTING = {"Broken", "Maintenance"}
 
 #: Existing-work classes may take the unattended shaping path. Origin remains
@@ -563,7 +563,7 @@ def awaiting_decision(items: Iterable[Item]) -> List[Item]:
         return (
             depth,
             not item.is_blocked,
-            0 if effective_class(item, by_ref) == "Broken" else 1,
+            ladder_index(effective_class(item, by_ref)),
             0 if item.pinned else 1,
             since,
             item.repo,

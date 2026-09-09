@@ -223,6 +223,13 @@ def test_ticket_inherits_broken_for_decision_ordering():
     assert [i.number for i in awaiting_decision([parent, child, older])] == [2, 3]
 
 
+def test_ticket_inherits_investigate_for_decision_ordering():
+    parent = project(1, "Ideas", "Investigate")
+    child = item(2, "Shaped", None, days=1, parent=parent.ref)
+    older = project(3, "Shaped", "Broken", days=30)
+    assert [i.number for i in awaiting_decision([parent, child, older])] == [2, 3]
+
+
 def test_a_closed_item_waits_on_nobody():
     assert gate_question(item(1, "Ready", "New", state="CLOSED")) is None
 
@@ -291,14 +298,26 @@ def test_unset_class_sorts_last_and_never_preempts():
 
 
 def test_ladder_is_in_the_documented_order():
-    ranks = [ladder_index(c) for c in ["Broken", "Maintenance", "Improve", "New", "Replace"]]
-    assert ranks == sorted(ranks) and len(set(ranks)) == 5
+    ranks = [ladder_index(c) for c in [
+        "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace",
+    ]]
+    assert ranks == sorted(ranks) and len(set(ranks)) == 6
+
+
+def test_investigate_is_first_but_does_not_preempt_or_self_approve():
+    assert ladder_index("Investigate") == 0
+    assert funnel.PREEMPTING == {"Broken", "Maintenance"}
+    assert "Investigate" not in funnel.PREEMPTING
+    assert funnel.SELF_APPROVABLE_CLASSES == frozenset(
+        {"Broken", "Maintenance", "Improve"}
+    )
 
 
 def test_anything_past_ideas_must_carry_a_class():
     assert needs_class(item(1, "Shaped", None))
     assert needs_class(item(2, "Ready", None))
     assert needs_class(item(3, "Building", None))
+    assert not needs_class(item(4, "Ready", "Investigate"))
 
 
 def test_a_ticket_is_exempt_because_it_inherits():
@@ -337,6 +356,17 @@ def test_ladder_orders_what_to_start():
                      (5, "Improve")):
         items += [project(n, "Building", klass), ticket(10 + n, n)]
     assert [i.number for i in startable(items)] == [12, 14, 15, 13, 11]
+
+
+def test_investigate_ticket_is_startable_and_outranks_broken():
+    investigate_parent = project(1, "Building", "Investigate")
+    investigate_ticket = ticket(2, 1)
+    broken_parent = project(3, "Building", "Broken")
+    broken_ticket = ticket(4, 3)
+
+    assert [i.number for i in startable([
+        broken_parent, broken_ticket, investigate_parent, investigate_ticket,
+    ])] == [2, 4]
 
 
 def test_pins_do_not_change_codex_startable_output():

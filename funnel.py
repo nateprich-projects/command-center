@@ -880,13 +880,14 @@ def access_signals(plan_body: str) -> List[str]:
 
 def effective_shape_owner(origin_voice: Optional[str],
                           override_target: Optional[str] = None) -> Optional[str]:
-    """Return who should shape an item, or None when origin is untrusted.
+    """Return who should shape an item, or None for an invalid override.
 
     Capture uses the provenance voice vocabulary: ``agent`` means observed by
     an agent, while either Nate voice means he raised it. An authorised origin
     override is already reduced by its parser to ``nate`` or ``agents`` and
-    supersedes that default. Missing or malformed origin fails closed here; the
-    backlog-wide default remains #151's concern.
+    supersedes that default. Missing or malformed origin resolves to Nate: the
+    existing backlog predates the marker, and the safe direction is to keep it
+    out of unattended shaping unless an authorised override says otherwise.
     """
     if override_target is not None:
         return override_target if override_target in ("nate", "agents") else None
@@ -894,7 +895,7 @@ def effective_shape_owner(origin_voice: Optional[str],
         return "agents"
     if origin_voice in ("nate-direct", "nate-relayed"):
         return "nate"
-    return None
+    return "nate"
 
 
 def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],

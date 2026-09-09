@@ -585,11 +585,13 @@ def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:
             {
                 "window": "five_hour",
                 "used_percent": five["used_percent"],
-                "reserve": FIVE_HOUR_RESERVE,
+                "reserve": policy(provider, "five_hour_reserve",
+                                  FIVE_HOUR_RESERVE),
                 "allowed_percent": policy(provider, "five_hour_ceiling",
                                           FIVE_HOUR_CEILING),
-                "over": five["used_percent"] + FIVE_HOUR_RESERVE > policy(
-                    provider, "five_hour_ceiling", FIVE_HOUR_CEILING),
+                "over": five["used_percent"] + policy(
+                    provider, "five_hour_reserve", FIVE_HOUR_RESERVE
+                ) > policy(provider, "five_hour_ceiling", FIVE_HOUR_CEILING),
             }
         )
 
@@ -789,7 +791,20 @@ PROVIDER_POLICY = {
                # went to 4 and hit the five-hour ceiling at 75% used + 10%
                # reserved = 85% against 80% allowed. Its weekly window was fine
                # at 24%. This buys back that headroom and leaves 15%.
-               "five_hour_ceiling": 85.0},
+               #
+               # **Suspended on 2026-09-09 by Nate's instruction:** "codex budget
+               # limits should be suspended right now as I have unused usage
+               # reset credits." Ceiling 100 and reserve 0, so `used + reserve >
+               # ceiling` can never be true — the same shape as the weekly
+               # switch-off above: parameters, not a deleted code path. Measured
+               # at the time: 83% used + 10% reserved against 85% allowed,
+               # refusing every run while two ChatGPT resets sat unspent. The
+               # five-hour reserve became provider-scoped for this; the shared
+               # default still protects `anthropic` and z.ai. **Temporary and
+               # tracked in #194**, which now covers both windows: restore the
+               # ceiling to 85 and drop the reserve override when the credits
+               # are spent.
+               "five_hour_ceiling": 100.0, "five_hour_reserve": 0.0},
 }
 
 

@@ -44,6 +44,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `stranded` | Open items for which no current agent or gate can make progress. Diagnostic only; it does not add to `total_needing_nate` |
 | `working_tree_touched` | Runs during which Nate's own checkout changed. No routine should write it — engineers use their own clones, reviewers are read-only. Reports a *change*, not a crime: him committing mid-run looks the same. Say it plainly when present |
 | `maintenance_load` | `upkeep_share` is the fraction of work closed in the last 30 days that was `Broken` or `Maintenance` |
+| `resend_ratio` | Recent total-input over fresh-input ratio for metered agents (`codex` and `zcode`); agents without usable telemetry are omitted |
 | `human_steps` | Open tickets only Nate can do, with the `reason` each declares. **Work he owes, not a decision he owes** — deliberately outside `total_needing_nate`, the same distinction that keeps `blocked` out. No agent can pick these up: `startable()` excludes them, so this list is the only place they surface |
 | `parked` | Stopped items with the written reason each carries. The reason is the artifact that makes re-encountering an idea a 30-second decision |
 | `awaiting_breakdown` | Approved plans with no tickets yet. Claude owes these a breakdown; they are not startable until it happens |
@@ -66,7 +67,7 @@ handed one, so an unrendered human step is invisible everywhere.
 
 Then the gate counts on one line. Then anything unusual, and only if present:
 `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`, `awaiting_breakdown`,
-`unattended_merges`, `agent_health`, `rejected_merges`, and
+`unattended_merges`, `agent_health`, `resend_ratio`, `rejected_merges`, and
 `closed_with_access_vocabulary`.
 
 Offer the `launch` command for the top item. Do not run it.

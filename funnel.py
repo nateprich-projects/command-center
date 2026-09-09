@@ -2054,14 +2054,14 @@ query($login: String!, $number: Int!, $cursor: String) {
             ... on Issue {
               number title url body state stateReason closedAt
               repository { nameWithOwner }
-              labels(first: 25) { nodes { name } }
-              assignees(first: 10) { nodes { login } }
+              labels(first: 5) { nodes { name } }
+              assignees(first: 3) { nodes { login } }
               parent { number repository { nameWithOwner } }
               subIssuesSummary { total completed }
-              blockedBy(first: 50) {
+              blockedBy(first: 10) {
                 nodes { number state stateReason repository { nameWithOwner } }
               }
-              timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]) {
+              timelineItems(last: 10, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]) {
                 nodes {
                   ... on ProjectV2ItemStatusChangedEvent {
                     createdAt status project { number }

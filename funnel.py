@@ -454,8 +454,11 @@ def gate_question(item: Item) -> Optional[str]:
         # a project that ever carried a human-step ticket must still reach him.
         if not item.children_all_closed:
             return None
-        if item.klass in ("Broken", "Maintenance", "Improve"):
-            return GATES["Building"] if item.carried_human_step else None
+        # Keep this tied to the same existing-work class set used by the
+        # unattended shaping rule. An unset or unknown Class fails closed into
+        # the accept queue; it must never inherit the permissive path.
+        if item.klass in SELF_APPROVABLE_CLASSES and not item.carried_human_step:
+            return None
         return GATES["Building"]
     if item.status == "Shaped":
         # A plan with no Needs section has not earned an all-clear. The shared

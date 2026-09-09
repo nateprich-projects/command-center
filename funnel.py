@@ -859,7 +859,13 @@ def startable(items: Sequence[Item],
     }
 
     def eligible(item: Item) -> bool:
-        if item.state != "OPEN" or item.is_blocked or item.open_blockers or item.children_total:
+        if (
+            item.state != "OPEN"
+            or item.is_blocked
+            or item.open_blockers
+            or item.children_total
+            or parse_human_step(item.body or "") is not None
+        ):
             return False
         if item.ref in awaiting_review:
             return False

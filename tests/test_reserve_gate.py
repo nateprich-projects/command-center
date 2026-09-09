@@ -75,3 +75,16 @@ def test_the_decline_outcome_is_in_the_skipped_family():
     """`errored` would make the watchdog alarm on the system working."""
     import heartbeat
     assert "skipped-api-reserve" in heartbeat.OUTCOMES
+
+
+def test_no_graphql_call_is_not_the_same_as_an_unreadable_budget():
+    """Absence of a question, not absence of an answer.
+
+    `load_items` queries before `begin` is dispatched, so a real run always has
+    a reading. Failing closed here would refuse runs that never asked.
+    """
+    funnel._GRAPHQL_SPEND.update(
+        {"calls": 0, "cost": 0, "remaining": None, "reset_at": None})
+
+    assert funnel._reserve_verdict("review") is None
+    assert funnel._reserve_verdict("breakdown") is None

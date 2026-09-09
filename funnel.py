@@ -4174,8 +4174,17 @@ def _reserve_verdict(do: object) -> Optional[Dict[str, object]]:
     remaining = spend.get("remaining")
     load_cost = spend.get("cost") or 0
 
-    if not spend.get("calls") or remaining is None:
-        # Fail closed, matching the unreadable-usage branch above.
+    if not spend.get("calls"):
+        # No GraphQL call was made, so there is no budget question to answer —
+        # distinct from a call whose rate-limit block was unreadable. In a real
+        # run this cannot happen: `load_items` queries before `begin` is
+        # dispatched, and an unreachable GitHub raises there first. Failing
+        # closed here would refuse on the absence of a question rather than on
+        # the absence of an answer.
+        return None
+    if remaining is None:
+        # A call was made and its block could not be read. Fail closed,
+        # matching the unreadable-usage branch above.
         return {"gate": "reserve", "do": "stop",
                 "why": "GraphQL budget could not be read; a run that cannot "
                        "read its budget does not work"}

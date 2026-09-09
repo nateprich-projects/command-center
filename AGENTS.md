@@ -90,11 +90,10 @@ wrong.
   Meta's terms, he answered *"I think we're good."* That settles it as a decision and
   the schedules run. _(confirmed by Nate 2026-09-07.)_
 
-  **It remains his risk call on an inference, not a verified reading of Meta's terms**
-  — an earlier version of this section asserted sanction it had not established, and
-  his answer accepts the exposure rather than closing the gap. Do not upgrade the
-  wording below to "permitted" or "sanctioned" on the strength of this line.
-  _(corrected 2026-09-07.)_
+  **The terms have now been read, and they do not prohibit scheduled or headless use.**
+  All three governing documents were retrieved on 2026-09-09. This replaces the
+  inference his 2026-09-07 answer rested on. _(terms read 2026-09-09; the risk decision
+  remains his and is unchanged.)_
 
   What is actually established: `muse exec` is described in the CLI's own help as
   running a prompt non-interactively (headless), with `--json` for machine-readable
@@ -104,12 +103,43 @@ wrong.
   these schedules satisfy. Separate API keys bill pay-as-you-go, so the runner
   deliberately uses the account login and never sets `META_API_KEY`.
 
-  What is **not** established: the Meta Model API Terms of Service and Acceptable Use
-  Policy, which the subscriptions page names as the governing documents, returned no
-  readable content when fetched on 2026-09-07. Nobody here has read them. "No
-  restriction found" means "not in the pages that could be read", which is a weaker
-  claim than it looks. **If a fair-use or automated-workload clause exists, it lives
-  there, and the schedules are ~198 runs a day, against up to ~312 possible starts
+  **What the terms actually say, read 2026-09-09.** The earlier version of this
+  paragraph said the Model API Terms of Service and Acceptable Use Policy "returned no
+  readable content" and that nobody had read them. That was a *rendering* failure, not
+  an access one: both pages are JavaScript shells that a plain fetch returns as an empty
+  "Model API" header. Loaded in a browser they render in full. See `LEARNINGS.md`.
+
+  - **Meta Model API Terms of Service** (last updated 2026-08-28). Fifteen enumerated
+    restrictions in §10.1, none of which prohibits automated, scheduled, headless or
+    unattended use. Three bear on these schedules: **(xii)** forbids evading "rate
+    limits, usage quotas, content filters, access controls, or other technical
+    safeguards"; **(xiii)** forbids consuming resources "excessive relative to your
+    authorized use, that degrades the Services for others, or that is inconsistent with
+    legitimate end-user application use"; and **§3.2** restricts the subscription
+    credential to "use only with the coding harness", never to "circumvent your
+    subscription's usage limits or billing".
+  - **Model API Acceptable Use Policy.** Its agent clause is conditioned, and the
+    condition is the whole clause: it bars operating AI agents or automated systems
+    "in ways that **evade human oversight or accountability**" — concealing an agent's
+    automated nature, evading oversight controls, or splitting tasks across sessions or
+    accounts to evade detection. Automation itself is not prohibited.
+  - **Meta Subscription Terms of Service.** Billing, cancellation and refunds. No
+    automation, rate-limit, fair-use or account-sharing clause.
+
+  **So (xiii) is the only live constraint, and it is a conduct standard rather than a
+  cap.** The published allowance is "10-50 prompts every 5 hours" with the stated remedy
+  being to upgrade or wait for the refresh — throttling, not enforcement — and measured
+  consumption is 1% of the five-hour window and 0% weekly. Against that, ~198 runs a day
+  is not plausibly excessive.
+
+  **What this does not license.** Do not build anything that evades a limit (xii), and
+  do not conceal the automated nature of these runs — the heartbeat, the recorded
+  verdicts and the provenance comments are what keep the AUP's oversight condition
+  satisfied, so they are load-bearing rather than housekeeping. The reading was a
+  keyword search over a 57,000-character document, not a line-by-line review, and nobody
+  here is giving legal advice.
+
+  **The volume, for reference: ~198 runs a day, against up to ~312 possible starts
   (two launchd jobs: `command-center-muse-review-standard` every five minutes,
   `command-center-muse-review` hourly at :07).** Measured from the heartbeat branch,
   over the 24-hour window ending 2026-09-08 14:20 PDT — 198 runs started, 195

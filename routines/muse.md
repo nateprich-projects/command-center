@@ -258,6 +258,10 @@ python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent muse
 `--merged` takes **the PR's number**, not a count of merges — `--merged 96`, never `--merged 1`. It is a field, not prose: unattended merges have to appear in the brief as
 a record, and a record that must be parsed out of a sentence is not one.
 
+If the ticket named a prerequisite that has not landed and the result is **no
+change made**, finish with `--outcome skipped-blocked` and a note. This is an
+honest decline, not an error.
+
 Use `errored` with a note if something broke. An honest `errored` is worth more
 than a run that vanishes: the watchdog can see the first and can only guess at the
 second.

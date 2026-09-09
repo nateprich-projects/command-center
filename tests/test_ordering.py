@@ -324,6 +324,24 @@ def test_blocked_work_is_not_startable_at_either_level():
     assert startable([parent, ticket(4, 3)]) == []
 
 
+def test_a_human_step_ticket_is_not_startable():
+    rows = [
+        project(1, "Building", "New"),
+        ticket(2, 1, body="Human step: entering a credential"),
+    ]
+
+    assert startable(rows) == []
+
+
+def test_an_unmarked_ticket_is_still_startable():
+    rows = [
+        project(1, "Building", "New"),
+        ticket(2, 1, body="Enter a value supplied through the environment."),
+    ]
+
+    assert [candidate.number for candidate in startable(rows)] == [2]
+
+
 def test_a_ticket_with_an_open_native_blocker_is_not_startable():
     rows = [project(1, "Building", "New"),
             ticket(2, 1, open_blockers=["other/repo#9"])]

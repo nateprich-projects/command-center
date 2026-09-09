@@ -27,7 +27,7 @@ preempt.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent claude --tier escalated --routine-sha 722dbea03c798459cbb67c27fe43bf8091bc7ebcf7adc8be4b4b41a95c476a4b
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha f00eb79dc232826ead5ba9845701c0e8e0e7b79860251e10a329a830346f4ade
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and names
@@ -71,7 +71,7 @@ So before reviewing anything, check the open PRs for:
 - **approved but unmerged** — finish the merge, if it still meets the bar below.
 - **merged but its ticket still open** — close the ticket and check whether its parent has any children left.
 
-`python3 /Users/nateprich/.claude/command-center/prior_run.py <issue-number> --agent claude` shows what a previous
+`python3 /Users/nateprich/.claude/command-center-run/prior_run.py <issue-number> --agent claude` shows what a previous
 run intended, if you need it. Evidence of intent, never of truth.
 
 ## 3. Your PR — escalated only
@@ -139,8 +139,8 @@ it guards passes its own check, and that is exactly the diff worth catching.
 **Record the verdict either way — you do not merge by hand.**
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py review <pr> --verdict approved --ci green
-python3 /Users/nateprich/.claude/command-center/funnel.py merge <pr> --yes
+python3 /Users/nateprich/.claude/command-center-run/funnel.py review <pr> --verdict approved --ci green
+python3 /Users/nateprich/.claude/command-center-run/funnel.py merge <pr> --yes
 ```
 
 `review` stamps your verdict with the commit you actually read. `merge` then
@@ -153,13 +153,13 @@ doing it by hand is what makes an unattended merge impossible to audit later.
 
 **Both hold →** review `approved`, merge, close the ticket, and if that was its
 last open child, post the parent completion note with
-`python3 /Users/nateprich/.claude/command-center/funnel.py comment <parent> --voice agent --body "<what shipped>"`.
+`python3 /Users/nateprich/.claude/command-center-run/funnel.py comment <parent> --voice agent --body "<what shipped>"`.
 Nate accepts the *project*, not each PR.
 
 **Either fails →** record it:
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py review <pr> --verdict rejected --ci <state> --blocking "<what does not match>"
+python3 /Users/nateprich/.claude/command-center-run/funnel.py review <pr> --verdict rejected --ci <state> --blocking "<what does not match>"
 ```
 
 Be specific enough that the next Codex run can act on it without guessing — and
@@ -185,7 +185,7 @@ If nothing escalated was waiting, this run has nothing to do. Finish and stop.
 <summary>The old job two, kept until zcode has run it a few times</summary>
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py brief | jq '.awaiting_breakdown'
+python3 /Users/nateprich/.claude/command-center-run/funnel.py brief | jq '.awaiting_breakdown'
 ```
 
 These are plans Nate has approved — **his writing `Ready` is his answer to "is
@@ -200,7 +200,7 @@ first — the same reason `funnel.py` owns ranking rather than each agent.
 In short: one ticket is one Codex run ending in a PR; split by behaviour rather
 than by layer; every project gets at least one ticket; do not set `Status` or
 `Class` on what you create; and **do not create repositories** — post the
-explanation with `python3 /Users/nateprich/.claude/command-center/funnel.py
+explanation with `python3 /Users/nateprich/.claude/command-center-run/funnel.py
 comment <issue> --voice agent --body "<what is missing>"` and leave repository
 creation to Nate.
 
@@ -228,7 +228,7 @@ directions — a ticket you mark `standard` stays standard even if its prose
 mentions a race condition, because you knew what the words meant.
 
 If the plan is too vague to size, **do not invent the missing decisions.** Post
-what is undecided with `python3 /Users/nateprich/.claude/command-center/funnel.py
+what is undecided with `python3 /Users/nateprich/.claude/command-center-run/funnel.py
 comment <issue> --voice agent --body "<the undecided question>"` and leave it.
 It needs another grilling pass, which is interactive and not yours to do.
 
@@ -240,7 +240,7 @@ It needs another grilling pass, which is interactive and not yours to do.
 one. This is the third job, after review and breakdown, and it is one idea only.
 
 Read the issue first. Then use
-`/Users/nateprich/.claude/command-center/skills/shape/SKILL.md` for the plan
+`/Users/nateprich/.claude/command-center-run/skills/shape/SKILL.md` for the plan
 structure and the `funnel shaped` command. Its general on-demand guidance is
 intentionally superseded here: this scheduled job is the approved unattended
 shaping path for escalated ideas.
@@ -255,7 +255,7 @@ nothing is outstanding.
 Write the plan to a file, then run:
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py shaped <ref> --plan <file>
+python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --plan <file>
 ```
 
 Moving the item to `Shaped` records that a plan exists; **Shaped is not approval**.
@@ -264,7 +264,7 @@ Do not set `Ready`, answer the Shaped gate, or change `Status` or `Class` yourse
 ## 8. Finish, always
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent claude --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>; broke down #<m> into <k> tickets"
+python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent claude --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>; broke down #<m> into <k> tickets"
 ```
 
 `--merged` takes **the PR's number**, not a count of merges — `--merged 96`, never `--merged 1`. It is a field, not prose: unattended merges have to appear in the brief

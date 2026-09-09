@@ -28,7 +28,9 @@ case "$TIER" in
   *) echo "muse-review: tier must be escalated or standard, got '$TIER'" >&2; exit 1 ;;
 esac
 
-REPO="/Users/nateprich/.claude/command-center"
+# The maintained read-only clone (#171, #204), not Nate's working tree: the
+# routine text and the funnel it invokes must come from the same checkout.
+REPO="/Users/nateprich/.claude/command-center-run"
 ROUTINE="$REPO/routines/muse.md"
 # An empty directory on purpose. Muse roots its workspace at the working
 # directory, so this is what it can see. Everything real is reached by absolute

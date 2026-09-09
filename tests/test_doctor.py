@@ -394,6 +394,10 @@ def test_item_consistency_reports_each_contradiction_without_writing(monkeypatch
             repo="owner/repo", number=6, title="Closed parked", url="", state="CLOSED",
             status="Parked",
         ),
+        funnel.Item(
+            repo="owner/repo", number=7, title="Closed ticket", url="", state="CLOSED",
+            parent="owner/repo#99",
+        ),
     ]
     monkeypatch.setattr(
         funnel, "gh_graphql",
@@ -432,6 +436,89 @@ def test_item_consistency_is_silent_for_a_consistent_board():
     result = funnel.check_item_consistency(items)
 
     assert result == funnel.Check("item consistency", True, "", "")
+
+
+def test_item_consistency_reports_an_open_ticket_with_a_merged_pr():
+    ticket = funnel.Item(
+        repo="owner/repo", number=7, title="Merged ticket", url="", state="OPEN",
+        parent="owner/repo#99",
+    )
+
+    result = funnel.check_item_consistency(
+        [ticket],
+        merged_pr_facts=funnel.MergedPRFacts(frozenset([ticket.ref]), False),
+    )
+
+    assert result == funnel.Check(
+        "item consistency", False,
+        "owner/repo#7: open ticket has a merged PR",
+        "",
+    )
+
+
+def test_item_consistency_does_not_report_an_unmerged_ticket():
+    ticket = funnel.Item(
+        repo="owner/repo", number=7, title="Open ticket", url="", state="OPEN",
+        parent="owner/repo#99",
+    )
+
+    result = funnel.check_item_consistency(
+        [ticket],
+        merged_pr_facts=funnel.MergedPRFacts(frozenset(), False),
+    )
+
+    assert result == funnel.Check("item consistency", True, "", "")
+
+
+def test_merged_pr_facts_intersects_one_bounded_repo_scan(monkeypatch):
+    ticket = funnel.Item(
+        repo="owner/repo", number=7, title="Open ticket", url="", state="OPEN",
+        parent="owner/repo#99",
+    )
+    calls = []
+
+    def fake_gh_json(*args):
+        calls.append(args)
+        return [
+            {"headRefName": "ticket/7"},
+            {"headRefName": "feature/not-a-ticket"},
+        ]
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+
+    result = funnel.merged_pr_facts([ticket])
+
+    assert result == funnel.MergedPRFacts(frozenset([ticket.ref]), False)
+    assert len(calls) == 1
+    assert calls[0][0:6] == (
+        "gh", "pr", "list", "--repo", "owner/repo", "--state",
+    )
+    assert calls[0][-3:] == (
+        "headRefName", "--limit", str(funnel.MERGED_PR_SCAN_LIMIT + 1),
+    )
+    assert str(funnel.MERGED_PR_SCAN_LIMIT + 1) in calls[0]
+
+
+def test_merged_pr_scan_truncation_is_visible_in_the_finding(monkeypatch):
+    ticket = funnel.Item(
+        repo="owner/repo", number=7, title="Open ticket", url="", state="OPEN",
+        parent="owner/repo#99",
+    )
+    rows = [{"headRefName": "ticket/7"}]
+    rows.extend(
+        {"headRefName": "feature/{}".format(number)}
+        for number in range(funnel.MERGED_PR_SCAN_LIMIT)
+    )
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: rows)
+
+    facts = funnel.merged_pr_facts([ticket])
+    result = funnel.check_item_consistency([ticket], merged_pr_facts=facts)
+
+    assert facts.truncated
+    assert "open ticket has a merged PR" in result.found
+    assert "merged PR scan truncated after newest {} entries".format(
+        funnel.MERGED_PR_SCAN_LIMIT
+    ) in result.found
 
 
 def test_class_assignment_dump_is_sorted_and_skips_unassigned_items(monkeypatch):
@@ -488,7 +575,9 @@ def test_main_doctor_loads_project_items_for_consistency(monkeypatch):
 
     monkeypatch.setattr(
         funnel, "doctor_checks",
-        lambda items=None: [funnel.Check("local", True, "ok", "")],
+        lambda items=None, merged_pr_facts=None: [
+            funnel.Check("local", True, "ok", "")
+        ],
     )
     monkeypatch.setattr(funnel, "load_items", lambda: loaded)
 
@@ -512,7 +601,9 @@ def test_main_doctor_reports_consistency_load_failure(monkeypatch, capsys):
 def test_main_doctor_returns_one_when_any_check_is_broken(monkeypatch):
     monkeypatch.setattr(
         funnel, "doctor_checks",
-        lambda items=None: [funnel.Check("local", False, "broken", "fix")],
+        lambda items=None, merged_pr_facts=None: [
+            funnel.Check("local", False, "broken", "fix")
+        ],
     )
     monkeypatch.setattr(funnel, "load_items", lambda: [])
 

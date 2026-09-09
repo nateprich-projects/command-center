@@ -64,7 +64,8 @@ def routine_sha(path: os.PathLike) -> str:
 
 def routine_path(agent: str) -> pathlib.Path:
     """The checked-in routine whose pasted copy identifies itself."""
-    return CHECKOUT_ROOT / "routines" / (agent + ".md")
+    filename = "codex-work.md" if agent == "codex" else agent + ".md"
+    return CHECKOUT_ROOT / "routines" / filename
 
 # One small, shared shape for every doctor check. Later doctor tickets add
 # checks to the fixed list without changing the report contract.

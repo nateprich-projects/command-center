@@ -21,9 +21,9 @@ The order is fixed: **review, then breakdown, then shaping**. Review one pull
 request if one is waiting; otherwise break one approved plan into tickets; only
 then shape one standard-tier idea. Never combine jobs in one run.
 
-A pull request waiting for review if there is one; otherwise one approved plan
-broken into tickets; otherwise one standard-tier idea shaped. Never both in the
-same run; do not combine more than one job.
+A pull request is waiting for review if there is one; otherwise one approved
+plan is broken into tickets; otherwise one standard-tier idea is shaped. Never
+combine more than one job in the same run.
 
 **Reviews win because they are further down the funnel.** Bottom-up is the rule
 everywhere here — clear the work closest to shipping before starting more — and a
@@ -39,7 +39,7 @@ asked of it.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha fbf1d5506a372ba569d25660f84da04ab456805b7472612b7569e94393cfddb8
+python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha 207e8f6232bc6ab5b80c301d98426e31d2c6791213919ccc8864d46d25c3571d
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and says

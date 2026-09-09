@@ -8,6 +8,41 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### A brief's real cost was double the projection, because `gh pr list` was never counted
+
+**2026-09-09 · GitHub GraphQL · measured**
+
+Replacing `ticket_pr_facts`'s per-ticket PR lookup with one bounded scan per repo
+(#272 / #297) cut a full `funnel brief`:
+
+| | run 1 | run 2 |
+|---|---|---|
+| per-ticket loop | 230 points | 188 |
+| one bounded scan | 60 points | 47 |
+
+Roughly **209 -> 54, a 74 per cent cut**. Measured as `rateLimit { remaining }`
+immediately before and after each brief, on commit ff1a2cd, with the Codex schedules
+paused so the delta was attributable to nothing else on the shared token.
+
+**The projection said 110 -> 18. Both halves were about half the truth**, and the reason
+is the durable part: that figure came from `rateLimit { cost }` inside the Project query,
+which counts only what goes through `gh_graphql`. `ticket_pr_facts` reaches GitHub
+through `gh pr list` — the `gh` CLI — and that spend is invisible to an in-query `cost`
+field even though it lands on the same 5,000/hour GraphQL budget.
+
+So: **an in-query `rateLimit { cost }` measures the query it is in, not the command.**
+Any command that also shells out to `gh` is under-reported by it, and the per-run counter
+added in #295 inherits exactly this blind spot — it reported an identical "17 points" for
+both the before and after branches while the true costs differed fourfold.
+
+Attributing a whole command needs a `remaining` delta across it, which is only
+trustworthy when nothing else is spending on the token. That makes it a bench
+measurement with the schedules paused, not something a live run can do — and it is why
+the rule against differencing `remaining` still stands everywhere else.
+
+**Also confirmed: `reviews` comes back from a PR list query**, so no per-ticket round trip
+is needed to read it.
+
 ### REST `/rate_limit` and GraphQL's own `rateLimit` are different counters, not a lag
 
 **2026-09-08, again 2026-09-09 · GitHub API · measured**

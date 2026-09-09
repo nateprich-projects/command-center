@@ -774,6 +774,28 @@ def _needs_nate_sections(plan_body: str) -> List[str]:
     return sections
 
 
+def shaped_plan_status(plan_body: str) -> Tuple[str, str]:
+    """Return the status and reason earned by a newly recorded plan.
+
+    The all-clear is deliberately narrow: a recognised Needs section must be
+    present, explicitly empty, and free of authority signals that contradict
+    its claim. Everything else stays at Shaped with a reason the caller can
+    print.
+    """
+    sections = _needs_nate_sections(plan_body)
+    if not sections:
+        return "Shaped", "plan has no ## Needs you section"
+    if any(section.strip().lower() not in EMPTY_NEEDS_NATE
+           for section in sections):
+        return "Shaped", "plan has an open question"
+    signals = needs_nate_signals(plan_body)
+    if signals:
+        return "Shaped", "plan contains authority signal: {}".format(
+            ", ".join(signals)
+        )
+    return "Ready", "plan declares nothing open"
+
+
 def plan_needs_nate(plan_body: str) -> bool:
     """Whether a plan's Needs Nate/Needs you section asks for Nate.
 
@@ -784,13 +806,7 @@ def plan_needs_nate(plan_body: str) -> bool:
     content. An otherwise empty section also fails closed when the plan body
     contains an authority signal that contradicts the section's claim.
     """
-    sections = _needs_nate_sections(plan_body)
-    if not sections:
-        return True
-    if any(section.strip().lower() not in EMPTY_NEEDS_NATE
-           for section in sections):
-        return True
-    return bool(needs_nate_signals(plan_body))
+    return shaped_plan_status(plan_body)[0] == "Shaped"
 
 
 def plan_is_escalated(plan_body: str) -> List[str]:
@@ -3661,8 +3677,9 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
 
     Writes the plan into the issue body — `plan.md` puts it there through Ideas
     and Shaped, and it only becomes a repo's own `plan.md` at the Ready gate —
-    then moves the item to `Shaped`, which is what asks Nate the next gate: is
-    the plan good?
+    then moves the item to `Ready` only when the plan's explicit Needs section
+    declares nothing open. Otherwise it stays at `Shaped`, which asks Nate the
+    next gate: is the plan good?
     """
     item = find(items, ref)
     try:
@@ -3688,12 +3705,17 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
 
     if not item.item_id:
         raise GitHubError("{} is not in the Project".format(item.ref))
+    status, reason = shaped_plan_status(plan)
     gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
-               field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Shaped"))
+               field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, status))
     subprocess.run(["gh", "issue", "edit", str(item.number), "--repo", item.repo,
                     "--remove-label", "needs-shaping"], capture_output=True)
-    print("{} → Shaped\n{}".format(item.ref, item.url))
-    print("\nIt now waits on you: is the plan good? Answer by moving it to Ready.")
+    print("{} → {}\n{}".format(item.ref, status, item.url))
+    if status == "Ready":
+        print("advanced to Ready: {}".format(reason))
+    else:
+        print("held at Shaped: {}".format(reason))
+        print("\nIt now waits on you: is the plan good? Answer by moving it to Ready.")
     return 0
 
 

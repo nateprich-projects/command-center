@@ -40,85 +40,25 @@ string, so normalising it makes every call prompt — and a scheduled run cannot
 answer a prompt. Treat any such rewrite outside Codex's own configuration as a bug
 and undo it before continuing. `tests/test_guardrails.py` fails on it.
 
-## 1. Record that you started
+## 1. Start, check the budget, and get one ticket
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/heartbeat.py start --agent codex
+python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent codex --tier standard
 ```
 
-**It prints a run id. Keep it, and pass it to every `finish` below as
-`--run <id>`.** Without it, `finish` has to work out which run it belongs to
-from the records, and when two runs overlap it cannot — it then records the
-outcome as unattributable rather than guessing, which is safe but loses which
-run this was. The id is a literal string, so the command still matches the
-permission rule; never wrap it in `RUN=$(...)`, which is unpredictable and
-caused a prompt storm.
+**One call does all of it**: records the heartbeat, checks the budget, finds the
+next ticket, and claims it. It always prints JSON. Keep its `run` value and pass
+it to every `finish` below as `--run <id>`.
 
-**Every exit path below finishes it.** A start without a finish is
-read by the watchdog as a run that died, so never leave one dangling on purpose.
+- **`"do": "stop"`** — finish immediately. `gate: over` means
+  `skipped-over-pace`; `gate: unknown` means `skipped-usage-unknown`; otherwise
+  use `nothing-to-do`.
+- **`"do": "ticket"`** — `work` names the one ticket already claimed for this
+  run. Do not call `claim` again.
 
-**If the heartbeat prints a warning about GitHub being unreachable, keep going.**
-It spools the record locally and a later run pushes it. Instrumentation does not
-gate the work it instruments — an earlier version stopped the run here, and left
-no trace of having stopped, which is indistinguishable from never running.
-
-## 2. Check the budget, and believe it
-
-```bash
-python3 /Users/nateprich/.claude/command-center/usage.py gate codex
-```
-
-**Some schedules append `--idle` to that line, and yours already says which.**
-It adds a second condition: Nate must not have touched the five-hour window at
-all. That is a *proxy* for him being at the keyboard, and it belongs only on
-schedules that fire while he might be — the frequent daytime one. A schedule that
-runs at 2am already knows he is away, and applying the proxy there would refuse
-legitimate overnight work, because an evening ChatGPT session still shows in the
-window hours after he has gone to bed. `scripts/sync_codex_automations.py` adds
-the flag to the schedules that need it; do not add or remove it yourself.
-
-- **exit 1** — refused. **Read the last line to see which refusal it was**, because they are different facts and the record should say which:
-  - an `idle` line reading `OVER` means Nate is using the five-hour window right now. Finish with `--outcome skipped-nate-active` and **stop**.
-  - otherwise it is the budget. Finish with `--outcome skipped-over-pace` and **stop**.
-
-  Both are healthy outcomes, not failures. Do not argue with either, and do not do "just a small thing" first. On an always-on hourly schedule most runs end here, and that is the design working.
-- **exit 2** — usage could not be read. Finish with `skipped-usage-unknown` and **stop**. A run that cannot read its budget does not work.
-- **exit 0** — continue.
-
-Run this *after* your first turn, never before. The reading is refreshed by this
-very session, and a stale reading always understates usage.
-
-## 3. Ask what to work on. Do not decide yourself
-
-```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py next --tier standard
-```
-
-**`--tier` says what this engine is allowed to work, and it is fixed by the
-schedule, not chosen by you.** This automation runs the cheap default engine, so
-it asks for `standard` work and the funnel walks past anything needing the
-escalated one — auth, credentials, migrations, destructive operations,
-concurrency, or a ticket a previous attempt already failed. A separate schedule
-runs the escalated engine and passes `--tier escalated`.
-
-**Do not change the tier, and do not argue that you could handle an escalated
-ticket.** A model asked whether a task is too hard for it answers from
-confidence rather than from risk, which is the whole reason this is decided
-outside the model.
-
-**You must not rank, reorder, or second-guess this.** If it looks wrong, say so
-in your finish note — do not quietly pick something else. Two agents each
-applying the rules from prose drift apart silently, and both produce
-plausible-looking lists.
-
-- **exit 1, "lock held"** — finish with `skipped-locked` and stop.
-- **exit 1, "no ... work waiting"** — finish with `nothing-to-do` and stop.
-  Healthy: there is work, and none of it is yours to take. A tier means *only*
-  that tier in both directions — the cheap engine walks past risky tickets, and
-  the expensive one walks past ordinary ones rather than spending its quota on
-  work the cheap schedule is already doing.
-- **exit 1, no work** — finish with `nothing-to-do` and stop.
-- **exit 0** — you get one ticket as JSON. That is your work.
+The schedule fixes `--tier`; do not change it or second-guess the ordering. The
+standard lane skips work needing the escalated engine. The `--idle` flag is added
+only to schedules that need the presence proxy.
 
 If the ticket is not workable because a prerequisite named by the ticket has not
 landed, that is a **decline**, not a reason to stop the run. Keep the declined
@@ -144,17 +84,12 @@ not ask for a fourth candidate and do not persist a decline or reorder the queue
 If a re-ask returns a workable ticket, claim that ticket and continue with it;
 the declined tickets receive no implementation work or PR in this run.
 
-## 4. Take the lock
+The replacement returned by `next` is not claimed by that read-only command, so
+run `claim` before working a replacement. If it refuses, finish with
+`skipped-locked` and stop. If it reports taking over a stale claim, note that in
+your finish note — one takeover is noise, three in a week means runs are dying.
 
-```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py claim <issue-number>
-```
-
-If it refuses, finish with `skipped-locked` and stop. If it reports taking over a
-stale claim, note that in your finish note — one takeover is noise, three in a
-week means runs are dying.
-
-## 5. Look for a previous attempt before starting fresh
+## 2. Look for a previous attempt before starting fresh
 
 ```bash
 python3 /Users/nateprich/.claude/command-center/prior_run.py <issue-number>
@@ -167,7 +102,7 @@ which the diff cannot. Three rules:
 - The match is **heuristic**. A session that merely mentioned the ticket looks the same as one that worked it. Check the `cwd` and timing.
 - If it reports **stranded work** in a previous directory, that work exists only there. Each Codex session gets a fresh directory, so you did not inherit it. Rescue it or deliberately redo it — do not assume it is gone and do not assume it is present.
 
-## 6. Do the work
+## 3. Do the work
 
 **Clone first. Never work in `~/.claude/command-center`.** That is Nate's own
 working tree, and your sandbox has no write access to it by design: this is a
@@ -257,7 +192,7 @@ If you discover one:
    assigned engineering ticket was not completed; it does not authorize a
    plausible artefact to merge.
 
-## 7. Open a pull request
+## 4. Open a pull request
 
 Say what you did, what you deliberately did not do, and anything you are unsure
 about. It will be reviewed against `plan.md`, so if you departed from the plan,
@@ -265,7 +200,7 @@ say so plainly — an unflagged departure fails review and wastes another run.
 
 Do not merge it.
 
-## 8. Finish, always
+## 5. Finish, always
 
 ```bash
 python3 /Users/nateprich/.claude/command-center/funnel.py release <issue-number>

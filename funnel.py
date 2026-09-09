@@ -1320,6 +1320,35 @@ def next_ticket(items: Sequence[Item], now: datetime,
     return None
 
 
+def next_ticket_for_tier(items: Sequence[Item], now: datetime,
+                         tier: Optional[str] = None,
+                         blocked: Optional[Set[str]] = None,
+                         excluded: Optional[Set[str]] = None) -> Optional[Item]:
+    """Return the first shared-order ticket belonging to ``tier``.
+
+    Tier filtering has to happen by asking ``next_ticket`` repeatedly rather
+    than by filtering its input first. The latter would hide other in-motion
+    tickets from the WIP cap and could let a standard caller exceed it while
+    walking past escalated work. Reusing ``next_ticket`` also keeps Broken
+    preemption and all other ordering rules in one place.
+    """
+    excluded = set(excluded or ())
+    while True:
+        ticket = next_ticket(
+            items, now, blocked=blocked, excluded=excluded
+        )
+        if ticket is None or tier is None:
+            return ticket
+
+        reasons = escalation_reasons(
+            ticket.title, _ticket_body(ticket.repo, ticket.number)
+        )
+        wanted = bool(reasons) if tier == "escalated" else not reasons
+        if wanted:
+            return ticket
+        excluded.add(ticket.ref)
+
+
 def rejected_merges(items: Iterable[Item], now: datetime) -> Dict[str, object]:
     """Merges Nate checked and found broken.
 
@@ -3173,32 +3202,9 @@ def cmd_next(
 ) -> int:
     excluded = excluded or frozenset()
     blocked = awaiting_review(items)
-    ticket = next_ticket(
-        items, now, blocked=blocked, excluded=excluded
+    ticket = next_ticket_for_tier(
+        items, now, tier=tier, blocked=blocked, excluded=excluded
     )
-
-    # A caller declaring a tier gets only work of that tier — in both directions.
-    #
-    # `standard` walks past escalated tickets rather than refusing outright, or
-    # the queue would stall behind one risky ticket until the other schedule came
-    # round. `escalated` walks past *ordinary* ones, which is the same rule
-    # applied the other way: the expensive engine is reserved for work that needs
-    # it, and idling costs nothing because the cheap continuous schedule is
-    # already working the ordinary queue, including overnight.
-    reasons: List[str] = []
-    if ticket is not None and tier:
-        for candidate in startable(items, awaiting_review=blocked):
-            if candidate.ref in excluded:
-                continue
-            found = escalation_reasons(
-                candidate.title, _ticket_body(candidate.repo, candidate.number))
-            wanted = bool(found) if tier == "escalated" else not found
-            if wanted:
-                ticket, reasons = candidate, found
-                break
-        else:
-            print("nothing — no {} work waiting".format(tier), file=sys.stderr)
-            return 1
 
     if ticket is None:
         holder = lock_holder(items, now)
@@ -3209,6 +3215,8 @@ def cmd_next(
                 ),
                 file=sys.stderr,
             )
+        elif tier:
+            print("nothing — no {} work waiting".format(tier), file=sys.stderr)
         return 1
     print(json.dumps(item_json(ticket, now, {i.ref: i for i in items}), indent=2))
     return 0
@@ -3286,6 +3294,38 @@ def find(items: Sequence[Item], ref: str) -> Item:
     raise GitHubError("no funnel item matches {}".format(ref))
 
 
+def claim_ticket(items: List[Item], now: datetime, target: Item) -> Optional[str]:
+    """Write a ticket claim, or return the reason it must be refused."""
+    running = in_motion(items, now)
+
+    taken = next((i for i in running if i.ref == target.ref), None)
+    if taken is not None and taken.in_motion_since != target.in_motion_since:
+        return "refused — {} is already claimed".format(target.ref)
+
+    if taken is None and len(running) >= WIP_LIMIT:
+        by_ref = {i.ref: i for i in items}
+        preempts = (
+            effective_class(target, by_ref) == "Broken"
+            and not any(
+                effective_class(item, by_ref) == "Broken" for item in running
+            )
+        )
+        if not preempts:
+            return "refused — {} tickets already in motion, limit is {} ({})".format(
+                len(running), WIP_LIMIT,
+                ", ".join(i.ref for i in running))
+
+    stale = [i for i in stale_locks(items, now) if i.ref != target.ref]
+    for item in stale:
+        # Self-correcting, no human in the loop. Every takeover is a line in the
+        # brief: one is noise, three in a week means runs are dying.
+        write_lock(item, "")
+        print("took over stale claim on {}".format(item.ref), file=sys.stderr)
+
+    write_lock(target, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    return None
+
+
 def cmd_claim(items: List[Item], now: datetime, ref: str) -> int:
     """Claim a ticket, or refuse. Two separate refusals, deliberately.
 
@@ -3301,30 +3341,10 @@ def cmd_claim(items: List[Item], now: datetime, ref: str) -> int:
     caller distinguishes by exit code.
     """
     target = find(items, ref)
-    running = in_motion(items, now)
-
-    taken = next((i for i in running if i.ref == target.ref), None)
-    if taken is not None and taken.in_motion_since != target.in_motion_since:
-        print("refused — {} is already claimed".format(target.ref), file=sys.stderr)
+    refusal = claim_ticket(items, now, target)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
         return 1
-
-    if taken is None and len(running) >= WIP_LIMIT:
-        print(
-            "refused — {} tickets already in motion, limit is {} ({})".format(
-                len(running), WIP_LIMIT,
-                ", ".join(i.ref for i in running)),
-            file=sys.stderr,
-        )
-        return 1
-
-    stale = [i for i in stale_locks(items, now) if i.ref != target.ref]
-    for item in stale:
-        # Self-correcting, no human in the loop. Every takeover is a line in the
-        # brief: one is noise, three in a week means runs are dying.
-        write_lock(item, "")
-        print("took over stale claim on {}".format(item.ref), file=sys.stderr)
-
-    write_lock(target, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
     print(target.url)
     return 0
 
@@ -4052,34 +4072,6 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     return None
 
 
-def _next_ticket_for_tier(items: Sequence[Item], now: datetime,
-                          tier: Optional[str],
-                          blocked: Optional[Set[str]] = None) -> Optional[Item]:
-    """Return the shared next-ticket result for one engine tier.
-
-    ``next_ticket`` owns queue order, the WIP cap and Broken preemption. Tier
-    filtering is expressed as per-call exclusions so this path cannot grow a
-    second ordering implementation. ``blocked`` is supplied by callers that
-    already fetched the open-PR index; omitting it keeps the helper convenient
-    for the begin path.
-    """
-    if blocked is None:
-        blocked = awaiting_review(items)
-
-    excluded: Set[str] = set()
-    if tier is not None:
-        for candidate in startable(items, awaiting_review=blocked):
-            body = candidate.body
-            if body is None:
-                body = _ticket_body(candidate.repo, candidate.number)
-            reasons = escalation_reasons(candidate.title, body)
-            wanted = bool(reasons) if tier == "escalated" else not reasons
-            if not wanted:
-                excluded.add(candidate.ref)
-
-    return next_ticket(items, now, blocked=blocked, excluded=excluded)
-
-
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
               routine_sha_literal: Optional[str] = None) -> int:
@@ -4160,34 +4152,37 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # passed a check.
         out["unmetered"] = True
     if agent == "codex":
-        # Codex is the implementation lane. Keep its selection on the shared
-        # next-ticket path, then claim the result in this same command so there
-        # is no model-turn gap between reading and locking a ticket.
         blocked = awaiting_review(items)
-        ticket = _next_ticket_for_tier(items, now, tier, blocked=blocked)
+        ticket = next_ticket_for_tier(
+            items, now, tier=tier, blocked=blocked
+        )
         if ticket is None:
             holder = lock_holder(items, now)
-            out.update(
-                do="stop",
-                why=(
-                    "lock held by {} (claimed {} ago)".format(
-                        holder.ref, humanise(now - holder.in_motion_since)
-                    )
-                    if holder is not None
-                    else "nothing to work"
-                ),
-            )
+            if holder is not None:
+                why = "nothing — lock held by {} (claimed {} ago)".format(
+                    holder.ref, humanise(now - holder.in_motion_since)
+                )
+            elif tier:
+                why = "nothing — no {} work waiting".format(tier)
+            else:
+                why = "nothing to do"
+            out.update(do="stop", why=why)
         else:
-            write_lock(ticket, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
-            out.update(
-                do="ticket",
-                work={
-                    "ref": ticket.ref,
-                    "repo": ticket.repo,
-                    "url": ticket.url,
-                    "title": ticket.title,
-                },
-            )
+            refusal = claim_ticket(items, now, ticket)
+            if refusal is not None:
+                out.update(do="stop", why=refusal)
+            else:
+                out.update(
+                    do="ticket",
+                    work=item_json(ticket, now, {i.ref: i for i in items}),
+                )
+        print(json.dumps(out, indent=2))
+        return 0
+
+    queue = review_queue(items, tier)
+    if queue:
+        out.update(do="review", work=queue[0])
+
     else:
         queue = review_queue(items, tier)
         if queue:

@@ -42,6 +42,135 @@ def _begin(monkeypatch, capsys, *, breakdown):
     return json.loads(capsys.readouterr().out)
 
 
+def _ticket(number, parent, *, body="Risk: standard", klass="Improve",
+            in_motion_since=None):
+    project = funnel.Item(
+        repo="nateprich/example",
+        number=parent,
+        title="Project {}".format(parent),
+        url="https://github.com/nateprich/example/issues/{}".format(parent),
+        state="OPEN",
+        status="Building",
+        klass=klass,
+        children_total=1,
+    )
+    ticket = funnel.Item(
+        repo=project.repo,
+        number=number,
+        title="Ticket {}".format(number),
+        url="https://github.com/nateprich/example/issues/{}".format(number),
+        state="OPEN",
+        body=body,
+        parent=project.ref,
+        item_id="item-{}".format(number),
+        in_motion_since=in_motion_since,
+    )
+    return project, ticket
+
+
+def _codex_begin(monkeypatch, capsys, items, *, tier="standard"):
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+    bodies = {item.number: item.body for item in items}
+    monkeypatch.setattr(
+        funnel, "_ticket_body", lambda repo, number: bodies.get(number) or ""
+    )
+    writes = []
+    monkeypatch.setattr(
+        funnel, "write_lock", lambda item, value: writes.append((item.ref, value))
+    )
+    assert funnel.cmd_begin(items, NOW, "codex", tier, False) == 0
+    return json.loads(capsys.readouterr().out), writes
+
+
+def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(7, 6)
+    items = [project, ticket]
+    events = []
+
+    def heartbeat(*args, **kwargs):
+        events.append("heartbeat")
+        return SimpleNamespace(stdout="run-id\n")
+
+    monkeypatch.setattr(funnel.subprocess, "run", heartbeat)
+    monkeypatch.setattr(usage, "read_agent", lambda agent, timestamp: {"windows": {}})
+    monkeypatch.setattr(
+        usage, "pace", lambda reading, timestamp, provider: {"over_pace": False}
+    )
+    monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+    monkeypatch.setattr(
+        funnel,
+        "next_ticket_for_tier",
+        lambda *args, **kwargs: events.append("next") or ticket,
+    )
+    monkeypatch.setattr(
+        funnel, "write_lock", lambda item, value: events.append("claim")
+    )
+
+    assert funnel.cmd_begin(items, NOW, "codex", "standard", False) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert events == ["heartbeat", "next", "claim"]
+
+
+def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):
+    standard_project, standard = _ticket(8, 9, body="Risk: standard")
+    escalated_project, escalated = _ticket(
+        10, 11, body="Risk: escalated — concurrency"
+    )
+    result, writes = _codex_begin(
+        monkeypatch, capsys,
+        [escalated_project, escalated, standard_project, standard],
+        tier="standard",
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == standard.ref
+    assert [ref for ref, value in writes if value] == [standard.ref]
+
+
+def test_codex_begin_respects_the_wip_limit(monkeypatch, capsys):
+    items = []
+    for index in range(funnel.WIP_LIMIT):
+        project, ticket = _ticket(
+            20 + index * 2, 21 + index * 2,
+            in_motion_since=NOW,
+        )
+        items.extend((project, ticket))
+    project, ticket = _ticket(40, 41)
+    items.extend((project, ticket))
+
+    result, writes = _codex_begin(monkeypatch, capsys, items)
+
+    assert result["do"] == "stop"
+    assert "lock held" in result["why"]
+    assert writes == []
+
+
+def test_codex_begin_allows_broken_preemption_at_the_wip_limit(
+    monkeypatch, capsys
+):
+    items = []
+    for index in range(funnel.WIP_LIMIT):
+        project, ticket = _ticket(
+            50 + index * 2, 51 + index * 2,
+            in_motion_since=NOW,
+        )
+        items.extend((project, ticket))
+    project, ticket = _ticket(70, 71, klass="Broken")
+    items.extend((project, ticket))
+
+    result, writes = _codex_begin(monkeypatch, capsys, items)
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert [ref for ref, value in writes if value] == [ticket.ref]
+
+
 def test_begin_stop_reason_omits_breakdown_when_it_was_not_requested(
     monkeypatch, capsys
 ):
@@ -175,145 +304,3 @@ def test_shape_offers_only_the_first_idea_matching_the_run_tier(
     }
     assert len(calls) == 1
 
-
-def _ticket_project(number, klass="New", *, in_motion_since=None):
-    return funnel.Item(
-        repo="nateprich/beta",
-        number=number,
-        title="project {}".format(number),
-        url="https://github.com/nateprich/beta/issues/{}".format(number),
-        state="OPEN",
-        status="Building",
-        klass=klass,
-        status_since=NOW,
-        children_total=1,
-        in_motion_since=in_motion_since,
-    )
-
-
-def _ticket(number, parent, body="Risk: standard", *, in_motion_since=None):
-    return funnel.Item(
-        repo="nateprich/beta",
-        number=number,
-        title="ticket {}".format(number),
-        url="https://github.com/nateprich/beta/issues/{}".format(number),
-        state="OPEN",
-        body=body,
-        parent="nateprich/beta#{}".format(parent),
-        in_motion_since=in_motion_since,
-    )
-
-
-def _allow_codex_begin(monkeypatch):
-    _allow_begin(monkeypatch)
-    monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
-
-
-def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
-    monkeypatch, capsys
-):
-    ticket = _ticket(2, 1)
-    rows = [_ticket_project(1), ticket]
-    events = []
-
-    def start(*args, **kwargs):
-        events.append("heartbeat")
-        return SimpleNamespace(stdout="run-id\n")
-
-    monkeypatch.setattr(funnel.subprocess, "run", start)
-    monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
-    monkeypatch.setattr(
-        funnel,
-        "next_ticket",
-        lambda items, now, **kwargs: events.append("next") or ticket,
-    )
-    monkeypatch.setattr(
-        funnel,
-        "write_lock",
-        lambda item, value: events.append(("claim", item.ref, value)),
-    )
-
-    assert funnel.cmd_begin(rows, NOW, "codex", "standard", False) == 0
-    result = json.loads(capsys.readouterr().out)
-
-    assert result["do"] == "ticket"
-    assert result["work"]["ref"] == ticket.ref
-    assert events == [
-        "heartbeat",
-        "next",
-        ("claim", ticket.ref, "2026-09-05T12:00:00Z"),
-    ]
-
-
-def test_codex_begin_honours_the_run_tier(monkeypatch, capsys):
-    rows = [
-        _ticket_project(1),
-        _ticket(2, 1, body="Risk: escalated"),
-        _ticket_project(3),
-        _ticket(4, 3, body="Risk: standard"),
-    ]
-    claims = []
-    _allow_codex_begin(monkeypatch)
-    monkeypatch.setattr(
-        funnel, "write_lock", lambda item, value: claims.append(item.ref)
-    )
-
-    assert funnel.cmd_begin(rows, NOW, "codex", "standard", False) == 0
-    result = json.loads(capsys.readouterr().out)
-
-    assert result["do"] == "ticket"
-    assert result["work"]["ref"] == rows[3].ref
-    assert claims == [rows[3].ref]
-
-
-def test_codex_begin_stops_at_the_wip_limit(monkeypatch, capsys):
-    rows = []
-    claimed_at = NOW.replace(hour=11, minute=55)
-    for index in range(funnel.WIP_LIMIT):
-        parent = 100 + index
-        rows.extend([
-            _ticket_project(parent, in_motion_since=None),
-            _ticket(200 + index, parent, in_motion_since=claimed_at),
-        ])
-    rows.extend([_ticket_project(1), _ticket(2, 1)])
-    claims = []
-    _allow_codex_begin(monkeypatch)
-    monkeypatch.setattr(
-        funnel, "write_lock", lambda item, value: claims.append(item.ref)
-    )
-
-    assert funnel.cmd_begin(rows, NOW, "codex", "standard", False) == 0
-    result = json.loads(capsys.readouterr().out)
-
-    assert result["do"] == "stop"
-    assert "lock held by" in result["why"]
-    assert claims == []
-
-
-def test_codex_begin_allows_broken_preemption_at_the_wip_limit(
-    monkeypatch, capsys
-):
-    rows = []
-    claimed_at = NOW.replace(hour=11, minute=55)
-    for index in range(funnel.WIP_LIMIT):
-        parent = 100 + index
-        rows.extend([
-            _ticket_project(parent, in_motion_since=None),
-            _ticket(200 + index, parent, in_motion_since=claimed_at),
-        ])
-    rows.extend([
-        _ticket_project(1, klass="Broken"),
-        _ticket(2, 1, body="Risk: standard"),
-    ])
-    claims = []
-    _allow_codex_begin(monkeypatch)
-    monkeypatch.setattr(
-        funnel, "write_lock", lambda item, value: claims.append(item.ref)
-    )
-
-    assert funnel.cmd_begin(rows, NOW, "codex", "standard", False) == 0
-    result = json.loads(capsys.readouterr().out)
-
-    assert result["do"] == "ticket"
-    assert result["work"]["ref"] == rows[-1].ref
-    assert claims == [rows[-1].ref]

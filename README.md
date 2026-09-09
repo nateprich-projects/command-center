@@ -23,6 +23,7 @@ ranks anything itself.
 | `funnel doctor` | Check the local install and report actionable failures |
 | `funnel park <ref> --reason "<why>"` | Stop a project and preserve the reason |
 | `funnel comment <ref> --body "<text>" --voice <voice>` | Post a comment with explicit provenance |
+| `funnel comment <ref> --blocked-on N [--blocked-on M] --because "<reason>" --voice <voice>` | Post a canonical block comment |
 
 ## Documentation
 

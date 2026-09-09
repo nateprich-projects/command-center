@@ -3938,6 +3938,32 @@ def _parking_reason(value: str) -> str:
     return reason
 
 
+def _comment_reason(value: str) -> str:
+    """Reject blank reasons for canonical blocked comments during parsing."""
+    reason = value.strip()
+    if not reason:
+        raise argparse.ArgumentTypeError("a non-empty block reason is required")
+    return reason
+
+
+def _blocked_reference(value: str) -> str:
+    """Normalise one issue number for the strict block-comment header."""
+    reference = value.strip()
+    if reference.startswith("#"):
+        reference = reference[1:]
+    if not reference.isdigit() or int(reference) < 1:
+        raise argparse.ArgumentTypeError(
+            "a positive issue number is required for --blocked-on"
+        )
+    return reference
+
+
+def _blocked_comment_body(blocked_on: Sequence[str], because: str) -> str:
+    """Render the block-comment header owned by ``BLOCK_COMMENT_RE``."""
+    references = " and ".join("#{}".format(number) for number in blocked_on)
+    return "**Blocked on {}:** {}".format(references, because)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -4025,9 +4051,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--voice", required=True, choices=PROVENANCE_VOICES,
         help="who the comment speaks for",
     )
-    body = comment.add_mutually_exclusive_group(required=True)
-    body.add_argument("--body", help="comment text")
-    body.add_argument("--body-file", help="file containing the comment text")
+    comment_body = comment.add_mutually_exclusive_group(required=True)
+    comment_body.add_argument("--body", help="comment text")
+    comment_body.add_argument("--body-file", help="file containing the comment text")
+    comment_body.add_argument(
+        "--blocked-on", action="append", type=_blocked_reference, metavar="N",
+        help="post a canonical block header; repeat for multiple issue numbers",
+    )
+    comment.add_argument(
+        "--because", type=_comment_reason,
+        help="reason appended to a canonical block header (requires --blocked-on)",
+    )
     comment.add_argument(
         "--run", default=None,
         help="heartbeat run id; otherwise infer a unique open local start",
@@ -4085,6 +4119,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     reject.add_argument("--note", default=None, help="what is broken")
     args = parser.parse_args(argv)
 
+    if args.command == "comment":
+        if args.blocked_on and args.because is None:
+            parser.error("--because is required with --blocked-on")
+        if args.because is not None and not args.blocked_on:
+            parser.error("--because requires --blocked-on")
+
     now = datetime.now(timezone.utc)
     # Doctor keeps its fixed checks runnable when the Project cannot be loaded;
     # the data-dependent consistency check is added when that read succeeds.
@@ -4106,7 +4146,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_park(items, now, args.ref, args.reason,
                             args.run, args.agent)
         if args.command == "comment":
-            body = args.body
+            if args.blocked_on:
+                body = _blocked_comment_body(args.blocked_on, args.because)
+            else:
+                body = args.body
             if args.body_file:
                 try:
                     body = pathlib.Path(args.body_file).read_text()

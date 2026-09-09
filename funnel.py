@@ -1147,13 +1147,20 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
 
 
 def next_ticket(items: Sequence[Item], now: datetime,
-                blocked: Optional[Set[str]] = None) -> Optional[Item]:
+                blocked: Optional[Set[str]] = None,
+                excluded: Optional[Set[str]] = None) -> Optional[Item]:
     """The single ticket Codex should work, or None.
 
     Returns None when the funnel is at its work-in-progress limit. A Broken
-    ticket may start anyway; that is the one sanctioned preemption.
+    ticket may start anyway; that is the one sanctioned preemption. `excluded`
+    is a per-call filter for a caller that has already declined a candidate;
+    it never changes the queue or persists any state.
     """
-    queue = startable(items, awaiting_review=blocked)
+    excluded = excluded or frozenset()
+    queue = [
+        item for item in startable(items, awaiting_review=blocked)
+        if item.ref not in excluded
+    ]
     if not queue:
         return None
 
@@ -2803,9 +2810,17 @@ def cmd_queue(items: List[Item], now: datetime) -> int:
     return 0
 
 
-def cmd_next(items: List[Item], now: datetime, tier: Optional[str] = None) -> int:
+def cmd_next(
+    items: List[Item],
+    now: datetime,
+    tier: Optional[str] = None,
+    excluded: Optional[Set[str]] = None,
+) -> int:
+    excluded = excluded or frozenset()
     blocked = awaiting_review(items)
-    ticket = next_ticket(items, now, blocked=blocked)
+    ticket = next_ticket(
+        items, now, blocked=blocked, excluded=excluded
+    )
 
     # A caller declaring a tier gets only work of that tier — in both directions.
     #
@@ -2818,6 +2833,8 @@ def cmd_next(items: List[Item], now: datetime, tier: Optional[str] = None) -> in
     reasons: List[str] = []
     if ticket is not None and tier:
         for candidate in startable(items, awaiting_review=blocked):
+            if candidate.ref in excluded:
+                continue
             found = escalation_reasons(
                 candidate.title, _ticket_body(candidate.repo, candidate.number))
             wanted = bool(found) if tier == "escalated" else not found
@@ -3932,6 +3949,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="what this engine is allowed to work. `standard` skips tickets "
              "needing the escalated engine; `escalated` may take anything. "
              "Declared by the routine, never by the model.")
+    nxt.add_argument(
+        "--not", dest="excluded", action="append", default=[], metavar="<ref>",
+        help="exclude a candidate for this call; repeat for multiple refs",
+    )
     sub.add_parser("brief", help="JSON for the /funnel skill and the morning brief")
     sub.add_parser("ideas", help="captured ideas, flagged ones first")
     sub.add_parser(
@@ -4121,7 +4142,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "merge":
             return cmd_merge(items, now, args.repo, args.pr, args.confirmed)
         if args.command == "next":
-            return cmd_next(items, now, tier=getattr(args, "tier", None))
+            return cmd_next(
+                items,
+                now,
+                tier=getattr(args, "tier", None),
+                excluded=set(getattr(args, "excluded", [])),
+            )
         if args.command == "brief":
             return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
         return {"queue": cmd_queue, "brief": cmd_brief}[args.command](

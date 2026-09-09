@@ -5714,6 +5714,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # passed a check.
         out["unmetered"] = True
 
+    auto_closed = reconcile_auto_closeable_projects(items)
+    if auto_closed:
+        out["auto_closed"] = auto_closed
+
     if agent == "codex":
         cleared = clear_satisfied_blocks(
             items, now, run=out.get("run"), agent=agent
@@ -5997,14 +6001,101 @@ def closed_itself_comment(tickets: Sequence[Item], drift: Sequence[str]) -> str:
     )
 
 
+def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
+                            ) -> bool:
+    """Whether a project has earned the funnel's unattended close.
+
+    ``funnel merge`` sees the Project summary before GitHub closes the ticket,
+    so it supplies the post-merge child count. Every other caller uses the
+    count already loaded on the project.
+    """
+    completed = item.children_done if children_done is None else children_done
+    return (
+        item.parent is None
+        and item.state == "OPEN"
+        and item.status == "Building"
+        and item.klass in SELF_APPROVABLE_CLASSES
+        and item.children_total > 0
+        and completed == item.children_total
+        and not item.carried_human_step
+    )
+
+
+def _close_auto_closeable_project(items: Sequence[Item], project: Item,
+                                  *, children_done: Optional[int] = None
+                                  ) -> bool:
+    """Move one eligible project to Done, close it, and record its marker."""
+    if not _auto_closeable_project(project, children_done=children_done):
+        return False
+    if not project.item_id:
+        raise GitHubError(
+            "{} is not in the Project; cannot auto-close it".format(project.ref)
+        )
+
+    drift = drift_since_approval(project)
+    tickets = [item for item in items if item.parent == project.ref]
+    tickets.sort(key=lambda item: (item.repo, item.number))
+
+    gh_graphql(
+        SET_FIELD,
+        project=PROJECT_ID,
+        item=project.item_id,
+        field=STATUS_FIELD_ID,
+        option=_option_id(STATUS_FIELD_ID, "Done"),
+    )
+
+    close = subprocess.run(
+        ["gh", "issue", "close", str(project.number), "--repo", project.repo,
+         "--reason", "completed"],
+        capture_output=True, text=True,
+    )
+    if close.returncode != 0:
+        raise GitHubError(
+            "could not auto-close {}: {}".format(
+                project.ref, close.stderr.strip()
+            )
+        )
+
+    comment = subprocess.run(
+        ["gh", "issue", "comment", str(project.number), "--repo", project.repo,
+         "--body", closed_itself_comment(tickets, drift)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(
+            "{} was moved to Done and closed, but its closing comment could not "
+            "be recorded: {}".format(project.ref, comment.stderr.strip())
+        )
+
+    # Keep fixture and same-process callers in sync with the writes. A fresh
+    # `begin` reloads these facts from GitHub, where the closed state is the
+    # idempotence guard.
+    project.status = "Done"
+    project.state = "CLOSED"
+    project.state_reason = "COMPLETED"
+    print("auto-closed {}".format(project.ref), file=sys.stderr)
+    return True
+
+
+def reconcile_auto_closeable_projects(items: Sequence[Item]) -> List[str]:
+    """Close every already-finished upkeep project before queue selection."""
+    closed: List[str] = []
+    projects = sorted(
+        (item for item in items if _auto_closeable_project(item)),
+        key=lambda item: (item.repo, item.number),
+    )
+    for project in projects:
+        if _close_auto_closeable_project(items, project):
+            closed.append(project.ref)
+    return closed
+
+
 def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
     """Close a finished upkeep project after its last ticket merge.
 
-    The class is the only decision here. Drift is fetched for the durable
-    comment, but it never changes whether a ``Broken``, ``Maintenance`` or
-    ``Improve`` project closes itself. The Project summary is read before the
-    merge, so exactly one closed child is the evidence that this merge was the
-    last open ticket rather than a later reconciliation of an old project.
+    The Project summary is read before the merge, so exactly one open child is
+    the evidence that this merge was the last open ticket. The project-level
+    eligibility decision is shared with the begin reconcile.
     """
     parent = next((item for item in items if item.ref == ticket.parent), None)
     if parent is None:
@@ -6013,55 +6104,16 @@ def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
         ticket.state != "OPEN"
         or parent.state != "OPEN"
         or parent.status != "Building"
-        or parent.klass not in SELF_APPROVABLE_CLASSES
         or parent.children_total <= 0
         or parent.children_done != parent.children_total - 1
     ):
         return False
-    if not parent.item_id:
-        raise GitHubError(
-            "{} is not in the Project; cannot auto-close it".format(parent.ref)
-        )
-
-    drift = drift_since_approval(parent)
-    tickets = [item for item in items if item.parent == parent.ref]
-    if not any(item.ref == ticket.ref for item in tickets):
-        tickets.append(ticket)
-    tickets.sort(key=lambda item: (item.repo, item.number))
-
-    gh_graphql(
-        SET_FIELD,
-        project=PROJECT_ID,
-        item=parent.item_id,
-        field=STATUS_FIELD_ID,
-        option=_option_id(STATUS_FIELD_ID, "Done"),
+    merge_items = list(items)
+    if not any(item.ref == ticket.ref for item in merge_items):
+        merge_items.append(ticket)
+    return _close_auto_closeable_project(
+        merge_items, parent, children_done=parent.children_total
     )
-
-    close = subprocess.run(
-        ["gh", "issue", "close", str(parent.number), "--repo", parent.repo,
-         "--reason", "completed"],
-        capture_output=True, text=True,
-    )
-    if close.returncode != 0:
-        raise GitHubError(
-            "could not auto-close {}: {}".format(
-                parent.ref, close.stderr.strip()
-            )
-        )
-
-    comment = subprocess.run(
-        ["gh", "issue", "comment", str(parent.number), "--repo", parent.repo,
-         "--body", closed_itself_comment(tickets, drift)],
-        capture_output=True, text=True,
-    )
-    if comment.returncode != 0:
-        raise GitHubError(
-            "{} was moved to Done and closed, but its closing comment could not "
-            "be recorded: {}".format(parent.ref, comment.stderr.strip())
-        )
-
-    print("auto-closed {}".format(parent.ref))
-    return True
 
 
 def merged_pr_facts(items: Sequence[Item]) -> MergedPRFacts:

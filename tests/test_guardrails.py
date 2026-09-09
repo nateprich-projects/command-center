@@ -27,6 +27,24 @@ CANONICAL = "/Users/nateprich/.claude/command-center"
 #: trap — but never in a file an agent executes from.
 RESOLVED = "/Volumes/"
 
+CAPTURE_ROUTINES = (
+    "claude.md",
+    "zcode.md",
+    "codex-work.md",
+)
+CAPTURE_RULE = (
+    "When this run observes a defect (broken behaviour, a failing command, or a "
+    "misbehaving run — evidence, not speculation), record it before finishing "
+    "with `funnel capture`. Put the observed evidence in the note, choose its "
+    "class at capture using `skills/shape`'s \"Class it when you file it\" rule, "
+    "and say why. Agents class their own captures, never his existing issues."
+)
+CAPTURE_EXCEPTION = (
+    "This is the sanctioned exception to the review rule to act only on the PR "
+    "you were given: capture records the observed defect; it does not act on the "
+    "thing observed."
+)
+
 # These are the load-bearing plan sections described by skills/shape. Keep the
 # canonical names here so a prose edit cannot silently drift away from the
 # vocabulary the plan parser and self-approval path understand.
@@ -96,6 +114,19 @@ def test_the_permission_rule_itself_is_intact():
         "answer a prompt."
     )
 
+
+def test_every_work_routine_captures_observed_defects_before_finishing():
+    offenders = []
+    for filename in CAPTURE_ROUTINES:
+        path = ROOT / "routines" / filename
+        body = " ".join(path.read_text(encoding="utf-8").split())
+        for rule in (CAPTURE_RULE, CAPTURE_EXCEPTION):
+            if rule not in body:
+                offenders.append("{} is missing: {}".format(filename, rule))
+        if "funnel.py capture" not in body:
+            offenders.append("{} is missing the funnel capture command".format(filename))
+
+    assert not offenders, "\n".join(offenders)
 
 def test_shape_skill_pins_plan_section_names():
     skill = (ROOT / "skills" / "shape" / "SKILL.md").read_text()

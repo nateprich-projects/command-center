@@ -114,6 +114,26 @@ def test_finish_accepts_skipped_blocked(monkeypatch):
     assert records[0]["outcome"] == "skipped-blocked"
 
 
+def test_finish_accepts_skipped_human_step(monkeypatch):
+    records = []
+    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(
+        heartbeat,
+        "append",
+        lambda agent, record: records.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    assert heartbeat.main([
+        "finish", "--agent", "codex", "--run", "run-id",
+        "--outcome", "skipped-human-step",
+    ]) == 0
+    assert records[0]["outcome"] == "skipped-human-step"
+
+
 def test_finish_records_input_usage_when_harness_exposes_both_counts(monkeypatch):
     records = []
     monkeypatch.setattr(heartbeat, "read", lambda agent: [])

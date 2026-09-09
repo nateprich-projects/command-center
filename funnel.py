@@ -4372,10 +4372,11 @@ def stranded_items(
     This is deliberately a diagnostic, not a queue. The first release only
     uses facts the funnel already knows how to read: an approved current-head
     verdict on a conflicting PR, a stale claim with no PR, a childless
-    ``Building`` project, a native or named dependency closed as
-    ``not_planned``, and two PR-side strands when PR facts were requested:
-    an open PR on a closed ticket or an open PR whose project's Status is not
-    ``Building``. Missing CI history is intentionally absent; no fetched fact
+    ``Building`` project, a self-approvable ``Building`` project whose upkeep
+    children all closed but the project itself did not, a native or named
+    dependency closed as ``not_planned``, and two PR-side strands when PR facts
+    were requested: an open PR on a closed ticket or an open PR whose project's
+    Status is not ``Building``. Missing CI history is intentionally absent; no fetched fact
     distinguishes that from a PR whose first check is still pending.
 
     ``pr_facts`` is optional so the function remains fixture-pure. ``None``
@@ -4432,6 +4433,15 @@ def stranded_items(
 
         if item.parent is None and item.status == "Building" and not item.children_total:
             reasons.append("Building project has no tickets")
+
+        if (
+            item.parent is None
+            and item.status == "Building"
+            and item.klass in SELF_APPROVABLE_CLASSES
+            and item.children_all_closed
+            and not item.carried_human_step
+        ):
+            reasons.append("finished upkeep project not closed")
 
         dead = _dead_dependency_refs(item, by_ref)
         if dead:

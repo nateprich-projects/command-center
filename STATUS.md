@@ -8,7 +8,7 @@ as history and not re-verified today.
 ## Where this stands, in one place
 
 **The pipeline is unwedged and the automations are paused, waiting for Nate to turn
-them back on.** 575 tests pass on the Mac mini from the run clone, including the three
+them back on.** 573 tests pass on the Mac mini from the run clone, including the three
 machine-local install checks (`test_launchd_drift`, `test_automation_drift`).
 
 **What was wedging it, and what fixed each:**

@@ -412,6 +412,16 @@ def test_a_blocker_of_a_broken_ticket_preempts_with_it():
     assert order.index(6) < order.index(2)
 
 
+def test_a_class_above_broken_on_the_ladder_does_not_preempt_by_position(monkeypatch):
+    """Preemption is granted by name (plan.md: only finite classes), not by
+    where a class sits on the ladder — so #130 landing Investigate first does
+    not widen it unless Investigate is added to PREEMPTING_CLASSES."""
+    monkeypatch.setattr(funnel, "LADDER", ["Investigate"] + funnel.LADDER)
+    rows = [project(1, "Building", "Improve"), ticket(2, 1),
+            project(3, "Ready", "Investigate"), ticket(4, 3)]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
 def test_tickets_inherit_their_parents_class():
     """The ladder ranks projects, not individual tickets."""
     broken_parent = project(1, "Building", "Broken")

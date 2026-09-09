@@ -2602,6 +2602,70 @@ def check_block_comments(items: Iterable[Item]) -> Check:
     return Check("block comments", not findings, "\n".join(findings), "")
 
 
+def check_block_conditions(items: Iterable[Item]) -> Check:
+    """Report blocked items whose conditions are satisfied or unresolvable.
+
+    The loaded Project rows contain both the parsed block comments and the
+    native dependency facts. Keep this check pure so ``funnel doctor`` does not
+    pay for a second request per blocked ticket, and keep still-waiting items
+    visible without making an ordinary open dependency a doctor failure.
+    """
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    findings: List[str] = []
+    broken = False
+
+    candidates = sorted(
+        (
+            item for item in rows
+            if item.state == "OPEN"
+            and (
+                item.is_blocked
+                or item.block_reason is not None
+                or item.block_references
+                or item.open_blockers
+                or item.dead_blockers
+            )
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+
+    for item in candidates:
+        satisfied = satisfied_block_refs(item, by_ref)
+        if satisfied:
+            findings.append(
+                "{}: satisfied block conditions: {}".format(
+                    item.ref, ", ".join(satisfied)
+                )
+            )
+            broken = True
+            continue
+
+        dead = _dead_dependency_refs(item, by_ref)
+        if dead:
+            findings.append(
+                "{}: unresolvable block conditions: {}".format(
+                    item.ref, ", ".join(dead)
+                )
+            )
+            broken = True
+            continue
+
+        if item.block_reason is None:
+            detail = "block comment is not parseable"
+        elif not item.block_references:
+            detail = "no machine-readable conditions"
+        else:
+            resolved = [
+                _dependency_ref(item, value) or str(value).strip()
+                for value in item.block_references
+            ]
+            detail = "on {}".format(", ".join(resolved))
+        findings.append("{}: still-waiting ({})".format(item.ref, detail))
+
+    return Check("block conditions", not broken, "\n".join(findings), "")
+
+
 def doctor_checks(claude_dir: Optional[os.PathLike] = None,
                   checkout_root: Optional[os.PathLike] = None,
                   usage_cache: Optional[os.PathLike] = None,
@@ -2631,6 +2695,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         ))
         checks.append(check_class_assignments(items))
         checks.append(check_block_comments(items))
+        checks.append(check_block_conditions(items))
     return checks
 
 

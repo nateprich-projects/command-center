@@ -23,18 +23,22 @@ change.** Two schedules run this routine:
 
 - **hourly, `escalated`** — review only. Escalated work is rare and this schedule
   exists so it is never left waiting.
-- **every fifteen minutes, `standard`** — review, and breakdown when there is
-  nothing to review. Breakdown is mechanical, so it belongs on the frequent
-  cheaper-effort schedule rather than the hourly one at max effort.
+- **every five minutes, `standard`** — review; breakdown when there is nothing
+  to review; and shaping one standard-tier idea when there is nothing to break
+  down either. Breakdown and shaping are the cheaper jobs, so they belong on the
+  frequent schedule rather than the hourly one at max effort.
 
 Everything here applies to both. The section beginning *"If your tier is
-escalated"* applies only to the first, and the breakdown job only to the second —
-your opening command already says which you have.
+escalated"* applies only to the first, and the breakdown and shaping jobs only to
+the second — your opening command already says which you have.
 
 One pull request, reviewed against the plan, verdict recorded, merged if it
 passes — or, when there is nothing to review and your schedule carries the
-breakdown job, one approved plan broken into tickets. **Never both in the same
-run.**
+breakdown job, one approved plan broken into tickets — or, when there is nothing
+to break down either, one standard-tier idea shaped. **Never more than one job in
+the same run.** The order is fixed: **review, then breakdown, then shaping** —
+a review finishes work, a breakdown creates tickets for work already approved,
+and shaping starts new work.
 
 **Reviews win because they are further down the funnel.** Bottom-up is the rule
 everywhere here: clear the work closest to shipping before starting more, and a
@@ -76,6 +80,8 @@ prints JSON.
 - `"do": "review"` — go to step 2. `work` names the PR.
 - `"do": "breakdown"` — skip to the breakdown section below. `work` names the
   project. Only the standard schedule ever sees this.
+- `"do": "shape"` — skip to the shaping section below. `work` names one
+  standard-tier idea. Only the standard schedule ever sees this.
 
 **`"unmetered": true` is expected here and is not a problem.** Meta exposes no
 usage, so nothing was gated. It is a standing exception recorded in `AGENTS.md`,
@@ -249,7 +255,43 @@ dependency, and Codex was handed one whose prerequisite had an open PR, declined
 correctly, and recorded `errored` — twice. Tracked as #129. Until that lands, the
 best you can do is make the dependency unmissable to the human reading it.
 
-## 7. Finish
+## 7. Only if there was no PR and no breakdown: shape one standard-tier idea
+
+**If you reviewed a PR or broke down a plan above, you are done — go to
+"Finish".** This section is for runs whose `begin` returned `do: shape`, which
+only the standard schedule carries. Shaping is the last job because it starts new
+work; it runs only when nothing further down the funnel is waiting. Nate revised
+#86 on 2026-09-09 to route standard-tier ideas here as well as to zcode.
+Escalated ideas are not yours, and `begin` will never offer you one.
+
+`begin` already named the idea. Do not call `ideas` again or choose a different
+one. One idea per run.
+
+Read the issue first. Then read
+`/Users/nateprich/.claude/command-center-run/skills/shape/SKILL.md` for the plan
+structure. Its general on-demand guidance is intentionally superseded here: this
+scheduled job is the approved unattended shaping path for standard-tier ideas.
+
+**Do not grill.** There is nobody to ask in an unattended run. Settle what
+precedent covers, cite the source in the plan, and do not invent an answer where
+the decision is genuinely Nate's. Record that open question in the per-category
+`Needs you` section instead — Exposure, Gates, Scope and priority, and
+Preference — with an explicit answer under every category, including when
+nothing is outstanding.
+
+**You cannot write a file** — `--disable-write` is on — so pass the plan on
+standard input. Put the whole plan in one single-quoted argument and write
+apostrophes as ’ rather than ' so the quoting cannot break. A pipe writes nothing
+to disk; a heredoc may, so do not use one:
+
+```bash
+printf '%s' '<the whole plan, as one quoted argument>' | python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --plan -
+```
+
+Moving the item to `Shaped` records that a plan exists; **Shaped is not approval**.
+Do not set `Ready`, answer the Shaped gate, or change `Status` or `Class` yourself.
+
+## 8. Finish
 
 ```bash
 python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent muse --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>"

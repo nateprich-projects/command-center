@@ -138,3 +138,39 @@ def test_capture_flag_is_rejected_before_github_is_loaded(monkeypatch, capsys):
 
     assert exc.value.code == 2
     assert "unrecognized arguments" in capsys.readouterr().err
+
+
+def test_shaped_reads_the_plan_from_stdin_when_asked(monkeypatch):
+    """Muse runs with --disable-write and cannot write a plan file (#366)."""
+    import io
+
+    plan = "# Plan\n\nPiped, not written.\n"
+    item = Item(
+        repo="owner/repo", number=43, title="An idea",
+        url="https://github.com/owner/repo/issues/43", state="OPEN",
+        status="Ideas", item_id="project-item-43",
+    )
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, variables))
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
+        return {"node": {"options": [{"id": "shaped-option", "name": "Shaped"}]}}
+
+    def run(args, capture_output, text=True):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel.sys, "stdin", io.StringIO(plan))
+
+    assert funnel.cmd_shaped([item], NOW, item.ref, "-",
+                             run="shape-run", agent="muse") == 0
+
+    edit = calls[0][1]
+    body = edit[edit.index("--body") + 1]
+    assert body.startswith(plan)

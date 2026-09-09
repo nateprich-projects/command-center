@@ -556,7 +556,16 @@ def shaping_allowed(reading: Dict) -> bool:
     established 0%-to-15% boundary rather than adding a shaping-specific
     threshold. Missing or malformed usage is not evidence of headroom, so it
     refuses closed.
+
+    An **unmetered** provider is the one exception, and it is the same one
+    `funnel begin` already applies to the pace gate: Muse exposes no usage to a
+    scheduled run, and Nate accepted that pool as ungated (AGENTS.md). Refusing
+    shaping on the same absence turned the exception into "never shape", which
+    is not what #86 decided — revised by Nate on 2026-09-09 to route
+    standard-tier ideas to Muse's standard schedule as well as to zcode.
     """
+    if isinstance(reading, dict) and reading.get("unmetered"):
+        return True
     try:
         five = (reading.get("windows") or {}).get("five_hour") or {}
         used = five.get("used_percent")

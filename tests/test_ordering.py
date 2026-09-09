@@ -367,6 +367,51 @@ def test_in_flight_work_finishes_before_anything_new_starts():
     assert order == [4, 2]  # ladder first: New outranks Replace
 
 
+def test_a_ready_broken_ticket_preempts_in_flight_improve_work():
+    """plan.md: "Broken and Maintenance preempt in-flight work — only classes
+    that are finite may preempt." Nate, 2026-09-09: broken items in Ready move
+    past improvement items in Building (#435)."""
+    rows = [project(1, "Building", "Improve", days=30), ticket(2, 1, days=30),
+            project(3, "Ready", "Broken", days=1), ticket(4, 3, days=1)]
+    assert [i.number for i in startable(rows)] == [4, 2]
+
+
+def test_in_flight_broken_work_still_finishes_before_a_ready_broken_start():
+    """Among the finite classes, commitment still comes first."""
+    rows = [project(1, "Building", "Broken", days=1), ticket(2, 1, days=1),
+            project(3, "Ready", "Broken", days=30), ticket(4, 3, days=30)]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
+def test_a_ready_improve_ticket_still_waits_behind_in_flight_improve_work():
+    """plan.md's rejection stands: an unbounded class never preempts."""
+    rows = [project(1, "Building", "Improve", days=1), ticket(2, 1, days=1),
+            project(3, "Ready", "Improve", days=30), ticket(4, 3, days=30)]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
+def test_maintenance_preempts_in_flight_ranking_like_broken():
+    rows = [project(1, "Building", "New"), ticket(2, 1),
+            project(3, "Ready", "Maintenance"), ticket(4, 3)]
+    assert [i.number for i in startable(rows)] == [4, 2]
+
+
+def test_new_never_preempts_in_flight_work():
+    rows = [project(1, "Building", "Replace"), ticket(2, 1),
+            project(3, "Ready", "New"), ticket(4, 3)]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
+def test_a_blocker_of_a_broken_ticket_preempts_with_it():
+    """The descendants rule carries preemption to whatever a Broken fix waits on."""
+    rows = [project(1, "Building", "Improve", days=30), ticket(2, 1, days=30),
+            project(3, "Ready", "Broken"), ticket(4, 3),
+            project(5, "Ready", "New"), ticket(6, 5)]
+    rows[3].open_blockers = [rows[5].ref]          # #4 (Broken) is blocked by #6 (New)
+    order = [i.number for i in startable(rows)]
+    assert order.index(6) < order.index(2)
+
+
 def test_tickets_inherit_their_parents_class():
     """The ladder ranks projects, not individual tickets."""
     broken_parent = project(1, "Building", "Broken")

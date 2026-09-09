@@ -185,6 +185,15 @@ STAGES = ["Ideas", "Shaped", "Ready", "Building", "Done", "Parked"]
 
 #: The ladder, best-first. Only finite classes may preempt in-flight work.
 LADDER = ["Broken", "Maintenance", "Improve", "New", "Replace"]
+
+#: The finite classes. `plan.md`: "Broken and Maintenance preempt in-flight
+#: work — and this is only safe because both are finite. The governing rule:
+#: only classes that are finite may preempt." `startable()` ranks these ahead
+#: of in-flight work of the unbounded classes (#435). The WIP-cap preemption in
+#: `claim_ticket()` stays Broken-only: Maintenance may preempt ranking, not the
+#: cap (`test_maintenance_does_not_preempt_the_limit`).
+PREEMPTING_CLASSES = frozenset({"Broken", "Maintenance"})
+PREEMPTING_RANK = max(LADDER.index(klass) for klass in PREEMPTING_CLASSES)
 PREEMPTING = {"Broken", "Maintenance"}
 
 #: Existing-work classes may take the unattended shaping path. Origin remains
@@ -1212,6 +1221,12 @@ def startable(items: Sequence[Item],
     def key(item: Item):
         since = question_since(item) or datetime.max.replace(tzinfo=timezone.utc)
         return (
+            # Finite classes preempt in-flight work of unbounded ones — the half
+            # of plan.md's rule this key never implemented until #435. Measured
+            # 2026-09-09: six Broken projects at Ready sat behind ten in-flight
+            # Improve tickets all afternoon. Read through `effective_rank` so a
+            # ticket that blocks a Broken one preempts with it.
+            0 if effective_rank[item.ref] <= PREEMPTING_RANK else 1,
             not in_flight(item),
             effective_rank[item.ref],
             # A blocker with the same effective rank as its dependent still

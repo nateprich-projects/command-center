@@ -8,6 +8,48 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### REST `/rate_limit` and GraphQL's own `rateLimit` are different counters, not a lag
+
+**2026-09-08, again 2026-09-09 · GitHub API · measured**
+
+The sibling finding below records three disagreeing `core` counters. This is the sharper
+case: the REST endpoint's **`graphql`** resource does not lag the real GraphQL counter, it
+is unrelated to it. Measured outside any outage, with budget to spare:
+
+```
+REST /rate_limit  ->  graphql: {limit: 5000, remaining: 5000, used: 0}
+GraphQL rateLimit ->  {limit: 5000, remaining: 3174, used: 1826, resetAt: 03:52:06Z}
+```
+
+REST read a flat zero while 1,826 points were demonstrably spent. Measured again on
+2026-09-09 03:45Z, from the other direction: `/rate_limit` reported `graphql: 5000/5000`
+across all fifteen resources while the same token's next GraphQL call returned
+`X-Ratelimit-Remaining: 0`, `X-Ratelimit-Used: 5012` — **`used` above `limit`** — and the
+two disagreed on reset time by an interval. One reading is an anomaly; two, in opposite
+directions, is a property.
+
+**So `funnel doctor` can never source this from REST at all**, not even as a cheap
+pre-check. The measurement has to come from inside the GraphQL response. Note the trap for
+whoever reads the entry below and reaches for `-i` response headers: that works for a REST
+route, but for GraphQL only the in-query `rateLimit { cost remaining resetAt }` gives a
+per-query **cost**, and cost is the half you need to attribute spend.
+
+**Never infer cost by differencing `remaining` between calls.** The token is shared — the
+1,826 points above belonged to something other than the measuring session — so a delta
+attributes other consumers' spend to the funnel.
+
+### `rateLimit` appears to be a free field, but this is not established
+
+**2026-09-08 · GitHub GraphQL · documented**
+
+Three consecutive `rateLimit`-only queries showed `used` flat across the first two and up
+by one on the third. On a shared token that is consistent with the field being free and the
+increment belonging to another consumer — but it does not establish it.
+
+Labelled `documented` deliberately, not `measured`. Upgrading it needs an isolated token,
+which is a credential outside the agent capability boundary. Do not upgrade the wording
+without one.
+
 ### `gh api rate_limit` can report full headroom while a route is fully exhausted
 
 **2026-09-08 · GitHub API · measured**

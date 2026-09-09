@@ -27,7 +27,7 @@ preempt.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha f00eb79dc232826ead5ba9845701c0e8e0e7b79860251e10a329a830346f4ade
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha 79a4998074472b4b307e97f3a4c0c7f80dde2a1e6834dfc0dd866f84be972cac
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and names
@@ -260,6 +260,21 @@ python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --pla
 
 Moving the item to `Shaped` records that a plan exists; **Shaped is not approval**.
 Do not set `Ready`, answer the Shaped gate, or change `Status` or `Class` yourself.
+
+## Capture observed defects before finishing
+
+When this run observes a defect (broken behaviour, a failing command, or a
+misbehaving run — evidence, not speculation), record it before finishing with
+`funnel capture`. Put the observed evidence in the note, choose its class at
+capture using `skills/shape`'s "Class it when you file it" rule, and say why.
+Agents class their own captures, never his existing issues.
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --note "<observed evidence; chosen class and why>"
+```
+
+This is the sanctioned exception to the review rule to act only on the PR you were
+given: capture records the observed defect; it does not act on the thing observed.
 
 ## 8. Finish, always
 

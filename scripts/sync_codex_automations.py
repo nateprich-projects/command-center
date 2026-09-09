@@ -35,6 +35,9 @@ ROUTINE = ROOT / "routines" / "codex-work.md"
 AUTOMATIONS = pathlib.Path.home() / ".codex" / "automations"
 GLOB = "command-center-*/automation.toml"
 
+sys.path.insert(0, str(ROOT))
+import funnel  # noqa: E402
+
 #: Everything above this line is setup documentation for Nate — how to paste it,
 #: how to scope the sandbox. The agent at runtime needs what is below it.
 SEPARATOR = "\n---\n"
@@ -63,6 +66,11 @@ IDLE_RRULE_MARKER = "BYHOUR="
 
 BEGIN_LINE = "funnel.py begin --agent codex --tier standard"
 NEXT_LINE = "funnel.py next --tier standard"
+# The source routine is intentionally hash-free: the copied prompt is the thing
+# that identifies itself, and each lane has its own derived flags. Strip a
+# future source literal from the opening command before inserting the current
+# one, so a stale literal is replaced rather than duplicated.
+ROUTINE_SHA_ARGUMENT = re.compile(r"(?:[ \t]+)--routine-sha[ \t]+\S+")
 # Kept as a compatibility prefix for callers that use the old name for the
 # schedule-specific opening command.
 GATE_LINE = "funnel.py begin --agent codex"
@@ -125,7 +133,8 @@ def prompt_text(automation: str = "") -> str:
     """The runtime prompt for one automation.
 
     Everything above the `---` is setup documentation for Nate; below it is what
-    the agent runs. The only per-automation difference is the idle flag.
+    the agent runs. Per-automation differences are the tier and idle flag; the
+    routine hash is shared by every derived lane.
     """
     body = ROUTINE.read_text()
     title = body.splitlines()[0].strip()
@@ -133,15 +142,17 @@ def prompt_text(automation: str = "") -> str:
         raise SystemExit("{}: no '---' separator; cannot tell setup notes from the "
                          "runtime prompt".format(ROUTINE))
     runtime = body.split(SEPARATOR, 1)[1].strip()
-    if needs_presence_check(automation):
-        runtime = runtime.replace(BEGIN_LINE, BEGIN_LINE + " --idle", 1)
+    runtime = "\n".join(
+        ROUTINE_SHA_ARGUMENT.sub("", line) if BEGIN_LINE in line else line
+        for line in runtime.splitlines()
+    )
     tier = tier_for(automation)
-    if tier != "standard":
-        runtime = runtime.replace(
-            BEGIN_LINE, BEGIN_LINE.replace("standard", tier), 1)
-        runtime = runtime.replace(
-            NEXT_LINE, NEXT_LINE.replace("standard", tier)
-        )
+    begin = BEGIN_LINE.replace("standard", tier)
+    begin += " --routine-sha {}".format(funnel.routine_sha(ROUTINE))
+    if needs_presence_check(automation):
+        begin += " --idle"
+    runtime = runtime.replace(BEGIN_LINE, begin, 1)
+    runtime = runtime.replace(NEXT_LINE, NEXT_LINE.replace("standard", tier))
     return "{}\n\n{}\n".format(title, runtime)
 
 

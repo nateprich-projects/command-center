@@ -58,12 +58,25 @@ def _allow_begin(monkeypatch):
     )
 
 
-def _routine(tmp_path, body):
+def _routine(tmp_path, body, filename="zcode.md"):
     routines = tmp_path / "routines"
     routines.mkdir(parents=True)
-    path = routines / "zcode.md"
+    path = routines / filename
     path.write_text(body)
     return path
+
+
+def _codex_ticket():
+    return funnel.Item(
+        repo="nateprich/example",
+        number=19,
+        title="Ticket 19",
+        url="https://github.com/nateprich/example/issues/19",
+        state="OPEN",
+        body="Risk: standard",
+        parent="nateprich/example#18",
+        item_id="item-19",
+    )
 
 
 def test_routine_sha_is_unchanged_by_its_own_literal(tmp_path):
@@ -83,17 +96,32 @@ python3 funnel.py begin --agent zcode --tier standard
     assert funnel.routine_sha(plain) == funnel.routine_sha(with_literal)
 
 
+@pytest.mark.parametrize(
+    ("agent", "filename"),
+    (("zcode", "zcode.md"), ("codex", "codex-work.md")),
+)
 def test_matching_routine_sha_reports_ok_and_does_not_record_drift(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, agent, filename
 ):
     path = _routine(
         tmp_path,
-        "python3 funnel.py begin --agent zcode --tier standard\n",
+        "python3 funnel.py begin --agent {} --tier standard\n".format(agent),
+        filename,
     )
     monkeypatch.setattr(funnel, "CHECKOUT_ROOT", tmp_path)
     _allow_begin(monkeypatch)
     work = {"pr": 7, "repo": "nateprich/beta", "ref": "nateprich/beta#19"}
     monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [work])
+    items = []
+    expected_do = "review"
+    if agent == "codex":
+        ticket = _codex_ticket()
+        items = [ticket]
+        expected_do = "ticket"
+        monkeypatch.setattr(funnel, "clear_satisfied_blocks", lambda *args, **kwargs: [])
+        monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+        monkeypatch.setattr(funnel, "next_ticket_for_tier", lambda *args, **kwargs: ticket)
+        monkeypatch.setattr(funnel, "claim_ticket", lambda *args, **kwargs: None)
     events = []
     monkeypatch.setattr(
         heartbeat,
@@ -102,29 +130,47 @@ def test_matching_routine_sha_reports_ok_and_does_not_record_drift(
     )
 
     assert funnel.cmd_begin(
-        [], NOW, "zcode", "standard", False,
+        items, NOW, agent, "standard", False,
         routine_sha_literal=funnel.routine_sha(path),
     ) == 0
     result = json.loads(capsys.readouterr().out)
 
     assert result["routine_sha"]["status"] == "ok"
     assert result["routine_sha"]["actual"] == result["routine_sha"]["expected"]
-    assert result["do"] == "review"
-    assert result["work"] == work
+    assert result["do"] == expected_do
+    if agent == "codex":
+        assert result["work"]["ref"] == ticket.ref
+    else:
+        assert result["work"] == work
     assert events == []
 
 
+@pytest.mark.parametrize(
+    ("agent", "filename"),
+    (("zcode", "zcode.md"), ("codex", "codex-work.md")),
+)
 def test_mismatching_routine_sha_records_prompt_drift_and_keeps_working(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, agent, filename
 ):
     path = _routine(
         tmp_path,
-        "python3 funnel.py begin --agent zcode --tier standard\n",
+        "python3 funnel.py begin --agent {} --tier standard\n".format(agent),
+        filename,
     )
     monkeypatch.setattr(funnel, "CHECKOUT_ROOT", tmp_path)
     _allow_begin(monkeypatch)
     work = {"pr": 8, "repo": "nateprich/gamma", "ref": "nateprich/gamma#20"}
     monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [work])
+    items = []
+    expected_do = "review"
+    if agent == "codex":
+        ticket = _codex_ticket()
+        items = [ticket]
+        expected_do = "ticket"
+        monkeypatch.setattr(funnel, "clear_satisfied_blocks", lambda *args, **kwargs: [])
+        monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+        monkeypatch.setattr(funnel, "next_ticket_for_tier", lambda *args, **kwargs: ticket)
+        monkeypatch.setattr(funnel, "claim_ticket", lambda *args, **kwargs: None)
     events = []
     monkeypatch.setattr(
         heartbeat,
@@ -133,17 +179,20 @@ def test_mismatching_routine_sha_records_prompt_drift_and_keeps_working(
     )
 
     assert funnel.cmd_begin(
-        [], NOW, "zcode", "standard", False,
+        items, NOW, agent, "standard", False,
         routine_sha_literal="0" * 64,
     ) == 0
     result = json.loads(capsys.readouterr().out)
 
     assert result["routine_sha"]["status"] == "drift"
     assert result["routine_sha"]["actual"] == funnel.routine_sha(path)
-    assert result["do"] == "review"
-    assert result["work"] == work
+    assert result["do"] == expected_do
+    if agent == "codex":
+        assert result["work"]["ref"] == ticket.ref
+    else:
+        assert result["work"] == work
     assert len(events) == 1
-    assert events[0][0] == ("zcode", "run-id", "prompt-drift")
+    assert events[0][0] == (agent, "run-id", "prompt-drift")
     assert events[0][1]["routine_sha"] == result["routine_sha"]
 
 

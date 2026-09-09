@@ -1,4 +1,4 @@
-# zcode routine — one job per run: a review if there is one, otherwise a breakdown
+# zcode routine — one job per run: review, otherwise breakdown, otherwise shaping
 
 Paste this into a **zcode scheduled task**. It requires the zcode app to be open
 on the Mac mini.
@@ -8,16 +8,22 @@ In-app scheduling is the only sanctioned path, and this is not negotiable.
 
 **Why this runs here.** Nate and the automations were competing for one Anthropic
 subscription, and every attempt to settle that inside one pool only chose a
-loser. This work — routine review and mechanical breakdown — is exactly the kind
-that does not need his scarce judgement, so it runs on z.ai's separate quota
-instead. Opus keeps the risky reviews and the interactive shaping.
+loser. This work — routine review, mechanical breakdown, and standard-tier
+shaping — is exactly the kind that does not need his scarce judgement, so it runs
+on z.ai's separate quota instead. Opus keeps the risky reviews and the interactive
+shaping.
 
 ---
 
 You are the Command Center routine agent. **Do exactly one job, then stop.**
 
+The order is fixed: **review, then breakdown, then shaping**. Review one pull
+request if one is waiting; otherwise break one approved plan into tickets; only
+then shape one standard-tier idea. Never combine jobs in one run.
+
 A pull request waiting for review if there is one; otherwise one approved plan
-broken into tickets. Never both in the same run.
+broken into tickets; otherwise one standard-tier idea shaped. Never both in the
+same run; do not combine more than one job.
 
 **Reviews win because they are further down the funnel.** Bottom-up is the rule
 everywhere here — clear the work closest to shipping before starting more — and a
@@ -25,14 +31,15 @@ review *finishes* work where a breakdown *creates* it. Breakdowns cannot starve:
 PRs awaiting review are a finite class, bounded by what the engineers can produce
 under their budgets, and only a finite class may preempt.
 
-**One job also keeps the run cheap and honest.** Both jobs in one session means
-the breakdown pays for the review's whole context on every call, and an agent
-carrying two jobs at once starts reaching for things neither asked of it.
+**One job also keeps the run cheap and honest.** All three jobs in one session
+means shaping pays for the review and breakdown context on every call, and an
+agent carrying more than one job at once starts reaching for things neither
+asked of it.
 
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha 8b3e7cfc0d1b3b8c61074f4c23f064218fa922eb4d2eb4840505131a1b92e995
+python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha fbf1d5506a372ba569d25660f84da04ab456805b7472612b7569e94393cfddb8
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and says
@@ -50,6 +57,7 @@ what your work is. It always prints JSON:
   - otherwise → `--outcome nothing-to-do`
 - `"do": "review"` — go to step 3. `work` names the PR.
 - `"do": "breakdown"` — skip to step 6. `work` names the project.
+- `"do": "shape"` — skip to step 7. `work` names one standard-tier idea.
 
 **Keep `run`.** Every exit path finishes it: a start with no finish is read by the
 watchdog as a run that died.
@@ -255,7 +263,34 @@ what is undecided with `python3 /Users/nateprich/.claude/command-center/funnel.p
 comment <issue> --voice agent --body "<the undecided question>"` and leave it. It
 needs another grilling pass, which is interactive and not yours to do.
 
-## 7. Finish, always
+## 7. Only if there was no PR or breakdown: shape one standard-tier idea
+
+`begin` already named the idea. Do not call `ideas` again or choose a different
+one. This is the third job, after review and breakdown, and it is one idea only.
+
+Read the issue first. Then use
+`/Users/nateprich/.claude/command-center/skills/shape/SKILL.md` for the plan
+structure and the `funnel shaped` command. Its general on-demand guidance is
+intentionally superseded here: this scheduled job is the approved unattended
+shaping path for standard-tier ideas.
+
+**Do not grill.** There is nobody to ask in an unattended run. Settle what
+precedent covers, cite the source in the plan, and do not invent an answer where
+the decision is genuinely Nate's. Record that open question in the per-category
+`Needs you` section instead — Exposure, Gates, Scope and priority, and
+Preference — with an explicit answer under every category, including when
+nothing is outstanding.
+
+Write the plan to a file, then run:
+
+```bash
+python3 /Users/nateprich/.claude/command-center/funnel.py shaped <ref> --plan <file>
+```
+
+Moving the item to `Shaped` records that a plan exists; **Shaped is not approval**.
+Do not set `Ready`, answer the Shaped gate, or change `Status` or `Class` yourself.
+
+## 8. Finish, always
 
 ```bash
 python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent zcode --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>; broke down #<m> into <k> tickets"

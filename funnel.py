@@ -3815,6 +3815,27 @@ def stranded_json(
     return stranded_items(items, now, pr_facts=pr_facts)
 
 
+def _print_queue_section(items: Sequence[Item], render) -> None:
+    """Print a queue section, grouping by repo only when it spans repos."""
+    if not items:
+        print("  nothing")
+        return
+
+    by_repo: Dict[str, List[Item]] = {}
+    for item in items:
+        by_repo.setdefault(item.repo, []).append(item)
+
+    if len(by_repo) == 1:
+        for item in items:
+            print(render(item, "  "))
+        return
+
+    for repo, repo_items in by_repo.items():
+        print("  {}:".format(repo))
+        for item in repo_items:
+            print(render(item, "    "))
+
+
 def cmd_queue(items: List[Item], now: datetime) -> int:
     """Everything, ordered — both queues, each under its own heading.
 
@@ -3825,34 +3846,43 @@ def cmd_queue(items: List[Item], now: datetime) -> int:
     tickets = startable(items)
 
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
-    if not decisions:
-        print("  nothing")
     by_ref = {i.ref: i for i in items}
-    for item in decisions:
-        print(
-            "  {:<10} {:<24} {:<34} {:<18} {}".format(
-                item.status or "-",
-                class_display(item, by_ref),
-                item.ref,
-                humanise(item.waited(now)),
-                gate_question(item),
-            )
-        )
+    _print_queue_section(
+        decisions,
+        lambda item, prefix: "{}{:<10} {:<24} {:<34} {:<18} {}".format(
+            prefix,
+            item.status or "-",
+            class_display(item, by_ref),
+            item.ref,
+            humanise(item.waited(now)),
+            gate_question(item),
+        ),
+    )
 
     print("\nStartable by Codex ({}), ladder order:".format(len(tickets)))
-    if not tickets:
-        print("  nothing")
-    for item in tickets:
-        print("  {:<24} {:<34} {}".format(
-            class_display(item, by_ref), item.ref, item.title))
+    _print_queue_section(
+        tickets,
+        lambda item, prefix: "{}{:<24} {:<34} {}".format(
+            prefix,
+            class_display(item, by_ref),
+            item.ref,
+            item.title,
+        ),
+    )
 
     pending = awaiting_breakdown(items)
     if pending:
         print("\nApproved, awaiting breakdown into tickets ({}):".format(len(pending)))
-        for item in pending:
-            print("  {:<24} {:<34} {:<18} {}".format(
-                class_display(item, by_ref), item.ref,
-                humanise(item.waited(now)), item.title))
+        _print_queue_section(
+            pending,
+            lambda item, prefix: "{}{:<24} {:<34} {:<18} {}".format(
+                prefix,
+                class_display(item, by_ref),
+                item.ref,
+                humanise(item.waited(now)),
+                item.title,
+            ),
+        )
 
     missing = [i for i in items if needs_class(i)]
     if missing:

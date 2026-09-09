@@ -1165,8 +1165,9 @@ def required_tier(title: str, body: str, failed_before: bool = False) -> str:
 
 
 def startable(items: Sequence[Item],
-              awaiting_review: Optional[Set[str]] = None) -> List[Item]:
-    """Tickets Codex may pick up, best-first.
+              awaiting_review: Optional[Set[str]] = None,
+              agent: str = "codex") -> List[Item]:
+    """Tickets the requesting agent may pick up, best-first.
 
     A ticket is an open issue with no children of its own, whose parent has
     passed the Ready gate. Tickets inherit their parent's Class — the ladder
@@ -1202,12 +1203,22 @@ def startable(items: Sequence[Item],
     }
 
     def eligible(item: Item) -> bool:
+        capability_reason = parse_human_step(item.body or "")
+        machine_local = (
+            capability_reason is not None
+            and capability_reason.casefold() == MACHINE_LOCAL_REASON.casefold()
+        )
         if (
             item.state != "OPEN"
             or item.is_blocked
             or item.open_blockers
             or item.children_total
-            or parse_human_step(item.body or "") is not None
+            # A machine-local marker is the middle capability outcome: Claude
+            # Code may work it, while every other requester must leave it in
+            # the queue. All other parsed markers remain human steps and are
+            # excluded from every agent, as #141 established.
+            or (capability_reason is not None
+                and (not machine_local or agent != "claude"))
         ):
             return False
         if item.ref in awaiting_review:
@@ -1667,8 +1678,9 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
 
 def next_ticket(items: Sequence[Item], now: datetime,
                 blocked: Optional[Set[str]] = None,
-                excluded: Optional[Set[str]] = None) -> Optional[Item]:
-    """The single ticket Codex should work, or None.
+                excluded: Optional[Set[str]] = None,
+                agent: str = "codex") -> Optional[Item]:
+    """The single ticket the requesting agent should work, or None.
 
     Returns None when the funnel is at its work-in-progress limit. A Broken
     ticket may start anyway; that is the one sanctioned preemption. `excluded`
@@ -1677,7 +1689,9 @@ def next_ticket(items: Sequence[Item], now: datetime,
     """
     excluded = excluded or frozenset()
     queue = [
-        item for item in startable(items, awaiting_review=blocked)
+        item for item in startable(
+            items, awaiting_review=blocked, agent=agent
+        )
         if item.ref not in excluded
     ]
     if not queue:
@@ -1706,7 +1720,8 @@ def next_ticket(items: Sequence[Item], now: datetime,
 def next_ticket_for_tier(items: Sequence[Item], now: datetime,
                          tier: Optional[str] = None,
                          blocked: Optional[Set[str]] = None,
-                         excluded: Optional[Set[str]] = None) -> Optional[Item]:
+                         excluded: Optional[Set[str]] = None,
+                         agent: str = "codex") -> Optional[Item]:
     """Return the first shared-order ticket belonging to ``tier``.
 
     Tier filtering has to happen by asking ``next_ticket`` repeatedly rather
@@ -1718,7 +1733,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
     excluded = set(excluded or ())
     while True:
         ticket = next_ticket(
-            items, now, blocked=blocked, excluded=excluded
+            items, now, blocked=blocked, excluded=excluded, agent=agent
         )
         if ticket is None or tier is None:
             return ticket
@@ -4270,6 +4285,7 @@ def cmd_next(
     now: datetime,
     tier: Optional[str] = None,
     excluded: Optional[Set[str]] = None,
+    agent: str = "codex",
 ) -> int:
     # Accept bare numbers as well as refs (#436). The routine passes whatever
     # the model copied from the ticket JSON, and a bare number matched nothing
@@ -4298,7 +4314,8 @@ def cmd_next(
             print("released {} (declined)".format(declined.ref), file=sys.stderr)
     blocked = awaiting_review(items)
     ticket = next_ticket_for_tier(
-        items, now, tier=tier, blocked=blocked, excluded=excluded
+        items, now, tier=tier, blocked=blocked, excluded=excluded,
+        agent=agent,
     )
 
     if ticket is None:
@@ -5429,7 +5446,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             out["cleared_blocks"] = cleared
         blocked = awaiting_review(items)
         ticket = next_ticket_for_tier(
-            items, now, tier=tier, blocked=blocked
+            items, now, tier=tier, blocked=blocked, agent=agent
         )
         if ticket is None:
             holder = lock_holder(items, now)
@@ -6165,12 +6182,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("queue", help="everything, ordered")
     nxt = sub.add_parser(
-        "next", help="the single next ticket Codex should work, or nothing")
+        "next", help="the single next ticket this agent should work, or nothing")
     nxt.add_argument(
         "--tier", choices=TIERS, default=None,
         help="what this engine is allowed to work. `standard` skips tickets "
              "needing the escalated engine; `escalated` may take anything. "
              "Declared by the routine, never by the model.")
+    nxt.add_argument(
+        "--agent", default="codex",
+        help="agent whose capabilities filter the queue (default: codex)",
+    )
     nxt.add_argument(
         "--not", dest="excluded", action="append", default=[], metavar="<ref>",
         help="exclude a candidate for this call; repeat for multiple refs",
@@ -6415,6 +6436,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 now,
                 tier=getattr(args, "tier", None),
                 excluded=set(getattr(args, "excluded", [])),
+                agent=getattr(args, "agent", "codex"),
             )
         if args.command == "brief":
             return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))

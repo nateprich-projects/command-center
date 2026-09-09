@@ -192,6 +192,12 @@ REGRESSION_PREFIX = "Regression from PR #"
 #: fixed marker back from issue comments, so it is a shared contract.
 PARK_COMMENT_PREFIX = "**Parked:** "
 
+#: A project the funnel closes after its last upkeep ticket lands carries this
+#: fixed prefix. The brief uses it to distinguish funnel-closed work from a
+#: project Nate accepted at the gate; the JSON block after it carries the
+#: ticket names and drift list for that later reader.
+CLOSED_ITSELF_PREFIX = "**Closed itself:** "
+
 #: A blocked comment names an optional, knowable condition after this marker.
 #: The parser below owns the rest of the fixed header shape.
 BLOCK_COMMENT_PREFIX = "**Blocked"
@@ -4508,6 +4514,87 @@ def ticket_ref_from_branch(repo: str, branch: str) -> Optional[str]:
     return "{}#{}".format(repo, tail) if tail.isdigit() else None
 
 
+def closed_itself_comment(tickets: Sequence[Item], drift: Sequence[str]) -> str:
+    """Render the durable marker comment for a funnel-closed project."""
+    payload = {
+        "drift": list(drift),
+        "tickets": [
+            {"ref": ticket.ref, "title": ticket.title}
+            for ticket in tickets
+        ],
+    }
+    return CLOSED_ITSELF_PREFIX + "\n```json\n{}\n```".format(
+        json.dumps(payload, indent=2, sort_keys=True)
+    )
+
+
+def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
+    """Close a finished upkeep project after its last ticket merge.
+
+    The class is the only decision here. Drift is fetched for the durable
+    comment, but it never changes whether a ``Broken``, ``Maintenance`` or
+    ``Improve`` project closes itself. The Project summary is read before the
+    merge, so exactly one closed child is the evidence that this merge was the
+    last open ticket rather than a later reconciliation of an old project.
+    """
+    parent = next((item for item in items if item.ref == ticket.parent), None)
+    if parent is None:
+        return False
+    if (
+        ticket.state != "OPEN"
+        or parent.state != "OPEN"
+        or parent.status != "Building"
+        or parent.klass not in SELF_APPROVABLE_CLASSES
+        or parent.children_total <= 0
+        or parent.children_done != parent.children_total - 1
+    ):
+        return False
+    if not parent.item_id:
+        raise GitHubError(
+            "{} is not in the Project; cannot auto-close it".format(parent.ref)
+        )
+
+    drift = drift_since_approval(parent)
+    tickets = [item for item in items if item.parent == parent.ref]
+    if not any(item.ref == ticket.ref for item in tickets):
+        tickets.append(ticket)
+    tickets.sort(key=lambda item: (item.repo, item.number))
+
+    gh_graphql(
+        SET_FIELD,
+        project=PROJECT_ID,
+        item=parent.item_id,
+        field=STATUS_FIELD_ID,
+        option=_option_id(STATUS_FIELD_ID, "Done"),
+    )
+
+    close = subprocess.run(
+        ["gh", "issue", "close", str(parent.number), "--repo", parent.repo,
+         "--reason", "completed"],
+        capture_output=True, text=True,
+    )
+    if close.returncode != 0:
+        raise GitHubError(
+            "could not auto-close {}: {}".format(
+                parent.ref, close.stderr.strip()
+            )
+        )
+
+    comment = subprocess.run(
+        ["gh", "issue", "comment", str(parent.number), "--repo", parent.repo,
+         "--body", closed_itself_comment(tickets, drift)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(
+            "{} was moved to Done and closed, but its closing comment could not "
+            "be recorded: {}".format(parent.ref, comment.stderr.strip())
+        )
+
+    print("auto-closed {}".format(parent.ref))
+    return True
+
+
 def merged_pr_facts(items: Sequence[Item]) -> MergedPRFacts:
     """Find open tickets whose convention-named PR has already merged.
 
@@ -4660,24 +4747,27 @@ def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
     number = ref.split("#", 1)[1]
     state = (_gh_json("gh", "issue", "view", number, "--repo", repo,
                       "--json", "state") or {}).get("state")
-    if str(state).upper() == "CLOSED":
-        return 0
+    if str(state).upper() != "CLOSED":
+        closed = subprocess.run(
+            ["gh", "issue", "close", number, "--repo", repo,
+             "--reason", "completed"],
+            capture_output=True, text=True)
+        if closed.returncode != 0:
+            # Say plainly that the merge succeeded, then exit non-zero: a ticket
+            # left open is the exact failure this close exists to prevent, and a
+            # silent 0 hides it. Re-running is harmless — the gate refuses a PR
+            # that is no longer open — so the risk is only a visible retry, which
+            # is cheaper than an invisible stranded ticket. (#236's plan.)
+            print("MERGED, but {} could not be closed: {}".format(
+                ref, closed.stderr.strip()), file=sys.stderr)
+            print("the merge succeeded; close {} by hand — it stays startable "
+                  "until you do.".format(ref), file=sys.stderr)
+            return 1
+        print("closed {}".format(ref))
 
-    closed = subprocess.run(
-        ["gh", "issue", "close", number, "--repo", repo, "--reason", "completed"],
-        capture_output=True, text=True)
-    if closed.returncode != 0:
-        # Say plainly that the merge succeeded, then exit non-zero: a ticket
-        # left open is the exact failure this close exists to prevent, and a
-        # silent 0 hides it. Re-running is harmless — the gate refuses a PR
-        # that is no longer open — so the risk is only a visible retry, which
-        # is cheaper than an invisible stranded ticket. (#236's plan.)
-        print("MERGED, but {} could not be closed: {}".format(
-            ref, closed.stderr.strip()), file=sys.stderr)
-        print("the merge succeeded; close {} by hand — it stays startable "
-              "until you do.".format(ref), file=sys.stderr)
-        return 1
-    print("closed {}".format(ref))
+    ticket = next((item for item in items if item.ref == ref), None)
+    if ticket is not None:
+        _auto_close_parent(items, ticket)
     return 0
 
 

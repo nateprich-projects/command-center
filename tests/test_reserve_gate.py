@@ -88,3 +88,14 @@ def test_no_graphql_call_is_not_the_same_as_an_unreadable_budget():
 
     assert funnel._reserve_verdict("review") is None
     assert funnel._reserve_verdict("breakdown") is None
+
+
+def test_shape_takes_the_engineering_floor_not_the_reviewer_s():
+    """`shape` arrived on main after this gate was written (#306).
+
+    It opens new work, so it is a consumer, not a drainer.
+    """
+    spend(cost=12, remaining=100)   # engineering floor 240, review floor 60
+
+    assert funnel._reserve_verdict("shape") is not None
+    assert funnel._reserve_verdict("review") is None

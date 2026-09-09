@@ -28,6 +28,7 @@ import base64
 import json
 import os
 import glob
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -314,6 +315,23 @@ def _report(kept: str) -> None:
 #: routine could move his checkout and the only evidence would be his own
 #: surprise, weeks later.
 CANONICAL_REPO = "/Users/nateprich/.claude/command-center"
+
+
+def runtime_state() -> Optional[Dict]:
+    """Best-effort HEAD of the checkout this script is running from."""
+    root = Path(__file__).resolve().parent
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        if head.returncode != 0:
+            return None
+        value = head.stdout.strip()
+        if not value:
+            return None
+        return {"root": str(root), "head": value[:12]}
+    except Exception:
+        return None
 
 
 def repo_state() -> Optional[Dict]:
@@ -750,6 +768,7 @@ def main(argv=None) -> int:
                 "attempt": args.attempt,
                 "escalated_from": args.escalated_from,
                 "repo": repo_state(),
+                "runtime": runtime_state(),
                 **detect_model(args.agent),
             })
             _report(kept)
@@ -782,6 +801,7 @@ def main(argv=None) -> int:
             "review_result": args.review_result,
             "human_intervention_required": args.human_intervention or None,
             "repo": repo_state(),
+            "runtime": runtime_state(),
             **detect_model(args.agent),
         }
         metric = input_usage(args.agent)

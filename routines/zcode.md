@@ -10,8 +10,10 @@ In-app scheduling is the only sanctioned path, and this is not negotiable.
 subscription, and every attempt to settle that inside one pool only chose a
 loser. This work — routine review, mechanical breakdown, and standard-tier
 shaping — is exactly the kind that does not need his scarce judgement, so it runs
-on z.ai's separate quota instead. Opus keeps the risky reviews and the interactive
-shaping.
+on z.ai's separate quota instead. Shaping is tiered (#86): standard-tier ideas
+shape here, unattended — and, since Nate's 2026-09-09 revision of #86, on Muse's
+standard schedule too — while escalated ideas wait for an escalated run on Opus.
+Opus keeps the risky reviews. _(agent rule, unconfirmed — advisory)_
 
 ---
 
@@ -39,7 +41,7 @@ asked of it.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha a67c9e59548f7c1cdc02f88d3725e0e5f8e8c87eddfc3b193c91ca02f28a90b6
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha c05bb4f1914aa72c834d6da42cc3595797838484202154731c0b20e78bb390b9
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and says

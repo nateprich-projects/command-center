@@ -109,7 +109,12 @@ wrong.
   readable content when fetched on 2026-09-07. Nobody here has read them. "No
   restriction found" means "not in the pages that could be read", which is a weaker
   claim than it looks. **If a fair-use or automated-workload clause exists, it lives
-  there, and the schedules are ~100 runs a day.**
+  there, and the schedules are ~198 runs a day, against up to ~312 possible starts
+  (two launchd jobs: `command-center-muse-review-standard` every five minutes,
+  `command-center-muse-review` hourly at :07).** Measured from the heartbeat branch,
+  over the 24-hour window ending 2026-09-08 14:20 PDT — 198 runs started, 195
+  finished; outcomes 126 `nothing-to-do`, 63 `done`, 6 `errored`.
+  _(confirmed by Nate 2026-09-07; figure corrected and re-confirmed 2026-09-08)_
 
   Muse ships no scheduler of its own, so a launchd job is the only way to schedule it —
   and it is a *better* surface than the alternative, because a plist is a file that can

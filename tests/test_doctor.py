@@ -470,6 +470,47 @@ def test_item_consistency_does_not_report_an_unmerged_ticket():
     assert result == funnel.Check("item consistency", True, "", "")
 
 
+@pytest.mark.parametrize("status", ["Ideas", "Shaped", "Ready"])
+def test_item_consistency_reports_a_project_with_closed_children_outside_building(
+    status,
+):
+    project = funnel.Item(
+        repo="owner/repo", number=8, title="Stranded project", url="", state="OPEN",
+        status=status, children_total=2, children_done=2,
+    )
+
+    result = funnel.check_item_consistency([project])
+
+    assert result == funnel.Check(
+        "item consistency", False,
+        "owner/repo#8: project has all children closed but Status is {}; run "
+        "funnel start owner/repo#8 --yes then funnel accept owner/repo#8 --yes"
+        .format(status),
+        "",
+    )
+
+
+def test_item_consistency_ignores_building_projects_open_children_and_tickets():
+    items = [
+        funnel.Item(
+            repo="owner/repo", number=8, title="Accepted project", url="", state="OPEN",
+            status="Building", children_total=2, children_done=2,
+        ),
+        funnel.Item(
+            repo="owner/repo", number=9, title="Unfinished project", url="", state="OPEN",
+            status="Ready", children_total=2, children_done=1,
+        ),
+        funnel.Item(
+            repo="owner/repo", number=10, title="Closed ticket", url="", state="OPEN",
+            status="Ready", parent="owner/repo#99", children_total=1, children_done=1,
+        ),
+    ]
+
+    assert funnel.check_item_consistency(items) == funnel.Check(
+        "item consistency", True, "", ""
+    )
+
+
 def test_merged_pr_facts_intersects_one_bounded_repo_scan(monkeypatch):
     ticket = funnel.Item(
         repo="owner/repo", number=7, title="Open ticket", url="", state="OPEN",

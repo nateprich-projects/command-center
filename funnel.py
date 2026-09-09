@@ -2024,6 +2024,18 @@ def item_consistency_findings(
             )
         if (
             item.state == "OPEN"
+            and not item.parent
+            and item.status != "Building"
+            and item.children_all_closed
+        ):
+            reasons.append(
+                "project has all children closed but Status is {}; run funnel "
+                "start {} --yes then funnel accept {} --yes".format(
+                    status, item.ref, item.ref
+                )
+            )
+        if (
+            item.state == "OPEN"
             and item.parent
             and item.ref in merged_ticket_refs
         ):

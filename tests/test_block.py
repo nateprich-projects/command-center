@@ -52,6 +52,57 @@ def test_embedded_block_prefix_does_not_match():
     ]) is None
 
 
+def test_unparseable_block_comment_reports_its_first_line(monkeypatch):
+    item = funnel.Item(
+        repo="owner/repo", number=7, title="Broken comment", url="", state="OPEN",
+        labels=["blocked"],
+    )
+
+    def gh_json(*args):
+        return {"comments": [
+            {"body": "**Blocked on #77, 2026-09-07.** Legacy format.\nMore detail."},
+            {"body": "A regular follow-up."},
+        ]}
+
+    # The loader is the only remote seam; the doctor check remains pure over
+    # the state it records on the Item.
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    funnel._load_block_comment(item)
+
+    assert funnel.check_block_comments([item]) == funnel.Check(
+        "block comments", False,
+        "owner/repo#7: **Blocked on #77, 2026-09-07.** Legacy format.",
+        "",
+    )
+
+
+def test_canonical_block_comment_is_quiet_in_doctor():
+    item = funnel.Item(
+        repo="owner/repo", number=7, title="Good comment", url="", state="OPEN",
+        labels=["blocked"],
+        unparseable_block_comments=[],
+    )
+
+    assert funnel.check_block_comments([item]) == funnel.Check(
+        "block comments", True, "", ""
+    )
+
+
+def test_comment_fetch_failure_is_reported_by_doctor(monkeypatch):
+    item = funnel.Item(
+        repo="owner/repo", number=7, title="Unreadable comments", url="", state="OPEN",
+        labels=["blocked"],
+    )
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: None)
+
+    funnel._load_block_comment(item)
+
+    assert funnel.check_block_comments([item]) == funnel.Check(
+        "block comments", False,
+        "owner/repo#7: could not read comments", "",
+    )
+
+
 def test_comment_posts_a_canonical_single_block_header(monkeypatch):
     monkeypatch.setattr(funnel, "load_items", lambda: [comment_item()])
     calls = []
@@ -185,3 +236,5 @@ def test_load_items_fetches_comments_only_for_open_blocked_items(monkeypatch):
     blocked = items[0]
     assert blocked.block_references == ["#84"]
     assert blocked.block_reason == "Wait for the decision."
+    assert blocked.unparseable_block_comments == []
+    assert blocked.block_comments_error is None

@@ -564,10 +564,32 @@ def test_doctor_includes_class_assignment_dump_with_loaded_items(monkeypatch):
         ),
     ])
 
-    assert [check.name for check in checks][-2:] == [
-        "item consistency", "Class assignments",
+    assert [check.name for check in checks][-3:] == [
+        "item consistency", "Class assignments", "block comments",
     ]
-    assert checks[-1].found == "owner/repo#1 | issue number 1 | Class Broken"
+    assert checks[-2].found == "owner/repo#1 | issue number 1 | Class Broken"
+
+
+def test_doctor_reports_unparseable_block_comments_with_loaded_items(monkeypatch):
+    stub_heartbeat_checks(monkeypatch)
+    stub_github_checks(monkeypatch)
+
+    checks = funnel.doctor_checks(items=[
+        funnel.Item(
+            repo="owner/repo", number=7, title="Bad comment", url="", state="OPEN",
+            labels=["blocked"],
+            unparseable_block_comments=[
+                "**Blocked on #77, 2026-09-07.** Legacy format."
+            ],
+        ),
+    ])
+
+    result = checks[-1]
+    assert result == funnel.Check(
+        "block comments", False,
+        "owner/repo#7: **Blocked on #77, 2026-09-07.** Legacy format.",
+        "",
+    )
 
 
 def test_main_doctor_loads_project_items_for_consistency(monkeypatch):

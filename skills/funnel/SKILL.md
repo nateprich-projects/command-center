@@ -37,6 +37,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `waiting_on` | The question being asked. `Accept it?` · `Is the plan good?` · `Unblock or park?` |
 | `waited` | Time at the current gate |
 | `class` | The item's Project `Class`; tickets inherit their parent's Class |
+| `pinned` | Present as `true` when Nate pinned the Project within its current gate; absent otherwise |
 | `needs_class` | Items with no `Class` set. Invalid and not startable — a one-word fix in the Project |
 | `in_motion` | Tickets currently claimed, as a list. `wip_limit` is how many may run at once — the cap is policy, the per-ticket claim is correctness |
 | `stale_locks_taken_over` | Claims past the 2-hour TTL that were taken over |
@@ -53,9 +54,9 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 
 ## How to render it
 
-Lead with the count and the ordered list. For each item: its Class, the question, the repo
-and issue title as a link, and how long it has waited. Keep it scannable — this is read to
-decide, not to browse.
+Lead with the count and the ordered list. For each item: its Class, a pin marker when
+`pinned` is `true`, the question, the repo and issue title as a link, and how long it has
+waited. Keep it scannable — this is read to decide, not to browse.
 
 **Then `human_steps`, whenever it is non-empty**, as its own short list with each item's
 reason. Never fold it into the decision list and never count it in the total: it answers a

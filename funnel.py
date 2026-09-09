@@ -2466,6 +2466,46 @@ class GitHubError(RuntimeError):
     pass
 
 
+#: Per-process GraphQL spend, accumulated from the responses themselves.
+#:
+#: Not state of record and it never outlives the process, so `GitHub is the
+#: state` is untouched. It exists because consumption was invisible until it
+#: hit zero: on 2026-09-08 `funnel.py` stopped entirely — `brief`, `queue`,
+#: `next`, every gate command — for the better part of an hour, several times
+#: in one day, with no earlier symptom to read (#273).
+_GRAPHQL_SPEND: Dict[str, object] = {
+    "calls": 0, "cost": 0, "remaining": None, "reset_at": None,
+}
+
+
+def graphql_spend() -> Dict[str, object]:
+    """What this process has spent on GraphQL so far, read from responses."""
+    return dict(_GRAPHQL_SPEND)
+
+
+def _record_rate_limit(block: object) -> None:
+    """Accumulate one response's reported cost.
+
+    **Summed from each response's own ``cost``, never inferred by differencing
+    ``remaining`` between calls.** The token is shared — a measurement on
+    2026-09-08 found 1,826 points spent by something other than the measuring
+    session — so ``remaining`` moves under the funnel's feet from Nate's own
+    `gh` use and every other agent on it. A delta would attribute their spend
+    to the funnel.
+    """
+    _GRAPHQL_SPEND["calls"] = int(_GRAPHQL_SPEND["calls"]) + 1
+    if not isinstance(block, dict):
+        return
+    cost = block.get("cost")
+    if isinstance(cost, int) and not isinstance(cost, bool):
+        _GRAPHQL_SPEND["cost"] = int(_GRAPHQL_SPEND["cost"]) + cost
+    remaining = block.get("remaining")
+    if isinstance(remaining, int) and not isinstance(remaining, bool):
+        _GRAPHQL_SPEND["remaining"] = remaining
+    if isinstance(block.get("resetAt"), str):
+        _GRAPHQL_SPEND["reset_at"] = block["resetAt"]
+
+
 def gh_graphql(query: str, **variables) -> dict:
     """Run a GraphQL query and preserve its top-level ``rateLimit`` field.
 
@@ -2473,6 +2513,9 @@ def gh_graphql(query: str, **variables) -> dict:
     callers can inspect the cost without changing the shape they already
     index into. Mutations deliberately do not request it: GitHub exposes the
     field on the query root, not the mutation root.
+
+    Each response's rate-limit block is also accumulated into
+    ``graphql_spend()`` so a run can report what it spent.
     """
     cmd = ["gh", "api", "graphql", "-f", "query=" + query]
     for key, value in variables.items():
@@ -2484,7 +2527,10 @@ def gh_graphql(query: str, **variables) -> dict:
     payload = json.loads(proc.stdout)
     if payload.get("errors"):
         raise GitHubError(json.dumps(payload["errors"]))
-    return payload["data"]
+    data = payload["data"]
+    if isinstance(data, dict):
+        _record_rate_limit(data.get("rateLimit"))
+    return data
 
 
 def parse_time(value: Optional[str]) -> Optional[datetime]:
@@ -4705,5 +4751,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
 
+def report_graphql_spend(stream=None) -> None:
+    """Print what this process spent on GraphQL, if it spent anything.
+
+    To **stderr**, never stdout: `begin`, `brief` and `next` emit JSON that
+    routines parse, and a spend line on stdout would corrupt it. A run that
+    made no GraphQL call prints nothing rather than a row of zeros.
+    """
+    spend = graphql_spend()
+    if not spend["calls"]:
+        return
+    print(
+        "graphql: {} call(s), {} point(s) spent, {} remaining{}".format(
+            spend["calls"], spend["cost"],
+            "unknown" if spend["remaining"] is None else spend["remaining"],
+            "" if not spend["reset_at"] else ", resets {}".format(spend["reset_at"]),
+        ),
+        file=stream if stream is not None else sys.stderr,
+    )
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        code = main()
+    finally:
+        # In a `finally` so a run that dies on an exhausted budget still says
+        # what it spent — that run is exactly the one whose numbers matter.
+        report_graphql_spend()
+    sys.exit(code)

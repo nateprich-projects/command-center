@@ -88,6 +88,17 @@ def test_openai_five_hour_gate_is_suspended_by_policy():
     assert usage.pace(reading, NOW)["over_pace"]
 
 
+def test_shaping_is_allowed_for_an_unmetered_provider():
+    """Muse exposes no usage to a scheduled run (AGENTS.md); begin honours that
+    for the pace gate, and #86's 2026-09-09 revision has the shaping gate honour
+    it too. A metered reading keeps the idle-window rule, and a missing metered
+    reading still refuses closed."""
+    assert usage.shaping_allowed({"unmetered": True, "windows": {}})
+    assert not usage.shaping_allowed({"windows": {}})
+    assert usage.shaping_allowed({"windows": {"five_hour": {"used_percent": 5.0}}})
+    assert not usage.shaping_allowed({"windows": {"five_hour": {"used_percent": 50.0}}})
+
+
 def test_the_reserves_are_sized_against_a_real_run_not_a_guess():
     """A run with nothing to do cost 2,690 output tokens; ten times that is
     ~1.5% of a weekly window. Reserves an order of magnitude above that refused

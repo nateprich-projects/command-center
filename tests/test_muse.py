@@ -160,5 +160,7 @@ def test_the_routine_describes_both_jobs_and_their_order():
     ordering, and the funnel cannot correct it after the fact."""
     routine = (ROOT / "routines" / "muse.md").read_text()
     assert "Reviews win because they are further down the funnel" in routine
-    assert "Never both in the same\nrun" in routine or "Never both in the same run" in routine
+    # One job per run, stated in the routine. The wording widened from "both"
+    # when shaping became the third job (#366).
+    assert "Never more than one job in the same run" in " ".join(routine.split())
     assert "skills/breakdown/SKILL.md" in routine

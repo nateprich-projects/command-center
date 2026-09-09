@@ -3637,7 +3637,12 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     """
     item = find(items, ref)
     try:
-        plan = pathlib.Path(plan_file).read_text()
+        if plan_file == "-":
+            # Muse runs with --disable-write and cannot write a plan file; a
+            # pipe writes nothing to disk (#366).
+            plan = sys.stdin.read()
+        else:
+            plan = pathlib.Path(plan_file).read_text()
     except OSError as exc:
         raise GitHubError("cannot read {}: {}".format(plan_file, exc))
     if not plan.strip():
@@ -4901,7 +4906,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     shaped = sub.add_parser("shaped", help="record a grilled plan and move to Shaped")
     shaped.add_argument("ref", help="issue number, owner/repo#number, or URL")
-    shaped.add_argument("--plan", required=True, help="file holding the plan")
+    shaped.add_argument("--plan", required=True,
+                        help="file holding the plan, or - to read it from stdin")
     shaped.add_argument(
         "--run", default=None,
         help="heartbeat run id; otherwise infer a unique open local start",

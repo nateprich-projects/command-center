@@ -303,3 +303,51 @@ def test_shape_offers_only_the_first_idea_matching_the_run_tier(
         "title": candidates[1].title,
     }
     assert len(calls) == 1
+
+
+def test_muse_standard_schedule_is_offered_a_standard_idea_on_an_unmetered_reading(
+    monkeypatch, capsys
+):
+    """#86, revised by Nate 2026-09-09: Muse's standard schedule shapes too.
+    The real headroom gate must admit an unmetered reading, not a patched one."""
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="run-id\n"),
+    )
+    monkeypatch.setattr(
+        usage, "read_agent",
+        lambda agent, timestamp: {"unmetered": True, "windows": {}},
+    )
+    monkeypatch.setattr(
+        funnel, "ideas",
+        lambda items: [_idea(36, "A standard idea", "Risk: standard")],
+    )
+
+    assert funnel.cmd_begin([], NOW, "muse", "standard", False, True) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["unmetered"] is True
+    assert result["do"] == "shape"
+    assert result["work"]["ref"] == "nateprich-projects/command-center#36"
+
+
+def test_muse_escalated_schedule_is_never_offered_shaping(monkeypatch, capsys):
+    """The hourly escalated schedule is review-only: no --breakdown, and an
+    escalated idea is not offered either, so nothing routes shaping there."""
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="run-id\n"),
+    )
+    monkeypatch.setattr(
+        usage, "read_agent",
+        lambda agent, timestamp: {"unmetered": True, "windows": {}},
+    )
+    monkeypatch.setattr(
+        funnel, "ideas",
+        lambda items: [_idea(37, "A standard idea", "Risk: standard")],
+    )
+
+    assert funnel.cmd_begin([], NOW, "muse", "escalated", False, False) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "stop"

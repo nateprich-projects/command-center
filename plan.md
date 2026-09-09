@@ -1,7 +1,7 @@
 ---
 title: Command Center — Design Record
 tags: [command-center, funnel, design-record, plan]
-last_updated: 2026-09-05
+last_updated: 2026-09-09
 status: Design settled. v0 in progress.
 ---
 
@@ -159,10 +159,20 @@ a stalled item from permanently plugging the queue.
 
 **Codex's work runs the ladder:**
 
-`Broken > Maintenance > Improve existing > Build new > Replace existing`
+`Investigate > Broken > Maintenance > Improve existing > Build new > Replace existing`
+
+`Investigate` comes first because an unanswered "is this broken?" gates a possible
+`Broken`: it is cheap to answer, but expensive to sit on while something silently
+misbehaves. Investigations are startable like any other class. The run is evidence
+first: if it establishes a defect, file the resulting tickets under the investigation
+before closing the question; if it establishes none, record the evidence on the
+investigation and close through the existing `funnel accept --no-tickets` path. There
+is no separate ending or new funnel mechanic.
 
 The ladder ranks what to **start**. Once a project is Building, its remaining tickets
 finish first. Passing a gate is a commitment and nothing may silently un-commit it.
+
+Within one decision gate, the same ladder breaks class ties; gate depth still wins.
 
 **Broken and Maintenance preempt in-flight work** — and this is only safe because both
 are finite. The governing rule: **only classes that are finite may preempt.**
@@ -564,7 +574,8 @@ deliberately deferred rather than oversights, and all four are now settled.
 
 ### Ladder class is a Project single-select field
 
-An item's ladder class (`Broken`, `Maintenance`, `Improve`, `New`, `Replace`) is
+An item's ladder class (`Investigate`, `Broken`, `Maintenance`, `Improve`, `New`,
+`Replace`) is
 **un-derivable** — it fails the same test `needs-shaping` passed, so it has to be
 written down. It lives as a **`Class` single-select field on the Project**, alongside
 `Status`.
@@ -579,8 +590,9 @@ acquire preemption rights.
 The one case where `Class` is written by code rather than by Nate: the rejected-merge
 flow sets `Class: Broken` mechanically.
 
-_Rejected: five labels (`broken`, `maintenance`, `improve`, `new`, `replace`).
-A single-select cannot be self-contradictory; five labels permit `broken` + `new` on
+_Rejected: six labels (`investigate`, `broken`, `maintenance`, `improve`, `new`,
+`replace`).
+A single-select cannot be self-contradictory; six labels permit `broken` + `new` on
 one issue, which forces validation rules — exactly the machinery the v1 wayfinder
 contract carried and that was deleted with it. Single-select is also the same shape as
 `Status`: two fields, one mental model. And it preserves the two-label decision, which

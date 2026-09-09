@@ -56,9 +56,9 @@ _(Confirmed by Nate 2026-09-07 — "I want you to class these yourself when you
 create them", replacing the 2026-09-05 rule that `Broken` was settable at entry
 by him alone.)_
 
-Class the item when you file it, using the ladder's own option names — `Broken`,
-`Maintenance`, `Improve`, `New`, `Replace`. Say in the capture note why you chose
-it, and say so plainly when you are unsure rather than guessing confidently; he
+Class the item when you file it, using the ladder's own option names — `Investigate`,
+`Broken`, `Maintenance`, `Improve`, `New`, `Replace`. Say in the capture note why you
+chose it, and say so plainly when you are unsure rather than guessing confidently; he
 overrides freely and a stated doubt is cheaper to correct than a confident error.
 `funnel.py` has no `class` command; use `SET_FIELD` with `CLASS_FIELD_ID` the way
 `cmd_reject` does, and record who decided it in a comment — your own name now,

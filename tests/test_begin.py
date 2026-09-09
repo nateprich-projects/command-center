@@ -104,3 +104,73 @@ def test_breakdown_work_carries_plan_access_signals(monkeypatch, capsys):
 
     assert result["do"] == "breakdown"
     assert result["work"]["access_signals"] == ["token", "tunnel"]
+
+
+def _idea(number, title, body):
+    return SimpleNamespace(
+        ref="nateprich-projects/command-center#{}".format(number),
+        repo="nateprich-projects/command-center",
+        number=number,
+        url="https://github.com/nateprich-projects/command-center/issues/{}".format(number),
+        title=title,
+        body=body,
+    )
+
+
+def test_shape_is_not_offered_when_the_first_idea_is_the_other_tier(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        funnel,
+        "ideas",
+        lambda items: [_idea(31, "Risky idea", "Risk: escalated")],
+    )
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+
+    result = _begin(monkeypatch, capsys, breakdown=True)
+
+    assert result["do"] == "stop"
+    assert result["why"] == "nothing to review and nothing to break down"
+
+
+def test_shape_is_not_offered_without_headroom(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(
+        funnel,
+        "ideas",
+        lambda items: calls.append(items) or [_idea(32, "An idea", "Risk: standard")],
+    )
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: False)
+
+    result = _begin(monkeypatch, capsys, breakdown=True)
+
+    assert result["do"] == "stop"
+    assert result["why"] == "nothing to review and nothing to break down"
+    assert calls == []
+
+
+def test_shape_offers_only_the_first_idea_matching_the_run_tier(
+    monkeypatch, capsys
+):
+    candidates = [
+        _idea(33, "Escalated first", "Risk: escalated"),
+        _idea(34, "Standard first", "Risk: standard"),
+        _idea(35, "Standard second", "Risk: standard"),
+    ]
+    calls = []
+    monkeypatch.setattr(
+        funnel,
+        "ideas",
+        lambda items: calls.append(items) or candidates,
+    )
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+
+    result = _begin(monkeypatch, capsys, breakdown=True)
+
+    assert result["do"] == "shape"
+    assert result["work"] == {
+        "ref": candidates[1].ref,
+        "url": candidates[1].url,
+        "title": candidates[1].title,
+    }
+    assert len(calls) == 1

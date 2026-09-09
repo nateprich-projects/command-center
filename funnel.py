@@ -1768,8 +1768,13 @@ def working_tree_touched(now: datetime) -> List[Dict[str, object]]:
     looks identical from here. The point is that a routine moving his checkout
     stops being invisible, which on 2026-09-06 it was — a run added worktrees and
     ran `git pull` in it, and nothing recorded that but the transcript.
+
+    HEAD changes are one checkout transition even when several runs were open
+    across it. Changes where only the dirty count moved stay one row per run:
+    the heartbeat has no identity for a dirty-only event to group on.
     """
     found: List[Dict[str, object]] = []
+    transitions: Dict[Tuple[object, object], Dict[str, object]] = {}
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import heartbeat
@@ -1785,18 +1790,56 @@ def working_tree_touched(now: datetime) -> List[Dict[str, object]]:
                 after = row.get("repo")
                 if not before or not after or before == after:
                     continue
-                if (row.get("ts") or 0) < (now - MAINTENANCE_WINDOW).timestamp():
+                timestamp = row.get("ts") or 0
+                if timestamp < (now - MAINTENANCE_WINDOW).timestamp():
+                    continue
+                at = datetime.fromtimestamp(
+                    timestamp, timezone.utc
+                ).isoformat()
+                before_head = before.get("head") if isinstance(before, dict) else None
+                after_head = after.get("head") if isinstance(after, dict) else None
+                if (before_head is not None and after_head is not None
+                        and before_head != after_head):
+                    key = (before_head, after_head)
+                    transition = transitions.get(key)
+                    if transition is None:
+                        transition = {
+                            "at": at,
+                            "before": before,
+                            "after": after,
+                            "observers": [],
+                            "_at_ts": timestamp,
+                            "_observers": [],
+                        }
+                        transitions[key] = transition
+                    if timestamp < transition["_at_ts"]:
+                        transition.update(
+                            at=at, before=before, after=after, _at_ts=timestamp
+                        )
+                    transition["_observers"].append((
+                        timestamp,
+                        {"agent": agent, "run": row.get("run")},
+                    ))
                     continue
                 found.append({
                     "agent": agent,
                     "run": row.get("run"),
-                    "at": datetime.fromtimestamp(
-                        row["ts"], timezone.utc).isoformat(),
+                    "at": at,
                     "before": before,
                     "after": after,
                 })
     except Exception:
         return []
+
+    for transition in transitions.values():
+        observers = sorted(
+            transition.pop("_observers"),
+            key=lambda entry: (entry[0], entry[1]["agent"],
+                               str(entry[1]["run"])),
+        )
+        transition["observers"] = [entry[1] for entry in observers]
+        transition.pop("_at_ts")
+    found.extend(transitions.values())
     return sorted(found, key=lambda r: str(r["at"]))
 
 

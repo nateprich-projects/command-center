@@ -278,6 +278,11 @@ ORIGIN_OVERRIDE_TARGETS = ("nate", "agents")
 REJECTED_MERGE_ALARM = 3
 REJECTED_MERGE_WINDOW = timedelta(days=7)
 
+#: Keep funnel-closed work visible across several unattended brief runs. A
+#: brief is hourly, so a one-run window would make the record disappear before
+#: Nate could reasonably see it.
+CLOSED_ITSELF_WINDOW = timedelta(days=7)
+
 #: Drift is reported, never used as a gate. Keep these names short and stable:
 #: callers put them verbatim into comments and the brief.
 DRIFT_PLAN_EDIT = "plan edited after Ready"
@@ -3419,6 +3424,64 @@ def parked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     return [_parked_item_json(item) for item in parked_items(items)]
 
 
+def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
+    """Closed projects recent enough to carry a funnel-close record."""
+    cutoff = now - CLOSED_ITSELF_WINDOW
+    return sorted(
+        (
+            item for item in items
+            if item.parent is None
+            and item.state == "CLOSED"
+            and item.status == "Done"
+            and item.closed_at is not None
+            and item.closed_at >= cutoff
+        ),
+        key=lambda item: (
+            -item.closed_at.timestamp(), item.repo, item.number
+        ),
+    )
+
+
+def _closed_itself_item_json(item: Item) -> Optional[Dict[str, object]]:
+    """Render one funnel-close marker, or omit an ordinary accepted close."""
+    comments = (_gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "comments",
+    ) or {}).get("comments", [])
+    for comment in reversed(comments):
+        if not isinstance(comment, dict):
+            continue
+        payload = _marked_json(
+            comment.get("body") or "", CLOSED_ITSELF_PREFIX
+        )
+        if payload is None:
+            continue
+        drift = payload.get("drift", [])
+        if not isinstance(drift, list):
+            drift = []
+        drift = [value for value in drift if isinstance(value, str)]
+        return {
+            "ref": item.ref,
+            "title": item.title,
+            "url": item.url,
+            "closed_at": item.closed_at.isoformat() if item.closed_at else None,
+            "drift": drift,
+        }
+    return None
+
+
+def closed_itself_json(
+    items: Iterable[Item], now: datetime
+) -> List[Dict[str, object]]:
+    """The brief's recent funnel-close records, newest first."""
+    rows = []
+    for item in closed_itself_items(items, now):
+        row = _closed_itself_item_json(item)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
 def blocked_items(items: Iterable[Item]) -> List[Item]:
     """Open, label-blocked items, oldest first.
 
@@ -3834,6 +3897,7 @@ def cmd_brief(
         "counts_by_gate": counts,
         "items": [item_json(i, now, by_ref) for i in decisions],
         "parked": parked_json(items),
+        "closed_itself": closed_itself_json(items, now),
         "blocked": blocked_json(items),
         "human_steps": human_step_json(items),
         "closed_with_access_vocabulary": closed_with_access_vocabulary_json(

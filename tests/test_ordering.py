@@ -325,9 +325,21 @@ def test_a_parent_is_not_itself_a_startable_ticket():
     assert [i.number for i in startable([parent])] == []
 
 
-def test_ready_is_not_startable_until_the_parent_is_building():
-    """Ready means broken into issues; only Building exposes tickets to Codex."""
-    assert startable([project(1, "Ready", "New"), ticket(2, 1)]) == []
+def test_ready_and_building_parents_are_both_startable():
+    """plan.md: "Codex draws tickets from any `Ready` or `Building` parent".
+
+    This asserted the opposite until #343. That assertion arrived in #287, the
+    same commit that deleted the `start` gate — the only writer of `Building`.
+    Requiring a stage while removing its sole producer left every `Ready`
+    project unstartable and its accept gate unreachable, and the test passed
+    because it exercised the half that survived.
+
+    There is no coherent reading in which `Ready` stays unstartable: a claim
+    cannot promote a ticket nothing will hand out, and nothing else writes the
+    stage. `Building` is the record that work began, written by `cmd_claim`.
+    """
+    assert [i.number for i in startable(
+        [project(1, "Ready", "New"), ticket(2, 1)])] == [2]
     assert [i.number for i in startable(
         [project(1, "Building", "New"), ticket(2, 1)])] == [2]
 

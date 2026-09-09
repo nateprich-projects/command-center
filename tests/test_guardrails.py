@@ -27,6 +27,16 @@ CANONICAL = "/Users/nateprich/.claude/command-center"
 #: trap — but never in a file an agent executes from.
 RESOLVED = "/Volumes/"
 
+# These are the load-bearing plan sections described by skills/shape. Keep the
+# canonical names here so a prose edit cannot silently drift away from the
+# vocabulary the plan parser and self-approval path understand.
+PLAN_SECTION_NAMES = (
+    "Decided from precedent",
+    "Decided by the agent",
+    "Needs Nate",
+)
+NEEDS_SECTION_ALIASES = ("Needs Nate", "Needs you")
+
 
 def command_files():
     """Files an agent reads and runs commands out of."""
@@ -84,4 +94,19 @@ def test_the_permission_rule_itself_is_intact():
         "The allow rule the routines depend on is gone from .claude/settings.json. "
         "Without it every command-center call prompts, and a scheduled run cannot "
         "answer a prompt."
+    )
+
+
+def test_shape_skill_pins_plan_section_names():
+    skill = (ROOT / "skills" / "shape" / "SKILL.md").read_text()
+    missing = [name for name in PLAN_SECTION_NAMES if name not in skill]
+    assert not missing, (
+        "skills/shape/SKILL.md must keep the plan section names stable; missing: {}"
+        .format(", ".join(missing))
+    )
+
+    missing_aliases = [name for name in NEEDS_SECTION_ALIASES if name not in skill]
+    assert not missing_aliases, (
+        "skills/shape/SKILL.md must document both Needs-section spellings; missing: {}"
+        .format(", ".join(missing_aliases))
     )

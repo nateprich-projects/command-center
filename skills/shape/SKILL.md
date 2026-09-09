@@ -94,11 +94,23 @@ closed-world test: does the plan require anything outside what an agent can reac
 The access cases named there are examples, not an exhaustive checklist; an unnamed
 capability gap still counts.
 
-Decide from precedent, and cite where it comes from:
+The plan's decision record has three separate sections. Keep these names stable:
 
-- anything `plan.md` or `AGENTS.md` already rules on
-- conventions a sibling project established — deployment shape, file layout, testing
-- technical choices with an obvious answer given those conventions
+- **Decided from precedent** — cite a written source for anything `plan.md` or
+  `AGENTS.md` already rules on, a sibling project's established convention, or a
+  technical choice with an obvious answer given those conventions.
+- **Decided by the agent** — record the agent's own engineering judgement when
+  precedent does not settle a technical choice. Each entry must include its reasoning
+  and the alternative it rejected, in the same shape as the plan's `Rejected` section.
+  A bare line such as `decided: SQLite` is not a decision record.
+- **Needs Nate** (also written **Needs you** in existing plans) — record the questions
+  that only Nate may answer. This section must be empty for a plan to self-approve;
+  use the stable heading spelling rather than inventing a synonym.
+
+The middle section exists for the #31 anti-laundering principle one stage earlier:
+the agent's own judgement must be marked as its own, never folded into the precedent
+list where it would acquire authority it does not have. Nate can reverse a decision he
+can see was made on his behalf; he cannot do that when it is disguised as a citation.
 
 Leave to Nate, and say so explicitly rather than guessing:
 
@@ -112,10 +124,10 @@ Leave to Nate, and say so explicitly rather than guessing:
 - anything where the plan would encode a preference rather than a deduction
 
 The plan must **separate the decision record from the open-question record**. "Decided
-from precedent (source)" and "Needs you" are different sections, and the latter is what
-he actually reads at the Shaped gate. If the plan also has a "Decided by the agent"
-section, keep that separate too; it records the agent's judgement and reasoning rather
-than laundering it into precedent.
+from precedent", "Decided by the agent", and "Needs Nate" (or the existing "Needs you")
+are different sections; the latter is what he actually reads at the Shaped gate. Do not
+merge either decision section into the other or use the decision headings for open
+questions.
 
 "Needs you" (or the existing "Needs Nate" spelling) is **not** answered by an empty
 section. Write one explicit answer under each category, even when the answer is that

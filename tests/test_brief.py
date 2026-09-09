@@ -308,3 +308,27 @@ def test_brief_flags_completed_access_plan_without_any_human_ticket(
         "access_signals": ["token", "tunnel"],
     }]
     assert brief["human_steps"] == []
+
+
+def test_brief_surfaces_agent_health_without_counting_it_as_a_decision(
+    monkeypatch, capsys
+):
+    item = funnel.Item(
+        repo="nateprich/beta", number=60, title="A plan with an open question",
+        url="https://example.invalid/60", state="OPEN", status="Shaped",
+        klass="Improve", status_since=NOW,
+        body="## Needs you\n\nChoose a direction.\n",
+    )
+    health = [{
+        "agent": "codex",
+        "condition": "`codex` errored 3 times this week. Most recent: reserve",
+    }]
+    monkeypatch.setattr(funnel, "agent_health", lambda now: health)
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+    monkeypatch.setattr(funnel, "working_tree_touched", lambda now: [])
+
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["agent_health"] == health
+    assert brief["total_needing_nate"] == 1

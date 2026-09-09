@@ -241,6 +241,10 @@ python3 /Users/nateprich/.claude/command-center/funnel.py release <issue-number>
 python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent codex --run <id> --outcome done --note "PR #<n>"
 ```
 
+If the ticket named a prerequisite that has not landed and the result is **no
+change made**, finish with `--outcome skipped-blocked` and a note. This is an
+honest decline, not an error.
+
 If anything went wrong, finish with `--outcome errored --note "<what broke>"`.
 An honest `errored` is worth more than a run that vanishes: the watchdog can see
 the first and can only guess at the second.

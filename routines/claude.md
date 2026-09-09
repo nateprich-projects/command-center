@@ -23,7 +23,7 @@ and only finite classes may preempt.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent claude --tier escalated --routine-sha 3994c12f3b2388cef22d27d7a05780f95fe3955e31d4a42b8d73a9fe0e7e396c
+python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent claude --tier escalated --routine-sha 847b4dff7c8e5b4f25e55278be17e6121fae5b7e3f2bb274f1d3f3c5fb89c6d0
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and names
@@ -236,6 +236,10 @@ python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent clau
 
 `--merged` takes **the PR's number**, not a count of merges — `--merged 96`, never `--merged 1`. It is a field, not prose: unattended merges have to appear in the brief
 as a record, and a record that must be parsed out of a sentence is not one.
+
+If the ticket named a prerequisite that has not landed and the result is **no
+change made**, finish with `--outcome skipped-blocked` and a note. This is an
+honest decline, not an error.
 
 Use `errored` with a note if something broke. Unattended merges must appear in
 the brief as a record — the note is that record.

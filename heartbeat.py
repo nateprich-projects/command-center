@@ -66,6 +66,7 @@ OUTCOMES = [
     "skipped-over-pace",   # budget gate refused
     "skipped-nate-active",  # the five-hour window was already in use; Codex only
     "skipped-usage-unknown",  # could not read usage; failed closed
+    "skipped-blocked",     # prerequisite has not landed; no change made
     "prompt-drift",        # routine literal did not match the checked-in file
     "errored",             # tried and failed
 ]

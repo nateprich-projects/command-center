@@ -4023,7 +4023,17 @@ def cmd_next(
     tier: Optional[str] = None,
     excluded: Optional[Set[str]] = None,
 ) -> int:
-    excluded = excluded or frozenset()
+    # Accept bare numbers as well as refs (#436). The routine passes whatever
+    # the model copied from the ticket JSON, and a bare number matched nothing
+    # in `next_ticket`'s ref comparison — so the run released its claim and
+    # was handed the same ticket straight back.
+    resolved = set()
+    for ref in excluded or ():
+        try:
+            resolved.add(find(items, ref).ref)
+        except (GitHubError, SystemExit, ValueError):
+            resolved.add(ref)
+    excluded = frozenset(resolved)
     # A ref reaches `--not` only from the run that was offered it, and `next`
     # never offers a claimed ticket to a second run — so the caller holds the
     # claim it is declining. Release it here rather than trusting the routine

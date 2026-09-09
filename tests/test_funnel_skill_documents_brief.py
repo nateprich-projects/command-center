@@ -21,7 +21,6 @@ import funnel  # noqa: E402
 
 SKILL = pathlib.Path(__file__).resolve().parent.parent / "skills" / "funnel" / "SKILL.md"
 
-
 def brief_keys() -> set:
     """The brief's top-level keys, read from the source rather than a live run.
 

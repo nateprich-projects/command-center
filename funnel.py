@@ -4897,9 +4897,10 @@ def ticket_pr_facts(
 
     An explicit ``None`` means both scans established no PR and no branch. A
     dict carries PR data when present plus ``branch_exists``; a branch without
-    a PR is a minimal dict. An absent key means a bounded scan was truncated,
-    so callers must not infer absence. That distinction keeps a scan blind spot
-    from becoming either a false stranded diagnostic or an unsafe takeover.
+    a PR is a minimal dict. A missing PR in a truncated PR scan is represented
+    only by its branch fact, while an absent key means branch presence itself
+    was not established. That distinction keeps a scan blind spot from becoming
+    either a false stranded diagnostic or an unsafe takeover.
     """
     wanted = {
         item.ref: item for item in items
@@ -4927,7 +4928,9 @@ def ticket_pr_facts(
             elif not truncated:
                 fact = None
             else:
-                continue
+                # PR absence is unknown beyond the bounded history, but a
+                # complete branch scan can still establish branch absence.
+                fact = {}
 
             if ref in branch_refs:
                 if fact is None:
@@ -4938,7 +4941,7 @@ def ticket_pr_facts(
                 if fact is not None:
                     fact["branch_exists"] = False
                 facts[ref] = fact
-            elif fact is not None:
+            elif fact:
                 # Preserve useful PR diagnostics while explicitly withholding
                 # the branch-absence conclusion from stale-lock detection.
                 fact["branch_exists"] = None

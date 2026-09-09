@@ -74,19 +74,25 @@ def test_one_scan_per_repo_regardless_of_ticket_count(monkeypatch):
     assert len(many) == 30
 
 
-def test_a_ticket_beyond_the_scan_window_is_omitted_not_none(monkeypatch):
-    """A truncated scan's blind spot must not read as a defect in the work.
-
-    `None` would reach `stranded_items` as "claim past its TTL with no PR".
-    """
+def test_branch_absence_survives_a_truncated_pr_scan(monkeypatch):
+    """Unknown PR absence must not erase definitive branch absence."""
     limit = funnel.MERGED_PR_SCAN_LIMIT
     rows = [pr_row(n, "ticket/{}".format(n)) for n in range(1000, 1000 + limit + 1)]
     monkeypatch.setattr(funnel, "_gh_json", repo_reads(rows))
 
     facts = funnel.ticket_pr_facts([ticket(42)])
 
-    assert "nateprich/beta#42" not in facts, "beyond-window ticket must be omitted"
-    assert facts.get("nateprich/beta#42", "absent") == "absent"
+    assert facts["nateprich/beta#42"] == {"branch_exists": False}
+
+
+def test_a_truncated_branch_scan_never_implies_branch_absence(monkeypatch):
+    limit = funnel.MERGED_PR_SCAN_LIMIT
+    branches = [branch_row(n) for n in range(1000, 1000 + limit)]
+    monkeypatch.setattr(funnel, "_gh_json", repo_reads([], branches))
+
+    facts = funnel.ticket_pr_facts([ticket(42)])
+
+    assert "nateprich/beta#42" not in facts
 
 
 def test_a_missing_pr_inside_a_complete_scan_is_none(monkeypatch):

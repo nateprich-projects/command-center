@@ -85,6 +85,25 @@ def test_building_waits_only_once_every_child_has_closed():
     assert gate_question(item(2, "Building", "New", children_total=3, children_done=3)) == "Accept it?"
 
 
+def test_upkeep_that_carried_a_human_step_still_waits_for_acceptance():
+    for number, klass in enumerate(("Broken", "Maintenance", "Improve"), start=1):
+        carried = project(
+            number, "Building", klass, children=2, done=2,
+            carried_human_step=True,
+        )
+        ordinary = project(number + 10, "Building", klass, children=2, done=2)
+
+        assert gate_question(carried) == "Accept it?"
+        assert gate_question(ordinary) is None
+
+
+def test_new_replace_and_unset_class_still_wait_for_acceptance():
+    for number, klass in enumerate(("New", "Replace", None), start=1):
+        finished = project(number, "Building", klass, children=1, done=1)
+
+        assert gate_question(finished) == "Accept it?"
+
+
 def test_building_with_no_children_does_not_count_as_complete():
     """children_all_closed must not be vacuously true for a childless item."""
     assert gate_question(item(1, "Building", "New", children_total=0, children_done=0)) is None
@@ -322,6 +341,24 @@ def test_blocked_work_is_not_startable_at_either_level():
     assert startable([project(1, "Building", "New"), ticket(2, 1, labels=["blocked"])]) == []
     parent = project(3, "Building", "New", labels=["blocked"])
     assert startable([parent, ticket(4, 3)]) == []
+
+
+def test_a_human_step_ticket_is_not_startable():
+    rows = [
+        project(1, "Building", "New"),
+        ticket(2, 1, body="Human step: entering a credential"),
+    ]
+
+    assert startable(rows) == []
+
+
+def test_an_unmarked_ticket_is_still_startable():
+    rows = [
+        project(1, "Building", "New"),
+        ticket(2, 1, body="Enter a value supplied through the environment."),
+    ]
+
+    assert [candidate.number for candidate in startable(rows)] == [2]
 
 
 def test_a_ticket_with_an_open_native_blocker_is_not_startable():

@@ -61,8 +61,11 @@ SEPARATOR = "\n---\n"
 IDLE_RRULE_MARKER = "BYHOUR="
 
 
-GATE_LINE = "usage.py gate codex"
-TIER_LINE = "funnel.py next --tier standard"
+BEGIN_LINE = "funnel.py begin --agent codex --tier standard"
+NEXT_LINE = "funnel.py next --tier standard"
+# Kept as a compatibility prefix for callers that use the old name for the
+# schedule-specific opening command.
+GATE_LINE = "funnel.py begin --agent codex"
 
 #: Which tier a schedule works, derived from when it fires — the same signal as
 #: the presence check, and for a related reason.
@@ -131,11 +134,14 @@ def prompt_text(automation: str = "") -> str:
                          "runtime prompt".format(ROUTINE))
     runtime = body.split(SEPARATOR, 1)[1].strip()
     if needs_presence_check(automation):
-        runtime = runtime.replace(GATE_LINE, GATE_LINE + " --idle", 1)
+        runtime = runtime.replace(BEGIN_LINE, BEGIN_LINE + " --idle", 1)
     tier = tier_for(automation)
     if tier != "standard":
         runtime = runtime.replace(
-            TIER_LINE, TIER_LINE.replace("standard", tier), 1)
+            BEGIN_LINE, BEGIN_LINE.replace("standard", tier), 1)
+        runtime = runtime.replace(
+            NEXT_LINE, NEXT_LINE.replace("standard", tier)
+        )
     return "{}\n\n{}\n".format(title, runtime)
 
 

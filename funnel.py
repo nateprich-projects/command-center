@@ -164,6 +164,24 @@ MAINTENANCE_WINDOW = timedelta(days=30)
 # this diagnostic's deliberately finite window.
 MERGED_PR_SCAN_LIMIT = 100
 
+#: GraphQL reserve floors, expressed in **loads remaining** rather than raw
+#: points so they stay correct as the per-load cost changes — #272 is about to
+#: change it by roughly a factor of six.
+#:
+#: Two tiers, on Nate's call 2026-09-08: **reviewers keep going.** New work
+#: consumes budget and adds in-flight PRs; review drains the lane and is cheap.
+#: One floor for everything risks a stall where approved PRs sit unmerged until
+#: the hour resets, and the undrained backlog makes the next hour worse than the
+#: one that triggered it — the same instinct as `plan.md`'s "once a project is
+#: Building, its remaining tickets finish first".
+#:
+#: Accepted knowingly: reviewers can still drive the budget to actual zero, so
+#: the last review runs of a bad hour may crash rather than decline cleanly.
+#: Two tiers make that rarer; they do not abolish it. Do not "fix" it by
+#: collapsing the tiers.
+ENGINEERING_RESERVE_LOADS = 20
+REVIEW_RESERVE_LOADS = 5
+
 #: Regression issues opened by `funnel reject`. The issues themselves are the
 #: counter — GitHub is the state, so there is nothing else to keep in step.
 REGRESSION_PREFIX = "Regression from PR #"
@@ -248,6 +266,10 @@ class Item:
     parent: Optional[str] = None  # "owner/repo#123"
     children_total: int = 0
     children_done: int = 0
+    # Derived at load time from child ticket bodies. This is deliberately not
+    # a second GitHub record: the Human step marker remains the only source of
+    # truth, including after its ticket closes.
+    carried_human_step: bool = False
     first_child_created_at: Optional[datetime] = None
     last_child_closed_at: Optional[datetime] = None
     blocked_since: Optional[datetime] = None
@@ -419,8 +441,14 @@ def gate_question(item: Item) -> Optional[str]:
             return None
         return "Unblock?" if item.parent else "Unblock or park?"
     if item.status == "Building":
-        # Building waits on Nate only once every child has closed.
-        return GATES["Building"] if item.children_all_closed else None
+        # New work and replacements always stop for acceptance. Upkeep closes
+        # itself once #55 lands, except where Nate performed part of the work:
+        # a project that ever carried a human-step ticket must still reach him.
+        if not item.children_all_closed:
+            return None
+        if item.klass in ("Broken", "Maintenance", "Improve"):
+            return GATES["Building"] if item.carried_human_step else None
+        return GATES["Building"]
     if item.status == "Shaped":
         # A plan with no Needs section has not earned an all-clear. The shared
         # parser fails closed so a missing section still reaches Nate rather
@@ -566,6 +594,24 @@ def parse_human_step(body: str) -> Optional[str]:
         return None
     match = HUMAN_STEP_LINE.search(body)
     return match.group("reason") if match else None
+
+
+def mark_projects_that_carried_human_steps(items: Sequence[Item]) -> None:
+    """Derive project acceptance history from child ticket markers.
+
+    Closed child tickets remain in the Project item feed, so deriving this
+    after all pages load preserves "ever carried" without persisting a second
+    field that could drift from the marker.
+    """
+    parent_refs = {
+        item.parent
+        for item in items
+        if item.parent is not None
+        and parse_human_step(item.body or "") is not None
+    }
+    for item in items:
+        item.carried_human_step = item.ref in parent_refs
+
 
 #: A safety boundary for tickets written before markers existed, or by someone
 #: who forgot. False positives cost one escalated review; false negatives can
@@ -859,7 +905,13 @@ def startable(items: Sequence[Item],
     }
 
     def eligible(item: Item) -> bool:
-        if item.state != "OPEN" or item.is_blocked or item.open_blockers or item.children_total:
+        if (
+            item.state != "OPEN"
+            or item.is_blocked
+            or item.open_blockers
+            or item.children_total
+            or parse_human_step(item.body or "") is not None
+        ):
             return False
         if item.ref in awaiting_review:
             return False
@@ -1207,7 +1259,7 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
     """Tickets whose work is already in an open PR, waiting to be reviewed.
 
     Found by the `ticket/<number>` branch name the routine guarantees, which is
-    the same handle `_ticket_pr` uses. One `gh pr list` per member repo, and only
+    the same handle `ticket_pr_index` uses. One `gh pr list` per member repo, and
     for repos that actually have candidate tickets.
     """
     repos = {i.repo for i in items}
@@ -1266,6 +1318,35 @@ def next_ticket(items: Sequence[Item], now: datetime,
         if effective_class(candidate, by_ref) == "Broken":
             return candidate
     return None
+
+
+def next_ticket_for_tier(items: Sequence[Item], now: datetime,
+                         tier: Optional[str] = None,
+                         blocked: Optional[Set[str]] = None,
+                         excluded: Optional[Set[str]] = None) -> Optional[Item]:
+    """Return the first shared-order ticket belonging to ``tier``.
+
+    Tier filtering has to happen by asking ``next_ticket`` repeatedly rather
+    than by filtering its input first. The latter would hide other in-motion
+    tickets from the WIP cap and could let a standard caller exceed it while
+    walking past escalated work. Reusing ``next_ticket`` also keeps Broken
+    preemption and all other ordering rules in one place.
+    """
+    excluded = set(excluded or ())
+    while True:
+        ticket = next_ticket(
+            items, now, blocked=blocked, excluded=excluded
+        )
+        if ticket is None or tier is None:
+            return ticket
+
+        reasons = escalation_reasons(
+            ticket.title, _ticket_body(ticket.repo, ticket.number)
+        )
+        wanted = bool(reasons) if tier == "escalated" else not reasons
+        if wanted:
+            return ticket
+        excluded.add(ticket.ref)
 
 
 def rejected_merges(items: Iterable[Item], now: datetime) -> Dict[str, object]:
@@ -2466,6 +2547,46 @@ class GitHubError(RuntimeError):
     pass
 
 
+#: Per-process GraphQL spend, accumulated from the responses themselves.
+#:
+#: Not state of record and it never outlives the process, so `GitHub is the
+#: state` is untouched. It exists because consumption was invisible until it
+#: hit zero: on 2026-09-08 `funnel.py` stopped entirely — `brief`, `queue`,
+#: `next`, every gate command — for the better part of an hour, several times
+#: in one day, with no earlier symptom to read (#273).
+_GRAPHQL_SPEND: Dict[str, object] = {
+    "calls": 0, "cost": 0, "remaining": None, "reset_at": None,
+}
+
+
+def graphql_spend() -> Dict[str, object]:
+    """What this process has spent on GraphQL so far, read from responses."""
+    return dict(_GRAPHQL_SPEND)
+
+
+def _record_rate_limit(block: object) -> None:
+    """Accumulate one response's reported cost.
+
+    **Summed from each response's own ``cost``, never inferred by differencing
+    ``remaining`` between calls.** The token is shared — a measurement on
+    2026-09-08 found 1,826 points spent by something other than the measuring
+    session — so ``remaining`` moves under the funnel's feet from Nate's own
+    `gh` use and every other agent on it. A delta would attribute their spend
+    to the funnel.
+    """
+    _GRAPHQL_SPEND["calls"] = int(_GRAPHQL_SPEND["calls"]) + 1
+    if not isinstance(block, dict):
+        return
+    cost = block.get("cost")
+    if isinstance(cost, int) and not isinstance(cost, bool):
+        _GRAPHQL_SPEND["cost"] = int(_GRAPHQL_SPEND["cost"]) + cost
+    remaining = block.get("remaining")
+    if isinstance(remaining, int) and not isinstance(remaining, bool):
+        _GRAPHQL_SPEND["remaining"] = remaining
+    if isinstance(block.get("resetAt"), str):
+        _GRAPHQL_SPEND["reset_at"] = block["resetAt"]
+
+
 def gh_graphql(query: str, **variables) -> dict:
     """Run a GraphQL query and preserve its top-level ``rateLimit`` field.
 
@@ -2473,6 +2594,9 @@ def gh_graphql(query: str, **variables) -> dict:
     callers can inspect the cost without changing the shape they already
     index into. Mutations deliberately do not request it: GitHub exposes the
     field on the query root, not the mutation root.
+
+    Each response's rate-limit block is also accumulated into
+    ``graphql_spend()`` so a run can report what it spent.
     """
     cmd = ["gh", "api", "graphql", "-f", "query=" + query]
     for key, value in variables.items():
@@ -2484,7 +2608,10 @@ def gh_graphql(query: str, **variables) -> dict:
     payload = json.loads(proc.stdout)
     if payload.get("errors"):
         raise GitHubError(json.dumps(payload["errors"]))
-    return payload["data"]
+    data = payload["data"]
+    if isinstance(data, dict):
+        _record_rate_limit(data.get("rateLimit"))
+    return data
 
 
 def parse_time(value: Optional[str]) -> Optional[datetime]:
@@ -2649,6 +2776,7 @@ def load_items() -> List[Item]:
         if not page["pageInfo"]["hasNextPage"]:
             break
         cursor = page["pageInfo"]["endCursor"]
+    mark_projects_that_carried_human_steps(items)
     return items
 
 
@@ -3074,32 +3202,9 @@ def cmd_next(
 ) -> int:
     excluded = excluded or frozenset()
     blocked = awaiting_review(items)
-    ticket = next_ticket(
-        items, now, blocked=blocked, excluded=excluded
+    ticket = next_ticket_for_tier(
+        items, now, tier=tier, blocked=blocked, excluded=excluded
     )
-
-    # A caller declaring a tier gets only work of that tier — in both directions.
-    #
-    # `standard` walks past escalated tickets rather than refusing outright, or
-    # the queue would stall behind one risky ticket until the other schedule came
-    # round. `escalated` walks past *ordinary* ones, which is the same rule
-    # applied the other way: the expensive engine is reserved for work that needs
-    # it, and idling costs nothing because the cheap continuous schedule is
-    # already working the ordinary queue, including overnight.
-    reasons: List[str] = []
-    if ticket is not None and tier:
-        for candidate in startable(items, awaiting_review=blocked):
-            if candidate.ref in excluded:
-                continue
-            found = escalation_reasons(
-                candidate.title, _ticket_body(candidate.repo, candidate.number))
-            wanted = bool(found) if tier == "escalated" else not found
-            if wanted:
-                ticket, reasons = candidate, found
-                break
-        else:
-            print("nothing — no {} work waiting".format(tier), file=sys.stderr)
-            return 1
 
     if ticket is None:
         holder = lock_holder(items, now)
@@ -3110,6 +3215,8 @@ def cmd_next(
                 ),
                 file=sys.stderr,
             )
+        elif tier:
+            print("nothing — no {} work waiting".format(tier), file=sys.stderr)
         return 1
     print(json.dumps(item_json(ticket, now, {i.ref: i for i in items}), indent=2))
     return 0
@@ -3187,6 +3294,38 @@ def find(items: Sequence[Item], ref: str) -> Item:
     raise GitHubError("no funnel item matches {}".format(ref))
 
 
+def claim_ticket(items: List[Item], now: datetime, target: Item) -> Optional[str]:
+    """Write a ticket claim, or return the reason it must be refused."""
+    running = in_motion(items, now)
+
+    taken = next((i for i in running if i.ref == target.ref), None)
+    if taken is not None and taken.in_motion_since != target.in_motion_since:
+        return "refused — {} is already claimed".format(target.ref)
+
+    if taken is None and len(running) >= WIP_LIMIT:
+        by_ref = {i.ref: i for i in items}
+        preempts = (
+            effective_class(target, by_ref) == "Broken"
+            and not any(
+                effective_class(item, by_ref) == "Broken" for item in running
+            )
+        )
+        if not preempts:
+            return "refused — {} tickets already in motion, limit is {} ({})".format(
+                len(running), WIP_LIMIT,
+                ", ".join(i.ref for i in running))
+
+    stale = [i for i in stale_locks(items, now) if i.ref != target.ref]
+    for item in stale:
+        # Self-correcting, no human in the loop. Every takeover is a line in the
+        # brief: one is noise, three in a week means runs are dying.
+        write_lock(item, "")
+        print("took over stale claim on {}".format(item.ref), file=sys.stderr)
+
+    write_lock(target, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    return None
+
+
 def cmd_claim(items: List[Item], now: datetime, ref: str) -> int:
     """Claim a ticket, or refuse. Two separate refusals, deliberately.
 
@@ -3202,30 +3341,10 @@ def cmd_claim(items: List[Item], now: datetime, ref: str) -> int:
     caller distinguishes by exit code.
     """
     target = find(items, ref)
-    running = in_motion(items, now)
-
-    taken = next((i for i in running if i.ref == target.ref), None)
-    if taken is not None and taken.in_motion_since != target.in_motion_since:
-        print("refused — {} is already claimed".format(target.ref), file=sys.stderr)
+    refusal = claim_ticket(items, now, target)
+    if refusal is not None:
+        print(refusal, file=sys.stderr)
         return 1
-
-    if taken is None and len(running) >= WIP_LIMIT:
-        print(
-            "refused — {} tickets already in motion, limit is {} ({})".format(
-                len(running), WIP_LIMIT,
-                ", ".join(i.ref for i in running)),
-            file=sys.stderr,
-        )
-        return 1
-
-    stale = [i for i in stale_locks(items, now) if i.ref != target.ref]
-    for item in stale:
-        # Self-correcting, no human in the loop. Every takeover is a line in the
-        # brief: one is noise, three in a week means runs are dying.
-        write_lock(item, "")
-        print("took over stale claim on {}".format(item.ref), file=sys.stderr)
-
-    write_lock(target, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
     print(target.url)
     return 0
 
@@ -3812,12 +3931,36 @@ def _ticket_body(repo: str, number: int) -> str:
     return row.get("body") or ""
 
 
-def _ticket_pr(repo: str, number: int) -> Optional[Dict]:
-    """The PR for a ticket, found by the branch name the routine guarantees."""
-    rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "all",
-                    "--head", "ticket/{}".format(number), "--json",
-                    "number,state,url,headRefOid,mergeable,mergedAt,reviews") or []
-    return rows[0] if rows else None
+def ticket_pr_index(repo: str) -> Tuple[Dict[str, Dict], bool]:
+    """Every `ticket/<n>` PR in one repo, indexed by ticket ref.
+
+    One bounded ``gh pr list`` for the whole repository, so a caller pays once
+    however many tickets it is about to ask about. Returns the index and whether
+    the scan was truncated, because a truncated scan cannot tell "no PR" from
+    "PR older than the window" and only the caller knows which answer is safe.
+    """
+    rows = _gh_json(
+        "gh", "pr", "list", "--repo", repo, "--state", "all",
+        "--json",
+        "number,state,url,headRefName,headRefOid,mergeable,mergedAt,reviews",
+        "--limit", str(MERGED_PR_SCAN_LIMIT + 1),
+    )
+    if rows is None:
+        raise GitHubError("could not read PRs for {}".format(repo))
+    if not isinstance(rows, list):
+        raise GitHubError("invalid PR response for {}".format(repo))
+
+    truncated = len(rows) > MERGED_PR_SCAN_LIMIT
+    index: Dict[str, Dict] = {}
+    for row in rows[:MERGED_PR_SCAN_LIMIT]:
+        if not isinstance(row, dict):
+            continue
+        ref = ticket_ref_from_branch(repo, row.get("headRefName") or "")
+        # `gh pr list` returns newest first, so the first row for a branch is
+        # the one the old per-ticket lookup's `rows[0]` used to return.
+        if ref and ref not in index:
+            index[ref] = row
+    return index, truncated
 
 
 def ticket_pr_facts(
@@ -3825,21 +3968,46 @@ def ticket_pr_facts(
 ) -> Dict[str, Optional[Dict[str, object]]]:
     """Read PR facts needed by the brief's stranded-work diagnostics.
 
-    Only open child tickets and claimed items need a PR lookup. The result is a
-    map with an explicit ``None`` for a known missing PR, so the pure detector
-    can distinguish that from a ticket omitted by a caller that did not fetch
-    PR facts at all.
+    One bounded ``gh pr list`` per member repository, indexed by head branch —
+    not one lookup per ticket. The per-ticket form was the single largest
+    GraphQL consumer in the system: 68 requests on the board of 2026-09-08, 93
+    of a full brief's 110 points, and it grew with the board (#272). The scan is
+    the same query shape against the same endpoint, so lazily-computed fields
+    behave identically; this is a re-indexing, not a new data source.
+
+    The map's contract is unchanged and load-bearing. An explicit ``None`` means
+    "looked up, no PR"; an **absent key** means "not fetched", which
+    ``stranded_items`` reads through ``pr_known``.
+
+    That distinction is why a ticket beyond the scan window is omitted rather
+    than recorded as ``None``. A truncated scan cannot tell "this ticket has no
+    PR" from "its PR is older than the window", and ``None`` would render the
+    scan's own blind spot as a defect in the work — a false "claim past its TTL
+    with no PR" that would grow as PR history grows.
     """
+    wanted = {
+        item.ref: item for item in items
+        if item.state == "OPEN"
+        and (item.parent or item.in_motion_since is not None)
+    }
     facts: Dict[str, Optional[Dict[str, object]]] = {}
-    for item in items:
-        if item.state != "OPEN" or not (item.parent or item.in_motion_since is not None):
-            continue
-        pr = _ticket_pr(item.repo, item.number)
-        if pr and str(pr.get("state") or "").upper() == "OPEN":
-            pr = dict(pr)
-            if str(pr.get("mergeable") or "").upper() == "CONFLICTING":
-                pr["verdict"] = latest_verdict(item.repo, pr.get("number"))
-        facts[item.ref] = pr
+
+    for repo in sorted({item.repo for item in wanted.values()}):
+        index, truncated = ticket_pr_index(repo)
+        for ref, item in wanted.items():
+            if item.repo != repo:
+                continue
+            if ref in index:
+                pr = dict(index[ref])
+                if str(pr.get("state") or "").upper() == "OPEN":
+                    if str(pr.get("mergeable") or "").upper() == "CONFLICTING":
+                        # Kept conditional: a verdict lookup per ticket would
+                        # undo the saving this scan exists for.
+                        pr["verdict"] = latest_verdict(item.repo, pr.get("number"))
+                facts[ref] = pr
+            elif not truncated:
+                facts[ref] = None
+
     return facts
 
 
@@ -3983,6 +4151,35 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # a run that never had a budget to check should not read like one that
         # passed a check.
         out["unmetered"] = True
+
+    if agent == "codex":
+        blocked = awaiting_review(items)
+        ticket = next_ticket_for_tier(
+            items, now, tier=tier, blocked=blocked
+        )
+        if ticket is None:
+            holder = lock_holder(items, now)
+            if holder is not None:
+                why = "nothing — lock held by {} (claimed {} ago)".format(
+                    holder.ref, humanise(now - holder.in_motion_since)
+                )
+            elif tier:
+                why = "nothing — no {} work waiting".format(tier)
+            else:
+                why = "nothing to do"
+            out.update(do="stop", why=why)
+        else:
+            refusal = claim_ticket(items, now, ticket)
+            if refusal is not None:
+                out.update(do="stop", why=refusal)
+            else:
+                out.update(
+                    do="ticket",
+                    work=item_json(ticket, now, {i.ref: i for i in items}),
+                )
+        print(json.dumps(out, indent=2))
+        return 0
+
     queue = review_queue(items, tier)
     if queue:
         out.update(do="review", work=queue[0])
@@ -4026,8 +4223,66 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 )
             else:
                 out.update(do="stop", why="nothing to review")
+
+    reserve = _reserve_verdict(out.get("do"))
+    if reserve is not None:
+        out.update(reserve)
+        heartbeat.record_event(agent, out["run"], "skipped-api-reserve",
+                               note=out["why"])
     print(json.dumps(out, indent=2))
     return 0
+
+
+def _reserve_verdict(do: object) -> Optional[Dict[str, object]]:
+    """Decline this run if the GraphQL budget is below its tier's floor.
+
+    Returns ``None`` to proceed. A run that was already stopping is left alone:
+    relabelling "nothing to review" as a budget decline would report a refusal
+    the system never had to make.
+
+    ``review`` takes the lower floor; ``breakdown`` and ``shape`` take the
+    engineering one. The split is consumers versus drainers — both of the
+    latter open new work, while review drains the lane and is cheap. Keyed on
+    what the run would do rather than on which agent asked, so there is no list
+    of agent names to keep in step.
+
+    Coast to a stop rather than seize. Retry was rejected as the mechanism —
+    waiting out a reset that can be fifty minutes away either sleeps through the
+    run's own schedule or fails anyway, and spends the run's credits sitting
+    still. Declining cleanly *is* the backoff; the schedule supplies it.
+    """
+    if do not in ("review", "breakdown", "shape"):
+        return None
+
+    spend = graphql_spend()
+    remaining = spend.get("remaining")
+    load_cost = spend.get("cost") or 0
+
+    if not spend.get("calls"):
+        # No GraphQL call was made, so there is no budget question to answer —
+        # distinct from a call whose rate-limit block was unreadable. In a real
+        # run this cannot happen: `load_items` queries before `begin` is
+        # dispatched, and an unreachable GitHub raises there first. Failing
+        # closed here would refuse on the absence of a question rather than on
+        # the absence of an answer.
+        return None
+    if remaining is None:
+        # A call was made and its block could not be read. Fail closed,
+        # matching the unreadable-usage branch above.
+        return {"gate": "reserve", "do": "stop",
+                "why": "GraphQL budget could not be read; a run that cannot "
+                       "read its budget does not work"}
+
+    loads = (REVIEW_RESERVE_LOADS if do == "review"
+             else ENGINEERING_RESERVE_LOADS)
+    floor = loads * int(load_cost)
+    if int(remaining) < floor:
+        return {"gate": "reserve", "do": "stop",
+                "why": "GraphQL budget {} is below the {} floor of {} "
+                       "({} loads at {} points)".format(
+                           remaining, "review" if do == "review"
+                           else "engineering", floor, loads, load_cost)}
+    return None
 
 
 def cmd_next_review(items: List[Item], tier: Optional[str]) -> int:
@@ -4307,10 +4562,17 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
         children = (issue.get("subIssues") or {}).get("nodes") or []
         print("--- tickets ({}/{} closed) ---".format(
             item.children_done, item.children_total))
+        # One scan per repo rather than one lookup per child: a project with
+        # twenty tickets cost twenty requests here.
+        indexes: Dict[str, Dict[str, Dict]] = {}
         for child in children:
             mark = "x" if child["state"] == "CLOSED" else " "
             print("  [{}] #{} {}".format(mark, child["number"], child["title"]))
-            pr = _ticket_pr(child["repository"]["nameWithOwner"], child["number"])
+            child_repo = child["repository"]["nameWithOwner"]
+            if child_repo not in indexes:
+                indexes[child_repo] = ticket_pr_index(child_repo)[0]
+            pr = indexes[child_repo].get(
+                "{}#{}".format(child_repo, child["number"]))
             if pr:
                 print("        PR #{} {}{}".format(
                     pr["number"], pr["state"].lower(),
@@ -4705,5 +4967,31 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
 
+def report_graphql_spend(stream=None) -> None:
+    """Print what this process spent on GraphQL, if it spent anything.
+
+    To **stderr**, never stdout: `begin`, `brief` and `next` emit JSON that
+    routines parse, and a spend line on stdout would corrupt it. A run that
+    made no GraphQL call prints nothing rather than a row of zeros.
+    """
+    spend = graphql_spend()
+    if not spend["calls"]:
+        return
+    print(
+        "graphql: {} call(s), {} point(s) spent, {} remaining{}".format(
+            spend["calls"], spend["cost"],
+            "unknown" if spend["remaining"] is None else spend["remaining"],
+            "" if not spend["reset_at"] else ", resets {}".format(spend["reset_at"]),
+        ),
+        file=stream if stream is not None else sys.stderr,
+    )
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        code = main()
+    finally:
+        # In a `finally` so a run that dies on an exhausted budget still says
+        # what it spent — that run is exactly the one whose numbers matter.
+        report_graphql_spend()
+    sys.exit(code)

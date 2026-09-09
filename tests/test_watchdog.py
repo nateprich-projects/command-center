@@ -355,3 +355,9 @@ def test_a_record_is_lost_only_when_both_routes_fail(tmp_path, monkeypatch):
     _offline(monkeypatch)
     assert heartbeat.append(
         "codex", {"run": "a", "phase": "start", "ts": 1}) == "lost"
+
+
+def test_an_api_reserve_decline_is_not_an_alarm():
+    """Coasting to a stop on budget is the design working, not a fault (#273)."""
+    rows = [start("a", 1), finish("a", 1, "skipped-api-reserve")]
+    assert watchdog.assess("codex", rows, NOW) == []

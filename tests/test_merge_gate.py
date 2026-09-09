@@ -14,6 +14,8 @@ import pathlib
 import sys
 from datetime import datetime, timezone
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -31,12 +33,18 @@ def verdict(**kw):
     return funnel.REVIEW_MARKER + "\n\n```json\n" + json.dumps(body) + "\n```"
 
 
-def items():
+def items(klass="Improve", children_total=1, children_done=0,
+          other_ticket=False):
     project = Item(repo=REPO, number=1, title="p", url="", state="OPEN",
-                   status="Building", klass="Improve", children_total=1)
+                   status="Building", klass=klass, item_id="project-id",
+                   children_total=children_total, children_done=children_done)
     ticket = Item(repo=REPO, number=9, title="t", url="", state="OPEN",
                   parent=REPO + "#1")
-    return [project, ticket]
+    rows = [project, ticket]
+    if other_ticket:
+        rows.append(Item(repo=REPO, number=10, title="other", url="",
+                         state="OPEN", parent=REPO + "#1"))
+    return rows
 
 
 def wire(monkeypatch, pr_json, comments):
@@ -245,9 +253,13 @@ def test_moved_head_refusal_does_not_write_a_gate_rejection(monkeypatch):
 # every run — 38 of 176 Codex runs that day did nothing but re-verify a PR that
 # had already merged. These tests hold the close to the merge itself.
 
-def _merge_wired(monkeypatch, issue_state="OPEN", close_rc=0, close_err=""):
+def _merge_wired(monkeypatch, issue_state="OPEN", close_rc=0, close_err="",
+                 rows=None, drift=None):
     """Run cmd_merge past a clean gate, recording the subprocesses it runs."""
     calls = []
+    graphql_calls = []
+
+    rows = rows or items()
 
     def fake_gh_json(*args):
         if "issue" in args and "view" in args:
@@ -262,23 +274,34 @@ def _merge_wired(monkeypatch, issue_state="OPEN", close_rc=0, close_err=""):
         err = close_err if argv[:2] == ["gh", "issue"] else ""
         return type("R", (), {"returncode": rc, "stdout": "", "stderr": err})()
 
+    def fake_graphql(query, **variables):
+        graphql_calls.append((query, variables))
+        return {}
+
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
     monkeypatch.setattr(funnel.subprocess, "run", fake_run)
-    rc = funnel.cmd_merge(items(), NOW, REPO, 7, True)
-    return rc, calls
+    monkeypatch.setattr(funnel, "gh_graphql", fake_graphql)
+    monkeypatch.setattr(funnel, "_option_id", lambda *args: "done-option")
+    monkeypatch.setattr(
+        funnel, "drift_since_approval",
+        lambda item: list(drift or []),
+    )
+    rc = funnel.cmd_merge(rows, NOW, REPO, 7, True)
+    return rc, calls, graphql_calls
 
 
 def test_merge_closes_the_ticket_the_branch_names(monkeypatch):
-    rc, calls = _merge_wired(monkeypatch)
+    rc, calls, _ = _merge_wired(monkeypatch)
     assert rc == 0
     assert ["gh", "issue", "close", "9", "--repo", REPO,
             "--reason", "completed"] in calls
 
 
 def test_merge_does_not_reclose_a_ticket_github_already_closed(monkeypatch):
-    rc, calls = _merge_wired(monkeypatch, issue_state="CLOSED")
+    rc, calls, _ = _merge_wired(monkeypatch, issue_state="CLOSED")
     assert rc == 0
-    assert not [c for c in calls if c[:3] == ["gh", "issue", "close"]]
+    assert ["gh", "issue", "close", "9", "--repo", REPO,
+            "--reason", "completed"] not in calls
 
 
 def test_a_failed_close_says_the_merge_landed_and_still_exits_non_zero(
@@ -286,11 +309,75 @@ def test_a_failed_close_says_the_merge_landed_and_still_exits_non_zero(
     # #236's plan: report loudly *and* exit non-zero. A ticket left open is the
     # failure this close exists to prevent, so a silent 0 would hide it. A retry
     # is harmless — the gate refuses a PR that is no longer open.
-    rc, _ = _merge_wired(monkeypatch, close_rc=1, close_err="gh: nope")
+    rc, _, _ = _merge_wired(monkeypatch, close_rc=1, close_err="gh: nope")
     assert rc == 1
     err = capsys.readouterr().err
     assert "could not be closed" in err and "owner/repo#9" in err
     assert "the merge succeeded" in err
+
+
+def test_last_upkeep_ticket_auto_closes_parent_and_records_drift(monkeypatch):
+    drift = [funnel.DRIFT_PLAN_EDIT, funnel.DRIFT_REGRESSION]
+    rc, calls, graphql_calls = _merge_wired(monkeypatch, drift=drift)
+
+    assert rc == 0
+    assert (funnel.SET_FIELD, {
+        "project": funnel.PROJECT_ID,
+        "item": "project-id",
+        "field": funnel.STATUS_FIELD_ID,
+        "option": "done-option",
+    }) in graphql_calls
+    assert ["gh", "issue", "close", "1", "--repo", REPO,
+            "--reason", "completed"] in calls
+
+    comments = [call[-1] for call in calls
+                if call[:3] == ["gh", "issue", "comment"]]
+    assert len(comments) == 1
+    assert comments[0].startswith(funnel.CLOSED_ITSELF_PREFIX)
+    assert "owner/repo#9" in comments[0]
+    assert '"drift": [' in comments[0]
+    assert '"plan edited after Ready"' in comments[0]
+    assert '"merge later rejected"' in comments[0]
+
+
+@pytest.mark.parametrize("klass", ["Broken", "Maintenance", "Improve"])
+def test_each_self_approvable_class_auto_closes_on_its_last_merge(
+        monkeypatch, klass):
+    rc, calls, _ = _merge_wired(monkeypatch, rows=items(klass=klass))
+
+    assert rc == 0
+    assert ["gh", "issue", "close", "1", "--repo", REPO,
+            "--reason", "completed"] in calls
+
+
+@pytest.mark.parametrize("klass", [None, "New", "Replace"])
+def test_unset_and_human_gate_classes_never_auto_close(monkeypatch, klass):
+    rc, calls, graphql_calls = _merge_wired(
+        monkeypatch, rows=items(klass=klass), drift=[funnel.DRIFT_PLAN_EDIT]
+    )
+
+    assert rc == 0
+    assert ["gh", "issue", "close", "1", "--repo", REPO,
+            "--reason", "completed"] not in calls
+    assert not [call for call in graphql_calls if call[1].get("item") == "project-id"]
+    assert not [call for call in calls
+                if call[:3] == ["gh", "issue", "comment"]]
+
+
+def test_a_merge_leaving_another_ticket_open_does_not_close_parent(monkeypatch):
+    rc, calls, graphql_calls = _merge_wired(
+        monkeypatch,
+        rows=items(children_total=2, children_done=0, other_ticket=True),
+    )
+
+    assert rc == 0
+    assert ["gh", "issue", "close", "9", "--repo", REPO,
+            "--reason", "completed"] in calls
+    assert ["gh", "issue", "close", "1", "--repo", REPO,
+            "--reason", "completed"] not in calls
+    assert not [call for call in graphql_calls if call[1].get("item") == "project-id"]
+    assert not [call for call in calls
+                if call[:3] == ["gh", "issue", "comment"]]
 
 
 def test_ticket_ref_from_branch_is_the_one_parser():

@@ -19,6 +19,15 @@ def routine() -> str:
     return ROUTINE.read_text(encoding="utf-8")
 
 
+def test_the_opening_is_one_begin_call_that_already_claims_the_ticket():
+    body = routine()
+
+    assert body.count("funnel.py begin --agent codex --tier standard") == 1
+    assert "heartbeat.py start --agent codex" not in body
+    assert "usage.py gate codex" not in body
+    assert "already claimed" in body
+
+
 def test_a_declined_ticket_is_released_before_the_next_filtered_lookup():
     body = routine()
     release = "funnel.py release <declined-ref>"

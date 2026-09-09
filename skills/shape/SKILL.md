@@ -35,12 +35,15 @@ about its length.
 ## Capturing a new one
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py capture "<title>" --note "<anything worth keeping>"
+python3 /Users/nateprich/.claude/command-center/funnel.py capture "<title>" --origin nate-relayed --note "<anything worth keeping>"
 ```
 
 Capture is cheap and is meant to be. Write down what he actually said rather than
 a tidied version — the raw phrasing is often the part that reminds him what he
 meant.
+
+`--origin` is required. Use `nate-relayed` when Nate raised the idea and the agent
+is recording it in its own words; use `agent` when the agent observed it itself.
 
 Capture always applies `needs-shaping`. Every idea needs shaping, so the label is true
 of all of them; Nate keeps it because it is what makes an idea recognisable when he is

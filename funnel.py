@@ -216,6 +216,13 @@ UNATTRIBUTED = "UNATTRIBUTED"
 PROVENANCE_MARKER = "<!-- command-center-provenance -->"
 PROVENANCE_VOICES = ("nate-direct", "nate-relayed", "agent")
 
+#: Captured ideas carry their origin separately from the voice that wrote the
+#: issue body. A Nate-raised idea is relayed by the capturing agent; an
+#: agent-raised idea was observed by it. Keep these two values aligned with
+#: the provenance convention, but do not overload the body-author marker.
+ORIGIN_MARKER = "<!-- command-center-origin -->"
+ORIGIN_VOICES = ("nate-relayed", "agent")
+
 #: An origin is only a default for who shapes an idea. This marker records the
 #: explicit exception without rewriting that historical fact. Moving work back
 #: toward Nate is always safe; moving it toward agents requires Nate's voice.
@@ -1124,6 +1131,14 @@ def parse_provenance(body: str) -> Optional[Dict]:
     return found
 
 
+def parse_origin(body: str) -> Optional[Dict]:
+    """The explicit capture origin, or None when it is absent or malformed."""
+    found = _marked_json(body, ORIGIN_MARKER)
+    if found is None or found.get("voice") not in ORIGIN_VOICES:
+        return None
+    return found
+
+
 def parse_origin_override(body: str) -> Optional[Dict]:
     """Return an authorised origin override, or None when it fails closed.
 
@@ -1277,6 +1292,33 @@ def append_provenance(body: str, voice: str, at: Optional[datetime] = None,
     """Append one provenance block without changing the supplied body."""
     return "{}\n\n{}".format(
         body, provenance_block(voice, at=at, run=run, agent=agent)
+    )
+
+
+def origin_block(voice: str, at: Optional[datetime] = None,
+                 run: Optional[str] = None,
+                 agent: Optional[str] = None) -> str:
+    """Build the explicit origin block attached to a captured idea."""
+    if voice not in ORIGIN_VOICES:
+        raise ValueError("unknown capture origin {!r}".format(voice))
+    run, agent = _heartbeat_context(run, agent)
+    fields = {
+        "agent": agent,
+        "at": (at or datetime.now(timezone.utc)).isoformat(),
+        "run": run,
+        "voice": voice,
+    }
+    return "{}\n\n```json\n{}\n```".format(
+        ORIGIN_MARKER, json.dumps(fields, indent=2, sort_keys=True)
+    )
+
+
+def append_origin(body: str, voice: str, at: Optional[datetime] = None,
+                  run: Optional[str] = None,
+                  agent: Optional[str] = None) -> str:
+    """Append an explicit capture origin without changing the supplied body."""
+    return "{}\n\n{}".format(
+        body, origin_block(voice, at=at, run=run, agent=agent)
     )
 
 
@@ -3674,13 +3716,19 @@ def cmd_ideas(items: List[Item], now: datetime) -> int:
 
 def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
                 repo: Optional[str], run: Optional[str] = None,
-                agent: Optional[str] = None) -> int:
+                agent: Optional[str] = None,
+                origin: Optional[str] = None) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
+    if origin not in ORIGIN_VOICES:
+        raise GitHubError(
+            "capture requires an explicit --origin (nate-relayed or agent)"
+        )
     repo = resolve_repo(repo)
     body = append_provenance(
         note or "Captured from chat. Not yet thought through.", "agent",
         at=now, run=run, agent=agent,
     )
+    body = append_origin(body, origin, at=now, run=run, agent=agent)
     args = [
         "gh", "issue", "create", "--repo", repo, "--title", title,
         "--body", body, "--label", "needs-shaping",
@@ -5071,6 +5119,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--agent", default=None,
         help="agent that wrote the body; otherwise read the heartbeat spool",
     )
+    capture.add_argument(
+        "--origin", required=True, choices=ORIGIN_VOICES,
+        help="idea origin: nate-relayed if Nate raised it, agent if observed",
+    )
     shaped = sub.add_parser("shaped", help="record a grilled plan and move to Shaped")
     shaped.add_argument("ref", help="issue number, owner/repo#number, or URL")
     shaped.add_argument("--plan", required=True,
@@ -5228,7 +5280,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_ideas(items, now)
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
-                               args.run, args.agent)
+                               args.run, args.agent, args.origin)
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan,
                               args.run, args.agent)

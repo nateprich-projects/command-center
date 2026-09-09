@@ -560,9 +560,8 @@ def test_item_consistency_reports_a_project_with_closed_children_outside_buildin
 
     assert result == funnel.Check(
         "item consistency", False,
-        "owner/repo#8: project has all children closed but Status is {}; run "
-        "funnel start owner/repo#8 --yes then funnel accept owner/repo#8 --yes"
-        .format(status),
+        "owner/repo#8: project has all children closed but Status is {}; "
+        "resolve the Status before accepting it".format(status),
         "",
     )
 

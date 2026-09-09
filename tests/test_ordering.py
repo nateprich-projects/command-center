@@ -71,7 +71,7 @@ def test_decisions_run_bottom_up_not_top_down():
         project(2, "Ready", "New"),
         project(3, "Building", "New", children=1, done=1),
     ]
-    assert [i.number for i in awaiting_decision(items)] == [3, 2, 1]
+    assert [i.number for i in awaiting_decision(items)] == [3, 1]
 
 
 def test_ideas_never_waits_on_anyone():
@@ -100,14 +100,13 @@ def test_building_question_starts_when_the_last_ticket_closes():
     assert building.waited(NOW) == timedelta(hours=3)
 
 
-def test_ready_question_starts_when_the_first_ticket_is_created():
+def test_ready_never_asks_start_now():
     ready = project(
         1, "Ready", "New", days=30, children=2,
         first_child_created_at=NOW - timedelta(hours=1),
     )
 
-    assert question_since(ready) == NOW - timedelta(hours=1)
-    assert ready.waited(NOW) == timedelta(hours=1)
+    assert gate_question(ready) is None
 
 
 def test_shaped_question_starts_when_the_status_does():
@@ -117,35 +116,40 @@ def test_shaped_question_starts_when_the_status_does():
     assert shaped.waited(NOW) == timedelta(days=12)
 
 
-def test_ready_decision_order_uses_question_start_not_status_start():
-    newer_question = project(
-        1, "Ready", "New", days=30, children=2,
-        first_child_created_at=at(1),
+def test_shaped_decision_order_uses_time_at_the_plan_gate():
+    older = project(
+        1, "Shaped", "New", days=30,
+        body="## Needs you\n\nWhich repository should this use?\n",
     )
-    older_question = project(
-        2, "Ready", "New", days=2, children=2,
-        first_child_created_at=at(10),
+    newer = project(
+        2, "Shaped", "New", days=2,
+        body="## Needs you\n\nWhich repository should this use?\n",
     )
 
-    assert [i.number for i in awaiting_decision([newer_question, older_question])] == [2, 1]
+    assert [i.number for i in awaiting_decision([newer, older])] == [1, 2]
 
 
 def test_oldest_at_gate_wins_within_a_stage():
     """The longest-waiting item is the most likely park candidate."""
-    items = [project(1, "Ready", "New", days=2), project(2, "Ready", "New", days=30),
-             project(3, "Ready", "New", days=9)]
+    items = [
+        project(1, "Shaped", "New", days=2),
+        project(2, "Shaped", "New", days=30),
+        project(3, "Shaped", "New", days=9),
+    ]
     assert [i.number for i in awaiting_decision(items)] == [2, 3, 1]
 
 
 def test_broken_does_not_outrank_a_deeper_gate():
     items = [project(1, "Shaped", "Broken", days=30),
-             project(2, "Ready", "New", days=1)]
+             project(2, "Building", "New", children=1, done=1, days=1)]
     assert [i.number for i in awaiting_decision(items)] == [2, 1]
 
 
 def test_broken_outranks_older_work_at_the_same_gate():
-    items = [project(1, "Ready", "New", days=30),
-             project(2, "Ready", "Broken", days=1)]
+    items = [
+        project(1, "Shaped", "New", days=30),
+        project(2, "Shaped", "Broken", days=1),
+    ]
     assert [i.number for i in awaiting_decision(items)] == [2, 1]
 
 
@@ -203,12 +207,13 @@ def test_block_condition_state_does_not_change_non_blocked_questions():
     ready = project(1, "Ready", "New", children=2,
                     block_references=["#84"])
 
-    assert gate_question(ready) == "Start now?"
+    assert gate_question(ready) is None
 
 
 def test_unknown_status_still_appears_rather_than_vanishing():
     """An item with an unrecognised Status must not be silently dropped."""
-    items = [project(1, "Shaped", "New"), project(2, "Ready", "New")]
+    items = [project(1, "Shaped", "New"),
+             project(2, "Building", "New", children=1, done=1)]
     assert len(awaiting_decision(items)) == 2
 
 
@@ -301,16 +306,15 @@ def test_a_parent_is_not_itself_a_startable_ticket():
     assert [i.number for i in startable([parent])] == []
 
 
-def test_ready_is_not_startable_until_nate_says_start_now():
-    """Ready means broken into issues and still waiting on his gate. Starting
-    there jumps it — he answers by moving the parent to Building."""
+def test_ready_is_not_startable_until_the_parent_is_building():
+    """Ready means broken into issues; only Building exposes tickets to Codex."""
     assert startable([project(1, "Ready", "New"), ticket(2, 1)]) == []
     assert [i.number for i in startable(
         [project(1, "Building", "New"), ticket(2, 1)])] == [2]
 
 
 def test_shaped_work_is_not_startable():
-    """Ready is the gate that says 'start now'. Shaped has not passed it."""
+    """Shaped has not been broken into tickets for Codex to work."""
     assert startable([project(1, "Shaped", "New"), ticket(2, 1)]) == []
 
 
@@ -690,11 +694,9 @@ def test_ordinary_issues_are_not_counted_as_rejections():
 
 
 def test_ready_with_no_tickets_waits_on_the_funnel_not_on_nate():
-    """Nate writing Ready *is* his answer to 'is the plan good?'. Asking 'start
-    now?' about something with nothing to start asks him to approve an empty
-    box."""
+    """Ready is not a human gate, whether or not it has tickets."""
     assert gate_question(item(1, "Ready", "New", children_total=0)) is None
-    assert gate_question(item(2, "Ready", "New", children_total=3)) == "Start now?"
+    assert gate_question(item(2, "Ready", "New", children_total=3)) is None
 
 
 def test_approved_plans_with_no_tickets_are_owed_a_breakdown():
@@ -720,6 +722,30 @@ def test_an_unbroken_plan_never_reaches_codex():
     awaiting its breakdown, not waiting to be worked — treating it as both is
     what put an issue in two queues at once."""
     assert startable([item(1, "Ready", "New", children_total=0)]) == []
+
+
+def test_shaped_plan_with_an_open_needs_you_question_waits_on_nate():
+    shaped = item(
+        1, "Shaped", "New",
+        body="## Needs you\n\nWhich repository should this use?\n",
+    )
+
+    assert gate_question(shaped) == "Is the plan good?"
+
+
+def test_shaped_plan_declaring_nothing_open_does_not_wait_on_nate():
+    shaped = item(1, "Shaped", "New", body="## Needs you\n\nNothing.\n")
+
+    assert gate_question(shaped) is None
+
+
+def test_shaped_plan_without_needs_you_fails_closed_at_the_plan_gate():
+    shaped = item(
+        1, "Shaped", "New",
+        body="## Decided from precedent\n\nUse the existing command.\n",
+    )
+
+    assert gate_question(shaped) == "Is the plan good?"
 
 
 # -- the Ideas stage: what feeds everything else ---------------------------
@@ -763,7 +789,7 @@ def test_ideas_are_listed_but_never_counted_as_waiting():
 def test_every_gate_has_exactly_one_answering_command():
     """Each question the brief asks must be answerable, and only from the stage
     that asks it."""
-    assert set(funnel.ANSWERS) == {"approve", "start", "accept"}
+    assert set(funnel.ANSWERS) == {"approve", "accept"}
     for verb, (frm, to, _) in funnel.ANSWERS.items():
         assert frm in funnel.STAGES and to in funnel.STAGES
         # never skips a gate

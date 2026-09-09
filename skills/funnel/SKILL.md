@@ -34,7 +34,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `total_needing_nate` | How many decisions are waiting |
 | `counts_by_gate` | Open items at each gate. `Ideas` is deliberately excluded — it is unbounded and guilt-free, and counting it turns it into pressure |
 | `items` | The decisions, **already ordered**. Bottom-up: closest to shipping first |
-| `waiting_on` | The question being asked. `Accept it?` · `Start now?` · `Is the plan good?` · `Unblock or park?` |
+| `waiting_on` | The question being asked. `Accept it?` · `Is the plan good?` · `Unblock or park?` |
 | `waited` | Time at the current gate |
 | `class` | The item's Project `Class`; tickets inherit their parent's Class |
 | `needs_class` | Items with no `Class` set. Invalid and not startable — a one-word fix in the Project |
@@ -74,14 +74,14 @@ is exactly what he should know before saying yes.
 
 ## Answering a gate
 
-`funnel approve` / `start` / `accept` answer the three gates. They are **dry runs
+`funnel approve` / `accept` answer the two gates. They are **dry runs
 unless `--yes` is passed**.
 
 **The decision is always his. The typing does not have to be.** Nate authorised agents
-to run all three on his explicit instruction (2026-09-05), replacing an earlier rule
+to run both on his explicit instruction (2026-09-05), replacing an earlier rule
 here that no agent may run them at all. He often works these sessions by voice while
 driving, where handing him a command means the decision he already made goes
-unrecorded — three approved gates sat unexecuted for a whole session that way.
+unrecorded — approved gates sat unexecuted for a whole session that way.
 _(confirmed by Nate 2026-09-05)_
 
 That earlier rule was not his; an agent wrote it after accidentally running an approval,

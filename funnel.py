@@ -146,10 +146,9 @@ PREEMPTING = {"Broken", "Maintenance"}
 #: an independent condition: class describes the work, not who raised it.
 SELF_APPROVABLE_CLASSES = frozenset({"Broken", "Maintenance", "Improve"})
 
-#: Which stages are waiting on a human, and the question each one asks.
+#: Which stages can wait on a human, and the question each one asks.
 GATES = {
     "Shaped": "Is the plan good?",
-    "Ready": "Start now?",
     "Building": "Accept it?",  # only once every child has closed
 }
 
@@ -349,33 +348,29 @@ def gate_question(item: Item) -> Optional[str]:
     if item.status == "Building":
         # Building waits on Nate only once every child has closed.
         return GATES["Building"] if item.children_all_closed else None
-    if item.status == "Ready" and not item.children_total:
-        # Nate writing Ready *is* his answer to "is the plan good?". Until the
-        # plan has been broken into sub-issues the system owes the work, so this
-        # waits on the funnel, not on him. Asking "start now?" about something
-        # with nothing to start would be asking him to approve an empty box.
-        return None
-    return GATES.get(item.status or "")
+    if item.status == "Shaped":
+        # A plan with no Needs section has not earned an all-clear. The shared
+        # parser fails closed so a missing section still reaches Nate rather
+        # than silently bypassing the plan gate.
+        return GATES["Shaped"] if plan_needs_nate(item.body or "") else None
+    return None
 
 
 def question_since(item: Item) -> Optional[datetime]:
     """When the item's current question became live.
 
-    ``gate_question`` is the authority for which question is live. A Ready
-    project starts asking "Start now?" when its first sub-issue exists, not
-    when the project entered Ready. A Building project starts asking "Accept
-    it?" when its last sub-issue closes. A blocked item starts asking its
-    unblock question when the ``blocked`` label is applied. The status
-    timestamp remains the fallback for older or partial fixture data without
-    the event details.
+    ``gate_question`` is the authority for which question is live. A Shaped
+    project asks "Is the plan good?" only when its plan carries an open
+    question. A Building project starts asking "Accept it?" when its last
+    sub-issue closes. A blocked item starts asking its unblock question when
+    the ``blocked`` label is applied. The status timestamp remains the
+    fallback for older or partial fixture data without the event details.
     """
     question = gate_question(item)
     if item.is_blocked and question is not None:
         return item.blocked_since or item.status_since
     if question == GATES["Building"]:
         return item.last_child_closed_at or item.status_since
-    if question == GATES["Ready"]:
-        return item.first_child_created_at or item.status_since
     return item.status_since
 
 
@@ -802,10 +797,9 @@ def startable(items: Sequence[Item],
             # not waiting to be worked. Treating it as both is what made an issue
             # appear in two queues at once.
             return False
-        # Only `Building`. `Ready` means "broken into issues" and is still
-        # waiting on Nate's "start now?" — treating it as startable lets Codex
-        # begin work he never authorised, jumping a gate. He answers that gate
-        # by moving the parent to `Building`.
+        # Only `Building`. `Ready` means "broken into issues"; treating it as
+        # startable would let Codex begin before a claim moves the parent to
+        # `Building`, which is the observable start of work.
         return parent.status == "Building" and not parent.is_blocked
 
     def in_flight(item: Item) -> bool:
@@ -2157,10 +2151,8 @@ def item_consistency_findings(
             and item.children_all_closed
         ):
             reasons.append(
-                "project has all children closed but Status is {}; run funnel "
-                "start {} --yes then funnel accept {} --yes".format(
-                    status, item.ref, item.ref
-                )
+                "project has all children closed but Status is {}; resolve the "
+                "Status before accepting it".format(status)
             )
         if (
             item.state == "OPEN"
@@ -3411,12 +3403,12 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
 
 
 #: The gates, and the command that answers each. **These are Nate's answers to
-#: his own questions — no agent may run them.** An agent writing `Ready` starts
-#: work he never authorised; one writing `Done` accepts its own output. Both are
-#: gate-jumping, which is the failure the whole funnel is arranged to prevent.
+#: his own questions — no agent may decide them.** An agent writing `Done`
+#: accepts its own output. That is gate-jumping, which the funnel is arranged
+#: to prevent. The funnel may write `Ready` only on its explicit fail-closed
+#: plan condition; an agent may never bypass an open question.
 ANSWERS = {
     "approve": ("Shaped", "Ready", "the plan is good"),
-    "start": ("Ready", "Building", "start now"),
     "accept": ("Building", "Done", "shipped and accepted"),
 }
 
@@ -3968,7 +3960,8 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
         humanise(item.waited(now))))
     print(item.url)
     print("=" * 72)
-    print("GATE: {}".format(gate_question(item) or "not waiting on you"))
+    question = gate_question(item)
+    print("GATE: {}".format(question or "not waiting on you"))
     print("")
 
     owner, name = item.repo.split("/")
@@ -4026,7 +4019,7 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
         print("")
 
     verb = {frm: v for v, (frm, _, _) in ANSWERS.items()}.get(item.status or "")
-    if verb:
+    if verb and question:
         print("Answer it:  python3 funnel.py {} {} --yes".format(verb, item.number))
     return 0
 
@@ -4106,8 +4099,6 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
     print("{} → {}  ({})".format(item.ref, nxt, meaning))
     if verb == "approve":
         print("The next Claude run will break it into tickets.")
-    elif verb == "start":
-        print("Codex can now pick up its tickets.")
     return 0
 
 

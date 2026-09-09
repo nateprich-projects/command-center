@@ -3539,21 +3539,67 @@ def ticket_pr_facts(
 ) -> Dict[str, Optional[Dict[str, object]]]:
     """Read PR facts needed by the brief's stranded-work diagnostics.
 
-    Only open child tickets and claimed items need a PR lookup. The result is a
-    map with an explicit ``None`` for a known missing PR, so the pure detector
-    can distinguish that from a ticket omitted by a caller that did not fetch
-    PR facts at all.
+    One bounded ``gh pr list`` per member repository, indexed by head branch —
+    not one lookup per ticket. The per-ticket form was the single largest
+    GraphQL consumer in the system: 68 requests on the board of 2026-09-08, 93
+    of a full brief's 110 points, and it grew with the board (#272). The scan is
+    the same query shape against the same endpoint, so lazily-computed fields
+    behave identically; this is a re-indexing, not a new data source.
+
+    The map's contract is unchanged and load-bearing. An explicit ``None`` means
+    "looked up, no PR"; an **absent key** means "not fetched", which
+    ``stranded_items`` reads through ``pr_known``.
+
+    That distinction is why a ticket beyond the scan window is omitted rather
+    than recorded as ``None``. A truncated scan cannot tell "this ticket has no
+    PR" from "its PR is older than the window", and ``None`` would render the
+    scan's own blind spot as a defect in the work — a false "claim past its TTL
+    with no PR" that would grow as PR history grows.
     """
+    wanted = {
+        item.ref: item for item in items
+        if item.state == "OPEN"
+        and (item.parent or item.in_motion_since is not None)
+    }
     facts: Dict[str, Optional[Dict[str, object]]] = {}
-    for item in items:
-        if item.state != "OPEN" or not (item.parent or item.in_motion_since is not None):
-            continue
-        pr = _ticket_pr(item.repo, item.number)
-        if pr and str(pr.get("state") or "").upper() == "OPEN":
-            pr = dict(pr)
-            if str(pr.get("mergeable") or "").upper() == "CONFLICTING":
-                pr["verdict"] = latest_verdict(item.repo, pr.get("number"))
-        facts[item.ref] = pr
+
+    for repo in sorted({item.repo for item in wanted.values()}):
+        rows = _gh_json(
+            "gh", "pr", "list", "--repo", repo, "--state", "all",
+            "--json",
+            "number,state,url,headRefName,headRefOid,mergeable,mergedAt,reviews",
+            "--limit", str(MERGED_PR_SCAN_LIMIT + 1),
+        )
+        if rows is None:
+            raise GitHubError("could not read PRs for {}".format(repo))
+        if not isinstance(rows, list):
+            raise GitHubError("invalid PR response for {}".format(repo))
+
+        truncated = len(rows) > MERGED_PR_SCAN_LIMIT
+        index: Dict[str, Dict] = {}
+        for row in rows[:MERGED_PR_SCAN_LIMIT]:
+            if not isinstance(row, dict):
+                continue
+            ref = ticket_ref_from_branch(repo, row.get("headRefName") or "")
+            # `gh pr list` returns newest first, so the first row for a branch
+            # is the one the per-ticket lookup's `rows[0]` used to return.
+            if ref and ref not in index:
+                index[ref] = row
+
+        for ref, item in wanted.items():
+            if item.repo != repo:
+                continue
+            if ref in index:
+                pr = dict(index[ref])
+                if str(pr.get("state") or "").upper() == "OPEN":
+                    if str(pr.get("mergeable") or "").upper() == "CONFLICTING":
+                        # Kept conditional: a verdict lookup per ticket would
+                        # undo the saving this scan exists for.
+                        pr["verdict"] = latest_verdict(item.repo, pr.get("number"))
+                facts[ref] = pr
+            elif not truncated:
+                facts[ref] = None
+
     return facts
 
 

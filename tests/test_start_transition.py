@@ -12,6 +12,8 @@ import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
@@ -83,6 +85,19 @@ def test_a_second_claim_does_not_rewrite_building(monkeypatch):
 
     rows = [project(1, "Building"), ticket(2, 1)]
     assert funnel.cmd_claim(rows, NOW, "nateprich/beta#2") == 0
+
+    assert writes == []
+
+
+def test_a_parentless_target_is_refused_before_status_promotion(monkeypatch):
+    """The existing Project lock guard still rejects a non-Project target."""
+    writes = []
+    monkeypatch.setattr(funnel, "gh_graphql",
+                        lambda q, **kw: writes.append(kw) or {})
+
+    rows = [project(1, "Ready"), item(2, item_id=None)]
+    with pytest.raises(funnel.GitHubError, match="not in the Project"):
+        funnel.cmd_claim(rows, NOW, "nateprich/beta#2")
 
     assert writes == []
 

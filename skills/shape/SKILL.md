@@ -171,6 +171,30 @@ What the grilling has to produce, because the next stages depend on it:
 - **What is still undecided.** Naming an open question is a result. Inventing an
   answer to it is a defect that gets implemented.
 
+### Record the overlap outcome
+
+Every plan must carry an `## Overlap check` section. It is the plan's recorded
+outcome for the advisory scan performed when `funnel shaped` writes the plan:
+
+```text
+## Overlap check
+
+Checked: #27, #89, and #97 (the other open plans considered)
+
+Candidates:
+- #27 and #89 both touch `skills/shape/SKILL.md`
+
+Conclusion:
+- #27 and #89 describe the same capability axis; keep one mechanism and narrow
+  the plan accordingly.
+```
+
+Copy each candidate line exactly as printed, then record what it means for this
+plan. If there are no candidates, write `Candidates: none found` and still name
+the other plans checked; never omit the section. The conclusion may keep the plan
+as written, narrow it, or reuse an existing mechanism. This is an advisory record,
+not a dependency or a gate: do not block the plan or invent a plan-level graph.
+
 ## Recording the plan
 
 Write the plan to a file, then:

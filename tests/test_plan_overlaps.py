@@ -5,6 +5,8 @@ from __future__ import annotations
 import pathlib
 import sys
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -71,3 +73,39 @@ def test_current_plan_is_not_compared_with_itself():
         ("#27", "Use `startable()` and `funnel.py`."),
         [("#27", "Use `startable()` and `funnel.py`.")],
     ) == []
+
+
+COLLISION_FIXTURES = [
+    pytest.param(
+        ("#27", "The capability categories live in `skills/shape/SKILL.md`."),
+        [("#89", "The human-step checklist changes `skills/shape/SKILL.md`.")],
+        "#27 and #89 both touch `skills/shape/SKILL.md`",
+        id="same-axis-binary-versus-three-categories",
+    ),
+    pytest.param(
+        ("#97", "The doctor reports the live routine path `routines/codex-work.md`."),
+        [("#171", "The clone migration repoints `routines/codex-work.md`.")],
+        "#97 and #171 both touch `routines/codex-work.md`",
+        id="hazard-removed-by-clone-migration",
+    ),
+    pytest.param(
+        ("#65", "Guard the `start()` transition when a project has no children."),
+        [("#34", "Delete the `start()` transition from the revised gate model.")],
+        "#65 and #34 both name `start()`",
+        id="start-guarded-versus-deleted",
+    ),
+    pytest.param(
+        ("#178", "Investigate the `WIP_LIMIT` question in `funnel.py`."),
+        [("#250", "Keep the `WIP_LIMIT` decision record in `funnel.py`.")],
+        "#178 and #250 both touch `funnel.py`",
+        id="wip-limit-already-answered",
+    ),
+]
+
+
+@pytest.mark.parametrize("current, others, expected", COLLISION_FIXTURES)
+def test_replayed_2026_collisions_surface_advisory_candidates(
+    current, others, expected
+):
+    """The four shaping collisions are visible without a network lookup."""
+    assert expected in candidates(current, others)

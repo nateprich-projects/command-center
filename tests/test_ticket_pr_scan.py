@@ -119,3 +119,23 @@ def test_an_unreadable_response_fails_closed(monkeypatch):
     except funnel.GitHubError:
         return
     raise AssertionError("an unreadable PR list must raise")
+
+
+def test_the_per_ticket_helper_is_gone():
+    """It was the N+1. Leaving it in the file invites the next reach for it."""
+    assert not hasattr(funnel, "_ticket_pr")
+
+
+def test_the_index_is_shared_rather_than_reimplemented():
+    assert callable(funnel.ticket_pr_index)
+
+
+def test_index_returns_truncation_so_callers_choose_their_own_safe_answer(monkeypatch):
+    limit = funnel.MERGED_PR_SCAN_LIMIT
+    monkeypatch.setattr(funnel, "_gh_json", lambda *a: [
+        pr_row(n, "ticket/{}".format(n)) for n in range(1, limit + 2)])
+
+    index, truncated = funnel.ticket_pr_index("nateprich/beta")
+
+    assert truncated is True
+    assert len(index) == limit

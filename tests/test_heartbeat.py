@@ -94,6 +94,35 @@ def test_unreadable_records_do_not_refuse_an_explicit_id():
     assert heartbeat.resolve_run([], "aaa") == ("aaa", None)
 
 
+def test_finish_accepts_skipped_blocked(monkeypatch):
+    records = []
+    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(
+        heartbeat,
+        "append",
+        lambda agent, record: records.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    assert heartbeat.main([
+        "finish", "--agent", "codex", "--run", "run-id",
+        "--outcome", "skipped-blocked",
+    ]) == 0
+    assert records[0]["outcome"] == "skipped-blocked"
+
+
+def test_finish_rejects_an_unknown_outcome():
+    with pytest.raises(SystemExit) as exc:
+        heartbeat.main([
+            "finish", "--agent", "codex", "--run", "run-id",
+            "--outcome", "not-a-real-outcome",
+        ])
+    assert exc.value.code == 2
+
+
 # -- open starts --------------------------------------------------------------
 
 def test_the_incident_replayed():

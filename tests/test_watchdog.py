@@ -83,6 +83,21 @@ def test_nate_active_and_unknown_usage_skips_are_not_alarms():
     assert watchdog.assess("codex", rows, NOW) == []
 
 
+def test_a_week_of_blocked_skips_is_healthy_but_three_errors_alarm():
+    skipped = [
+        finish("blocked-{}".format(i), i + 1, "skipped-blocked")
+        for i in range(7)
+    ]
+    assert watchdog.assess("codex", skipped, NOW) == []
+
+    errored = [
+        finish("error-{}".format(i), i + 1, "errored", "boom {}".format(i))
+        for i in range(watchdog.ERROR_THRESHOLD)
+    ]
+    problems = watchdog.assess("codex", errored, NOW)
+    assert any("errored 3 times" in problem for problem in problems)
+
+
 def test_prompt_drift_is_reported_as_a_fault():
     problems = watchdog.assess("codex", [event("a", 1, "prompt-drift")], NOW)
     assert len(problems) == 1

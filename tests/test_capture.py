@@ -161,7 +161,9 @@ def test_shaped_prints_advisory_overlap_candidates(tmp_path, monkeypatch, capsys
     monkeypatch.setattr(
         funnel.subprocess,
         "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
     )
 
     assert funnel.cmd_shaped(
@@ -197,7 +199,9 @@ def test_shaped_without_overlap_still_succeeds_and_reports_none(tmp_path, monkey
     monkeypatch.setattr(
         funnel.subprocess,
         "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
     )
 
     assert funnel.cmd_shaped(
@@ -208,6 +212,109 @@ def test_shaped_without_overlap_still_succeeds_and_reports_none(tmp_path, monkey
     output = capsys.readouterr().out
     assert "--- plan overlap candidates (advisory) ---" in output
     assert "  none found" in output
+
+
+def test_shaped_refuses_and_names_each_authority_signal(tmp_path, monkeypatch,
+                                                         capsys):
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("""
+The check refuses a self-approval and does not add a decision he must answer
+on the happy path. The plan also records why unattended approvals are visible.
+It changes the gate's question and who answers it.
+
+## Needs you
+
+Nothing.
+""")
+    item = Item(
+        repo="owner/repo", number=42, title="An idea",
+        url="https://github.com/owner/repo/issues/42", state="OPEN",
+        status="Ideas", item_id="project-item-42",
+    )
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
+        return {"node": {"options": [{"id": "shaped-option", "name": "Shaped"}]}}
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file),
+        run="shape-run", agent="claude",
+    ) == 0
+
+    status_write = next(variables for query, variables in calls
+                        if query == funnel.SET_FIELD)
+    assert status_write["option"] == "shaped-option"
+    output = capsys.readouterr().out
+    assert "--- self-approval refused ---" in output
+    assert "The plan stays at Shaped for Nate because:" in output
+    assert (
+        "gate authority: changes a gate's question, answer, or owner"
+        in output
+    )
+    assert (
+        "unattended authority: changes what an agent may do unattended"
+        in output
+    )
+    assert "It now waits on you: is the plan good?" in output
+
+
+def test_shaped_all_clear_plan_does_not_report_a_refusal(tmp_path, monkeypatch,
+                                                         capsys):
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("""
+The plan discusses a gate and a Status field as subject matter, but changes
+neither and grants no additional authority to an agent.
+
+## Needs you
+
+Nothing.
+""")
+    item = Item(
+        repo="owner/repo", number=42, title="An idea",
+        url="https://github.com/owner/repo/issues/42", state="OPEN",
+        status="Ideas", item_id="project-item-42",
+    )
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
+        return {"node": {"options": [{"id": "ready-option", "name": "Ready"}]}}
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file),
+        run="shape-run", agent="claude",
+    ) == 0
+
+    status_write = next(variables for query, variables in calls
+                        if query == funnel.SET_FIELD)
+    assert status_write["option"] == "ready-option"
+    output = capsys.readouterr().out
+    assert "self-approval refused" not in output
+    assert "owner/repo#42 → Ready" in output
+    assert "It now waits on you: is the plan good?" not in output
 
 
 def test_capture_always_labels_the_issue_and_reports_it(monkeypatch, capsys):

@@ -31,18 +31,27 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 
 | Field | Meaning |
 |---|---|
+| `generated_at` | The UTC timestamp when the brief was generated |
 | `total_needing_nate` | How many decisions are waiting |
 | `counts_by_gate` | Open items at each gate. `Ideas` is deliberately excluded — it is unbounded and guilt-free, and counting it turns it into pressure |
 | `items` | The decisions, **already ordered**. Bottom-up: closest to shipping first |
 | `waiting_on` | The question being asked. `Accept it?` · `Is the plan good?` · `Unblock or park?` |
 | `waited` | Time at the current gate |
 | `class` | The item's Project `Class`; tickets inherit their parent's Class |
+| `parked` | Parked items, with their recorded reason when available |
+| `blocked` | Open blocked items, with the reason and named conditions that keep them blocked |
+| `human_steps` | Open child tickets Nate must complete, with each item's human-step reason. This is work Nate owes, not a decision he owes, so it is deliberately outside `total_needing_nate` |
+| `closed_with_access_vocabulary` | Completed projects whose plan contains access vocabulary but has no human-step child; a diagnostic for a possibly missed handoff, not proof that one was required |
 | `needs_class` | Items with no `Class` set. Invalid and not startable — a one-word fix in the Project |
-| `in_motion` | Tickets currently claimed, as a list. `wip_limit` is how many may run at once — the cap is policy, the per-ticket claim is correctness |
-| `stale_locks_taken_over` | Claims past the 2-hour TTL that were taken over |
+| `awaiting_breakdown` | Ready items with no child tickets and no blocker; Claude owes the breakdown |
 | `stranded` | Open items for which no current agent or gate can make progress. Diagnostic only; it does not add to `total_needing_nate` |
+| `in_motion` | Tickets currently claimed, as a list. `wip_limit` is how many may run at once — the cap is policy, the per-ticket claim is correctness |
+| `wip_limit` | The maximum number of tickets that may be claimed at once |
+| `stale_locks_taken_over` | Claims past the 2-hour TTL that were taken over |
+| `maintenance_load` | The portfolio signal for the recent share of completed work that was `Broken` or `Maintenance` |
+| `unattended_merges` | Recent merges made by Claude without Nate |
 | `working_tree_touched` | Runs during which Nate's own checkout changed. No routine should write it — engineers use their own clones, reviewers are read-only. Reports a *change*, not a crime: him committing mid-run looks the same. Say it plainly when present |
-| `maintenance_load` | `upkeep_share` is the fraction of work closed in the last 30 days that was `Broken` or `Maintenance` |
+| `rejected_merges` | Recent merge regressions Nate found, including whether automatic merging should stop |
 
 ## How to render it
 
@@ -50,8 +59,13 @@ Lead with the count and the ordered list. For each item: its Class, the question
 and issue title as a link, and how long it has waited. Keep it scannable — this is read to
 decide, not to browse.
 
-Then the gate counts on one line. Then anything unusual, and only if present:
-`needs_class`, `stale_locks_taken_over`, `stranded`, and `in_motion`.
+Then the gate counts on one line. Render each non-empty diagnostic section when present.
+Always surface `human_steps` when it is non-empty, with every item's reason; it is work
+Nate owes, not a decision list. Also call out `needs_class`, `awaiting_breakdown`,
+`closed_with_access_vocabulary`, `blocked`, `stale_locks_taken_over`, `stranded`,
+`in_motion`, `unattended_merges`, `working_tree_touched`, and `rejected_merges` when
+present. Use `maintenance_load` for the portfolio signal described below; `parked` is
+the recorded history of parked work, not another decision queue.
 
 Offer the `launch` command for the top item. Do not run it.
 

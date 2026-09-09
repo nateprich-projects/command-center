@@ -78,6 +78,16 @@ def test_the_five_hour_reserve_applies_too():
     assert usage.pace(over, NOW)["over_pace"]        # 75 + 10 = 85 > 80
 
 
+def test_openai_five_hour_gate_is_suspended_by_policy():
+    """2026-09-09, Nate's unused reset credits: ceiling 100, reserve 0 for
+    openai only — see PROVIDER_POLICY. The shared default still guards the
+    pools he competes with."""
+    reading = {"windows": {"five_hour": {"used_percent": 99.0, "resets_at": NOW}}}
+    assert not usage.pace(reading, NOW, provider="openai")["over_pace"]
+    assert usage.pace(reading, NOW, provider="anthropic")["over_pace"]
+    assert usage.pace(reading, NOW)["over_pace"]
+
+
 def test_the_reserves_are_sized_against_a_real_run_not_a_guess():
     """A run with nothing to do cost 2,690 output tokens; ten times that is
     ~1.5% of a weekly window. Reserves an order of magnitude above that refused

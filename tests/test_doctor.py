@@ -43,6 +43,10 @@ def stub_github_checks(monkeypatch):
             funnel, function_name,
             lambda name=check_name: funnel.Check(name, True, "ok", ""),
         )
+    monkeypatch.setattr(
+        funnel, "check_member_repos",
+        lambda: [funnel.Check("member repo owner/repo", True, "ok", "")],
+    )
 
 
 def install_fixture(tmp_path):
@@ -76,7 +80,7 @@ def test_all_local_checks_pass_and_discover_every_skill(tmp_path, monkeypatch):
 
     assert [check.name for check in checks] == [
         "install symlinks", "checkout staleness", "settings.json", "gh auth", "Project fields",
-        "command-center topic", "usage cache", "heartbeat branch",
+        "command-center topic", "member repo owner/repo", "usage cache", "heartbeat branch",
     ]
     assert all(check.ok for check in checks)
     assert "3 links" in checks[0].found
@@ -178,7 +182,7 @@ def test_doctor_does_not_require_a_self_referential_checkout_link(tmp_path, monk
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
-    assert len(checks) == 8
+    assert len(checks) == 9
     assert checks[0].ok
     assert checks[2].ok
 
@@ -445,6 +449,62 @@ def test_topic_search_failure_is_reported_not_raised(monkeypatch):
     assert result.fix
 
 
+def test_member_repo_readiness_reports_blocking_and_advisory_facts(monkeypatch):
+    def gh_json(*args):
+        endpoint = args[2]
+        if endpoint.endswith("owner/ready/actions/workflows"):
+            return {"workflows": [{"path": ".github/workflows/ci.yml"}]}
+        if endpoint.endswith("owner/ready/labels?per_page=100"):
+            return []
+        if endpoint.endswith("owner/ready/contents/.github/dependabot.yml"):
+            return {"type": "file"}
+        if endpoint.endswith("owner/no-ci/actions/workflows"):
+            return {"workflows": []}
+        if endpoint.endswith("owner/no-ci/labels?per_page=100"):
+            return [{"name": "bug"}]
+        if endpoint.endswith("owner/no-ci/contents/.github/dependabot.yml"):
+            return None
+        if endpoint.endswith("owner/no-ci/contents/.github/dependabot.yaml"):
+            return None
+        raise AssertionError("unexpected endpoint: {}".format(endpoint))
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+
+    checks = funnel.check_member_repos(["owner/no-ci", "owner/ready"])
+
+    assert [check.name for check in checks] == [
+        "member repo owner/no-ci", "member repo owner/ready",
+    ]
+    no_ci, ready = checks
+    assert not no_ci.ok
+    assert "CI workflow missing (blocking)" in no_ci.found
+    assert "stock GitHub labels remain: bug (advisory)" in no_ci.found
+    assert "Dependabot not configured (advisory)" in no_ci.found
+    assert no_ci.fix
+    assert ready.ok
+    assert ready.found == (
+        "CI workflow present; command-center topic applied; "
+        "stock GitHub labels removed; Dependabot configured"
+    )
+
+
+def test_member_repo_readiness_uses_topic_membership_as_the_filter(monkeypatch):
+    calls = []
+
+    def gh_json(*args):
+        calls.append(args[2])
+        return {"workflows": [{"path": ".github/workflows/ci.yml"}]} if \
+            args[2].endswith("actions/workflows") else []
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(funnel, "member_repos", lambda: ["owner/member"])
+
+    checks = funnel.check_member_repos()
+
+    assert [check.name for check in checks] == ["member repo owner/member"]
+    assert all("owner/outside" not in endpoint for endpoint in calls)
+
+
 def test_item_consistency_reports_each_contradiction_without_writing(monkeypatch):
     items = [
         funnel.Item(
@@ -681,10 +741,10 @@ def test_doctor_includes_class_assignment_dump_with_loaded_items(monkeypatch):
         ),
     ])
 
-    assert [check.name for check in checks][-3:] == [
-        "item consistency", "Class assignments", "block comments",
+    assert [check.name for check in checks][-4:] == [
+        "item consistency", "Class assignments", "block comments", "block conditions",
     ]
-    assert checks[-2].found == "owner/repo#1 | issue number 1 | Class Broken"
+    assert checks[-3].found == "owner/repo#1 | issue number 1 | Class Broken"
 
 
 def test_doctor_reports_unparseable_block_comments_with_loaded_items(monkeypatch):
@@ -701,12 +761,99 @@ def test_doctor_reports_unparseable_block_comments_with_loaded_items(monkeypatch
         ),
     ])
 
-    result = checks[-1]
+    result = checks[-2]
     assert result == funnel.Check(
         "block comments", False,
         "owner/repo#7: **Blocked on #77, 2026-09-07.** Legacy format.",
         "",
     )
+
+
+def test_doctor_reports_satisfied_and_still_waiting_block_conditions():
+    def ticket(number, references, **kwargs):
+        values = dict(
+            repo="owner/repo", number=number, title="ticket {}".format(number),
+            url="", state="OPEN", labels=["blocked"],
+            block_reason="Waiting for the condition.",
+            block_references=references,
+        )
+        values.update(kwargs)
+        return funnel.Item(**values)
+
+    items = [
+        ticket(108, ["#77"]),
+        ticket(141, ["#138"]),
+        ticket(145, ["#138"]),
+        ticket(168, ["#161"]),
+        ticket(109, ["#108"]),
+        funnel.Item(
+            repo="owner/repo", number=77, title="closed blocker", url="",
+            state="CLOSED", state_reason="COMPLETED",
+        ),
+        funnel.Item(
+            repo="owner/repo", number=138, title="closed blocker", url="",
+            state="CLOSED", state_reason="COMPLETED",
+        ),
+        funnel.Item(
+            repo="owner/repo", number=161, title="closed blocker", url="",
+            state="CLOSED", state_reason="COMPLETED",
+        ),
+    ]
+
+    result = funnel.check_block_conditions(items)
+
+    assert not result.ok
+    assert result.fix == ""
+    lines = result.found.splitlines()
+    assert lines[:4] == [
+        "owner/repo#108: satisfied block conditions: owner/repo#77",
+        "owner/repo#109: still-waiting (on owner/repo#108)",
+        "owner/repo#141: satisfied block conditions: owner/repo#138",
+        "owner/repo#145: satisfied block conditions: owner/repo#138",
+    ]
+    assert lines[4] == (
+        "owner/repo#168: satisfied block conditions: owner/repo#161"
+    )
+
+
+def test_doctor_reports_unresolvable_block_conditions():
+    ticket = funnel.Item(
+        repo="owner/repo", number=304, title="blocked", url="", state="OPEN",
+        labels=["blocked"], block_reason="Waiting for a decision.",
+        block_references=["#77"],
+    )
+    blocker = funnel.Item(
+        repo="owner/repo", number=77, title="parked", url="", state="CLOSED",
+        state_reason="NOT_PLANNED", status="Parked",
+    )
+
+    result = funnel.check_block_conditions([ticket, blocker])
+
+    assert result == funnel.Check(
+        "block conditions", False,
+        "owner/repo#304: unresolvable block conditions: owner/repo#77",
+        "",
+    )
+
+
+def test_block_condition_check_uses_loaded_items_without_fetching(monkeypatch):
+    ticket = funnel.Item(
+        repo="owner/repo", number=109, title="waiting", url="", state="OPEN",
+        labels=["blocked"], block_reason="Waiting for the chain.",
+        block_references=["#108"],
+    )
+    blocker = funnel.Item(
+        repo="owner/repo", number=108, title="open", url="", state="OPEN",
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_json",
+        lambda *args, **kwargs: pytest.fail("block condition check must not fetch"),
+    )
+
+    result = funnel.check_block_conditions([ticket, blocker])
+
+    assert result.ok
+    assert "owner/repo#109: still-waiting" in result.found
 
 
 def test_main_doctor_loads_project_items_for_consistency(monkeypatch):

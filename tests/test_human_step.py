@@ -19,6 +19,22 @@ def test_each_access_reason_parses(reason):
     ) == reason
 
 
+def test_machine_local_reason_parses_as_the_middle_capability_outcome():
+    assert funnel.parse_human_step(
+        funnel.HUMAN_STEP_PREFIX + funnel.MACHINE_LOCAL_REASON
+    ) == funnel.MACHINE_LOCAL_REASON
+
+
+def test_unmarked_and_marked_bodies_cover_all_three_capability_outcomes():
+    assert funnel.parse_human_step("Implement the bounded change.") is None
+    assert funnel.parse_human_step(
+        funnel.HUMAN_STEP_PREFIX + funnel.MACHINE_LOCAL_REASON
+    ) == funnel.MACHINE_LOCAL_REASON
+    assert funnel.parse_human_step(
+        funnel.HUMAN_STEP_PREFIX + funnel.HUMAN_STEP_REASONS[0]
+    ) == funnel.HUMAN_STEP_REASONS[0]
+
+
 def test_difficulty_is_not_a_human_step_reason():
     assert funnel.parse_human_step(
         funnel.HUMAN_STEP_PREFIX + "this is hard"

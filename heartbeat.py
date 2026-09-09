@@ -78,6 +78,15 @@ OUTCOMES = [
 PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
              "muse": "meta"}
 
+#: Agents whose schedules have been stopped on purpose. Their records stay
+#: readable and every command still accepts them, so re-enabling is a schedule
+#: paste and removing the name here; but the watchdog and `agent_health` must
+#: not read their silence as a run that died. zcode was retired on 2026-09-09
+#: by Nate's decision: measured over 24h it did work in 18 of 93 runs and was
+#: refused on the z.ai pace line in 63, while Muse carried every job it had on
+#: an unmetered pool (#431).
+RETIRED_AGENTS = frozenset({"zcode"})
+
 #: Which application ran it. Distinct from provider and model: one provider can
 #: be reached through more than one harness, and harnesses differ in ways that
 #: change outcomes — agent loop, tool selection, context handling, retries.

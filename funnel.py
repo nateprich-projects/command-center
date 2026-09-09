@@ -652,13 +652,16 @@ def plan_needs_nate(plan_body: str) -> bool:
     explicit evidence that Nate's questions were considered. Only a section
     containing exactly ``Nothing`` (with optional punctuation and whitespace)
     is empty. Multiple recognised sections fail closed if any one contains
-    content.
+    content. An otherwise empty section also fails closed when the plan body
+    contains an authority signal that contradicts the section's claim.
     """
     sections = _needs_nate_sections(plan_body)
     if not sections:
         return True
-    return any(section.strip().lower() not in EMPTY_NEEDS_NATE
-               for section in sections)
+    if any(section.strip().lower() not in EMPTY_NEEDS_NATE
+           for section in sections):
+        return True
+    return bool(needs_nate_signals(plan_body))
 
 
 def plan_is_escalated(plan_body: str) -> List[str]:

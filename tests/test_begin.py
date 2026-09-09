@@ -204,19 +204,33 @@ def test_begin_stop_reason_names_both_empty_queues_when_both_were_consulted(
     assert result["why"] == "nothing to review and nothing to break down"
 
 
-def test_begin_does_not_consult_breakdown_when_review_work_exists(monkeypatch, capsys):
+def test_begin_keeps_review_first_against_same_class_later_jobs(monkeypatch, capsys):
     work = {"pr": 7, "repo": "nateprich/beta", "ref": "nateprich/beta#19"}
+    pending = SimpleNamespace(
+        ref="nateprich-projects/command-center#20",
+        url="https://github.com/nateprich-projects/command-center/issues/20",
+        title="Break down project",
+        repo="nateprich-projects/command-center",
+        number=20,
+        klass="Improve",
+    )
+    idea = SimpleNamespace(klass="Improve")
+    breakdown_calls = []
     monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [work])
-
-    def unexpected_breakdown_lookup(items):
-        raise AssertionError("breakdown queue was consulted after review work was found")
-
-    monkeypatch.setattr(funnel, "awaiting_breakdown", unexpected_breakdown_lookup)
+    monkeypatch.setattr(
+        funnel,
+        "awaiting_breakdown",
+        lambda items: breakdown_calls.append(items) or [pending],
+    )
+    monkeypatch.setattr(
+        funnel, "shapeable_idea", lambda items, tier, reading: idea
+    )
 
     result = _begin(monkeypatch, capsys, breakdown=True)
 
     assert result["do"] == "review"
     assert result["work"] == work
+    assert breakdown_calls == [[]]
 
 
 def test_breakdown_work_carries_plan_access_signals(monkeypatch, capsys):
@@ -240,7 +254,7 @@ def test_breakdown_work_carries_plan_access_signals(monkeypatch, capsys):
     assert result["work"]["access_signals"] == ["token", "tunnel"]
 
 
-def _idea(number, title, body):
+def _idea(number, title, body, klass=None):
     return SimpleNamespace(
         ref="nateprich-projects/command-center#{}".format(number),
         repo="nateprich-projects/command-center",
@@ -248,7 +262,138 @@ def _idea(number, title, body):
         url="https://github.com/nateprich-projects/command-center/issues/{}".format(number),
         title=title,
         body=body,
+        klass=klass,
     )
+
+
+def _review_job(ticket, pr=7):
+    return {"pr": pr, "repo": ticket.repo, "ref": ticket.ref}
+
+
+def _reviewer_begin(
+    monkeypatch,
+    capsys,
+    items,
+    *,
+    review=None,
+    breakdown_item=None,
+    idea=None,
+    breakdown=False,
+):
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(
+        funnel,
+        "review_queue",
+        lambda rows, tier: [review] if review is not None else [],
+    )
+    monkeypatch.setattr(
+        funnel,
+        "awaiting_breakdown",
+        lambda rows: ([breakdown_item] if breakdown_item is not None else []),
+    )
+    monkeypatch.setattr(
+        funnel,
+        "shapeable_idea",
+        lambda rows, tier, reading: idea,
+    )
+    monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: "")
+
+    assert funnel.cmd_begin(
+        items, NOW, "zcode", "standard", False, breakdown
+    ) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_broken_idea_preempts_an_improve_review(monkeypatch, capsys):
+    project, ticket = _ticket(101, 100, klass="Improve")
+    idea = _idea(102, "Broken idea", "Risk: standard", klass="Broken")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        review=_review_job(ticket),
+        idea=idea,
+    )
+
+    assert result["do"] == "shape"
+    assert result["work"]["ref"] == idea.ref
+
+
+def test_improve_idea_does_not_preempt_an_improve_review(monkeypatch, capsys):
+    project, ticket = _ticket(103, 100, klass="Improve")
+    idea = _idea(104, "Improve idea", "Risk: standard", klass="Improve")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        review=_review_job(ticket),
+        idea=idea,
+    )
+
+    assert result["do"] == "review"
+    assert result["work"] == _review_job(ticket)
+
+
+def test_broken_review_is_before_a_broken_idea(monkeypatch, capsys):
+    project, ticket = _ticket(105, 100, klass="Broken")
+    idea = _idea(106, "Broken idea", "Risk: standard", klass="Broken")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        review=_review_job(ticket),
+        idea=idea,
+    )
+
+    assert result["do"] == "review"
+    assert result["work"] == _review_job(ticket)
+
+
+def test_unclassed_idea_does_not_preempt_an_improve_review(monkeypatch, capsys):
+    project, ticket = _ticket(107, 100, klass="Improve")
+    idea = _idea(108, "Unclassed idea", "Risk: standard")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        review=_review_job(ticket),
+        idea=idea,
+    )
+
+    assert result["do"] == "review"
+    assert result["work"] == _review_job(ticket)
+
+
+def test_same_class_candidates_keep_bottom_up_order(monkeypatch, capsys):
+    project, ticket = _ticket(109, 100, klass="Improve")
+    pending = funnel.Item(
+        repo="nateprich/example",
+        number=110,
+        title="Project 110",
+        url="https://github.com/nateprich/example/issues/110",
+        state="OPEN",
+        status="Ready",
+        klass="Improve",
+        children_total=0,
+    )
+    idea = _idea(111, "Improve idea", "Risk: standard", klass="Improve")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        review=_review_job(ticket),
+        breakdown_item=pending,
+        idea=idea,
+        breakdown=True,
+    )
+
+    assert result["do"] == "review"
+    assert result["work"] == _review_job(ticket)
 
 
 def test_shape_is_not_offered_when_the_first_idea_is_the_other_tier(

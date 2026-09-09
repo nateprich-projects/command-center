@@ -851,6 +851,96 @@ def plan_is_escalated(plan_body: str) -> List[str]:
     return escalation_reasons("", plan_body)
 
 
+# Plans already cite implementation details in ordinary Markdown. Keep this
+# detector deliberately mechanical: it reports shared tokens for a reader to
+# judge, rather than trying to decide whether two plans really collide.
+PLAN_FUNCTION_RE = re.compile(
+    r"(?<![\w.])(?P<name>(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*)"
+    r"\s*\([^()\n]*\)"
+)
+PLAN_PATH_RE = re.compile(
+    r"(?<![\w/.-])(?P<path>"
+    r"(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+\."
+    r"(?:cpp|tsx|jsx|yaml|json|html|toml|xml|css|sql|ini|txt|js|md|py|sh|go|cc|ts|yml|h|c)"
+    r"(?![A-Za-z0-9])"
+    r")(?:\:\d+(?:-\d+)?)?(?:#L\d+(?:-L\d+)?)?"
+)
+PLAN_ISSUE_RE = re.compile(
+    r"(?<![\w./-])(?P<ref>"
+    r"(?:(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+)?#\d+\b)"
+)
+
+
+def _plan_overlap_signals(plan_body: object) -> Tuple[Set[str], Set[str], Set[str]]:
+    """Extract the three checkable overlap signals from one plan body."""
+    if not isinstance(plan_body, str):
+        return set(), set(), set()
+
+    functions = {
+        match.group("name")
+        for match in PLAN_FUNCTION_RE.finditer(plan_body)
+    }
+    paths = set()
+    for match in PLAN_PATH_RE.finditer(plan_body):
+        path = match.group("path")
+        if path.startswith("./"):
+            path = path[2:]
+        paths.add(path)
+    issues = {
+        match.group("ref")
+        for match in PLAN_ISSUE_RE.finditer(plan_body)
+    }
+    return functions, paths, issues
+
+
+def plan_overlap_candidates(
+    plan_ref: str,
+    plan_body: str,
+    other_plans: Iterable[Tuple[str, str]],
+) -> List[str]:
+    """Return advisory lines for mechanical overlap with other plans.
+
+    ``other_plans`` supplies ``(ref, body)`` pairs for the open plans the
+    caller wants to compare. Shared function calls, file paths and issue
+    references are intentionally the whole signal: a human decides whether a
+    candidate is a real collision. The output is deterministic so the shaping
+    surface can print it without adding state or doing its own ranking.
+    """
+    current = _plan_overlap_signals(plan_body)
+    candidates: List[str] = []
+    seen: Set[str] = set()
+    pairs = sorted(other_plans, key=lambda pair: pair[0])
+
+    for other_ref, other_body in pairs:
+        if other_ref == plan_ref:
+            continue
+        other = _plan_overlap_signals(other_body)
+
+        for function in sorted(current[0] & other[0]):
+            line = "{} and {} both name `{}()`".format(
+                plan_ref, other_ref, function
+            )
+            if line not in seen:
+                candidates.append(line)
+                seen.add(line)
+        for path in sorted(current[1] & other[1]):
+            line = "{} and {} both touch `{}`".format(
+                plan_ref, other_ref, path
+            )
+            if line not in seen:
+                candidates.append(line)
+                seen.add(line)
+        for issue in sorted(current[2] & other[2]):
+            line = "{} and {} both reference {}".format(
+                plan_ref, other_ref, issue
+            )
+            if line not in seen:
+                candidates.append(line)
+                seen.add(line)
+
+    return candidates
+
+
 # These are evidence words, not a closed list of human-step categories. A plan
 # can use one while describing a rejected alternative or an already-automated
 # action, so the scan is a prompt to inspect the checklist rather than proof

@@ -1004,6 +1004,20 @@ def test_existing_heartbeat_branch_with_empty_spool_passes(tmp_path, monkeypatch
     assert "spool" in result.found and "empty" in result.found
 
 
+def test_four_drained_spool_files_pass(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    for name in ("claude.jsonl", "codex.jsonl", "muse.jsonl", "zcode.jsonl"):
+        (spool / name).touch()
+    monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
+
+    result = funnel.check_heartbeat(spool, now=NOW)
+
+    assert result.ok
+    assert "4 file(s), all drained" in result.found
+    assert "no pending records" in result.found
+
+
 def test_absent_heartbeat_branch_is_broken(tmp_path, monkeypatch):
     monkeypatch.setattr(funnel, "gh_branch_exists", lambda: False)
 
@@ -1045,12 +1059,28 @@ def test_three_spool_files_report_count_and_oldest_age(tmp_path, monkeypatch):
                       ("two.jsonl", 3600),
                       ("three.jsonl", 60)):
         path = spool / name
-        path.write_text("record\n")
-        os.utime(path, (NOW - age, NOW - age))
+        path.write_text(json.dumps({"phase": "start", "ts": NOW - age}) + "\n")
+        os.utime(path, (NOW - 30, NOW - 30))
     monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
 
     result = funnel.check_heartbeat(spool, now=NOW)
 
     assert not result.ok
-    assert "3 file(s)" in result.found
+    assert "3 pending record(s) across 3 file(s)" in result.found
     assert "oldest is 2 days" in result.found
+
+
+def test_spool_record_age_does_not_use_file_mtime(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    path = spool / "codex.jsonl"
+    path.write_text(json.dumps({"phase": "start", "ts": NOW - 5 * 60}) + "\n")
+    os.utime(path, (NOW - 2 * 86400, NOW - 2 * 86400))
+    monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
+
+    result = funnel.check_heartbeat(spool, now=NOW)
+
+    assert not result.ok
+    assert "1 pending record(s) across 1 file(s)" in result.found
+    assert "oldest is 5 minutes" in result.found
+    assert "2 days" not in result.found

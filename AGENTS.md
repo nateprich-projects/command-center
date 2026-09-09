@@ -86,6 +86,29 @@ wrong.
   and OpenAI permit on these plans, and it has been misread as universal.
   _(confirmed by Nate 2026-09-07.)_
 
+  **The rule bans unattended *prompt execution*, not a listener.** `claude rc`
+  (`claude remote-control`) started from launchd is outside it: the server idles and
+  issues no prompt of its own, consuming nothing until Nate sends a message from a
+  device. What the clause in Anthropic's consumer terms prohibits is accessing the
+  Services "through automated or non-human means"; a process that waits for a human is
+  not that, and the terms carve out "where we otherwise explicitly permit it".
+  _(confirmed by Nate 2026-09-09.)_
+
+  What is established here, and it is first-party rather than inference: Anthropic ships
+  auto-connect as a supported setting — `remoteControlAtStartup: true`, "connect
+  automatically when an interactive session starts", exposed in `/config`, the desktop
+  app, and the VS Code extension. Their Remote Control documentation describes server
+  mode as a persistent server accepting multiple concurrent sessions, and tells you to
+  run it under `tmux` or `screen` to survive a disconnect. The Usage Policy's automation
+  prohibitions are all abuse shapes this is nowhere near: automation in account
+  creation, spammy behaviour, bypassing guardrails, model scraping, ban circumvention.
+
+  **The line to watch is who issues the prompts, not what starts the process.** If
+  anything on this Mac ever drives the sessions the listener spawns — a channel, a
+  scheduled task, cross-session messaging — then a machine is issuing prompts through
+  it and the carve-out no longer applies. That would be the banned shape wearing the
+  listener's clothes. Do not widen this paragraph to cover it.
+
   **Muse Code is exempt, on Nate's judgement.** Asked whether the schedules were within
   Meta's terms, he answered *"I think we're good."* That settles it as a decision and
   the schedules run. _(confirmed by Nate 2026-09-07.)_

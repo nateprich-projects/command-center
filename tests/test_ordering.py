@@ -61,6 +61,21 @@ def item(number, status=None, klass=None, days=1.0, **kw) -> Item:
     )
 
 
+def repo_project(repo, number, status="Building", klass="New") -> Item:
+    return Item(
+        repo=repo, number=number, title="project {}".format(number), url="",
+        state="OPEN", status=status, klass=klass, status_since=at(1),
+        children_total=1,
+    )
+
+
+def repo_ticket(repo, number, parent) -> Item:
+    return Item(
+        repo=repo, number=number, title="ticket {}".format(number), url="",
+        state="OPEN", parent="{}#{}".format(repo, parent),
+    )
+
+
 # -- Nate's queue: bottom-up ------------------------------------------------
 
 
@@ -399,6 +414,41 @@ def test_ready_and_building_parents_are_both_startable():
         [project(1, "Ready", "New"), ticket(2, 1)])] == [2]
     assert [i.number for i in startable(
         [project(1, "Building", "New"), ticket(2, 1)])] == [2]
+
+
+def test_startable_withholds_only_repos_missing_blocking_readiness():
+    no_ci = "owner/no-ci"
+    advisory = "owner/advisory"
+    no_topic = "owner/no-topic"
+    rows = [
+        repo_project(no_ci, 1), repo_ticket(no_ci, 2, 1),
+        repo_project(advisory, 3), repo_ticket(advisory, 4, 3),
+        repo_project(no_topic, 5), repo_ticket(no_topic, 6, 5),
+    ]
+    readiness = {
+        no_ci: funnel.MemberRepoReadiness(
+            no_ci, topic=True, ci_workflow=False,
+            stock_labels=("bug",), dependabot=False,
+        ),
+        advisory: funnel.MemberRepoReadiness(
+            advisory, topic=True, ci_workflow=True,
+            stock_labels=("bug",), dependabot=False,
+        ),
+        no_topic: funnel.MemberRepoReadiness(
+            no_topic, topic=False, ci_workflow=True,
+            stock_labels=(), dependabot=True,
+        ),
+    }
+
+    assert [candidate.ref for candidate in startable(
+        rows, repo_readiness=readiness
+    )] == ["owner/advisory#4"]
+    assert funnel.readiness_blockers(rows, repo_readiness=readiness) == [
+        {"ref": "owner/no-ci#2", "repo": no_ci,
+         "reasons": ["no CI workflow"]},
+        {"ref": "owner/no-topic#6", "repo": no_topic,
+         "reasons": ["missing command-center topic"]},
+    ]
 
 
 def test_shaped_work_is_not_startable():

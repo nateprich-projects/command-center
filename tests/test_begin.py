@@ -68,7 +68,8 @@ def _ticket(number, parent, *, body="Risk: standard", klass="Improve",
     return project, ticket
 
 
-def _codex_begin(monkeypatch, capsys, items, *, tier="standard"):
+def _codex_begin(monkeypatch, capsys, items, *, tier="standard",
+                 repo_readiness=None):
     _allow_begin(monkeypatch)
     monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
     bodies = {item.number: item.body for item in items}
@@ -79,7 +80,10 @@ def _codex_begin(monkeypatch, capsys, items, *, tier="standard"):
     monkeypatch.setattr(
         funnel, "write_lock", lambda item, value: writes.append((item.ref, value))
     )
-    assert funnel.cmd_begin(items, NOW, "codex", tier, False) == 0
+    assert funnel.cmd_begin(
+        items, NOW, "codex", tier, False,
+        repo_readiness=repo_readiness,
+    ) == 0
     return json.loads(capsys.readouterr().out), writes
 
 
@@ -169,6 +173,32 @@ def test_codex_begin_allows_broken_preemption_at_the_wip_limit(
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == ticket.ref
     assert [ref for ref, value in writes if value] == [ticket.ref]
+
+
+def test_codex_begin_reports_repo_readiness_when_work_is_withheld(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(72, 73)
+    readiness = {
+        ticket.repo: funnel.MemberRepoReadiness(
+            ticket.repo, topic=True, ci_workflow=False,
+            stock_labels=(), dependabot=False,
+        ),
+    }
+
+    result, writes = _codex_begin(
+        monkeypatch, capsys, [project, ticket],
+        repo_readiness=readiness,
+    )
+
+    assert result["do"] == "stop"
+    assert "no CI workflow" in result["why"]
+    assert result["withheld"] == [{
+        "ref": ticket.ref,
+        "repo": ticket.repo,
+        "reasons": ["no CI workflow"],
+    }]
+    assert writes == []
 
 
 def test_begin_stop_reason_omits_breakdown_when_it_was_not_requested(

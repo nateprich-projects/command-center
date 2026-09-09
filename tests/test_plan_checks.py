@@ -11,6 +11,28 @@ sys.path.insert(0, str(ROOT))
 from funnel import plan_is_escalated, plan_needs_nate  # noqa: E402
 
 
+PLAN_82 = """
+The defect is that capture, review and merge silently default to one repo.
+With a second member repo, those become wrong writes: an idea lands here, a
+verdict is recorded against the wrong PR, and merge points at the wrong
+repository. Nothing in the output says which repo was acted on.
+
+Why this is separate: #18's plan was approved at a gate on 2026-09-06.
+Widening an approved plan by editing its body bypasses that gate, which is the
+drift #57 is being built to detect.
+"""
+
+PLAN_83 = """
+Everything required to onboard a repo exists only as prose in a closed issue.
+Membership is itself a gate: in the funnel is a commitment; out of it means
+still deciding what to do with it.
+
+The questions shaping would need to answer include whether an incompletely
+onboarded repo may be refused entry. Per plan.md:417, membership itself is a
+gate, and plan.md:740 keeps applying topics and transferring issues with him.
+"""
+
+
 def test_a_question_in_the_needs_nate_section_requires_nate():
     plan = """
     ## Decided from precedent
@@ -49,6 +71,23 @@ def test_a_lower_level_heading_stays_inside_the_needs_section():
     No-op.
     """
     assert plan_needs_nate(plan) is True
+
+
+def test_a_body_authority_signal_overrides_an_all_clear_section():
+    plan = """
+## Context
+Per plan.md:417, membership itself is a gate.
+
+## Needs you
+Nothing.
+    """
+    assert plan_needs_nate(plan) is True
+    assert plan_needs_nate(plan.replace("Per plan.md:417, ", "")) is False
+
+
+def test_real_plan_fixtures_are_checked_after_an_all_clear_section():
+    assert plan_needs_nate(PLAN_83 + "\n## Needs you\nNothing.\n") is True
+    assert plan_needs_nate(PLAN_82 + "\n## Needs you\nNothing.\n") is False
 
 
 def test_plan_escalation_scans_the_whole_body_and_returns_reasons():

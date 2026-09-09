@@ -102,6 +102,11 @@ def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
     monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
     monkeypatch.setattr(
         funnel,
+        "clear_satisfied_blocks",
+        lambda *args, **kwargs: events.append("clear") or [],
+    )
+    monkeypatch.setattr(
+        funnel,
         "next_ticket_for_tier",
         lambda *args, **kwargs: events.append("next") or ticket,
     )
@@ -114,7 +119,7 @@ def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
 
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == ticket.ref
-    assert events == ["heartbeat", "next", "claim"]
+    assert events == ["heartbeat", "clear", "next", "claim"]
 
 
 def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):

@@ -47,6 +47,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `human_steps` | Open tickets only Nate can do, with the `reason` each declares. **Work he owes, not a decision he owes** — deliberately outside `total_needing_nate`, the same distinction that keeps `blocked` out. No agent can pick these up: `startable()` excludes them, so this list is the only place they surface |
 | `parked` | Stopped items with the written reason each carries. The reason is the artifact that makes re-encountering an idea a 30-second decision |
 | `closed_itself` | Projects the funnel closed in the recent named window, newest first, with the drift recorded at close |
+| `cleared_blocks` | Tickets whose fully parsed conditions all closed and whose `blocked` label the funnel mechanically cleared in the last seven days |
 | `awaiting_breakdown` | Approved plans with no tickets yet. Claude owes these a breakdown; they are not startable until it happens |
 | `unattended_merges` | Merges an agent made without him, read from heartbeat records. `plan.md` makes these appearing in the brief a condition of unattended merging being allowed at all |
 | `agent_health` | Raised watchdog conditions, each with the heartbeat agent and the watchdog's condition wording. Empty when all agents are healthy |
@@ -70,6 +71,10 @@ each project show the title and closed-at time. Say **"closed itself with drift"
 name every drift signal when `drift` is non-empty; say **"closed itself cleanly"** when
 the list is empty. This distinction is the point of the section — do not collapse a
 drifted close into a generic completion line.
+
+Then `cleared_blocks`, whenever it is non-empty, as its own short list, newest first.
+Name the ticket, the conditions found closed, and the clear time. This is a record of a
+mechanical move, not a decision request; never add it to `total_needing_nate`.
 
 Then the gate counts on one line. Then anything unusual, and only if present:
 `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`, `awaiting_breakdown`,

@@ -150,6 +150,16 @@ gh pr checks <pr> --repo <repo>
 gh pr diff <pr> --repo <repo>
 ```
 
+### Check file overlap before approving
+
+A successful merge changes `main` underneath every other open PR. Because this
+routine does one job per run, the first review action after a successful merge is
+to compare the candidate PR's changed-file list with the changed-file list of
+every other open PR, before recording an approval. Do not approve a candidate
+that the merge just made stale: record a rejected verdict with `--blocking`
+naming the overlapping files, and leave the engineer to rebase it. This ordering
+check is an early warning; it does not replace the merge gate.
+
 **No clone, no checkout, no `git` at all, no `/tmp`, no writing anywhere except
 the heartbeat spool.** In particular never touch
 `/Users/nateprich/.claude/command-center` or the directory it points at — that is

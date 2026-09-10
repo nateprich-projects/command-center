@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import sys
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +30,11 @@ def stub_heartbeat_checks(monkeypatch):
         funnel, "check_heartbeat",
         lambda spool_dir=None, now=None: funnel.Check(
             "heartbeat branch", True, "ok", ""),
+    )
+    monkeypatch.setattr(
+        funnel, "check_repository_drift",
+        lambda checkout_root=None: funnel.Check(
+            "repository drift", True, "", ""),
     )
 
 
@@ -79,7 +85,7 @@ def test_all_local_checks_pass_and_discover_every_skill(tmp_path, monkeypatch):
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
     assert [check.name for check in checks] == [
-        "install symlinks", "checkout staleness", "settings.json", "gh auth", "Project fields",
+        "install symlinks", "checkout staleness", "repository drift", "settings.json", "gh auth", "Project fields",
         "command-center topic", "member repo owner/repo", "usage cache", "heartbeat branch",
     ]
     assert all(check.ok for check in checks)
@@ -182,7 +188,7 @@ def test_doctor_does_not_require_a_self_referential_checkout_link(tmp_path, monk
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
-    assert len(checks) == 9
+    assert len(checks) == 10
     assert checks[0].ok
     assert checks[2].ok
 
@@ -258,6 +264,108 @@ def test_checkout_staleness_reports_current_legacy_checkout(
 
     assert result.ok
     assert "matches origin/main" in result.found
+
+
+# -- repository drift --------------------------------------------------------
+
+
+def test_repository_drift_reports_uncommitted_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(" M funnel.py\n?? tests/new test.py\n" if args[3] == "status"
+                    else "main\n" if args[3] == "symbolic-ref" else "0 0\n"),
+            stderr="",
+        ),
+    )
+
+    result = funnel.check_repository_drift(tmp_path)
+
+    assert not result.ok
+    assert result.found.splitlines() == [
+        "uncommitted changes: funnel.py, tests/new test.py",
+    ]
+
+
+@pytest.mark.parametrize(
+    "symbolic_ref_output, expected",
+    [("feature/drift\n", "current branch is feature/drift, not main"),
+     ("", "detached HEAD (not main)")],
+)
+def test_repository_drift_reports_non_main_or_detached_head(
+    tmp_path, monkeypatch, symbolic_ref_output, expected
+):
+    def run(args, **kwargs):
+        if args[3] == "status":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[3] == "symbolic-ref":
+            return SimpleNamespace(
+                returncode=0 if symbolic_ref_output else 1,
+                stdout=symbolic_ref_output,
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="0 0\n", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    result = funnel.check_repository_drift(tmp_path)
+
+    assert not result.ok
+    assert result.found == expected
+
+
+def test_repository_drift_reports_commits_not_on_origin_main(tmp_path, monkeypatch):
+    def run(args, **kwargs):
+        if args[3] == "status":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[3] == "symbolic-ref":
+            return SimpleNamespace(returncode=0, stdout="main\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="2 0\n", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    result = funnel.check_repository_drift(tmp_path)
+
+    assert not result.ok
+    assert result.found == (
+        "2 commit(s) on the current branch are not present on origin/main"
+    )
+
+
+def test_repository_drift_is_silent_for_a_clean_main_checkout(tmp_path, monkeypatch):
+    def run(args, **kwargs):
+        if args[3] == "status":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[3] == "symbolic-ref":
+            return SimpleNamespace(returncode=0, stdout="main\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="0 0\n", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.check_repository_drift(tmp_path) == funnel.Check(
+        "repository drift", True, "", ""
+    )
+
+
+def test_repository_drift_uses_only_read_only_git_commands(tmp_path, monkeypatch):
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        if args[3] == "status":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[3] == "symbolic-ref":
+            return SimpleNamespace(returncode=0, stdout="main\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="0 0\n", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.check_repository_drift(tmp_path).ok
+    assert [args[3] for args, _ in calls] == [
+        "status", "symbolic-ref", "rev-list",
+    ]
+    assert calls[0][1]["env"]["GIT_OPTIONAL_LOCKS"] == "0"
 
 
 # -- GitHub wiring ------------------------------------------------------------
@@ -741,10 +849,11 @@ def test_doctor_includes_class_assignment_dump_with_loaded_items(monkeypatch):
         ),
     ])
 
-    assert [check.name for check in checks][-4:] == [
-        "item consistency", "Class assignments", "block comments", "block conditions",
+    assert [check.name for check in checks][-5:] == [
+        "item consistency", "Class assignments", "block comments",
+        "block conditions", "suspected human steps",
     ]
-    assert checks[-3].found == "owner/repo#1 | issue number 1 | Class Broken"
+    assert checks[-4].found == "owner/repo#1 | issue number 1 | Class Broken"
 
 
 def test_doctor_reports_unparseable_block_comments_with_loaded_items(monkeypatch):
@@ -761,10 +870,36 @@ def test_doctor_reports_unparseable_block_comments_with_loaded_items(monkeypatch
         ),
     ])
 
-    result = checks[-2]
+    result = checks[-3]
     assert result == funnel.Check(
         "block comments", False,
         "owner/repo#7: **Blocked on #77, 2026-09-07.** Legacy format.",
+        "",
+    )
+
+
+def test_doctor_reports_reference_less_human_step_without_writing(monkeypatch):
+    stub_heartbeat_checks(monkeypatch)
+    stub_github_checks(monkeypatch)
+
+    checks = funnel.doctor_checks(items=[
+        funnel.Item(
+            repo="owner/repo", number=8, title="Credential entry", url="",
+            state="OPEN", parent="owner/repo#7", labels=["blocked"],
+            block_reason="Human step: entering a credential",
+        ),
+        funnel.Item(
+            repo="owner/repo", number=9, title="Named condition", url="",
+            state="OPEN", parent="owner/repo#7", labels=["blocked"],
+            block_references=["#77"],
+            block_reason="Human step: entering a credential",
+        ),
+    ])
+
+    result = checks[-1]
+    assert result == funnel.Check(
+        "suspected human steps", False,
+        "owner/repo#8: suspected human step (entering a credential)",
         "",
     )
 
@@ -920,13 +1055,56 @@ def write_usage_cache(path, captured_at):
     }))
 
 
-def test_missing_usage_cache_names_opening_claude_code(tmp_path):
+def write_claude_transcript(path, timestamp):
+    path.write_text(json.dumps({
+        "type": "assistant",
+        "timestamp": datetime.fromtimestamp(
+            timestamp, timezone.utc).isoformat().replace("+00:00", "Z"),
+        "message": {
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "usage": {"output_tokens": 100},
+        },
+    }) + "\n")
+
+
+def disable_transcript_estimate(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        funnel, "CLAUDE_TRANSCRIPTS", str(tmp_path / "none" / "*.jsonl")
+    )
+
+
+def test_missing_usage_cache_uses_a_readable_transcript_estimate(
+    tmp_path, monkeypatch
+):
+    transcript = tmp_path / "project" / "session.jsonl"
+    transcript.parent.mkdir()
+    write_claude_transcript(transcript, NOW - 5 * 60)
+    monkeypatch.setattr(
+        funnel, "CLAUDE_TRANSCRIPTS", str(tmp_path / "project" / "*.jsonl")
+    )
+
+    result = funnel.check_usage_cache(tmp_path / "missing.json", now=NOW)
+
+    assert result.ok
+    assert "transcript estimate" in result.found
+    assert str(transcript) in result.found
+    assert "age 5 minutes" in result.found
+    assert result.fix == ""
+
+
+def test_missing_usage_cache_fails_with_a_run_fix_when_no_estimate_exists(
+    tmp_path, monkeypatch
+):
+    disable_transcript_estimate(monkeypatch, tmp_path)
+
     result = funnel.check_usage_cache(tmp_path / "missing.json", now=NOW)
 
     assert not result.ok
     assert "missing" in result.found
     assert "age unavailable" in result.found
-    assert result.fix == "open Claude Code on the Mac mini"
+    assert "transcript estimate is unavailable" in result.found
+    assert result.fix == "run a Claude Code session so a transcript exists"
 
 
 def test_fresh_usage_cache_reports_its_age(tmp_path):
@@ -936,11 +1114,13 @@ def test_fresh_usage_cache_reports_its_age(tmp_path):
     result = funnel.check_usage_cache(cache, now=NOW)
 
     assert result.ok
+    assert "statusline cache" in result.found
     assert "present and fresh" in result.found
     assert "age 5 minutes" in result.found
 
 
-def test_unparseable_usage_cache_is_distinct_from_missing(tmp_path):
+def test_unparseable_usage_cache_is_distinct_from_missing(tmp_path, monkeypatch):
+    disable_transcript_estimate(monkeypatch, tmp_path)
     cache = tmp_path / "usage.json"
     cache.write_text("{not valid json")
 
@@ -949,10 +1129,11 @@ def test_unparseable_usage_cache_is_distinct_from_missing(tmp_path):
     assert not result.ok
     assert "present but unparseable" in result.found
     assert "missing" not in result.found
-    assert result.fix == "open Claude Code on the Mac mini"
+    assert result.fix == "run a Claude Code session so a transcript exists"
 
 
-def test_old_usage_cache_reports_age_and_is_broken(tmp_path):
+def test_old_usage_cache_reports_age_and_is_broken(tmp_path, monkeypatch):
+    disable_transcript_estimate(monkeypatch, tmp_path)
     cache = tmp_path / "usage.json"
     write_usage_cache(cache, NOW - 2 * 3600)
 
@@ -961,7 +1142,27 @@ def test_old_usage_cache_reports_age_and_is_broken(tmp_path):
     assert not result.ok
     assert "stale" in result.found
     assert "age 2 hours" in result.found
-    assert "open Claude Code on the Mac mini" == result.fix
+    assert "freshness threshold is 15 minutes" in result.found
+    assert "run a Claude Code session so a transcript exists" == result.fix
+
+
+def test_stale_usage_cache_prefers_a_readable_transcript_estimate(
+    tmp_path, monkeypatch
+):
+    transcript = tmp_path / "project" / "session.jsonl"
+    transcript.parent.mkdir()
+    write_claude_transcript(transcript, NOW - 20 * 60)
+    monkeypatch.setattr(
+        funnel, "CLAUDE_TRANSCRIPTS", str(tmp_path / "project" / "*.jsonl")
+    )
+    cache = tmp_path / "usage.json"
+    write_usage_cache(cache, NOW - 2 * 3600)
+
+    result = funnel.check_usage_cache(cache, now=NOW)
+
+    assert result.ok
+    assert "transcript estimate" in result.found
+    assert "age 20 minutes" in result.found
 
 
 # -- heartbeat branch and spool --------------------------------------------
@@ -975,6 +1176,20 @@ def test_existing_heartbeat_branch_with_empty_spool_passes(tmp_path, monkeypatch
     assert result.ok
     assert "heartbeat branch `heartbeat` exists" in result.found
     assert "spool" in result.found and "empty" in result.found
+
+
+def test_four_drained_spool_files_pass(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    for name in ("claude.jsonl", "codex.jsonl", "muse.jsonl", "zcode.jsonl"):
+        (spool / name).touch()
+    monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
+
+    result = funnel.check_heartbeat(spool, now=NOW)
+
+    assert result.ok
+    assert "4 file(s), all drained" in result.found
+    assert "no pending records" in result.found
 
 
 def test_absent_heartbeat_branch_is_broken(tmp_path, monkeypatch):
@@ -1018,12 +1233,28 @@ def test_three_spool_files_report_count_and_oldest_age(tmp_path, monkeypatch):
                       ("two.jsonl", 3600),
                       ("three.jsonl", 60)):
         path = spool / name
-        path.write_text("record\n")
-        os.utime(path, (NOW - age, NOW - age))
+        path.write_text(json.dumps({"phase": "start", "ts": NOW - age}) + "\n")
+        os.utime(path, (NOW - 30, NOW - 30))
     monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
 
     result = funnel.check_heartbeat(spool, now=NOW)
 
     assert not result.ok
-    assert "3 file(s)" in result.found
+    assert "3 pending record(s) across 3 file(s)" in result.found
     assert "oldest is 2 days" in result.found
+
+
+def test_spool_record_age_does_not_use_file_mtime(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    path = spool / "codex.jsonl"
+    path.write_text(json.dumps({"phase": "start", "ts": NOW - 5 * 60}) + "\n")
+    os.utime(path, (NOW - 2 * 86400, NOW - 2 * 86400))
+    monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
+
+    result = funnel.check_heartbeat(spool, now=NOW)
+
+    assert not result.ok
+    assert "1 pending record(s) across 1 file(s)" in result.found
+    assert "oldest is 5 minutes" in result.found
+    assert "2 days" not in result.found

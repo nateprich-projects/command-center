@@ -8,6 +8,33 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### zcode was retired, and what an empty poll actually costs each pool
+
+**2026-09-09 · heartbeat · measured**
+
+Nate retired zcode on 2026-09-09 (#431) after a day on which it did work in 18 of 93
+runs and was refused on the z.ai pace line in 63 — one job in its last 34 runs — while
+Muse's standard schedule, unmetered, did 98 jobs in 217 runs and had taken over
+standard-tier shaping (#366). Its schedule (every 15 minutes at :08, :23, :38, :53,
+from 2026-09-07 02:11Z) lived only in the zcode app and is recorded in
+`routines/zcode.md`'s header. The routine, its records, `PROVIDERS` and the `zai`
+policy all stay; `heartbeat.RETIRED_AGENTS` is what keeps the watchdog and
+`agent_health` from reading the silence as a run that died.
+
+**The hypothesis it was retired on was wrong, and the measurement is worth keeping.**
+The guess was that zcode starved itself by polling — that each budget check burned the
+tokens that would have let it run. From the readings every run records at start and
+finish (z.ai weekly window, 24h): 62 refused polls cost **+1.0 point in total**, 10
+empty runs cost 0, and 18 working runs cost **+19 points — about 1% of the week each**.
+Polling was free; the jobs were expensive.
+
+The same method on Codex (OpenAI): a working run costs ~0.5% of the weekly window and
+~0.4% of the five-hour one, **an errored run costs the same as a working one**, and a
+refused poll costs ~0 on the weekly window. So for both metered pools the lever is
+jobs per day, not poll cadence. `measured`, from `usage.seven_day.used_percent` deltas;
+readings are account-wide and integer-coarse, so per-run means are reliable and sums
+are not.
+
 ### The routines ran a ticket branch's funnel.py for hours, because the canonical checkout is a working tree
 
 **2026-09-09 · Mac mini · measured**

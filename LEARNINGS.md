@@ -8,6 +8,69 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### What a Muse job costs its weekly window, and the cadence that meters it
+
+**2026-09-10 · usage · measured (prices `inferred`)**
+
+Muse exposes no usage reading, so this is the only way to meter it: price every
+session from its own snapshots and journals under `~/.local/share/muse/sessions`
+(prompt, cache-read and output tokens per turn; tier from the prompt; job from the
+heartbeat finish record joined on `--run`), then scale to the panel figure Nate read.
+The panel read **80% at Wed 23:30 PDT from a Sat 17:00 reset**, but the schedules did
+not fire until Mon 18:00, so 80 points went in **53.6 hours over 486 sessions**.
+Priced at Meta's list rates for `muse-spark-1.3` the cycle is ~$48, so a Muse week is
+worth ~$61 of API compute. Sources disagree on that rate by 12×, which does not
+matter here: both weightings put every class within 10% of the same share.
+
+| job | runs | points each | points |
+|---|---|---|---|
+| review, approved and merged (standard, high) | 118 | 0.28 | 32.5 |
+| review, approved and merged (escalated, max) | 6 | 0.43 | 2.6 |
+| review, rejected | 7 | 0.26 | 2.0 |
+| breakdown | 11 | 0.23 | 2.6 |
+| shaping | 11 | **0.46** | 4.9 |
+| errored (mostly `gh` 429 at begin) | 31 | 0.21 | 6.5 |
+| **nothing to do** | **236** | **0.10** | **24.0** |
+
+Two facts overturned the working assumptions. **An empty Muse fire is not cheap**:
+139k prompt tokens over ~5 turns to run `funnel begin` and hear stop — a tenth of a
+point, as much as a worked Codex Luna run — and 236 of them took 30% of the cycle.
+And **shaping is the dearest job**, 1.5× a review, because it reads the idea, the plan
+history and writes the plan; the two costliest runs of the night were shapings.
+
+The stable 8 hours (Wed 15:24–23:20, queue full) are the number to plan on: 44 jobs
+in 44 standard fires — 34 reviews, 10 shapings, 1 breakdown — for 16.5 points, about
+**2 points an hour**. Reviews then cost 0.32, shapings 0.46. Of the 8 reviews that did
+not merge, only 2 were rejections on substance; 6 were "approved on substance, merge
+refused: branch conflicting", each re-reviewed 10–40 minutes later after Codex merged
+main. That is #245's cascade from the reviewer's side: ~12% of the window on second
+looks at PRs already approved. The review ratio it produced, **1.31 review runs per
+merged PR**, is the one used below.
+
+**Codex, for the same picture** (see the entry below for the per-lane prices): in the
+same 8 hours every PR was written in one session and none was sent back by review,
+but 45 of 64 ticket sessions were re-hands of a ticket whose PR was already up — the
+rejection side of the same cascade (#245, #487) plus an Investigate ticket that can
+never finish (#498). Codex's cost is re-verification; Muse's is re-review.
+
+**The planning model** (Nate's assumptions, 2026-09-10): each shaped parent needs one
+shaping, one breakdown, and one review per sub-issue at the observed ratio. Over the
+whole Project history — every parent that was broken down, Parked and Done included,
+82 of them — the mean is **2.62 sub-issues per parent** (median 2; 28 had one, four had
+6–11). So a parent costs 0.46 + 0.26 + 3.4 × 0.32 = **1.82 points and 5.4 Muse jobs**,
+and the average job costs 0.335 points whatever N is — N moves throughput, not
+spacing. A 90-point week is **50 parents, 269 jobs, one job every 37 minutes**: on the
+two schedules, standard every 45 minutes with escalated hourly (~92 on a full queue,
+~17 of it escalated's idle fires), or standard every 40 with escalated every 2 hours
+(~88). Codex's share of that plan is 26–44% of its own week, so its 20-minute Luna
+cadence needs no change; **Muse's window is the throughput ceiling of the whole
+funnel**, at roughly 50 parents or 130 PRs a week.
+
+Not yet acted on: the Muse plists still fire standard every 5 minutes and escalated
+hourly. Also worth its own idea: `scripts/muse-review` is our shell, so the
+nothing-to-do check can run *before* `muse exec` is spawned, which makes empty fires
+free and lets a fast cadence back — the same thing the Codex app will not let us do.
+
 ### What a Codex session costs the Plus weekly window, by lane
 
 **2026-09-09 · usage · measured**

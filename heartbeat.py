@@ -28,6 +28,7 @@ import base64
 import json
 import os
 import glob
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -67,6 +68,7 @@ OUTCOMES = [
     "skipped-nate-active",  # the five-hour window was already in use; Codex only
     "skipped-usage-unknown",  # could not read usage; failed closed
     "skipped-blocked",     # prerequisite has not landed; no change made
+    "skipped-human-step",   # paused for a required human action
     "skipped-api-reserve",  # GraphQL budget below the reserve floor (#273)
     "prompt-drift",        # routine literal did not match the checked-in file
     "errored",             # tried and failed
@@ -77,6 +79,15 @@ OUTCOMES = [
 #: put more than one model on a pool, and the budget is per pool.
 PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
              "muse": "meta"}
+
+#: Agents whose schedules have been stopped on purpose. Their records stay
+#: readable and every command still accepts them, so re-enabling is a schedule
+#: paste and removing the name here; but the watchdog and `agent_health` must
+#: not read their silence as a run that died. zcode was retired on 2026-09-09
+#: by Nate's decision: measured over 24h it did work in 18 of 93 runs and was
+#: refused on the z.ai pace line in 63, while Muse carried every job it had on
+#: an unmetered pool (#431).
+RETIRED_AGENTS = frozenset({"zcode"})
 
 #: Which application ran it. Distinct from provider and model: one provider can
 #: be reached through more than one harness, and harnesses differ in ways that
@@ -307,6 +318,23 @@ def _report(kept: str) -> None:
 CANONICAL_REPO = "/Users/nateprich/.claude/command-center"
 
 
+def runtime_state() -> Optional[Dict]:
+    """Best-effort HEAD of the checkout this script is running from."""
+    root = Path(__file__).resolve().parent
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        if head.returncode != 0:
+            return None
+        value = head.stdout.strip()
+        if not value:
+            return None
+        return {"root": str(root), "head": value[:12]}
+    except Exception:
+        return None
+
+
 def repo_state() -> Optional[Dict]:
     """HEAD and dirtiness of the canonical checkout. Best effort, never fatal."""
     try:
@@ -428,6 +456,138 @@ def detect_model(agent: str) -> Dict[str, Optional[str]]:
         except Exception:
             pass
     return found
+
+
+def _number(value):
+    """Return a non-negative integer token count, or nothing."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _first_number(mapping, *names):
+    """Read the first present numeric field without treating zero as absent."""
+    for name in names:
+        if name in mapping:
+            return _number(mapping.get(name))
+    return None
+
+
+def _input_pair(usage: Dict) -> Optional[tuple]:
+    """Return total and fresh input from one harness usage object."""
+    total = _first_number(
+        usage, "total_input_tokens", "input_tokens", "inputTokens")
+    fresh = _first_number(usage, "fresh_input_tokens", "freshInputTokens")
+    cached = _first_number(
+        usage, "cached_input_tokens", "cache_read_input_tokens", "cacheReadTokens")
+    if fresh is None and total is not None and cached is not None:
+        if cached > total:
+            return None
+        fresh = total - cached
+    if total is None or fresh is None or fresh > total:
+        return None
+    return total, fresh
+
+
+def _input_record(total: int, fresh: int) -> Dict[str, Optional[float]]:
+    """Build the stored input metric without inventing a zero-denominator ratio."""
+    return {
+        "total_input_tokens": total,
+        "fresh_input_tokens": fresh,
+        "ratio": total / fresh if fresh else None,
+    }
+
+
+def _codex_input_usage(path: str) -> Optional[Dict[str, Optional[float]]]:
+    """Read per-turn or cumulative input counts from one Codex rollout."""
+    per_turn = []
+    cumulative = []
+    try:
+        with open(path) as fh:
+            for line in fh:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                payload = record.get("payload") or {}
+                usage = payload.get("usage")
+                if isinstance(usage, dict):
+                    pair = _input_pair(usage)
+                    if pair is None:
+                        return None
+                    per_turn.append(pair)
+                    continue
+                info = payload.get("info") or {}
+                total_usage = info.get("total_token_usage")
+                if isinstance(total_usage, dict):
+                    pair = _input_pair(total_usage)
+                    if pair is None:
+                        return None
+                    cumulative.append(pair)
+    except (OSError, ValueError):
+        return None
+
+    if per_turn:
+        return _input_record(
+            sum(total for total, _ in per_turn),
+            sum(fresh for _, fresh in per_turn),
+        )
+    if cumulative:
+        total, fresh = cumulative[-1]
+        return _input_record(total, fresh)
+    return None
+
+
+def _zcode_input_usage(path: str) -> Optional[Dict[str, Optional[float]]]:
+    """Read per-response input counts from one zcode model-io rollout."""
+    total = 0
+    fresh = 0
+    found = False
+    try:
+        with open(path) as fh:
+            for line in fh:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if record.get("type") != "model_io":
+                    continue
+                response = record.get("response") or {}
+                usage = response.get("usage")
+                if not isinstance(usage, dict):
+                    return None
+                pair = _input_pair(usage)
+                if pair is None:
+                    return None
+                found = True
+                total += pair[0]
+                fresh += pair[1]
+    except (OSError, ValueError):
+        return None
+
+    return _input_record(total, fresh) if found else None
+
+
+def input_usage(agent: str) -> Optional[Dict[str, Optional[float]]]:
+    """Read total and fresh input for the newest session, best effort.
+
+    Codex and zcode expose these counts in their own session files. Other
+    harnesses do not expose the complete pair used by this metric, so they
+    produce no estimate and no heartbeat field.
+    """
+    try:
+        paths = sorted(
+            glob.glob(os.path.expanduser(MODEL_SOURCES[agent])),
+            key=os.path.getmtime,
+            reverse=True,
+        )
+        if not paths or agent not in ("codex", "zcode"):
+            return None
+        if agent == "codex":
+            return _codex_input_usage(paths[0])
+        return _zcode_input_usage(paths[0])
+    except (KeyError, OSError):
+        return None
 
 
 def usage_snapshot(agent: str) -> Optional[Dict]:
@@ -609,6 +769,7 @@ def main(argv=None) -> int:
                 "attempt": args.attempt,
                 "escalated_from": args.escalated_from,
                 "repo": repo_state(),
+                "runtime": runtime_state(),
                 **detect_model(args.agent),
             })
             _report(kept)
@@ -641,8 +802,12 @@ def main(argv=None) -> int:
             "review_result": args.review_result,
             "human_intervention_required": args.human_intervention or None,
             "repo": repo_state(),
+            "runtime": runtime_state(),
             **detect_model(args.agent),
         }
+        metric = input_usage(args.agent)
+        if metric is not None:
+            record["input_usage"] = metric
         if run_id is None:
             # The watchdog reads this as a finish, so a completed run is not
             # reported as dying, while the record still says the id is unknown

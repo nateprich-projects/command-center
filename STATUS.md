@@ -27,6 +27,9 @@ brief as `agent_health` (#207, head of the standard queue). Until it lands, the 
 watchdog still only writes #160, and it will keep alarming for a week on the 72 historical
 errors.
 
+**zcode is retired** (2026-09-09, #431): Muse's standard schedule carries every job it had;
+`heartbeat.RETIRED_AGENTS` keeps its silence out of the watchdog and the brief.
+
 **Waiting on Nate:** the accept gate for #171 (all tickets closed). #343 has one ticket
 left (#347). The re-enable checklist is in the 2026-09-09 hand-off in this repo's
 issue history; the one paste he owes is the zcode prompt, whose `--routine-sha` changed.

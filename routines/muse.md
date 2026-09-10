@@ -46,6 +46,8 @@ review *finishes* work where a breakdown *creates* it. Breakdowns cannot starve,
 because PRs awaiting review are a finite class bounded by what the engineers can
 produce.
 
+A `Broken` or `Maintenance` job is offered first whatever its stage.
+
 ## Muse-specific behaviour you must know
 
 **Shell commands run in the background and their output arrives asynchronously.**
@@ -284,12 +286,41 @@ standard input. Put the whole plan in one single-quoted argument and write
 apostrophes as ’ rather than ' so the quoting cannot break. A pipe writes nothing
 to disk; a heredoc may, so do not use one:
 
+If the idea's capture origin is `agent` and its Class is unset, choose the Class from
+the ladder (`Broken`, `Maintenance`, `Improve`, `New`, or `Replace`) and pass it to
+`shaped` so the recovery write happens before the Status write:
+
+```bash
+printf '%s' '<the whole plan, as one quoted argument>' | python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --class <Broken|Maintenance|Improve|New|Replace> --plan -
+```
+
+For a `nate-relayed` idea, or one with no readable origin marker, do not pass
+`--class` and do not infer one. Include a non-empty `Proposed class: <one-word proposal>`
+line in the plan so Nate can make the one-word correction after it reaches `Shaped`.
+
 ```bash
 printf '%s' '<the whole plan, as one quoted argument>' | python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --plan -
 ```
 
 Moving the item to `Shaped` records that a plan exists; **Shaped is not approval**.
-Do not set `Ready`, answer the Shaped gate, or change `Status` or `Class` yourself.
+Do not set `Ready`, answer the Shaped gate, or use `--class` for a Nate-origin idea or
+an already-classed item. The only Class write in this step is the recovery path for an
+explicitly agent-origin, unclassed idea.
+
+## Capture observed defects before finishing
+
+When this run observes a defect (broken behaviour, a failing command, or a
+misbehaving run — evidence, not speculation), record it before finishing with
+`funnel capture`. Put the observed evidence in the note, choose its class at
+capture using `skills/shape`'s "Class it when you file it" rule, and say why.
+Agents class their own captures, never his existing issues.
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --origin agent --class <Broken|Maintenance|Improve|New|Replace> --note "<observed evidence; say why you chose this class, and say plainly when you are unsure>"
+```
+
+This is the sanctioned exception to the review rule to act only on the PR you were
+given: capture records the observed defect; it does not act on the thing observed.
 
 ## 8. Finish
 

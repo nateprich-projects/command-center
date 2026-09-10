@@ -8515,6 +8515,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
 SESSION_ENV = "FUNNEL_SESSION"
 SESSION_SERVER_ENV = "FUNNEL_SESSION_SERVER"
 SESSION_TIMEOUT_SECONDS = 30
+SESSION_STDIN_LIMIT = 1_000_000
+# The stdin limit is a content limit. JSON framing and escaped characters add
+# overhead before the request reaches the server, so the request reader needs
+# a larger bound than the existing one-megabyte reply reader.
+SESSION_REQUEST_LIMIT = SESSION_STDIN_LIMIT * 6 + 4_096
 
 
 class FunnelSession:
@@ -8535,8 +8540,13 @@ class FunnelSession:
             self.items = self._loader()
         return self.items
 
-    def dispatch(self, argv: Sequence[str]):
-        """Run one normal funnel command and return ``(code, stdout, stderr)``."""
+    def dispatch(self, argv: Sequence[str], stdin=None):
+        """Run one normal funnel command and return ``(code, stdout, stderr)``.
+
+        ``stdin`` is optional because an interactive client must not have its
+        terminal consumed by the session shim. When present, it is visible as
+        ``sys.stdin`` only while this command's ``main()`` runs.
+        """
         stdout = io.StringIO()
         stderr = io.StringIO()
         code = 2
@@ -8545,9 +8555,23 @@ class FunnelSession:
                 # Reset before the lazy load so its GraphQL work is measured as
                 # part of the first command rather than erased by ``main``.
                 reset_api_usage()
-                code = main(list(argv), _items=self.items,
-                            _items_loader=self._load_items,
-                            _reset_api_usage=False)
+                if stdin is None:
+                    code = main(list(argv), _items=self.items,
+                                _items_loader=self._load_items,
+                                _reset_api_usage=False)
+                else:
+                    if isinstance(stdin, bytes):
+                        stdin = stdin.decode("utf-8")
+                    if not isinstance(stdin, str):
+                        raise ValueError("invalid session stdin payload")
+                    previous_stdin = sys.stdin
+                    sys.stdin = io.StringIO(stdin)
+                    try:
+                        code = main(list(argv), _items=self.items,
+                                    _items_loader=self._load_items,
+                                    _reset_api_usage=False)
+                    finally:
+                        sys.stdin = previous_stdin
             except SystemExit as exc:
                 code = exc.code if isinstance(exc.code, int) else 2
             except Exception as exc:
@@ -8574,7 +8598,7 @@ class _SessionHandler(socketserver.StreamRequestHandler):
         self.wfile.flush()
 
     def handle(self) -> None:
-        line = self.rfile.readline(1_000_000)
+        line = self.rfile.readline(SESSION_REQUEST_LIMIT)
         try:
             request = json.loads(line.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
@@ -8610,7 +8634,19 @@ class _SessionHandler(socketserver.StreamRequestHandler):
             })
             return
 
-        code, stdout, stderr = self.server.session.dispatch(argv)
+        stdin = request.get("stdin")
+        if "stdin" in request and not isinstance(stdin, str):
+            self._reply({
+                "code": 2,
+                "stdout": "",
+                "stderr": "funnel: invalid session stdin\n",
+            })
+            return
+
+        if "stdin" in request:
+            code, stdout, stderr = self.server.session.dispatch(argv, stdin=stdin)
+        else:
+            code, stdout, stderr = self.server.session.dispatch(argv)
         self._reply({"code": code, "stdout": stdout, "stderr": stderr})
 
 
@@ -8644,6 +8680,52 @@ def serve_session(parent_pid: Optional[int] = None) -> int:
     return 0
 
 
+def _read_session_stdin() -> Optional[str]:
+    """Read piped stdin for a session request, or return ``None`` for a TTY."""
+    try:
+        if sys.stdin.isatty():
+            return None
+    except (AttributeError, OSError):
+        # A real CLI stdin always has `isatty`; if a test double or unusual
+        # wrapper cannot answer, do not risk blocking it as though it were a
+        # pipe.
+        return None
+
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    data = stream.read(SESSION_STDIN_LIMIT + 1)
+    if isinstance(data, str):
+        encoding = getattr(sys.stdin, "encoding", None) or "utf-8"
+        data = data.encode(encoding)
+    elif not isinstance(data, bytes):
+        data = bytes(data)
+
+    if len(data) > SESSION_STDIN_LIMIT:
+        raise ValueError(
+            "stdin exceeds the {}-byte session limit".format(SESSION_STDIN_LIMIT)
+        )
+
+    encoding = getattr(sys.stdin, "encoding", None) or "utf-8"
+    try:
+        return data.decode(encoding)
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            "stdin is not decodable as {}: {}".format(encoding, exc)
+        ) from exc
+
+
+def _session_command_uses_stdin(argv: Sequence[str]) -> bool:
+    """Return whether this command's arguments request a piped plan."""
+    parts = list(argv)
+    if not parts or parts[0] != "shaped":
+        return False
+    for index, part in enumerate(parts):
+        if part == "--plan" and index + 1 < len(parts):
+            return parts[index + 1] == "-"
+        if part == "--plan=-":
+            return True
+    return False
+
+
 def _session_client(argv: Sequence[str]) -> int:
     """Forward one CLI invocation to the current Muse run's session."""
     endpoint = os.environ.get(SESSION_ENV, "")
@@ -8662,6 +8744,14 @@ def _session_client(argv: Sequence[str]) -> int:
     }
     if list(argv) == ["session-stop"]:
         request["shutdown"] = True
+    elif _session_command_uses_stdin(argv):
+        try:
+            stdin = _read_session_stdin()
+        except (OSError, TypeError, ValueError) as exc:
+            print("funnel: {}".format(exc), file=sys.stderr)
+            return 2
+        if stdin is not None:
+            request["stdin"] = stdin
 
     try:
         connection = socket.create_connection(

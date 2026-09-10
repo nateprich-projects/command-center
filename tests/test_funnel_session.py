@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import json
 import pathlib
 import socket
 import sys
@@ -207,3 +209,166 @@ def test_session_client_reports_a_reply_timeout_as_a_busy_session(
         "funnel: reply-timeout: FUNNEL_SESSION session busy past the 30s "
         "reply budget (slow section unknown): timed out\n"
     )
+
+
+def test_session_client_forwards_piped_stdin_in_the_request(monkeypatch):
+    monkeypatch.setenv(funnel.SESSION_ENV, "127.0.0.1:1234:token")
+    monkeypatch.setattr(
+        funnel.sys, "stdin", io.BytesIO("# Plan\n☃\n".encode("utf-8"))
+    )
+    requests = []
+
+    class ResponseStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def write(self, payload):
+            requests.append(json.loads(payload.decode("utf-8")))
+            return len(payload)
+
+        def flush(self):
+            pass
+
+        def readline(self, limit):
+            return b'{"code":0,"stdout":"","stderr":""}\n'
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def makefile(self, mode):
+            return ResponseStream()
+
+    monkeypatch.setattr(
+        funnel.socket, "create_connection", lambda *args, **kwargs: Connection()
+    )
+
+    assert funnel._session_client(["shaped", "owner/repo#1", "--plan", "-"]) == 0
+    assert requests == [{
+        "token": "token",
+        "argv": ["shaped", "owner/repo#1", "--plan", "-"],
+        "stdin": "# Plan\n\u2603\n",
+    }]
+
+
+def test_session_client_does_not_read_tty_stdin(monkeypatch):
+    monkeypatch.setenv(funnel.SESSION_ENV, "127.0.0.1:1234:token")
+    requests = []
+
+    class TTYStdin:
+        encoding = "utf-8"
+
+        def isatty(self):
+            return True
+
+        def read(self, *args):
+            pytest.fail("TTY stdin must not be read")
+
+    monkeypatch.setattr(funnel.sys, "stdin", TTYStdin())
+
+    class ResponseStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def write(self, payload):
+            requests.append(json.loads(payload.decode("utf-8")))
+            return len(payload)
+
+        def flush(self):
+            pass
+
+        def readline(self, limit):
+            return b'{"code":0,"stdout":"","stderr":""}\n'
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def makefile(self, mode):
+            return ResponseStream()
+
+    monkeypatch.setattr(
+        funnel.socket, "create_connection", lambda *args, **kwargs: Connection()
+    )
+
+    argv = ["shaped", "owner/repo#1", "--plan", "-"]
+    assert funnel._session_client(argv) == 0
+    assert requests == [{"token": "token", "argv": argv}]
+
+
+def test_session_client_rejects_stdin_over_the_cap_before_connecting(
+    monkeypatch, capsys
+):
+    monkeypatch.setenv(funnel.SESSION_ENV, "127.0.0.1:1234:token")
+    monkeypatch.setattr(
+        funnel.sys,
+        "stdin",
+        io.BytesIO(b"x" * (funnel.SESSION_STDIN_LIMIT + 1)),
+    )
+    monkeypatch.setattr(
+        funnel.socket,
+        "create_connection",
+        lambda *args, **kwargs: pytest.fail("oversize stdin must not connect"),
+    )
+
+    assert funnel._session_client(
+        ["shaped", "owner/repo#1", "--plan", "-"]
+    ) == 2
+    assert capsys.readouterr().err == (
+        "funnel: stdin exceeds the 1000000-byte session limit\n"
+    )
+
+
+def test_session_dispatch_exposes_stdin_only_during_main_and_restores_it(
+    monkeypatch,
+):
+    original_stdin = sys.stdin
+    observed = []
+
+    def fake_main(argv, **kwargs):
+        observed.append(sys.stdin.read())
+        return 0
+
+    monkeypatch.setattr(funnel, "main", fake_main)
+    monkeypatch.setattr(funnel, "report_api_cost", lambda: None)
+    monkeypatch.setattr(funnel, "report_graphql_spend", lambda: None)
+
+    session = funnel.FunnelSession(loader=lambda: [])
+    assert session.dispatch(["shaped"], stdin="# Plan\n") == (0, "", "")
+    assert observed == ["# Plan\n"]
+    assert sys.stdin is original_stdin
+
+
+def test_session_dispatch_restores_stdin_when_main_raises(monkeypatch):
+    original_stdin = sys.stdin
+
+    def fail_main(argv, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(funnel, "main", fail_main)
+    monkeypatch.setattr(funnel, "report_api_cost", lambda: None)
+    monkeypatch.setattr(funnel, "report_graphql_spend", lambda: None)
+
+    result = funnel.FunnelSession(loader=lambda: []).dispatch(
+        ["shaped"], stdin="# Plan\n"
+    )
+    assert result == (2, "", "funnel: boom\n")
+    assert sys.stdin is original_stdin
+
+
+def test_muse_documents_direct_piped_shaped_calls_without_a_session_workaround():
+    routine = (ROOT / "routines" / "muse.md").read_text()
+    assert "shaped --plan -" in routine
+    assert "env -u FUNNEL_SESSION" not in routine

@@ -99,7 +99,8 @@ something precedent already settles spends his attention on nothing.
 So: **shape what precedent covers, and never invent a decision that is his.**
 
 Before applying the decision lists below, use the
-[capability boundary](../capability-boundary.md) as a closed-world test: does the
+[capability boundary in `AGENTS.md`](../../AGENTS.md#capability-boundary) as a
+closed-world test: does the
 plan require anything outside what an agent can reach? Its three outcomes distinguish
 work any agent can do, work only Claude Code can do in its local environment, and
 work no agent can do. The named access cases are examples, not an exhaustive
@@ -125,9 +126,7 @@ can see was made on his behalf; he cannot do that when it is disguised as a cita
 
 Leave to Nate, and say so explicitly rather than guessing:
 
-- **anything the agent cannot reach under the [capability boundary](../capability-boundary.md)**.
-  Treat that boundary as a closed-world test; its named access cases are examples,
-  not an exhaustive checklist.
+- **anything the agent cannot reach under the [capability boundary in `AGENTS.md`](../../AGENTS.md#capability-boundary)**
 - **anything that changes his exposure** — how reachable the system becomes or what
   an unattended run may touch
 - **anything touching a gate or who may write one**

@@ -13,9 +13,11 @@ stored or passed by this program.
 from __future__ import annotations
 
 import argparse
+import contextlib
 from collections import namedtuple
 import glob
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -5702,6 +5704,112 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     return None
 
 
+def approved_merge_candidates(items: Sequence[Item]) -> List[Dict[str, object]]:
+    """Find open ticket PRs whose latest verdict approves their current head."""
+    tickets = {
+        item.ref: item
+        for item in items
+        if (getattr(item, "state", "OPEN") or "OPEN").upper() == "OPEN"
+    }
+    if not tickets:
+        return []
+
+    candidates: List[Dict[str, object]] = []
+    for repo in sorted({item.repo for item in tickets.values()}):
+        rows = _gh_json(
+            "gh", "pr", "list", "--repo", repo, "--state", "open",
+            "--json", "number,headRefName,headRefOid", "--limit", "100",
+        ) or []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            branch = row.get("headRefName") or ""
+            ref = ticket_ref_from_branch(repo, branch)
+            if ref is None or ref not in tickets or row.get("number") is None:
+                continue
+            verdict = latest_verdict(repo, row.get("number"))
+            # The current-head proof is deliberately strict here. The stranded
+            # diagnostic accepts fixture rows without SHAs, but reconciliation
+            # must never turn missing evidence into an unattended merge.
+            if not row.get("headRefOid") or not isinstance(verdict, dict):
+                continue
+            if not verdict.get("head_sha"):
+                continue
+            probe = dict(row)
+            probe["verdict"] = verdict
+            if not _approved_current_head(probe):
+                continue
+            candidates.append({"repo": repo, "pr": row["number"], "ref": ref})
+
+    candidates.sort(key=lambda candidate: (
+        candidate["repo"], str(candidate["pr"])
+    ))
+    return candidates
+
+
+def reconcile_approved_merges(
+    items: List[Item], now: datetime
+) -> List[Dict[str, object]]:
+    """Retry the merge gate for every approved current-head ticket PR.
+
+    ``cmd_merge`` owns all merge conditions and the actual writes. This wrapper
+    only finds the half-applied approval sequence, keeps its human-readable
+    output on stderr so ``begin`` remains JSON, and records the result for the
+    caller. A refusal is a normal reconciliation result, not a queue failure.
+    """
+    results: List[Dict[str, object]] = []
+    by_ref = {item.ref: item for item in items}
+    for candidate in approved_merge_candidates(items):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = cmd_merge(
+                    items,
+                    now,
+                    candidate["repo"],
+                    candidate["pr"],
+                    True,
+                )
+        except GitHubError as exc:
+            code = None
+            error = str(exc)
+        else:
+            error = None
+
+        if stdout.getvalue():
+            print(stdout.getvalue(), end="", file=sys.stderr)
+        if stderr.getvalue():
+            print(stderr.getvalue(), end="", file=sys.stderr)
+
+        result: Dict[str, object] = dict(candidate)
+        if code == 0:
+            result["result"] = "merged"
+            ticket = by_ref.get(candidate["ref"])
+            if ticket is not None:
+                # ``load_items`` ran before the merge. Keep this process's
+                # queue consistent with the GitHub close that just happened.
+                ticket.state = "CLOSED"
+                ticket.state_reason = "COMPLETED"
+                ticket.in_motion_since = None
+        elif code == 1:
+            result["result"] = "refused"
+            reasons = [
+                line[4:]
+                for line in stderr.getvalue().splitlines()
+                if line.startswith("  - ")
+            ]
+            if reasons:
+                result["reasons"] = reasons
+        else:
+            result["result"] = "error"
+            result["error"] = error or "merge gate failed without a result"
+        results.append(result)
+    return results
+
+
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
               routine_sha_literal: Optional[str] = None) -> int:
@@ -5781,6 +5889,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # a run that never had a budget to check should not read like one that
         # passed a check.
         out["unmetered"] = True
+
+    reconciled = reconcile_approved_merges(items, now)
+    if reconciled:
+        out["reconciled"] = reconciled
 
     auto_closed = reconcile_auto_closeable_projects(items)
     if auto_closed:

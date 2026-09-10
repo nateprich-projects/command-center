@@ -172,16 +172,16 @@ LOCK_TTL = timedelta(hours=2)
 #: look at. The premise that made two right — Codex outrunning a metered Claude
 #: reviewer — no longer holds.
 #:
-#: **What this does not fix, and what to watch.** Parallelism multiplies whatever
-#: the queue hands out. Six of the top twelve startable tickets carry a prose
-#: dependency `startable()` cannot read, so extra sessions can be handed chained
-#: work, decline it, and record `errored` (#175) only to be handed it again
-#: (#177) — on 2026-09-08 three runs opened within one minute and all three took
-#: the same unworkable ticket. More branches against a faster-moving `main` also
-#: means more conflicts, and `merge_blockers` still does not read the `mergeable`
-#: it fetches (#161), so the gate passes a conflicting branch and fails at
-#: `gh pr merge`. If this raise goes badly, those are the two reasons; #129's
-#: #153/#154 and #161 are the fixes, not a lower number.
+#: **What this does not fix, and what to watch.** Parallelism still multiplies
+#: whatever the queue hands out, but the old risks are resolved: #129 and #161,
+#: together with #175 and #177, shipped on 2026-09-08. The live risk from the
+#: #178 investigation is stale Codex prompts, not a stale queue: all five Codex
+#: automations have drifted from `routines/codex-work.md`; four escalated-lane
+#: copies predate #268's decline handling, and the standard lane calls the
+#: nonexistent `funnel next --not` flag. At four concurrent sessions that is
+#: four runs executing an unparseable command instead of one. #178 is the fix,
+#: not a lower number. Whether `WIP_LIMIT = 4` is still right is open and
+#: unanswered; that is Nate's decision, not this comment's.
 WIP_LIMIT = 4
 
 #: Funnel order. Index is the stage's depth; later means further along.

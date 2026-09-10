@@ -162,21 +162,23 @@ a stalled item from permanently plugging the queue.
 
 `Investigate > Broken > Maintenance > Improve existing > Build new > Replace existing`
 
-`Investigate` comes first because an unanswered "is this broken?" gates a possible
-`Broken`: it is cheap to answer, but expensive to sit on while something silently
-misbehaves. Investigations are startable like any other class. The run is evidence
-first: if it establishes a defect, file the resulting tickets under the investigation
-before closing the question; if it establishes none, record the evidence on the
-investigation and close through the existing `funnel accept --no-tickets` path. There
-is no separate ending or new funnel mechanic.
-
 The ladder ranks what to **start**. Once a project is Building, its remaining tickets
 finish first. Passing a gate is a commitment and nothing may silently un-commit it.
 
 Within one decision gate, the same ladder breaks class ties; gate depth still wins.
 
+**Investigate is first because an unanswered "is this broken?" can gate a possible
+`Broken`: answering it is cheap, while letting a silent defect sit behind known work is
+expensive.** An investigation is ordinary startable work. If it establishes a defect,
+file the resulting tickets under the investigation project before closing the question;
+if it establishes no defect, record the evidence on the ticket or project and use the
+existing `funnel accept --no-tickets` path when there are no follow-up tickets. This is
+an ending, not a new gate or close mechanic.
+
 **Broken and Maintenance preempt in-flight work** — and this is only safe because both
-are finite. The governing rule: **only classes that are finite may preempt.**
+are finite. `Investigate` is deliberately first in start order but does not preempt or
+take a separate WIP exception. The governing rule remains: **only classes that are
+finite may preempt.**
 
 **Maintenance is defined tightly:** it is degrading, or it has a known date on which it
 stops working. Expiring certs, a sunsetting API, a CVE, a service that keeps dying, an
@@ -190,6 +192,23 @@ rights guarantees starvation of everything below it._
 _Rejected: strict ladder applied to in-flight work. Improve-existing never runs out,
 so a half-finished project would be preempted forever — producing exactly the
 80%-complete "fix it in prod" situation the ladder exists to prevent._
+
+_Rejected: never-startable Investigate work. An investigation that nobody can claim
+cannot reach `Building`, produce follow-up tickets, or close with evidence; startability
+is what gives the question a finite ending._
+
+_Rejected: a separate WIP cap for concurrent investigations. The shared cap and the
+non-preempting rule already bound their interference; a special number would be a new
+control with no evidence behind its tuning and would fail silently when the backlog
+changed._
+
+_Rejected: placing `Investigate` below `Broken`. A known defect would always outrank the
+question that decides whether another defect is real, leaving the unanswered diagnosis
+to wait while the silent failure continues._
+
+_Rejected: landing the ladder mechanics without the workflow. Putting `Investigate` at
+the top makes the class reachable, so shipping only the sort order would expose work
+without the rules for tickets-or-evidence that make the class safe._
 
 **Codex works only when Nate is away.** Added 2026-09-06. The pace gate answers
 "is there budget left" and permits Codex up to `FIVE_HOUR_CEILING`, which is right
@@ -592,13 +611,12 @@ The one case where `Class` is written by code rather than by Nate: the rejected-
 flow sets `Class: Broken` mechanically.
 
 _Rejected: six labels (`investigate`, `broken`, `maintenance`, `improve`, `new`,
-`replace`).
-A single-select cannot be self-contradictory; six labels permit `broken` + `new` on
-one issue, which forces validation rules — exactly the machinery the v1 wayfinder
-contract carried and that was deleted with it. Single-select is also the same shape as
-`Status`: two fields, one mental model. And it preserves the two-label decision, which
-was justified by public readability — `Class` is an internal scheduling concern, and a
-stranger browsing a public repo gains nothing from seeing `improve`._
+`replace`). A single-select cannot be self-contradictory; six labels permit `broken` +
+`new` on one issue, which forces validation rules — exactly the machinery the v1
+wayfinder contract carried and that was deleted with it. Single-select is also the same
+shape as `Status`: two fields, one mental model. And it preserves the decision to keep
+`Class` internal, which was justified by public readability — a stranger browsing a
+public repo gains nothing from seeing `improve`._
 
 ### Stage stays in the Project Status field
 

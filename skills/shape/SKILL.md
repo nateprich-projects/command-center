@@ -64,6 +64,13 @@ overrides freely and a stated doubt is cheaper to correct than a confident error
 `cmd_reject` does, and record who decided it in a comment — your own name now,
 not his.
 
+Use `Investigate` when the captured question is whether an observed defect exists, or
+what the observed behaviour actually means, and the deliverable is evidence that answers
+that question. It is not a synonym for an uncertain implementation: once a defect is
+established, the investigation run files the resulting work as sub-issue tickets under
+the investigation project before the question closes. If there is no defect to fix, the
+evidence is recorded and the project uses the existing `accept --no-tickets` ending.
+
 **Still his:** the class on anything *he* raises, and any reclassification of
 something already filed. Propose, do not set.
 

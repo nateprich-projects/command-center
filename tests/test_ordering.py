@@ -334,12 +334,12 @@ def test_unset_class_sorts_last_and_never_preempts():
 
 def test_ladder_is_in_the_documented_order():
     ranks = [ladder_index(c) for c in [
-        "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace",
+        "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"
     ]]
     assert ranks == sorted(ranks) and len(set(ranks)) == 6
 
 
-def test_investigate_is_first_but_does_not_preempt_or_self_approve():
+def test_investigate_is_first_without_gaining_preemption_or_self_approval():
     assert ladder_index("Investigate") == 0
     assert funnel.PREEMPTING_CLASSES == frozenset({"Broken", "Maintenance"})
     assert funnel.SELF_APPROVABLE_CLASSES == frozenset(
@@ -351,7 +351,7 @@ def test_anything_past_ideas_must_carry_a_class():
     assert needs_class(item(1, "Shaped", None))
     assert needs_class(item(2, "Ready", None))
     assert needs_class(item(3, "Building", None))
-    assert not needs_class(item(4, "Ready", "Investigate"))
+    assert not needs_class(item(4, "Building", "Investigate"))
 
 
 def test_a_ticket_is_exempt_because_it_inherits():
@@ -394,7 +394,7 @@ def test_ladder_orders_what_to_start():
     assert [i.number for i in startable(items)] == [12, 14, 16, 15, 13, 11]
 
 
-def test_investigate_ticket_is_startable_without_preempting_broken_work():
+def test_an_investigate_ticket_is_startable_without_preempting_broken_work():
     investigate_parent = project(1, "Building", "Investigate")
     investigate_ticket = ticket(2, 1)
     broken_parent = project(3, "Building", "Broken")
@@ -777,6 +777,11 @@ def test_broken_preempts_the_limit():
 def test_maintenance_does_not_preempt_the_limit():
     """Maintenance may preempt in-flight *ranking*, but not exceed the cap."""
     rows = _at_limit([project(3, "Building", "Maintenance"), ticket(4, 3)])
+    assert next_ticket(rows, NOW) is None
+
+
+def test_investigate_does_not_preempt_the_limit():
+    rows = _at_limit([project(3, "Building", "Investigate"), ticket(4, 3)])
     assert next_ticket(rows, NOW) is None
 
 

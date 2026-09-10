@@ -134,13 +134,14 @@ def _path(agent: str) -> str:
     return "{}.jsonl".format(agent)
 
 
-def _fetch(agent: str):
+def _fetch(agent: str, timeout: Optional[float] = None):
     """Current file content and blob sha, or (None, None) if absent."""
     try:
-        raw = gh(
+        args = (
             "api",
             "repos/{}/contents/{}?ref={}".format(REPO, _path(agent), BRANCH),
         )
+        raw = gh(*args, **({"timeout": timeout} if timeout is not None else {}))
     except HeartbeatError:
         return None, None
     payload = json.loads(raw)
@@ -778,9 +779,9 @@ def usage_snapshot(agent: str) -> Optional[Dict]:
         return None
 
 
-def read(agent: str) -> List[Dict]:
+def read(agent: str, timeout: Optional[float] = None) -> List[Dict]:
     """Every record this machine knows about — pushed and still spooled."""
-    content, _ = _fetch(agent)
+    content, _ = _fetch(agent, timeout=timeout)
     records = []
     for line in (content or "").splitlines():
         try:

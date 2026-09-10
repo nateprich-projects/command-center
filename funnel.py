@@ -1232,6 +1232,19 @@ def plan_overlap_candidates(
 SHAPING_PLAN_STATUSES = frozenset(("Shaped", "Ready", "Building"))
 
 
+OVERLAP_CHECK_SECTION_RE = re.compile(
+    r"(?ms)^[ \t]*##[ \t]+Overlap check[ \t]*(?:\r?\n|\Z)"
+    r".*?(?=^[ \t]*##[ \t]+|\Z)"
+)
+
+
+def _without_overlap_check(plan_body: object) -> object:
+    """Remove the recorded overlap result before extracting plan signals."""
+    if not isinstance(plan_body, str):
+        return plan_body
+    return OVERLAP_CHECK_SECTION_RE.sub("", plan_body, count=1)
+
+
 def shaping_plan_overlap_candidates(
     items: Iterable[Item], item: Item, plan_body: str
 ) -> List[str]:
@@ -1242,14 +1255,16 @@ def shaping_plan_overlap_candidates(
     are not in flight and must not keep influencing a newly shaped plan.
     """
     other_plans = (
-        (other.ref, other.body or "")
+        (other.ref, _without_overlap_check(other.body or ""))
         for other in items
         if other.ref != item.ref
         and other.parent is None
         and other.state == "OPEN"
         and other.status in SHAPING_PLAN_STATUSES
     )
-    return plan_overlap_candidates(item.ref, plan_body, other_plans)
+    return plan_overlap_candidates(
+        item.ref, _without_overlap_check(plan_body), other_plans
+    )
 
 
 # These are evidence words, not a closed list of human-step categories. A plan

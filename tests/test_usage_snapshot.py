@@ -22,6 +22,12 @@ def _reading(source, resets_at):
 
 @pytest.fixture
 def meters(monkeypatch):
+    # A fixture-local registry: zcode is retired and may leave the live
+    # registry, but it remains the clearest example of a non-Codex metered
+    # agent, so the test carries its own entry rather than depending on it.
+    registry = dict(usage.PROVIDERS)
+    registry.update({"zcode": "zai", "muse": "meta", "codex": "openai", "claude": "anthropic"})
+    monkeypatch.setattr(usage, "PROVIDERS", registry)
     monkeypatch.setattr(usage, "read_zai", lambda now: _reading("zai", 1789291561))
     monkeypatch.setattr(usage, "read_codex", lambda: _reading("codex", 1789445736))
     monkeypatch.setattr(usage, "read_claude", lambda: _reading("claude", 1789400000))

@@ -367,10 +367,12 @@ def test_ladder_orders_what_to_start():
     for n, klass in ((1, "Replace"), (2, "Broken"), (3, "New"), (4, "Maintenance"),
                      (5, "Improve"), (6, "Investigate")):
         items += [project(n, "Building", klass), ticket(10 + n, n)]
-    assert [i.number for i in startable(items)] == [16, 12, 14, 15, 13, 11]
+    # Finite Broken/Maintenance work preempts in-flight work; Investigate is
+    # first among the non-preempting classes.
+    assert [i.number for i in startable(items)] == [12, 14, 16, 15, 13, 11]
 
 
-def test_an_investigate_ticket_is_startable_above_broken_work():
+def test_an_investigate_ticket_is_startable_without_preempting_broken_work():
     investigate_parent = project(1, "Building", "Investigate")
     investigate_ticket = ticket(2, 1)
     broken_parent = project(3, "Building", "Broken")
@@ -378,7 +380,7 @@ def test_an_investigate_ticket_is_startable_above_broken_work():
 
     assert [i.number for i in startable([
         broken_parent, broken_ticket, investigate_parent, investigate_ticket,
-    ])] == [2, 4]
+    ])] == [4, 2]
 
 
 def test_pins_do_not_change_codex_startable_output():

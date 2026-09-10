@@ -172,16 +172,16 @@ LOCK_TTL = timedelta(hours=2)
 #: look at. The premise that made two right — Codex outrunning a metered Claude
 #: reviewer — no longer holds.
 #:
-#: **What this does not fix, and what to watch.** Parallelism multiplies whatever
-#: the queue hands out. Six of the top twelve startable tickets carry a prose
-#: dependency `startable()` cannot read, so extra sessions can be handed chained
-#: work, decline it, and record `errored` (#175) only to be handed it again
-#: (#177) — on 2026-09-08 three runs opened within one minute and all three took
-#: the same unworkable ticket. More branches against a faster-moving `main` also
-#: means more conflicts, and `merge_blockers` still does not read the `mergeable`
-#: it fetches (#161), so the gate passes a conflicting branch and fails at
-#: `gh pr merge`. If this raise goes badly, those are the two reasons; #129's
-#: #153/#154 and #161 are the fixes, not a lower number.
+#: **What this does not fix, and what to watch.** Parallelism still multiplies
+#: whatever the queue hands out, but the old risks are resolved: #129 and #161,
+#: together with #175 and #177, shipped on 2026-09-08. The live risk from the
+#: #178 investigation is stale Codex prompts, not a stale queue: all five Codex
+#: automations have drifted from `routines/codex-work.md`; four escalated-lane
+#: copies predate #268's decline handling, and the standard lane calls the
+#: nonexistent `funnel next --not` flag. At four concurrent sessions that is
+#: four runs executing an unparseable command instead of one. #178 is the fix,
+#: not a lower number. Whether `WIP_LIMIT = 4` is still right is open and
+#: unanswered; that is Nate's decision, not this comment's.
 WIP_LIMIT = 4
 
 #: Funnel order. Index is the stage's depth; later means further along.
@@ -214,6 +214,11 @@ GATES = {
 DECISION_ORDER = ["Building", "Ready", "Shaped"]
 
 MAINTENANCE_WINDOW = timedelta(days=30)
+
+# Only these harnesses expose the complete pair of input-token counts used by
+# the re-send metric. Claude is unscheduled and Muse is unmetered, so their
+# absence from the brief is intentional rather than missing data.
+METERED_AGENTS = ("codex", "zcode")
 
 # A doctor run asks for one row beyond the bound so it can distinguish a full
 # result from a truncated one without an unbounded history scan. The bound is
@@ -2030,6 +2035,68 @@ def agent_health(now: datetime) -> List[Dict[str, str]]:
             for condition in conditions
         )
     return found
+
+
+def recent_resend_ratio(now: datetime) -> Dict[str, Optional[float]]:
+    """Return recent weighted input re-send ratios for metered agents.
+
+    Heartbeat finish records carry total and fresh input counts when the
+    harness exposes both. Sum those counts across the existing diagnostic
+    window before dividing so a short run cannot outweigh a long one merely
+    because its individual ratio is larger. Malformed or partial telemetry is
+    ignored; a diagnostic must not invent a figure from an incomplete record.
+    """
+    try:
+        import heartbeat
+    except Exception:
+        return {}
+
+    cutoff = (now - MAINTENANCE_WINDOW).timestamp()
+    ratios: Dict[str, Optional[float]] = {}
+    for agent in METERED_AGENTS:
+        try:
+            rows = heartbeat.read(agent)
+        except Exception:
+            continue
+
+        total = 0
+        fresh = 0
+        found = False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("phase") != "finish":
+                continue
+            timestamp = row.get("ts")
+            if (
+                isinstance(timestamp, bool)
+                or not isinstance(timestamp, (int, float))
+            ):
+                continue
+            if timestamp < cutoff:
+                continue
+            usage = row.get("input_usage")
+            if not isinstance(usage, dict):
+                continue
+            row_total = usage.get("total_input_tokens")
+            row_fresh = usage.get("fresh_input_tokens")
+            if (
+                isinstance(row_total, bool)
+                or not isinstance(row_total, int)
+                or row_total < 0
+                or isinstance(row_fresh, bool)
+                or not isinstance(row_fresh, int)
+                or row_fresh < 0
+                or row_fresh > row_total
+            ):
+                continue
+            total += row_total
+            fresh += row_fresh
+            found = True
+
+        if found:
+            ratios[agent] = total / fresh if fresh else None
+    return ratios
 
 
 def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
@@ -4959,6 +5026,7 @@ def cmd_brief(
         "wip_limit": WIP_LIMIT,
         "stale_locks_taken_over": [i.ref for i in stale_locks(items, now)],
         "maintenance_load": maintenance_load(items, now),
+        "resend_ratio": recent_resend_ratio(now),
         "unattended_merges": unattended_merges(now),
         "agent_health": agent_health(now),
         "working_tree_touched": working_tree_touched(now),

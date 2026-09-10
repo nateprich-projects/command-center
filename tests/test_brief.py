@@ -7,6 +7,8 @@ import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
@@ -14,6 +16,12 @@ import funnel  # noqa: E402
 
 NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "project_items.json"
+
+
+@pytest.fixture(autouse=True)
+def no_resend_network(monkeypatch):
+    """Brief fixture tests should not read the live heartbeat branch."""
+    monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
 
 
 def fixture_items():

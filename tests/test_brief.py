@@ -119,6 +119,73 @@ def test_brief_includes_prose_dependencies_without_counting_them(monkeypatch, ca
     assert brief["total_needing_nate"] == 0
 
 
+def test_brief_surfaces_unclassed_captures_with_origin_without_counting_them(
+    monkeypatch, capsys
+):
+    agent_origin = funnel.Item(
+        repo="nateprich/beta", number=13, title="Observed idea",
+        url="https://example.invalid/13", state="OPEN", status="Ideas",
+        status_since=NOW - timedelta(hours=3),
+        body=funnel.origin_block(
+            "agent", at=NOW, run="agent-run", agent="codex"
+        ),
+    )
+    classed = funnel.Item(
+        repo="nateprich/beta", number=14, title="Already classed",
+        url="https://example.invalid/14", state="OPEN", status="Ideas",
+        klass="Improve", status_since=NOW - timedelta(hours=2),
+        body=funnel.origin_block(
+            "agent", at=NOW, run="classed-run", agent="codex"
+        ),
+    )
+    nate_origin = funnel.Item(
+        repo="nateprich/beta", number=15, title="Nate's idea",
+        url="https://example.invalid/15", state="OPEN", status="Ideas",
+        status_since=NOW - timedelta(hours=1),
+        body=funnel.origin_block(
+            "nate-relayed", at=NOW, run="nate-run", agent="claude"
+        ),
+    )
+    legacy = funnel.Item(
+        repo="nateprich/beta", number=16, title="Legacy idea",
+        url="https://example.invalid/16", state="OPEN", status="Ideas",
+        status_since=NOW - timedelta(minutes=30), body="Old capture.",
+    )
+
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief(
+        [legacy, nate_origin, classed, agent_origin], NOW
+    ) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["unclassed_captures"] == [
+        {
+            "ref": agent_origin.ref,
+            "title": agent_origin.title,
+            "url": agent_origin.url,
+            "origin": "agent",
+        },
+        {
+            "ref": nate_origin.ref,
+            "title": nate_origin.title,
+            "url": nate_origin.url,
+            "origin": "nate-relayed",
+        },
+        {
+            "ref": legacy.ref,
+            "title": legacy.title,
+            "url": legacy.url,
+            "origin": "unknown",
+        },
+    ]
+    assert classed.ref not in {
+        row["ref"] for row in brief["unclassed_captures"]
+    }
+    assert "Ideas" not in brief["counts_by_gate"]
+    assert brief["total_needing_nate"] == 0
+
+
 def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
     monkeypatch, capsys
 ):

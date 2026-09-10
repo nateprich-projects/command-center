@@ -213,10 +213,21 @@ def test_session_client_reports_a_reply_timeout_as_a_busy_session(
 
 def test_session_client_forwards_piped_stdin_in_the_request(monkeypatch):
     monkeypatch.setenv(funnel.SESSION_ENV, "127.0.0.1:1234:token")
+    plan = "# Plan\n☃\n"
     monkeypatch.setattr(
-        funnel.sys, "stdin", io.BytesIO("# Plan\n☃\n".encode("utf-8"))
+        funnel.sys, "stdin", io.BytesIO(plan.encode("utf-8"))
     )
     requests = []
+    recorded = []
+
+    def fake_main(argv, **kwargs):
+        recorded.append(sys.stdin.read())
+        return 0
+
+    monkeypatch.setattr(funnel, "main", fake_main)
+    monkeypatch.setattr(funnel, "report_api_cost", lambda: None)
+    monkeypatch.setattr(funnel, "report_graphql_spend", lambda: None)
+    session = funnel.FunnelSession(loader=lambda: [])
 
     class ResponseStream:
         def __enter__(self):
@@ -226,7 +237,12 @@ def test_session_client_forwards_piped_stdin_in_the_request(monkeypatch):
             return False
 
         def write(self, payload):
-            requests.append(json.loads(payload.decode("utf-8")))
+            request = json.loads(payload.decode("utf-8"))
+            requests.append(request)
+            code, stdout, stderr = session.dispatch(
+                request["argv"], stdin=request["stdin"]
+            )
+            assert (code, stdout, stderr) == (0, "", "")
             return len(payload)
 
         def flush(self):
@@ -255,6 +271,7 @@ def test_session_client_forwards_piped_stdin_in_the_request(monkeypatch):
         "argv": ["shaped", "owner/repo#1", "--plan", "-"],
         "stdin": "# Plan\n\u2603\n",
     }]
+    assert recorded == [plan]
 
 
 def test_session_client_does_not_read_tty_stdin(monkeypatch):

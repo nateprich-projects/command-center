@@ -3937,6 +3937,15 @@ PROSE_DEPENDENCY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A Nate-origin idea may move through the shaping command without an assigned
+# Class, but only when the plan leaves him a visible proposal to answer. This
+# is a presence check, not a parser for a value: no agent infers or writes a
+# Class from plan prose on Nate's behalf.
+PROPOSED_CLASS_RE = re.compile(
+    r"^[ \t]*Proposed[ \t]+class:[ \t]*\S.*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 def _prose_dependency_sentences(body: str) -> Iterable[Tuple[str, List[str]]]:
     """Yield recognised dependency sentences and their named issue numbers."""
@@ -4003,6 +4012,46 @@ def prose_dependencies(items: Iterable[Item]) -> List[Dict[str, object]]:
                 })
 
     return sorted(found, key=lambda row: row["ref"])
+
+
+def has_proposed_class(plan: str) -> bool:
+    """Whether a plan gives Nate a non-empty ``Proposed class:`` line."""
+    return isinstance(plan, str) and PROPOSED_CLASS_RE.search(plan) is not None
+
+
+def capture_origin(item: Item) -> str:
+    """Return the recorded capture origin, or ``unknown`` when absent."""
+    origin = parse_origin(item.body or "")
+    if origin is None:
+        return "unknown"
+    return origin["voice"]
+
+
+def unclassed_capture_items(items: Iterable[Item]) -> List[Item]:
+    """Open Ideas whose Project Class is missing or invalid.
+
+    Ideas stay outside the decision counts. This diagnostic only makes the
+    forgotten assignment visible, preserving the funnel's unbounded Ideas
+    stage and leaving the origin-specific repair to the right actor.
+    """
+    return [item for item in ideas(items) if item.klass not in LADDER]
+
+
+def _unclassed_capture_item_json(item: Item) -> Dict[str, object]:
+    return {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "origin": capture_origin(item),
+    }
+
+
+def unclassed_captures_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """Render the diagnostic list without adding a human decision."""
+    return [
+        _unclassed_capture_item_json(item)
+        for item in unclassed_capture_items(items)
+    ]
 
 
 def suspected_human_step_reason(item: Item) -> Optional[str]:
@@ -4691,6 +4740,7 @@ def cmd_brief(
         "closed_with_access_vocabulary": closed_with_access_vocabulary_json(
             items
         ),
+        "unclassed_captures": unclassed_captures_json(items),
         "needs_class": [item_json(i, now, by_ref) for i in items if needs_class(i)],
         "awaiting_breakdown": [
             item_json(i, now, by_ref) for i in awaiting_breakdown(items)
@@ -5174,7 +5224,8 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
 
 
 def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
-               run: Optional[str] = None, agent: Optional[str] = None) -> int:
+               run: Optional[str] = None, agent: Optional[str] = None,
+               klass: Optional[str] = None) -> int:
     """Record that an idea has been grilled and a plan now exists.
 
     Writes the plan into the issue body — `plan.md` puts it there through Ideas
@@ -5184,6 +5235,23 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     next gate: is the plan good?
     """
     item = find(items, ref)
+    if klass is not None and klass not in LADDER:
+        raise GitHubError(
+            "unknown shaping class {!r}; choose one of {}".format(
+                klass, ", ".join(LADDER)
+            )
+        )
+
+    origin = parse_origin(item.body or "")
+    origin_voice = origin["voice"] if origin is not None else None
+    class_missing = item.klass not in LADDER
+    if class_missing and origin_voice == "agent" and klass is None:
+        raise GitHubError(
+            "agent-origin idea has no Class; pass --class with one of {}".format(
+                ", ".join(LADDER)
+            )
+        )
+
     try:
         if plan_file == "-":
             # Muse runs with --disable-write and cannot write a plan file; a
@@ -5195,6 +5263,10 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
         raise GitHubError("cannot read {}: {}".format(plan_file, exc))
     if not plan.strip():
         raise GitHubError("the plan is empty; nothing to record")
+    if class_missing and origin_voice != "agent" and not has_proposed_class(plan):
+        raise GitHubError(
+            "unclassed idea requires a non-empty Proposed class: line"
+        )
     authority_signals = needs_nate_signals(plan)
     body = append_provenance(plan, "agent", at=now, run=run, agent=agent)
     overlaps = shaping_plan_overlap_candidates(items, item, plan)
@@ -5210,6 +5282,12 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     if not item.item_id:
         raise GitHubError("{} is not in the Project".format(item.ref))
     status, reason = shaped_plan_status(plan)
+    if class_missing and origin_voice == "agent":
+        # This recovery write is the only place shaping may assign a Class.
+        # Keep it immediately before the Status mutation so the latter never
+        # makes an unclassed idea look like it advanced cleanly.
+        gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
+                   field=CLASS_FIELD_ID, option=_option_id(CLASS_FIELD_ID, klass))
     gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
                field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, status))
     subprocess.run(["gh", "issue", "edit", str(item.number), "--repo", item.repo,
@@ -6885,6 +6963,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--agent", default=None,
         help="agent that wrote the body; otherwise read the heartbeat spool",
     )
+    shaped.add_argument(
+        "--class", dest="klass", choices=LADDER, default=None,
+        help="fill an unset Class on an agent-origin idea",
+    )
     claim = sub.add_parser("claim", help="take the single-in-motion lock on a ticket")
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
     release = sub.add_parser("release", help="give up the lock on a ticket")
@@ -7068,7 +7150,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                                args.run, args.agent, args.origin, args.klass)
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan,
-                              args.run, args.agent)
+                              args.run, args.agent, args.klass)
         if args.command == "begin":
             return cmd_begin(items, now, args.agent, args.tier, args.idle,
                              args.breakdown, args.routine_sha)

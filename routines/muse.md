@@ -286,12 +286,26 @@ standard input. Put the whole plan in one single-quoted argument and write
 apostrophes as ’ rather than ' so the quoting cannot break. A pipe writes nothing
 to disk; a heredoc may, so do not use one:
 
+If the idea's capture origin is `agent` and its Class is unset, choose the Class from
+the ladder (`Broken`, `Maintenance`, `Improve`, `New`, or `Replace`) and pass it to
+`shaped` so the recovery write happens before the Status write:
+
+```bash
+printf '%s' '<the whole plan, as one quoted argument>' | python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --class <Broken|Maintenance|Improve|New|Replace> --plan -
+```
+
+For a `nate-relayed` idea, or one with no readable origin marker, do not pass
+`--class` and do not infer one. Include a non-empty `Proposed class: <one-word proposal>`
+line in the plan so Nate can make the one-word correction after it reaches `Shaped`.
+
 ```bash
 printf '%s' '<the whole plan, as one quoted argument>' | python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --plan -
 ```
 
 Moving the item to `Shaped` records that a plan exists; **Shaped is not approval**.
-Do not set `Ready`, answer the Shaped gate, or change `Status` or `Class` yourself.
+Do not set `Ready`, answer the Shaped gate, or use `--class` for a Nate-origin idea or
+an already-classed item. The only Class write in this step is the recovery path for an
+explicitly agent-origin, unclassed idea.
 
 ## Capture observed defects before finishing
 

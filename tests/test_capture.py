@@ -106,7 +106,7 @@ def test_agent_capture_requires_a_class_before_resolving_repo(monkeypatch):
 
 
 def test_shaped_preserves_plan_bytes_above_agent_stamp(tmp_path, monkeypatch):
-    plan = "# Plan\n\nKeep this trailing newline exactly.\n"
+    plan = "# Plan\n\nProposed class: New\n\nKeep this trailing newline exactly.\n"
     plan_file = tmp_path / "plan.md"
     plan_file.write_text(plan)
     item = Item(
@@ -152,7 +152,9 @@ def test_shaped_preserves_plan_bytes_above_agent_stamp(tmp_path, monkeypatch):
 
 def test_shaped_prints_advisory_overlap_candidates(tmp_path, monkeypatch, capsys):
     plan_file = tmp_path / "plan.md"
-    plan_file.write_text("Touch `funnel.py` and follow #91.\n")
+    plan_file.write_text(
+        "Proposed class: New\n\nTouch `funnel.py` and follow #91.\n"
+    )
     item = Item(
         repo="owner/repo", number=42, title="An idea",
         url="https://github.com/owner/repo/issues/42", state="OPEN",
@@ -195,7 +197,9 @@ def test_shaped_prints_advisory_overlap_candidates(tmp_path, monkeypatch, capsys
 def test_shaped_without_overlap_still_succeeds_and_reports_none(tmp_path, monkeypatch,
                                                                  capsys):
     plan_file = tmp_path / "plan.md"
-    plan_file.write_text("A plan with no shared signals.\n")
+    plan_file.write_text(
+        "Proposed class: New\n\nA plan with no shared signals.\n"
+    )
     item = Item(
         repo="owner/repo", number=42, title="An idea",
         url="https://github.com/owner/repo/issues/42", state="OPEN",
@@ -232,6 +236,8 @@ def test_shaped_refuses_and_names_each_authority_signal(tmp_path, monkeypatch,
                                                          capsys):
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("""
+Proposed class: Improve
+
 The check refuses a self-approval and does not add a decision he must answer
 on the happy path. The plan also records why unattended approvals are visible.
 It changes the gate's question and who answers it.
@@ -288,6 +294,8 @@ def test_shaped_all_clear_plan_does_not_report_a_refusal(tmp_path, monkeypatch,
                                                          capsys):
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("""
+Proposed class: Improve
+
 The plan discusses a gate and a Status field as subject matter, but changes
 neither and grants no additional authority to an agent.
 
@@ -492,7 +500,7 @@ def test_shaped_reads_the_plan_from_stdin_when_asked(monkeypatch):
     """Muse runs with --disable-write and cannot write a plan file (#366)."""
     import io
 
-    plan = "# Plan\n\nPiped, not written.\n"
+    plan = "# Plan\n\nProposed class: New\n\nPiped, not written.\n"
     item = Item(
         repo="owner/repo", number=43, title="An idea",
         url="https://github.com/owner/repo/issues/43", state="OPEN",
@@ -524,6 +532,179 @@ def test_shaped_reads_the_plan_from_stdin_when_asked(monkeypatch):
     assert body.startswith(plan)
 
 
+def test_shaped_refuses_an_unclassed_agent_origin_before_any_write(
+    tmp_path, monkeypatch
+):
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\n")
+    item = Item(
+        repo="owner/repo", number=45, title="An observed idea",
+        url="https://github.com/owner/repo/issues/45", state="OPEN",
+        status="Ideas", body=funnel.origin_block(
+            "agent", at=NOW, run="capture-run", agent="muse"
+        ), item_id="project-item-45",
+    )
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, variables))
+        return {}
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    with pytest.raises(funnel.GitHubError, match="agent-origin.*--class"):
+        funnel.cmd_shaped(
+            [item], NOW, item.ref, str(plan_file),
+            run="shape-run", agent="muse",
+        )
+
+    assert calls == []
+
+
+def test_shaped_class_flag_is_forwarded_by_the_cli(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(funnel, "load_items", lambda: [])
+    monkeypatch.setattr(
+        funnel,
+        "cmd_shaped",
+        lambda *args: calls.append(args) or 0,
+    )
+
+    assert funnel.main([
+        "shaped", "owner/repo#45", "--plan", str(tmp_path / "plan.md"),
+        "--class", "Broken",
+    ]) == 0
+    assert calls[0][-1] == "Broken"
+
+
+def test_shaped_fills_an_unclassed_agent_class_before_status(
+    tmp_path, monkeypatch
+):
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\n\n## Needs you\n\nChoose a direction.\n")
+    item = Item(
+        repo="owner/repo", number=46, title="An observed idea",
+        url="https://github.com/owner/repo/issues/46", state="OPEN",
+        status="Ideas", body=funnel.origin_block(
+            "agent", at=NOW, run="capture-run", agent="muse"
+        ), item_id="project-item-46",
+    )
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, variables))
+        return {"ok": True}
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel, "_option_id", lambda field_id, name: "{}-option".format(name)
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file),
+        run="shape-run", agent="muse", klass="Improve",
+    ) == 0
+
+    status_writes = [
+        call for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+    ]
+    assert [call[2]["field"] for call in status_writes] == [
+        funnel.CLASS_FIELD_ID, funnel.STATUS_FIELD_ID,
+    ]
+    assert status_writes[0][2]["option"] == "Improve-option"
+    assert status_writes[1][2]["option"] == "Shaped-option"
+
+
+@pytest.mark.parametrize("origin", ["nate-relayed", None])
+def test_shaped_refuses_an_unclassed_nate_origin_without_a_proposal(
+    tmp_path, monkeypatch, origin
+):
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("# Plan\n\n## Needs you\n\nChoose a direction.\n")
+    body = (
+        funnel.origin_block(origin, at=NOW, run="capture-run", agent="claude")
+        if origin is not None else "Legacy capture."
+    )
+    item = Item(
+        repo="owner/repo", number=47, title="A Nate idea",
+        url="https://github.com/owner/repo/issues/47", state="OPEN",
+        status="Ideas", body=body, item_id="project-item-47",
+    )
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, variables))
+        return {}
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    with pytest.raises(funnel.GitHubError, match="Proposed class:"):
+        funnel.cmd_shaped([item], NOW, item.ref, str(plan_file))
+
+    assert calls == []
+
+
+def test_shaped_leaves_nate_origin_class_unset_when_plan_proposes_one(
+    tmp_path, monkeypatch
+):
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text(
+        "# Plan\n\nProposed class: Improve\n\n"
+        "## Needs you\n\nChoose a direction.\n"
+    )
+    item = Item(
+        repo="owner/repo", number=48, title="A Nate idea",
+        url="https://github.com/owner/repo/issues/48", state="OPEN",
+        status="Ideas", body=funnel.origin_block(
+            "nate-relayed", at=NOW, run="capture-run", agent="claude"
+        ), item_id="project-item-48",
+    )
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, variables))
+        return {"ok": True}
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel, "_option_id", lambda field_id, name: "{}-option".format(name)
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file),
+        run="shape-run", agent="claude",
+    ) == 0
+
+    status_writes = [
+        call for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+    ]
+    assert [call[2]["field"] for call in status_writes] == [funnel.STATUS_FIELD_ID]
+    item.status = "Shaped"
+    assert funnel.needs_class(item)
+
+
 def _shaped_status_fixture(monkeypatch, plan_file, plan, status_option):
     plan_file.write_text(plan)
     item = Item(
@@ -553,7 +734,7 @@ def test_shaped_advances_a_plan_that_declares_nothing_open(
     tmp_path, monkeypatch, capsys
 ):
     plan_file = tmp_path / "plan.md"
-    plan = "# Plan\n\n## Needs you\nNothing.\n"
+    plan = "# Plan\n\nProposed class: New\n\n## Needs you\nNothing.\n"
     item, calls = _shaped_status_fixture(
         monkeypatch, plan_file, plan, {"Ready": "ready-option"}
     )
@@ -574,9 +755,9 @@ def test_shaped_advances_a_plan_that_declares_nothing_open(
 @pytest.mark.parametrize(
     ("plan", "reason"),
     (
-        ("# Plan\n\n## Needs you\nWhich repository should this use?\n",
+        ("# Plan\n\nProposed class: New\n\n## Needs you\nWhich repository should this use?\n",
          "plan has an open question"),
-        ("# Plan\n\n## Decided\nUse the existing repository.\n",
+        ("# Plan\n\nProposed class: New\n\n## Decided\nUse the existing repository.\n",
          "plan has no ## Needs you section"),
     ),
 )

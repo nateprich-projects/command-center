@@ -218,6 +218,25 @@ If you discover one:
    that the run paused for a required human action; it does not authorize a
    plausible artefact to merge.
 
+### When the deliverable is comments, not a branch
+
+Some tickets end in comments on the issue — an investigation's evidence, a set
+of proposals — with no code change, so no `ticket/*` branch and no PR are
+possible. Post the comments, then release the claim and finish as **waiting on
+Nate**:
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py release <current-number>
+python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent codex --run <id> --outcome skipped-human-step --note "finished by comments: <comment URLs>; waiting on Nate to close #<current-number>"
+```
+
+The `finished by comments:` prefix is the marker the queue reads: the ticket
+leaves the engineering queue until Nate closes it, or until a later run finishes
+it another way. Do not close the ticket and do not change `Status` or `Class`;
+closing is his gate. Without the marker the next fire re-offers the ticket — on
+2026-09-09 eleven consecutive runs re-claimed #277 and re-verified the same
+nine comments in 85 minutes (#498).
+
 ## 4. Open a pull request
 
 Say what you did, what you deliberately did not do, and anything you are unsure

@@ -1,35 +1,49 @@
 # Status
 
-**Last updated: 2026-09-06**
+**Last updated: 2026-09-09** — by Claude, on Nate's delegation, after a stabilisation
+pass with every scheduled agent paused. The section below is where things stand now;
+everything from "The command surface" onward is the 2026-09-05/06 trial record, kept
+as history and not re-verified today.
 
 ## Where this stands, in one place
 
-v0 is built and **not accepted** — deliberately, pending evidence that the pipeline runs
-end to end. 171 tests pass.
+**The pipeline is unwedged and the automations are paused, waiting for Nate to turn
+them back on.** 573 tests pass on the Mac mini from the run clone, including the three
+machine-local install checks (`test_launchd_drift`, `test_automation_drift`).
 
-**Waiting on Nate:** one item.
+**What was wedging it, and what fixed each:**
 
-| Item | Gate |
-|---|---|
-| #2 Command Center v0 | Accept it? |
+| Wedge | Fix | Verified by |
+|---|---|---|
+| Routines executed `funnel.py` from Nate's working tree, which sat on `ticket/346` — so they ran code predating #349 while `main` moved on (#171) | #204/#315 installed `~/.claude/command-center-run`, kept at `origin/main` every five minutes by launchd; #205 repointed every routine, `scripts/muse-review` and both Muse plists at it | `doctor`'s checkout-staleness check counts zero legacy invocations and retired itself |
+| Nothing wrote `Building` after #287 deleted the `start` gate, so every `Ready` project was unstartable (#343) | #348: `startable()` admits `Ready` parents and the shared `claim_ticket()` promotes on first claim — for `funnel begin` and `funnel claim` alike | The merge gate refused #348 itself with "project is not Building" until a claim promoted #343; nine Ready projects now expose startable tickets |
+| Four of five Codex automations ran the pre-#349 prompt, recording correct declines as `errored` — 34 of 72 errored runs in 24h were one prose dependency on #77 (#178) | #324 reconciled (nothing in the stale copies worth keeping), #325 synced all five from the run clone; `status = "PAUSED"` preserved | `sync_codex_automations.py --check`: 0 of 5 drifted, re-checked four minutes later |
+| A merge refused on a conflicting branch stranded the ticket (#168) | #342: the gate writes its own `rejected` verdict so `awaiting_review` hands the ticket back | fixture tests in `test_merge_gate.py` |
+| #204 and #315 blocked on each other; #207 and #205 carried blocks whose conditions had landed | cleared, with the reasoning on each issue | — |
 
-Held on purpose. Nate is waiting to watch work go all the way through — shaped, broken
-down, built by Codex, reviewed and merged — before accepting the thing that does it.
+**Watch for:** `plan.md` and the routines say the alert path for a dying agent is TickTick;
+Nate overturned that on 2026-09-09 — #176 now routes watchdog conditions into the `/funnel`
+brief as `agent_health` (#207, head of the standard queue). Until it lands, the Actions
+watchdog still only writes #160, and it will keep alarming for a week on the 72 historical
+errors.
 
-**In flight:** four projects at `Ready` (#16 `funnel park`, #17 `funnel doctor`, #18
-multi-repo, #26 heartbeat run ids, #32 `Broken` ordering, #34 the gate model), of which
-#18, #26, #32 and #34 await breakdown into tickets by the next Claude run. Five tickets
-are already startable; `funnel next` currently returns **#19**.
+**zcode is retired** (2026-09-09, #431): Muse's standard schedule carries every job it had;
+`heartbeat.RETIRED_AGENTS` keeps its silence out of the watchdog and the brief.
 
-**Seven ideas captured**, two classed `Broken`: #15 self-improvement and calibration, #27
-tracking Claude-only work, #28 manual priority override, #29 versioning and change logs,
-#30 public-repo findability, **#31** agent-written content indistinguishable from Nate's,
-**#35** the watchdog alarming on silence rather than on a missed expected run.
+**Waiting on Nate:** the accept gate for #171 (all tickets closed). #343 has one ticket
+left (#347). The re-enable checklist is in the 2026-09-09 hand-off in this repo's
+issue history; the one paste he owes is the zcode prompt, whose `--routine-sha` changed.
 
-**Not yet done:** dependabot #13 is open and untriaged; `pytest` is absent from the cloud
-image, which only matters if cloud sessions are ever meant to run tests here; the
-automations run with `cwds = ["~"]`, so whether home is writable during a scheduled run is
-reasoned but not measured.
+**Still open and deliberately untouched:** PR #335 (docs, his to merge), PR #341
+(follow-up on a closed ticket, invisible to the review queue by construction), PR #13
+(Dependabot), and #25's block, which he reconfirmed on 2026-09-08.
+
+**Known cost:** `funnel begin` loads the Project before its budget gate, so a refused
+five-minute poll still spends ~20 GraphQL points. Roughly 500-600 points an hour across
+the four schedules, against a 5,000-point limit — fine, and the overnight exhaustion that
+produced Muse's rate-limit errors was the #77 decline storm, not the polling.
+
+---
 
 ## The command surface
 
@@ -41,7 +55,7 @@ Nate's, from any Claude Code session on this Mac:
 | `funnel show <n>` | the evidence for one item's gate |
 | `funnel approve\|start\|accept <n> --yes` | answer a gate — **his decision**, an agent may execute it on his explicit instruction |
 | `funnel ideas` | captured ideas, flagged first |
-| `funnel capture "<title>"` | take an idea down from chat |
+| `funnel capture "<title>" --origin <nate-relayed|agent>` | take an idea down from chat with explicit origin |
 | `funnel shaped <n> --plan <file>` | record a grilled plan, → Shaped |
 | `funnel reject <pr>` | a merged PR was broken; undo and count it |
 

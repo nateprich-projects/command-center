@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import sys
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -30,6 +31,11 @@ def stub_heartbeat_checks(monkeypatch):
         lambda spool_dir=None, now=None: funnel.Check(
             "heartbeat branch", True, "ok", ""),
     )
+    monkeypatch.setattr(
+        funnel, "check_repository_drift",
+        lambda checkout_root=None: funnel.Check(
+            "repository drift", True, "", ""),
+    )
 
 
 def stub_github_checks(monkeypatch):
@@ -43,6 +49,10 @@ def stub_github_checks(monkeypatch):
             funnel, function_name,
             lambda name=check_name: funnel.Check(name, True, "ok", ""),
         )
+    monkeypatch.setattr(
+        funnel, "check_member_repos",
+        lambda: [funnel.Check("member repo owner/repo", True, "ok", "")],
+    )
 
 
 def install_fixture(tmp_path):
@@ -75,8 +85,8 @@ def test_all_local_checks_pass_and_discover_every_skill(tmp_path, monkeypatch):
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
     assert [check.name for check in checks] == [
-        "install symlinks", "checkout staleness", "settings.json", "gh auth", "Project fields",
-        "command-center topic", "usage cache", "heartbeat branch",
+        "install symlinks", "checkout staleness", "repository drift", "settings.json", "gh auth", "Project fields",
+        "command-center topic", "member repo owner/repo", "usage cache", "heartbeat branch",
     ]
     assert all(check.ok for check in checks)
     assert "3 links" in checks[0].found
@@ -178,7 +188,7 @@ def test_doctor_does_not_require_a_self_referential_checkout_link(tmp_path, monk
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
-    assert len(checks) == 8
+    assert len(checks) == 10
     assert checks[0].ok
     assert checks[2].ok
 
@@ -254,6 +264,108 @@ def test_checkout_staleness_reports_current_legacy_checkout(
 
     assert result.ok
     assert "matches origin/main" in result.found
+
+
+# -- repository drift --------------------------------------------------------
+
+
+def test_repository_drift_reports_uncommitted_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(" M funnel.py\n?? tests/new test.py\n" if args[3] == "status"
+                    else "main\n" if args[3] == "symbolic-ref" else "0 0\n"),
+            stderr="",
+        ),
+    )
+
+    result = funnel.check_repository_drift(tmp_path)
+
+    assert not result.ok
+    assert result.found.splitlines() == [
+        "uncommitted changes: funnel.py, tests/new test.py",
+    ]
+
+
+@pytest.mark.parametrize(
+    "symbolic_ref_output, expected",
+    [("feature/drift\n", "current branch is feature/drift, not main"),
+     ("", "detached HEAD (not main)")],
+)
+def test_repository_drift_reports_non_main_or_detached_head(
+    tmp_path, monkeypatch, symbolic_ref_output, expected
+):
+    def run(args, **kwargs):
+        if args[3] == "status":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[3] == "symbolic-ref":
+            return SimpleNamespace(
+                returncode=0 if symbolic_ref_output else 1,
+                stdout=symbolic_ref_output,
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="0 0\n", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    result = funnel.check_repository_drift(tmp_path)
+
+    assert not result.ok
+    assert result.found == expected
+
+
+def test_repository_drift_reports_commits_not_on_origin_main(tmp_path, monkeypatch):
+    def run(args, **kwargs):
+        if args[3] == "status":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[3] == "symbolic-ref":
+            return SimpleNamespace(returncode=0, stdout="main\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="2 0\n", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    result = funnel.check_repository_drift(tmp_path)
+
+    assert not result.ok
+    assert result.found == (
+        "2 commit(s) on the current branch are not present on origin/main"
+    )
+
+
+def test_repository_drift_is_silent_for_a_clean_main_checkout(tmp_path, monkeypatch):
+    def run(args, **kwargs):
+        if args[3] == "status":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[3] == "symbolic-ref":
+            return SimpleNamespace(returncode=0, stdout="main\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="0 0\n", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.check_repository_drift(tmp_path) == funnel.Check(
+        "repository drift", True, "", ""
+    )
+
+
+def test_repository_drift_uses_only_read_only_git_commands(tmp_path, monkeypatch):
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        if args[3] == "status":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[3] == "symbolic-ref":
+            return SimpleNamespace(returncode=0, stdout="main\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="0 0\n", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.check_repository_drift(tmp_path).ok
+    assert [args[3] for args, _ in calls] == [
+        "status", "symbolic-ref", "rev-list",
+    ]
+    assert calls[0][1]["env"]["GIT_OPTIONAL_LOCKS"] == "0"
 
 
 # -- GitHub wiring ------------------------------------------------------------
@@ -443,6 +555,62 @@ def test_topic_search_failure_is_reported_not_raised(monkeypatch):
     assert not result.ok
     assert "topic search failed" in result.found
     assert result.fix
+
+
+def test_member_repo_readiness_reports_blocking_and_advisory_facts(monkeypatch):
+    def gh_json(*args):
+        endpoint = args[2]
+        if endpoint.endswith("owner/ready/actions/workflows"):
+            return {"workflows": [{"path": ".github/workflows/ci.yml"}]}
+        if endpoint.endswith("owner/ready/labels?per_page=100"):
+            return []
+        if endpoint.endswith("owner/ready/contents/.github/dependabot.yml"):
+            return {"type": "file"}
+        if endpoint.endswith("owner/no-ci/actions/workflows"):
+            return {"workflows": []}
+        if endpoint.endswith("owner/no-ci/labels?per_page=100"):
+            return [{"name": "bug"}]
+        if endpoint.endswith("owner/no-ci/contents/.github/dependabot.yml"):
+            return None
+        if endpoint.endswith("owner/no-ci/contents/.github/dependabot.yaml"):
+            return None
+        raise AssertionError("unexpected endpoint: {}".format(endpoint))
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+
+    checks = funnel.check_member_repos(["owner/no-ci", "owner/ready"])
+
+    assert [check.name for check in checks] == [
+        "member repo owner/no-ci", "member repo owner/ready",
+    ]
+    no_ci, ready = checks
+    assert not no_ci.ok
+    assert "CI workflow missing (blocking)" in no_ci.found
+    assert "stock GitHub labels remain: bug (advisory)" in no_ci.found
+    assert "Dependabot not configured (advisory)" in no_ci.found
+    assert no_ci.fix
+    assert ready.ok
+    assert ready.found == (
+        "CI workflow present; command-center topic applied; "
+        "stock GitHub labels removed; Dependabot configured"
+    )
+
+
+def test_member_repo_readiness_uses_topic_membership_as_the_filter(monkeypatch):
+    calls = []
+
+    def gh_json(*args):
+        calls.append(args[2])
+        return {"workflows": [{"path": ".github/workflows/ci.yml"}]} if \
+            args[2].endswith("actions/workflows") else []
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(funnel, "member_repos", lambda: ["owner/member"])
+
+    checks = funnel.check_member_repos()
+
+    assert [check.name for check in checks] == ["member repo owner/member"]
+    assert all("owner/outside" not in endpoint for endpoint in calls)
 
 
 def test_item_consistency_reports_each_contradiction_without_writing(monkeypatch):
@@ -681,10 +849,11 @@ def test_doctor_includes_class_assignment_dump_with_loaded_items(monkeypatch):
         ),
     ])
 
-    assert [check.name for check in checks][-3:] == [
+    assert [check.name for check in checks][-5:] == [
         "item consistency", "Class assignments", "block comments",
+        "block conditions", "suspected human steps",
     ]
-    assert checks[-2].found == "owner/repo#1 | issue number 1 | Class Broken"
+    assert checks[-4].found == "owner/repo#1 | issue number 1 | Class Broken"
 
 
 def test_doctor_reports_unparseable_block_comments_with_loaded_items(monkeypatch):
@@ -701,12 +870,125 @@ def test_doctor_reports_unparseable_block_comments_with_loaded_items(monkeypatch
         ),
     ])
 
-    result = checks[-1]
+    result = checks[-3]
     assert result == funnel.Check(
         "block comments", False,
         "owner/repo#7: **Blocked on #77, 2026-09-07.** Legacy format.",
         "",
     )
+
+
+def test_doctor_reports_reference_less_human_step_without_writing(monkeypatch):
+    stub_heartbeat_checks(monkeypatch)
+    stub_github_checks(monkeypatch)
+
+    checks = funnel.doctor_checks(items=[
+        funnel.Item(
+            repo="owner/repo", number=8, title="Credential entry", url="",
+            state="OPEN", parent="owner/repo#7", labels=["blocked"],
+            block_reason="Human step: entering a credential",
+        ),
+        funnel.Item(
+            repo="owner/repo", number=9, title="Named condition", url="",
+            state="OPEN", parent="owner/repo#7", labels=["blocked"],
+            block_references=["#77"],
+            block_reason="Human step: entering a credential",
+        ),
+    ])
+
+    result = checks[-1]
+    assert result == funnel.Check(
+        "suspected human steps", False,
+        "owner/repo#8: suspected human step (entering a credential)",
+        "",
+    )
+
+
+def test_doctor_reports_satisfied_and_still_waiting_block_conditions():
+    def ticket(number, references, **kwargs):
+        values = dict(
+            repo="owner/repo", number=number, title="ticket {}".format(number),
+            url="", state="OPEN", labels=["blocked"],
+            block_reason="Waiting for the condition.",
+            block_references=references,
+        )
+        values.update(kwargs)
+        return funnel.Item(**values)
+
+    items = [
+        ticket(108, ["#77"]),
+        ticket(141, ["#138"]),
+        ticket(145, ["#138"]),
+        ticket(168, ["#161"]),
+        ticket(109, ["#108"]),
+        funnel.Item(
+            repo="owner/repo", number=77, title="closed blocker", url="",
+            state="CLOSED", state_reason="COMPLETED",
+        ),
+        funnel.Item(
+            repo="owner/repo", number=138, title="closed blocker", url="",
+            state="CLOSED", state_reason="COMPLETED",
+        ),
+        funnel.Item(
+            repo="owner/repo", number=161, title="closed blocker", url="",
+            state="CLOSED", state_reason="COMPLETED",
+        ),
+    ]
+
+    result = funnel.check_block_conditions(items)
+
+    assert not result.ok
+    assert result.fix == ""
+    lines = result.found.splitlines()
+    assert lines[:4] == [
+        "owner/repo#108: satisfied block conditions: owner/repo#77",
+        "owner/repo#109: still-waiting (on owner/repo#108)",
+        "owner/repo#141: satisfied block conditions: owner/repo#138",
+        "owner/repo#145: satisfied block conditions: owner/repo#138",
+    ]
+    assert lines[4] == (
+        "owner/repo#168: satisfied block conditions: owner/repo#161"
+    )
+
+
+def test_doctor_reports_unresolvable_block_conditions():
+    ticket = funnel.Item(
+        repo="owner/repo", number=304, title="blocked", url="", state="OPEN",
+        labels=["blocked"], block_reason="Waiting for a decision.",
+        block_references=["#77"],
+    )
+    blocker = funnel.Item(
+        repo="owner/repo", number=77, title="parked", url="", state="CLOSED",
+        state_reason="NOT_PLANNED", status="Parked",
+    )
+
+    result = funnel.check_block_conditions([ticket, blocker])
+
+    assert result == funnel.Check(
+        "block conditions", False,
+        "owner/repo#304: unresolvable block conditions: owner/repo#77",
+        "",
+    )
+
+
+def test_block_condition_check_uses_loaded_items_without_fetching(monkeypatch):
+    ticket = funnel.Item(
+        repo="owner/repo", number=109, title="waiting", url="", state="OPEN",
+        labels=["blocked"], block_reason="Waiting for the chain.",
+        block_references=["#108"],
+    )
+    blocker = funnel.Item(
+        repo="owner/repo", number=108, title="open", url="", state="OPEN",
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_json",
+        lambda *args, **kwargs: pytest.fail("block condition check must not fetch"),
+    )
+
+    result = funnel.check_block_conditions([ticket, blocker])
+
+    assert result.ok
+    assert "owner/repo#109: still-waiting" in result.found
 
 
 def test_main_doctor_loads_project_items_for_consistency(monkeypatch):
@@ -773,13 +1055,56 @@ def write_usage_cache(path, captured_at):
     }))
 
 
-def test_missing_usage_cache_names_opening_claude_code(tmp_path):
+def write_claude_transcript(path, timestamp):
+    path.write_text(json.dumps({
+        "type": "assistant",
+        "timestamp": datetime.fromtimestamp(
+            timestamp, timezone.utc).isoformat().replace("+00:00", "Z"),
+        "message": {
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "usage": {"output_tokens": 100},
+        },
+    }) + "\n")
+
+
+def disable_transcript_estimate(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        funnel, "CLAUDE_TRANSCRIPTS", str(tmp_path / "none" / "*.jsonl")
+    )
+
+
+def test_missing_usage_cache_uses_a_readable_transcript_estimate(
+    tmp_path, monkeypatch
+):
+    transcript = tmp_path / "project" / "session.jsonl"
+    transcript.parent.mkdir()
+    write_claude_transcript(transcript, NOW - 5 * 60)
+    monkeypatch.setattr(
+        funnel, "CLAUDE_TRANSCRIPTS", str(tmp_path / "project" / "*.jsonl")
+    )
+
+    result = funnel.check_usage_cache(tmp_path / "missing.json", now=NOW)
+
+    assert result.ok
+    assert "transcript estimate" in result.found
+    assert str(transcript) in result.found
+    assert "age 5 minutes" in result.found
+    assert result.fix == ""
+
+
+def test_missing_usage_cache_fails_with_a_run_fix_when_no_estimate_exists(
+    tmp_path, monkeypatch
+):
+    disable_transcript_estimate(monkeypatch, tmp_path)
+
     result = funnel.check_usage_cache(tmp_path / "missing.json", now=NOW)
 
     assert not result.ok
     assert "missing" in result.found
     assert "age unavailable" in result.found
-    assert result.fix == "open Claude Code on the Mac mini"
+    assert "transcript estimate is unavailable" in result.found
+    assert result.fix == "run a Claude Code session so a transcript exists"
 
 
 def test_fresh_usage_cache_reports_its_age(tmp_path):
@@ -789,11 +1114,13 @@ def test_fresh_usage_cache_reports_its_age(tmp_path):
     result = funnel.check_usage_cache(cache, now=NOW)
 
     assert result.ok
+    assert "statusline cache" in result.found
     assert "present and fresh" in result.found
     assert "age 5 minutes" in result.found
 
 
-def test_unparseable_usage_cache_is_distinct_from_missing(tmp_path):
+def test_unparseable_usage_cache_is_distinct_from_missing(tmp_path, monkeypatch):
+    disable_transcript_estimate(monkeypatch, tmp_path)
     cache = tmp_path / "usage.json"
     cache.write_text("{not valid json")
 
@@ -802,10 +1129,11 @@ def test_unparseable_usage_cache_is_distinct_from_missing(tmp_path):
     assert not result.ok
     assert "present but unparseable" in result.found
     assert "missing" not in result.found
-    assert result.fix == "open Claude Code on the Mac mini"
+    assert result.fix == "run a Claude Code session so a transcript exists"
 
 
-def test_old_usage_cache_reports_age_and_is_broken(tmp_path):
+def test_old_usage_cache_reports_age_and_is_broken(tmp_path, monkeypatch):
+    disable_transcript_estimate(monkeypatch, tmp_path)
     cache = tmp_path / "usage.json"
     write_usage_cache(cache, NOW - 2 * 3600)
 
@@ -814,7 +1142,27 @@ def test_old_usage_cache_reports_age_and_is_broken(tmp_path):
     assert not result.ok
     assert "stale" in result.found
     assert "age 2 hours" in result.found
-    assert "open Claude Code on the Mac mini" == result.fix
+    assert "freshness threshold is 15 minutes" in result.found
+    assert "run a Claude Code session so a transcript exists" == result.fix
+
+
+def test_stale_usage_cache_prefers_a_readable_transcript_estimate(
+    tmp_path, monkeypatch
+):
+    transcript = tmp_path / "project" / "session.jsonl"
+    transcript.parent.mkdir()
+    write_claude_transcript(transcript, NOW - 20 * 60)
+    monkeypatch.setattr(
+        funnel, "CLAUDE_TRANSCRIPTS", str(tmp_path / "project" / "*.jsonl")
+    )
+    cache = tmp_path / "usage.json"
+    write_usage_cache(cache, NOW - 2 * 3600)
+
+    result = funnel.check_usage_cache(cache, now=NOW)
+
+    assert result.ok
+    assert "transcript estimate" in result.found
+    assert "age 20 minutes" in result.found
 
 
 # -- heartbeat branch and spool --------------------------------------------
@@ -828,6 +1176,20 @@ def test_existing_heartbeat_branch_with_empty_spool_passes(tmp_path, monkeypatch
     assert result.ok
     assert "heartbeat branch `heartbeat` exists" in result.found
     assert "spool" in result.found and "empty" in result.found
+
+
+def test_four_drained_spool_files_pass(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    for name in ("claude.jsonl", "codex.jsonl", "muse.jsonl", "zcode.jsonl"):
+        (spool / name).touch()
+    monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
+
+    result = funnel.check_heartbeat(spool, now=NOW)
+
+    assert result.ok
+    assert "4 file(s), all drained" in result.found
+    assert "no pending records" in result.found
 
 
 def test_absent_heartbeat_branch_is_broken(tmp_path, monkeypatch):
@@ -871,12 +1233,28 @@ def test_three_spool_files_report_count_and_oldest_age(tmp_path, monkeypatch):
                       ("two.jsonl", 3600),
                       ("three.jsonl", 60)):
         path = spool / name
-        path.write_text("record\n")
-        os.utime(path, (NOW - age, NOW - age))
+        path.write_text(json.dumps({"phase": "start", "ts": NOW - age}) + "\n")
+        os.utime(path, (NOW - 30, NOW - 30))
     monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
 
     result = funnel.check_heartbeat(spool, now=NOW)
 
     assert not result.ok
-    assert "3 file(s)" in result.found
+    assert "3 pending record(s) across 3 file(s)" in result.found
     assert "oldest is 2 days" in result.found
+
+
+def test_spool_record_age_does_not_use_file_mtime(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    path = spool / "codex.jsonl"
+    path.write_text(json.dumps({"phase": "start", "ts": NOW - 5 * 60}) + "\n")
+    os.utime(path, (NOW - 2 * 86400, NOW - 2 * 86400))
+    monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
+
+    result = funnel.check_heartbeat(spool, now=NOW)
+
+    assert not result.ok
+    assert "1 pending record(s) across 1 file(s)" in result.found
+    assert "oldest is 5 minutes" in result.found
+    assert "2 days" not in result.found

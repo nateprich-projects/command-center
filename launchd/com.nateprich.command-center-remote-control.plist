@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Bring up the Remote Control server so Nate can reach this checkout from the
+  Claude mobile app. It starts a detached tmux session; tmux is parented to
+  launchd rather than to the Claude desktop app, so the server survives quitting
+  the app. Measured 2026-09-09: started inside the desktop app's terminal panel,
+  `claude rc` dies with that panel's shell.
+
+  This is a listener, not a schedule. It idles until Nate sends a message from a
+  device and issues no prompt of its own; see the Remote Control carve-out in
+  `AGENTS.md`, which is why this does not fall under the ban on invoking the
+  Claude CLI from launchd.
+
+  It fires at Nate's login, not at boot. Auto-login on this Mac goes to the
+  `claude` account, so a LaunchAgent under `nateprich` cannot run any earlier;
+  the alternative was enabling auto-login for this account, which writes a
+  recoverable password to `/etc/kcpassword` and was rejected on 2026-09-09.
+
+  The job is idempotent: it does nothing when the session already exists, so a
+  reload never produces a second server. The brief sleep lets the login keychain
+  unlock first; Remote Control needs the OAuth token and exits 1 without it.
+
+  The canonical copy lives here in the repo. launchd refuses a symlinked plist
+  (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the
+  installed file is a copy and `tests/test_launchd_drift.py` compares them.
+
+  Note for editors: XML forbids a double hyphen inside a comment. Use an em dash
+  or a semicolon; plutil accepts the double hyphen and plistlib rejects it, so a
+  file can lint clean and still be unparseable.
+
+  After editing, re-install:
+    cp launchd/com.nateprich.command-center-remote-control.plist ~/Library/LaunchAgents/
+    launchctl bootout gui/$(id -u)/com.nateprich.command-center-remote-control
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nateprich.command-center-remote-control.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nateprich.command-center-remote-control</string>
+
+    <!--
+      `=rc` is an exact session match; a bare `rc` would also match `rc-anything`
+      and silently skip starting the real one.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>sleep 15; tmux has-session -t =rc || tmux new-session -d -s rc -x 200 -y 50 -c /Users/nateprich/.claude/command-center '/opt/homebrew/bin/claude rc --spawn=same-dir'</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-remote-control.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-remote-control.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/nateprich/.local/bin</string>
+        <key>HOME</key>
+        <string>/Users/nateprich</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

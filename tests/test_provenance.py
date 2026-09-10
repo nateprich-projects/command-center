@@ -40,6 +40,31 @@ def test_provenance_parser_reads_only_its_own_marker():
     assert funnel.parse_provenance(review + "\n\n" + provenance)["voice"] == "agent"
 
 
+def test_origin_parser_reads_only_its_own_marker():
+    origin = marked(
+        funnel.ORIGIN_MARKER,
+        voice="nate-relayed", agent="claude", run="run-1", at=NOW.isoformat(),
+    )
+    provenance = marked(
+        funnel.PROVENANCE_MARKER,
+        voice="agent", agent="claude", run="run-1", at=NOW.isoformat(),
+    )
+    review = marked(
+        funnel.REVIEW_MARKER,
+        verdict="approved", ci="green", head_sha="abc", blocking=[],
+    )
+
+    assert funnel.parse_origin(origin)["voice"] == "nate-relayed"
+    assert funnel.parse_origin(provenance) is None
+    assert funnel.parse_origin(review) is None
+    assert funnel.parse_origin(origin + "\n\n" + provenance)["voice"] == "nate-relayed"
+
+
+@pytest.mark.parametrize("voice", ["nate-direct", "unknown", None])
+def test_origin_parser_rejects_non_capture_voices(voice):
+    assert funnel.parse_origin(marked(funnel.ORIGIN_MARKER, voice=voice)) is None
+
+
 def test_malformed_or_unknown_provenance_fails_closed():
     assert funnel.parse_provenance("ordinary prose") is None
     assert funnel.parse_provenance(funnel.PROVENANCE_MARKER + "\n{not json") is None

@@ -23,24 +23,30 @@ change.** Two schedules run this routine:
 
 - **hourly, `escalated`** — review only. Escalated work is rare and this schedule
   exists so it is never left waiting.
-- **every fifteen minutes, `standard`** — review, and breakdown when there is
-  nothing to review. Breakdown is mechanical, so it belongs on the frequent
-  cheaper-effort schedule rather than the hourly one at max effort.
+- **every five minutes, `standard`** — review; breakdown when there is nothing
+  to review; and shaping one standard-tier idea when there is nothing to break
+  down either. Breakdown and shaping are the cheaper jobs, so they belong on the
+  frequent schedule rather than the hourly one at max effort.
 
 Everything here applies to both. The section beginning *"If your tier is
-escalated"* applies only to the first, and the breakdown job only to the second —
-your opening command already says which you have.
+escalated"* applies only to the first, and the breakdown and shaping jobs only to
+the second — your opening command already says which you have.
 
 One pull request, reviewed against the plan, verdict recorded, merged if it
 passes — or, when there is nothing to review and your schedule carries the
-breakdown job, one approved plan broken into tickets. **Never both in the same
-run.**
+breakdown job, one approved plan broken into tickets — or, when there is nothing
+to break down either, one standard-tier idea shaped. **Never more than one job in
+the same run.** The order is fixed: **review, then breakdown, then shaping** —
+a review finishes work, a breakdown creates tickets for work already approved,
+and shaping starts new work.
 
 **Reviews win because they are further down the funnel.** Bottom-up is the rule
 everywhere here: clear the work closest to shipping before starting more, and a
 review *finishes* work where a breakdown *creates* it. Breakdowns cannot starve,
 because PRs awaiting review are a finite class bounded by what the engineers can
 produce.
+
+A `Broken` or `Maintenance` job is offered first whatever its stage.
 
 ## Muse-specific behaviour you must know
 
@@ -62,7 +68,7 @@ read-only by instruction and by `--disable-write`. Behave accordingly.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py begin --agent muse OPENING_FLAGS
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent muse OPENING_FLAGS
 ```
 
 One call: records the heartbeat, checks the gate, and names your work. It always
@@ -76,6 +82,8 @@ prints JSON.
 - `"do": "review"` — go to step 2. `work` names the PR.
 - `"do": "breakdown"` — skip to the breakdown section below. `work` names the
   project. Only the standard schedule ever sees this.
+- `"do": "shape"` — skip to the shaping section below. `work` names one
+  standard-tier idea. Only the standard schedule ever sees this.
 
 **`"unmetered": true` is expected here and is not a problem.** Meta exposes no
 usage, so nothing was gated. It is a standing exception recorded in `AGENTS.md`,
@@ -171,8 +179,8 @@ plainly ask for exactly that, reject it.
 ## 5. Decide — record the verdict either way
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py review <pr> --verdict approved --ci green
-python3 /Users/nateprich/.claude/command-center/funnel.py merge <pr> --yes
+python3 /Users/nateprich/.claude/command-center-run/funnel.py review <pr> --verdict approved --ci green
+python3 /Users/nateprich/.claude/command-center-run/funnel.py merge <pr> --yes
 ```
 
 `review` stamps your verdict with the commit you actually read. `merge` then
@@ -186,7 +194,7 @@ doing it by hand is what makes an unattended merge impossible to audit later.
 **Does not meet the bar →** record it, do not merge:
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py review <pr> --verdict rejected --ci <state> --blocking "<what does not match>"
+python3 /Users/nateprich/.claude/command-center-run/funnel.py review <pr> --verdict rejected --ci <state> --blocking "<what does not match>"
 ```
 
 Be specific enough that the next engineer run can act on it without guessing — it
@@ -211,10 +219,27 @@ carries.
 
 `begin` already named the project. Do not go looking for a different one.
 
-**Read `/Users/nateprich/.claude/command-center/skills/breakdown/SKILL.md` and
+**Read `/Users/nateprich/.claude/command-center-run/skills/breakdown/SKILL.md` and
 follow it.** It carries the sizing standard, the ordering and coverage rules,
 worked examples, and what to do when a plan will not decompose. It exists so the
 fiftieth unattended breakdown is done the same way as the first.
+
+Before declaring a plan's decision undecidable, read the issue's comments for an
+earlier `**Needs a decision:**` header and the answer that followed it. If Nate
+answered it, act on that answer and continue the breakdown; do not ask the same
+question again. If it is still undecidable, post precisely the question with:
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py comment <ref> --voice agent --needs-decision "<the undecided question>"
+```
+
+Create no tickets. Finish with
+`python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent muse --run <id> --outcome done --note "needs decision: <question>"`;
+the note must name the question. The command adds `blocked`, so the project
+leaves `awaiting_breakdown()` and enters Nate's queue as **"Answer the
+breakdown's question?"** with the question visible. After Nate records his
+answer and removes the `blocked` label, it returns to `awaiting_breakdown()` for
+the next run to read the answer before deciding again.
 
 In short: one ticket is one engineer run ending in a PR; split by behaviour rather
 than by layer; every project gets at least one ticket; do not set `Status` or
@@ -249,10 +274,75 @@ dependency, and Codex was handed one whose prerequisite had an open PR, declined
 correctly, and recorded `errored` — twice. Tracked as #129. Until that lands, the
 best you can do is make the dependency unmissable to the human reading it.
 
-## 7. Finish
+## 7. Only if there was no PR and no breakdown: shape one standard-tier idea
+
+**If you reviewed a PR or broke down a plan above, you are done — go to
+"Finish".** This section is for runs whose `begin` returned `do: shape`, which
+only the standard schedule carries. Shaping is the last job because it starts new
+work; it runs only when nothing further down the funnel is waiting. Nate revised
+#86 on 2026-09-09 to route standard-tier ideas here as well as to zcode.
+Escalated ideas are not yours, and `begin` will never offer you one.
+
+`begin` already named the idea. Do not call `ideas` again or choose a different
+one. One idea per run.
+
+Read the issue first. Then read
+`/Users/nateprich/.claude/command-center-run/skills/shape/SKILL.md` for the plan
+structure. Its general on-demand guidance is intentionally superseded here: this
+scheduled job is the approved unattended shaping path for standard-tier ideas.
+
+**Do not grill.** There is nobody to ask in an unattended run. Settle what
+precedent covers, cite the source in the plan, and do not invent an answer where
+the decision is genuinely Nate's. Record that open question in the per-category
+`Needs you` section instead — Exposure, Gates, Scope and priority, and
+Preference — with an explicit answer under every category, including when
+nothing is outstanding.
+
+**You cannot write a file** — `--disable-write` is on — so pass the plan on
+standard input. Put the whole plan in one single-quoted argument and write
+apostrophes as ’ rather than ' so the quoting cannot break. A pipe writes nothing
+to disk; a heredoc may, so do not use one:
+
+If the idea's capture origin is `agent` and its Class is unset, choose the Class from
+the ladder (`Broken`, `Maintenance`, `Improve`, `New`, or `Replace`) and pass it to
+`shaped` so the recovery write happens before the Status write:
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent muse --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>"
+printf '%s' '<the whole plan, as one quoted argument>' | python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --class <Broken|Maintenance|Improve|New|Replace> --plan -
+```
+
+For a `nate-relayed` idea, or one with no readable origin marker, do not pass
+`--class` and do not infer one. Include a non-empty `Proposed class: <one-word proposal>`
+line in the plan so Nate can make the one-word correction after it reaches `Shaped`.
+
+```bash
+printf '%s' '<the whole plan, as one quoted argument>' | python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --plan -
+```
+
+Moving the item to `Shaped` records that a plan exists; **Shaped is not approval**.
+Do not set `Ready`, answer the Shaped gate, or use `--class` for a Nate-origin idea or
+an already-classed item. The only Class write in this step is the recovery path for an
+explicitly agent-origin, unclassed idea.
+
+## Capture observed defects before finishing
+
+When this run observes a defect (broken behaviour, a failing command, or a
+misbehaving run — evidence, not speculation), record it before finishing with
+`funnel capture`. Put the observed evidence in the note, choose its class at
+capture using `skills/shape`'s "Class it when you file it" rule, and say why.
+Agents class their own captures, never his existing issues.
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --origin agent --class <Broken|Maintenance|Improve|New|Replace> --note "<observed evidence; say why you chose this class, and say plainly when you are unsure>"
+```
+
+This is the sanctioned exception to the review rule to act only on the PR you were
+given: capture records the observed defect; it does not act on the thing observed.
+
+## 8. Finish
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent muse --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>"
 ```
 
 `--merged` takes **the PR's number**, not a count of merges — `--merged 96`, never `--merged 1`. It is a field, not prose: unattended merges have to appear in the brief as

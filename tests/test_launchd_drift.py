@@ -23,10 +23,14 @@ import pathlib
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-NAMES = [
+REVIEWER_NAMES = [
     "com.nateprich.command-center-muse-review.plist",           # escalated, hourly
-    "com.nateprich.command-center-muse-review-standard.plist",  # standard, /15
+    "com.nateprich.command-center-muse-review-standard.plist",  # standard, /5
 ]
+KEEPER_NAME = "com.nateprich.command-center-run-keeper.plist"
+#: The Remote Control listener. Not a schedule; see the carve-out in `AGENTS.md`.
+REMOTE_CONTROL_NAME = "com.nateprich.command-center-remote-control.plist"
+NAMES = REVIEWER_NAMES + [KEEPER_NAME, REMOTE_CONTROL_NAME]
 LAUNCH_AGENTS = pathlib.Path.home() / "Library" / "LaunchAgents"
 
 
@@ -35,8 +39,6 @@ def test_the_repo_carries_the_canonical_plist(name):
     """Whatever the OS makes us install, the reviewable copy lives here."""
     repo_copy = ROOT / "launchd" / name
     assert repo_copy.is_file()
-    text = repo_copy.read_text()
-    assert "scripts/muse-review" in text
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -49,7 +51,6 @@ def test_the_plist_is_well_formed_xml(name):
     with (ROOT / "launchd" / name).open("rb") as handle:
         plist = plistlib.load(handle)
     assert plist["Label"] == name[: -len(".plist")]
-    assert plist["ProgramArguments"][0] == "/bin/bash"
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -63,13 +64,13 @@ def test_the_installed_plist_matches_the_repo(name):
     assert installed == canonical, (
         "the installed launchd plist has drifted from launchd/{}. "
         "Re-copy it: cp launchd/{} ~/Library/LaunchAgents/ && "
-        "launchctl bootout gui/$(id -u)/com.nateprich.command-center-muse-review && "
+        "launchctl bootout gui/$(id -u)/{} && "
         "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{}".format(
-            name, name, name)
+            name, name, name[: -len(".plist")], name)
     )
 
 
-@pytest.mark.parametrize("name", NAMES)
+@pytest.mark.parametrize("name", REVIEWER_NAMES)
 def test_the_plist_points_at_the_stable_path(name):
     """`/Users/nateprich/.claude/command-center` is a symlink to the working
     tree. The plist must use it rather than the resolved external-volume path,
@@ -81,6 +82,7 @@ def test_the_plist_points_at_the_stable_path(name):
     with (ROOT / "launchd" / name).open("rb") as handle:
         plist = plistlib.load(handle)
     args = plist["ProgramArguments"]
+    assert args[0] == "/bin/bash"
     assert any(a.endswith("/scripts/muse-review") for a in args), args
     # Checked against the arguments, not the file text: the header explains the
     # TCC blocker and has to name `/Volumes/External SSD` to do so. Asserting on
@@ -115,3 +117,36 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
 
     assert args(NAMES[0]) == ["escalated", "max"]
     assert args(NAMES[1]) == ["standard", "high"]
+
+
+def test_the_keeper_only_fast_forwards_the_run_clone():
+    """The unattended job must never reconcile or mutate Nate's working tree."""
+    import plistlib
+
+    with (ROOT / "launchd" / KEEPER_NAME).open("rb") as handle:
+        plist = plistlib.load(handle)
+    assert plist["ProgramArguments"] == [
+        "/usr/bin/git",
+        "-C",
+        "/Users/nateprich/.claude/command-center-run",
+        "pull",
+        "--ff-only",
+    ]
+
+
+def test_the_keeper_fires_at_least_as_often_as_the_fastest_routine():
+    """A routine must not outrun the job responsible for refreshing its code."""
+    import plistlib
+
+    def maximum_gap(name):
+        with (ROOT / "launchd" / name).open("rb") as handle:
+            schedule = plistlib.load(handle)["StartCalendarInterval"]
+        if isinstance(schedule, dict):
+            schedule = [schedule]
+        minutes = sorted(entry["Minute"] for entry in schedule)
+        gaps = [right - left for left, right in zip(minutes, minutes[1:])]
+        gaps.append(minutes[0] + 60 - minutes[-1])
+        return max(gaps)
+
+    fastest_routine_gap = min(maximum_gap(name) for name in REVIEWER_NAMES)
+    assert maximum_gap(KEEPER_NAME) <= fastest_routine_gap

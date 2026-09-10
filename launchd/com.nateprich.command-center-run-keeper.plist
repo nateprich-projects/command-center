@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Keep the read-only routine checkout current without touching Nate's working
+  tree. The command is deliberately only a fast-forward pull: if the checkout
+  ever acquires local state, the job refuses to reconcile it.
+
+  The canonical copy lives here in the repo. launchd refuses a symlinked plist
+  (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the
+  installed file is a copy and `tests/test_launchd_drift.py` compares them.
+
+  Note for editors: XML forbids a double hyphen inside a comment. Use an em dash
+  or a semicolon; plutil accepts the double hyphen and plistlib rejects it, so a
+  file can lint clean and still be unparseable.
+
+  After editing, re-install:
+    cp launchd/com.nateprich.command-center-run-keeper.plist ~/Library/LaunchAgents/
+    launchctl bootout gui/$(id -u)/com.nateprich.command-center-run-keeper
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nateprich.command-center-run-keeper.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nateprich.command-center-run-keeper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/git</string>
+        <string>-C</string>
+        <string>/Users/nateprich/.claude/command-center-run</string>
+        <string>pull</string>
+        <string>--ff-only</string>
+    </array>
+
+    <!--
+      Every five minutes, matching the fastest routine schedule. A calendar
+      schedule avoids interval drift and gives every routine a freshly pulled
+      checkout no later than its next fire.
+    -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Minute</key><integer>5</integer></dict>
+        <dict><key>Minute</key><integer>10</integer></dict>
+        <dict><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Minute</key><integer>20</integer></dict>
+        <dict><key>Minute</key><integer>25</integer></dict>
+        <dict><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Minute</key><integer>35</integer></dict>
+        <dict><key>Minute</key><integer>40</integer></dict>
+        <dict><key>Minute</key><integer>45</integer></dict>
+        <dict><key>Minute</key><integer>50</integer></dict>
+        <dict><key>Minute</key><integer>55</integer></dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-run-keeper.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-run-keeper.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/nateprich/.local/bin</string>
+        <key>HOME</key>
+        <string>/Users/nateprich</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

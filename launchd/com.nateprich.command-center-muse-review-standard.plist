@@ -28,7 +28,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/nateprich/.claude/command-center/scripts/muse-review</string>
+        <string>/Users/nateprich/.claude/command-center-run/scripts/muse-review</string>
         <string>standard</string>
         <string>high</string>
     </array>

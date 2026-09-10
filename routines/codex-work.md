@@ -10,15 +10,17 @@ work needs:
 - **writable:** Codex's own per-session working directory, and
   `~/.claude/command-center-heartbeat` — the heartbeat spool lives outside the
   session directory, and a denied write there loses the record silently.
-- **read and execute:** `/Users/nateprich/.claude/command-center`. The scripts are
-  run, never edited. Ticket work belongs on a `ticket/<n>` branch pushed to the
+- **read and execute:** `/Users/nateprich/.claude/command-center-run`, the
+  read-only routine clone that its own launchd job keeps at `origin/main`
+  (#171, #204). The scripts are run, never edited. Ticket work belongs on a
+  `ticket/<n>` branch pushed to the
   remote, so **the canonical checkout never needs to be writable** — and a working
   tree an agent cannot write is one it cannot damage. This repository is a private
   org repo on the free plan, where rulesets are unavailable, so this is the only
   structural protection there is.
 
 The resolved path belongs in that configuration and **nowhere else**. Every command
-below keeps its `~/.claude/command-center` spelling; see the note above step 1.
+below keeps its `~/.claude/command-center-run` spelling; see the note above step 1.
 
 **Never invoke the Codex CLI headlessly** — not from launchd, cron, CI, or any
 script. In-app scheduling is the only sanctioned path, and this is not
@@ -30,8 +32,9 @@ You are the Command Center implementation agent. Work **one ticket**, then stop.
 
 ## Path invariant — do not normalise command paths
 
-`~/.claude/command-center` is a symlink, and every command below uses that
-spelling deliberately. Codex's sandbox configuration is the one place its resolved
+Every command below invokes `~/.claude/command-center-run` — the maintained
+clone, never Nate's working tree — and uses that spelling deliberately. Codex's
+sandbox configuration is the one place its resolved
 target may appear, because Codex will not accept a symlink as a writable root.
 
 **Never rewrite a command, helper invocation, skill reference or permission-rule
@@ -40,85 +43,25 @@ string, so normalising it makes every call prompt — and a scheduled run cannot
 answer a prompt. Treat any such rewrite outside Codex's own configuration as a bug
 and undo it before continuing. `tests/test_guardrails.py` fails on it.
 
-## 1. Record that you started
+## 1. Start, check the budget, and get one ticket
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/heartbeat.py start --agent codex
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent codex --tier standard
 ```
 
-**It prints a run id. Keep it, and pass it to every `finish` below as
-`--run <id>`.** Without it, `finish` has to work out which run it belongs to
-from the records, and when two runs overlap it cannot — it then records the
-outcome as unattributable rather than guessing, which is safe but loses which
-run this was. The id is a literal string, so the command still matches the
-permission rule; never wrap it in `RUN=$(...)`, which is unpredictable and
-caused a prompt storm.
+**One call does all of it**: records the heartbeat, checks the budget, finds the
+next ticket, and claims it. It always prints JSON. Keep its `run` value and pass
+it to every `finish` below as `--run <id>`.
 
-**Every exit path below finishes it.** A start without a finish is
-read by the watchdog as a run that died, so never leave one dangling on purpose.
+- **`"do": "stop"`** — finish immediately. `gate: over` means
+  `skipped-over-pace`; `gate: unknown` means `skipped-usage-unknown`; otherwise
+  use `nothing-to-do`.
+- **`"do": "ticket"`** — `work` names the one ticket already claimed for this
+  run. Do not call `claim` again.
 
-**If the heartbeat prints a warning about GitHub being unreachable, keep going.**
-It spools the record locally and a later run pushes it. Instrumentation does not
-gate the work it instruments — an earlier version stopped the run here, and left
-no trace of having stopped, which is indistinguishable from never running.
-
-## 2. Check the budget, and believe it
-
-```bash
-python3 /Users/nateprich/.claude/command-center/usage.py gate codex
-```
-
-**Some schedules append `--idle` to that line, and yours already says which.**
-It adds a second condition: Nate must not have touched the five-hour window at
-all. That is a *proxy* for him being at the keyboard, and it belongs only on
-schedules that fire while he might be — the frequent daytime one. A schedule that
-runs at 2am already knows he is away, and applying the proxy there would refuse
-legitimate overnight work, because an evening ChatGPT session still shows in the
-window hours after he has gone to bed. `scripts/sync_codex_automations.py` adds
-the flag to the schedules that need it; do not add or remove it yourself.
-
-- **exit 1** — refused. **Read the last line to see which refusal it was**, because they are different facts and the record should say which:
-  - an `idle` line reading `OVER` means Nate is using the five-hour window right now. Finish with `--outcome skipped-nate-active` and **stop**.
-  - otherwise it is the budget. Finish with `--outcome skipped-over-pace` and **stop**.
-
-  Both are healthy outcomes, not failures. Do not argue with either, and do not do "just a small thing" first. On an always-on hourly schedule most runs end here, and that is the design working.
-- **exit 2** — usage could not be read. Finish with `skipped-usage-unknown` and **stop**. A run that cannot read its budget does not work.
-- **exit 0** — continue.
-
-Run this *after* your first turn, never before. The reading is refreshed by this
-very session, and a stale reading always understates usage.
-
-## 3. Ask what to work on. Do not decide yourself
-
-```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py next --tier standard
-```
-
-**`--tier` says what this engine is allowed to work, and it is fixed by the
-schedule, not chosen by you.** This automation runs the cheap default engine, so
-it asks for `standard` work and the funnel walks past anything needing the
-escalated one — auth, credentials, migrations, destructive operations,
-concurrency, or a ticket a previous attempt already failed. A separate schedule
-runs the escalated engine and passes `--tier escalated`.
-
-**Do not change the tier, and do not argue that you could handle an escalated
-ticket.** A model asked whether a task is too hard for it answers from
-confidence rather than from risk, which is the whole reason this is decided
-outside the model.
-
-**You must not rank, reorder, or second-guess this.** If it looks wrong, say so
-in your finish note — do not quietly pick something else. Two agents each
-applying the rules from prose drift apart silently, and both produce
-plausible-looking lists.
-
-- **exit 1, "lock held"** — finish with `skipped-locked` and stop.
-- **exit 1, "no ... work waiting"** — finish with `nothing-to-do` and stop.
-  Healthy: there is work, and none of it is yours to take. A tier means *only*
-  that tier in both directions — the cheap engine walks past risky tickets, and
-  the expensive one walks past ordinary ones rather than spending its quota on
-  work the cheap schedule is already doing.
-- **exit 1, no work** — finish with `nothing-to-do` and stop.
-- **exit 0** — you get one ticket as JSON. That is your work.
+The schedule fixes `--tier`; do not change it or second-guess the ordering. The
+standard lane skips work needing the escalated engine. The `--idle` flag is added
+only to schedules that need the presence proxy.
 
 If the ticket is not workable because a prerequisite named by the ticket has not
 landed, that is a **decline**, not a reason to stop the run. Keep the declined
@@ -126,15 +69,15 @@ refs in this run's context only — do not write them anywhere — and release t
 ticket before asking again:
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py release <declined-ref>
-python3 /Users/nateprich/.claude/command-center/funnel.py next --tier standard --not <declined-ref>
+python3 /Users/nateprich/.claude/command-center-run/funnel.py release <declined-ref>
+python3 /Users/nateprich/.claude/command-center-run/funnel.py next --tier standard --not <declined-ref>
 ```
 
 The `--not` list is a per-call filter. On the second re-ask, repeat every earlier
 declined ref, for example:
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py next --tier standard --not <declined-ref-1> --not <declined-ref-2>
+python3 /Users/nateprich/.claude/command-center-run/funnel.py next --tier standard --not <declined-ref-1> --not <declined-ref-2>
 ```
 
 Count candidates, not re-asks: consider at most three candidates in one run. If
@@ -144,20 +87,15 @@ not ask for a fourth candidate and do not persist a decline or reorder the queue
 If a re-ask returns a workable ticket, claim that ticket and continue with it;
 the declined tickets receive no implementation work or PR in this run.
 
-## 4. Take the lock
+The replacement returned by `next` is not claimed by that read-only command, so
+run `claim` before working a replacement. If it refuses, finish with
+`skipped-locked` and stop. If it reports taking over a stale claim, note that in
+your finish note — one takeover is noise, three in a week means runs are dying.
+
+## 2. Look for a previous attempt before starting fresh
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py claim <issue-number>
-```
-
-If it refuses, finish with `skipped-locked` and stop. If it reports taking over a
-stale claim, note that in your finish note — one takeover is noise, three in a
-week means runs are dying.
-
-## 5. Look for a previous attempt before starting fresh
-
-```bash
-python3 /Users/nateprich/.claude/command-center/prior_run.py <issue-number>
+python3 /Users/nateprich/.claude/command-center-run/prior_run.py <issue-number>
 ```
 
 If a previous run worked this ticket, that output tells you what it **intended** —
@@ -167,10 +105,12 @@ which the diff cannot. Three rules:
 - The match is **heuristic**. A session that merely mentioned the ticket looks the same as one that worked it. Check the `cwd` and timing.
 - If it reports **stranded work** in a previous directory, that work exists only there. Each Codex session gets a fresh directory, so you did not inherit it. Rescue it or deliberately redo it — do not assume it is gone and do not assume it is present.
 
-## 6. Do the work
+## 3. Do the work
 
-**Clone first. Never work in `~/.claude/command-center`.** That is Nate's own
-working tree, and your sandbox has no write access to it by design: this is a
+**Clone first. Never work in `~/.claude/command-center` or in
+`~/.claude/command-center-run`.** The first is Nate's own working tree, the
+second is the read-only clone the routines execute from. Your sandbox has no
+write access to either by design: this is a
 private org repo on the free plan, so rulesets are unavailable and the writable
 root is the only structural protection there is. Clone the repo named in the
 ticket JSON into your own session directory and work there:
@@ -181,7 +121,7 @@ cd work/repo
 ```
 
 Keep invoking the Command Center scripts by their absolute
-`~/.claude/command-center` path — they are read and executed, never edited, and
+`~/.claude/command-center-run` path — they are read and executed, never edited, and
 read access is unaffected.
 
 Branch **`ticket/<issue-number>`**, from `main`. If that branch already exists on
@@ -197,6 +137,27 @@ issue** — do not fix it here. Half-built projects are the problem this whole
 system exists to solve.
 
 Do not change `Status` or `Class` on anything. Those are Nate's gates.
+
+### Investigate-class work
+
+When the ticket inherits `Class: Investigate`, the run answers the question rather than
+assuming that the suspected defect is real. If the evidence establishes a defect, file
+each resulting piece of work as a sub-issue of the investigation project before closing
+the investigation ticket. Keep the tickets small, give each one a `Risk:` line, and do
+not set the project's `Status` or `Class` while filing them:
+
+```bash
+gh issue create --repo <repo> --parent <investigation-project-number> \
+  --title "<resulting work>" \
+  --body $'Part of #<investigation-project-number>; discovered while investigating #<ticket-number>.\n\n<what the evidence established>.\n\nRisk: standard'
+```
+
+If the evidence establishes no defect, record it on the ticket or investigation project
+before the question is closed. The existing `funnel accept --no-tickets` path is the
+explicit ending for an investigation with no follow-up tickets; do not invent a new
+accept verb, change `#55`'s upkeep auto-close behaviour, or add `Investigate` to
+`SELF_APPROVABLE_CLASSES`. A finding that does produce tickets follows the ordinary
+ticket and accept flow.
 
 If, after starting work, you discover that the current ticket is blocked by a
 named prerequisite that has not landed and you made no change, release it and
@@ -238,7 +199,7 @@ If you discover one:
 
    ```bash
    gh issue edit <current-number> --add-blocked-by <human-number> --add-label blocked
-   python3 /Users/nateprich/.claude/command-center/funnel.py comment <current-number> --voice agent --body "**Blocked on #<human-number>:** Complete the human step before resuming this ticket."
+   python3 /Users/nateprich/.claude/command-center-run/funnel.py comment <current-number> --voice agent --body "**Blocked on #<human-number>:** Complete the human step before resuming this ticket."
    ```
 
    Do not change `Status` or `Class`. Do not close either issue; Nate closes the
@@ -249,15 +210,15 @@ If you discover one:
    dependency, and blocked comment:
 
    ```bash
-   python3 /Users/nateprich/.claude/command-center/funnel.py release <current-number>
-   python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent codex --run <id> --outcome errored --note "stopped: human step filed as #<human-number>; ticket blocked; no PR opened"
+   python3 /Users/nateprich/.claude/command-center-run/funnel.py release <current-number>
+   python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent codex --run <id> --outcome skipped-human-step --note "stopped: human step filed as #<human-number>; ticket blocked; no PR opened"
    ```
 
-   This is the deliberate stop path. The `errored` outcome records that the
-   assigned engineering ticket was not completed; it does not authorize a
+   This is the deliberate stop path. The `skipped-human-step` outcome records
+   that the run paused for a required human action; it does not authorize a
    plausible artefact to merge.
 
-## 7. Open a pull request
+## 4. Open a pull request
 
 Say what you did, what you deliberately did not do, and anything you are unsure
 about. It will be reviewed against `plan.md`, so if you departed from the plan,
@@ -265,11 +226,26 @@ say so plainly — an unflagged departure fails review and wastes another run.
 
 Do not merge it.
 
-## 8. Finish, always
+## Capture observed defects before finishing
+
+When this run observes a defect (broken behaviour, a failing command, or a
+misbehaving run — evidence, not speculation), record it before finishing with
+`funnel capture`. Put the observed evidence in the note, choose its class at
+capture using `skills/shape`'s "Class it when you file it" rule, and say why.
+Agents class their own captures, never his existing issues.
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py release <issue-number>
-python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent codex --run <id> --outcome done --note "PR #<n>"
+python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --origin agent --class <Broken|Maintenance|Improve|New|Replace> --note "<observed evidence; say why you chose this class, and say plainly when you are unsure>"
+```
+
+This is the sanctioned exception to the review rule to act only on the PR you were
+given: capture records the observed defect; it does not act on the thing observed.
+
+## 5. Finish, always
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py release <issue-number>
+python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent codex --run <id> --outcome done --note "PR #<n>"
 ```
 
 If the ticket named a prerequisite that has not landed and the result is **no
@@ -277,7 +253,7 @@ change made**, finish with `--outcome skipped-blocked` and a note. When the run
 declined more than one candidate, the note must name each ref, for example:
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/heartbeat.py finish --agent codex --run <id> --outcome skipped-blocked --note "declined <ref-1>; declined <ref-2>; declined <ref-3>"
+python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent codex --run <id> --outcome skipped-blocked --note "declined <ref-1>; declined <ref-2>; declined <ref-3>"
 ```
 
 This is an honest decline, not an error.

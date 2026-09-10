@@ -35,12 +35,15 @@ about its length.
 ## Capturing a new one
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py capture "<title>" --note "<anything worth keeping>"
+python3 /Users/nateprich/.claude/command-center/funnel.py capture "<title>" --origin nate-relayed --note "<anything worth keeping>"
 ```
 
 Capture is cheap and is meant to be. Write down what he actually said rather than
 a tidied version — the raw phrasing is often the part that reminds him what he
 meant.
+
+`--origin` is required. Use `nate-relayed` when Nate raised the idea and the agent
+is recording it in its own words; use `agent` when the agent observed it itself.
 
 Capture always applies `needs-shaping`. Every idea needs shaping, so the label is true
 of all of them; Nate keeps it because it is what makes an idea recognisable when he is
@@ -53,13 +56,20 @@ _(Confirmed by Nate 2026-09-07 — "I want you to class these yourself when you
 create them", replacing the 2026-09-05 rule that `Broken` was settable at entry
 by him alone.)_
 
-Class the item when you file it, using the ladder's own option names — `Broken`,
-`Maintenance`, `Improve`, `New`, `Replace`. Say in the capture note why you chose
-it, and say so plainly when you are unsure rather than guessing confidently; he
+Class the item when you file it, using the ladder's own option names — `Investigate`,
+`Broken`, `Maintenance`, `Improve`, `New`, `Replace`. Say in the capture note why you
+chose it, and say so plainly when you are unsure rather than guessing confidently; he
 overrides freely and a stated doubt is cheaper to correct than a confident error.
 `funnel.py` has no `class` command; use `SET_FIELD` with `CLASS_FIELD_ID` the way
 `cmd_reject` does, and record who decided it in a comment — your own name now,
 not his.
+
+Use `Investigate` when the captured question is whether an observed defect exists, or
+what the observed behaviour actually means, and the deliverable is evidence that answers
+that question. It is not a synonym for an uncertain implementation: once a defect is
+established, the investigation run files the resulting work as sub-issue tickets under
+the investigation project before the question closes. If there is no defect to fix, the
+evidence is recorded and the project uses the existing `accept --no-tickets` ending.
 
 **Still his:** the class on anything *he* raises, and any reclassification of
 something already filed. Propose, do not set.
@@ -89,16 +99,29 @@ something precedent already settles spends his attention on nothing.
 So: **shape what precedent covers, and never invent a decision that is his.**
 
 Before applying the decision lists below, use the
-[capability boundary in `AGENTS.md`](../../AGENTS.md#capability-boundary) as a
-closed-world test: does the plan require anything outside what an agent can reach?
-The access cases named there are examples, not an exhaustive checklist; an unnamed
-capability gap still counts.
+[capability boundary](../capability-boundary.md) as a closed-world test: does the
+plan require anything outside what an agent can reach? Its three outcomes distinguish
+work any agent can do, work only Claude Code can do in its local environment, and
+work no agent can do. The named access cases are examples, not an exhaustive
+checklist; an unnamed capability gap still counts.
 
-Decide from precedent, and cite where it comes from:
+The plan's decision record has three separate sections. Keep these names stable:
 
-- anything `plan.md` or `AGENTS.md` already rules on
-- conventions a sibling project established — deployment shape, file layout, testing
-- technical choices with an obvious answer given those conventions
+- **Decided from precedent** — cite a written source for anything `plan.md` or
+  `AGENTS.md` already rules on, a sibling project's established convention, or a
+  technical choice with an obvious answer given those conventions.
+- **Decided by the agent** — record the agent's own engineering judgement when
+  precedent does not settle a technical choice. Each entry must include its reasoning
+  and the alternative it rejected, in the same shape as the plan's `Rejected` section.
+  A bare line such as `decided: SQLite` is not a decision record.
+- **Needs Nate** (also written **Needs you** in existing plans) — record the questions
+  that only Nate may answer. This section must be empty for a plan to self-approve;
+  use the stable heading spelling rather than inventing a synonym.
+
+The middle section exists for the #31 anti-laundering principle one stage earlier:
+the agent's own judgement must be marked as its own, never folded into the precedent
+list where it would acquire authority it does not have. Nate can reverse a decision he
+can see was made on his behalf; he cannot do that when it is disguised as a citation.
 
 Leave to Nate, and say so explicitly rather than guessing:
 
@@ -112,10 +135,10 @@ Leave to Nate, and say so explicitly rather than guessing:
 - anything where the plan would encode a preference rather than a deduction
 
 The plan must **separate the decision record from the open-question record**. "Decided
-from precedent (source)" and "Needs you" are different sections, and the latter is what
-he actually reads at the Shaped gate. If the plan also has a "Decided by the agent"
-section, keep that separate too; it records the agent's judgement and reasoning rather
-than laundering it into precedent.
+from precedent", "Decided by the agent", and "Needs Nate" (or the existing "Needs you")
+are different sections; the latter is what he actually reads at the Shaped gate. Do not
+merge either decision section into the other or use the decision headings for open
+questions.
 
 "Needs you" (or the existing "Needs Nate" spelling) is **not** answered by an empty
 section. Write one explicit answer under each category, even when the answer is that
@@ -168,6 +191,30 @@ What the grilling has to produce, because the next stages depend on it:
 - **What is still undecided.** Naming an open question is a result. Inventing an
   answer to it is a defect that gets implemented.
 
+### Record the overlap outcome
+
+Every plan must carry an `## Overlap check` section. It is the plan's recorded
+outcome for the advisory scan performed when `funnel shaped` writes the plan:
+
+```text
+## Overlap check
+
+Checked: #27, #89, and #97 (the other open plans considered)
+
+Candidates:
+- #27 and #89 both touch `skills/shape/SKILL.md`
+
+Conclusion:
+- #27 and #89 describe the same capability axis; keep one mechanism and narrow
+  the plan accordingly.
+```
+
+Copy each candidate line exactly as printed, then record what it means for this
+plan. If there are no candidates, write `Candidates: none found` and still name
+the other plans checked; never omit the section. The conclusion may keep the plan
+as written, narrow it, or reuse an existing mechanism. This is an advisory record,
+not a dependency or a gate: do not block the plan or invent a plan-level graph.
+
 ## Recording the plan
 
 Write the plan to a file, then:
@@ -176,20 +223,25 @@ Write the plan to a file, then:
 python3 /Users/nateprich/.claude/command-center/funnel.py shaped <issue> --plan <file>
 ```
 
-That writes the plan into the issue body, moves the item to `Shaped`, and clears
-`needs-shaping`. The plan lives in the issue body through Ideas and Shaped; it
-only becomes a repo's own `plan.md` at the Ready gate, if the work earns a repo.
+That writes the plan into the issue body, clears `needs-shaping`, and advances
+the item to `Ready` only when a present `## Needs you` section explicitly says
+that nothing is open. The shared command fails closed: a plan with an open
+question or no `## Needs you` section stays at `Shaped`, and the output says why.
+The plan lives in the issue body through Ideas and Shaped; it only becomes a
+repo's own `plan.md` at the Ready gate, if the work earns a repo.
 
 **Moving to `Shaped` is not approval.** It records that a plan now exists. The
-next gate — *is the plan good?* — is Nate's, and he answers it by moving the item
-to `Ready`. Say that plainly at the end rather than implying the idea is now
-greenlit.
+funnel may move an all-clear plan to `Ready` on that narrow, fail-closed
+condition, but an agent may never set `Ready` directly or use it to bypass an
+open question. A plan held at `Shaped` waits on Nate's *is the plan good?* gate;
+say that plainly rather than implying the idea is greenlit.
 
 ## Do not
 
-- **Do not set `Ready`.** That is his gate, and the breakdown routine treats
-  `Ready` as his approval to create tickets. Setting it yourself starts work he
-  never authorised.
+- **Do not set `Ready` directly.** `funnel shaped` may write it only when the
+  shared check finds a present `## Needs you` section that explicitly declares
+  nothing open. An agent must never use that path to bypass an open question;
+  plans that fail the check stay at `Shaped` for Nate.
 - **Do not set a `Class` on anything *he* raised, and do not reclassify
   something already filed.** Propose it instead. Setting `Class` on your own
   captures is now expected — see "Class it when you file it" above.

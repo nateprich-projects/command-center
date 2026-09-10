@@ -18,6 +18,7 @@ from funnel import (  # noqa: E402
     Item,
     effective_class,
     awaiting_decision,
+    awaiting_breakdown,
     gate_question,
     ladder_index,
     lock_holder,
@@ -58,6 +59,21 @@ def item(number, status=None, klass=None, days=1.0, **kw) -> Item:
     kw.setdefault("state", "OPEN")
     return Item(
         number=number, status=status, klass=klass, status_since=at(days), **kw
+    )
+
+
+def repo_project(repo, number, status="Building", klass="New") -> Item:
+    return Item(
+        repo=repo, number=number, title="project {}".format(number), url="",
+        state="OPEN", status=status, klass=klass, status_since=at(1),
+        children_total=1,
+    )
+
+
+def repo_ticket(repo, number, parent) -> Item:
+    return Item(
+        repo=repo, number=number, title="ticket {}".format(number), url="",
+        state="OPEN", parent="{}#{}".format(repo, parent),
     )
 
 
@@ -102,6 +118,26 @@ def test_new_replace_and_unset_class_still_wait_for_acceptance():
         finished = project(number, "Building", klass, children=1, done=1)
 
         assert gate_question(finished) == "Accept it?"
+
+
+def test_drift_is_reported_without_changing_the_building_gate():
+    drifted = project(1, "Building", "New", children=2, done=2)
+    facts = funnel.DriftFacts(
+        ready_at=NOW - timedelta(days=2),
+        plan_edit_times=(NOW - timedelta(days=1),),
+        review_verdicts=({"verdict": "rejected"},),
+        regression_pr_numbers=(20,),
+        building_at=NOW - timedelta(hours=2),
+        ticket_created_at=(NOW - timedelta(hours=1),),
+    )
+
+    assert funnel.drift_since_approval(drifted, facts) == list(
+        funnel.DRIFT_SIGNAL_NAMES
+    )
+    assert gate_question(drifted) == "Accept it?"
+    assert gate_question(
+        project(2, "Building", "Broken", children=2, done=2)
+    ) is None
 
 
 def test_building_with_no_children_does_not_count_as_complete():
@@ -172,10 +208,41 @@ def test_broken_outranks_older_work_at_the_same_gate():
     assert [i.number for i in awaiting_decision(items)] == [2, 1]
 
 
+def test_pinned_work_outranks_unpinned_work_at_the_same_gate():
+    items = [
+        project(1, "Shaped", "Improve", days=30),
+        project(2, "Shaped", "Improve", days=1, pinned=True),
+    ]
+    assert [i.number for i in awaiting_decision(items)] == [2, 1]
+
+
+def test_broken_work_outranks_pinned_work_at_the_same_gate():
+    items = [
+        project(1, "Shaped", "Improve", days=30, pinned=True),
+        project(2, "Shaped", "Broken", days=1),
+    ]
+    assert [i.number for i in awaiting_decision(items)] == [2, 1]
+
+
+def test_pinned_work_does_not_cross_decision_gates():
+    items = [
+        project(1, "Shaped", "Improve", days=30, pinned=True),
+        project(2, "Building", "New", children=1, done=1, days=1),
+    ]
+    assert [i.number for i in awaiting_decision(items)] == [2, 1]
+
+
 def test_ticket_inherits_broken_for_decision_ordering():
     parent = project(1, "Ideas", "Broken")
     child = item(2, "Shaped", None, days=1, parent=parent.ref)
     older = project(3, "Shaped", "New", days=30)
+    assert [i.number for i in awaiting_decision([parent, child, older])] == [2, 3]
+
+
+def test_ticket_inherits_investigate_for_decision_ordering():
+    parent = project(1, "Ideas", "Investigate")
+    child = item(2, "Shaped", None, days=1, parent=parent.ref)
+    older = project(3, "Shaped", "Broken", days=30)
     assert [i.number for i in awaiting_decision([parent, child, older])] == [2, 3]
 
 
@@ -195,6 +262,25 @@ def test_a_blocked_ticket_asks_only_whether_to_unblock():
     blocked = ticket(1, 9, labels=["blocked"])
 
     assert gate_question(blocked) == "Unblock?"
+
+
+def test_a_blocked_ticket_with_a_breakdown_question_still_asks_to_unblock():
+    blocked = ticket(
+        1, 9, labels=["blocked"], needs_decision="Where should this live?"
+    )
+
+    assert gate_question(blocked) == "Unblock?"
+
+
+def test_a_ready_project_with_a_breakdown_question_leaves_breakdown_queue():
+    blocked = project(
+        1, "Ready", "New", children=0, labels=["blocked"],
+        needs_decision="Where should this connector live?",
+    )
+
+    assert awaiting_breakdown([blocked]) == []
+    assert awaiting_decision([blocked]) == [blocked]
+    assert gate_question(blocked) == "Answer the breakdown's question?"
 
 
 def test_blocked_ticket_without_status_starts_when_the_label_is_applied():
@@ -247,14 +333,25 @@ def test_unset_class_sorts_last_and_never_preempts():
 
 
 def test_ladder_is_in_the_documented_order():
-    ranks = [ladder_index(c) for c in ["Broken", "Maintenance", "Improve", "New", "Replace"]]
-    assert ranks == sorted(ranks) and len(set(ranks)) == 5
+    ranks = [ladder_index(c) for c in [
+        "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"
+    ]]
+    assert ranks == sorted(ranks) and len(set(ranks)) == 6
+
+
+def test_investigate_is_first_without_gaining_preemption_or_self_approval():
+    assert ladder_index("Investigate") == 0
+    assert funnel.PREEMPTING_CLASSES == frozenset({"Broken", "Maintenance"})
+    assert funnel.SELF_APPROVABLE_CLASSES == frozenset(
+        {"Broken", "Maintenance", "Improve"}
+    )
 
 
 def test_anything_past_ideas_must_carry_a_class():
     assert needs_class(item(1, "Shaped", None))
     assert needs_class(item(2, "Ready", None))
     assert needs_class(item(3, "Building", None))
+    assert not needs_class(item(4, "Building", "Investigate"))
 
 
 def test_a_ticket_is_exempt_because_it_inherits():
@@ -290,9 +387,35 @@ def test_ideas_done_and_parked_are_exempt_from_class():
 def test_ladder_orders_what_to_start():
     items = []
     for n, klass in ((1, "Replace"), (2, "Broken"), (3, "New"), (4, "Maintenance"),
-                     (5, "Improve")):
+                     (5, "Improve"), (6, "Investigate")):
         items += [project(n, "Building", klass), ticket(10 + n, n)]
-    assert [i.number for i in startable(items)] == [12, 14, 15, 13, 11]
+    # Finite Broken/Maintenance work preempts in-flight work; Investigate is
+    # first among the non-preempting classes.
+    assert [i.number for i in startable(items)] == [12, 14, 16, 15, 13, 11]
+
+
+def test_an_investigate_ticket_is_startable_without_preempting_broken_work():
+    investigate_parent = project(1, "Building", "Investigate")
+    investigate_ticket = ticket(2, 1)
+    broken_parent = project(3, "Building", "Broken")
+    broken_ticket = ticket(4, 3)
+
+    assert [i.number for i in startable([
+        broken_parent, broken_ticket, investigate_parent, investigate_ticket,
+    ])] == [4, 2]
+
+
+def test_pins_do_not_change_codex_startable_output():
+    unpinned = [
+        project(1, "Building", "New"), ticket(2, 1),
+        project(3, "Building", "Broken"), ticket(4, 3),
+    ]
+    pinned = [
+        project(1, "Building", "New", pinned=True), ticket(2, 1),
+        project(3, "Building", "Broken", pinned=True), ticket(4, 3),
+    ]
+
+    assert startable(unpinned) == startable(pinned)
 
 
 def test_in_flight_work_finishes_before_anything_new_starts():
@@ -310,6 +433,61 @@ def test_in_flight_work_finishes_before_anything_new_starts():
     assert order == [4, 2]  # ladder first: New outranks Replace
 
 
+def test_a_ready_broken_ticket_preempts_in_flight_improve_work():
+    """plan.md: "Broken and Maintenance preempt in-flight work — only classes
+    that are finite may preempt." Nate, 2026-09-09: broken items in Ready move
+    past improvement items in Building (#435)."""
+    rows = [project(1, "Building", "Improve", days=30), ticket(2, 1, days=30),
+            project(3, "Ready", "Broken", days=1), ticket(4, 3, days=1)]
+    assert [i.number for i in startable(rows)] == [4, 2]
+
+
+def test_in_flight_broken_work_still_finishes_before_a_ready_broken_start():
+    """Among the finite classes, commitment still comes first."""
+    rows = [project(1, "Building", "Broken", days=1), ticket(2, 1, days=1),
+            project(3, "Ready", "Broken", days=30), ticket(4, 3, days=30)]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
+def test_a_ready_improve_ticket_still_waits_behind_in_flight_improve_work():
+    """plan.md's rejection stands: an unbounded class never preempts."""
+    rows = [project(1, "Building", "Improve", days=1), ticket(2, 1, days=1),
+            project(3, "Ready", "Improve", days=30), ticket(4, 3, days=30)]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
+def test_maintenance_preempts_in_flight_ranking_like_broken():
+    rows = [project(1, "Building", "New"), ticket(2, 1),
+            project(3, "Ready", "Maintenance"), ticket(4, 3)]
+    assert [i.number for i in startable(rows)] == [4, 2]
+
+
+def test_new_never_preempts_in_flight_work():
+    rows = [project(1, "Building", "Replace"), ticket(2, 1),
+            project(3, "Ready", "New"), ticket(4, 3)]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
+def test_a_blocker_of_a_broken_ticket_preempts_with_it():
+    """The descendants rule carries preemption to whatever a Broken fix waits on."""
+    rows = [project(1, "Building", "Improve", days=30), ticket(2, 1, days=30),
+            project(3, "Ready", "Broken"), ticket(4, 3),
+            project(5, "Ready", "New"), ticket(6, 5)]
+    rows[3].open_blockers = [rows[5].ref]          # #4 (Broken) is blocked by #6 (New)
+    order = [i.number for i in startable(rows)]
+    assert order.index(6) < order.index(2)
+
+
+def test_a_class_above_broken_on_the_ladder_does_not_preempt_by_position(monkeypatch):
+    """Preemption is granted by name (plan.md: only finite classes), not by
+    where a class sits on the ladder — so #130 landing Investigate first does
+    not widen it unless Investigate is added to PREEMPTING_CLASSES."""
+    monkeypatch.setattr(funnel, "LADDER", ["Investigate"] + funnel.LADDER)
+    rows = [project(1, "Building", "Improve"), ticket(2, 1),
+            project(3, "Ready", "Investigate"), ticket(4, 3)]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
 def test_tickets_inherit_their_parents_class():
     """The ladder ranks projects, not individual tickets."""
     broken_parent = project(1, "Building", "Broken")
@@ -325,11 +503,58 @@ def test_a_parent_is_not_itself_a_startable_ticket():
     assert [i.number for i in startable([parent])] == []
 
 
-def test_ready_is_not_startable_until_the_parent_is_building():
-    """Ready means broken into issues; only Building exposes tickets to Codex."""
-    assert startable([project(1, "Ready", "New"), ticket(2, 1)]) == []
+def test_ready_and_building_parents_are_both_startable():
+    """plan.md: "Codex draws tickets from any `Ready` or `Building` parent".
+
+    This asserted the opposite until #343. That assertion arrived in #287, the
+    same commit that deleted the `start` gate — the only writer of `Building`.
+    Requiring a stage while removing its sole producer left every `Ready`
+    project unstartable and its accept gate unreachable, and the test passed
+    because it exercised the half that survived.
+
+    There is no coherent reading in which `Ready` stays unstartable: a claim
+    cannot promote a ticket nothing will hand out, and nothing else writes the
+    stage. `Building` is the record that work began, written by `cmd_claim`.
+    """
+    assert [i.number for i in startable(
+        [project(1, "Ready", "New"), ticket(2, 1)])] == [2]
     assert [i.number for i in startable(
         [project(1, "Building", "New"), ticket(2, 1)])] == [2]
+
+
+def test_startable_withholds_only_repos_missing_blocking_readiness():
+    no_ci = "owner/no-ci"
+    advisory = "owner/advisory"
+    no_topic = "owner/no-topic"
+    rows = [
+        repo_project(no_ci, 1), repo_ticket(no_ci, 2, 1),
+        repo_project(advisory, 3), repo_ticket(advisory, 4, 3),
+        repo_project(no_topic, 5), repo_ticket(no_topic, 6, 5),
+    ]
+    readiness = {
+        no_ci: funnel.MemberRepoReadiness(
+            no_ci, topic=True, ci_workflow=False,
+            stock_labels=("bug",), dependabot=False,
+        ),
+        advisory: funnel.MemberRepoReadiness(
+            advisory, topic=True, ci_workflow=True,
+            stock_labels=("bug",), dependabot=False,
+        ),
+        no_topic: funnel.MemberRepoReadiness(
+            no_topic, topic=False, ci_workflow=True,
+            stock_labels=(), dependabot=True,
+        ),
+    }
+
+    assert [candidate.ref for candidate in startable(
+        rows, repo_readiness=readiness
+    )] == ["owner/advisory#4"]
+    assert funnel.readiness_blockers(rows, repo_readiness=readiness) == [
+        {"ref": "owner/no-ci#2", "repo": no_ci,
+         "reasons": ["no CI workflow"]},
+        {"ref": "owner/no-topic#6", "repo": no_topic,
+         "reasons": ["missing command-center topic"]},
+    ]
 
 
 def test_shaped_work_is_not_startable():
@@ -341,6 +566,45 @@ def test_blocked_work_is_not_startable_at_either_level():
     assert startable([project(1, "Building", "New"), ticket(2, 1, labels=["blocked"])]) == []
     parent = project(3, "Building", "New", labels=["blocked"])
     assert startable([parent, ticket(4, 3)]) == []
+
+
+def test_a_machine_local_ticket_is_startable_by_claude_only():
+    rows = [
+        project(1, "Building", "New"),
+        ticket(
+            2, 1,
+            body="Human step: {}".format(funnel.MACHINE_LOCAL_REASON),
+        ),
+    ]
+
+    assert startable(rows, agent="codex") == []
+    assert [candidate.number for candidate in startable(
+        rows, agent="claude"
+    )] == [2]
+
+
+def test_a_human_step_ticket_is_not_startable_by_any_agent():
+    rows = [
+        project(1, "Building", "New"),
+        ticket(2, 1, body="Human step: entering a credential"),
+    ]
+
+    assert startable(rows, agent="codex") == []
+    assert startable(rows, agent="claude") == []
+
+
+def test_an_unmarked_ticket_is_startable_by_both_agents():
+    rows = [
+        project(1, "Building", "New"),
+        ticket(2, 1, body="Enter a value supplied through the environment."),
+    ]
+
+    assert [candidate.number for candidate in startable(
+        rows, agent="codex"
+    )] == [2]
+    assert [candidate.number for candidate in startable(
+        rows, agent="claude"
+    )] == [2]
 
 
 def test_a_ticket_with_an_open_native_blocker_is_not_startable():
@@ -516,6 +780,11 @@ def test_maintenance_does_not_preempt_the_limit():
     assert next_ticket(rows, NOW) is None
 
 
+def test_investigate_does_not_preempt_the_limit():
+    rows = _at_limit([project(3, "Building", "Investigate"), ticket(4, 3)])
+    assert next_ticket(rows, NOW) is None
+
+
 def test_broken_does_not_stack_on_broken_work_already_running():
     """Preemption is for getting a fix moving, not for piling fixes on fixes."""
     rows = [project(1, "Building", "Broken"),
@@ -558,6 +827,53 @@ def test_next_excludes_declined_refs_without_changing_queue_order():
     ).number == 6
 
 
+def test_next_releases_the_claim_held_on_a_declined_ref(monkeypatch, capsys):
+    """A declined ticket's claim is released by the decline itself (#395)."""
+    released = []
+    monkeypatch.setattr(funnel, "write_lock",
+                        lambda item, value: released.append((item.ref, value)))
+    rows = [
+        project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(60)),
+        project(3, "Building", "New"), ticket(4, 3),
+    ]
+
+    assert funnel.cmd_next(rows, NOW, excluded={rows[1].ref}) == 0
+
+    assert released == [(rows[1].ref, "")]
+    assert rows[1].in_motion_since is None
+    assert "released {} (declined)".format(rows[1].ref) in capsys.readouterr().err
+    assert funnel.in_motion(rows, NOW) == []
+
+
+def test_next_excludes_a_declined_ticket_given_as_a_bare_number(monkeypatch, capsys):
+    """#436: the routine may pass the number it copied; it must still exclude."""
+    released = []
+    monkeypatch.setattr(funnel, "write_lock",
+                        lambda item, value: released.append((item.ref, value)))
+    rows = [
+        project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(60)),
+        project(3, "Building", "New"), ticket(4, 3),
+    ]
+
+    assert funnel.cmd_next(rows, NOW, excluded={"2"}) == 0
+
+    assert '"ref": "nateprich/beta#4"' in capsys.readouterr().out
+    assert released == [(rows[1].ref, "")]
+
+
+def test_next_leaves_an_unclaimed_declined_ref_alone(monkeypatch, capsys):
+    released = []
+    monkeypatch.setattr(funnel, "write_lock",
+                        lambda item, value: released.append((item.ref, value)))
+    rows = [project(1, "Building", "New"), ticket(2, 1),
+            project(3, "Building", "New"), ticket(4, 3)]
+
+    assert funnel.cmd_next(rows, NOW, excluded={rows[1].ref}) == 0
+
+    assert released == []
+    capsys.readouterr()
+
+
 def test_next_returns_nothing_when_every_candidate_is_excluded():
     rows = [
         project(1, "Building", "New"), ticket(2, 1),
@@ -575,6 +891,16 @@ def test_next_cli_accepts_repeatable_not_filters(monkeypatch, capsys):
     ]
     monkeypatch.setattr(funnel, "load_items", lambda: rows)
     monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
+    monkeypatch.setattr(
+        funnel,
+        "repo_readiness_for_items",
+        lambda items: {
+            "nateprich/beta": funnel.MemberRepoReadiness(
+                "nateprich/beta", topic=True, ci_workflow=True,
+                stock_labels=(), dependabot=True,
+            ),
+        },
+    )
 
     assert funnel.main([
         "next", "--not", rows[1].ref, "--not", rows[3].ref,
@@ -582,6 +908,38 @@ def test_next_cli_accepts_repeatable_not_filters(monkeypatch, capsys):
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ref"] == rows[5].ref
+
+
+def test_next_cli_filters_machine_local_work_by_requesting_agent(
+    monkeypatch, capsys
+):
+    rows = [
+        project(1, "Building", "New"),
+        ticket(
+            2, 1,
+            body="Human step: {}".format(funnel.MACHINE_LOCAL_REASON),
+        ),
+    ]
+    monkeypatch.setattr(funnel, "load_items", lambda: rows)
+    monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
+    monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: rows[1].body)
+    monkeypatch.setattr(
+        funnel,
+        "repo_readiness_for_items",
+        lambda items: {
+            rows[0].repo: funnel.MemberRepoReadiness(
+                rows[0].repo, topic=True, ci_workflow=True,
+                stock_labels=(), dependabot=True,
+            ),
+        },
+    )
+
+    assert funnel.main(["next", "--agent", "codex"]) == 1
+    capsys.readouterr()
+
+    assert funnel.main(["next", "--agent", "claude"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ref"] == rows[1].ref
 
 
 # -- The portfolio signal ---------------------------------------------------

@@ -38,6 +38,57 @@ that a document could not be read — especially before letting a decision rest 
 try a real browser, and follow the redirect by hand. Downgrading a fact to an inference
 costs more than the second attempt does.
 
+### zcode was retired, and what an empty poll actually costs each pool
+
+**2026-09-09 · heartbeat · measured**
+
+Nate retired zcode on 2026-09-09 (#431) after a day on which it did work in 18 of 93
+runs and was refused on the z.ai pace line in 63 — one job in its last 34 runs — while
+Muse's standard schedule, unmetered, did 98 jobs in 217 runs and had taken over
+standard-tier shaping (#366). Its schedule (every 15 minutes at :08, :23, :38, :53,
+from 2026-09-07 02:11Z) lived only in the zcode app and is recorded in
+`routines/zcode.md`'s header. The routine, its records, `PROVIDERS` and the `zai`
+policy all stay; `heartbeat.RETIRED_AGENTS` is what keeps the watchdog and
+`agent_health` from reading the silence as a run that died.
+
+**The hypothesis it was retired on was wrong, and the measurement is worth keeping.**
+The guess was that zcode starved itself by polling — that each budget check burned the
+tokens that would have let it run. From the readings every run records at start and
+finish (z.ai weekly window, 24h): 62 refused polls cost **+1.0 point in total**, 10
+empty runs cost 0, and 18 working runs cost **+19 points — about 1% of the week each**.
+Polling was free; the jobs were expensive.
+
+The same method on Codex (OpenAI): a working run costs ~0.5% of the weekly window and
+~0.4% of the five-hour one, **an errored run costs the same as a working one**, and a
+refused poll costs ~0 on the weekly window. So for both metered pools the lever is
+jobs per day, not poll cadence. `measured`, from `usage.seven_day.used_percent` deltas;
+readings are account-wide and integer-coarse, so per-run means are reliable and sums
+are not.
+
+### The routines ran a ticket branch's funnel.py for hours, because the canonical checkout is a working tree
+
+**2026-09-09 · Mac mini · measured**
+
+Every routine invoked `/Users/nateprich/.claude/command-center/funnel.py`, and that
+checkout was on `ticket/346` — Nate's own fix for #343, unmerged. So for the hours it
+sat there, every unattended run executed code that *predated* #349 (`funnel begin`'s
+claim path) while `main` had it, and `funnel queue` from that tree reported 52 startable
+tickets that `main` could not have offered. The queue looked healthy *because of* the bug
+#171 describes.
+
+Two consequences worth keeping:
+
+- **A green suite from the wrong checkout is not evidence.** `test_launchd_drift.py` run
+  from that tree passed 10 tests and exercised nothing about the keeper plist, because
+  the tree predated the change that added it to the parametrised set. From the run
+  clone it ran 15 and actually compared the installed file.
+- **The fix had to be applied through the bug.** `funnel merge` refused PR #348 with
+  "project is not Building" — the exact defect #348 fixes — until `funnel claim` was run
+  from the ticket branch's own `funnel.py`, which already carried the promotion.
+
+Resolved by #205: routines now execute `~/.claude/command-center-run`, a read-only clone
+that launchd fast-forwards every five minutes. Nate's tree is his again.
+
 ### A brief's real cost was double the projection, because `gh pr list` was never counted
 
 **2026-09-09 · GitHub GraphQL · measured**

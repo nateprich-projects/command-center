@@ -85,3 +85,50 @@ def test_provider_is_the_pool_not_the_model(tmp_path, monkeypatch):
     """Routing will put more than one model on a pool. The budget is per pool."""
     assert heartbeat.PROVIDERS["codex"] == "openai"
     assert heartbeat.PROVIDERS["claude"] == "anthropic"
+
+
+def test_codex_input_usage_aggregates_turns_and_computes_resend_ratio(
+        tmp_path, monkeypatch):
+    write(tmp_path / "rollout.jsonl", [
+        {"payload": {"usage": {
+            "input_tokens": 100, "cached_input_tokens": 60,
+        }}},
+        {"payload": {"usage": {
+            "input_tokens": 50, "cached_input_tokens": 20,
+        }}},
+    ])
+    point_at(monkeypatch, "codex", tmp_path / "*.jsonl")
+
+    assert heartbeat.input_usage("codex") == {
+        "total_input_tokens": 150,
+        "fresh_input_tokens": 70,
+        "ratio": 150 / 70,
+    }
+
+
+def test_zcode_input_usage_reads_total_and_cached_input(
+        tmp_path, monkeypatch):
+    write(tmp_path / "rollout.jsonl", [
+        {"type": "model_io", "response": {"usage": {
+            "inputTokens": 100, "cacheReadTokens": 60,
+        }}},
+        {"type": "model_io", "response": {"usage": {
+            "inputTokens": 50, "cacheReadTokens": 20,
+        }}},
+    ])
+    point_at(monkeypatch, "zcode", tmp_path / "*.jsonl")
+
+    assert heartbeat.input_usage("zcode") == {
+        "total_input_tokens": 150,
+        "fresh_input_tokens": 70,
+        "ratio": 150 / 70,
+    }
+
+
+def test_missing_input_figure_produces_no_metric(tmp_path, monkeypatch):
+    write(tmp_path / "rollout.jsonl", [{"payload": {"usage": {
+        "input_tokens": 100,
+    }}}])
+    point_at(monkeypatch, "codex", tmp_path / "*.jsonl")
+
+    assert heartbeat.input_usage("codex") is None

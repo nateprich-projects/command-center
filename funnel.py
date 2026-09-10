@@ -2129,6 +2129,84 @@ def _git_ahead_behind(root: pathlib.Path) -> Tuple[int, int]:
         raise OSError("git returned an invalid ahead/behind count") from exc
 
 
+def check_repository_drift(
+    checkout_root: Optional[os.PathLike] = None,
+) -> Check:
+    """Report local repository state that can make the checkout misleading.
+
+    This is deliberately diagnostic and read-only. A dirty tree, a branch
+    other than ``main`` (including detached HEAD), or commits that are not on
+    ``origin/main`` all make it harder to tell which committed code a local
+    command is actually exercising.
+    """
+    root = _path(checkout_root, CHECKOUT_ROOT)
+    try:
+        git_env = os.environ.copy()
+        # `git status` may refresh the index unless optional locks are
+        # disabled. Doctor must not write even that incidental repository
+        # metadata while it is inspecting the checkout.
+        git_env["GIT_OPTIONAL_LOCKS"] = "0"
+        status = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain=v1",
+             "--untracked-files=all"],
+            capture_output=True,
+            text=True,
+            env=git_env,
+        )
+        if status.returncode != 0:
+            detail = (status.stderr or status.stdout or "").strip()
+            raise OSError(detail or "git status exited {}".format(
+                status.returncode))
+        paths = [
+            line[3:] if len(line) >= 3 else line
+            for line in status.stdout.splitlines()
+            if line.strip()
+        ]
+
+        branch = subprocess.run(
+            ["git", "-C", str(root), "symbolic-ref", "--quiet", "--short",
+             "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        if branch.returncode == 0:
+            current_branch = branch.stdout.strip()
+            if not current_branch:
+                raise OSError("git returned an empty branch name")
+        elif branch.returncode == 1:
+            current_branch = None
+        else:
+            detail = (branch.stderr or branch.stdout or "").strip()
+            raise OSError(detail or "git symbolic-ref exited {}".format(
+                branch.returncode))
+
+        ahead, _ = _git_ahead_behind(root)
+    except OSError as exc:
+        return Check(
+            "repository drift", False,
+            "could not inspect {} ({})".format(
+                root, str(exc) or "unknown error"),
+            "",
+        )
+
+    findings: List[str] = []
+    if paths:
+        findings.append("uncommitted changes: {}".format(", ".join(paths)))
+    if current_branch is None:
+        findings.append("detached HEAD (not main)")
+    elif current_branch != "main":
+        findings.append(
+            "current branch is {}, not main".format(current_branch)
+        )
+    if ahead:
+        findings.append(
+            "{} commit(s) on the current branch are not present on "
+            "origin/main".format(ahead)
+        )
+
+    return Check("repository drift", not findings, "\n".join(findings), "")
+
+
 def check_checkout_staleness(
     claude_dir: Optional[os.PathLike] = None,
     checkout_root: Optional[os.PathLike] = None,
@@ -3242,6 +3320,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         check_symlinks(claude_dir=claude_dir, checkout_root=checkout_root),
         check_checkout_staleness(
             claude_dir=claude_dir, checkout_root=checkout_root),
+        check_repository_drift(checkout_root=checkout_root),
         check_settings(claude_dir=claude_dir),
         check_auth_scope(),
         check_project_fields(),

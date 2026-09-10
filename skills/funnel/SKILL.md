@@ -127,6 +127,12 @@ is exactly what he should know before saying yes.
 `funnel approve` / `accept` answer the two gates. They are **dry runs
 unless `--yes` is passed**.
 
+An investigation that records evidence and produces no follow-up tickets uses the
+existing explicit escape hatch: `funnel accept <ref> --no-tickets --yes`. That flag is
+only for work that happened outside the ticket path; it is not a new gate or a way to
+accept a project whose tickets are still open. If an investigation produced tickets,
+wait for the ordinary all-children-closed accept path instead.
+
 **The decision is always his. The typing does not have to be.** Nate authorised agents
 to run both on his explicit instruction (2026-09-05), replacing an earlier rule
 here that no agent may run them at all. He often works these sessions by voice while

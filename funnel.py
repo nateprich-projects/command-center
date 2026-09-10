@@ -188,7 +188,7 @@ WIP_LIMIT = 4
 STAGES = ["Ideas", "Shaped", "Ready", "Building", "Done", "Parked"]
 
 #: The ladder, best-first. Only finite classes may preempt in-flight work.
-LADDER = ["Broken", "Maintenance", "Improve", "New", "Replace"]
+LADDER = ["Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"]
 
 #: The finite classes. `plan.md`: "Broken and Maintenance preempt in-flight
 #: work — and this is only safe because both are finite. The governing rule:

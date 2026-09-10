@@ -27,7 +27,7 @@ preempt.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha 79a4998074472b4b307e97f3a4c0c7f80dde2a1e6834dfc0dd866f84be972cac
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha ab35b8610baed504f9f62f75c5567d92eeb1223f3e01a3679e1420c4c651c986
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and names

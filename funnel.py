@@ -6896,6 +6896,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     do="ticket",
                     work=item_json(ticket, now, {i.ref: i for i in items}),
                 )
+        _bind_run(agent, out)
         print(json.dumps(out, indent=2))
         return 0
 
@@ -6974,8 +6975,38 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         out.update(reserve)
         heartbeat.record_event(agent, out["run"], "skipped-api-reserve",
                                note=out["why"])
+    _bind_run(agent, out)
     print(json.dumps(out, indent=2))
     return 0
+
+
+def _bind_run(agent: str, out: Dict[str, object]) -> None:
+    """Bind the work this run was issued to its start record (#497).
+
+    A finish that names other work is then refused by the heartbeat rather
+    than filed under a run that never issued it. The binding is also printed
+    under ``bound`` so the routine can hand it back on ``finish --work``.
+    Bookkeeping never stops the run: a binding that cannot be written is
+    reported by the heartbeat and the run proceeds with the work.
+    """
+    do = out.get("do")
+    work = out.get("work")
+    run = out.get("run")
+    if do not in ("ticket", "review", "breakdown", "shape") or not run:
+        return
+    if not isinstance(work, dict):
+        return
+    subject = work.get("pr") if do == "review" else work.get("ref")
+    if subject is None:
+        return
+    out["bound"] = {"do": do, "work": str(subject)}
+    try:
+        import heartbeat
+
+        heartbeat.record_binding(agent, str(run), str(do), str(subject))
+    except Exception:
+        # Instrumentation must not gate the thing it instruments.
+        pass
 
 
 def _reserve_verdict(do: object) -> Optional[Dict[str, object]]:

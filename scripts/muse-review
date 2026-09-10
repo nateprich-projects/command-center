@@ -60,12 +60,13 @@ if [[ "$TIER" == "standard" ]]; then
   FLAGS="$FLAGS --breakdown"
 fi
 
-PROMPT="$(awk 'f{print} /^---$/{f=1}' "$ROUTINE" | sed "s/OPENING_FLAGS/$FLAGS/g")"
-if printf '%s' "$PROMPT" | grep -q OPENING_FLAGS; then
+PROMPT_TEMPLATE="$(awk 'f{print} /^---$/{f=1}' "$ROUTINE")"
+PROMPT_TEMPLATE="${PROMPT_TEMPLATE//OPENING_FLAGS/$FLAGS}"
+if printf '%s' "$PROMPT_TEMPLATE" | grep -q OPENING_FLAGS; then
   echo "muse-review: the opening-flags placeholder was not substituted" >&2
   exit 1
 fi
-if [[ "$PROMPT" != *[![:space:]]* ]]; then
+if [[ "$PROMPT_TEMPLATE" != *[![:space:]]* ]]; then
   echo "muse-review: $ROUTINE has no prompt after its --- separator" >&2
   exit 1
 fi
@@ -92,6 +93,72 @@ stop_funnel_session() {
   python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
 }
 trap stop_funnel_session EXIT
+
+# Own the opening poll. Empty polls must not launch a model: `begin` has already
+# recorded the heartbeat and made the gate decision, so a stop can finish the run
+# here without ever invoking `muse exec`. The JSON is also the exact result the
+# model sees for a non-empty poll; it must not have to repeat the claim path.
+BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent muse $FLAGS)"
+begin_status=$?
+if (( begin_status != 0 )); then
+  echo "muse-review: funnel begin failed (exit $begin_status)" >&2
+  exit "$begin_status"
+fi
+
+begin_value() {
+  local key="$1"
+  printf '%s\n' "$BEGIN_JSON" | python3 -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin)[sys.argv[1]]
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if value is None:
+    raise SystemExit(1)
+print(value)
+' "$key"
+}
+
+if ! BEGIN_DO="$(begin_value do)" \
+  || ! BEGIN_GATE="$(begin_value gate)" \
+  || ! BEGIN_RUN="$(begin_value run)"; then
+  echo "muse-review: funnel begin returned invalid JSON" >&2
+  exit 1
+fi
+
+if [[ "$BEGIN_DO" == "stop" ]]; then
+  case "$BEGIN_GATE" in
+    over) STOP_OUTCOME="skipped-over-pace" ;;
+    unknown) STOP_OUTCOME="skipped-usage-unknown" ;;
+    *) STOP_OUTCOME="nothing-to-do" ;;
+  esac
+  if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+      --outcome "$STOP_OUTCOME"; then
+    echo "muse-review: could not finish the stopped run" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+case "$BEGIN_DO" in
+  review|breakdown|shape) ;;
+  *)
+    echo "muse-review: funnel begin returned unknown job '$BEGIN_DO'" >&2
+    exit 1
+    ;;
+esac
+
+PROMPT="${PROMPT_TEMPLATE//BEGIN_JSON/$BEGIN_JSON}"
+if printf '%s' "$PROMPT" | grep -q BEGIN_JSON; then
+  echo "muse-review: the begin-json placeholder was not substituted" >&2
+  exit 1
+fi
+if [[ "$PROMPT" != *[![:space:]]* ]]; then
+  echo "muse-review: $ROUTINE has no prompt after its --- separator" >&2
+  exit 1
+fi
 
 # --model muse-spark-1.3, NOT -contributor. The contributor variant is the CLI
 # default and carries "Your content ... may be used for product improvement".

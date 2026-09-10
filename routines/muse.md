@@ -88,12 +88,21 @@ read-only by instruction and by `--disable-write`. Behave accordingly.
 
 ## 1. Start, and find out whether there is anything to do
 
+The runner has already run the opening command before handing you this prompt:
+
 ```bash
 python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent muse OPENING_FLAGS
 ```
 
-One call: records the heartbeat, checks the gate, and names your work. It always
-prints JSON.
+Its JSON result is inserted below at `BEGIN_JSON`:
+
+```json
+BEGIN_JSON
+```
+
+Do not run `begin` again. Use this exact result to follow the job it already chose;
+if it says `"do": "stop"`, the runner has finished the heartbeat and will not launch
+you.
 
 - `"do": "stop"` — finish with the outcome below and **stop immediately**. Do not
   investigate, do not look around. Most runs end here and that is the design.

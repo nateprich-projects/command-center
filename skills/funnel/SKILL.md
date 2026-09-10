@@ -31,6 +31,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 
 | Field | Meaning |
 |---|---|
+| `generated_at` | UTC timestamp recording when the brief was generated; transport metadata, never surfaced in the voice brief |
 | `total_needing_nate` | How many decisions are waiting |
 | `counts_by_gate` | Open items at each gate. `Ideas` is deliberately excluded — it is unbounded and guilt-free, and counting it turns it into pressure |
 | `items` | The decisions, **already ordered**. Bottom-up: closest to shipping first |

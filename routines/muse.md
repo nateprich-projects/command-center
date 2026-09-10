@@ -224,6 +224,23 @@ follow it.** It carries the sizing standard, the ordering and coverage rules,
 worked examples, and what to do when a plan will not decompose. It exists so the
 fiftieth unattended breakdown is done the same way as the first.
 
+Before declaring a plan's decision undecidable, read the issue's comments for an
+earlier `**Needs a decision:**` header and the answer that followed it. If Nate
+answered it, act on that answer and continue the breakdown; do not ask the same
+question again. If it is still undecidable, post precisely the question with:
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py comment <ref> --voice agent --needs-decision "<the undecided question>"
+```
+
+Create no tickets. Finish with
+`python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent muse --run <id> --outcome done --note "needs decision: <question>"`;
+the note must name the question. The command adds `blocked`, so the project
+leaves `awaiting_breakdown()` and enters Nate's queue as **"Answer the
+breakdown's question?"** with the question visible. After Nate records his
+answer and removes the `blocked` label, it returns to `awaiting_breakdown()` for
+the next run to read the answer before deciding again.
+
 In short: one ticket is one engineer run ending in a PR; split by behaviour rather
 than by layer; every project gets at least one ticket; do not set `Status` or
 `Class` on what you create; and **do not create repositories** — comment and leave

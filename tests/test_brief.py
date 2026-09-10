@@ -160,6 +160,24 @@ def test_prose_dependencies_recognises_each_supported_sentence_shape():
     ]
 
 
+def test_prose_dependencies_reports_unnumbered_sentence_without_native_edge():
+    blocker = _dependency_item(7)
+    unnumbered = _dependency_item(
+        8, body="Depends on the pricing-watch ticket having landed"
+    )
+    with_edge = _dependency_item(
+        9,
+        body="Depends on the pricing-watch ticket having landed",
+        open_blockers=[blocker.ref],
+    )
+
+    assert funnel.prose_dependencies([with_edge, unnumbered, blocker]) == [{
+        "ref": unnumbered.ref,
+        "names": [],
+        "sentence": "Depends on the pricing-watch ticket having landed",
+    }]
+
+
 def test_brief_includes_prose_dependencies_without_counting_them(monkeypatch, capsys):
     blocker = _dependency_item(7)
     ticket = _dependency_item(8, body="Depends on #7")
@@ -172,6 +190,25 @@ def test_brief_includes_prose_dependencies_without_counting_them(monkeypatch, ca
         "ref": ticket.ref,
         "names": [blocker.ref],
         "sentence": "Depends on #7",
+    }]
+    assert brief["total_needing_nate"] == 0
+
+
+def test_brief_includes_unnumbered_prose_dependencies_without_counting_them(
+    monkeypatch, capsys
+):
+    ticket = _dependency_item(
+        8, body="Depends on the pricing-watch ticket having landed"
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([ticket], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["prose_dependencies"] == [{
+        "ref": ticket.ref,
+        "names": [],
+        "sentence": "Depends on the pricing-watch ticket having landed",
     }]
     assert brief["total_needing_nate"] == 0
 

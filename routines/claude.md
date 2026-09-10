@@ -342,5 +342,7 @@ the brief as a record — the note is that record.
 auto-merge bar having failed, which is a different and more serious thing. He
 runs `funnel reject <pr>`, which reopens the ticket, files the regression,
 returns the parent to `Building` with `Class: Broken`, and reports the count.
-**Three in a week and auto-merging stops** until this prompt is fixed. Check
-`rejected_merges.stop_auto_merging` in `funnel brief` before merging anything.
+**Three in a week and auto-merging stops** until this prompt is fixed. Before
+merging anything, run `funnel brief` and require it to succeed, then check
+`rejected_merges.stop_auto_merging`. If the command fails or that gate-feeding
+section is missing/degraded, do not merge: the check is fail-closed.

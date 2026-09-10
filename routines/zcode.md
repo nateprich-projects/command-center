@@ -224,8 +224,10 @@ than stranding it.
 are unsure about, and leave it. An unattended merge you were not confident in is
 exactly the failure that retires this whole arrangement.
 
-**Before merging anything**, check `rejected_merges.stop_auto_merging` in
-`funnel brief`. Three rejected merges in a week means auto-merging stops until
+**Before merging anything**, run `funnel brief` and require it to succeed, then
+check `rejected_merges.stop_auto_merging`. If the command fails or that
+gate-feeding section is missing/degraded, do not merge: the check is
+fail-closed. Three rejected merges in a week means auto-merging stops until
 Nate fixes the review bar.
 
 Do not change `Status` or `Class` on anything. Those are Nate's gates.

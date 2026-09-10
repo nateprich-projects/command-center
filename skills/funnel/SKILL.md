@@ -59,6 +59,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `rejected_merges` | Merges he checked and found broken, over `window_days`. `stop_auto_merging` true means three in a week — auto-merging stops until he fixes the review bar |
 | `closed_with_access_vocabulary` | Projects that closed with access-shaped words in the plan and no human-step ticket. The detective backstop for when every preventive layer missed one |
 | `timings` | Diagnostic elapsed seconds for each brief section, including the shared `ticket_pr_facts` read. Use it to identify the slow section when a brief is close to the session reply budget |
+| `degraded` | Informational sections that exceeded their time budget, with the section name, elapsed time, budget, and reason. A gate-feeding section never appears here: it fails the brief closed instead |
 
 ## How to render it
 
@@ -96,7 +97,7 @@ when he chooses, not a notification and not a request for review.
 Then the gate counts on one line. Then anything unusual, and only if present:
 `prose_dependencies`, `suspected_human_steps`, `unclassed_captures`, `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`,
 `working_tree_touched`,
-`awaiting_breakdown`, `unattended_merges`, `unattended_approvals`, `agent_health`, `resend_ratio`, `rejected_merges`, and
+`awaiting_breakdown`, `unattended_merges`, `unattended_approvals`, `agent_health`, `resend_ratio`, `rejected_merges`, `degraded`, and
 `closed_with_access_vocabulary`. A suspected human step is report-only: do not clear its
 `blocked` label, restate it, or split it while rendering the brief.
 
@@ -104,6 +105,11 @@ Use `timings` diagnostically when a brief is slow: name the largest section in t
 report, but do not treat timing as a queue or gate signal. A session reply timeout
 means the session was busy; the client reports the slow section as unknown when no
 brief response made it back.
+
+When `degraded` is non-empty, say which informational sections exceeded their
+budgets and that the brief is partial. If `brief` exits non-zero, show the error
+and do not use a partial or missing `rejected_merges` value to justify a merge;
+that section is a fail-closed pre-merge gate.
 
 For `unclassed_captures`, show each Idea's origin and make the repair owner clear:
 agent-origin entries are for the shaping agent to class, while Nate-origin and unknown

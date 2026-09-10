@@ -13,8 +13,11 @@ stored or passed by this program.
 from __future__ import annotations
 
 import argparse
+import contextlib
 from collections import namedtuple
+import glob
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -64,7 +67,8 @@ def routine_sha(path: os.PathLike) -> str:
 
 def routine_path(agent: str) -> pathlib.Path:
     """The checked-in routine whose pasted copy identifies itself."""
-    return CHECKOUT_ROOT / "routines" / (agent + ".md")
+    filename = "codex-work.md" if agent == "codex" else agent + ".md"
+    return CHECKOUT_ROOT / "routines" / filename
 
 # One small, shared shape for every doctor check. Later doctor tickets add
 # checks to the fixed list without changing the report contract.
@@ -257,6 +261,15 @@ BLOCK_COMMENT_RE = re.compile(
     + r"(?: on (?P<references>#[0-9]+(?: and #[0-9]+)*))?:\*\*"
 )
 
+#: A breakdown can leave a project waiting on Nate's answer. The header is
+#: deliberately strict and anchored just like the ordinary block header so a
+#: quoted or embedded sentence cannot become a gate question by accident.
+NEEDS_DECISION_PREFIX = "**Needs a decision:**"
+NEEDS_DECISION_RE = re.compile(
+    r"\A" + re.escape(NEEDS_DECISION_PREFIX)
+    + r"[ \t]+(?P<question>.+)", flags=re.DOTALL
+)
+
 #: A satisfied block is recorded before its label is removed. The structured
 #: payload makes a partial failure idempotent: the next run can retry the label
 #: write without posting a second provenance comment for the same block.
@@ -337,6 +350,7 @@ class Item:
     labels: List[str] = field(default_factory=list)
     block_references: List[str] = field(default_factory=list)
     block_reason: Optional[str] = None
+    needs_decision: Optional[str] = None
     unparseable_block_comments: List[str] = field(default_factory=list)
     block_comments_error: Optional[str] = None
     satisfied_block_record: Optional[Dict[str, object]] = None
@@ -522,6 +536,8 @@ def gate_question(item: Item) -> Optional[str]:
         # can be parked; a ticket can only be unblocked.
         if item.block_references:
             return None
+        if item.parent is None and item.needs_decision:
+            return "Answer the breakdown's question?"
         return "Unblock?" if item.parent else "Unblock or park?"
     if item.status == "Building":
         # New work and replacements always stop for acceptance. Upkeep closes
@@ -1165,8 +1181,9 @@ def required_tier(title: str, body: str, failed_before: bool = False) -> str:
 
 
 def startable(items: Sequence[Item],
-              awaiting_review: Optional[Set[str]] = None) -> List[Item]:
-    """Tickets Codex may pick up, best-first.
+              awaiting_review: Optional[Set[str]] = None,
+              agent: str = "codex") -> List[Item]:
+    """Tickets the requesting agent may pick up, best-first.
 
     A ticket is an open issue with no children of its own, whose parent has
     passed the Ready gate. Tickets inherit their parent's Class — the ladder
@@ -1202,12 +1219,22 @@ def startable(items: Sequence[Item],
     }
 
     def eligible(item: Item) -> bool:
+        capability_reason = parse_human_step(item.body or "")
+        machine_local = (
+            capability_reason is not None
+            and capability_reason.casefold() == MACHINE_LOCAL_REASON.casefold()
+        )
         if (
             item.state != "OPEN"
             or item.is_blocked
             or item.open_blockers
             or item.children_total
-            or parse_human_step(item.body or "") is not None
+            # A machine-local marker is the middle capability outcome: Claude
+            # Code may work it, while every other requester must leave it in
+            # the queue. All other parsed markers remain human steps and are
+            # excluded from every agent, as #141 established.
+            or (capability_reason is not None
+                and (not machine_local or agent != "claude"))
         ):
             return False
         if item.ref in awaiting_review:
@@ -1427,6 +1454,20 @@ def parse_block_comment(bodies: Iterable[str]) -> Optional[Tuple[List[str], str]
             references.split(" and ") if references else [],
             body[match.end():].strip(),
         )
+    return None
+
+
+def parse_needs_decision_comment(bodies: Iterable[str]) -> Optional[str]:
+    """Return the newest parseable breakdown question, if one exists."""
+    for body in reversed(list(bodies)):
+        if not isinstance(body, str):
+            continue
+        match = NEEDS_DECISION_RE.match(body)
+        if not match:
+            continue
+        question = _visible_comment(match.group("question")).strip()
+        if question:
+            return question
     return None
 
 
@@ -1667,8 +1708,9 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
 
 def next_ticket(items: Sequence[Item], now: datetime,
                 blocked: Optional[Set[str]] = None,
-                excluded: Optional[Set[str]] = None) -> Optional[Item]:
-    """The single ticket Codex should work, or None.
+                excluded: Optional[Set[str]] = None,
+                agent: str = "codex") -> Optional[Item]:
+    """The single ticket the requesting agent should work, or None.
 
     Returns None when the funnel is at its work-in-progress limit. A Broken
     ticket may start anyway; that is the one sanctioned preemption. `excluded`
@@ -1677,7 +1719,9 @@ def next_ticket(items: Sequence[Item], now: datetime,
     """
     excluded = excluded or frozenset()
     queue = [
-        item for item in startable(items, awaiting_review=blocked)
+        item for item in startable(
+            items, awaiting_review=blocked, agent=agent
+        )
         if item.ref not in excluded
     ]
     if not queue:
@@ -1706,7 +1750,8 @@ def next_ticket(items: Sequence[Item], now: datetime,
 def next_ticket_for_tier(items: Sequence[Item], now: datetime,
                          tier: Optional[str] = None,
                          blocked: Optional[Set[str]] = None,
-                         excluded: Optional[Set[str]] = None) -> Optional[Item]:
+                         excluded: Optional[Set[str]] = None,
+                         agent: str = "codex") -> Optional[Item]:
     """Return the first shared-order ticket belonging to ``tier``.
 
     Tier filtering has to happen by asking ``next_ticket`` repeatedly rather
@@ -1718,7 +1763,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
     excluded = set(excluded or ())
     while True:
         ticket = next_ticket(
-            items, now, blocked=blocked, excluded=excluded
+            items, now, blocked=blocked, excluded=excluded, agent=agent
         )
         if ticket is None or tier is None:
             return ticket
@@ -1948,12 +1993,22 @@ STATUSLINE_COMMAND = "~/.claude/statusline.sh"
 USAGE_CACHE = pathlib.Path.home() / ".claude" / "command-center-usage.json"
 
 # `usage.py:174` uses fifteen minutes to decide whether one gate reading is
-# usable. Doctor answers a different question: has the status line stopped
-# writing altogether? Claude Code refreshes this file repeatedly while open, so
-# one hour (four missed gate intervals) distinguishes a stopped status line from
-# a single stale reading without calling a 20-minute gap a broken install.
-USAGE_CACHE_BROKEN_AFTER = timedelta(hours=1)
-USAGE_CACHE_FIX = "open Claude Code on the Mac mini"
+# usable. Doctor reports the source the gate would choose, so it uses the same
+# freshness boundary before trying the transcript estimate.
+USAGE_CACHE_BROKEN_AFTER = timedelta(minutes=15)
+USAGE_CACHE_FIX = "run a Claude Code session so a transcript exists"
+
+# Keep the fallback's discovery local for the same reason the cache path lives
+# here: doctor must still be able to diagnose an install when usage.py is one of
+# the things that is missing. These mirror usage.py's estimate inputs without
+# making the doctor depend on that module.
+CLAUDE_TRANSCRIPTS = str(
+    pathlib.Path.home() / ".claude" / "projects" / "*" / "*.jsonl"
+)
+CLAUDE_ESTIMATE_FIVE_HOUR = timedelta(hours=5)
+CLAUDE_ESTIMATE_RESET_WEEKDAY = 5  # usage.py: Saturday, local time
+CLAUDE_ESTIMATE_RESET_HOUR = 12
+CLAUDE_ESTIMATE_MODEL = "opus"
 
 # These mirror `heartbeat.py:38` and `heartbeat.py:52`. They are intentionally
 # local constants so doctor still works when heartbeat.py itself is unavailable.
@@ -2340,26 +2395,105 @@ def _mtime_age(path: pathlib.Path, now: float) -> Optional[float]:
         return None
 
 
+def _claude_estimate_reset(now: float) -> float:
+    """Return the local-time weekly reset used by Claude's estimate."""
+    here = datetime.fromtimestamp(now)
+    candidate = here.replace(
+        hour=CLAUDE_ESTIMATE_RESET_HOUR, minute=0, second=0, microsecond=0
+    ) - timedelta(
+        days=(here.weekday() - CLAUDE_ESTIMATE_RESET_WEEKDAY) % 7
+    )
+    if candidate > here:
+        candidate -= timedelta(days=7)
+    return candidate.timestamp()
+
+
+def _latest_claude_estimate(transcript_glob: os.PathLike,
+                            now: float) -> Optional[Tuple[pathlib.Path, float]]:
+    """Find the newest transcript record the Claude estimate can read.
+
+    This is deliberately the small availability slice of
+    ``usage.read_claude_local``. It does not calculate a percentage; doctor only
+    needs to know whether that fallback source exists and how old its newest
+    usable record is.
+    """
+    cutoff = min(
+        _claude_estimate_reset(now),
+        now - CLAUDE_ESTIMATE_FIVE_HOUR.total_seconds(),
+    )
+    newest: Optional[Tuple[float, pathlib.Path]] = None
+
+    for name in glob.glob(os.path.expanduser(str(transcript_glob))):
+        path = pathlib.Path(name)
+        try:
+            with path.open(errors="replace") as stream:
+                for line in stream:
+                    if '"usage"' not in line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    message = record.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    model = str(message.get("model") or "").lower()
+                    if CLAUDE_ESTIMATE_MODEL not in model:
+                        continue
+                    usage = message.get("usage")
+                    tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
+                    if not isinstance(tokens, (int, float)) or isinstance(tokens, bool) or tokens <= 0:
+                        continue
+                    stamp = _timestamp(record.get("timestamp"))
+                    if stamp is None or stamp < cutoff:
+                        continue
+                    if newest is None or stamp > newest[0]:
+                        newest = (stamp, path)
+        except OSError:
+            continue
+
+    if newest is None:
+        return None
+    return newest[1], now - newest[0]
+
+
 def check_usage_cache(cache_path: Optional[os.PathLike] = None,
                       now: Optional[float] = None) -> Check:
-    """Check the Claude usage cache directly, including its writing age.
+    """Report the source the Claude usage gate would use.
 
-    This intentionally does not import usage.py. Its tolerant readers are right
-    for a budget gate but would erase the distinction between a missing file,
-    malformed JSON, and a cache that simply stopped being refreshed.
+    A fresh statusline cache is preferred. When it is absent or too old, the
+    same recent transcript records used by ``usage.read_claude_local`` are the
+    fallback. This intentionally does not import usage.py: doctor must diagnose
+    a broken install even when that module is one of the missing links.
     """
     cache = _path(cache_path, USAGE_CACHE)
     now = time.time() if now is None else now
+
+    def fallback(cache_finding: str) -> Check:
+        estimate = _latest_claude_estimate(CLAUDE_TRANSCRIPTS, now)
+        if estimate is not None:
+            transcript, age = estimate
+            return Check(
+                "usage cache", True,
+                "transcript estimate {} is readable ({})".format(
+                    transcript, _age_text(age)),
+                "",
+            )
+        return Check(
+            "usage cache", False,
+            "{}; transcript estimate is unavailable".format(cache_finding),
+            USAGE_CACHE_FIX,
+        )
 
     try:
         exists = cache.exists()
     except OSError:
         exists = False
     if not exists:
-        return Check(
-            "usage cache", False,
-            "{} is missing (age unavailable)".format(cache),
-            USAGE_CACHE_FIX,
+        return fallback(
+            "{} is missing (age unavailable)".format(cache)
         )
 
     file_age = _mtime_age(cache, now)
@@ -2367,61 +2501,48 @@ def check_usage_cache(cache_path: Optional[os.PathLike] = None,
         with cache.open(encoding="utf-8") as stream:
             data = json.load(stream)
     except FileNotFoundError:
-        return Check(
-            "usage cache", False,
-            "{} is missing (age unavailable)".format(cache),
-            USAGE_CACHE_FIX,
+        return fallback(
+            "{} is missing (age unavailable)".format(cache)
         )
     except (OSError, UnicodeError) as exc:
-        return Check(
-            "usage cache", False,
+        return fallback(
             "{} is present but cannot be read ({}; {})".format(
-                cache, exc, _age_text(file_age)),
-            USAGE_CACHE_FIX,
+                cache, exc, _age_text(file_age))
         )
     except ValueError:
-        return Check(
-            "usage cache", False,
+        return fallback(
             "{} is present but unparseable ({})".format(
-                cache, _age_text(file_age)),
-            USAGE_CACHE_FIX,
+                cache, _age_text(file_age))
         )
 
     if not isinstance(data, dict):
-        return Check(
-            "usage cache", False,
+        return fallback(
             "{} is present but unparseable (top-level JSON is not an object; {})".format(
-                cache, _age_text(file_age)),
-            USAGE_CACHE_FIX,
+                cache, _age_text(file_age))
         )
 
     captured_at = _timestamp(data.get("captured_at"))
     if captured_at is None:
-        return Check(
-            "usage cache", False,
+        return fallback(
             "{} is present but unparseable (captured_at is missing or invalid; {})".format(
-                cache, _age_text(file_age)),
-            USAGE_CACHE_FIX,
+                cache, _age_text(file_age))
         )
 
     age = now - captured_at
-    if age < 0:
-        return Check(
-            "usage cache", False,
+    if age < -60:
+        return fallback(
             "{} is present but its timestamp is from the future ({})".format(
-                cache, _age_text(age)),
-            USAGE_CACHE_FIX,
+                cache, _age_text(age))
         )
-    if age >= USAGE_CACHE_BROKEN_AFTER.total_seconds():
-        return Check(
-            "usage cache", False,
-            "{} is present but stale ({}; health threshold is 1 hour)".format(
-                cache, _age_text(age)),
-            USAGE_CACHE_FIX,
+    if age > USAGE_CACHE_BROKEN_AFTER.total_seconds():
+        return fallback(
+            "{} is present but stale ({}; freshness threshold is 15 minutes)".format(
+                cache, _age_text(age))
         )
     return Check(
         "usage cache", True,
-        "{} is present and fresh ({})".format(cache, _age_text(age)),
+        "statusline cache {} is present and fresh ({})".format(
+            cache, _age_text(age)),
         "",
     )
 
@@ -2630,7 +2751,7 @@ def gh_branch_exists() -> bool:
 
 
 def _spool_files(spool_dir: pathlib.Path) -> List[pathlib.Path]:
-    """List pending spool files without importing heartbeat.py."""
+    """List spool files without importing heartbeat.py."""
     try:
         if not spool_dir.exists():
             return []
@@ -2644,6 +2765,31 @@ def _spool_files(spool_dir: pathlib.Path) -> List[pathlib.Path]:
         return []
 
 
+def _spool_pending_records(files: Iterable[pathlib.Path]) -> List[object]:
+    """Read non-empty spool lines without importing heartbeat.py.
+
+    A drained spool file remains on disk as a zero-byte file. Count records
+    from its non-empty lines instead of treating the file itself as pending.
+    Keep the raw decoded values so a malformed line is still visible as a
+    pending record, while a well-formed heartbeat record can supply its own
+    timestamp for the age diagnostic.
+    """
+    records: List[object] = []
+    for path in files:
+        try:
+            with path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except ValueError:
+                        records.append(None)
+        except (OSError, UnicodeError) as exc:
+            raise OSError("{}: {}".format(path, exc)) from exc
+    return records
+
+
 def check_heartbeat(spool_dir: Optional[os.PathLike] = None,
                     now: Optional[float] = None) -> Check:
     """Check the remote heartbeat branch and any undrained local spool files."""
@@ -2651,6 +2797,8 @@ def check_heartbeat(spool_dir: Optional[os.PathLike] = None,
     now = time.time() if now is None else now
     findings: List[str] = []
     branch_ok: Optional[bool]
+    files: List[pathlib.Path] = []
+    pending_records: List[object] = []
 
     try:
         branch_ok = gh_branch_exists()
@@ -2669,7 +2817,6 @@ def check_heartbeat(spool_dir: Optional[os.PathLike] = None,
     try:
         files = _spool_files(spool)
     except OSError as exc:
-        files = []
         findings.append("local heartbeat spool {} cannot be read ({})".format(
             spool, exc))
     else:
@@ -2677,22 +2824,41 @@ def check_heartbeat(spool_dir: Optional[os.PathLike] = None,
             findings.append("local heartbeat spool {} is empty".format(spool))
         else:
             try:
-                oldest = min(path.stat().st_mtime for path in files)
+                pending_records = _spool_pending_records(files)
             except OSError as exc:
-                findings.append(
-                    "local heartbeat spool {} has {} file(s), but its age cannot "
-                    "be read ({})".format(spool, len(files), exc)
-                )
+                findings.append("local heartbeat spool {} cannot be read ({})".format(
+                    spool, exc))
             else:
-                age = _age_text(now - oldest)
-                findings.append(
-                    "local heartbeat spool {} has {} file(s); oldest is {} old".format(
-                        spool, len(files), age[4:] if age.startswith("age ") else age)
-                )
+                if not pending_records:
+                    findings.append(
+                        "local heartbeat spool {} has {} file(s), all drained "
+                        "(no pending records)".format(spool, len(files))
+                    )
+                else:
+                    timestamps = [
+                        _timestamp(record.get("ts"))
+                        for record in pending_records
+                        if isinstance(record, dict)
+                    ]
+                    valid_timestamps = [
+                        timestamp for timestamp in timestamps
+                        if timestamp is not None
+                    ]
+                    oldest = min(valid_timestamps) if valid_timestamps else None
+                    age = _age_text(None if oldest is None else now - oldest)
+                    findings.append(
+                        "local heartbeat spool {} has {} pending record(s) "
+                        "across {} file(s); oldest is {} old".format(
+                            spool,
+                            len(pending_records),
+                            len(files),
+                            age[4:] if age.startswith("age ") else age,
+                        )
+                    )
 
     broken = (
         branch_ok is not True
-        or bool(files)
+        or bool(pending_records)
         or any("cannot be read" in finding for finding in findings)
     )
     if broken:
@@ -3555,6 +3721,8 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
     }
     if item.pinned:
         rendered["pinned"] = True
+    if item.needs_decision is not None:
+        rendered["needs_decision"] = item.needs_decision
     return rendered
 
 
@@ -3743,7 +3911,7 @@ def blocked_items(items: Iterable[Item]) -> List[Item]:
 
 def _blocked_item_json(item: Item) -> Dict[str, object]:
     """Render one blocked item from the parsed block-comment state."""
-    return {
+    rendered = {
         "ref": item.ref,
         "title": item.title,
         "url": item.url,
@@ -3751,11 +3919,90 @@ def _blocked_item_json(item: Item) -> Dict[str, object]:
         "conditions": item.block_references,
         "blocked_at": item.status_since.isoformat() if item.status_since else None,
     }
+    if item.needs_decision is not None:
+        rendered["needs_decision"] = item.needs_decision
+    return rendered
 
 
 def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     """The brief's blocked section, reusing one load-time comment fetch."""
     return [_blocked_item_json(item) for item in blocked_items(items)]
+
+
+PROSE_DEPENDENCY_RE = re.compile(
+    r"\b(?:depends\s+on|blocked\s+on)\s+"
+    r"(?P<references>#[0-9]+(?:\s*(?:,|and)\s*#[0-9]+)*)"
+    r"|\bafter\s+(?P<after>#[0-9]+)\s+lands\b"
+    r"|\b(?:until|requires)\s+(?P<single>#[0-9]+)\b",
+    re.IGNORECASE,
+)
+
+
+def _prose_dependency_sentences(body: str) -> Iterable[Tuple[str, List[str]]]:
+    """Yield recognised dependency sentences and their named issue numbers."""
+    if not isinstance(body, str):
+        return
+
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        for sentence in re.split(r"(?<=[.!?])\s+", line):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            match = PROSE_DEPENDENCY_RE.search(sentence)
+            if match is None:
+                continue
+            references = (
+                match.group("references")
+                or match.group("after")
+                or match.group("single")
+            )
+            yield sentence, re.findall(r"#[0-9]+", references)
+
+
+def prose_dependencies(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """Report open prose dependencies that have no matching native edge.
+
+    This is deliberately pure over the Project items already loaded by the
+    funnel. A named issue is reportable only when it is present and open in
+    that set; resolving an absent issue would require a new API call and would
+    turn a diagnostic into a second dependency source.
+    """
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    found: List[Dict[str, object]] = []
+
+    for item in rows:
+        if item.state != "OPEN" or item.parent is None:
+            continue
+
+        native = {
+            _dependency_ref(item, value) or str(value).strip()
+            for value in item.open_blockers
+        }
+        for sentence, numbers in _prose_dependency_sentences(item.body or ""):
+            names: List[str] = []
+            for number in numbers:
+                ref = item.repo + number
+                blocker = by_ref.get(ref)
+                if (
+                    blocker is None
+                    or blocker.state != "OPEN"
+                    or ref in native
+                    or ref in names
+                ):
+                    continue
+                names.append(ref)
+            if names:
+                found.append({
+                    "ref": item.ref,
+                    "names": names,
+                    "sentence": sentence,
+                })
+
+    return sorted(found, key=lambda row: row["ref"])
 
 
 def suspected_human_step_reason(item: Item) -> Optional[str]:
@@ -4117,19 +4364,86 @@ def _approved_current_head(pr: Optional[Dict[str, object]]) -> bool:
     return not head or not reviewed_head or head == reviewed_head
 
 
+def _block_cycle_reasons(
+    items: Sequence[Item], by_ref: Dict[str, Item]
+) -> Dict[str, List[str]]:
+    """Return one diagnostic reason for each detected open block cycle.
+
+    Edges point from a waiting item to its blocker. Native dependency facts and
+    parsed comment references are deliberately combined here: either source
+    can be stale or incomplete on its own, while a cycle may cross both. Only
+    open items in the loaded Project can participate in a stranded cycle;
+    missing or closed references are ignored just as they are by the other
+    derived dependency checks.
+
+    A cycle is searched from its lowest-numbered member, and candidate edges
+    back to an earlier member are skipped. That makes the displayed path
+    canonical and prevents the same loop from being reported once per member.
+    The walk is iterative so malformed dependency data cannot exhaust Python's
+    call stack while producing a diagnostic.
+    """
+    open_refs = {
+        item.ref for item in items if item.state == "OPEN"
+    }
+    graph: Dict[str, Set[str]] = {ref: set() for ref in open_refs}
+    for item in items:
+        if item.ref not in open_refs:
+            continue
+        for value in list(item.open_blockers) + list(item.block_references):
+            ref = _dependency_ref(item, value)
+            if ref in open_refs:
+                graph[item.ref].add(ref)
+
+    def order(ref: str) -> Tuple[int, str]:
+        item = by_ref[ref]
+        return item.number, item.repo
+
+    def display(refs: Sequence[str]) -> str:
+        cycle_items = [by_ref[ref] for ref in refs]
+        same_repo = len({item.repo for item in cycle_items}) == 1
+        labels = (
+            ["#{}".format(item.number) for item in cycle_items]
+            if same_repo
+            else list(refs)
+        )
+        return "block cycle: " + " → ".join(labels)
+
+    reasons: Dict[str, List[str]] = {}
+    for start in sorted(graph, key=order):
+        pending = [(start, [start])]
+        cycle = None
+        while pending:
+            current, path = pending.pop()
+            for target in sorted(graph[current], key=order, reverse=True):
+                if target == start:
+                    cycle = path + [start]
+                    break
+                if target in path or order(target) < order(start):
+                    continue
+                pending.append((target, path + [target]))
+            if cycle is not None:
+                break
+        if cycle is not None:
+            reasons.setdefault(start, []).append(display(cycle))
+    return reasons
+
+
 def stranded_items(
     items: Iterable[Item],
     now: datetime,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
 ) -> List[Dict[str, object]]:
-    """Render open items for which no current agent or gate can make progress.
+    """Render items for which no current agent or gate can make progress.
 
     This is deliberately a diagnostic, not a queue. The first release only
     uses facts the funnel already knows how to read: an approved current-head
     verdict on a conflicting PR, a stale claim with no PR, a childless
-    ``Building`` project, and a native or named dependency closed as
-    ``not_planned``. Missing CI history is intentionally absent; no fetched
-    fact distinguishes that from a PR whose first check is still pending.
+    ``Building`` project, a native or named dependency closed as
+    ``not_planned``, plus cycles formed by native or parsed block edges, and
+    two PR-side strands when PR facts were requested:
+    an open PR on a closed ticket or an open PR whose project's Status is not
+    ``Building``. Missing CI history is intentionally absent; no fetched fact
+    distinguishes that from a PR whose first check is still pending.
 
     ``pr_facts`` is optional so the function remains fixture-pure. ``None``
     means the caller has not requested PR lookups and therefore treats a stale
@@ -4139,15 +4453,40 @@ def stranded_items(
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
     stale = {item.ref for item in stale_locks(rows, now)}
+    cycle_reasons = _block_cycle_reasons(rows, by_ref)
     found: List[Dict[str, object]] = []
 
     for item in rows:
-        if item.state != "OPEN":
-            continue
-
         reasons: List[str] = []
         pr_known = pr_facts is None or item.ref in pr_facts
         pr = None if pr_facts is None else pr_facts.get(item.ref)
+
+        if (
+            isinstance(pr, dict)
+            and str(pr.get("state") or "").upper() == "OPEN"
+            and item.parent is not None
+        ):
+            if item.state == "CLOSED":
+                reasons.append("open PR on closed ticket")
+            elif item.state == "OPEN":
+                parent = by_ref.get(item.parent)
+                if parent is not None and parent.status != "Building":
+                    status = parent.status or "unset"
+                    reasons.append(
+                        "open PR on open ticket whose project Status is {}; "
+                        "merge gate will refuse it".format(status)
+                    )
+
+        if item.state != "OPEN":
+            if reasons:
+                found.append({
+                    "ref": item.ref,
+                    "title": item.title,
+                    "url": item.url,
+                    "reason": "; ".join(reasons),
+                })
+            continue
+
         if (
             pr
             and str(pr.get("state") or "").upper() == "OPEN"
@@ -4168,6 +4507,8 @@ def stranded_items(
                 "blocked on blocker that will never close: {}".format(
                     ", ".join(dead))
             )
+
+        reasons.extend(cycle_reasons.get(item.ref, []))
 
         if reasons:
             found.append({
@@ -4270,6 +4611,7 @@ def cmd_next(
     now: datetime,
     tier: Optional[str] = None,
     excluded: Optional[Set[str]] = None,
+    agent: str = "codex",
 ) -> int:
     # Accept bare numbers as well as refs (#436). The routine passes whatever
     # the model copied from the ticket JSON, and a bare number matched nothing
@@ -4298,7 +4640,8 @@ def cmd_next(
             print("released {} (declined)".format(declined.ref), file=sys.stderr)
     blocked = awaiting_review(items)
     ticket = next_ticket_for_tier(
-        items, now, tier=tier, blocked=blocked, excluded=excluded
+        items, now, tier=tier, blocked=blocked, excluded=excluded,
+        agent=agent,
     )
 
     if ticket is None:
@@ -4342,6 +4685,7 @@ def cmd_brief(
         "closed_itself": closed_itself_json(items, now),
         "cleared_blocks": cleared_blocks_json(items, now),
         "blocked": blocked_json(items),
+        "prose_dependencies": prose_dependencies(items),
         "suspected_human_steps": suspected_human_step_json(items),
         "human_steps": human_step_json(items),
         "closed_with_access_vocabulary": closed_with_access_vocabulary_json(
@@ -4638,7 +4982,8 @@ def _set_pinned(items: List[Item], now: datetime, ref: str, pinned: bool,
 
 def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
                 voice: str, run: Optional[str] = None,
-                agent: Optional[str] = None) -> int:
+                agent: Optional[str] = None,
+                apply_blocked: bool = False) -> int:
     """Post an issue comment with an explicit, stamped voice."""
     if not body.strip():
         raise GitHubError("a non-empty comment body is required")
@@ -4650,6 +4995,21 @@ def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
     )
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
+    if apply_blocked:
+        edit = subprocess.run(
+            [
+                "gh", "issue", "edit", str(item.number), "--repo", item.repo,
+                "--add-label", "blocked",
+            ],
+            capture_output=True, text=True,
+        )
+        if edit.returncode != 0:
+            raise GitHubError(
+                "recorded needs-decision comment on {}, but could not add its "
+                "blocked label: {}".format(item.ref, edit.stderr.strip())
+            )
+        if not item.is_blocked:
+            item.labels.append("blocked")
     print("recorded {} comment on {}".format(voice, item.ref))
     return 0
 
@@ -4758,11 +5118,20 @@ def cmd_ideas(items: List[Item], now: datetime) -> int:
 def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
                 repo: Optional[str], run: Optional[str] = None,
                 agent: Optional[str] = None,
-                origin: Optional[str] = None) -> int:
+                origin: Optional[str] = None,
+                klass: Optional[str] = None) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
     if origin not in ORIGIN_VOICES:
         raise GitHubError(
             "capture requires an explicit --origin (nate-relayed or agent)"
+        )
+    if origin == "agent" and klass is None:
+        raise GitHubError("capture requires --class when --origin agent")
+    if klass is not None and klass not in LADDER:
+        raise GitHubError(
+            "unknown capture class {!r}; choose one of {}".format(
+                klass, ", ".join(LADDER)
+            )
         )
     repo = resolve_repo(repo)
     body = append_provenance(
@@ -4788,6 +5157,14 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         item_id = json.loads(add.stdout)["id"]
         gh_graphql(SET_FIELD, project=PROJECT_ID, item=item_id,
                    field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Ideas"))
+        if klass is not None:
+            gh_graphql(
+                SET_FIELD,
+                project=PROJECT_ID,
+                item=item_id,
+                field=CLASS_FIELD_ID,
+                option=_option_id(CLASS_FIELD_ID, klass),
+            )
         print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
     else:
         print("{} in {}\nnote: created, but not added to the Project".format(
@@ -5178,6 +5555,7 @@ def _load_block_comment(item: Item) -> None:
     parsed = parse_block_comment(bodies)
     if parsed is not None:
         item.block_references, item.block_reason = parsed
+    item.needs_decision = parse_needs_decision_comment(bodies)
     for body in reversed(bodies):
         record = parse_satisfied_block_comment(body)
         if record is not None:
@@ -5248,8 +5626,7 @@ def ticket_pr_facts(
     """
     wanted = {
         item.ref: item for item in items
-        if item.state == "OPEN"
-        and (item.parent or item.in_motion_since is not None)
+        if item.parent or (item.state == "OPEN" and item.in_motion_since is not None)
     }
     facts: Dict[str, Optional[Dict[str, object]]] = {}
 
@@ -5260,7 +5637,10 @@ def ticket_pr_facts(
                 continue
             if ref in index:
                 pr = dict(index[ref])
-                if str(pr.get("state") or "").upper() == "OPEN":
+                if (
+                    item.state == "OPEN"
+                    and str(pr.get("state") or "").upper() == "OPEN"
+                ):
                     if str(pr.get("mergeable") or "").upper() == "CONFLICTING":
                         # Kept conditional: a verdict lookup per ticket would
                         # undo the saving this scan exists for.
@@ -5339,6 +5719,112 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
             continue
         return item
     return None
+
+
+def approved_merge_candidates(items: Sequence[Item]) -> List[Dict[str, object]]:
+    """Find open ticket PRs whose latest verdict approves their current head."""
+    tickets = {
+        item.ref: item
+        for item in items
+        if (getattr(item, "state", "OPEN") or "OPEN").upper() == "OPEN"
+    }
+    if not tickets:
+        return []
+
+    candidates: List[Dict[str, object]] = []
+    for repo in sorted({item.repo for item in tickets.values()}):
+        rows = _gh_json(
+            "gh", "pr", "list", "--repo", repo, "--state", "open",
+            "--json", "number,headRefName,headRefOid", "--limit", "100",
+        ) or []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            branch = row.get("headRefName") or ""
+            ref = ticket_ref_from_branch(repo, branch)
+            if ref is None or ref not in tickets or row.get("number") is None:
+                continue
+            verdict = latest_verdict(repo, row.get("number"))
+            # The current-head proof is deliberately strict here. The stranded
+            # diagnostic accepts fixture rows without SHAs, but reconciliation
+            # must never turn missing evidence into an unattended merge.
+            if not row.get("headRefOid") or not isinstance(verdict, dict):
+                continue
+            if not verdict.get("head_sha"):
+                continue
+            probe = dict(row)
+            probe["verdict"] = verdict
+            if not _approved_current_head(probe):
+                continue
+            candidates.append({"repo": repo, "pr": row["number"], "ref": ref})
+
+    candidates.sort(key=lambda candidate: (
+        candidate["repo"], str(candidate["pr"])
+    ))
+    return candidates
+
+
+def reconcile_approved_merges(
+    items: List[Item], now: datetime
+) -> List[Dict[str, object]]:
+    """Retry the merge gate for every approved current-head ticket PR.
+
+    ``cmd_merge`` owns all merge conditions and the actual writes. This wrapper
+    only finds the half-applied approval sequence, keeps its human-readable
+    output on stderr so ``begin`` remains JSON, and records the result for the
+    caller. A refusal is a normal reconciliation result, not a queue failure.
+    """
+    results: List[Dict[str, object]] = []
+    by_ref = {item.ref: item for item in items}
+    for candidate in approved_merge_candidates(items):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = cmd_merge(
+                    items,
+                    now,
+                    candidate["repo"],
+                    candidate["pr"],
+                    True,
+                )
+        except GitHubError as exc:
+            code = None
+            error = str(exc)
+        else:
+            error = None
+
+        if stdout.getvalue():
+            print(stdout.getvalue(), end="", file=sys.stderr)
+        if stderr.getvalue():
+            print(stderr.getvalue(), end="", file=sys.stderr)
+
+        result: Dict[str, object] = dict(candidate)
+        if code == 0:
+            result["result"] = "merged"
+            ticket = by_ref.get(candidate["ref"])
+            if ticket is not None:
+                # ``load_items`` ran before the merge. Keep this process's
+                # queue consistent with the GitHub close that just happened.
+                ticket.state = "CLOSED"
+                ticket.state_reason = "COMPLETED"
+                ticket.in_motion_since = None
+        elif code == 1:
+            result["result"] = "refused"
+            reasons = [
+                line[4:]
+                for line in stderr.getvalue().splitlines()
+                if line.startswith("  - ")
+            ]
+            if reasons:
+                result["reasons"] = reasons
+        else:
+            result["result"] = "error"
+            result["error"] = error or "merge gate failed without a result"
+        results.append(result)
+    return results
 
 
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
@@ -5421,6 +5907,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # passed a check.
         out["unmetered"] = True
 
+    reconciled = reconcile_approved_merges(items, now)
+    if reconciled:
+        out["reconciled"] = reconciled
+
+    auto_closed = reconcile_auto_closeable_projects(items)
+    if auto_closed:
+        out["auto_closed"] = auto_closed
+
     if agent == "codex":
         cleared = clear_satisfied_blocks(
             items, now, run=out.get("run"), agent=agent
@@ -5429,7 +5923,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             out["cleared_blocks"] = cleared
         blocked = awaiting_review(items)
         ticket = next_ticket_for_tier(
-            items, now, tier=tier, blocked=blocked
+            items, now, tier=tier, blocked=blocked, agent=agent
         )
         if ticket is None:
             holder = lock_holder(items, now)
@@ -5455,48 +5949,74 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         return 0
 
     queue = review_queue(items, tier)
-    if queue:
-        out.update(do="review", work=queue[0])
-    else:
-        # Breakdown is opt-in per routine. Claude reviews only — its breakdown
-        # job moved to the cheaper pool — so offering it one would send the
-        # scarce reviewer off to do mechanical decomposition.
-        if breakdown:
-            pending = awaiting_breakdown(items)
-            if pending:
-                item = pending[0]
-                work = {
-                    "ref": item.ref,
-                    "url": item.url,
-                    "title": item.title,
-                    "access_signals": access_signals(
-                        _ticket_body(item.repo, item.number)
-                    ),
-                }
-                out.update(do="breakdown", work=work)
-            else:
-                item = shapeable_idea(items, tier, reading)
-                if item is not None:
-                    out.update(
-                        do="shape",
-                        work={"ref": item.ref, "url": item.url,
-                              "title": item.title},
-                    )
-                else:
-                    out.update(
-                        do="stop",
-                        why="nothing to review and nothing to break down",
-                    )
+    review = queue[0] if queue else None
+
+    # The fixed job order remains the tiebreak within a class group, but a
+    # finite preempting class can cross stages. Build only the head of each
+    # queue: the next run gets the next item if this run preempts it.
+    by_ref = {item.ref: item for item in items}
+    pending = awaiting_breakdown(items) if breakdown else []
+    breakdown_item = pending[0] if pending else None
+    shape_item = shapeable_idea(items, tier, reading)
+    candidates: List[Tuple[int, int, str, object]] = []
+
+    if review is not None:
+        review_item = by_ref.get(review.get("ref"))
+        review_class = (
+            effective_class(review_item, by_ref)
+            if review_item is not None else None
+        )
+        candidates.append((
+            0 if review_class in PREEMPTING_CLASSES else 1,
+            0,
+            "review",
+            review,
+        ))
+    if breakdown_item is not None:
+        breakdown_class = getattr(breakdown_item, "klass", None)
+        candidates.append((
+            0 if breakdown_class in PREEMPTING_CLASSES else 1,
+            1,
+            "breakdown",
+            breakdown_item,
+        ))
+    if shape_item is not None:
+        shape_class = getattr(shape_item, "klass", None)
+        candidates.append((
+            0 if shape_class in PREEMPTING_CLASSES else 1,
+            2,
+            "shape",
+            shape_item,
+        ))
+
+    if candidates:
+        _, _, job, payload = min(candidates, key=lambda candidate: candidate[:2])
+        if job == "review":
+            out.update(do="review", work=payload)
+        elif job == "breakdown":
+            item = payload
+            work = {
+                "ref": item.ref,
+                "url": item.url,
+                "title": item.title,
+                "access_signals": access_signals(
+                    _ticket_body(item.repo, item.number)
+                ),
+            }
+            out.update(do="breakdown", work=work)
         else:
-            item = shapeable_idea(items, tier, reading)
-            if item is not None:
-                out.update(
-                    do="shape",
-                    work={"ref": item.ref, "url": item.url,
-                          "title": item.title},
-                )
-            else:
-                out.update(do="stop", why="nothing to review")
+            item = payload
+            out.update(
+                do="shape",
+                work={"ref": item.ref, "url": item.url,
+                      "title": item.title},
+            )
+    else:
+        out.update(
+            do="stop",
+            why=("nothing to review and nothing to break down"
+                 if breakdown else "nothing to review"),
+        )
 
     reserve = _reserve_verdict(out.get("do"))
     if reserve is not None:
@@ -5704,14 +6224,101 @@ def closed_itself_comment(tickets: Sequence[Item], drift: Sequence[str]) -> str:
     )
 
 
+def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
+                            ) -> bool:
+    """Whether a project has earned the funnel's unattended close.
+
+    ``funnel merge`` sees the Project summary before GitHub closes the ticket,
+    so it supplies the post-merge child count. Every other caller uses the
+    count already loaded on the project.
+    """
+    completed = item.children_done if children_done is None else children_done
+    return (
+        item.parent is None
+        and item.state == "OPEN"
+        and item.status == "Building"
+        and item.klass in SELF_APPROVABLE_CLASSES
+        and item.children_total > 0
+        and completed == item.children_total
+        and not item.carried_human_step
+    )
+
+
+def _close_auto_closeable_project(items: Sequence[Item], project: Item,
+                                  *, children_done: Optional[int] = None
+                                  ) -> bool:
+    """Move one eligible project to Done, close it, and record its marker."""
+    if not _auto_closeable_project(project, children_done=children_done):
+        return False
+    if not project.item_id:
+        raise GitHubError(
+            "{} is not in the Project; cannot auto-close it".format(project.ref)
+        )
+
+    drift = drift_since_approval(project)
+    tickets = [item for item in items if item.parent == project.ref]
+    tickets.sort(key=lambda item: (item.repo, item.number))
+
+    gh_graphql(
+        SET_FIELD,
+        project=PROJECT_ID,
+        item=project.item_id,
+        field=STATUS_FIELD_ID,
+        option=_option_id(STATUS_FIELD_ID, "Done"),
+    )
+
+    close = subprocess.run(
+        ["gh", "issue", "close", str(project.number), "--repo", project.repo,
+         "--reason", "completed"],
+        capture_output=True, text=True,
+    )
+    if close.returncode != 0:
+        raise GitHubError(
+            "could not auto-close {}: {}".format(
+                project.ref, close.stderr.strip()
+            )
+        )
+
+    comment = subprocess.run(
+        ["gh", "issue", "comment", str(project.number), "--repo", project.repo,
+         "--body", closed_itself_comment(tickets, drift)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(
+            "{} was moved to Done and closed, but its closing comment could not "
+            "be recorded: {}".format(project.ref, comment.stderr.strip())
+        )
+
+    # Keep fixture and same-process callers in sync with the writes. A fresh
+    # `begin` reloads these facts from GitHub, where the closed state is the
+    # idempotence guard.
+    project.status = "Done"
+    project.state = "CLOSED"
+    project.state_reason = "COMPLETED"
+    print("auto-closed {}".format(project.ref), file=sys.stderr)
+    return True
+
+
+def reconcile_auto_closeable_projects(items: Sequence[Item]) -> List[str]:
+    """Close every already-finished upkeep project before queue selection."""
+    closed: List[str] = []
+    projects = sorted(
+        (item for item in items if _auto_closeable_project(item)),
+        key=lambda item: (item.repo, item.number),
+    )
+    for project in projects:
+        if _close_auto_closeable_project(items, project):
+            closed.append(project.ref)
+    return closed
+
+
 def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
     """Close a finished upkeep project after its last ticket merge.
 
-    The class is the only decision here. Drift is fetched for the durable
-    comment, but it never changes whether a ``Broken``, ``Maintenance`` or
-    ``Improve`` project closes itself. The Project summary is read before the
-    merge, so exactly one closed child is the evidence that this merge was the
-    last open ticket rather than a later reconciliation of an old project.
+    The Project summary is read before the merge, so exactly one open child is
+    the evidence that this merge was the last open ticket. The project-level
+    eligibility decision is shared with the begin reconcile.
     """
     parent = next((item for item in items if item.ref == ticket.parent), None)
     if parent is None:
@@ -5720,55 +6327,16 @@ def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
         ticket.state != "OPEN"
         or parent.state != "OPEN"
         or parent.status != "Building"
-        or parent.klass not in SELF_APPROVABLE_CLASSES
         or parent.children_total <= 0
         or parent.children_done != parent.children_total - 1
     ):
         return False
-    if not parent.item_id:
-        raise GitHubError(
-            "{} is not in the Project; cannot auto-close it".format(parent.ref)
-        )
-
-    drift = drift_since_approval(parent)
-    tickets = [item for item in items if item.parent == parent.ref]
-    if not any(item.ref == ticket.ref for item in tickets):
-        tickets.append(ticket)
-    tickets.sort(key=lambda item: (item.repo, item.number))
-
-    gh_graphql(
-        SET_FIELD,
-        project=PROJECT_ID,
-        item=parent.item_id,
-        field=STATUS_FIELD_ID,
-        option=_option_id(STATUS_FIELD_ID, "Done"),
+    merge_items = list(items)
+    if not any(item.ref == ticket.ref for item in merge_items):
+        merge_items.append(ticket)
+    return _close_auto_closeable_project(
+        merge_items, parent, children_done=parent.children_total
     )
-
-    close = subprocess.run(
-        ["gh", "issue", "close", str(parent.number), "--repo", parent.repo,
-         "--reason", "completed"],
-        capture_output=True, text=True,
-    )
-    if close.returncode != 0:
-        raise GitHubError(
-            "could not auto-close {}: {}".format(
-                parent.ref, close.stderr.strip()
-            )
-        )
-
-    comment = subprocess.run(
-        ["gh", "issue", "comment", str(parent.number), "--repo", parent.repo,
-         "--body", closed_itself_comment(tickets, drift)],
-        capture_output=True, text=True,
-    )
-    if comment.returncode != 0:
-        raise GitHubError(
-            "{} was moved to Done and closed, but its closing comment could not "
-            "be recorded: {}".format(parent.ref, comment.stderr.strip())
-        )
-
-    print("auto-closed {}".format(parent.ref))
-    return True
 
 
 def merged_pr_facts(items: Sequence[Item]) -> MergedPRFacts:
@@ -5963,6 +6531,8 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
     print("=" * 72)
     question = gate_question(item)
     print("GATE: {}".format(question or "not waiting on you"))
+    if item.needs_decision is not None:
+        print("NEEDS DECISION: {}".format(item.needs_decision))
     print("")
 
     owner, name = item.repo.split("/")
@@ -6142,6 +6712,16 @@ def _comment_reason(value: str) -> str:
     return reason
 
 
+def _decision_question(value: str) -> str:
+    """Reject blank questions before loading GitHub."""
+    question = value.strip()
+    if not question:
+        raise argparse.ArgumentTypeError(
+            "a non-empty decision question is required"
+        )
+    return question
+
+
 def _blocked_reference(value: str) -> str:
     """Normalise one issue number for the strict block-comment header."""
     reference = value.strip()
@@ -6160,17 +6740,26 @@ def _blocked_comment_body(blocked_on: Sequence[str], because: str) -> str:
     return "**Blocked on {}:** {}".format(references, because)
 
 
+def _needs_decision_comment_body(question: str) -> str:
+    """Render the breakdown-question header owned by its parser."""
+    return "{} {}".format(NEEDS_DECISION_PREFIX, question)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("queue", help="everything, ordered")
     nxt = sub.add_parser(
-        "next", help="the single next ticket Codex should work, or nothing")
+        "next", help="the single next ticket this agent should work, or nothing")
     nxt.add_argument(
         "--tier", choices=TIERS, default=None,
         help="what this engine is allowed to work. `standard` skips tickets "
              "needing the escalated engine; `escalated` may take anything. "
              "Declared by the routine, never by the model.")
+    nxt.add_argument(
+        "--agent", default="codex",
+        help="agent whose capabilities filter the queue (default: codex)",
+    )
     nxt.add_argument(
         "--not", dest="excluded", action="append", default=[], metavar="<ref>",
         help="exclude a candidate for this call; repeat for multiple refs",
@@ -6213,6 +6802,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     capture.add_argument(
         "--origin", required=True, choices=ORIGIN_VOICES,
         help="idea origin: nate-relayed if Nate raised it, agent if observed",
+    )
+    capture.add_argument(
+        "--class", dest="klass", choices=LADDER, default=None,
+        help="ladder class; required when --origin agent",
     )
     shaped = sub.add_parser("shaped", help="record a grilled plan and move to Shaped")
     shaped.add_argument("ref", help="issue number, owner/repo#number, or URL")
@@ -6276,6 +6869,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     comment_body.add_argument(
         "--blocked-on", action="append", type=_blocked_reference, metavar="N",
         help="post a canonical block header; repeat for multiple issue numbers",
+    )
+    comment_body.add_argument(
+        "--needs-decision", type=_decision_question, metavar="QUESTION",
+        help="post a breakdown question and apply the blocked label",
     )
     comment.add_argument(
         "--because", type=_comment_reason,
@@ -6343,6 +6940,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             parser.error("--because is required with --blocked-on")
         if args.because is not None and not args.blocked_on:
             parser.error("--because requires --blocked-on")
+    if (args.command == "capture" and args.origin == "agent"
+            and args.klass is None):
+        parser.error("--class is required with --origin agent")
 
     now = datetime.now(timezone.utc)
     # Doctor keeps its fixed checks runnable when the Project cannot be loaded;
@@ -6371,7 +6971,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_park(items, now, args.ref, args.reason,
                             args.run, args.agent)
         if args.command == "comment":
-            if args.blocked_on:
+            if args.needs_decision is not None:
+                body = _needs_decision_comment_body(args.needs_decision)
+            elif args.blocked_on:
                 body = _blocked_comment_body(args.blocked_on, args.because)
             else:
                 body = args.body
@@ -6382,8 +6984,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     raise GitHubError(
                         "cannot read {}: {}".format(args.body_file, exc)
                     )
-            return cmd_comment(items, now, args.ref, body or "", args.voice,
-                               args.run, args.agent)
+            return cmd_comment(
+                items, now, args.ref, body or "", args.voice,
+                args.run, args.agent, apply_blocked=args.needs_decision is not None,
+            )
         if args.command == "reject":
             return cmd_reject(items, now, args.pr, args.note)
         if args.command in ANSWERS:
@@ -6395,7 +6999,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_ideas(items, now)
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
-                               args.run, args.agent, args.origin)
+                               args.run, args.agent, args.origin, args.klass)
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan,
                               args.run, args.agent)
@@ -6415,6 +7019,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 now,
                 tier=getattr(args, "tier", None),
                 excluded=set(getattr(args, "excluded", [])),
+                agent=getattr(args, "agent", "codex"),
             )
         if args.command == "brief":
             return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))

@@ -52,6 +52,20 @@ def test_embedded_block_prefix_does_not_match():
     ]) is None
 
 
+def test_needs_decision_comment_returns_the_latest_question():
+    assert funnel.parse_needs_decision_comment([
+        "**Needs a decision:** Older question.",
+        "A regular follow-up.",
+        "**Needs a decision:** Where should this connector live?",
+    ]) == "Where should this connector live?"
+
+
+def test_embedded_needs_decision_prefix_does_not_match():
+    assert funnel.parse_needs_decision_comment([
+        "A sentence before **Needs a decision:** is not a header.",
+    ]) is None
+
+
 def test_unparseable_block_comment_reports_its_first_line(monkeypatch):
     item = funnel.Item(
         repo="owner/repo", number=7, title="Broken comment", url="", state="OPEN",
@@ -142,6 +156,60 @@ def test_comment_joins_multiple_block_references(monkeypatch):
     posted = calls[0][-1]
     assert posted.startswith("**Blocked on #77 and #78:** waiting on both\n\n")
     assert funnel.parse_block_comment([posted])[0] == ["#77", "#78"]
+
+
+def test_comment_posts_needs_decision_and_applies_blocked_label(monkeypatch):
+    item = comment_item()
+    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.main([
+        "comment", "42", "--needs-decision", "Where should this live?",
+        "--voice", "agent", "--run", "run-decision", "--agent", "codex",
+    ]) == 0
+
+    assert calls[0][:6] == (
+        "gh", "issue", "comment", "42", "--repo", "nateprich/beta",
+    )
+    posted = calls[0][-1]
+    assert posted.startswith(
+        "**Needs a decision:** Where should this live?\n\n"
+    )
+    assert funnel.parse_needs_decision_comment([posted]) == "Where should this live?"
+    assert calls[1] == (
+        "gh", "issue", "edit", "42", "--repo", "nateprich/beta",
+        "--add-label", "blocked",
+    )
+    assert item.is_blocked
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ("--body", "another comment"),
+        ("--blocked-on", "77"),
+    ],
+)
+def test_needs_decision_is_mutually_exclusive_with_other_comment_forms(
+    monkeypatch, extra
+):
+    monkeypatch.setattr(
+        funnel, "load_items", lambda: pytest.fail("GitHub should not be loaded")
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        funnel.main([
+            "comment", "42", "--needs-decision", "Where should this live?",
+            extra[0], extra[1], "--voice", "agent",
+        ])
+
+    assert exc.value.code != 0
 
 
 def test_blocked_comment_requires_because_before_loading_github(monkeypatch, capsys):
@@ -236,5 +304,6 @@ def test_load_items_fetches_comments_only_for_open_blocked_items(monkeypatch):
     blocked = items[0]
     assert blocked.block_references == ["#84"]
     assert blocked.block_reason == "Wait for the decision."
+    assert blocked.needs_decision is None
     assert blocked.unparseable_block_comments == []
     assert blocked.block_comments_error is None

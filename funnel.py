@@ -5915,6 +5915,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if auto_closed:
         out["auto_closed"] = auto_closed
 
+    reconciled = reconcile_closed_items(items)
+    if reconciled:
+        out["reconciled"] = reconciled
+
     if agent == "codex":
         cleared = clear_satisfied_blocks(
             items, now, run=out.get("run"), agent=agent
@@ -6311,6 +6315,68 @@ def reconcile_auto_closeable_projects(items: Sequence[Item]) -> List[str]:
         if _close_auto_closeable_project(items, project):
             closed.append(project.ref)
     return closed
+
+
+def reconcile_closed_items(items: Sequence[Item]) -> List[str]:
+    """Repair terminal Project state and stale shaping labels on closed items.
+
+    Closing an issue outside the funnel does not update its Project item. The
+    issue's state reason is the authoritative terminal choice, and a closed
+    item cannot still be waiting in Ideas. Only closed items participate so an
+    open issue is never changed by this unattended repair.
+    """
+    repaired: List[str] = []
+    terminal_statuses = {
+        "COMPLETED": "Done",
+        "NOT_PLANNED": "Parked",
+    }
+    candidates = sorted(
+        (item for item in items if item.state == "CLOSED"),
+        key=lambda item: (item.repo, item.number),
+    )
+    for item in candidates:
+        reason = str(item.state_reason or "").upper().replace("-", "_")
+        target = terminal_statuses.get(reason)
+        changed = False
+
+        if target is not None and not item.parent and item.status != target:
+            if not item.item_id:
+                raise GitHubError(
+                    "{} is not in the Project; cannot set Status to {}".format(
+                        item.ref, target
+                    )
+                )
+            gh_graphql(
+                SET_FIELD,
+                project=PROJECT_ID,
+                item=item.item_id,
+                field=STATUS_FIELD_ID,
+                option=_option_id(STATUS_FIELD_ID, target),
+            )
+            item.status = target
+            changed = True
+
+        if "needs-shaping" in item.labels and item.status != "Ideas":
+            edit = subprocess.run(
+                [
+                    "gh", "issue", "edit", str(item.number), "--repo", item.repo,
+                    "--remove-label", "needs-shaping",
+                ],
+                capture_output=True, text=True,
+            )
+            if edit.returncode != 0:
+                raise GitHubError(
+                    "reconciled {} but could not remove its needs-shaping "
+                    "label: {}".format(item.ref, edit.stderr.strip())
+                )
+            item.labels = [
+                label for label in item.labels if label != "needs-shaping"
+            ]
+            changed = True
+
+        if changed:
+            repaired.append(item.ref)
+    return repaired
 
 
 def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:

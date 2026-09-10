@@ -267,6 +267,21 @@ def _completed_project(number, *, klass="Improve", children_done=2,
     return [project] + children
 
 
+def _closed_project_item(number, *, status, state_reason, labels=None):
+    repo = "nateprich/example"
+    return funnel.Item(
+        repo=repo,
+        number=number,
+        title="Closed project {}".format(number),
+        url="https://github.com/{}/issues/{}".format(repo, number),
+        state="CLOSED",
+        state_reason=state_reason,
+        status=status,
+        labels=list(labels or []),
+        item_id="project-{}".format(number),
+    )
+
+
 def _begin_with_reconcile_wired(monkeypatch, capsys, items):
     calls = []
     graphql_calls = []
@@ -391,6 +406,83 @@ def test_begin_reconcile_is_idempotent(monkeypatch, capsys):
     assert not [
         call for call in calls
         if call[:3] in (["gh", "issue", "close"], ["gh", "issue", "comment"])
+    ]
+
+
+def test_begin_repairs_closed_terminal_statuses_and_stale_shaping_labels(
+    monkeypatch, capsys
+):
+    completed = _closed_project_item(
+        230, status="Building", state_reason="COMPLETED"
+    )
+    parked = _closed_project_item(
+        231, status="Ideas", state_reason="NOT_PLANNED",
+        labels=["needs-shaping"],
+    )
+    already_done = _closed_project_item(
+        232, status="Done", state_reason="COMPLETED"
+    )
+    already_parked = _closed_project_item(
+        233, status="Parked", state_reason="NOT_PLANNED"
+    )
+    open_item = funnel.Item(
+        repo="nateprich/example",
+        number=234,
+        title="Open idea",
+        url="https://github.com/nateprich/example/issues/234",
+        state="OPEN",
+        state_reason="NOT_PLANNED",
+        status="Ideas",
+        labels=["needs-shaping"],
+        item_id="project-234",
+    )
+    items = [completed, parked, already_done, already_parked, open_item]
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert result["reconciled"] == [completed.ref, parked.ref]
+    assert completed.status == "Done"
+    assert parked.status == "Parked"
+    assert parked.labels == []
+    assert already_done.status == "Done"
+    assert already_parked.status == "Parked"
+    assert open_item.status == "Ideas"
+    assert open_item.labels == ["needs-shaping"]
+    assert [variables for query, variables in graphql_calls] == [
+        {
+            "project": funnel.PROJECT_ID,
+            "item": "project-230",
+            "field": funnel.STATUS_FIELD_ID,
+            "option": "done-option",
+        },
+        {
+            "project": funnel.PROJECT_ID,
+            "item": "project-231",
+            "field": funnel.STATUS_FIELD_ID,
+            "option": "done-option",
+        },
+    ]
+    assert [
+        call for call in calls
+        if call[:3] == ["gh", "issue", "edit"]
+    ] == [[
+        "gh", "issue", "edit", "231", "--repo", "nateprich/example",
+        "--remove-label", "needs-shaping",
+    ]]
+
+    calls.clear()
+    graphql_calls.clear()
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert "reconciled" not in result
+    assert not graphql_calls
+    assert not [
+        call for call in calls
+        if call[:3] == ["gh", "issue", "edit"]
     ]
 
 

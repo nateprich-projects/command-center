@@ -25,6 +25,16 @@ def test_finish_uses_the_run_id_from_this_runs_begin(routine):
     assert "never wrap the id in `run=$(...)`" in normalized
 
 
+def test_muse_step_one_uses_the_runner_opening_result():
+    body = (ROOT / "routines" / "muse.md").read_text(encoding="utf-8")
+    normalized = " ".join(body.split()).lower()
+
+    assert "the runner has already run the opening command before handing you this prompt" in normalized
+    assert "its json result is inserted below at `begin_json`" in normalized
+    assert "do not run `begin` again" in normalized
+    assert "if it says `\"do\": \"stop\"`, the runner has finished the heartbeat" in normalized
+
+
 def test_claude_reports_codex_automation_drift_without_gating_the_run():
     body = (ROOT / "routines" / "claude.md").read_text(encoding="utf-8")
     normalized = " ".join(body.split()).lower()

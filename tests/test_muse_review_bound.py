@@ -17,8 +17,21 @@ def _stub_repo(tmp_path):
     repo = tmp_path / "repo"
     (repo / "routines").mkdir(parents=True)
     shutil.copy(ROOT / "routines" / "muse.md", repo / "routines" / "muse.md")
-    shutil.copy(ROOT / "funnel.py", repo / "funnel.py")
-    shutil.copy(ROOT / "agent_health.py", repo / "agent_health.py")
+    (repo / "begin.json").write_text(
+        '{"agent":"muse","run":"bound-run","gate":"ok","do":"review"}'
+    )
+    (repo / "funnel.py").write_text(
+        "import pathlib, sys\n"
+        "root = pathlib.Path(__file__).parent\n"
+        "if sys.argv[1] == 'session-server':\n"
+        "    print('127.0.0.1:1:stub', flush=True)\n"
+        "elif sys.argv[1] == 'begin':\n"
+        "    print((root / 'begin.json').read_text(), end='')\n"
+        "elif sys.argv[1] == 'session-stop':\n"
+        "    pass\n"
+        "else:\n"
+        "    raise SystemExit('unexpected funnel command')\n"
+    )
     (repo / "heartbeat.py").write_text(
         "import sys, pathlib\n"
         "pathlib.Path(sys.argv[0]).with_name('heartbeat.log').write_text(' '.join(sys.argv[1:]))\n"

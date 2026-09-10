@@ -5625,55 +5625,143 @@ def cmd_next(
     return 0
 
 
+def _brief_timed(
+    section: str,
+    reader: Callable[[], object],
+    timings: Dict[str, float],
+) -> object:
+    """Run one brief section and record its elapsed time in seconds."""
+    started = time.perf_counter()
+    try:
+        return reader()
+    finally:
+        timings[section] = round(
+            max(0.0, time.perf_counter() - started), 6
+        )
+
+
 def cmd_brief(
     items: List[Item],
     now: datetime,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+    timings: Optional[Dict[str, float]] = None,
 ) -> int:
-    decisions = awaiting_decision(items)
-    by_ref = {i.ref: i for i in items}
-    counts = {}
-    for stage in STAGES:
-        if stage == "Ideas":
-            continue  # Ideas is unbounded and guilt-free; counting it is pressure
-        counts[stage] = sum(
-            1 for i in items if i.status == stage and i.state == "OPEN"
-        )
+    timings = dict(timings or {})
 
-    running = in_motion(items, now, pr_facts=pr_facts)
+    def decision_payload():
+        decisions = awaiting_decision(items)
+        by_ref = {i.ref: i for i in items}
+        rows = [item_json(i, now, by_ref) for i in decisions]
+        return decisions, by_ref, rows
+
+    decisions, by_ref, decision_rows = _brief_timed(
+        "items", decision_payload, timings
+    )
+    counts = _brief_timed(
+        "counts_by_gate",
+        lambda: {
+            stage: sum(
+                1 for i in items if i.status == stage and i.state == "OPEN"
+            )
+            for stage in STAGES
+            if stage != "Ideas"
+        },
+        timings,
+    )
+
+    running = _brief_timed(
+        "in_motion",
+        lambda: in_motion(items, now, pr_facts=pr_facts),
+        timings,
+    )
     brief = {
         "generated_at": now.isoformat(),
         "total_needing_nate": len(decisions),
         "counts_by_gate": counts,
-        "items": [item_json(i, now, by_ref) for i in decisions],
-        "parked": parked_json(items),
-        "closed_itself": closed_itself_json(items, now),
-        "cleared_blocks": cleared_blocks_json(items, now),
-        "blocked": blocked_json(items),
-        "prose_dependencies": prose_dependencies(items),
-        "suspected_human_steps": suspected_human_step_json(items),
-        "human_steps": human_step_json(items),
-        "closed_with_access_vocabulary": closed_with_access_vocabulary_json(
-            items
+        "items": decision_rows,
+        "parked": _brief_timed(
+            "parked", lambda: parked_json(items), timings
         ),
-        "unclassed_captures": unclassed_captures_json(items),
-        "needs_class": [item_json(i, now, by_ref) for i in items if needs_class(i)],
-        "awaiting_breakdown": [
-            item_json(i, now, by_ref) for i in awaiting_breakdown(items)
-        ],
-        "stranded": stranded_json(items, now, pr_facts=pr_facts),
+        "closed_itself": _brief_timed(
+            "closed_itself", lambda: closed_itself_json(items, now), timings
+        ),
+        "cleared_blocks": _brief_timed(
+            "cleared_blocks", lambda: cleared_blocks_json(items, now), timings
+        ),
+        "blocked": _brief_timed(
+            "blocked", lambda: blocked_json(items), timings
+        ),
+        "prose_dependencies": _brief_timed(
+            "prose_dependencies", lambda: prose_dependencies(items), timings
+        ),
+        "suspected_human_steps": _brief_timed(
+            "suspected_human_steps",
+            lambda: suspected_human_step_json(items),
+            timings,
+        ),
+        "human_steps": _brief_timed(
+            "human_steps", lambda: human_step_json(items), timings
+        ),
+        "closed_with_access_vocabulary": _brief_timed(
+            "closed_with_access_vocabulary",
+            lambda: closed_with_access_vocabulary_json(items),
+            timings,
+        ),
+        "unclassed_captures": _brief_timed(
+            "unclassed_captures",
+            lambda: unclassed_captures_json(items),
+            timings,
+        ),
+        "needs_class": _brief_timed(
+            "needs_class",
+            lambda: [item_json(i, now, by_ref) for i in items if needs_class(i)],
+            timings,
+        ),
+        "awaiting_breakdown": _brief_timed(
+            "awaiting_breakdown",
+            lambda: [
+                item_json(i, now, by_ref) for i in awaiting_breakdown(items)
+            ],
+            timings,
+        ),
+        "stranded": _brief_timed(
+            "stranded",
+            lambda: stranded_json(items, now, pr_facts=pr_facts),
+            timings,
+        ),
         "in_motion": [i.ref for i in running],
         "wip_limit": WIP_LIMIT,
         "stale_locks_taken_over": [
-            i.ref for i in stale_locks(items, now, pr_facts=pr_facts)
+            i.ref for i in _brief_timed(
+                "stale_locks_taken_over",
+                lambda: stale_locks(items, now, pr_facts=pr_facts),
+                timings,
+            )
         ],
-        "maintenance_load": maintenance_load(items, now),
-        "resend_ratio": recent_resend_ratio(now),
-        "unattended_merges": unattended_merges(now),
-        "unattended_approvals": unattended_approvals(items, now),
-        "agent_health": agent_health(now),
-        "working_tree_touched": working_tree_touched(now),
-        "rejected_merges": rejected_merges(items, now),
+        "maintenance_load": _brief_timed(
+            "maintenance_load", lambda: maintenance_load(items, now), timings
+        ),
+        "resend_ratio": _brief_timed(
+            "resend_ratio", lambda: recent_resend_ratio(now), timings
+        ),
+        "unattended_merges": _brief_timed(
+            "unattended_merges", lambda: unattended_merges(now), timings
+        ),
+        "unattended_approvals": _brief_timed(
+            "unattended_approvals",
+            lambda: unattended_approvals(items, now),
+            timings,
+        ),
+        "agent_health": _brief_timed(
+            "agent_health", lambda: agent_health(now), timings
+        ),
+        "working_tree_touched": _brief_timed(
+            "working_tree_touched", lambda: working_tree_touched(now), timings
+        ),
+        "rejected_merges": _brief_timed(
+            "rejected_merges", lambda: rejected_merges(items, now), timings
+        ),
+        "timings": timings,
     }
     print(json.dumps(brief, indent=2))
     return 0
@@ -8405,7 +8493,17 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 pr_facts=ticket_pr_facts(items),
             )
         if args.command == "brief":
-            return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
+            timings: Dict[str, float] = {}
+            started = time.perf_counter()
+            try:
+                pr_facts = ticket_pr_facts(items)
+            finally:
+                timings["ticket_pr_facts"] = round(
+                    max(0.0, time.perf_counter() - started), 6
+                )
+            return cmd_brief(
+                items, now, pr_facts=pr_facts, timings=timings
+            )
         if args.command == "queue":
             return cmd_queue(items, now, repo_readiness=repo_readiness)
         return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
@@ -8416,6 +8514,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
 
 SESSION_ENV = "FUNNEL_SESSION"
 SESSION_SERVER_ENV = "FUNNEL_SESSION_SERVER"
+SESSION_TIMEOUT_SECONDS = 30
 
 
 class FunnelSession:
@@ -8565,7 +8664,23 @@ def _session_client(argv: Sequence[str]) -> int:
         request["shutdown"] = True
 
     try:
-        with socket.create_connection((host, port), timeout=30) as connection:
+        connection = socket.create_connection(
+            (host, port), timeout=SESSION_TIMEOUT_SECONDS
+        )
+    except socket.timeout as exc:
+        print(
+            "funnel: connect-timeout: {} session unreachable within {}s: {}"
+            .format(SESSION_ENV, SESSION_TIMEOUT_SECONDS, exc),
+            file=sys.stderr,
+        )
+        return 2
+    except OSError as exc:
+        print("funnel: could not reach {}: {}".format(SESSION_ENV, exc),
+              file=sys.stderr)
+        return 2
+
+    try:
+        with connection:
             stream = connection.makefile("rwb")
             with stream:
                 stream.write(
@@ -8574,6 +8689,15 @@ def _session_client(argv: Sequence[str]) -> int:
                 )
                 stream.flush()
                 line = stream.readline(1_000_000)
+    except socket.timeout as exc:
+        print(
+            "funnel: reply-timeout: {} session busy past the {}s reply "
+            "budget (slow section unknown): {}".format(
+                SESSION_ENV, SESSION_TIMEOUT_SECONDS, exc
+            ),
+            file=sys.stderr,
+        )
+        return 2
     except OSError as exc:
         print("funnel: could not reach {}: {}".format(SESSION_ENV, exc),
               file=sys.stderr)

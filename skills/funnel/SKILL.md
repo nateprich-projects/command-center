@@ -58,6 +58,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `agent_health` | Raised watchdog conditions, each with the heartbeat agent and the watchdog's condition wording. Empty when all agents are healthy |
 | `rejected_merges` | Merges he checked and found broken, over `window_days`. `stop_auto_merging` true means three in a week — auto-merging stops until he fixes the review bar |
 | `closed_with_access_vocabulary` | Projects that closed with access-shaped words in the plan and no human-step ticket. The detective backstop for when every preventive layer missed one |
+| `timings` | Diagnostic elapsed seconds for each brief section, including the shared `ticket_pr_facts` read. Use it to identify the slow section when a brief is close to the session reply budget |
 
 ## How to render it
 
@@ -98,6 +99,11 @@ Then the gate counts on one line. Then anything unusual, and only if present:
 `awaiting_breakdown`, `unattended_merges`, `unattended_approvals`, `agent_health`, `resend_ratio`, `rejected_merges`, and
 `closed_with_access_vocabulary`. A suspected human step is report-only: do not clear its
 `blocked` label, restate it, or split it while rendering the brief.
+
+Use `timings` diagnostically when a brief is slow: name the largest section in the
+report, but do not treat timing as a queue or gate signal. A session reply timeout
+means the session was busy; the client reports the slow section as unknown when no
+brief response made it back.
 
 For `unclassed_captures`, show each Idea's origin and make the repair owner clear:
 agent-origin entries are for the shaping agent to class, while Nate-origin and unknown

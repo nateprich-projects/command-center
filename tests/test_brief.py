@@ -748,3 +748,27 @@ def test_brief_surfaces_agent_health_without_counting_it_as_a_decision(
 
     assert brief["agent_health"] == health
     assert brief["total_needing_nate"] == 1
+
+
+def test_brief_emits_elapsed_seconds_for_each_section(monkeypatch, capsys):
+    item = funnel.Item(
+        repo="nateprich/beta", number=93, title="Timed project",
+        url="https://example.invalid/93", state="OPEN", status="Ready",
+        status_since=NOW,
+    )
+    clock = [0.0]
+
+    def fake_perf_counter():
+        clock[0] += 0.1
+        return clock[0]
+
+    monkeypatch.setattr(funnel.time, "perf_counter", fake_perf_counter)
+    monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
+
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["timings"]["items"] == pytest.approx(0.1)
+    assert brief["timings"]["rejected_merges"] == pytest.approx(0.1)
+    assert brief["timings"]["unattended_merges"] == pytest.approx(0.1)
+    assert all(value >= 0 for value in brief["timings"].values())

@@ -1010,7 +1010,24 @@ def _needs_nate_section_reason(section: str) -> Optional[str]:
     if section.strip().lower() in EMPTY_NEEDS_NATE:
         return None
 
-    lines = [line for line in section.splitlines() if line.strip()]
+    # A wrapped elaboration continues the category line above it: Muse writes
+    # Markdown at eighty columns, and #514's clear section read as an open
+    # question because its indented second lines counted as extra lines
+    # (#524). A blank line, a new list item, or an unindented line still ends
+    # the answer and is judged on its own.
+    lines: List[str] = []
+    for line in section.splitlines():
+        if not line.strip():
+            continue
+        continues = (
+            line[:1].isspace()
+            and not re.match(r"^\s*(?:[-+*]|\d+[.)])\s+", line)
+            and bool(lines)
+        )
+        if continues:
+            lines[-1] = lines[-1].rstrip() + " " + line.strip()
+        else:
+            lines.append(line)
     found = set()
     for line in lines:
         parsed = _needs_nate_category_line(line)

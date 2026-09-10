@@ -79,7 +79,7 @@ def test_a_lower_level_heading_stays_inside_the_needs_section():
     assert plan_needs_nate(plan) is True
 
 
-def test_a_body_authority_signal_overrides_an_all_clear_section():
+def test_a_body_authority_signal_is_advisory_with_an_all_clear_section():
     plan = """
 ## Context
 Per plan.md:417, membership itself is a gate.
@@ -87,12 +87,13 @@ Per plan.md:417, membership itself is a gate.
 ## Needs you
 Nothing.
     """
-    assert plan_needs_nate(plan) is True
+    assert shaped_plan_status(plan) == ("Ready", "plan declares nothing open")
+    assert plan_needs_nate(plan) is False
     assert plan_needs_nate(plan.replace("Per plan.md:417, ", "")) is False
 
 
 def test_real_plan_fixtures_are_checked_after_an_all_clear_section():
-    assert plan_needs_nate(PLAN_83 + "\n## Needs you\nNothing.\n") is True
+    assert plan_needs_nate(PLAN_83 + "\n## Needs you\nNothing.\n") is False
     assert plan_needs_nate(PLAN_82 + "\n## Needs you\nNothing.\n") is False
 
 

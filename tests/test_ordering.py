@@ -18,6 +18,7 @@ from funnel import (  # noqa: E402
     Item,
     effective_class,
     awaiting_decision,
+    awaiting_breakdown,
     gate_question,
     ladder_index,
     lock_holder,
@@ -239,6 +240,25 @@ def test_a_blocked_ticket_asks_only_whether_to_unblock():
     blocked = ticket(1, 9, labels=["blocked"])
 
     assert gate_question(blocked) == "Unblock?"
+
+
+def test_a_blocked_ticket_with_a_breakdown_question_still_asks_to_unblock():
+    blocked = ticket(
+        1, 9, labels=["blocked"], needs_decision="Where should this live?"
+    )
+
+    assert gate_question(blocked) == "Unblock?"
+
+
+def test_a_ready_project_with_a_breakdown_question_leaves_breakdown_queue():
+    blocked = project(
+        1, "Ready", "New", children=0, labels=["blocked"],
+        needs_decision="Where should this connector live?",
+    )
+
+    assert awaiting_breakdown([blocked]) == []
+    assert awaiting_decision([blocked]) == [blocked]
+    assert gate_question(blocked) == "Answer the breakdown's question?"
 
 
 def test_blocked_ticket_without_status_starts_when_the_label_is_applied():

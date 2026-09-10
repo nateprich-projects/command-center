@@ -2024,6 +2024,41 @@ def rejected_at_current_head(verdict: Optional[Dict], head_oid: Optional[str]) -
     return verdict_covers_head(verdict, head_oid) and verdict.get("verdict") == "rejected"
 
 
+def approved_conflicting_current_head(
+    pr: Optional[Dict[str, object]],
+) -> bool:
+    """Whether an open PR is an approved head that now cannot merge.
+
+    ``UNKNOWN`` is deliberately not enough: GitHub has not established that
+    state as a conflict, so handing it back would reintroduce the unconditional
+    open-PR re-offer that this predicate is meant to avoid.
+    """
+    if not isinstance(pr, dict):
+        return False
+    if str(pr.get("state") or "").upper() != "OPEN":
+        return False
+    if str(pr.get("mergeable") or "").upper() != "CONFLICTING":
+        return False
+    verdict = pr.get("verdict")
+    return (
+        isinstance(verdict, dict)
+        and verdict.get("verdict") == "approved"
+        and verdict_covers_head(verdict, pr.get("headRefOid"))
+    )
+
+
+def approved_conflicting_refs(
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]],
+) -> Set[str]:
+    """Return refs whose approved current-head PR is definitively conflicting."""
+    if pr_facts is None:
+        return set()
+    return {
+        ref for ref, pr in pr_facts.items()
+        if approved_conflicting_current_head(pr)
+    }
+
+
 def awaiting_review(items: Sequence[Item]) -> Set[str]:
     """Tickets whose work is already in an open PR, waiting to be reviewed.
 
@@ -5552,7 +5587,13 @@ def cmd_next(
             write_lock(declined, "")
             object.__setattr__(declined, "in_motion_since", None)
             print("released {} (declined)".format(declined.ref), file=sys.stderr)
-    blocked = awaiting_review(items) | finished_by_comments(items)
+    blocked = awaiting_review(items)
+    # An approved current head that GitHub now reports as conflicting is no
+    # longer review work: the reviewer already judged it, and the engineer must
+    # rebase it. Every other open PR remains withheld, including UNKNOWN and
+    # approvals for an older head.
+    blocked.difference_update(approved_conflicting_refs(pr_facts))
+    blocked.update(finished_by_comments(items))
     ticket = next_ticket_for_tier(
         items, now, tier=tier, blocked=blocked, excluded=excluded,
         agent=agent,
@@ -7110,7 +7151,13 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             )
             print(json.dumps(out, indent=2))
             return 0
-        blocked = awaiting_review(items) | finished_by_comments(items)
+        blocked = awaiting_review(items)
+        # Keep the normal open-PR exclusion as the default. Only the
+        # machine-readable approved-plus-conflicting state hands ownership back
+        # to the engineer; the supplied PR snapshot is also the one used by the
+        # claim/WIP checks below.
+        blocked.difference_update(approved_conflicting_refs(pr_facts))
+        blocked.update(finished_by_comments(items))
         ticket = next_ticket_for_tier(
             items, now, tier=tier, blocked=blocked,
             agent=agent,

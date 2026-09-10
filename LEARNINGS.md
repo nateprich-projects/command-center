@@ -8,6 +8,34 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### If Muse took the escalated coding lane
+
+**2026-09-10 · planning · inferred**
+
+Nate's question: what if Muse (spark 1.3 at max effort) covered the escalated coding jobs
+Codex's Sol schedules do now? Worked through on the measured prices, recorded here so it
+is not re-derived.
+
+- **Escalated is a small slice of the work.** In the Codex cycle Sol merged 12 PRs of
+  ~160 — 7–8% of tickets — for 22% of Codex's week, most of it idle: 42 of 54 Sol fires
+  found nothing. A worked Sol session's token profile (72k uncached in, 2.2M cached,
+  11k out) priced at Muse's contributor rate is ~0.45 points; at max effort on a hard
+  ticket call it 0.5–1.0. Muse has never coded a ticket, so that is an estimate.
+- **Per parent it adds ~15%**: 1.53 (shaping, breakdown, 3.2 reviews) + 0.2 escalated
+  tickets × ~1.5 sessions × ~0.75 ≈ **1.75 points**.
+- **Where the limit moves.** On the $15 plan the pipeline stays Muse-bound at ~51
+  parents (~135 PRs) a week — what it clears now. On the $50 plan Muse (~170 parents)
+  stops being the limit and Codex's Luna cadence is: ~75 parents a week at 20-minute
+  fires with the cascade, ~125 with #245 fixed; with Sol's 22% handed back, Luna every
+  10 minutes fits the same Codex budget and reaches ~200 parents before Codex walls.
+- **The gain is the idle tax, not the coding.** Dropping the four Sol schedules
+  recovers ~22% of the Codex week; Muse's extra cost for the same dozen PRs is ~4
+  points of its week. The system gets cheaper either way.
+- **What it needs**: an implementation routine for Muse and a Luna-style clone/branch
+  sandbox — `scripts/muse-review` runs `--disable-write` in an empty workspace on
+  purpose — plus a plist. Shaping-sized, not a config change. Not filed; Nate asked for
+  it to be recorded here for now.
+
 ### What a Muse job costs its weekly window, and the cadence that meters it
 
 **2026-09-10 · usage · measured (prices `inferred`)**
@@ -18,9 +46,15 @@ session from its own snapshots and journals under `~/.local/share/muse/sessions`
 heartbeat finish record joined on `--run`), then scale to the panel figure Nate read.
 The panel read **80% at Wed 23:30 PDT from a Sat 17:00 reset**, but the schedules did
 not fire until Mon 18:00, so 80 points went in **53.6 hours over 486 sessions**.
-Priced at Meta's list rates for `muse-spark-1.3` the cycle is ~$48, so a Muse week is
-worth ~$61 of API compute. Sources disagree on that rate by 12×, which does not
-matter here: both weightings put every class within 10% of the same share.
+Nate confirmed on 2026-09-10 that the Muse Code Personal Plan ($15/month) meters at
+the **contributor** rate ($0.10 in / $0.002 cached / $0.20 out per 1M), so the cycle is
+~$2.47 and a Muse week is ~$3.09 of API compute against a $3.46/week plan price — the
+plan is priced at cost. The table below is at the standard-tier weighting it was first
+computed with; at contributor rates the per-run prices become review 0.28, breakdown
+0.23, shaping 0.40, **empty fire 0.12** (relatively dearer, because cache reads are
+near-free and the routine's uncached read dominates), and a parent costs **1.53
+points**: 59 parents a week on the $15 plan at 90%, 195 on the $50 plan (3.33× the
+window), $0.059 per parent on either.
 
 | job | runs | points each | points |
 |---|---|---|---|

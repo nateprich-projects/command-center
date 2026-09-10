@@ -253,3 +253,46 @@ def test_shaped_status_rejects_extra_prose_inside_a_category_section():
     )
 
     assert shaped_plan_status(plan) == ("Shaped", "plan has an open question")
+
+
+# -- a wrapped elaboration is still one answer (#524) -------------------------
+
+WRAPPED_514 = """\
+# Plan
+
+## Needs you
+
+- Exposure: nothing outstanding. No new credentials or reachable surface; the
+  z.ai key stays in its existing keychain entry.
+- Gates: nothing outstanding. No gate ownership changes; the snapshot stays
+  documentary and never fatal, and the pace gate itself is untouched.
+- Scope and priority: nothing outstanding. The scoped change is documented.
+- Preference: nothing outstanding. No user-facing choice remains.
+"""
+
+
+def test_a_wrapped_elaboration_is_still_clear():
+    """#514's section verbatim: Muse wraps at eighty columns."""
+    assert shaped_plan_status(WRAPPED_514) == ("Ready", "plan declares nothing open")
+
+
+def test_a_wrapped_open_question_stays_open():
+    plan = WRAPPED_514.replace(
+        "- Gates: nothing outstanding. No gate ownership changes; the snapshot stays\n"
+        "  documentary and never fatal, and the pace gate itself is untouched.\n",
+        "- Gates: who may write Ready for\n  an all-clear plan?\n",
+    )
+    assert shaped_plan_status(plan) == ("Shaped", "open question under Gates")
+
+
+def test_an_unindented_extra_line_stays_open():
+    plan = WRAPPED_514 + "Also: the reviewer should decide the wording.\n"
+    assert shaped_plan_status(plan) == ("Shaped", "plan has an open question")
+
+
+def test_a_nested_bullet_is_not_a_continuation():
+    plan = WRAPPED_514.replace(
+        "- Preference: nothing outstanding. No user-facing choice remains.\n",
+        "- Preference: nothing outstanding.\n  - except the label colour, which is open\n",
+    )
+    assert shaped_plan_status(plan) == ("Shaped", "plan has an open question")

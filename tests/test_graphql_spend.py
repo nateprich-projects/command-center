@@ -6,6 +6,9 @@ import io
 import json
 import pathlib
 import sys
+from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
@@ -21,8 +24,7 @@ class Proc:
 
 
 def reset():
-    funnel._GRAPHQL_SPEND.update(
-        {"calls": 0, "cost": 0, "remaining": None, "reset_at": None})
+    funnel.reset_api_usage()
 
 
 def test_spend_is_accumulated_from_the_response(monkeypatch):
@@ -99,3 +101,89 @@ def test_unknown_remaining_is_said_rather_than_guessed():
     out = io.StringIO()
     funnel.report_graphql_spend(out)
     assert "unknown remaining" in out.getvalue()
+
+
+def test_api_usage_counts_cli_calls_separately_from_graphql(monkeypatch):
+    reset()
+
+    def run(args, **kwargs):
+        if args[:3] == ["gh", "api", "graphql"]:
+            return Proc({
+                "data": {
+                    "viewer": {"login": "n"},
+                    "rateLimit": {
+                        "cost": 7, "remaining": 4993, "resetAt": "z",
+                    },
+                }
+            })
+        return Proc({"items": []})
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    funnel.gh_graphql("{viewer{login}}")
+    assert funnel._gh_json("gh", "pr", "list") == {"items": []}
+
+    assert funnel.api_usage() == {
+        "calls": 2,
+        "graphql_calls": 1,
+        "cli_calls": 1,
+        "cost": 7,
+        "remaining": 4993,
+        "reset_at": "z",
+    }
+
+
+def test_doctor_api_usage_uses_graphql_remaining_and_never_rest(monkeypatch, capsys):
+    def run(args, **kwargs):
+        assert args[:3] == ["gh", "api", "graphql"]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "data": {
+                    "viewer": {"login": "n"},
+                    "rateLimit": {
+                        "cost": 4, "remaining": 321, "resetAt": "later",
+                    },
+                }
+            }),
+            stderr="",
+        )
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(
+        funnel, "_gh_json",
+        lambda *args: pytest.fail(
+            "doctor API usage must not consult REST /rate_limit"
+        ),
+    )
+    monkeypatch.setattr(
+        funnel, "load_items",
+        lambda: (funnel.gh_graphql("{viewer{login}}"), [])[1],
+    )
+    monkeypatch.setattr(
+        funnel, "doctor_checks",
+        lambda items=None, merged_pr_facts=None: [
+            funnel.Check("local", True, "ok", ""),
+            funnel.check_api_usage(),
+        ],
+    )
+
+    assert funnel.main(["doctor"]) == 0
+    output = capsys.readouterr().out
+    assert (
+        "API usage: funnel doctor made 1 API call(s) (1 GraphQL, 0 gh CLI); "
+        "cost 4 GraphQL point(s); 321 remaining, resets later"
+    ) in output
+
+
+def test_doctor_api_usage_fails_when_remaining_is_unreadable():
+    reset()
+    funnel._API_USAGE["cli_calls"] = 1
+    funnel._GRAPHQL_SPEND.update({"calls": 1, "cost": 4})
+
+    result = funnel.check_api_usage()
+
+    assert not result.ok
+    assert "unknown remaining" in result.found
+    assert "rerun funnel doctor" in result.fix
+    reset()

@@ -2132,29 +2132,44 @@ def working_tree_touched(now: datetime) -> List[Dict[str, object]]:
 
 
 def unattended_merges(now: datetime) -> List[Dict[str, object]]:
-    """Merges Claude made without Nate, read from its own heartbeat records.
+    """Merges a reviewer made without Nate, read from every live agent's heartbeat.
 
     plan.md makes these a condition of unattended merging being allowed at all:
-    they must appear in the brief as a record.
+    they must appear in the brief as a record. Until 2026-09-10 this read only
+    the retired Claude routine's spool, so every Muse merge since the review
+    handover was missing from the brief (#489). The reader set is the live
+    provider set -- ``heartbeat.PROVIDERS`` minus ``heartbeat.RETIRED_AGENTS`` --
+    the same pattern ``agent_health`` and ``working_tree_touched`` use, so the
+    next rotation cannot reintroduce the blind spot. Each record carries the
+    ``agent`` that merged, oldest first.
     """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import heartbeat
-
-        rows = heartbeat.read("claude")
     except Exception:
         return []
 
     cutoff = (now - MAINTENANCE_WINDOW).timestamp()
-    return [
-        {
-            "pr": row.get("merged"),
-            "at": datetime.fromtimestamp(row["ts"], timezone.utc).isoformat(),
-            "note": row.get("note"),
-        }
-        for row in rows
-        if row.get("merged") and (row.get("ts") or 0) >= cutoff
-    ]
+    found: List[Dict[str, object]] = []
+    for agent in sorted(heartbeat.PROVIDERS):
+        if agent in heartbeat.RETIRED_AGENTS:
+            # A stopped schedule must not read as activity (#431).
+            continue
+        try:
+            rows = heartbeat.read(agent)
+        except Exception:
+            continue
+        for row in rows:
+            if not row.get("merged") or (row.get("ts") or 0) < cutoff:
+                continue
+            found.append({
+                "pr": row.get("merged"),
+                "at": datetime.fromtimestamp(row["ts"], timezone.utc).isoformat(),
+                "note": row.get("note"),
+                "agent": agent,
+            })
+    found.sort(key=lambda record: (record["at"], record["pr"] or 0))
+    return found
 
 
 def _self_approval_transition_times(item: Item, now: datetime) -> List[datetime]:

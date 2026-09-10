@@ -8,6 +8,43 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### What a Codex session costs the Plus weekly window, by lane
+
+**2026-09-09 · usage · measured**
+
+From the `rate_limits` readings in `~/.codex/sessions`, the weekly window reset at
+2026-09-08 04:15Z and read 95% at 2026-09-10 05:37Z: 49.4 hours, 509 sessions, all but
+two of them Command Center automations. Priced at API list rates (Luna $0.20 / $0.02
+cached / $1.20 out; Sol $4 / $0.40 / $20 promo, per 1M) the cycle comes to ~$80, so
+**one Plus week is worth roughly $84 of API compute** and 1% of it is ~$0.84.
+
+| lane | class | sessions | $/session | % of week / session |
+|---|---|---|---|---|
+| standard (`tickets-hourly`, Luna/max) | worked | 357 | $0.086 | 0.10% |
+| standard | fired, nothing to pick up | 97 (21%) | $0.030 | 0.04% |
+| escalated (four windows, Sol/high) | worked | 30 | $1.37 | 1.63% |
+| escalated | fired, nothing to pick up | 21 (41%) | $0.19 | 0.23% |
+
+Two things the raw token counts hid. **A worked Sol ticket costs sixteen worked Luna
+tickets**, so the 30 escalated jobs took more of the week (52%) than the 357 standard
+ones (38%). And **an escalated fire that finds nothing is not free**: it re-reads
+~216k cached tokens at Sol's cached rate, 0.23% of the week — more than two worked
+Luna tickets — and 41% of escalated fires did exactly that. Blended per fire at those
+no-op rates: standard 0.088%, escalated 1.06%.
+
+The cadence that burned the window — standard every 5 minutes, escalated every 15
+inside its windows — projects to ~360% of a week, which is why 95% went in 29% of one.
+Set on 2026-09-09 (Nate's call, from a 20/30/15-minute frontier): **standard every 20
+minutes, escalated hourly** inside the same windows (39 window-hours a week), ~85–88%
+of the week. Written straight into each `automation.toml` `rrule` with a `.bak`
+beside it, the same path `scripts/sync_codex_automations.py` uses for the prompt.
+
+Attribution assumes the Plus meter weights compute like the API price list, which is
+`inferred`; the per-session token counts and the 95% endpoint are measured. The
+counter also mis-reported once, 69% → 44% → 69% across an hour on 2026-09-09 16:41Z
+with the same `limit_id`, so hour-by-hour rates from these readings are noisy even
+though the endpoints agree.
+
 ### zcode was retired, and what an empty poll actually costs each pool
 
 **2026-09-09 · heartbeat · measured**

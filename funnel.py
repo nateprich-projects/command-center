@@ -1905,6 +1905,24 @@ def latest_verdict(repo: str, pr) -> Optional[Dict]:
     return None
 
 
+def verdict_covers_head(verdict: Optional[Dict], head_oid: Optional[str]) -> bool:
+    """Whether a verdict judged exactly the commit that is the branch head now."""
+    return bool(verdict) and bool(head_oid) and verdict.get("head_sha") == head_oid
+
+
+def rejected_at_current_head(verdict: Optional[Dict], head_oid: Optional[str]) -> bool:
+    """A rejection hands the ticket back only while the head it judged is still the head.
+
+    Both selectors read this one predicate (#487). A rejected verdict on the
+    current head means the engineer owes a fix, so the ticket is engineering
+    work. The moment a new head is pushed the rejection no longer covers the
+    diff, and the ticket is awaiting review -- offered by `next-review` once
+    and by `begin` not at all. Reading the verdict alone, as `awaiting_review`
+    did until 2026-09-10, handed the fixed ticket to both at the same time.
+    """
+    return verdict_covers_head(verdict, head_oid) and verdict.get("verdict") == "rejected"
+
+
 def awaiting_review(items: Sequence[Item]) -> Set[str]:
     """Tickets whose work is already in an open PR, waiting to be reviewed.
 
@@ -1916,7 +1934,8 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
     blocked: Set[str] = set()
     for repo in sorted(repos):
         rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "open",
-                        "--json", "headRefName,number", "--limit", "100") or []
+                        "--json", "headRefName,headRefOid,number",
+                        "--limit", "100") or []
         for row in rows:
             head = row.get("headRefName") or ""
             if not head.startswith("ticket/"):
@@ -1924,9 +1943,11 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
             # A PR whose review asked for changes is *not* blocked: its ticket
             # goes back to the engineer to fix. Without this a rejected PR has no
             # owner — the reviewer will not revisit it and the engineer is never
-            # offered it — so it waits for Nate. That is #39.
+            # offered it — so it waits for Nate. That is #39. The hand-back
+            # lasts only while the rejected head is still the head: once the
+            # engineer pushes, the ticket is review work again (#487).
             verdict = latest_verdict(repo, row.get("number"))
-            if verdict and verdict.get("verdict") == "rejected":
+            if rejected_at_current_head(verdict, row.get("headRefOid")):
                 continue
             blocked.add("{}#{}".format(repo, head.split("/", 1)[1]))
     return blocked
@@ -6457,7 +6478,7 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
             if ticket is None:
                 continue
             verdict = latest_verdict(repo, row.get("number"))
-            if verdict and verdict.get("head_sha") == row.get("headRefOid"):
+            if verdict_covers_head(verdict, row.get("headRefOid")):
                 continue  # this exact diff has already been judged
             needed = required_tier(
                 ticket.title, _ticket_body(repo, ticket.number))

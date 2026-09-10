@@ -181,7 +181,9 @@ def _gate_rejection_wired(monkeypatch, pr_json, comments):
 
     def fake_gh_json(*args):
         if "list" in args:
-            return [{"headRefName": "ticket/9", "number": 5}]
+            # The gate rejection is written at SHA, which is still the head:
+            # the hand-back to the engineer lasts exactly while that holds (#487).
+            return [{"headRefName": "ticket/9", "headRefOid": SHA, "number": 5}]
         if "comments" in args:
             return {"comments": [
                 {"body": body} for body in comments + posted

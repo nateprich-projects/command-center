@@ -77,3 +77,61 @@ def test_ties_on_creation_time_break_by_pr_number(monkeypatch):
     _wire(monkeypatch, rows)
 
     assert [e["pr"] for e in funnel.review_queue([_ticket(1), _ticket(2)])] == [11, 12]
+
+
+# -- A rejected verdict binds to the head it judged (#487) --------------------
+
+def _both(monkeypatch, rows, verdicts):
+    """Run both selectors over one snapshot of PRs and verdicts."""
+    _wire(monkeypatch, rows, verdicts)
+    tickets = [_ticket(n) for n in range(1, 4)]
+    review = {e["ref"] for e in funnel.review_queue(tickets)}
+    blocked = funnel.awaiting_review(tickets)
+    return review, blocked
+
+
+def test_a_rejection_on_the_current_head_hands_the_ticket_back_to_engineering(monkeypatch):
+    rows = [_row(10, 1, "2026-09-10T05:00:00Z", head="h1")]
+    review, blocked = _both(monkeypatch, rows,
+                            {10: {"verdict": "rejected", "head_sha": "h1"}})
+    ref = "{}#1".format(REPO)
+    assert ref not in review      # the reviewer already judged this head
+    assert ref not in blocked     # so the engineer owes the fix
+
+
+def test_a_push_after_a_rejection_makes_the_ticket_review_work_only(monkeypatch):
+    rows = [_row(10, 1, "2026-09-10T05:00:00Z", head="h2")]
+    review, blocked = _both(monkeypatch, rows,
+                            {10: {"verdict": "rejected", "head_sha": "h1"}})
+    ref = "{}#1".format(REPO)
+    assert ref in review          # the new head has no verdict
+    assert ref in blocked         # and the engineer is not offered it again
+
+
+def test_the_observed_396_facts_route_to_review_not_engineering(monkeypatch):
+    """Run 17a0efb511ec, 2026-09-10: verdict rejected on 7cb32a2, branch at f62425d."""
+    rows = [_row(423, 1, "2026-09-09T19:00:00Z", head="f62425d")]
+    review, blocked = _both(monkeypatch, rows,
+                            {423: {"verdict": "rejected", "head_sha": "7cb32a2"}})
+    ref = "{}#1".format(REPO)
+    assert ref in review and ref in blocked
+
+
+def test_no_snapshot_offers_the_same_ticket_head_to_both_selectors(monkeypatch):
+    rows = [_row(10, 1, "2026-09-10T05:00:00Z", head="same"),
+            _row(20, 2, "2026-09-10T05:01:00Z", head="moved"),
+            _row(30, 3, "2026-09-10T05:02:00Z", head="fresh")]
+    verdicts = {10: {"verdict": "rejected", "head_sha": "same"},
+                20: {"verdict": "rejected", "head_sha": "old"}}
+    review, blocked = _both(monkeypatch, rows, verdicts)
+    engineering = {"{}#{}".format(REPO, n) for n in (1, 2, 3)} - blocked
+    assert not (review & engineering)
+    assert engineering == {"{}#1".format(REPO)}
+    assert review == {"{}#2".format(REPO), "{}#3".format(REPO)}
+
+
+def test_the_predicates_fail_closed_without_a_head():
+    assert not funnel.verdict_covers_head({"verdict": "rejected", "head_sha": "h"}, None)
+    assert not funnel.rejected_at_current_head(None, "h")
+    assert funnel.rejected_at_current_head({"verdict": "rejected", "head_sha": "h"}, "h")
+    assert not funnel.rejected_at_current_head({"verdict": "approved", "head_sha": "h"}, "h")

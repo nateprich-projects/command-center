@@ -60,6 +60,23 @@ def test_origin_parser_reads_only_its_own_marker():
     assert funnel.parse_origin(origin + "\n\n" + provenance)["voice"] == "nate-relayed"
 
 
+def test_origin_parser_skips_a_quoted_marker_before_the_real_block():
+    origin = marked(
+        funnel.ORIGIN_MARKER,
+        voice="agent", agent="muse", run="run-2", at=NOW.isoformat(),
+    )
+    body = (
+        "The note quotes {} before the captured block.\n\n{}"
+    ).format(funnel.ORIGIN_MARKER, origin)
+
+    assert funnel.parse_origin(body) == {
+        "agent": "muse",
+        "at": NOW.isoformat(),
+        "run": "run-2",
+        "voice": "agent",
+    }
+
+
 @pytest.mark.parametrize("voice", ["nate-direct", "unknown", None])
 def test_origin_parser_rejects_non_capture_voices(voice):
     assert funnel.parse_origin(marked(funnel.ORIGIN_MARKER, voice=voice)) is None

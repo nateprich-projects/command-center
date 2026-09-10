@@ -1564,43 +1564,68 @@ VERDICTS = ("approved", "rejected")
 CI_STATES = ("green", "red", "unknown")
 
 
-def _marked_json(body: str, marker: str) -> Optional[Dict]:
-    """Read the first JSON block owned by ``marker``.
+def _marked_json_blocks(body: str, marker: str) -> List[Tuple[Dict, str]]:
+    """Return parseable JSON blocks owned by ``marker``, newest first.
 
     A comment may carry both a review verdict and provenance. Parsing from one
     marker to the last closing brace would join those two objects and make the
-    review gate silently lose a valid verdict. The first fenced JSON block (or
-    an immediately following bare object for compatibility with early markers)
-    belongs to the requested marker; another Command Center marker never does.
+    review gate silently lose a valid verdict. Each marker occurrence therefore
+    owns only the first fenced JSON block (or an immediately following bare
+    object for compatibility with early markers) before another Command Center
+    marker. A quoted marker can precede the real block, so occurrences are tried
+    from last to first and malformed occurrences are skipped.
     """
-    marker_at = body.find(marker)
-    if marker_at < 0:
-        return None
+    if not isinstance(body, str):
+        return []
 
-    rest = body[marker_at + len(marker):]
-    next_marker = rest.find("<!-- command-center-")
-    if next_marker >= 0:
-        rest = rest[:next_marker]
+    marker_positions = [
+        match.start() for match in re.finditer(re.escape(marker), body)
+    ]
+    blocks = []
+    for marker_at in reversed(marker_positions):
+        rest = body[marker_at + len(marker):]
+        next_marker = rest.find("<!-- command-center-")
+        if next_marker >= 0:
+            rest = rest[:next_marker]
 
-    fenced = re.search(
-        r"```json[ \t]*\r?\n(.*?)\r?\n```", rest, flags=re.DOTALL
-    )
-    if fenced:
-        raw = fenced.group(1)
-        try:
-            found = json.loads(raw)
-        except (TypeError, ValueError):
-            return None
-    else:
+        fenced = re.search(
+            r"```json[ \t]*\r?\n(.*?)\r?\n```", rest, flags=re.DOTALL
+        )
+        if fenced:
+            raw = fenced.group(1)
+            try:
+                found = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(found, dict):
+                end = marker_at + len(marker) + fenced.end()
+                blocks.append((found, body[marker_at:end]))
+            continue
+
+        leading = len(rest) - len(rest.lstrip())
         raw = rest.lstrip()
         if not raw.startswith("{"):
-            return None
+            continue
         try:
-            found, _ = json.JSONDecoder().raw_decode(raw)
+            found, end = json.JSONDecoder().raw_decode(raw)
         except (TypeError, ValueError):
-            return None
+            continue
+        if isinstance(found, dict):
+            block_end = marker_at + len(marker) + leading + end
+            blocks.append((found, body[marker_at:block_end]))
+    return blocks
 
-    return found if isinstance(found, dict) else None
+
+def _marked_json(body: str, marker: str) -> Optional[Dict]:
+    """Read the newest parseable JSON block owned by ``marker``."""
+    blocks = _marked_json_blocks(body, marker)
+    return blocks[0][0] if blocks else None
+
+
+def _marked_json_block(body: str, marker: str) -> Optional[str]:
+    """Return the newest parseable marker block, preserving its original text."""
+    blocks = _marked_json_blocks(body, marker)
+    return blocks[0][1] if blocks else None
 
 
 def parse_self_approval(body: str) -> Optional[str]:
@@ -6088,8 +6113,13 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
             )
         )
 
-    origin = parse_origin(item.body or "")
+    original_body = item.body or ""
+    origin = parse_origin(original_body)
     origin_voice = origin["voice"] if origin is not None else None
+    captured_origin = (
+        _marked_json_block(original_body, ORIGIN_MARKER)
+        if origin is not None else None
+    )
     class_missing = item.klass not in LADDER
     if class_missing and origin_voice == "agent" and klass is None:
         raise GitHubError(
@@ -6115,6 +6145,8 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
         )
     authority_signals = needs_nate_signals(plan)
     body = append_provenance(plan, "agent", at=now, run=run, agent=agent)
+    if captured_origin is not None:
+        body = "{}\n\n{}".format(body, captured_origin)
     overlaps = shaping_plan_overlap_candidates(items, item, plan)
 
     out = _run_gh(

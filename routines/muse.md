@@ -60,6 +60,17 @@ in the commands; the forwarding is transparent. A non-TTY pipe is carried with
 the request (up to 1 MB), so `shaped --plan -` works directly inside the session;
 TTY stdin is left untouched.
 
+Each forwarded command has a 29-second server-side budget, just inside the
+30-second transport timeout. GitHub and other child-process work receives the
+remaining time and is killed when that budget expires, so a slow command
+returns `command-timeout` and releases the session for the next command. The
+session discards its in-memory Project view after that failure and reloads it on
+the next command. Treat a timed-out mutation as having an unknown remote result:
+inspect GitHub before repeating it, and never repeat `begin` or start a second
+claim path. A transport-level `reply-timeout` is still a failed run; do not
+retry the timed-out mutation or re-run `begin`, and let the next run reconcile
+GitHub state.
+
 **Shell commands run in the background and their output arrives asynchronously.**
 A tool result comes back `background_running` with guidance not to poll — the
 output reaches you later and wakes you even after you end a turn. Codex and zcode

@@ -60,6 +60,32 @@ def test_breakdown_docs_record_and_resume_needs_decisions():
         )
 
 
+def test_needs_guidance_uses_the_parser_ready_all_clear_form():
+    """The shaping docs must teach the syntax accepted by shaped_plan_status."""
+    example = " ".join(
+        """- Exposure: nothing outstanding. No new credentials or reachable surface.
+        - Gates: nothing outstanding. No gate ownership changes.
+        - Scope and priority: nothing outstanding. The scoped change is documented.
+        - Preference: nothing outstanding. No user-facing choice remains.""".split()
+    ).lower()
+    old_guidance = (
+        "explicit answer under every category, including when nothing is outstanding"
+    )
+    documents = (
+        ROOT / "routines" / "muse.md",
+        ROOT / "routines" / "claude.md",
+        ROOT / "skills" / "shape" / "SKILL.md",
+    )
+
+    for path in documents:
+        normalized = " ".join(path.read_text(encoding="utf-8").split()).lower()
+        assert example in normalized
+        assert old_guidance not in normalized
+        assert "a self-approvable class with `agent` origin" in normalized
+        assert "a `self-approved:` marker that `funnel brief` shows" in normalized
+        assert "stays at `shaped`, with the reason printed" in normalized
+
+
 @pytest.mark.parametrize("routine", ["claude", "muse"])
 def test_unattended_shaping_can_recover_an_unclassed_agent_idea(routine):
     body = (ROOT / "routines" / (routine + ".md")).read_text(encoding="utf-8")

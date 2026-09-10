@@ -253,7 +253,10 @@ def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
     old = _approval_item(
         82, NOW - funnel.MAINTENANCE_WINDOW - timedelta(seconds=1)
     )
-    basis = "plan declares nothing open; no escalated risk"
+    basis = (
+        "plan declares nothing open; no escalated risk; authority signals: "
+        "gate authority, policy authority"
+    )
     comments = {
         80: [{"body": funnel.SELF_APPROVED_PREFIX + basis}],
         81: [{"body": "Approved at the Shaped gate — Ready."}],
@@ -280,6 +283,8 @@ def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
         "at": (NOW - timedelta(hours=1)).isoformat(),
         "basis": basis,
     }]
+    assert "authority signals: gate authority, policy authority" in \
+        brief["unattended_approvals"][0]["basis"]
     assert [call[3] for call in calls] == ["81", "80"]
 
 

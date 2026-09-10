@@ -204,9 +204,12 @@ LADDER = ["Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"]
 PREEMPTING_CLASSES = frozenset({"Broken", "Maintenance"})
 PREEMPTING = {"Broken", "Maintenance"}
 
-#: Existing-work classes may take the unattended shaping path. Origin remains
-#: an independent condition: class describes the work, not who raised it.
-SELF_APPROVABLE_CLASSES = frozenset({"Broken", "Maintenance", "Improve"})
+#: Existing-work classes and finite investigations may take the unattended
+#: shaping path. Origin remains an independent condition: class describes the
+#: work, not who raised it.
+SELF_APPROVABLE_CLASSES = frozenset(
+    {"Investigate", "Broken", "Maintenance", "Improve"}
+)
 
 #: Which stages can wait on a human, and the question each one asks.
 GATES = {
@@ -1029,9 +1032,10 @@ def shaped_plan_status(plan_body: str) -> Tuple[str, str]:
 
     The all-clear is deliberately narrow: a recognised Needs section must be
     present, either explicitly empty or made up of the four category lines with
-    an explicit all-clear as each answer's first clause, and be free of
-    authority signals that contradict its claim. Everything else stays at
-    Shaped with a reason the caller can print.
+    an explicit all-clear as each answer's first clause. Authority-shaped
+    prose is reported separately by ``needs_nate_signals`` and does not change
+    this section result. Everything else stays at Shaped with a reason the
+    caller can print.
     """
     sections = _needs_nate_sections(plan_body)
     if not sections:
@@ -1040,11 +1044,6 @@ def shaped_plan_status(plan_body: str) -> Tuple[str, str]:
         reason = _needs_nate_section_reason(section)
         if reason:
             return "Shaped", reason
-    signals = needs_nate_signals(plan_body)
-    if signals:
-        return "Shaped", "plan contains authority signal: {}".format(
-            ", ".join(signals)
-        )
     return "Ready", "plan declares nothing open"
 
 
@@ -1055,8 +1054,8 @@ def plan_needs_nate(plan_body: str) -> bool:
     explicit evidence that Nate's questions were considered. Only a section
     containing exactly ``Nothing`` (with optional punctuation and whitespace)
     is empty. Multiple recognised sections fail closed if any one contains
-    content. An otherwise empty section also fails closed when the plan body
-    contains an authority signal that contradicts the section's claim.
+    content. Authority-shaped prose is an advisory signal for the unattended
+    approval record, not an open question for this parser.
     """
     return shaped_plan_status(plan_body)[0] == "Shaped"
 
@@ -1246,9 +1245,10 @@ def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],
     """Whether all conditions permit one unattended shaping transition.
 
     #77 supplies the plan booleans and #80 owns the transition. Keeping class,
-    origin, the Needs-Nate result (including #84's authority verifier), and
-    escalation in this one predicate prevents origin from becoming a second
-    gate that can drift from the existing self-approval rule.
+    origin, the Needs-section result, and escalation in this one predicate
+    prevents origin from becoming a second gate that can drift from the
+    existing self-approval rule. Authority signals remain advisory record
+    data and are intentionally not a predicate term.
     """
     return (
         klass in SELF_APPROVABLE_CLASSES
@@ -6021,9 +6021,10 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
 
     Writes the plan into the issue body — `plan.md` puts it there through Ideas
     and Shaped, and it only becomes a repo's own `plan.md` at the Ready gate —
-    then moves the item to `Ready` only when the plan's explicit Needs section
-    declares nothing open. Otherwise it stays at `Shaped`, which asks Nate the
-    next gate: is the plan good?
+    then moves the item to `Ready` only when the unattended self-approval
+    predicate accepts the effective Class, origin, Needs section, and risk.
+    Otherwise it stays at `Shaped`, which asks Nate the next gate: is the plan
+    good?
     """
     item = find(items, ref)
     if klass is not None and klass not in LADDER:
@@ -6072,7 +6073,38 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
 
     if not item.item_id:
         raise GitHubError("{} is not in the Project".format(item.ref))
-    status, reason = shaped_plan_status(plan)
+    plan_status, plan_reason = shaped_plan_status(plan)
+    by_ref = {candidate.ref: candidate for candidate in items}
+    effective_klass = effective_class(item, by_ref)
+    if class_missing and origin_voice == "agent" and klass is not None:
+        effective_klass = klass
+    override = parse_origin_override(item.body or "")
+    override_target = override["target"] if override is not None else None
+    escalation_reasons = plan_is_escalated(plan)
+    needs_nate = plan_status != "Ready"
+    eligible = self_approval_eligible(
+        effective_klass,
+        origin_voice,
+        override_target,
+        needs_nate=needs_nate,
+        escalated=bool(escalation_reasons),
+    )
+    status = "Ready" if eligible else "Shaped"
+    failed_conditions = []
+    if effective_klass not in SELF_APPROVABLE_CLASSES:
+        class_name = effective_klass or "unset"
+        failed_conditions.append(
+            "class {} is not self-approvable".format(class_name)
+        )
+    if effective_shape_owner(origin_voice, override_target) != "agents":
+        failed_conditions.append("origin is Nate's")
+    if needs_nate:
+        failed_conditions.append(plan_reason)
+    if escalation_reasons:
+        failed_conditions.append(
+            "escalated risk ({})".format(", ".join(escalation_reasons))
+        )
+    reason = plan_reason if status == "Ready" else "; ".join(failed_conditions)
     if class_missing and origin_voice == "agent":
         # This recovery write is the only place shaping may assign a Class.
         # Keep it immediately before the Status mutation so the latter never
@@ -6085,6 +6117,10 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
                     "--remove-label", "needs-shaping"], capture_output=True)
     if status == "Ready":
         basis = "{}; no escalated risk".format(reason)
+        if authority_signals:
+            basis += "; authority signals: {}".format(
+                ", ".join(authority_signals)
+            )
         comment = _run_gh(
             ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
              "--body", self_approval_comment(
@@ -6107,8 +6143,8 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     else:
         print("  none found")
     if authority_signals:
-        print("\n--- self-approval refused ---")
-        print("The plan stays at Shaped for Nate because:")
+        print("\n--- self-approval advisory ---")
+        print("Authority signals are recorded in the Self-approved basis:")
         for signal in authority_signals:
             print("  {}: {}".format(
                 signal, NEEDS_NATE_SIGNAL_REASONS[signal]
@@ -6900,6 +6936,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     do="ticket",
                     work=item_json(ticket, now, {i.ref: i for i in items}),
                 )
+        _bind_run(agent, out)
         print(json.dumps(out, indent=2))
         return 0
 
@@ -6978,8 +7015,38 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         out.update(reserve)
         heartbeat.record_event(agent, out["run"], "skipped-api-reserve",
                                note=out["why"])
+    _bind_run(agent, out)
     print(json.dumps(out, indent=2))
     return 0
+
+
+def _bind_run(agent: str, out: Dict[str, object]) -> None:
+    """Bind the work this run was issued to its start record (#497).
+
+    A finish that names other work is then refused by the heartbeat rather
+    than filed under a run that never issued it. The binding is also printed
+    under ``bound`` so the routine can hand it back on ``finish --work``.
+    Bookkeeping never stops the run: a binding that cannot be written is
+    reported by the heartbeat and the run proceeds with the work.
+    """
+    do = out.get("do")
+    work = out.get("work")
+    run = out.get("run")
+    if do not in ("ticket", "review", "breakdown", "shape") or not run:
+        return
+    if not isinstance(work, dict):
+        return
+    subject = work.get("pr") if do == "review" else work.get("ref")
+    if subject is None:
+        return
+    out["bound"] = {"do": do, "work": str(subject)}
+    try:
+        import heartbeat
+
+        heartbeat.record_binding(agent, str(run), str(do), str(subject))
+    except Exception:
+        # Instrumentation must not gate the thing it instruments.
+        pass
 
 
 def _reserve_verdict(do: object) -> Optional[Dict[str, object]]:

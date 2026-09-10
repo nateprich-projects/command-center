@@ -20,6 +20,16 @@ import usage  # noqa: E402
 NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _bindings_never_touch_the_real_spool(monkeypatch):
+    """`begin` now writes a binding record through the heartbeat (#497). The
+    subprocess stubs in these tests cover the push but not the local spool, so
+    stub the writer itself; tests that care patch it again explicitly."""
+    import heartbeat
+
+    monkeypatch.setattr(heartbeat, "record_binding", lambda *args, **kwargs: "pushed")
+
+
 def _allow_begin(monkeypatch):
     monkeypatch.setattr(
         funnel.subprocess,
@@ -1038,3 +1048,34 @@ def test_muse_escalated_schedule_is_never_offered_shaping(monkeypatch, capsys):
     result = json.loads(capsys.readouterr().out)
 
     assert result["do"] == "stop"
+
+
+def test_begin_binds_the_ticket_it_issues_to_the_run(monkeypatch, capsys):
+    """The run id alone let a stale finish land on the wrong run (#497)."""
+    import heartbeat
+
+    bound = []
+    monkeypatch.setattr(
+        heartbeat, "record_binding",
+        lambda agent, run, do, work: bound.append((agent, run, do, work)) or "pushed",
+    )
+    project, ticket = _ticket(7, 6)
+    result, writes = _codex_begin(monkeypatch, capsys, [project, ticket])
+
+    assert result["do"] == "ticket"
+    assert result["bound"] == {"do": "ticket", "work": ticket.ref}
+    assert bound == [("codex", "run-id", "ticket", ticket.ref)]
+
+
+def test_a_stop_run_binds_nothing(monkeypatch, capsys):
+    import heartbeat
+
+    bound = []
+    monkeypatch.setattr(
+        heartbeat, "record_binding",
+        lambda *args: bound.append(args) or "pushed",
+    )
+    result, writes = _codex_begin(monkeypatch, capsys, [])
+
+    assert result["do"] == "stop"
+    assert "bound" not in result and bound == []

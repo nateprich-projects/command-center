@@ -329,6 +329,27 @@ def record_api_cost(agent: str, run: Optional[str], api_cost: Dict) -> str:
     return kept
 
 
+def record_binding(agent: str, run: str, do: str, work: str) -> str:
+    """Bind the work `funnel begin` issued to the run that received it (#497).
+
+    Its own record, because the spool is append-only and the start record is
+    already on its way to GitHub. Readers that count starts and finishes ignore
+    the phase; `bindings()` is the reader for this one. Never raises for
+    bookkeeping: `append` reports what happened and the run proceeds.
+    """
+    record = {
+        "run": run,
+        "agent": agent,
+        "phase": "bind",
+        "ts": int(time.time()),
+        "do": do,
+        "work": work,
+    }
+    kept = append(agent, record)
+    _report(kept)
+    return kept
+
+
 def api_cost_for_run(records: List[Dict], run: Optional[str]) -> Dict[str, Optional[int]]:
     """Sum the per-command API events for one run, independently by field.
 
@@ -365,6 +386,66 @@ def api_cost_for_run(records: List[Dict], run: Optional[str]) -> Dict[str, Optio
         if readable:
             result[name] = sum(values)
     return result
+
+
+def bindings(records: List[Dict]) -> Dict[str, Dict]:
+    """The work each run was issued, by run id. The latest binding wins."""
+    found: Dict[str, Dict] = {}
+    rows = sorted(
+        (r for r in records if r.get("phase") == "bind" and r.get("run")),
+        key=lambda r: r.get("ts") or 0,
+    )
+    for rec in rows:
+        found[rec["run"]] = {
+            "do": rec.get("do"), "work": rec.get("work"), "ts": rec.get("ts"),
+        }
+    return found
+
+
+def verify_finish(records: List[Dict], run_id: str, *,
+                  merged=None, work: Optional[str] = None):
+    """Check a finish against the binding of the run it names.
+
+    Returns ``None`` when nothing contradicts: no binding was recorded (a stop
+    run, or a start that predates bindings -- instrumentation never gates the
+    thing it instruments), or the finish names no work, or the named work is
+    the bound work. Otherwise returns ``(right_run, reason)``: the still-open
+    run that *was* issued the named work, or ``None`` when there is none, and
+    a sentence saying what the named run was actually issued.
+
+    Membership alone let a stale id from an earlier tick accept an outcome
+    whenever that id was still open; the observed case (#497) was saved only
+    because the stale run had already finished.
+    """
+    bound = bindings(records).get(run_id)
+    if bound is None:
+        return None
+    if work:
+        named = str(work)
+        matches = str(bound.get("work")) == named
+    elif merged is not None:
+        named = "a merge of PR {}".format(merged)
+        matches = (bound.get("do") == "review"
+                   and str(bound.get("work")) == str(merged))
+    else:
+        return None
+    if matches:
+        return None
+    opens = {r.get("run") for r in open_starts(records)}
+    right = None
+    for other, other_bound in bindings(records).items():
+        if other == run_id or other not in opens:
+            continue
+        if work and str(other_bound.get("work")) == str(work):
+            right = other
+            break
+        if (merged is not None and other_bound.get("do") == "review"
+                and str(other_bound.get("work")) == str(merged)):
+            right = other
+            break
+    reason = "run {} was issued {} {}, not {}".format(
+        run_id, bound.get("do"), bound.get("work"), named)
+    return right, reason
 
 
 def _report(kept: str) -> None:
@@ -824,6 +905,11 @@ def main(argv=None) -> int:
         "--merged", default=None,
         help="PR number merged unattended; recorded so the brief can surface it",
     )
+    finish.add_argument(
+        "--work", default=None,
+        help="the ticket ref or PR number this run was issued, as `funnel begin` "
+             "printed it under `bound`; checked against the run's binding",
+    )
 
     show = sub.add_parser("read", help="print an agent's records as JSON")
     show.add_argument("--agent", required=True, choices=sorted(PROVIDERS))
@@ -856,6 +942,35 @@ def main(argv=None) -> int:
 
         records = read(args.agent)
         run_id, candidates = resolve_run(records, args.run)
+        if args.run and run_id:
+            misfiled = verify_finish(
+                records, run_id, merged=_merged_pr(args.merged), work=args.work
+            )
+            if misfiled is not None:
+                right, reason = misfiled
+                # Never dropped, never filed under the wrong run: the outcome
+                # becomes an event on the run that was issued the work, or an
+                # unattributed event naming the candidates when none is open.
+                event = {"misfiled_from": run_id, "note": args.note}
+                if args.work:
+                    event["work"] = args.work
+                if _merged_pr(args.merged) is not None:
+                    event["merged"] = _merged_pr(args.merged)
+                if right is None:
+                    event["candidates"] = [
+                        r.get("run") for r in open_starts(records)
+                    ]
+                record_event(args.agent, right, args.outcome, **event)
+                raise HeartbeatError(
+                    "{}. {}".format(
+                        reason,
+                        "Use --run {} (still open); this outcome has been filed "
+                        "as an event on it.".format(right)
+                        if right else
+                        "No open run is bound to that work; this outcome has "
+                        "been filed as an unattributed event.",
+                    )
+                )
         if run_id is None:
             print(
                 "heartbeat: could not tell which run this finishes ({} open). "

@@ -339,11 +339,11 @@ def test_ladder_is_in_the_documented_order():
     assert ranks == sorted(ranks) and len(set(ranks)) == 6
 
 
-def test_investigate_is_first_without_gaining_preemption_or_self_approval():
+def test_investigate_is_first_without_gaining_preemption():
     assert ladder_index("Investigate") == 0
     assert funnel.PREEMPTING_CLASSES == frozenset({"Broken", "Maintenance"})
     assert funnel.SELF_APPROVABLE_CLASSES == frozenset(
-        {"Broken", "Maintenance", "Improve"}
+        {"Investigate", "Broken", "Maintenance", "Improve"}
     )
 
 

@@ -8,6 +8,27 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### A disposable Muse session removes duplicate Project loads without stale claims
+
+**2026-09-10 · GitHub GraphQL / ticket #291 · measured (full-run total derived)**
+
+Before the change, the heartbeat branch recorded two-command Muse paths at **46 points**
+(run `e6ab9fbeedad`: 23 + 23, with 17 and 11 `gh` calls) and a three-command path at
+**69 points** (run `a23b74f4fa45`: 23 + 23 + 23, with 17, 11 and 12 `gh` calls). Each
+invocation cold-loaded the same Project. The corrected load measurement from #274 is
+~**12 points**, so the duplicated load component was ~12 points in the two-command path
+and ~24 in the three-command path.
+
+On `ticket/291`, the session harness dispatched multiple commands and measured exactly one
+lazy `load_items()` call. Its first-command reset happens before that load, and later
+commands reuse the live in-memory view; no cache or snapshot is involved. Holding the
+non-load work constant, the measured replay is therefore **46 → ~34 points** for two
+commands and **69 → ~45 points** for three. Applied to the corrected five-invocation
+Muse estimate of ~175 points, the duplicate-load component predicts **~175 → ~127
+points**; that whole-run number is arithmetic from measured components, not a shared-token
+remaining delta. The first load remains at command time, so a claim still reads GitHub
+immediately before it writes the lock.
+
 ### If Muse took the escalated coding lane
 
 **2026-09-10 · planning · inferred**

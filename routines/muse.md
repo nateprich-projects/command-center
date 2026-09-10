@@ -50,6 +50,14 @@ A `Broken` or `Maintenance` job is offered first whatever its stage.
 
 ## Muse-specific behaviour you must know
 
+**The runner provides one disposable funnel session for this run.** Every
+`funnel.py` invocation below is forwarded to the same in-memory process, which
+loads the Project once and keeps its locally updated view for the rest of the
+run. The first load happens when `begin` arrives, so the claim lock still reads
+GitHub at claim time. The session is discarded when the runner exits: there is
+no cache, snapshot file, or long-lived daemon. Use the exact funnel path shown
+in the commands; the forwarding is transparent.
+
 **Shell commands run in the background and their output arrives asynchronously.**
 A tool result comes back `background_running` with guidance not to poll — the
 output reaches you later and wakes you even after you end a turn. Codex and zcode

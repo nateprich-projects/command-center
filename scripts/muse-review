@@ -65,10 +65,33 @@ if printf '%s' "$PROMPT" | grep -q OPENING_FLAGS; then
   echo "muse-review: the opening-flags placeholder was not substituted" >&2
   exit 1
 fi
-if [[ -z "${PROMPT// }" ]]; then
+if [[ "$PROMPT" != *[![:space:]]* ]]; then
   echo "muse-review: $ROUTINE has no prompt after its --- separator" >&2
   exit 1
 fi
+
+# Keep the funnel's Project view in one disposable process for this Muse run.
+# The server prints its loopback endpoint through an inherited pipe; it does not
+# read GitHub until the first client command arrives, so `begin` still sees the
+# live Project when it claims work. No endpoint or Project data is written to
+# disk, and the session ends with this runner.
+exec 3< <(
+  FUNNEL_SESSION= FUNNEL_SESSION_SERVER=1 \
+    python3 "$REPO/funnel.py" session-server --parent-pid "$$"
+)
+FUNNEL_SESSION=""
+if ! IFS= read -r FUNNEL_SESSION <&3; then
+  echo "muse-review: could not start the per-run funnel session" >&2
+  exec 3<&-
+  exit 1
+fi
+exec 3<&-
+export FUNNEL_SESSION
+
+stop_funnel_session() {
+  python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
+}
+trap stop_funnel_session EXIT
 
 # --model muse-spark-1.3, NOT -contributor. The contributor variant is the CLI
 # default and carries "Your content ... may be used for product improvement".

@@ -17,6 +17,8 @@ def _stub_repo(tmp_path):
     repo = tmp_path / "repo"
     (repo / "routines").mkdir(parents=True)
     shutil.copy(ROOT / "routines" / "muse.md", repo / "routines" / "muse.md")
+    shutil.copy(ROOT / "funnel.py", repo / "funnel.py")
+    shutil.copy(ROOT / "agent_health.py", repo / "agent_health.py")
     (repo / "heartbeat.py").write_text(
         "import sys, pathlib\n"
         "pathlib.Path(sys.argv[0]).with_name('heartbeat.log').write_text(' '.join(sys.argv[1:]))\n"

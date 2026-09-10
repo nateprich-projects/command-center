@@ -53,9 +53,11 @@ def runtime_start(run, timestamp, head="stale", agent="codex", ticket=1):
     }
 
 
-def comparison(status="behind", behind_by=3, main_date="2026-09-09T10:00:00Z"):
+def comparison(status="ahead", ahead_by=3, behind_by=0,
+               main_date="2026-09-09T10:00:00Z"):
     return {
         "status": status,
+        "ahead_by": ahead_by,
         "behind_by": behind_by,
         "head_commit": {"commit": {"committer": {"date": main_date}}},
     }
@@ -220,7 +222,7 @@ def test_three_old_runtime_heads_behind_main_are_reported(monkeypatch):
     ]
     monkeypatch.setattr(
         watchdog, "runtime_compare",
-        lambda head: comparison(behind_by=4, main_date="2026-09-05T08:00:00Z"),
+        lambda head: comparison(ahead_by=4, main_date="2026-09-05T08:00:00Z"),
     )
 
     problems = watchdog.assess("codex", rows, NOW)
@@ -238,8 +240,9 @@ def test_runtime_grace_uses_the_real_compare_commits_shape(monkeypatch):
     monkeypatch.setattr(
         watchdog, "runtime_compare",
         lambda head: {
-            "status": "behind",
-            "behind_by": 2,
+            "status": "ahead",
+            "ahead_by": 2,
+            "behind_by": 0,
             "base_commit": {
                 "commit": {"committer": {"date": "2026-09-05T08:00:00Z"}}
             },
@@ -261,7 +264,7 @@ def test_recent_runtime_lag_is_within_the_grace_window(monkeypatch):
     ]
     monkeypatch.setattr(
         watchdog, "runtime_compare",
-        lambda head: comparison(behind_by=1, main_date="2026-09-05T09:10:00Z"),
+        lambda head: comparison(ahead_by=1, main_date="2026-09-05T09:10:00Z"),
     )
 
     assert not any("checkout" in problem
@@ -277,10 +280,28 @@ def test_one_current_runtime_head_suppresses_the_alarm(monkeypatch):
 
     def compare(head):
         if head == "current":
-            return comparison(status="identical", behind_by=0)
-        return comparison(behind_by=5, main_date="2026-09-05T08:00:00Z")
+            return comparison(status="identical", ahead_by=0, behind_by=0)
+        return comparison(ahead_by=5, main_date="2026-09-05T08:00:00Z")
 
     monkeypatch.setattr(watchdog, "runtime_compare", compare)
+
+    assert not any("checkout" in problem
+                   for problem in watchdog.assess("codex", rows, NOW))
+
+
+def test_runtime_ahead_of_main_is_not_reported(monkeypatch):
+    rows = [
+        runtime_start("a", NOW - 60 * 60),
+        runtime_start("b", NOW - 50 * 60),
+        runtime_start("c", NOW - 40 * 60),
+    ]
+    monkeypatch.setattr(
+        watchdog, "runtime_compare",
+        lambda head: comparison(
+            status="behind", ahead_by=0, behind_by=4,
+            main_date="2026-09-05T08:00:00Z",
+        ),
+    )
 
     assert not any("checkout" in problem
                    for problem in watchdog.assess("codex", rows, NOW))

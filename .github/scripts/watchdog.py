@@ -179,15 +179,18 @@ def _runtime_lag_problem(agent: str, rows: List[Dict], now: float) -> Optional[s
     comparisons = {}
     for head in set(heads):
         comparison = runtime_compare(head)
-        if not isinstance(comparison, dict) or comparison.get("status") != "behind":
+        # The API compares the recorded runtime head as the base to `main` as
+        # the target. A runtime that is behind main therefore has status
+        # `ahead`, and `ahead_by` is the number of missing main commits.
+        if not isinstance(comparison, dict) or comparison.get("status") != "ahead":
             return None
-        behind_by = comparison.get("behind_by")
-        if isinstance(behind_by, bool) or not isinstance(behind_by, int) or behind_by <= 0:
+        ahead_by = comparison.get("ahead_by")
+        if isinstance(ahead_by, bool) or not isinstance(ahead_by, int) or ahead_by <= 0:
             return None
         main_head = _main_head_timestamp(comparison)
         if main_head is None:
             return None
-        comparisons[head] = (behind_by, main_head)
+        comparisons[head] = (ahead_by, main_head)
 
     latest_start = _row_timestamp(recent[-1])
     if latest_start is None:
@@ -196,13 +199,13 @@ def _runtime_lag_problem(agent: str, rows: List[Dict], now: float) -> Optional[s
     if latest_start - main_head <= RUNTIME_GRACE_SECONDS:
         return None
 
-    behind_by = max(value[0] for value in comparisons.values())
-    unit = "commit" if behind_by == 1 else "commits"
+    lag_by = max(value[0] for value in comparisons.values())
+    unit = "commit" if lag_by == 1 else "commits"
     return (
         "`{}` has run from a checkout {} {} behind `main` for its last three "
         "runs. The most recent started more than fifteen minutes after `main`'s "
         "head commit; refresh the runtime checkout."
-    ).format(agent, behind_by, unit)
+    ).format(agent, lag_by, unit)
 
 
 def records(agent: str) -> List[Dict]:

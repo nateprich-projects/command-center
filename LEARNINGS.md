@@ -121,19 +121,39 @@ from 2026-09-07 02:11Z) lived only in the zcode app and is recorded in
 policy all stay; `heartbeat.RETIRED_AGENTS` is what keeps the watchdog and
 `agent_health` from reading the silence as a run that died.
 
-**The hypothesis it was retired on was wrong, and the measurement is worth keeping.**
-The guess was that zcode starved itself by polling — that each budget check burned the
-tokens that would have let it run. From the readings every run records at start and
-finish (z.ai weekly window, 24h): 62 refused polls cost **+1.0 point in total**, 10
-empty runs cost 0, and 18 working runs cost **+19 points — about 1% of the week each**.
-Polling was free; the jobs were expensive.
+**The measurement below was wrong, and is corrected here (2026-09-10).** The original
+read: *62 refused polls cost +1.0 point in total, 10 empty runs cost 0, 18 working runs
+cost +19 points — polling was free; the jobs were expensive.* Two defects sat under it.
+First, `heartbeat.usage_snapshot()` records **Codex's** meter for every agent that is
+not Claude (#514), so 137 of the 241 zcode records — every one from the afternoon of
+2026-09-07 — carry Codex's `resets_at`, and the "+14-point review" was Codex's 09:41
+counter glitch. Second, on the 104 runs with z.ai readings at both ends, **27 of 31
+points landed between runs**, in the fifteen-minute gap after a finish, and only 4
+inside one: z.ai's meter lags, so within-run deltas measure almost nothing.
 
-The same method on Codex (OpenAI): a working run costs ~0.5% of the weekly window and
-~0.4% of the five-hour one, **an errored run costs the same as a working one**, and a
-refused poll costs ~0 on the weekly window. So for both metered pools the lever is
-jobs per day, not poll cadence. `measured`, from `usage.seven_day.used_percent` deltas;
-readings are account-wide and integer-coarse, so per-run means are reliable and sums
-are not.
+Re-measured with lagged attribution (a run's cost is the rise from its start reading to
+the next run's start reading; the weekly cap is 10,000 credits, read whole-percent, so
+100 credits of resolution — stretches, not single runs):
+
+| stretch | fires | credits | per refused fire |
+|---|---|---|---|
+| Mon 00:38–09:23, Nate asleep | 36 refusals | 400 | **~11** (five-hour window: ~17) |
+| Mon 10:38–Wed 10:08, his own use mixed in | 44 refusals | 1,700 | 39 |
+
+A refused fire costs **11–17 credits**, not zero — at every fifteen minutes that is
+~8,000 of the 10,000 a week on runs that did nothing, and the `zai` pace gate was
+self-starving: each refusal spent what the gate was waiting to recover. The jobs were
+the cheap part: 12 breakdowns totalled ~200 credits, two shapings ~100, eight empty
+runs ~200. Credits meter calls, not tokens. Nate's hypothesis was 3–4 credits per
+refused fire; the coefficient was low by 3–4× and the direction was right. The
+retirement (#431) stands on its stated reason — Muse is cheaper and its models are
+better — not on the numbers above.
+
+The Codex half of the original paragraph (working run ~0.5% of the week, errored run the
+same, refused poll ~0) was taken from Codex's own rate-limit records, which are not
+subject to #514, and is superseded by the finer per-lane prices in the entry below.
+`measured` for the stretch figures; `inferred` for the per-job credits, which sit at
+the meter's resolution.
 
 ### The routines ran a ticket branch's funnel.py for hours, because the canonical checkout is a working tree
 

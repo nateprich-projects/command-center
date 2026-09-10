@@ -3,7 +3,7 @@
 Nate's decision, 2026-09-09: *"kill those and just use muse going forward since
 muse is cheaper, and the models are better."* Measured over the preceding 24 hours
 from the heartbeat: zcode did work in 18 of 93 runs and was refused on the z.ai pace
-line in 63; each job it did cost about 1% of the z.ai weekly quota. Muse's standard
+line in 63; each job it did was first measured at about 1% of the z.ai weekly quota — a figure since found to be wrong (LEARNINGS.md, "zcode was retired", corrected 2026-09-10: refused fires cost 11–17 credits each, jobs far less). Muse's standard
 schedule carries every job below — review, breakdown and (since #366) standard-tier
 shaping — on an unmetered pool. Tracked as #431.
 
@@ -60,7 +60,7 @@ asked of it.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha a3f6f4bb433f77b46e6597064908d6b472190c8c2d462b0c787771abe2871159
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha 49c0a09f51cf02ab701d3fc0dce59807f107ae8987a207d718e1cd9abefdcc2b
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and says

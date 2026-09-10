@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import contextvars
 from collections import namedtuple
 import glob
 import hashlib
@@ -347,6 +348,44 @@ CLOSED_ITSELF_WINDOW = timedelta(days=7)
 #: Keep mechanical block clears visible across several unattended brief runs,
 #: for the same reason funnel-closed projects remain visible for a week.
 CLEARED_BLOCK_WINDOW = timedelta(days=7)
+
+# A brief has to answer before the 30-second session reply timeout leaves the
+# caller unable to tell whether the session is alive. Keep a little room for
+# JSON encoding and the session wrapper's bookkeeping; the section allocations
+# below are deliberately explicit so the slowest reads stay visible and
+# reviewable instead of turning into one arbitrary global timeout.
+BRIEF_TOTAL_BUDGET_SECONDS = 29.0
+BRIEF_SECTION_BUDGETS = {
+    "ticket_pr_facts": 8.0,
+    "items": 0.25,
+    "counts_by_gate": 0.25,
+    "in_motion": 0.25,
+    "parked": 2.0,
+    "closed_itself": 2.0,
+    "cleared_blocks": 2.0,
+    "blocked": 0.25,
+    "prose_dependencies": 0.25,
+    "suspected_human_steps": 0.25,
+    "human_steps": 0.25,
+    "closed_with_access_vocabulary": 0.25,
+    "unclassed_captures": 0.25,
+    "needs_class": 0.25,
+    "awaiting_breakdown": 0.25,
+    "stranded": 0.25,
+    "stale_locks_taken_over": 0.25,
+    "maintenance_load": 0.25,
+    "resend_ratio": 3.0,
+    "unattended_merges": 3.0,
+    "unattended_approvals": 2.0,
+    "agent_health": 1.0,
+    "working_tree_touched": 1.0,
+    "rejected_merges": 0.25,
+}
+
+# This is the brief's current gate-feeding section. Keep the set explicit so
+# adding another value consumed by a merge routine cannot accidentally make a
+# partial brief look safe.
+BRIEF_GATE_SECTIONS = frozenset({"rejected_merges"})
 
 #: Drift is reported, never used as a gate. Keep these names short and stable:
 #: callers put them verbatim into comments and the brief.
@@ -2232,7 +2271,7 @@ def working_tree_touched(now: datetime) -> List[Dict[str, object]]:
         import heartbeat
 
         for agent in sorted(heartbeat.PROVIDERS):
-            rows = heartbeat.read(agent)
+            rows = _brief_heartbeat_rows(agent)
             starts = {r.get("run"): r for r in rows if r.get("phase") == "start"}
             for row in rows:
                 if row.get("phase") != "finish":
@@ -2320,7 +2359,7 @@ def unattended_merges(now: datetime) -> List[Dict[str, object]]:
             # A stopped schedule must not read as activity (#431).
             continue
         try:
-            rows = heartbeat.read(agent)
+            rows = _brief_heartbeat_rows(agent)
         except Exception:
             continue
         for row in rows:
@@ -2444,7 +2483,7 @@ def agent_health(now: datetime) -> List[Dict[str, str]]:
             continue  # a stopped schedule is not a dying one (#431)
         try:
             conditions = assess_agent_health(
-                agent, heartbeat.read(agent), now.timestamp()
+                agent, _brief_heartbeat_rows(agent), now.timestamp()
             )
         except Exception:
             # The brief is a diagnostic surface. An unreachable heartbeat must
@@ -2475,7 +2514,7 @@ def recent_resend_ratio(now: datetime) -> Dict[str, Optional[float]]:
     ratios: Dict[str, Optional[float]] = {}
     for agent in METERED_AGENTS:
         try:
-            rows = heartbeat.read(agent)
+            rows = _brief_heartbeat_rows(agent)
         except Exception:
             continue
 
@@ -4278,7 +4317,22 @@ def _run_gh(args: Sequence[str], **kwargs):
         _API_USAGE["graphql_calls"] += 1
     else:
         _API_USAGE["cli_calls"] += 1
-    proc = subprocess.run(command, **kwargs)
+    brief_timeout = _brief_timeout_remaining()
+    if brief_timeout is not None:
+        existing_timeout = kwargs.get("timeout")
+        if existing_timeout is None:
+            kwargs["timeout"] = brief_timeout
+        else:
+            kwargs["timeout"] = min(float(existing_timeout), brief_timeout)
+    try:
+        proc = subprocess.run(command, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        state = _BRIEF_SECTION_STATE.get()
+        if state:
+            raise BriefSectionTimeout(
+                state[0], "GitHub read timed out"
+            ) from exc
+        raise
     if (getattr(proc, "returncode", 0) != 0 and _uses_graphql(command)
             and _is_exhausted_signal(getattr(proc, "stderr", None))):
         _mark_exhausted(proc.stderr)
@@ -5569,6 +5623,10 @@ def _brief_read(
         return default
     try:
         return reader()
+    except BriefSectionTimeout:
+        # The timing wrapper owns the budget diagnostic and must see this
+        # exception rather than turning it into an ordinary missing read.
+        raise
     except Exception as exc:
         missing.append({"section": section, "error": _brief_error(exc)})
         return default
@@ -5646,19 +5704,179 @@ def cmd_next(
     return 0
 
 
+_BRIEF_UNAVAILABLE = object()
+_ACTIVE_BRIEF_CACHE: contextvars.ContextVar = contextvars.ContextVar(
+    "active_brief_cache", default=None
+)
+_BRIEF_SECTION_STATE: contextvars.ContextVar = contextvars.ContextVar(
+    "brief_section_state", default=None
+)
+
+
+class BriefSectionTimeout(RuntimeError):
+    """A bounded read stopped because its brief section budget expired."""
+
+    def __init__(self, section: str, reason: str):
+        self.section = section
+        self.reason = reason
+        super().__init__(reason)
+
+
+class BriefGateTimeout(RuntimeError):
+    """A gate-feeding brief section cannot safely return a partial brief."""
+
+    def __init__(self, section: str, elapsed: float, budget: float,
+                 reason: str):
+        self.section = section
+        self.elapsed = elapsed
+        self.budget = budget
+        self.reason = reason
+        super().__init__(
+            "section {!r} exceeded its {:.3f}s budget after {:.3f}s: {}"
+            .format(section, budget, elapsed, reason)
+        )
+
+
+def _brief_timeout_remaining() -> Optional[float]:
+    """Return the active section's remaining subprocess budget, if any."""
+    state = _BRIEF_SECTION_STATE.get()
+    if not state:
+        return None
+    remaining = float(state[1]) - time.monotonic()
+    return max(0.001, remaining)
+
+
+class BriefCache:
+    """Lazy, per-run cache for auxiliary brief reads.
+
+    The cache is owned by ``FunnelSession`` and is never written to disk or
+    shared across runs. That gives repeated commands in one Muse run the same
+    cheap-read behaviour as the session's Project item load without turning
+    diagnostic data into a second source of truth.
+    """
+
+    def __init__(self):
+        self._pr_facts = _BRIEF_UNAVAILABLE
+        self._heartbeat_rows: Dict[str, List[Dict]] = {}
+
+    def clear(self) -> None:
+        """Forget auxiliary reads after a command may have mutated GitHub."""
+        self._pr_facts = _BRIEF_UNAVAILABLE
+        self._heartbeat_rows.clear()
+
+    def get_pr_facts(self, items: Sequence[Item]):
+        if self._pr_facts is _BRIEF_UNAVAILABLE:
+            self._pr_facts = ticket_pr_facts(items)
+        return self._pr_facts
+
+    def heartbeat_rows(self, agent: str) -> List[Dict]:
+        if agent in self._heartbeat_rows:
+            return self._heartbeat_rows[agent]
+
+        import heartbeat
+
+        timeout = _brief_timeout_remaining()
+        try:
+            if timeout is None:
+                rows = heartbeat.read(agent)
+            else:
+                try:
+                    rows = heartbeat.read(agent, timeout=timeout)
+                except TypeError as exc:
+                    # Keep fixture-era one-argument test doubles compatible
+                    # while the real heartbeat reader uses the bound.
+                    if "timeout" not in str(exc):
+                        raise
+                    rows = heartbeat.read(agent)
+        except subprocess.TimeoutExpired as exc:
+            state = _BRIEF_SECTION_STATE.get()
+            section = state[0] if state else "unknown"
+            raise BriefSectionTimeout(
+                section, "heartbeat read timed out"
+            ) from exc
+
+        self._heartbeat_rows[agent] = rows
+        return rows
+
+
+def _brief_heartbeat_rows(agent: str) -> List[Dict]:
+    """Read one heartbeat spool, reusing the active brief cache when present."""
+    cache = _ACTIVE_BRIEF_CACHE.get()
+    if cache is not None:
+        return cache.heartbeat_rows(agent)
+    import heartbeat
+    return heartbeat.read(agent)
+
+
+def _brief_degraded_record(section: str, elapsed: float, budget: float,
+                           reason: str) -> Dict[str, object]:
+    return {
+        "section": section,
+        "elapsed_seconds": round(max(0.0, elapsed), 6),
+        "budget_seconds": budget,
+        "reason": reason,
+    }
+
+
 def _brief_timed(
     section: str,
     reader: Callable[[], object],
     timings: Dict[str, float],
+    degraded: Optional[List[Dict[str, object]]] = None,
+    *,
+    deadline: Optional[float] = None,
+    budget: Optional[float] = None,
+    gate: Optional[bool] = None,
 ) -> object:
-    """Run one brief section and record its elapsed time in seconds."""
+    """Run one brief section, enforce its budget, and record its timing."""
+    degraded = degraded if degraded is not None else []
+    budget = float(
+        BRIEF_SECTION_BUDGETS.get(section, 1.0)
+        if budget is None else budget
+    )
+    gate = section in BRIEF_GATE_SECTIONS if gate is None else gate
     started = time.perf_counter()
+    allowed = max(0.0, budget)
+    if deadline is not None:
+        allowed = min(allowed, max(0.0, deadline - started))
+    limit = started + allowed
+
+    def stop(reason: str, elapsed: float) -> object:
+        timings[section] = round(max(0.0, elapsed), 6)
+        if gate:
+            raise BriefGateTimeout(section, elapsed, budget, reason)
+        degraded.append(_brief_degraded_record(
+            section, elapsed, budget, reason
+        ))
+        return _BRIEF_UNAVAILABLE
+
+    if started >= limit:
+        return stop("brief budget exhausted before the section started", 0.0)
+
+    token = _BRIEF_SECTION_STATE.set(
+        (section, time.monotonic() + allowed, budget)
+    )
     try:
-        return reader()
+        try:
+            value = reader()
+        except BriefSectionTimeout as exc:
+            elapsed = time.perf_counter() - started
+            return stop(str(exc) or "section read timed out", elapsed)
     finally:
-        timings[section] = round(
-            max(0.0, time.perf_counter() - started), 6
-        )
+        _BRIEF_SECTION_STATE.reset(token)
+
+    elapsed = time.perf_counter() - started
+    timings[section] = round(max(0.0, elapsed), 6)
+    if elapsed > budget or (deadline is not None and started + elapsed > deadline):
+        reason = "section exceeded its time budget"
+        if deadline is not None and started + elapsed > deadline:
+            reason = "brief transport budget was exceeded"
+        if gate:
+            raise BriefGateTimeout(section, elapsed, budget, reason)
+        degraded.append(_brief_degraded_record(
+            section, elapsed, budget, reason
+        ))
+    return value
 
 
 def cmd_brief(
@@ -5667,158 +5885,186 @@ def cmd_brief(
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
     missing: Optional[List[Dict[str, str]]] = None,
     timings: Optional[Dict[str, float]] = None,
+    degraded: Optional[List[Dict[str, object]]] = None,
+    deadline: Optional[float] = None,
+    brief_cache: Optional[BriefCache] = None,
 ) -> int:
     missing = list(missing or [])
     timings = dict(timings or {})
+    degraded = list(degraded or [])
+    if deadline is None:
+        deadline = time.perf_counter() + BRIEF_TOTAL_BUDGET_SECONDS
+    cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
+    cache_token = _ACTIVE_BRIEF_CACHE.set(cache)
+
+    def section(name: str, reader: Callable[[], object], default):
+        value = _brief_timed(
+            name,
+            lambda: _brief_read(name, reader, missing),
+            timings,
+            degraded,
+            deadline=deadline,
+        )
+        return default if value is _BRIEF_UNAVAILABLE else value
 
     def decision_payload():
         decisions = awaiting_decision(items)
         by_ref = {i.ref: i for i in items}
-        rows = [item_json(i, now, by_ref) for i in decisions]
-        return decisions, by_ref, rows
+        return decisions, by_ref, [
+            item_json(i, now, by_ref) for i in decisions
+        ]
 
-    decisions, by_ref, decision_rows = _brief_timed(
-        "items", decision_payload, timings
-    )
-    counts = _brief_timed(
-        "counts_by_gate",
-        lambda: {
-            stage: sum(
-                1 for i in items if i.status == stage and i.state == "OPEN"
-            )
-            for stage in STAGES
-            if stage != "Ideas"
-        },
-        timings,
-    )
+    try:
+        decision_result = section("items", decision_payload, None)
+        if decision_result is None:
+            decisions = []
+            by_ref = {i.ref: i for i in items}
+            decision_rows = []
+        else:
+            decisions, by_ref, decision_rows = decision_result
 
-    running = _brief_timed(
-        "in_motion",
-        lambda: _brief_read(
+        counts = section(
+            "counts_by_gate",
+            lambda: {
+                stage: sum(
+                    1 for i in items if i.status == stage and i.state == "OPEN"
+                )
+                for stage in STAGES
+                if stage != "Ideas"
+            },
+            {},
+        )
+        running = section(
             "in_motion",
             lambda: in_motion(items, now, pr_facts=pr_facts),
-            missing,
-        ),
-        timings,
-    )
-    stale = _brief_timed(
-        "stale_locks_taken_over",
-        lambda: _brief_read(
-            "stale_locks_taken_over",
-            lambda: stale_locks(items, now, pr_facts=pr_facts),
-            missing,
-        ),
-        timings,
-    )
-    blocked_comment_errors = [
-        "{}: {}".format(item.ref, item.block_comments_error)
-        for item in items
-        if item.block_comments_error
-    ]
-    if blocked_comment_errors and not any(
-        entry.get("section") == "blocked" for entry in missing
-    ):
-        missing.append({
-            "section": "blocked",
-            "error": "; ".join(blocked_comment_errors),
-        })
-
-    def read_timed(section: str, reader: Callable[[], object]) -> object:
-        return _brief_timed(
-            section, lambda: _brief_read(section, reader, missing), timings
+            [],
         )
-
-    brief = {
-        "generated_at": now.isoformat(),
-        "total_needing_nate": len(decisions),
-        "counts_by_gate": counts,
-        "items": decision_rows,
-        "parked": read_timed("parked", lambda: parked_json(items)),
-        "closed_itself": read_timed(
-            "closed_itself", lambda: closed_itself_json(items, now)
-        ),
-        "cleared_blocks": read_timed(
-            "cleared_blocks", lambda: cleared_blocks_json(items, now)
-        ),
-        "blocked": _brief_timed(
-            "blocked", lambda: blocked_json(items), timings
-        ),
-        "prose_dependencies": _brief_timed(
-            "prose_dependencies", lambda: prose_dependencies(items), timings
-        ),
-        "suspected_human_steps": _brief_timed(
+        parked = section("parked", lambda: parked_json(items), [])
+        closed_itself = section(
+            "closed_itself", lambda: closed_itself_json(items, now), []
+        )
+        cleared_blocks = section(
+            "cleared_blocks", lambda: cleared_blocks_json(items, now), []
+        )
+        blocked = section("blocked", lambda: blocked_json(items), [])
+        prose = section(
+            "prose_dependencies", lambda: prose_dependencies(items), []
+        )
+        suspected = section(
             "suspected_human_steps",
             lambda: suspected_human_step_json(items),
-            timings,
-        ),
-        "human_steps": _brief_timed(
-            "human_steps", lambda: human_step_json(items), timings
-        ),
-        "closed_with_access_vocabulary": _brief_timed(
+            [],
+        )
+        human = section("human_steps", lambda: human_step_json(items), [])
+        closed_access = section(
             "closed_with_access_vocabulary",
             lambda: closed_with_access_vocabulary_json(items),
-            timings,
-        ),
-        "unclassed_captures": _brief_timed(
+            [],
+        )
+        unclassed = section(
             "unclassed_captures",
             lambda: unclassed_captures_json(items),
-            timings,
-        ),
-        "needs_class": _brief_timed(
+            [],
+        )
+        needs = section(
             "needs_class",
             lambda: [item_json(i, now, by_ref) for i in items if needs_class(i)],
-            timings,
-        ),
-        "awaiting_breakdown": _brief_timed(
+            [],
+        )
+        breakdown = section(
             "awaiting_breakdown",
             lambda: [
                 item_json(i, now, by_ref) for i in awaiting_breakdown(items)
             ],
-            timings,
-        ),
-        "stranded": _brief_timed(
+            [],
+        )
+        stranded = section(
             "stranded",
-            lambda: _brief_read(
-                "stranded",
-                lambda: stranded_json(items, now, pr_facts=pr_facts),
-                missing,
-            ),
-            timings,
-        ),
-        "in_motion": (
-            [i.ref for i in running] if running is not None else None
-        ),
-        "wip_limit": WIP_LIMIT,
-        "stale_locks_taken_over": [
-            i.ref for i in stale
-        ] if stale is not None else None,
-        "maintenance_load": _brief_timed(
-            "maintenance_load", lambda: maintenance_load(items, now), timings
-        ),
-        "resend_ratio": read_timed(
-            "resend_ratio", lambda: recent_resend_ratio(now)
-        ),
-        "unattended_merges": read_timed(
-            "unattended_merges", lambda: unattended_merges(now)
-        ),
-        "unattended_approvals": read_timed(
+            lambda: stranded_json(items, now, pr_facts=pr_facts),
+            [],
+        )
+        stale = section(
+            "stale_locks_taken_over",
+            lambda: stale_locks(items, now, pr_facts=pr_facts),
+            [],
+        )
+        maintenance = section(
+            "maintenance_load", lambda: maintenance_load(items, now), {}
+        )
+        resend = section("resend_ratio", lambda: recent_resend_ratio(now), {})
+        merges = section(
+            "unattended_merges", lambda: unattended_merges(now), []
+        )
+        approvals = section(
             "unattended_approvals",
             lambda: unattended_approvals(items, now),
-        ),
-        "agent_health": read_timed(
-            "agent_health", lambda: agent_health(now)
-        ),
-        "working_tree_touched": read_timed(
-            "working_tree_touched", lambda: working_tree_touched(now)
-        ),
-        "rejected_merges": _brief_timed(
-            "rejected_merges", lambda: rejected_merges(items, now), timings
-        ),
-        "timings": timings,
-        "missing": missing,
-    }
-    print(json.dumps(brief, indent=2))
-    return 0
+            [],
+        )
+        health = section("agent_health", lambda: agent_health(now), [])
+        touched = section(
+            "working_tree_touched", lambda: working_tree_touched(now), []
+        )
+        rejected = section(
+            "rejected_merges", lambda: rejected_merges(items, now), {}
+        )
+
+        blocked_comment_errors = [
+            "{}: {}".format(item.ref, item.block_comments_error)
+            for item in items
+            if item.block_comments_error
+        ]
+        if blocked_comment_errors and not any(
+            entry.get("section") == "blocked" for entry in missing
+        ):
+            missing.append({
+                "section": "blocked",
+                "error": "; ".join(blocked_comment_errors),
+            })
+
+        brief = {
+            "generated_at": now.isoformat(),
+            "total_needing_nate": len(decisions),
+            "counts_by_gate": counts,
+            "items": decision_rows,
+            "parked": parked,
+            "closed_itself": closed_itself,
+            "cleared_blocks": cleared_blocks,
+            "blocked": blocked,
+            "prose_dependencies": prose,
+            "suspected_human_steps": suspected,
+            "human_steps": human,
+            "closed_with_access_vocabulary": closed_access,
+            "unclassed_captures": unclassed,
+            "needs_class": needs,
+            "awaiting_breakdown": breakdown,
+            "stranded": stranded,
+            "in_motion": [i.ref for i in running] if running is not None else None,
+            "wip_limit": WIP_LIMIT,
+            "stale_locks_taken_over": [
+                i.ref for i in stale
+            ] if stale is not None else None,
+            "maintenance_load": maintenance,
+            "resend_ratio": resend,
+            "unattended_merges": merges,
+            "unattended_approvals": approvals,
+            "agent_health": health,
+            "working_tree_touched": touched,
+            "rejected_merges": rejected,
+            "degraded": degraded,
+            "timings": timings,
+            "missing": missing,
+        }
+        print(json.dumps(brief, indent=2))
+        return 0
+    except BriefGateTimeout as exc:
+        print(
+            "funnel: brief failed closed: {} (no partial JSON emitted)"
+            .format(exc),
+            file=sys.stderr,
+        )
+        return 2
+    finally:
+        _ACTIVE_BRIEF_CACHE.reset(cache_token)
 
 
 SET_LOCK = """
@@ -8570,23 +8816,51 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "brief":
             missing = []
             timings: Dict[str, float] = {}
-            started = time.perf_counter()
-            try:
-                pr_facts = ticket_pr_facts(items)
-            except GitHubError as exc:
-                error = "could not read ticket branch facts: {}".format(exc)
-                missing = [
-                    {"section": section, "error": error}
-                    for section in BRIEF_PR_FACT_SECTIONS
-                ]
+            degraded: List[Dict[str, object]] = []
+            deadline = time.perf_counter() + BRIEF_TOTAL_BUDGET_SECONDS
+            cache = _ACTIVE_BRIEF_CACHE.get() or BriefCache()
+
+            pr_facts_error: List[str] = []
+
+            def read_pr_facts():
+                try:
+                    return cache.get_pr_facts(items)
+                except GitHubError as exc:
+                    pr_facts_error.append(
+                        "could not read ticket branch facts: {}".format(exc)
+                    )
+                    for section in BRIEF_PR_FACT_SECTIONS:
+                        missing.append({
+                            "section": section,
+                            "error": pr_facts_error[-1],
+                        })
+                    return {}
+
+            pr_facts = _brief_timed(
+                "ticket_pr_facts",
+                read_pr_facts,
+                timings,
+                degraded,
+                deadline=deadline,
+            )
+            if pr_facts is _BRIEF_UNAVAILABLE:
+                # A missing PR/branch scan must not turn a stale claim into a
+                # false diagnostic. An empty mapping says those facts are
+                # unavailable, so the pure consumers preserve the safe side.
                 pr_facts = {}
-            finally:
-                timings["ticket_pr_facts"] = round(
-                    max(0.0, time.perf_counter() - started), 6
-                )
+                if not pr_facts_error:
+                    error = "could not read ticket branch facts: brief section read timed out"
+                    for section in BRIEF_PR_FACT_SECTIONS:
+                        missing.append({"section": section, "error": error})
             return cmd_brief(
-                items, now, pr_facts=pr_facts, missing=missing,
+                items,
+                now,
+                pr_facts=pr_facts,
+                missing=missing,
                 timings=timings,
+                degraded=degraded,
+                deadline=deadline,
+                brief_cache=cache,
             )
         if args.command == "queue":
             return cmd_queue(items, now, repo_readiness=repo_readiness)
@@ -8618,6 +8892,7 @@ class FunnelSession:
     def __init__(self, loader=None):
         self._loader = load_items if loader is None else loader
         self.items: Optional[List[Item]] = None
+        self._brief_cache = BriefCache()
 
     def _load_items(self) -> List[Item]:
         if self.items is None:
@@ -8635,6 +8910,9 @@ class FunnelSession:
         stderr = io.StringIO()
         code = 2
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            if not argv or argv[0] != "brief":
+                self._brief_cache.clear()
+            cache_token = _ACTIVE_BRIEF_CACHE.set(self._brief_cache)
             try:
                 # Reset before the lazy load so its GraphQL work is measured as
                 # part of the first command rather than erased by ``main``.
@@ -8666,6 +8944,7 @@ class FunnelSession:
                 # in-memory Project read is shared across them.
                 report_api_cost()
                 report_graphql_spend()
+                _ACTIVE_BRIEF_CACHE.reset(cache_token)
         return int(code), stdout.getvalue(), stderr.getvalue()
 
 

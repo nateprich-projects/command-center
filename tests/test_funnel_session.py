@@ -144,6 +144,36 @@ def test_the_first_command_keeps_the_lazy_load_cost(monkeypatch):
     funnel.reset_api_usage()
 
 
+def test_a_session_reuses_brief_auxiliary_reads_until_a_mutation(monkeypatch):
+    import heartbeat
+
+    items = []
+    pr_fact_calls = []
+    heartbeat_calls = []
+    monkeypatch.setattr(
+        funnel, "ticket_pr_facts",
+        lambda rows: pr_fact_calls.append(rows) or {},
+    )
+    monkeypatch.setattr(
+        heartbeat, "read",
+        lambda agent: heartbeat_calls.append(agent) or [],
+    )
+
+    session = funnel.FunnelSession(loader=lambda: items)
+    assert session.dispatch(["brief"])[0] == 0
+    assert session.dispatch(["brief"])[0] == 0
+
+    assert len(pr_fact_calls) == 1
+    assert sorted(heartbeat_calls) == sorted(heartbeat.PROVIDERS)
+
+    # A later brief must not reuse observations from before a command that may
+    # have changed GitHub, even when the command itself has no output.
+    assert session.dispatch(["next-review"])[0] == 1
+    assert session.dispatch(["brief"])[0] == 0
+    assert len(pr_fact_calls) == 2
+    assert sorted(heartbeat_calls) == sorted(list(heartbeat.PROVIDERS) * 2)
+
+
 def test_the_muse_runner_starts_a_session_and_stops_it_with_the_run():
     runner = (ROOT / "scripts" / "muse-review").read_text()
     assert "session-server" in runner

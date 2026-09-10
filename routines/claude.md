@@ -27,7 +27,7 @@ preempt.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha 1a6ab11c49238193ad8725cf8545255f4d12318fb537217995b581daf24e015e
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha 644340ec64692c4183b856c0c9d4496776f3d94fb3972e99b629cbf34be18fba
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and names
@@ -342,5 +342,7 @@ the brief as a record — the note is that record.
 auto-merge bar having failed, which is a different and more serious thing. He
 runs `funnel reject <pr>`, which reopens the ticket, files the regression,
 returns the parent to `Building` with `Class: Broken`, and reports the count.
-**Three in a week and auto-merging stops** until this prompt is fixed. Check
-`rejected_merges.stop_auto_merging` in `funnel brief` before merging anything.
+**Three in a week and auto-merging stops** until this prompt is fixed. Before
+merging anything, run `funnel brief` and require it to succeed, then check
+`rejected_merges.stop_auto_merging`. If the command fails or that gate-feeding
+section is missing/degraded, do not merge: the check is fail-closed.

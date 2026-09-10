@@ -884,3 +884,47 @@ def test_brief_emits_elapsed_seconds_for_each_section(monkeypatch, capsys):
     assert brief["timings"]["rejected_merges"] == pytest.approx(0.1)
     assert brief["timings"]["unattended_merges"] == pytest.approx(0.1)
     assert all(value >= 0 for value in brief["timings"].values())
+
+
+def test_brief_marks_an_over_budget_informational_section_degraded(
+    monkeypatch, capsys
+):
+    item = funnel.Item(
+        repo="nateprich/beta", number=94, title="Degraded project",
+        url="https://example.invalid/94", state="OPEN", status="Ready",
+        status_since=NOW,
+    )
+    monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS,
+                        "working_tree_touched", 0.0)
+    monkeypatch.setattr(funnel, "working_tree_touched", lambda now: [])
+
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["working_tree_touched"] == []
+    assert any(
+        row["section"] == "working_tree_touched"
+        for row in brief["degraded"]
+    )
+    assert brief["timings"]["working_tree_touched"] == 0.0
+
+
+def test_brief_fails_closed_without_partial_json_when_gate_section_is_slow(
+    monkeypatch, capsys
+):
+    item = funnel.Item(
+        repo="nateprich/beta", number=95, title="Gate project",
+        url="https://example.invalid/95", state="OPEN", status="Ready",
+        status_since=NOW,
+    )
+    monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS,
+                        "rejected_merges", 0.0)
+    monkeypatch.setattr(funnel, "rejected_merges", lambda items, now: {})
+
+    assert funnel.cmd_brief([item], NOW) == 2
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    assert "brief failed closed" in captured.err
+    assert "rejected_merges" in captured.err
+    assert "no partial JSON emitted" in captured.err

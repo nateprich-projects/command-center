@@ -750,15 +750,27 @@ def input_usage(agent: str) -> Optional[Dict[str, Optional[float]]]:
 
 
 def usage_snapshot(agent: str) -> Optional[Dict]:
-    """Best-effort usage reading. Never fatal — a heartbeat that cannot be
-    written because usage was unreadable would hide the very run it documents."""
+    """Best-effort usage reading of the agent's *own* pool. Never fatal — a
+    heartbeat that cannot be written because usage was unreadable would hide
+    the very run it documents.
+
+    Until 2026-09-10 every agent but Claude was read from the Codex meter, so
+    137 of 241 zcode records carried OpenAI's windows as their own, and two
+    measurements on #431 were drawn from the wrong meter (#514). The reading
+    now goes through `usage.read_agent`, the same per-provider dispatch the
+    pace gate uses.
+    """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import usage
 
-        reading = usage.read_claude() if agent == "claude" else usage.read_codex()
+        reading = usage.read_agent(agent, time.time())
         if not reading:
             return None
+        if reading.get("unmetered"):
+            # Nothing was gated and nothing was read: say so explicitly rather
+            # than writing an empty window map that implies a budget was checked.
+            return {"source": reading.get("source"), "unmetered": True}
         # Both figures, not just the percentage. `resets_at` is what identifies
         # *which* five-hour window a run belonged to, and the idle gate in
         # usage.py needs that to ask whether this window was already open.

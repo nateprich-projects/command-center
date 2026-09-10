@@ -17,17 +17,22 @@ import contextlib
 from collections import namedtuple
 import glob
 import hashlib
+import hmac
 import io
 import json
 import os
 import pathlib
 import re
+import secrets
+import socket
+import socketserver
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
+                    Sequence, Set, Tuple)
 
 from agent_health import assess as assess_agent_health
 
@@ -8034,7 +8039,10 @@ def _needs_decision_comment_body(question: str) -> str:
     return "{} {}".format(NEEDS_DECISION_PREFIX, question)
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Optional[Sequence[str]] = None, *,
+         _items: Optional[List[Item]] = None,
+         _items_loader: Optional[Callable[[], List[Item]]] = None,
+         _reset_api_usage: bool = True) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("queue", help="everything, ordered")
@@ -8220,6 +8228,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="compare the checked-in routine's normalized sha256 to this literal",
     )
 
+    session_server = sub.add_parser(
+        "session-server",
+        help="serve one in-memory Project view for a single Muse run",
+    )
+    session_server.add_argument(
+        "--parent-pid", type=int, default=None,
+        help="stop when the owning runner process exits",
+    )
+
     nxr = sub.add_parser(
         "next-review", help="the single PR this reviewer should read, or nothing")
     nxr.add_argument("--tier", choices=TIERS, default=None,
@@ -8243,15 +8260,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # A process normally serves one CLI command. Resetting here also keeps
     # repeated `main()` calls in tests from blending two commands' readings.
-    reset_api_usage()
+    if _reset_api_usage:
+        reset_api_usage()
     now = datetime.now(timezone.utc)
+    if args.command == "session-server":
+        return serve_session(args.parent_pid)
     # Doctor keeps its fixed checks runnable when the Project cannot be loaded;
     # the data-dependent consistency check is added when that read succeeds.
     if args.command == "doctor":
         return cmd_doctor()
 
     try:
-        items = load_items()
+        if _items is not None:
+            items = _items
+        elif _items_loader is not None:
+            items = _items_loader()
+        else:
+            items = load_items()
     except GitHubError as exc:
         print("funnel: {}".format(exc), file=sys.stderr)
         return 2
@@ -8342,6 +8367,187 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
 
+SESSION_ENV = "FUNNEL_SESSION"
+SESSION_SERVER_ENV = "FUNNEL_SESSION_SERVER"
+
+
+class FunnelSession:
+    """Serve one run's commands from one in-memory Project read.
+
+    This is deliberately a per-run session, not a cache or a daemon. The
+    Project is loaded lazily on the first command so a ``begin`` claim still
+    reads GitHub at claim time. Later commands in the same Muse run reuse the
+    already-loaded objects and their locally updated mutation state.
+    """
+
+    def __init__(self, loader=None):
+        self._loader = load_items if loader is None else loader
+        self.items: Optional[List[Item]] = None
+
+    def _load_items(self) -> List[Item]:
+        if self.items is None:
+            self.items = self._loader()
+        return self.items
+
+    def dispatch(self, argv: Sequence[str]):
+        """Run one normal funnel command and return ``(code, stdout, stderr)``."""
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        code = 2
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                # Reset before the lazy load so its GraphQL work is measured as
+                # part of the first command rather than erased by ``main``.
+                reset_api_usage()
+                code = main(list(argv), _items=self.items,
+                            _items_loader=self._load_items,
+                            _reset_api_usage=False)
+            except SystemExit as exc:
+                code = exc.code if isinstance(exc.code, int) else 2
+            except Exception as exc:
+                print("funnel: {}".format(exc), file=sys.stderr)
+            finally:
+                # A session has one process but several commands. Keep the
+                # existing per-command heartbeat measurements, while the
+                # in-memory Project read is shared across them.
+                report_api_cost()
+                report_graphql_spend()
+        return int(code), stdout.getvalue(), stderr.getvalue()
+
+
+class _SessionServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
+
+class _SessionHandler(socketserver.StreamRequestHandler):
+    """One newline-delimited request from a funnel client shim."""
+
+    def _reply(self, payload: Dict[str, Any]) -> None:
+        wire = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+        self.wfile.write(wire)
+        self.wfile.flush()
+
+    def handle(self) -> None:
+        line = self.rfile.readline(1_000_000)
+        try:
+            request = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            self._reply({
+                "code": 2,
+                "stdout": "",
+                "stderr": "funnel: invalid session request\n",
+            })
+            return
+
+        token = request.get("token") if isinstance(request, dict) else None
+        if not isinstance(token, str) or not hmac.compare_digest(
+                token, self.server.token):
+            self._reply({
+                "code": 2,
+                "stdout": "",
+                "stderr": "funnel: invalid session token\n",
+            })
+            return
+
+        if request.get("shutdown") is True:
+            self.server.stop_requested = True
+            self._reply({"code": 0, "stdout": "", "stderr": ""})
+            return
+
+        argv = request.get("argv")
+        if (not isinstance(argv, list)
+                or not all(isinstance(part, str) for part in argv)):
+            self._reply({
+                "code": 2,
+                "stdout": "",
+                "stderr": "funnel: invalid session arguments\n",
+            })
+            return
+
+        code, stdout, stderr = self.server.session.dispatch(argv)
+        self._reply({"code": code, "stdout": stdout, "stderr": stderr})
+
+
+def _process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def serve_session(parent_pid: Optional[int] = None) -> int:
+    """Serve a disposable funnel session on loopback until it is stopped."""
+    server = _SessionServer(("127.0.0.1", 0), _SessionHandler)
+    server.token = secrets.token_hex(24)
+    server.session = FunnelSession()
+    server.stop_requested = False
+    server.timeout = 1
+    host, port = server.server_address
+    print("{}:{}:{}".format(host, port, server.token), flush=True)
+
+    try:
+        while not server.stop_requested:
+            if parent_pid is not None and not _process_is_alive(parent_pid):
+                break
+            server.handle_request()
+    finally:
+        server.server_close()
+    return 0
+
+
+def _session_client(argv: Sequence[str]) -> int:
+    """Forward one CLI invocation to the current Muse run's session."""
+    endpoint = os.environ.get(SESSION_ENV, "")
+    try:
+        host, port_text, token = endpoint.split(":", 2)
+        port = int(port_text)
+        if not host or not token or not 1 <= port <= 65535:
+            raise ValueError
+    except (TypeError, ValueError):
+        print("funnel: invalid {} endpoint".format(SESSION_ENV), file=sys.stderr)
+        return 2
+
+    request = {
+        "token": token,
+        "argv": list(argv),
+    }
+    if list(argv) == ["session-stop"]:
+        request["shutdown"] = True
+
+    try:
+        with socket.create_connection((host, port), timeout=30) as connection:
+            stream = connection.makefile("rwb")
+            with stream:
+                stream.write(
+                    (json.dumps(request, separators=(",", ":")) + "\n")
+                    .encode("utf-8")
+                )
+                stream.flush()
+                line = stream.readline(1_000_000)
+    except OSError as exc:
+        print("funnel: could not reach {}: {}".format(SESSION_ENV, exc),
+              file=sys.stderr)
+        return 2
+
+    try:
+        response = json.loads(line.decode("utf-8"))
+        code = int(response["code"])
+        stdout = response.get("stdout", "")
+        stderr = response.get("stderr", "")
+        if not isinstance(stdout, str) or not isinstance(stderr, str):
+            raise ValueError
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+        print("funnel: invalid session response", file=sys.stderr)
+        return 2
+
+    sys.stdout.write(stdout)
+    sys.stderr.write(stderr)
+    return code
+
+
 def report_api_cost(run: Optional[str] = None,
                     agent: Optional[str] = None) -> None:
     """Append this command's API measurements to its open heartbeat run.
@@ -8390,11 +8596,18 @@ def report_graphql_spend(stream=None) -> None:
 
 
 if __name__ == "__main__":
-    try:
+    if os.environ.get(SESSION_ENV) and not os.environ.get(SESSION_SERVER_ENV):
+        code = _session_client(sys.argv[1:])
+    elif os.environ.get(SESSION_SERVER_ENV):
+        # The session server reports each forwarded command itself. Do not let
+        # the normal process-exit hook record the last command a second time.
         code = main()
-    finally:
-        report_api_cost()
-        # In a `finally` so a run that dies on an exhausted budget still says
-        # what it spent — that run is exactly the one whose numbers matter.
-        report_graphql_spend()
+    else:
+        try:
+            code = main()
+        finally:
+            report_api_cost()
+            # In a `finally` so a run that dies on an exhausted budget still says
+            # what it spent — that run is exactly the one whose numbers matter.
+            report_graphql_spend()
     sys.exit(code)

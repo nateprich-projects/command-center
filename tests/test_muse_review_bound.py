@@ -28,7 +28,9 @@ def _stub_repo(tmp_path):
 
 def _stub_muse(tmp_path, seconds):
     muse = tmp_path / "muse"
-    muse.write_text("#!/bin/bash\nsleep {}\nexit 0\n".format(seconds))
+    # Replace the wrapper so the signal targets the timed process directly;
+    # otherwise its child keeps the captured pipes open during teardown.
+    muse.write_text("#!/bin/bash\nexec sleep {}\n".format(seconds))
     muse.chmod(muse.stat().st_mode | stat.S_IEXEC)
     return muse
 
@@ -48,16 +50,18 @@ def _run(tmp_path, muse_seconds, bound_seconds):
 
 
 def test_a_run_past_the_bound_is_killed_and_finished_errored(tmp_path):
-    proc, heartbeat = _run(tmp_path, muse_seconds=30, bound_seconds=2)
+    # The runner's termination grace is fixed, so keep the exercised boundary
+    # short without weakening the past-bound assertion.
+    proc, heartbeat = _run(tmp_path, muse_seconds=2, bound_seconds=1)
 
     assert proc.returncode == 124
-    assert "killing run after 2s" in proc.stderr
+    assert "killing run after 1s" in proc.stderr
     assert heartbeat.startswith("finish --agent muse --outcome errored")
     assert "killed after 0 minutes" in heartbeat
 
 
 def test_a_run_inside_the_bound_is_left_alone(tmp_path):
-    proc, heartbeat = _run(tmp_path, muse_seconds=1, bound_seconds=20)
+    proc, heartbeat = _run(tmp_path, muse_seconds=1, bound_seconds=3)
 
     assert proc.returncode == 0
     assert "killing run" not in proc.stderr

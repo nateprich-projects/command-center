@@ -55,3 +55,94 @@ def test_ideas_renders_class_without_inventing_one(capsys):
 
     assert "Broken" in output
     assert "no class" in output
+
+
+def test_queue_groups_each_section_in_existing_rank_order(capsys):
+    waiting_alpha = item(
+        1, "Building", "New", days=1, children_total=1, children_done=1,
+        repo="alpha/repo",
+    )
+    waiting_zeta = item(
+        2, "Building", "New", days=10, children_total=1, children_done=1,
+        repo="zeta/repo",
+    )
+
+    parent_alpha = item(
+        10, "Ready", "New", children_total=1, repo="alpha/repo"
+    )
+    ticket_alpha = item(11, parent=parent_alpha.ref, repo="alpha/repo")
+    parent_zeta = item(
+        20, "Ready", "Broken", children_total=1, repo="zeta/repo"
+    )
+    ticket_zeta = item(21, parent=parent_zeta.ref, repo="zeta/repo")
+
+    pending_alpha = item(30, "Ready", "New", days=1, repo="alpha/repo")
+    pending_zeta = item(31, "Ready", "New", days=10, repo="zeta/repo")
+
+    assert funnel.cmd_queue(
+        [
+            waiting_alpha,
+            waiting_zeta,
+            parent_alpha,
+            ticket_alpha,
+            parent_zeta,
+            ticket_zeta,
+            pending_alpha,
+            pending_zeta,
+        ],
+        NOW,
+    ) == 0
+    output = capsys.readouterr().out
+
+    waiting, rest = output.split("\n\nStartable", 1)
+    startable, pending = rest.split("\n\nApproved", 1)
+    assert waiting.index("  zeta/repo:\n") < waiting.index("  alpha/repo:\n")
+    assert waiting.index("zeta/repo#2") < waiting.index("alpha/repo#1")
+    assert startable.index("  zeta/repo:\n") < startable.index("  alpha/repo:\n")
+    assert startable.index("zeta/repo#21") < startable.index("alpha/repo#11")
+    assert pending.index("  zeta/repo:\n") < pending.index("  alpha/repo:\n")
+    assert pending.index("zeta/repo#31") < pending.index("alpha/repo#30")
+    assert "    " in waiting
+    assert "    " in startable
+    assert "    " in pending
+
+
+def test_queue_keeps_single_repo_output_unchanged(capsys):
+    waiting = item(
+        1, "Building", "Broken", children_total=1, children_done=1,
+        carried_human_step=True,
+    )
+    parent = item(2, "Ready", "New", children_total=1)
+    ticket = item(3, parent=parent.ref)
+    pending = item(4, "Ready", "Maintenance")
+
+    assert funnel.cmd_queue([waiting, parent, ticket, pending], NOW) == 0
+    output = capsys.readouterr().out
+
+    assert output == (
+        "Waiting on Nate (1), bottom-up:\n"
+        "  Building   Broken                   nateprich/beta#1                   1 day              Accept it?\n"
+        "\n"
+        "Startable by Codex (1), ladder order:\n"
+        "  New (inherited)          nateprich/beta#3                   issue 3\n"
+        "\n"
+        "Approved, awaiting breakdown into tickets (1):\n"
+        "  Maintenance              nateprich/beta#4                   1 day              issue 4\n"
+    )
+    assert "nateprich/beta:" not in output
+
+
+def test_queue_empty_sections_keep_nothing_without_repo_headings(capsys):
+    idea = item(1, "Ideas")
+
+    assert funnel.cmd_queue([idea], NOW) == 0
+    output = capsys.readouterr().out
+
+    assert output == (
+        "Waiting on Nate (0), bottom-up:\n"
+        "  nothing\n"
+        "\n"
+        "Startable by Codex (0), ladder order:\n"
+        "  nothing\n"
+    )
+    assert "  nateprich/beta:\n" not in output

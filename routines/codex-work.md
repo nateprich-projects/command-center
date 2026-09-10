@@ -211,11 +211,11 @@ If you discover one:
 
    ```bash
    python3 /Users/nateprich/.claude/command-center-run/funnel.py release <current-number>
-   python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent codex --run <id> --outcome errored --note "stopped: human step filed as #<human-number>; ticket blocked; no PR opened"
+   python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent codex --run <id> --outcome skipped-human-step --note "stopped: human step filed as #<human-number>; ticket blocked; no PR opened"
    ```
 
-   This is the deliberate stop path. The `errored` outcome records that the
-   assigned engineering ticket was not completed; it does not authorize a
+   This is the deliberate stop path. The `skipped-human-step` outcome records
+   that the run paused for a required human action; it does not authorize a
    plausible artefact to merge.
 
 ## 4. Open a pull request
@@ -235,7 +235,7 @@ capture using `skills/shape`'s "Class it when you file it" rule, and say why.
 Agents class their own captures, never his existing issues.
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --note "<observed evidence; chosen class and why>"
+python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --origin agent --class <Broken|Maintenance|Improve|New|Replace> --note "<observed evidence; say why you chose this class, and say plainly when you are unsure>"
 ```
 
 This is the sanctioned exception to the review rule to act only on the PR you were

@@ -46,6 +46,8 @@ review *finishes* work where a breakdown *creates* it. Breakdowns cannot starve,
 because PRs awaiting review are a finite class bounded by what the engineers can
 produce.
 
+A `Broken` or `Maintenance` job is offered first whatever its stage.
+
 ## Muse-specific behaviour you must know
 
 **Shell commands run in the background and their output arrives asynchronously.**

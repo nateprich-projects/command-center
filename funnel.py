@@ -233,6 +233,13 @@ MAINTENANCE_WINDOW = timedelta(days=30)
 # absence from the brief is intentional rather than missing data.
 METERED_AGENTS = ("codex", "zcode")
 
+# Sections that depend on the bounded PR/branch snapshot collected by the
+# command-line entry point. A failed shared read must not let them infer a
+# clean result from an incomplete fact set.
+BRIEF_PR_FACT_SECTIONS = (
+    "stranded", "in_motion", "stale_locks_taken_over",
+)
+
 # A doctor run asks for one row beyond the bound so it can distinguish a full
 # result from a truncated one without an unbounded history scan. The bound is
 # per member repository; a hand merge older than the newest 100 PRs is outside
@@ -2359,12 +2366,7 @@ def _self_approval_transition_times(item: Item, now: datetime) -> List[datetime]
 
 def _self_approval_markers(item: Item) -> List[Dict[str, object]]:
     """Read marker comments for one already-identified candidate item."""
-    comments = (_gh_json(
-        "gh", "issue", "view", str(item.number), "--repo", item.repo,
-        "--json", "comments",
-    ) or {}).get("comments", [])
-    if not isinstance(comments, list):
-        return []
+    comments = _issue_comments(item)
 
     found: List[Dict[str, object]] = []
     for comment in comments:
@@ -4627,10 +4629,7 @@ def _parked_item_json(item: Item) -> Dict[str, object]:
     parked items are uncommon and the normal Project load must not pay for a
     comment request for every issue.
     """
-    comments = (_gh_json(
-        "gh", "issue", "view", str(item.number), "--repo", item.repo,
-        "--json", "comments",
-    ) or {}).get("comments", [])
+    comments = _issue_comments(item)
     reason = None
     for comment in reversed(comments):
         body = comment.get("body") or ""
@@ -4672,10 +4671,7 @@ def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
 
 def _closed_itself_item_json(item: Item) -> Optional[Dict[str, object]]:
     """Render one funnel-close marker, or omit an ordinary accepted close."""
-    comments = (_gh_json(
-        "gh", "issue", "view", str(item.number), "--repo", item.repo,
-        "--json", "comments",
-    ) or {}).get("comments", [])
+    comments = _issue_comments(item)
     for comment in reversed(comments):
         if not isinstance(comment, dict):
             continue
@@ -4728,10 +4724,7 @@ def cleared_block_items(items: Iterable[Item], now: datetime) -> List[Item]:
 
 def _cleared_block_item_json(item: Item) -> Optional[Dict[str, object]]:
     """Render the newest valid satisfied-block record on one unblocked item."""
-    comments = (_gh_json(
-        "gh", "issue", "view", str(item.number), "--repo", item.repo,
-        "--json", "comments",
-    ) or {}).get("comments", [])
+    comments = _issue_comments(item)
     for comment in reversed(comments):
         if not isinstance(comment, dict):
             continue
@@ -5553,6 +5546,34 @@ def cmd_queue(
     return 0
 
 
+def _brief_error(exc: BaseException) -> str:
+    """Return a short, useful diagnostic for one unreadable brief section."""
+    return str(exc).strip() or exc.__class__.__name__
+
+
+def _brief_read(
+    section: str,
+    reader: Callable[[], object],
+    missing: List[Dict[str, str]],
+    default: object = None,
+) -> object:
+    """Read one brief section without hiding an unreadable response.
+
+    A caller may pre-record a section when a shared read failed before the
+    renderer was entered. That keeps dependent sections from guessing from a
+    partial fact set. Successful sections retain their existing JSON shape;
+    failed ones become ``null`` and are named in the top-level ``missing``
+    list.
+    """
+    if any(entry.get("section") == section for entry in missing):
+        return default
+    try:
+        return reader()
+    except Exception as exc:
+        missing.append({"section": section, "error": _brief_error(exc)})
+        return default
+
+
 def cmd_next(
     items: List[Item],
     now: datetime,
@@ -5644,8 +5665,10 @@ def cmd_brief(
     items: List[Item],
     now: datetime,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+    missing: Optional[List[Dict[str, str]]] = None,
     timings: Optional[Dict[str, float]] = None,
 ) -> int:
+    missing = list(missing or [])
     timings = dict(timings or {})
 
     def decision_payload():
@@ -5671,22 +5694,51 @@ def cmd_brief(
 
     running = _brief_timed(
         "in_motion",
-        lambda: in_motion(items, now, pr_facts=pr_facts),
+        lambda: _brief_read(
+            "in_motion",
+            lambda: in_motion(items, now, pr_facts=pr_facts),
+            missing,
+        ),
         timings,
     )
+    stale = _brief_timed(
+        "stale_locks_taken_over",
+        lambda: _brief_read(
+            "stale_locks_taken_over",
+            lambda: stale_locks(items, now, pr_facts=pr_facts),
+            missing,
+        ),
+        timings,
+    )
+    blocked_comment_errors = [
+        "{}: {}".format(item.ref, item.block_comments_error)
+        for item in items
+        if item.block_comments_error
+    ]
+    if blocked_comment_errors and not any(
+        entry.get("section") == "blocked" for entry in missing
+    ):
+        missing.append({
+            "section": "blocked",
+            "error": "; ".join(blocked_comment_errors),
+        })
+
+    def read_timed(section: str, reader: Callable[[], object]) -> object:
+        return _brief_timed(
+            section, lambda: _brief_read(section, reader, missing), timings
+        )
+
     brief = {
         "generated_at": now.isoformat(),
         "total_needing_nate": len(decisions),
         "counts_by_gate": counts,
         "items": decision_rows,
-        "parked": _brief_timed(
-            "parked", lambda: parked_json(items), timings
+        "parked": read_timed("parked", lambda: parked_json(items)),
+        "closed_itself": read_timed(
+            "closed_itself", lambda: closed_itself_json(items, now)
         ),
-        "closed_itself": _brief_timed(
-            "closed_itself", lambda: closed_itself_json(items, now), timings
-        ),
-        "cleared_blocks": _brief_timed(
-            "cleared_blocks", lambda: cleared_blocks_json(items, now), timings
+        "cleared_blocks": read_timed(
+            "cleared_blocks", lambda: cleared_blocks_json(items, now)
         ),
         "blocked": _brief_timed(
             "blocked", lambda: blocked_json(items), timings
@@ -5726,42 +5778,44 @@ def cmd_brief(
         ),
         "stranded": _brief_timed(
             "stranded",
-            lambda: stranded_json(items, now, pr_facts=pr_facts),
+            lambda: _brief_read(
+                "stranded",
+                lambda: stranded_json(items, now, pr_facts=pr_facts),
+                missing,
+            ),
             timings,
         ),
-        "in_motion": [i.ref for i in running],
+        "in_motion": (
+            [i.ref for i in running] if running is not None else None
+        ),
         "wip_limit": WIP_LIMIT,
         "stale_locks_taken_over": [
-            i.ref for i in _brief_timed(
-                "stale_locks_taken_over",
-                lambda: stale_locks(items, now, pr_facts=pr_facts),
-                timings,
-            )
-        ],
+            i.ref for i in stale
+        ] if stale is not None else None,
         "maintenance_load": _brief_timed(
             "maintenance_load", lambda: maintenance_load(items, now), timings
         ),
-        "resend_ratio": _brief_timed(
-            "resend_ratio", lambda: recent_resend_ratio(now), timings
+        "resend_ratio": read_timed(
+            "resend_ratio", lambda: recent_resend_ratio(now)
         ),
-        "unattended_merges": _brief_timed(
-            "unattended_merges", lambda: unattended_merges(now), timings
+        "unattended_merges": read_timed(
+            "unattended_merges", lambda: unattended_merges(now)
         ),
-        "unattended_approvals": _brief_timed(
+        "unattended_approvals": read_timed(
             "unattended_approvals",
             lambda: unattended_approvals(items, now),
-            timings,
         ),
-        "agent_health": _brief_timed(
-            "agent_health", lambda: agent_health(now), timings
+        "agent_health": read_timed(
+            "agent_health", lambda: agent_health(now)
         ),
-        "working_tree_touched": _brief_timed(
-            "working_tree_touched", lambda: working_tree_touched(now), timings
+        "working_tree_touched": read_timed(
+            "working_tree_touched", lambda: working_tree_touched(now)
         ),
         "rejected_merges": _brief_timed(
             "rejected_merges", lambda: rejected_merges(items, now), timings
         ),
         "timings": timings,
+        "missing": missing,
     }
     print(json.dumps(brief, indent=2))
     return 0
@@ -6458,6 +6512,18 @@ def _gh_json(*args: str):
         return json.loads(out.stdout)
     except ValueError:
         return None
+
+
+def _issue_comments(item: Item) -> List[dict]:
+    """Read one issue's comments, keeping a failed response distinguishable."""
+    payload = _gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "comments",
+    )
+    comments = payload.get("comments") if isinstance(payload, dict) else None
+    if not isinstance(comments, list):
+        raise GitHubError("could not read comments for {}".format(item.ref))
+    return comments
 
 
 def _project_status_times(item: Item) -> Dict[str, Optional[datetime]]:
@@ -8413,6 +8479,15 @@ def main(argv: Optional[Sequence[str]] = None, *,
         else:
             items = load_items()
     except GitHubError as exc:
+        if args.command == "brief":
+            print(json.dumps({
+                "generated_at": now.isoformat(),
+                "missing": [{
+                    "section": "items",
+                    "error": _brief_error(exc),
+                }],
+            }, indent=2))
+            return 0
         print("funnel: {}".format(exc), file=sys.stderr)
         return 2
 
@@ -8493,16 +8568,25 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 pr_facts=ticket_pr_facts(items),
             )
         if args.command == "brief":
+            missing = []
             timings: Dict[str, float] = {}
             started = time.perf_counter()
             try:
                 pr_facts = ticket_pr_facts(items)
+            except GitHubError as exc:
+                error = "could not read ticket branch facts: {}".format(exc)
+                missing = [
+                    {"section": section, "error": error}
+                    for section in BRIEF_PR_FACT_SECTIONS
+                ]
+                pr_facts = {}
             finally:
                 timings["ticket_pr_facts"] = round(
                     max(0.0, time.perf_counter() - started), 6
                 )
             return cmd_brief(
-                items, now, pr_facts=pr_facts, timings=timings
+                items, now, pr_facts=pr_facts, missing=missing,
+                timings=timings,
             )
         if args.command == "queue":
             return cmd_queue(items, now, repo_readiness=repo_readiness)

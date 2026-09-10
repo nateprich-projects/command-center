@@ -128,7 +128,7 @@ def test_the_presence_switch_does_not_change_which_tier_a_schedule_works():
     """Both the tier and the idle flag are read off one fact — does this
     schedule fire all day. Suspending the presence proxy must not touch the
     tier: on 2026-09-07 an earlier version of the switch flipped the all-day
-    fifteen-minute schedule from `standard` to `escalated`, which would have
+    five-minute schedule from `standard` to `escalated`, which would have
     pointed the cheapest, most frequent poller at the riskiest work in the
     queue. Nothing would have reported it."""
     allday = "command-center-tickets-hourly"
@@ -208,3 +208,11 @@ def test_same_prompt_still_catches_a_real_change():
                                 wanted)
     assert not sync.same_prompt(" " + wanted, wanted)
     assert not sync.same_prompt(None, wanted)
+
+
+def test_hourly_lane_documentation_matches_its_actual_cadence():
+    source = (ROOT / "scripts" / "sync_codex_automations.py").read_text()
+    assert "The `-hourly`" in source
+    assert "historical" in source
+    assert "every five minutes, 12 times an" in source
+    assert "every fifteen minutes" not in source

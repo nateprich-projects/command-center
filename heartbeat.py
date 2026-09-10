@@ -74,6 +74,11 @@ OUTCOMES = [
     "errored",             # tried and failed
 ]
 
+#: The per-command GitHub measurements funnel records as non-terminal events.
+#: Keep the names here so finish can aggregate each budget independently and
+#: never turn an unreadable value into zero.
+API_COST_FIELDS = ("graphql_points", "gh_calls")
+
 
 #: Which pool an agent spends. Deliberately separate from the model: routing will
 #: put more than one model on a pool, and the budget is per pool.
@@ -287,6 +292,79 @@ def record_event(agent: str, run: Optional[str], outcome: str,
     kept = append(agent, record)
     _report(kept)
     return kept
+
+
+def _api_cost_number(value):
+    """Return a measured non-negative integer, or ``None`` if unreadable."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def record_api_cost(agent: str, run: Optional[str], api_cost: Dict) -> str:
+    """Append one funnel command's API measurements to the heartbeat stream.
+
+    It is an event rather than a mutation of the start record: several funnel
+    processes can belong to one run, and appending preserves every command's
+    contribution in the write-ahead spool.  An unattributed measurement is not
+    useful to a later finish, so it is ignored rather than assigned by guess.
+    """
+    if not run or agent not in PROVIDERS:
+        return "unattributed"
+    values = api_cost if isinstance(api_cost, dict) else {}
+    record = {
+        "run": run,
+        "agent": agent,
+        "phase": "api_cost",
+        "ts": int(time.time()),
+        "api_cost": {
+            name: _api_cost_number(values.get(name))
+            for name in API_COST_FIELDS
+        },
+    }
+    kept = append(agent, record)
+    _report(kept)
+    return kept
+
+
+def api_cost_for_run(records: List[Dict], run: Optional[str]) -> Dict[str, Optional[int]]:
+    """Sum the per-command API events for one run, independently by field.
+
+    No matching event means the run issued no funnel command.  If any command
+    could not provide one field, that field stays null while a separately
+    measurable field may still be summed.  Malformed telemetry is treated the
+    same way; this function is diagnostic and must never make finish fail.
+    """
+    result = {name: None for name in API_COST_FIELDS}
+    if not run:
+        return result
+
+    events = [
+        record.get("api_cost")
+        for record in records
+        if isinstance(record, dict)
+        if record.get("phase") == "api_cost" and record.get("run") == run
+    ]
+    if not events:
+        return result
+
+    for name in API_COST_FIELDS:
+        values = []
+        readable = True
+        for event in events:
+            if not isinstance(event, dict):
+                readable = False
+                break
+            value = _api_cost_number(event.get(name))
+            if value is None:
+                readable = False
+                break
+            values.append(value)
+        if readable:
+            result[name] = sum(values)
+    return result
 
 
 def _report(kept: str) -> None:
@@ -776,7 +854,8 @@ def main(argv=None) -> int:
             print(run_id)
             return 0
 
-        run_id, candidates = resolve_run(read(args.agent), args.run)
+        records = read(args.agent)
+        run_id, candidates = resolve_run(records, args.run)
         if run_id is None:
             print(
                 "heartbeat: could not tell which run this finishes ({} open). "
@@ -803,6 +882,7 @@ def main(argv=None) -> int:
             "human_intervention_required": args.human_intervention or None,
             "repo": repo_state(),
             "runtime": runtime_state(),
+            "api_cost": api_cost_for_run(records, run_id),
             **detect_model(args.agent),
         }
         metric = input_usage(args.agent)

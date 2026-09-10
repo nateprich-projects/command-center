@@ -239,6 +239,13 @@ def test_ticket_inherits_broken_for_decision_ordering():
     assert [i.number for i in awaiting_decision([parent, child, older])] == [2, 3]
 
 
+def test_ticket_inherits_investigate_for_decision_ordering():
+    parent = project(1, "Ideas", "Investigate")
+    child = item(2, "Shaped", None, days=1, parent=parent.ref)
+    older = project(3, "Shaped", "Broken", days=30)
+    assert [i.number for i in awaiting_decision([parent, child, older])] == [2, 3]
+
+
 def test_a_closed_item_waits_on_nobody():
     assert gate_question(item(1, "Ready", "New", state="CLOSED")) is None
 
@@ -325,19 +332,19 @@ def test_unset_class_sorts_last_and_never_preempts():
     assert ladder_index("nonsense") > ladder_index("Replace")
 
 
+def test_ladder_is_in_the_documented_order():
+    ranks = [ladder_index(c) for c in [
+        "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"
+    ]]
+    assert ranks == sorted(ranks) and len(set(ranks)) == 6
+
+
 def test_investigate_is_first_without_gaining_preemption_or_self_approval():
     assert ladder_index("Investigate") == 0
     assert funnel.PREEMPTING_CLASSES == frozenset({"Broken", "Maintenance"})
     assert funnel.SELF_APPROVABLE_CLASSES == frozenset(
         {"Broken", "Maintenance", "Improve"}
     )
-
-
-def test_ladder_is_in_the_documented_order():
-    ranks = [ladder_index(c) for c in [
-        "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"
-    ]]
-    assert ranks == sorted(ranks) and len(set(ranks)) == 6
 
 
 def test_anything_past_ideas_must_carry_a_class():

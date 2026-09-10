@@ -1,7 +1,7 @@
 ---
 title: Command Center — Design Record
 tags: [command-center, funnel, design-record, plan]
-last_updated: 2026-09-05
+last_updated: 2026-09-09
 status: Design settled. v0 in progress.
 ---
 
@@ -164,6 +164,8 @@ a stalled item from permanently plugging the queue.
 
 The ladder ranks what to **start**. Once a project is Building, its remaining tickets
 finish first. Passing a gate is a commitment and nothing may silently un-commit it.
+
+Within one decision gate, the same ladder breaks class ties; gate depth still wins.
 
 **Investigate is first because an unanswered "is this broken?" can gate a possible
 `Broken`: answering it is cheap, while letting a silent defect sit behind known work is
@@ -611,10 +613,10 @@ flow sets `Class: Broken` mechanically.
 _Rejected: six labels (`investigate`, `broken`, `maintenance`, `improve`, `new`,
 `replace`). A single-select cannot be self-contradictory; six labels permit `broken` +
 `new` on one issue, which forces validation rules — exactly the machinery the v1
-wayfinder contract carried and that was deleted with it. Single-select is also the same shape as
-`Status`: two fields, one mental model. And it preserves the decision to keep `Class`
-internal, which was justified by public readability — a stranger browsing a public repo
-gains nothing from seeing `improve`._
+wayfinder contract carried and that was deleted with it. Single-select is also the same
+shape as `Status`: two fields, one mental model. And it preserves the decision to keep
+`Class` internal, which was justified by public readability — a stranger browsing a
+public repo gains nothing from seeing `improve`._
 
 ### Stage stays in the Project Status field
 

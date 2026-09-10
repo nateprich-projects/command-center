@@ -5,10 +5,16 @@ from __future__ import annotations
 import pathlib
 import sys
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from funnel import plan_is_escalated, plan_needs_nate  # noqa: E402
+from funnel import (  # noqa: E402
+    plan_is_escalated,
+    plan_needs_nate,
+    shaped_plan_status,
+)
 
 
 PLAN_82 = """
@@ -123,3 +129,126 @@ def test_plan_escalation_preserves_the_shared_risk_marker_rule():
     Guard against a race condition in the spool.
     """
     assert plan_is_escalated(plan) == []
+
+
+def _needs_plan(lines, heading="## Needs you"):
+    return "{}\n\n{}\n".format(heading, "\n".join(lines))
+
+
+@pytest.mark.parametrize(
+    ("issue", "plan"),
+    (
+        (
+            131,
+            _needs_plan(
+                [
+                    "- Exposure: nothing outstanding. read-only inspection.",
+                    "- Gates: nothing outstanding. no approval changes.",
+                    "- Scope and priority: nothing outstanding. one run.",
+                    "- Preference: nothing outstanding. no user-facing surface.",
+                ],
+                heading="### Needs Nate",
+            ),
+        ),
+        (
+            239,
+            _needs_plan(
+                [
+                    "- Exposure. Nothing outstanding. existing credential only.",
+                    "- Gates. Nothing outstanding. usage gate is untouched.",
+                    "- Scope and priority. Nothing outstanding. one measurement.",
+                    "- Preference. Nothing outstanding. use response headers.",
+                ],
+            ),
+        ),
+        (
+            429,
+            _needs_plan(
+                [
+                    "Exposure. Nothing outstanding. no new surface.",
+                    "Gates. Nothing outstanding; leave the usage gate alone.",
+                    "Scope and priority. None — both halves are filed.",
+                    "Preference. nothing - fail fast.",
+                ],
+            ),
+        ),
+        (
+            460,
+            _needs_plan(
+                [
+                    "**Preference:** none. no naming decision.",
+                    "Scope and priority: nothing outstanding. documented-command fix.",
+                    "**Gates:** nothing outstanding. no approval change.",
+                    "Exposure: NOTHING OUTSTANDING — no new surface.",
+                ],
+            ),
+        ),
+    ),
+)
+def test_shaped_status_accepts_per_category_all_clear_fixtures(issue, plan):
+    assert shaped_plan_status(plan) == ("Ready", "plan declares nothing open")
+
+
+@pytest.mark.parametrize(
+    ("issue", "answer", "reason"),
+    (
+        (462, "one recorded item. name the guarded edit.", "open question under Gates"),
+        (463, "undecided — the scope answer controls exposure.", "open question under Exposure"),
+        (
+            245,
+            "nothing outstanding beyond this gate itself — no gate definitions change.",
+            "open question under Gates",
+        ),
+    ),
+)
+def test_shaped_status_names_the_open_category(issue, answer, reason):
+    lines = [
+        "Exposure: nothing outstanding. no new surface.",
+        "Gates: nothing outstanding. no gate change.",
+        "Scope and priority: nothing outstanding. filed scope.",
+        "Preference: nothing outstanding. no taste decision.",
+    ]
+    category = {
+        462: "Gates",
+        463: "Exposure",
+        245: "Gates",
+    }[issue]
+    category_index = {
+        "Exposure": 0,
+        "Gates": 1,
+        "Scope and priority": 2,
+        "Preference": 3,
+    }
+    lines[category_index[category]] = (
+        "{}: {}".format(category, answer)
+    )
+    assert shaped_plan_status(_needs_plan(lines)) == ("Shaped", reason)
+
+
+def test_shaped_status_names_a_missing_category():
+    plan = _needs_plan(
+        [
+            "Exposure: nothing outstanding.",
+            "Gates: nothing outstanding.",
+            "Preference: nothing outstanding.",
+        ]
+    )
+
+    assert shaped_plan_status(plan) == (
+        "Shaped",
+        "open question under Scope and priority",
+    )
+
+
+def test_shaped_status_rejects_extra_prose_inside_a_category_section():
+    plan = _needs_plan(
+        [
+            "Exposure: nothing outstanding.",
+            "Gates: nothing outstanding.",
+            "This is an unlabelled note.",
+            "Scope and priority: nothing outstanding.",
+            "Preference: nothing outstanding.",
+        ]
+    )
+
+    assert shaped_plan_status(plan) == ("Shaped", "plan has an open question")

@@ -634,6 +634,7 @@ def _reviewer_begin(
     breakdown=False,
 ):
     _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     monkeypatch.setattr(
         funnel,
         "review_queue",

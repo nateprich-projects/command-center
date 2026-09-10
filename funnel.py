@@ -6783,6 +6783,105 @@ def approved_merge_candidates(items: Sequence[Item]) -> List[Dict[str, object]]:
     return candidates
 
 
+def reconcile_orphaned_starts(
+    items: Sequence[Item], now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> List[Dict[str, object]]:
+    """Close a work-issuing start whose ticket PR merged under another run (#497).
+
+    The run that opened a PR sometimes never records its finish -- a session
+    that lost its id, a rate-limit death after the push -- while a reviewer
+    run merges the PR and records `merged` on its own finish. The start then
+    stands open until the watchdog calls it dead, for work that demonstrably
+    shipped. This writes the missing finish, naming the run that merged and
+    carrying no `merged` field of its own, so the brief's unattended-merge
+    record stays exactly once. A start whose PR has not merged, or whose merge
+    no finish record claims, is left alone: the dead-run signal catches
+    rate-limit deaths and must stay loud. Idempotent, because a closed start
+    is no longer open.
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import heartbeat
+    except Exception:
+        return []
+    by_ref = {item.ref: item for item in items}
+    spools: Dict[str, List[Dict]] = {}
+    for agent in sorted(heartbeat.PROVIDERS):
+        if agent in heartbeat.RETIRED_AGENTS:
+            continue
+        try:
+            spools[agent] = heartbeat.read(agent)
+        except Exception:
+            continue
+
+    # Which run recorded each merged PR, across every live agent.
+    merged_by: Dict[int, Tuple[str, str]] = {}
+    for agent, records in spools.items():
+        for row in records:
+            if row.get("phase") == "finish" and row.get("merged") and row.get("run"):
+                try:
+                    merged_by[int(row["merged"])] = (str(row["run"]), agent)
+                except (TypeError, ValueError):
+                    continue
+
+    candidates = []
+    for agent, records in spools.items():
+        bound = heartbeat.bindings(records)
+        for start in heartbeat.open_starts(records):
+            binding = bound.get(start.get("run"))
+            if not binding or binding.get("do") != "ticket":
+                continue
+            ref = str(binding.get("work"))
+            if ref in by_ref:
+                candidates.append((agent, start, ref))
+    if not candidates:
+        return []
+    if pr_facts is None:
+        try:
+            pr_facts = ticket_pr_facts([by_ref[ref] for _, _, ref in candidates])
+        except GitHubError:
+            return []
+
+    closed: List[Dict[str, object]] = []
+    for agent, start, ref in candidates:
+        fact = pr_facts.get(ref) or {}
+        merged = bool(fact.get("mergedAt")) or fact.get("state") == "MERGED"
+        number = fact.get("number")
+        if not merged or number is None:
+            continue
+        try:
+            number = int(number)
+        except (TypeError, ValueError):
+            continue
+        under = merged_by.get(number)
+        if under is None:
+            continue
+        other_run, other_agent = under
+        if other_run == start.get("run"):
+            continue
+        record = {
+            "run": start.get("run"),
+            "agent": agent,
+            "phase": "finish",
+            "ts": int(now.timestamp()),
+            "outcome": "done",
+            "note": "reconciled: PR #{} for {} merged under run {} ({}); "
+                    "this start never recorded its finish".format(
+                        number, ref, other_run, other_agent),
+            "reconciled_from": other_run,
+        }
+        try:
+            kept = heartbeat.append(agent, record)
+        except Exception:
+            continue
+        closed.append({
+            "run": start.get("run"), "agent": agent, "ref": ref,
+            "pr": number, "merged_under": other_run, "kept": kept,
+        })
+    return closed
+
+
 def reconcile_approved_merges(
     items: List[Item], now: datetime
 ) -> List[Dict[str, object]]:
@@ -6938,6 +7037,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     reconciled = reconcile_closed_items(items)
     if reconciled:
         out["reconciled"] = reconciled
+    orphaned = reconcile_orphaned_starts(items, now)
+    if orphaned:
+        out["reconciled_starts"] = orphaned
 
     if agent == "codex":
         cleared = clear_satisfied_blocks(

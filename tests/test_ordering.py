@@ -19,6 +19,7 @@ from funnel import (  # noqa: E402
     effective_class,
     awaiting_decision,
     awaiting_breakdown,
+    disposal,
     gate_question,
     ladder_index,
     lock_holder,
@@ -1037,6 +1038,69 @@ def test_days_since_anything_new_started():
     assert maintenance_load(items, NOW)["days_since_anything_new_started"] == 12
 
 
+def test_disposal_empty_window_reports_unknown_ratio_and_no_growth():
+    report = disposal([], NOW)
+
+    assert report == {
+        "window_days": 30,
+        "done": 0,
+        "parked": 0,
+        "finished_vs_abandoned": None,
+        "net_open_growth": 0,
+    }
+
+
+def test_disposal_counts_parentless_parks_and_excludes_child_tickets():
+    parked = item(
+        20, "Parked", None, state="CLOSED", state_reason="NOT_PLANNED",
+        created_at=at(5), closed_at=at(2),
+    )
+    child = item(
+        21, "Done", "New", state="CLOSED", state_reason="COMPLETED",
+        parent=parked.ref, created_at=at(4), closed_at=at(1),
+    )
+
+    report = disposal([parked, child], NOW)
+
+    assert report["done"] == 0
+    assert report["parked"] == 1
+    assert report["finished_vs_abandoned"] == 0.0
+    assert report["net_open_growth"] == 0
+
+
+def test_disposal_counts_done_projects_but_no_parked_ratio_is_unknown():
+    done = [
+        item(
+            30 + number, "Done", "New", state="CLOSED",
+            state_reason="COMPLETED", created_at=at(5), closed_at=at(2),
+        )
+        for number in range(2)
+    ]
+
+    report = disposal(done, NOW)
+
+    assert report["done"] == 2
+    assert report["parked"] == 0
+    assert report["finished_vs_abandoned"] is None
+    assert report["net_open_growth"] == 0
+
+
+def test_disposal_uses_native_parent_not_parent_prose():
+    project = item(
+        40, "Done", "New", state="CLOSED", state_reason="COMPLETED",
+        body="Parent: another-project#999", created_at=at(4), closed_at=at(1),
+    )
+    child = item(
+        41, "Done", "New", state="CLOSED", state_reason="COMPLETED",
+        parent=project.ref, body="", created_at=at(4), closed_at=at(1),
+    )
+
+    report = disposal([project, child], NOW)
+
+    assert report["done"] == 1
+    assert report["net_open_growth"] == 0
+
+
 # -- Parsing the GraphQL shape ---------------------------------------------
 
 
@@ -1044,6 +1108,9 @@ def test_fixture_parses_into_the_expected_items():
     nodes = json.loads(FIXTURE.read_text())
     items = [i for i in (funnel._from_node(n) for n in nodes) if i]
     assert [i.number for i in items] == [10, 11, 12, 13, 14, 15, 16]
+    assert next(i for i in items if i.number == 14).created_at == datetime(
+        2026, 8, 20, tzinfo=timezone.utc
+    )
 
 
 def test_a_draft_issue_is_skipped():

@@ -30,7 +30,7 @@ def test_muse_step_one_uses_the_runner_opening_result():
     normalized = " ".join(body.split()).lower()
 
     assert "the runner has already run the opening command before handing you this prompt" in normalized
-    assert "its json result is inserted below at `begin_json`" in normalized
+    assert "its json result is inserted into the code block below" in normalized
     assert "do not run `begin` again" in normalized
     assert "if it says `\"do\": \"stop\"`, the runner has finished the heartbeat" in normalized
 

@@ -94,7 +94,7 @@ The runner has already run the opening command before handing you this prompt:
 python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent muse OPENING_FLAGS
 ```
 
-Its JSON result is inserted below at `BEGIN_JSON`:
+Its JSON result is inserted into the code block below:
 
 ```json
 BEGIN_JSON

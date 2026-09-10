@@ -27,7 +27,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from agent_health import assess as assess_agent_health
 
@@ -1185,9 +1185,117 @@ def required_tier(title: str, body: str, failed_before: bool = False) -> str:
     return "escalated" if escalation_reasons(title, body, failed_before) else "standard"
 
 
-def startable(items: Sequence[Item],
-              awaiting_review: Optional[Set[str]] = None,
-              agent: str = "codex") -> List[Item]:
+def _startable_without_repo_readiness(
+    item: Item,
+    by_ref: Dict[str, Item],
+    awaiting_review: Set[str],
+    agent: str = "codex",
+) -> bool:
+    """Apply the queue exclusions that do not require a repository read."""
+    capability_reason = parse_human_step(item.body or "")
+    machine_local = (
+        capability_reason is not None
+        and capability_reason.casefold() == MACHINE_LOCAL_REASON.casefold()
+    )
+    if (
+        item.state != "OPEN"
+        or item.is_blocked
+        or item.open_blockers
+        or item.children_total
+        # A machine-local marker is the middle capability outcome: Claude
+        # Code may work it, while every other requester must leave it in
+        # the queue. All other parsed markers remain human steps and are
+        # excluded from every agent, as #141 established.
+        or (capability_reason is not None
+            and (not machine_local or agent != "claude"))
+    ):
+        return False
+    if item.ref in awaiting_review:
+        return False
+    parent = by_ref.get(item.parent or "")
+    if parent is None:
+        # A parentless item is a project, never a ticket — that is the whole
+        # basis of the model. One with no children is awaiting its breakdown,
+        # not waiting to be worked. Treating it as both is what made an issue
+        # appear in two queues at once.
+        return False
+    # `Ready` or `Building`. `plan.md`: "Codex draws tickets from any
+    # `Ready` or `Building` parent, so it stalls only if every parent lacks
+    # tickets." `Building` is not a precondition for work but the record that
+    # work began — `cmd_claim` writes it on the first claim.
+    return parent.status in ("Ready", "Building") and not parent.is_blocked
+
+
+def _repo_blocking_reasons(
+    item: Item,
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]],
+) -> Tuple[str, ...]:
+    """Return blocking onboarding reasons for one loaded ticket.
+
+    ``None`` means the caller did not request the optional repository snapshot;
+    this keeps the ordering function usable with its existing fixture-only
+    callers. Once a snapshot is supplied, a missing repo entry fails closed so
+    a partial read cannot quietly offer work from an unchecked repository.
+    """
+    if repo_readiness is None:
+        return ()
+    readiness = repo_readiness.get(item.repo)
+    if readiness is None:
+        return ("repository readiness unavailable",)
+    return readiness.blocking_reasons
+
+
+def readiness_blockers(
+    items: Sequence[Item],
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+    awaiting_review: Optional[Set[str]] = None,
+    agent: str = "codex",
+) -> List[Dict[str, object]]:
+    """Return otherwise-eligible tickets withheld by repo readiness.
+
+    The result is deliberately separate from ``startable()``'s list: callers
+    such as ``begin`` need to say why a queue is empty without changing the
+    shared ordering or turning diagnostics into another queue.
+    """
+    if repo_readiness is None:
+        return []
+    awaiting_review = awaiting_review or frozenset()
+    rows = list(items)
+    by_ref = {i.ref: i for i in rows}
+    found: List[Dict[str, object]] = []
+    for item in rows:
+        if not _startable_without_repo_readiness(
+            item, by_ref, awaiting_review, agent
+        ):
+            continue
+        reasons = _repo_blocking_reasons(item, repo_readiness)
+        if not reasons:
+            continue
+        found.append({
+            "ref": item.ref,
+            "repo": item.repo,
+            "reasons": list(reasons),
+        })
+    return sorted(found, key=lambda row: (str(row["repo"]), str(row["ref"])))
+
+
+def _readiness_blocker_summary(blockers: Sequence[Dict[str, object]]) -> str:
+    """Render the stable queue-empty explanation for repository blockers."""
+    details = []
+    for blocker in blockers:
+        reasons = ", ".join(str(reason) for reason in blocker["reasons"])
+        details.append("{}: {}".format(blocker["ref"], reasons))
+    return "tickets withheld by repository readiness — {}".format(
+        "; ".join(details)
+    )
+
+
+def startable(
+    items: Sequence[Item],
+    awaiting_review: Optional[Set[str]] = None,
+    agent: str = "codex",
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+) -> List[Item]:
     """Tickets the requesting agent may pick up, best-first.
 
     A ticket is an open issue with no children of its own, whose parent has
@@ -1200,6 +1308,10 @@ def startable(items: Sequence[Item],
     and then spent the 09:00 and 10:00 runs re-verifying the same branch, because
     Claude's routine was over pace and could not review it. Passing it in rather
     than querying here keeps this function pure and testable from fixtures.
+
+    ``repo_readiness`` is an optional, caller-supplied snapshot from the member
+    repository checks. Its blocking requirements are applied here; advisory
+    facts remain available to ``doctor`` but never affect queue membership.
     """
     awaiting_review = awaiting_review or frozenset()
     by_ref = {i.ref: i for i in items}
@@ -1224,44 +1336,11 @@ def startable(items: Sequence[Item],
     }
 
     def eligible(item: Item) -> bool:
-        capability_reason = parse_human_step(item.body or "")
-        machine_local = (
-            capability_reason is not None
-            and capability_reason.casefold() == MACHINE_LOCAL_REASON.casefold()
-        )
-        if (
-            item.state != "OPEN"
-            or item.is_blocked
-            or item.open_blockers
-            or item.children_total
-            # A machine-local marker is the middle capability outcome: Claude
-            # Code may work it, while every other requester must leave it in
-            # the queue. All other parsed markers remain human steps and are
-            # excluded from every agent, as #141 established.
-            or (capability_reason is not None
-                and (not machine_local or agent != "claude"))
+        if not _startable_without_repo_readiness(
+            item, by_ref, awaiting_review, agent
         ):
             return False
-        if item.ref in awaiting_review:
-            return False
-        parent = by_ref.get(item.parent or "")
-        if parent is None:
-            # A parentless item is a project, never a ticket — that is the whole
-            # basis of the model. One with no children is awaiting its breakdown,
-            # not waiting to be worked. Treating it as both is what made an issue
-            # appear in two queues at once.
-            return False
-        # `Ready` or `Building`. `plan.md`: "Codex draws tickets from any
-        # `Ready` or `Building` parent, so it stalls only if every parent lacks
-        # tickets." `Building` is not a precondition for work but the record
-        # that work began — `cmd_claim` writes it on the first claim.
-        #
-        # This read `Building` only, and #287 deleted the `start` gate that was
-        # the sole writer of it. Nothing replaced it, so every `Ready` project
-        # was unstartable and the accept gate unreachable: nine of them on
-        # 2026-09-09, failing silently and worsening as the pre-#287 backlog
-        # drained (#343).
-        return parent.status in ("Ready", "Building") and not parent.is_blocked
+        return not _repo_blocking_reasons(item, repo_readiness)
 
     def in_flight(item: Item) -> bool:
         """Once a project is Building, its remaining tickets finish first.
@@ -1714,7 +1793,9 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
 def next_ticket(items: Sequence[Item], now: datetime,
                 blocked: Optional[Set[str]] = None,
                 excluded: Optional[Set[str]] = None,
-                agent: str = "codex") -> Optional[Item]:
+                agent: str = "codex",
+                repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+                ) -> Optional[Item]:
     """The single ticket the requesting agent should work, or None.
 
     Returns None when the funnel is at its work-in-progress limit. A Broken
@@ -1725,7 +1806,10 @@ def next_ticket(items: Sequence[Item], now: datetime,
     excluded = excluded or frozenset()
     queue = [
         item for item in startable(
-            items, awaiting_review=blocked, agent=agent
+            items,
+            awaiting_review=blocked,
+            agent=agent,
+            repo_readiness=repo_readiness,
         )
         if item.ref not in excluded
     ]
@@ -1756,7 +1840,10 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
                          tier: Optional[str] = None,
                          blocked: Optional[Set[str]] = None,
                          excluded: Optional[Set[str]] = None,
-                         agent: str = "codex") -> Optional[Item]:
+                         agent: str = "codex",
+                         repo_readiness: Optional[
+                             Mapping[str, MemberRepoReadiness]
+                         ] = None) -> Optional[Item]:
     """Return the first shared-order ticket belonging to ``tier``.
 
     Tier filtering has to happen by asking ``next_ticket`` repeatedly rather
@@ -1768,7 +1855,9 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
     excluded = set(excluded or ())
     while True:
         ticket = next_ticket(
-            items, now, blocked=blocked, excluded=excluded, agent=agent
+            items, now, blocked=blocked, excluded=excluded,
+            agent=agent,
+            repo_readiness=repo_readiness,
         )
         if ticket is None or tier is None:
             return ticket
@@ -3172,6 +3261,16 @@ def check_member_repos(repos: Optional[Iterable[str]] = None) -> List[Check]:
         check_member_repo(repo)
         for repo in sorted(set(names))
     ]
+
+
+def repo_readiness_for_items(
+    items: Iterable[Item],
+) -> Dict[str, MemberRepoReadiness]:
+    """Read onboarding facts once for each repository in the loaded funnel."""
+    return {
+        repo: member_repo_readiness(repo)
+        for repo in sorted({item.repo for item in items})
+    }
 
 
 def _status_for_consistency(item: Item) -> str:
@@ -4755,14 +4854,18 @@ def _print_queue_section(items: Sequence[Item], render) -> None:
             print(render(item, "    "))
 
 
-def cmd_queue(items: List[Item], now: datetime) -> int:
+def cmd_queue(
+    items: List[Item],
+    now: datetime,
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+) -> int:
     """Everything, ordered — both queues, each under its own heading.
 
     They are genuinely different orderings over different subsets, so a single
     merged list would have to pick one and misrepresent the other.
     """
     decisions = awaiting_decision(items)
-    tickets = startable(items)
+    tickets = startable(items, repo_readiness=repo_readiness)
 
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
     by_ref = {i.ref: i for i in items}
@@ -4788,6 +4891,13 @@ def cmd_queue(items: List[Item], now: datetime) -> int:
             item.title,
         ),
     )
+
+    withheld = readiness_blockers(items, repo_readiness=repo_readiness)
+    if withheld:
+        print("\nWithheld by repository readiness ({}):".format(len(withheld)))
+        for blocker in withheld:
+            print("  {:<34} {}".format(
+                blocker["ref"], ", ".join(blocker["reasons"])))
 
     pending = awaiting_breakdown(items)
     if pending:
@@ -4817,6 +4927,7 @@ def cmd_next(
     tier: Optional[str] = None,
     excluded: Optional[Set[str]] = None,
     agent: str = "codex",
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
 ) -> int:
     # Accept bare numbers as well as refs (#436). The routine passes whatever
     # the model copied from the ticket JSON, and a bare number matched nothing
@@ -4847,10 +4958,15 @@ def cmd_next(
     ticket = next_ticket_for_tier(
         items, now, tier=tier, blocked=blocked, excluded=excluded,
         agent=agent,
+        repo_readiness=repo_readiness,
     )
 
     if ticket is None:
         holder = lock_holder(items, now)
+        withheld = readiness_blockers(
+            items, repo_readiness=repo_readiness, awaiting_review=blocked,
+            agent=agent,
+        )
         if holder is not None:
             print(
                 "nothing — lock held by {} (claimed {} ago)".format(
@@ -4858,6 +4974,10 @@ def cmd_next(
                 ),
                 file=sys.stderr,
             )
+        elif withheld:
+            print("nothing — {}".format(
+                _readiness_blocker_summary(withheld)
+            ), file=sys.stderr)
         elif tier:
             print("nothing — no {} work waiting".format(tier), file=sys.stderr)
         return 1
@@ -6064,7 +6184,10 @@ def reconcile_approved_merges(
 
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
-              routine_sha_literal: Optional[str] = None) -> int:
+              routine_sha_literal: Optional[str] = None,
+              repo_readiness: Optional[
+                  Mapping[str, MemberRepoReadiness]
+              ] = None) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
     A polling routine spends most of its runs discovering there is nothing to
@@ -6162,13 +6285,24 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             out["cleared_blocks"] = cleared
         blocked = awaiting_review(items)
         ticket = next_ticket_for_tier(
-            items, now, tier=tier, blocked=blocked, agent=agent
+            items, now, tier=tier, blocked=blocked,
+            agent=agent,
+            repo_readiness=repo_readiness,
         )
         if ticket is None:
             holder = lock_holder(items, now)
+            withheld = readiness_blockers(
+                items, repo_readiness=repo_readiness, awaiting_review=blocked
+            )
+            if withheld:
+                out["withheld"] = withheld
             if holder is not None:
                 why = "nothing — lock held by {} (claimed {} ago)".format(
                     holder.ref, humanise(now - holder.in_motion_since)
+                )
+            elif withheld:
+                why = "nothing — {}".format(
+                    _readiness_blocker_summary(withheld)
                 )
             elif tier:
                 why = "nothing — no {} work waiting".format(tier)
@@ -7262,6 +7396,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     try:
+        repo_readiness = None
+        if (
+            args.command in ("next", "queue")
+            or (args.command == "begin" and args.agent == "codex")
+        ):
+            repo_readiness = repo_readiness_for_items(items)
         if args.command == "claim":
             return cmd_claim(items, now, args.ref)
         if args.command == "release":
@@ -7310,7 +7450,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                               args.run, args.agent, args.klass)
         if args.command == "begin":
             return cmd_begin(items, now, args.agent, args.tier, args.idle,
-                             args.breakdown, args.routine_sha)
+                             args.breakdown, args.routine_sha,
+                             repo_readiness=repo_readiness)
         if args.command == "next-review":
             return cmd_next_review(items, args.tier)
         if args.command == "review":
@@ -7325,12 +7466,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 tier=getattr(args, "tier", None),
                 excluded=set(getattr(args, "excluded", [])),
                 agent=getattr(args, "agent", "codex"),
+                repo_readiness=repo_readiness,
             )
         if args.command == "brief":
             return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
-        return {"queue": cmd_queue, "brief": cmd_brief}[args.command](
-            items, now
-        )
+        if args.command == "queue":
+            return cmd_queue(items, now, repo_readiness=repo_readiness)
+        return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
     except GitHubError as exc:
         print("funnel: {}".format(exc), file=sys.stderr)
         return 2

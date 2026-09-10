@@ -56,13 +56,20 @@ _(Confirmed by Nate 2026-09-07 — "I want you to class these yourself when you
 create them", replacing the 2026-09-05 rule that `Broken` was settable at entry
 by him alone.)_
 
-Class the item when you file it, using the ladder's own option names — `Broken`,
-`Maintenance`, `Improve`, `New`, `Replace`. Say in the capture note why you chose
-it, and say so plainly when you are unsure rather than guessing confidently; he
+Class the item when you file it, using the ladder's own option names — `Investigate`,
+`Broken`, `Maintenance`, `Improve`, `New`, `Replace`. Say in the capture note why you
+chose it, and say so plainly when you are unsure rather than guessing confidently; he
 overrides freely and a stated doubt is cheaper to correct than a confident error.
 `funnel.py` has no `class` command; use `SET_FIELD` with `CLASS_FIELD_ID` the way
 `cmd_reject` does, and record who decided it in a comment — your own name now,
 not his.
+
+Use `Investigate` when the captured question is whether an observed defect exists, or
+what the observed behaviour actually means, and the deliverable is evidence that answers
+that question. It is not a synonym for an uncertain implementation: once a defect is
+established, the investigation run files the resulting work as sub-issue tickets under
+the investigation project before the question closes. If there is no defect to fix, the
+evidence is recorded and the project uses the existing `accept --no-tickets` ending.
 
 **Still his:** the class on anything *he* raises, and any reclassification of
 something already filed. Propose, do not set.
@@ -92,10 +99,11 @@ something precedent already settles spends his attention on nothing.
 So: **shape what precedent covers, and never invent a decision that is his.**
 
 Before applying the decision lists below, use the
-[capability boundary in `AGENTS.md`](../../AGENTS.md#capability-boundary) as a
-closed-world test: does the plan require anything outside what an agent can reach?
-The access cases named there are examples, not an exhaustive checklist; an unnamed
-capability gap still counts.
+[capability boundary](../capability-boundary.md) as a closed-world test: does the
+plan require anything outside what an agent can reach? Its three outcomes distinguish
+work any agent can do, work only Claude Code can do in its local environment, and
+work no agent can do. The named access cases are examples, not an exhaustive
+checklist; an unnamed capability gap still counts.
 
 The plan's decision record has three separate sections. Keep these names stable:
 
@@ -182,6 +190,30 @@ What the grilling has to produce, because the next stages depend on it:
   the reviewer has no way to catch a diff that quietly reintroduces one.
 - **What is still undecided.** Naming an open question is a result. Inventing an
   answer to it is a defect that gets implemented.
+
+### Record the overlap outcome
+
+Every plan must carry an `## Overlap check` section. It is the plan's recorded
+outcome for the advisory scan performed when `funnel shaped` writes the plan:
+
+```text
+## Overlap check
+
+Checked: #27, #89, and #97 (the other open plans considered)
+
+Candidates:
+- #27 and #89 both touch `skills/shape/SKILL.md`
+
+Conclusion:
+- #27 and #89 describe the same capability axis; keep one mechanism and narrow
+  the plan accordingly.
+```
+
+Copy each candidate line exactly as printed, then record what it means for this
+plan. If there are no candidates, write `Candidates: none found` and still name
+the other plans checked; never omit the section. The conclusion may keep the plan
+as written, narrow it, or reuse an existing mechanism. This is an advisory record,
+not a dependency or a gate: do not block the plan or invent a plan-level graph.
 
 ## Recording the plan
 

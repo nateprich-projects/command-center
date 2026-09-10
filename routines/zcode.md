@@ -1,3 +1,22 @@
+# RETIRED 2026-09-09 — this routine no longer runs
+
+Nate's decision, 2026-09-09: *"kill those and just use muse going forward since
+muse is cheaper, and the models are better."* Measured over the preceding 24 hours
+from the heartbeat: zcode did work in 18 of 93 runs and was refused on the z.ai pace
+line in 63; each job it did cost about 1% of the z.ai weekly quota. Muse's standard
+schedule carries every job below — review, breakdown and (since #366) standard-tier
+shaping — on an unmetered pool. Tracked as #431.
+
+**Schedule it ran on**, recorded here because the zcode app holds it where nothing can
+read it (#52): every 15 minutes at :08, :23, :38 and :53, first run 2026-09-07 02:11Z.
+
+**To re-enable:** paste the `begin` command below (regenerate its `--routine-sha` with
+`scripts/paste_routine_sha.py`), schedule it in the app, and remove `"zcode"` from
+`heartbeat.RETIRED_AGENTS`. Nothing else was removed — records, `PROVIDERS` entries
+and the `zai` policy in `usage.py` are all still in place.
+
+---
+
 # zcode routine — one job per run: review, otherwise breakdown, otherwise shaping
 
 Paste this into a **zcode scheduled task**. It requires the zcode app to be open
@@ -41,7 +60,7 @@ asked of it.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha 7cb98003ca616fcc32cfe5b3fd85164b1a3f17ca632f397d31e755dc969c3159
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha a3f6f4bb433f77b46e6597064908d6b472190c8c2d462b0c787771abe2871159
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and says

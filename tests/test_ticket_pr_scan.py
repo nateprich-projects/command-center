@@ -120,6 +120,18 @@ def test_a_remote_branch_without_a_pr_is_still_recorded(monkeypatch):
     }
 
 
+def test_a_closed_ticket_with_an_open_pr_is_included(monkeypatch):
+    closed = ticket(338, state="CLOSED")
+    monkeypatch.setattr(
+        funnel, "_gh_json", repo_reads([pr_row(341, "ticket/338")])
+    )
+
+    facts = funnel.ticket_pr_facts([closed])
+
+    assert facts[closed.ref]["number"] == 341
+    assert facts[closed.ref]["state"] == "OPEN"
+
+
 def test_verdict_is_looked_up_only_for_an_open_conflicting_pr(monkeypatch):
     """A verdict lookup per ticket would undo the saving the scan exists for."""
     verdicts = []

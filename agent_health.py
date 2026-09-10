@@ -7,6 +7,7 @@ the thresholds and wording here prevents the two readers from drifting apart.
 
 from __future__ import annotations
 
+import statistics
 from typing import Dict, List, Optional, Tuple
 
 #: Calibrated by the offline replay in tests/test_watchdog_calibration.py against
@@ -27,6 +28,11 @@ UNFINISHED_SECONDS = 2 * 3600
 
 #: One dying run is noise. Three in a week means runs are dying.
 DYING_THRESHOLD = 3
+#: A single open start is normal while it is within this floor and the agent's
+#: own typical completed-run duration. The floor avoids alarming on short runs
+#: when the history contains only very fast no-op sessions.
+OPEN_START_FLOOR_SECONDS = 15 * 60
+OPEN_START_MULTIPLE = 10
 ERROR_THRESHOLD = 3
 WEEK = 7 * 86400
 PROMPT_DRIFT_OUTCOME = "prompt-drift"
@@ -105,6 +111,43 @@ def _window_label(history_window_seconds: int = HISTORY_WINDOW_SECONDS) -> str:
     if days.is_integer():
         return "{} days".format(int(days))
     return _duration(history_window_seconds)
+
+
+def _completed_run_durations(
+    rows: List[Dict],
+    now: float,
+    *,
+    history_window_seconds: int = HISTORY_WINDOW_SECONDS,
+) -> List[float]:
+    """Return named start-to-finish durations completed in the history window."""
+    cutoff = now - history_window_seconds
+    starts = {
+        row.get("run"): float(row["ts"])
+        for row in rows
+        if row.get("phase") == "start"
+        and row.get("run")
+        and isinstance(row.get("ts"), (int, float))
+        and float(row["ts"]) <= now
+    }
+    durations = []
+    for row in rows:
+        if (
+            row.get("phase") != "finish"
+            or not row.get("run")
+            or not isinstance(row.get("ts"), (int, float))
+        ):
+            continue
+        finished_at = float(row["ts"])
+        started_at = starts.get(row.get("run"))
+        if (
+            started_at is None
+            or finished_at < cutoff
+            or finished_at < started_at
+            or finished_at > now
+        ):
+            continue
+        durations.append(finished_at - started_at)
+    return durations
 
 
 def assess(
@@ -192,8 +235,37 @@ def assess(
     # that false alarm is the failure this signal exists to avoid.
     import heartbeat
 
+    open_starts = heartbeat.open_starts(rows)
+    completed_durations = _completed_run_durations(
+        rows, now, history_window_seconds=history_window_seconds
+    )
+    if len(open_starts) == 1 and completed_durations:
+        open_start = open_starts[0]
+        started_at = open_start.get("ts")
+        if isinstance(started_at, (int, float)) and started_at <= now:
+            age = now - started_at
+            median = statistics.median(completed_durations)
+            threshold = max(
+                OPEN_START_FLOOR_SECONDS,
+                OPEN_START_MULTIPLE * median,
+            )
+            if age > threshold:
+                problems.append(
+                    "`{}` has one open start `{}` aged {} — over the {} "
+                    "threshold (10x median completed-run length {}, floor {}). "
+                    "Started at <t:{}:f>.".format(
+                        agent,
+                        open_start.get("run"),
+                        _duration(age),
+                        _duration(threshold),
+                        _duration(median),
+                        _duration(OPEN_START_FLOOR_SECONDS),
+                        int(started_at),
+                    )
+                )
+
     dying = [
-        r for r in heartbeat.open_starts(rows)
+        r for r in open_starts
         if now - (r.get("ts") or 0) > unfinished_seconds
         and now - (r.get("ts") or 0) < week
     ]

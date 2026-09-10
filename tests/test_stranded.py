@@ -169,3 +169,174 @@ def test_conflicting_pr_with_a_moved_head_is_not_called_stranded():
             "verdict": {"verdict": "approved", "head_sha": "old-head"},
         }},
     ) == []
+
+
+def _comment_block(number, blocker):
+    references, reason = funnel.parse_block_comment([
+        "**Blocked on #{}:** waiting for the other ticket.".format(blocker)
+    ])
+    return issue(
+        number,
+        block_references=references,
+        block_reason=reason,
+    )
+
+
+def test_native_block_cycle_is_reported_once_on_lowest_numbered_member():
+    first = issue(21, open_blockers=["{}#31".format(REPO)])
+    second = issue(31, open_blockers=["{}#21".format(REPO)])
+
+    assert funnel.stranded_json([second, first], NOW) == [{
+        "ref": first.ref,
+        "title": "issue 21",
+        "url": "https://example.invalid/21",
+        "reason": "block cycle: #21 → #31 → #21",
+    }]
+
+
+def test_comment_block_cycle_is_reported_once_on_lowest_numbered_member():
+    first = _comment_block(41, 51)
+    second = _comment_block(51, 41)
+
+    assert funnel.stranded_json([first, second], NOW) == [{
+        "ref": first.ref,
+        "title": "issue 41",
+        "url": "https://example.invalid/41",
+        "reason": "block cycle: #41 → #51 → #41",
+    }]
+
+
+def test_mixed_native_and_comment_block_cycle_is_reported_once():
+    first = issue(61, open_blockers=["{}#71".format(REPO)])
+    second = _comment_block(71, 81)
+    third = issue(81, open_blockers=["{}#61".format(REPO)])
+
+    rows = funnel.stranded_json([third, first, second], NOW)
+
+    assert [row["ref"] for row in rows] == [first.ref]
+    assert rows[0]["reason"] == "block cycle: #61 → #71 → #81 → #61"
+
+
+def test_block_chain_is_not_reported_as_a_cycle():
+    first = issue(91, open_blockers=["{}#101".format(REPO)])
+    second = issue(101, open_blockers=["{}#111".format(REPO)])
+    third = issue(111)
+
+    assert funnel.stranded_json([first, second, third], NOW) == []
+
+
+def test_pr_side_strands_report_closed_and_non_building_tickets():
+    closed_ticket = issue(
+        338,
+        parent="{}#89".format(REPO),
+        state="CLOSED",
+    )
+    ready_project = issue(
+        343,
+        title="Ready project",
+        status="Ready",
+        children_total=1,
+    )
+    waiting_ticket = issue(
+        346,
+        title="Waiting ticket",
+        parent=ready_project.ref,
+    )
+    building_project = issue(
+        350,
+        title="Building project",
+        status="Building",
+        children_total=1,
+    )
+    healthy_ticket = issue(
+        351,
+        title="Healthy ticket",
+        parent=building_project.ref,
+    )
+
+    rows = funnel.stranded_json(
+        [closed_ticket, ready_project, waiting_ticket,
+         building_project, healthy_ticket],
+        NOW,
+        pr_facts={
+            closed_ticket.ref: {"state": "OPEN", "number": 341},
+            waiting_ticket.ref: {"state": "OPEN", "number": 348},
+            healthy_ticket.ref: {"state": "OPEN", "number": 349},
+        },
+    )
+
+    assert rows == [
+        {
+            "ref": closed_ticket.ref,
+            "title": "issue 338",
+            "url": "https://example.invalid/338",
+            "reason": "open PR on closed ticket",
+        },
+        {
+            "ref": waiting_ticket.ref,
+            "title": "Waiting ticket",
+            "url": "https://example.invalid/346",
+            "reason": "open PR on open ticket whose project Status is Ready; "
+                      "merge gate will refuse it",
+        },
+    ]
+
+
+def test_pr_side_strands_are_absent_without_pr_facts():
+    project = issue(355, status="Ready", children_total=1)
+    ticket = issue(356, parent=project.ref)
+    closed_ticket = issue(
+        357,
+        parent=project.ref,
+        state="CLOSED",
+    )
+
+    assert funnel.stranded_json(
+        [project, ticket, closed_ticket], NOW
+    ) == []
+
+
+def test_stranded_reports_finished_upkeep_projects_without_acceptance():
+    finished = issue(
+        86,
+        title="Finished upkeep",
+        status="Building",
+        klass="Improve",
+        children_total=5,
+        children_done=5,
+    )
+    carried_human_step = issue(
+        87,
+        title="Upkeep with human step",
+        status="Building",
+        klass="Improve",
+        children_total=5,
+        children_done=5,
+        carried_human_step=True,
+    )
+    new_project = issue(
+        88,
+        title="New project",
+        status="Building",
+        klass="New",
+        children_total=5,
+        children_done=5,
+    )
+    incomplete = issue(
+        89,
+        title="Incomplete upkeep",
+        status="Building",
+        klass="Improve",
+        children_total=5,
+        children_done=4,
+    )
+
+    assert funnel.stranded_json(
+        [finished, carried_human_step, new_project, incomplete], NOW
+    ) == [{
+        "ref": finished.ref,
+        "title": finished.title,
+        "url": finished.url,
+        "reason": "finished upkeep project not closed",
+    }]
+    assert funnel.gate_question(carried_human_step) == "Accept it?"

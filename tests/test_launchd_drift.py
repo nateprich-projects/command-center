@@ -28,7 +28,9 @@ REVIEWER_NAMES = [
     "com.nateprich.command-center-muse-review-standard.plist",  # standard, /5
 ]
 KEEPER_NAME = "com.nateprich.command-center-run-keeper.plist"
-NAMES = REVIEWER_NAMES + [KEEPER_NAME]
+#: The Remote Control listener. Not a schedule; see the carve-out in `AGENTS.md`.
+REMOTE_CONTROL_NAME = "com.nateprich.command-center-remote-control.plist"
+NAMES = REVIEWER_NAMES + [KEEPER_NAME, REMOTE_CONTROL_NAME]
 LAUNCH_AGENTS = pathlib.Path.home() / "Library" / "LaunchAgents"
 
 

@@ -75,23 +75,31 @@ the blocker's live state.
 ## The capability boundary
 
 Use the [capability boundary](../capability-boundary.md) as the closed-world test
-when deciding whether a planned step is work an agent can take on. Ask whether the
-step requires anything outside that boundary; the named access cases are examples,
-not an exhaustive checklist. Keep this test separate from ticket sizing: a step can
-be small and still be outside the agent's reach.
+when deciding whether a planned step is work an agent can take on. Classify the
+step by the boundary's three outcomes before sizing it; keep capability separate
+from ticket sizing, because a step can be small and still be outside an agent's
+reach.
+
+## Capability markers
+
+At breakdown, leave the capability marker out for work that is workable by any
+agent. When a step is workable only where the Claude Code environment is present,
+put this line in the ticket body, using the same line-anchored marker shape as the
+`Risk:` line:
+
+```text
+Human step: a Claude Code environment
+```
+
+This is the middle outcome, not a difficulty or uncertainty marker. For work that
+is workable by no agent, use one of the existing allowlisted `Human step:` reasons
+for the specific human action. Keep this metadata in the ticket body rather than
+adding a Project field or label; the ticket is the unit being routed.
 
 If a ticket cannot start until another finishes, that is fine. If *every* ticket
 is chained, the plan has not really been broken up: it has been sliced into
 stages, and the funnel will process them one hourly run at a time with no
 parallelism gained. Look for a different cut.
-
-## Capability boundary
-
-When deciding whether a plan step is within an agent's reach, use the
-[capability boundary in `AGENTS.md`](../../AGENTS.md#capability-boundary) as a
-closed-world test: does the step require anything outside what an agent can reach?
-The access cases named there are examples, not an exhaustive list, so an unnamed
-requirement outside the boundary counts too.
 
 ## Boundary checklist at breakdown
 
@@ -262,10 +270,25 @@ Some plans cannot be broken up honestly, and forcing it produces tickets that
 look like work and are not.
 
 If the plan is too vague to size — it says what to achieve but not what to build
-— **do not invent the missing decisions.** Comment on the issue saying precisely
-what is undecided, and leave it. It needs another grilling pass, which is
-interactive and not yours to do. A ticket built on an invented decision is worse
-than no ticket, because someone will implement it.
+— first read the issue's comments for an earlier `**Needs a decision:**` header
+and the answer that followed it. If Nate answered that question, act on that
+answer and continue the breakdown; do not declare the same decision undecided
+again.
+
+If the plan still leaves a decision undecided, **do not invent the missing
+decision.** Post the precise question with:
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py comment <ref> --voice agent --needs-decision "<the undecided question>"
+```
+
+Create no tickets. Finish the run with `--outcome done` and a note naming the
+question. The command applies `blocked`, so the item leaves
+`awaiting_breakdown()` and enters Nate's queue with the gate question
+**"Answer the breakdown's question?"**. After Nate records his answer and
+removes the `blocked` label, the item returns to `awaiting_breakdown()`; the
+next breakdown run reads that answer before deciding again. A ticket built on
+an invented decision is worse than no ticket, because someone will implement it.
 
 If the plan is genuinely one indivisible piece of work, make it one ticket and
 say why in a comment.

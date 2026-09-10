@@ -138,6 +138,27 @@ system exists to solve.
 
 Do not change `Status` or `Class` on anything. Those are Nate's gates.
 
+### Investigate-class work
+
+When the ticket inherits `Class: Investigate`, the run answers the question rather than
+assuming that the suspected defect is real. If the evidence establishes a defect, file
+each resulting piece of work as a sub-issue of the investigation project before closing
+the investigation ticket. Keep the tickets small, give each one a `Risk:` line, and do
+not set the project's `Status` or `Class` while filing them:
+
+```bash
+gh issue create --repo <repo> --parent <investigation-project-number> \
+  --title "<resulting work>" \
+  --body $'Part of #<investigation-project-number>; discovered while investigating #<ticket-number>.\n\n<what the evidence established>.\n\nRisk: standard'
+```
+
+If the evidence establishes no defect, record it on the ticket or investigation project
+before the question is closed. The existing `funnel accept --no-tickets` path is the
+explicit ending for an investigation with no follow-up tickets; do not invent a new
+accept verb, change `#55`'s upkeep auto-close behaviour, or add `Investigate` to
+`SELF_APPROVABLE_CLASSES`. A finding that does produce tickets follows the ordinary
+ticket and accept flow.
+
 If, after starting work, you discover that the current ticket is blocked by a
 named prerequisite that has not landed and you made no change, release it and
 return to the decline-and-re-ask rule in step 3. Do not commit or open a PR for a
@@ -190,11 +211,11 @@ If you discover one:
 
    ```bash
    python3 /Users/nateprich/.claude/command-center-run/funnel.py release <current-number>
-   python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent codex --run <id> --outcome errored --note "stopped: human step filed as #<human-number>; ticket blocked; no PR opened"
+   python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent codex --run <id> --outcome skipped-human-step --note "stopped: human step filed as #<human-number>; ticket blocked; no PR opened"
    ```
 
-   This is the deliberate stop path. The `errored` outcome records that the
-   assigned engineering ticket was not completed; it does not authorize a
+   This is the deliberate stop path. The `skipped-human-step` outcome records
+   that the run paused for a required human action; it does not authorize a
    plausible artefact to merge.
 
 ## 4. Open a pull request
@@ -214,7 +235,7 @@ capture using `skills/shape`'s "Class it when you file it" rule, and say why.
 Agents class their own captures, never his existing issues.
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --note "<observed evidence; chosen class and why>"
+python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --origin agent --class <Broken|Maintenance|Improve|New|Replace> --note "<observed evidence; say why you chose this class, and say plainly when you are unsure>"
 ```
 
 This is the sanctioned exception to the review rule to act only on the PR you were

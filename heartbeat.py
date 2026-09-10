@@ -28,6 +28,7 @@ import base64
 import json
 import os
 import glob
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -67,6 +68,7 @@ OUTCOMES = [
     "skipped-nate-active",  # the five-hour window was already in use; Codex only
     "skipped-usage-unknown",  # could not read usage; failed closed
     "skipped-blocked",     # prerequisite has not landed; no change made
+    "skipped-human-step",   # paused for a required human action
     "skipped-api-reserve",  # GraphQL budget below the reserve floor (#273)
     "prompt-drift",        # routine literal did not match the checked-in file
     "errored",             # tried and failed
@@ -77,6 +79,15 @@ OUTCOMES = [
 #: put more than one model on a pool, and the budget is per pool.
 PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
              "muse": "meta"}
+
+#: Agents whose schedules have been stopped on purpose. Their records stay
+#: readable and every command still accepts them, so re-enabling is a schedule
+#: paste and removing the name here; but the watchdog and `agent_health` must
+#: not read their silence as a run that died. zcode was retired on 2026-09-09
+#: by Nate's decision: measured over 24h it did work in 18 of 93 runs and was
+#: refused on the z.ai pace line in 63, while Muse carried every job it had on
+#: an unmetered pool (#431).
+RETIRED_AGENTS = frozenset({"zcode"})
 
 #: Which application ran it. Distinct from provider and model: one provider can
 #: be reached through more than one harness, and harnesses differ in ways that
@@ -305,6 +316,23 @@ def _report(kept: str) -> None:
 #: routine could move his checkout and the only evidence would be his own
 #: surprise, weeks later.
 CANONICAL_REPO = "/Users/nateprich/.claude/command-center"
+
+
+def runtime_state() -> Optional[Dict]:
+    """Best-effort HEAD of the checkout this script is running from."""
+    root = Path(__file__).resolve().parent
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        if head.returncode != 0:
+            return None
+        value = head.stdout.strip()
+        if not value:
+            return None
+        return {"root": str(root), "head": value[:12]}
+    except Exception:
+        return None
 
 
 def repo_state() -> Optional[Dict]:
@@ -741,6 +769,7 @@ def main(argv=None) -> int:
                 "attempt": args.attempt,
                 "escalated_from": args.escalated_from,
                 "repo": repo_state(),
+                "runtime": runtime_state(),
                 **detect_model(args.agent),
             })
             _report(kept)
@@ -773,6 +802,7 @@ def main(argv=None) -> int:
             "review_result": args.review_result,
             "human_intervention_required": args.human_intervention or None,
             "repo": repo_state(),
+            "runtime": runtime_state(),
             **detect_model(args.agent),
         }
         metric = input_usage(args.agent)

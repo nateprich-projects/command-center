@@ -9,6 +9,21 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
+ROUTINES = ("codex-work", "claude", "muse", "zcode")
+
+
+@pytest.mark.parametrize("routine", ROUTINES)
+def test_finish_uses_the_run_id_from_this_runs_begin(routine):
+    """Routine retries must not reuse a prior begin id in the same session."""
+    body = (ROOT / "routines" / (routine + ".md")).read_text(encoding="utf-8")
+    normalized = " ".join(body.split()).lower()
+
+    assert "pass the run id printed by this run's `begin` output as `--run <id>`" in normalized
+    assert "never an id from an earlier `begin` in the same session" in normalized
+    assert "if `heartbeat finish` refuses a run/work mismatch" in normalized
+    assert "use that id in `--run` and retry" in normalized
+    assert "never wrap the id in `run=$(...)`" in normalized
+
 
 @pytest.mark.parametrize(
     ("routine", "tier_phrase"),

@@ -30,6 +30,16 @@ from funnel import (  # noqa: E402
     startable,
 )
 
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _next_reads_no_live_heartbeat(monkeypatch):
+    """`cmd_next` now consults the heartbeat for tickets finished by comments
+    (#498); the fixtures here describe the queue, not the spool."""
+    monkeypatch.setattr(funnel, "finished_by_comments", lambda items: set())
+
+
 NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "project_items.json"
 
@@ -339,11 +349,11 @@ def test_ladder_is_in_the_documented_order():
     assert ranks == sorted(ranks) and len(set(ranks)) == 6
 
 
-def test_investigate_is_first_without_gaining_preemption_or_self_approval():
+def test_investigate_is_first_without_gaining_preemption():
     assert ladder_index("Investigate") == 0
     assert funnel.PREEMPTING_CLASSES == frozenset({"Broken", "Maintenance"})
     assert funnel.SELF_APPROVABLE_CLASSES == frozenset(
-        {"Broken", "Maintenance", "Improve"}
+        {"Investigate", "Broken", "Maintenance", "Improve"}
     )
 
 

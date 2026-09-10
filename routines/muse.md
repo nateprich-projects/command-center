@@ -50,6 +50,16 @@ A `Broken` or `Maintenance` job is offered first whatever its stage.
 
 ## Muse-specific behaviour you must know
 
+**The runner provides one disposable funnel session for this run.** Every
+`funnel.py` invocation below is forwarded to the same in-memory process, which
+loads the Project once and keeps its locally updated view for the rest of the
+run. The first load happens when `begin` arrives, so the claim lock still reads
+GitHub at claim time. The session is discarded when the runner exits: there is
+no cache, snapshot file, or long-lived daemon. Use the exact funnel path shown
+in the commands; the forwarding is transparent. A non-TTY pipe is carried with
+the request (up to 1 MB), so `shaped --plan -` works directly inside the session;
+TTY stdin is left untouched.
+
 **Shell commands run in the background and their output arrives asynchronously.**
 A tool result comes back `background_running` with guidance not to poll — the
 output reaches you later and wakes you even after you end a turn. Codex and zcode
@@ -90,7 +100,11 @@ usage, so nothing was gated. It is a standing exception recorded in `AGENTS.md`,
 not a failure to read a budget.
 
 **Keep `run`.** Every exit path finishes it: a start with no finish is read by the
-watchdog as a run that died.
+watchdog as a run that died. Pass the run id printed by this run's `begin` output
+as `--run <id>` — never an id from an earlier `begin` in the same session. If
+`heartbeat finish` refuses a run/work mismatch, it names the still-open run id
+to use; use that id in `--run` and retry. Never wrap the id in `RUN=$(...)` —
+command substitution cannot be permission-matched and caused a prompt storm.
 
 ## 2. Reconcile before you review
 
@@ -137,6 +151,16 @@ are green — it will not take your word for it.
 gh pr checks <pr> --repo <repo>
 gh pr diff <pr> --repo <repo>
 ```
+
+### Check file overlap before approving
+
+A successful merge changes `main` underneath every other open PR. Because this
+routine does one job per run, the first review action after a successful merge is
+to compare the candidate PR's changed-file list with the changed-file list of
+every other open PR, before recording an approval. Do not approve a candidate
+that the merge just made stale: record a rejected verdict with `--blocking`
+naming the overlapping files, and leave the engineer to rebase it. This ordering
+check is an early warning; it does not replace the merge gate.
 
 **No clone, no checkout, no `git` at all, no `/tmp`, no writing anywhere except
 the heartbeat spool.** In particular never touch
@@ -294,9 +318,22 @@ scheduled job is the approved unattended shaping path for standard-tier ideas.
 **Do not grill.** There is nobody to ask in an unattended run. Settle what
 precedent covers, cite the source in the plan, and do not invent an answer where
 the decision is genuinely Nate's. Record that open question in the per-category
-`Needs you` section instead — Exposure, Gates, Scope and priority, and
-Preference — with an explicit answer under every category, including when
-nothing is outstanding.
+`Needs you` section instead. Put the answer first on each category line, using
+this four-line form when the category is clear:
+
+```text
+- Exposure: nothing outstanding. No new credentials or reachable surface.
+- Gates: nothing outstanding. No gate ownership changes.
+- Scope and priority: nothing outstanding. The scoped change is documented.
+- Preference: nothing outstanding. No user-facing choice remains.
+```
+
+The bare answer must be `nothing outstanding`; any elaboration follows after a
+period. When a category is open, replace that answer with the question itself in
+one sentence, for example `- Gates: Who may write Ready for an all-clear plan?`.
+When all four categories are clear, a self-approvable Class with `agent` origin
+advances to `Ready` and gets a `Self-approved:` marker that `funnel brief` shows.
+Any other case stays at `Shaped`, with the reason printed.
 
 **You cannot write a file** — `--disable-write` is on — so pass the plan on
 standard input. Put the whole plan in one single-quoted argument and write

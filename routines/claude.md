@@ -27,15 +27,16 @@ preempt.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha ac65a15aca0d0ff7dd7f457a9136d734fa646968074bfc650f79016f9f670ebb
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha 1a6ab11c49238193ad8725cf8545255f4d12318fb537217995b581daf24e015e
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and names
 your work. It always prints JSON.
 
-- `"do": "stop"` — finish with the outcome below and **stop immediately**. Do not
-  investigate, do not look around. **Most runs end here and that is the design** —
-  you exist for escalated reviews, and there usually are none.
+- `"do": "stop"` — run the diagnostic below, then finish with the outcome below and
+  **stop immediately**. Do not investigate or look around beyond that diagnostic.
+  **Most runs end here and that is the design** — you exist for escalated reviews,
+  and there usually are none.
   - `"gate": "over"` → `--outcome skipped-over-pace`
   - `"gate": "unknown"` → `--outcome skipped-usage-unknown`
   - otherwise → `--outcome nothing-to-do`
@@ -43,9 +44,29 @@ your work. It always prints JSON.
 - `"do": "shape"` — go to the third job below. `work` names one escalated idea.
 
 **Keep `run`.** Every exit path finishes it: a start with no finish is read by the
-watchdog as a run that died. Pass it as `--run <id>`, and never wrap it in
-`RUN=$(...)` — command substitution cannot be permission-matched and caused a
-prompt storm.
+watchdog as a run that died. Pass the run id printed by this run's `begin` output
+as `--run <id>` — never an id from an earlier `begin` in the same session. If
+`heartbeat finish` refuses a run/work mismatch, it names the still-open run id
+to use; use that id in `--run` and retry. Never wrap the id in `RUN=$(...)` —
+command substitution cannot be permission-matched and caused a prompt storm.
+
+### Live automation diagnostic
+
+After `begin` returns, including when it returns `"do": "stop"`, run this
+read-only check:
+
+```bash
+if [ -d "$HOME/.codex/automations" ]; then
+  python3 /Users/nateprich/.claude/command-center-run/scripts/sync_codex_automations.py --check || true
+fi
+```
+
+This reuses the sync script's existing detector and is report-only. If it prints
+`DRIFTED` lines, report one short `Codex automation drift:` diagnostic naming
+each schedule, the same way the brief reports other unusual facts. Do not treat
+the check's nonzero drift exit as a failed run, and do not run write mode or edit
+the live automations. If `~/.codex/automations` is absent, or no `DRIFTED` lines
+appear, say nothing.
 
 **Why one command rather than three.** This routine runs on Nate's own Anthropic
 subscription — the pool he does his real work on — and every separate tool call
@@ -248,9 +269,22 @@ shaping path for escalated ideas.
 **Do not grill.** There is nobody to ask in an unattended run. Settle what
 precedent covers, cite the source in the plan, and do not invent an answer where
 the decision is genuinely Nate's. Record that open question in the per-category
-`Needs you` section instead — Exposure, Gates, Scope and priority, and
-Preference — with an explicit answer under every category, including when
-nothing is outstanding.
+`Needs you` section instead. Put the answer first on each category line, using
+this four-line form when the category is clear:
+
+```text
+- Exposure: nothing outstanding. No new credentials or reachable surface.
+- Gates: nothing outstanding. No gate ownership changes.
+- Scope and priority: nothing outstanding. The scoped change is documented.
+- Preference: nothing outstanding. No user-facing choice remains.
+```
+
+The bare answer must be `nothing outstanding`; any elaboration follows after a
+period. When a category is open, replace that answer with the question itself in
+one sentence, for example `- Gates: Who may write Ready for an all-clear plan?`.
+When all four categories are clear, a self-approvable Class with `agent` origin
+advances to `Ready` and gets a `Self-approved:` marker that `funnel brief` shows.
+Any other case stays at `Shaped`, with the reason printed.
 
 Write the plan to a file. If the idea's capture origin is `agent` and its Class is
 unset, choose the Class from the ladder (`Broken`, `Maintenance`, `Improve`, `New`,

@@ -165,3 +165,23 @@ def test_the_routine_describes_both_jobs_and_their_order():
     # when shaping became the third job (#366).
     assert "Never more than one job in the same run" in " ".join(routine.split())
     assert "skills/breakdown/SKILL.md" in routine
+
+
+def test_muse_checks_open_pr_file_overlap_before_approval():
+    """A merge must not make the next approval stale before the reviewer notices.
+
+    This is deliberately a prompt guardrail: the merge gate can discover the
+    conflict, but by then the reviewer has already approved a branch that the
+    preceding merge invalidated.
+    """
+    routine = (ROOT / "routines" / "muse.md").read_text(encoding="utf-8")
+    normalized = " ".join(routine.split()).lower()
+
+    assert "a successful merge changes `main` underneath every other open pr" in normalized
+    assert (
+        "compare the candidate pr's changed-file list with the changed-file list "
+        "of every other open pr"
+    ) in normalized
+    assert "before recording an approval" in normalized
+    assert "record a rejected verdict with `--blocking` naming the overlapping files" in normalized
+    assert "does not replace the merge gate" in normalized

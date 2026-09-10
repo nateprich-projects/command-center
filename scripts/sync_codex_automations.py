@@ -56,11 +56,11 @@ SEPARATOR = "\n---\n"
 #: So: a schedule with `BYHOUR` fires only in chosen windows and needs no proxy.
 #: One without it fires all day and does.
 #:
-#: This was a set of ids, keyed on `command-center-tickets-hourly`. That name is
-#: already wrong — the schedule runs every fifteen minutes — and worse, renaming
-#: it in the app would have silently switched the presence check off. Reading the
-#: rule the schedule already carries has no such trap, and a new all-day schedule
-#: gets the check without anyone remembering to add it.
+#: This was a set of ids, keyed on `command-center-tickets-hourly`. The `-hourly`
+#: suffix is historical: this schedule fires every five minutes, 12 times an
+#: hour. Renaming it in the app would have silently switched the presence check
+#: off. Reading the rule the schedule already carries has no such trap, and a new
+#: all-day schedule gets the check without anyone remembering to add it.
 IDLE_RRULE_MARKER = "BYHOUR="
 
 
@@ -97,7 +97,7 @@ def fires_all_day(automation: str) -> bool:
     are read off this one fact: which tier a schedule works, and whether it pays
     the presence proxy. `PRESENCE_CHECK_ENABLED` suspends the second. It must not
     touch the first — turning the proxy off once flipped the all-day schedule to
-    `escalated`, which would have pointed the cheap fifteen-minute poller at the
+    `escalated`, which would have pointed the cheap five-minute poller at the
     riskiest work in the queue. Caught before it shipped, 2026-09-07.
     """
     if not automation:

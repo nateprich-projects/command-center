@@ -72,9 +72,9 @@ edge with a `Depends:` body marker, a label, or a later follow-up edit: malforme
 prose is silently unreadable by the queue, while the native relationship carries
 the blocker's live state.
 
-## The capability boundary
+## Capability boundary
 
-Use the [capability boundary](../capability-boundary.md) as the closed-world test
+Use the [capability boundary](../../AGENTS.md#capability-boundary) as the closed-world test
 when deciding whether a planned step is work an agent can take on. Classify the
 step by the boundary's three outcomes before sizing it; keep capability separate
 from ticket sizing, because a step can be small and still be outside an agent's

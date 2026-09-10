@@ -74,6 +74,11 @@ OUTCOMES = [
     "errored",             # tried and failed
 ]
 
+#: The per-command GitHub measurements funnel records as non-terminal events.
+#: Keep the names here so finish can aggregate each budget independently and
+#: never turn an unreadable value into zero.
+API_COST_FIELDS = ("graphql_points", "gh_calls")
+
 
 #: Which pool an agent spends. Deliberately separate from the model: routing will
 #: put more than one model on a pool, and the budget is per pool.
@@ -287,6 +292,160 @@ def record_event(agent: str, run: Optional[str], outcome: str,
     kept = append(agent, record)
     _report(kept)
     return kept
+
+
+def _api_cost_number(value):
+    """Return a measured non-negative integer, or ``None`` if unreadable."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def record_api_cost(agent: str, run: Optional[str], api_cost: Dict) -> str:
+    """Append one funnel command's API measurements to the heartbeat stream.
+
+    It is an event rather than a mutation of the start record: several funnel
+    processes can belong to one run, and appending preserves every command's
+    contribution in the write-ahead spool.  An unattributed measurement is not
+    useful to a later finish, so it is ignored rather than assigned by guess.
+    """
+    if not run or agent not in PROVIDERS:
+        return "unattributed"
+    values = api_cost if isinstance(api_cost, dict) else {}
+    record = {
+        "run": run,
+        "agent": agent,
+        "phase": "api_cost",
+        "ts": int(time.time()),
+        "api_cost": {
+            name: _api_cost_number(values.get(name))
+            for name in API_COST_FIELDS
+        },
+    }
+    kept = append(agent, record)
+    _report(kept)
+    return kept
+
+
+def record_binding(agent: str, run: str, do: str, work: str) -> str:
+    """Bind the work `funnel begin` issued to the run that received it (#497).
+
+    Its own record, because the spool is append-only and the start record is
+    already on its way to GitHub. Readers that count starts and finishes ignore
+    the phase; `bindings()` is the reader for this one. Never raises for
+    bookkeeping: `append` reports what happened and the run proceeds.
+    """
+    record = {
+        "run": run,
+        "agent": agent,
+        "phase": "bind",
+        "ts": int(time.time()),
+        "do": do,
+        "work": work,
+    }
+    kept = append(agent, record)
+    _report(kept)
+    return kept
+
+
+def api_cost_for_run(records: List[Dict], run: Optional[str]) -> Dict[str, Optional[int]]:
+    """Sum the per-command API events for one run, independently by field.
+
+    No matching event means the run issued no funnel command.  If any command
+    could not provide one field, that field stays null while a separately
+    measurable field may still be summed.  Malformed telemetry is treated the
+    same way; this function is diagnostic and must never make finish fail.
+    """
+    result = {name: None for name in API_COST_FIELDS}
+    if not run:
+        return result
+
+    events = [
+        record.get("api_cost")
+        for record in records
+        if isinstance(record, dict)
+        if record.get("phase") == "api_cost" and record.get("run") == run
+    ]
+    if not events:
+        return result
+
+    for name in API_COST_FIELDS:
+        values = []
+        readable = True
+        for event in events:
+            if not isinstance(event, dict):
+                readable = False
+                break
+            value = _api_cost_number(event.get(name))
+            if value is None:
+                readable = False
+                break
+            values.append(value)
+        if readable:
+            result[name] = sum(values)
+    return result
+
+
+def bindings(records: List[Dict]) -> Dict[str, Dict]:
+    """The work each run was issued, by run id. The latest binding wins."""
+    found: Dict[str, Dict] = {}
+    rows = sorted(
+        (r for r in records if r.get("phase") == "bind" and r.get("run")),
+        key=lambda r: r.get("ts") or 0,
+    )
+    for rec in rows:
+        found[rec["run"]] = {
+            "do": rec.get("do"), "work": rec.get("work"), "ts": rec.get("ts"),
+        }
+    return found
+
+
+def verify_finish(records: List[Dict], run_id: str, *,
+                  merged=None, work: Optional[str] = None):
+    """Check a finish against the binding of the run it names.
+
+    Returns ``None`` when nothing contradicts: no binding was recorded (a stop
+    run, or a start that predates bindings -- instrumentation never gates the
+    thing it instruments), or the finish names no work, or the named work is
+    the bound work. Otherwise returns ``(right_run, reason)``: the still-open
+    run that *was* issued the named work, or ``None`` when there is none, and
+    a sentence saying what the named run was actually issued.
+
+    Membership alone let a stale id from an earlier tick accept an outcome
+    whenever that id was still open; the observed case (#497) was saved only
+    because the stale run had already finished.
+    """
+    bound = bindings(records).get(run_id)
+    if bound is None:
+        return None
+    if work:
+        named = str(work)
+        matches = str(bound.get("work")) == named
+    elif merged is not None:
+        named = "a merge of PR {}".format(merged)
+        matches = (bound.get("do") == "review"
+                   and str(bound.get("work")) == str(merged))
+    else:
+        return None
+    if matches:
+        return None
+    opens = {r.get("run") for r in open_starts(records)}
+    right = None
+    for other, other_bound in bindings(records).items():
+        if other == run_id or other not in opens:
+            continue
+        if work and str(other_bound.get("work")) == str(work):
+            right = other
+            break
+        if (merged is not None and other_bound.get("do") == "review"
+                and str(other_bound.get("work")) == str(merged)):
+            right = other
+            break
+    reason = "run {} was issued {} {}, not {}".format(
+        run_id, bound.get("do"), bound.get("work"), named)
+    return right, reason
 
 
 def _report(kept: str) -> None:
@@ -597,9 +756,14 @@ def usage_snapshot(agent: str) -> Optional[Dict]:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import usage
 
-        reading = usage.read_claude() if agent == "claude" else usage.read_codex()
+        reading = usage.read_agent(agent, time.time())
         if not reading:
             return None
+        if reading.get("unmetered"):
+            return {
+                "source": reading.get("source"),
+                "unmetered": True,
+            }
         # Both figures, not just the percentage. `resets_at` is what identifies
         # *which* five-hour window a run belonged to, and the idle gate in
         # usage.py needs that to ask whether this window was already open.
@@ -746,6 +910,11 @@ def main(argv=None) -> int:
         "--merged", default=None,
         help="PR number merged unattended; recorded so the brief can surface it",
     )
+    finish.add_argument(
+        "--work", default=None,
+        help="the ticket ref or PR number this run was issued, as `funnel begin` "
+             "printed it under `bound`; checked against the run's binding",
+    )
 
     show = sub.add_parser("read", help="print an agent's records as JSON")
     show.add_argument("--agent", required=True, choices=sorted(PROVIDERS))
@@ -776,7 +945,37 @@ def main(argv=None) -> int:
             print(run_id)
             return 0
 
-        run_id, candidates = resolve_run(read(args.agent), args.run)
+        records = read(args.agent)
+        run_id, candidates = resolve_run(records, args.run)
+        if args.run and run_id:
+            misfiled = verify_finish(
+                records, run_id, merged=_merged_pr(args.merged), work=args.work
+            )
+            if misfiled is not None:
+                right, reason = misfiled
+                # Never dropped, never filed under the wrong run: the outcome
+                # becomes an event on the run that was issued the work, or an
+                # unattributed event naming the candidates when none is open.
+                event = {"misfiled_from": run_id, "note": args.note}
+                if args.work:
+                    event["work"] = args.work
+                if _merged_pr(args.merged) is not None:
+                    event["merged"] = _merged_pr(args.merged)
+                if right is None:
+                    event["candidates"] = [
+                        r.get("run") for r in open_starts(records)
+                    ]
+                record_event(args.agent, right, args.outcome, **event)
+                raise HeartbeatError(
+                    "{}. {}".format(
+                        reason,
+                        "Use --run {} (still open); this outcome has been filed "
+                        "as an event on it.".format(right)
+                        if right else
+                        "No open run is bound to that work; this outcome has "
+                        "been filed as an unattributed event.",
+                    )
+                )
         if run_id is None:
             print(
                 "heartbeat: could not tell which run this finishes ({} open). "
@@ -803,6 +1002,7 @@ def main(argv=None) -> int:
             "human_intervention_required": args.human_intervention or None,
             "repo": repo_state(),
             "runtime": runtime_state(),
+            "api_cost": api_cost_for_run(records, run_id),
             **detect_model(args.agent),
         }
         metric = input_usage(args.agent)

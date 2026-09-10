@@ -17,17 +17,22 @@ import contextlib
 from collections import namedtuple
 import glob
 import hashlib
+import hmac
 import io
 import json
 import os
 import pathlib
 import re
+import secrets
+import socket
+import socketserver
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
+                    Sequence, Set, Tuple)
 
 from agent_health import assess as assess_agent_health
 
@@ -204,9 +209,12 @@ LADDER = ["Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"]
 PREEMPTING_CLASSES = frozenset({"Broken", "Maintenance"})
 PREEMPTING = {"Broken", "Maintenance"}
 
-#: Existing-work classes may take the unattended shaping path. Origin remains
-#: an independent condition: class describes the work, not who raised it.
-SELF_APPROVABLE_CLASSES = frozenset({"Broken", "Maintenance", "Improve"})
+#: Existing-work classes and finite investigations may take the unattended
+#: shaping path. Origin remains an independent condition: class describes the
+#: work, not who raised it.
+SELF_APPROVABLE_CLASSES = frozenset(
+    {"Investigate", "Broken", "Maintenance", "Improve"}
+)
 
 #: Which stages can wait on a human, and the question each one asks.
 GATES = {
@@ -939,6 +947,18 @@ def needs_nate_signals(plan_body: str) -> List[str]:
 PLAN_HEADING = re.compile(r"^\s{0,3}(?P<marks>#{1,6})\s+(?P<title>.*?)\s*#*\s*$")
 NEEDS_NATE_HEADINGS = {"needs nate", "needs you"}
 EMPTY_NEEDS_NATE = {"", "nothing", "nothing."}
+NEEDS_NATE_CATEGORIES = (
+    "Exposure",
+    "Gates",
+    "Scope and priority",
+    "Preference",
+)
+NEEDS_NATE_CLEAR_ANSWERS = {
+    "nothing",
+    "nothing outstanding",
+    "none",
+}
+NEEDS_NATE_CLAUSE_END = re.compile(r"[.;\u2013\u2014]| - ")
 
 
 def _needs_nate_sections(plan_body: str) -> List[str]:
@@ -974,25 +994,85 @@ def _needs_nate_sections(plan_body: str) -> List[str]:
     return sections
 
 
+def _needs_nate_category_line(line: str) -> Optional[Tuple[str, str]]:
+    """Return a category and answer from one supported Needs line."""
+    text = re.sub(r"^(?:[-+*]|\d+[.)])\s+", "", line.strip())
+    for category in NEEDS_NATE_CATEGORIES:
+        escaped = re.escape(category)
+        patterns = (
+            rf"\*\*{escaped}\s*[:.]\s*\*\*\s*(?P<answer>.*)",
+            rf"\*\*{escaped}\*\*\s*[:.]\s*(?P<answer>.*)",
+            rf"{escaped}\s*[:.]\s*(?P<answer>.*)",
+        )
+        for pattern in patterns:
+            match = re.fullmatch(pattern, text, re.IGNORECASE)
+            if match:
+                return category, match.group("answer").strip()
+    return None
+
+
+def _needs_nate_answer_is_clear(answer: str) -> bool:
+    """Whether an answer's first clause is an explicit all-clear token."""
+    clause = NEEDS_NATE_CLAUSE_END.split(answer, maxsplit=1)[0].strip().lower()
+    return clause in NEEDS_NATE_CLEAR_ANSWERS
+
+
+def _needs_nate_section_reason(section: str) -> Optional[str]:
+    """Return a hold reason, or ``None`` when one Needs section is clear."""
+    if section.strip().lower() in EMPTY_NEEDS_NATE:
+        return None
+
+    # A wrapped elaboration continues the category line above it: Muse writes
+    # Markdown at eighty columns, and #514's clear section read as an open
+    # question because its indented second lines counted as extra lines
+    # (#524). A blank line, a new list item, or an unindented line still ends
+    # the answer and is judged on its own.
+    lines: List[str] = []
+    for line in section.splitlines():
+        if not line.strip():
+            continue
+        continues = (
+            line[:1].isspace()
+            and not re.match(r"^\s*(?:[-+*]|\d+[.)])\s+", line)
+            and bool(lines)
+        )
+        if continues:
+            lines[-1] = lines[-1].rstrip() + " " + line.strip()
+        else:
+            lines.append(line)
+    found = set()
+    for line in lines:
+        parsed = _needs_nate_category_line(line)
+        if parsed is None:
+            return "plan has an open question"
+        category, answer = parsed
+        if category in found or not _needs_nate_answer_is_clear(answer):
+            return "open question under {}".format(category)
+        found.add(category)
+
+    for category in NEEDS_NATE_CATEGORIES:
+        if category not in found:
+            return "open question under {}".format(category)
+    return None
+
+
 def shaped_plan_status(plan_body: str) -> Tuple[str, str]:
     """Return the status and reason earned by a newly recorded plan.
 
     The all-clear is deliberately narrow: a recognised Needs section must be
-    present, explicitly empty, and free of authority signals that contradict
-    its claim. Everything else stays at Shaped with a reason the caller can
-    print.
+    present, either explicitly empty or made up of the four category lines with
+    an explicit all-clear as each answer's first clause. Authority-shaped
+    prose is reported separately by ``needs_nate_signals`` and does not change
+    this section result. Everything else stays at Shaped with a reason the
+    caller can print.
     """
     sections = _needs_nate_sections(plan_body)
     if not sections:
         return "Shaped", "plan has no ## Needs you section"
-    if any(section.strip().lower() not in EMPTY_NEEDS_NATE
-           for section in sections):
-        return "Shaped", "plan has an open question"
-    signals = needs_nate_signals(plan_body)
-    if signals:
-        return "Shaped", "plan contains authority signal: {}".format(
-            ", ".join(signals)
-        )
+    for section in sections:
+        reason = _needs_nate_section_reason(section)
+        if reason:
+            return "Shaped", reason
     return "Ready", "plan declares nothing open"
 
 
@@ -1003,8 +1083,8 @@ def plan_needs_nate(plan_body: str) -> bool:
     explicit evidence that Nate's questions were considered. Only a section
     containing exactly ``Nothing`` (with optional punctuation and whitespace)
     is empty. Multiple recognised sections fail closed if any one contains
-    content. An otherwise empty section also fails closed when the plan body
-    contains an authority signal that contradicts the section's claim.
+    content. Authority-shaped prose is an advisory signal for the unattended
+    approval record, not an open question for this parser.
     """
     return shaped_plan_status(plan_body)[0] == "Shaped"
 
@@ -1194,9 +1274,10 @@ def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],
     """Whether all conditions permit one unattended shaping transition.
 
     #77 supplies the plan booleans and #80 owns the transition. Keeping class,
-    origin, the Needs-Nate result (including #84's authority verifier), and
-    escalation in this one predicate prevents origin from becoming a second
-    gate that can drift from the existing self-approval rule.
+    origin, the Needs-section result, and escalation in this one predicate
+    prevents origin from becoming a second gate that can drift from the
+    existing self-approval rule. Authority signals remain advisory record
+    data and are intentionally not a predicate term.
     """
     return (
         klass in SELF_APPROVABLE_CLASSES
@@ -1512,43 +1593,68 @@ VERDICTS = ("approved", "rejected")
 CI_STATES = ("green", "red", "unknown")
 
 
-def _marked_json(body: str, marker: str) -> Optional[Dict]:
-    """Read the first JSON block owned by ``marker``.
+def _marked_json_blocks(body: str, marker: str) -> List[Tuple[Dict, str]]:
+    """Return parseable JSON blocks owned by ``marker``, newest first.
 
     A comment may carry both a review verdict and provenance. Parsing from one
     marker to the last closing brace would join those two objects and make the
-    review gate silently lose a valid verdict. The first fenced JSON block (or
-    an immediately following bare object for compatibility with early markers)
-    belongs to the requested marker; another Command Center marker never does.
+    review gate silently lose a valid verdict. Each marker occurrence therefore
+    owns only the first fenced JSON block (or an immediately following bare
+    object for compatibility with early markers) before another Command Center
+    marker. A quoted marker can precede the real block, so occurrences are tried
+    from last to first and malformed occurrences are skipped.
     """
-    marker_at = body.find(marker)
-    if marker_at < 0:
-        return None
+    if not isinstance(body, str):
+        return []
 
-    rest = body[marker_at + len(marker):]
-    next_marker = rest.find("<!-- command-center-")
-    if next_marker >= 0:
-        rest = rest[:next_marker]
+    marker_positions = [
+        match.start() for match in re.finditer(re.escape(marker), body)
+    ]
+    blocks = []
+    for marker_at in reversed(marker_positions):
+        rest = body[marker_at + len(marker):]
+        next_marker = rest.find("<!-- command-center-")
+        if next_marker >= 0:
+            rest = rest[:next_marker]
 
-    fenced = re.search(
-        r"```json[ \t]*\r?\n(.*?)\r?\n```", rest, flags=re.DOTALL
-    )
-    if fenced:
-        raw = fenced.group(1)
-        try:
-            found = json.loads(raw)
-        except (TypeError, ValueError):
-            return None
-    else:
+        fenced = re.search(
+            r"```json[ \t]*\r?\n(.*?)\r?\n```", rest, flags=re.DOTALL
+        )
+        if fenced:
+            raw = fenced.group(1)
+            try:
+                found = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(found, dict):
+                end = marker_at + len(marker) + fenced.end()
+                blocks.append((found, body[marker_at:end]))
+            continue
+
+        leading = len(rest) - len(rest.lstrip())
         raw = rest.lstrip()
         if not raw.startswith("{"):
-            return None
+            continue
         try:
-            found, _ = json.JSONDecoder().raw_decode(raw)
+            found, end = json.JSONDecoder().raw_decode(raw)
         except (TypeError, ValueError):
-            return None
+            continue
+        if isinstance(found, dict):
+            block_end = marker_at + len(marker) + leading + end
+            blocks.append((found, body[marker_at:block_end]))
+    return blocks
 
-    return found if isinstance(found, dict) else None
+
+def _marked_json(body: str, marker: str) -> Optional[Dict]:
+    """Read the newest parseable JSON block owned by ``marker``."""
+    blocks = _marked_json_blocks(body, marker)
+    return blocks[0][0] if blocks else None
+
+
+def _marked_json_block(body: str, marker: str) -> Optional[str]:
+    """Return the newest parseable marker block, preserving its original text."""
+    blocks = _marked_json_blocks(body, marker)
+    return blocks[0][1] if blocks else None
 
 
 def parse_self_approval(body: str) -> Optional[str]:
@@ -1853,6 +1959,113 @@ def latest_verdict(repo: str, pr) -> Optional[Dict]:
     return None
 
 
+#: A run that finished its ticket by comments -- an investigation or proposal
+#: with no code change, so no `ticket/*` branch and no PR possible -- says so
+#: with this prefix in its finish note. The queue withholds the bound ticket
+#: until Nate closes it or a later run finishes it another way (#498).
+COMMENTS_DELIVERABLE_PREFIX = "finished by comments:"
+
+
+def finished_by_comments(items: Sequence[Item]) -> Set[str]:
+    """Open tickets whose latest run finished them by comments, waiting on Nate.
+
+    Read from the heartbeat records the way ``awaiting_review`` reads PRs: the
+    run's ``bind`` record names the ticket, and its finish carries the
+    ``skipped-human-step`` outcome with ``COMMENTS_DELIVERABLE_PREFIX`` in the
+    note. The latest finish per ticket decides, so a later run that finishes
+    the ticket another way returns it to the queue, and a closed ticket is
+    never withheld. Observed 2026-09-09: eleven consecutive runs re-claimed
+    #277 and re-verified the same nine comments in 85 minutes, because nothing
+    recorded that the deliverable had already been delivered.
+    """
+    open_refs = {i.ref for i in items if i.state == "OPEN" and i.parent}
+    if not open_refs:
+        return set()
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import heartbeat
+    except Exception:
+        return set()
+    latest: Dict[str, Tuple[float, bool]] = {}
+    for agent in sorted(heartbeat.PROVIDERS):
+        if agent in heartbeat.RETIRED_AGENTS:
+            continue
+        try:
+            records = heartbeat.read(agent)
+        except Exception:
+            continue
+        bound = heartbeat.bindings(records)
+        for row in records:
+            if row.get("phase") != "finish" or not row.get("run"):
+                continue
+            binding = bound.get(row["run"])
+            if not binding or binding.get("do") != "ticket":
+                continue
+            ref = str(binding.get("work"))
+            if ref not in open_refs:
+                continue
+            ts = float(row.get("ts") or 0)
+            note = str(row.get("note") or "").lower()
+            marker = (row.get("outcome") == "skipped-human-step"
+                      and COMMENTS_DELIVERABLE_PREFIX in note)
+            if ref not in latest or ts >= latest[ref][0]:
+                latest[ref] = (ts, marker)
+    return {ref for ref, (_, marker) in latest.items() if marker}
+
+
+def verdict_covers_head(verdict: Optional[Dict], head_oid: Optional[str]) -> bool:
+    """Whether a verdict judged exactly the commit that is the branch head now."""
+    return bool(verdict) and bool(head_oid) and verdict.get("head_sha") == head_oid
+
+
+def rejected_at_current_head(verdict: Optional[Dict], head_oid: Optional[str]) -> bool:
+    """A rejection hands the ticket back only while the head it judged is still the head.
+
+    Both selectors read this one predicate (#487). A rejected verdict on the
+    current head means the engineer owes a fix, so the ticket is engineering
+    work. The moment a new head is pushed the rejection no longer covers the
+    diff, and the ticket is awaiting review -- offered by `next-review` once
+    and by `begin` not at all. Reading the verdict alone, as `awaiting_review`
+    did until 2026-09-10, handed the fixed ticket to both at the same time.
+    """
+    return verdict_covers_head(verdict, head_oid) and verdict.get("verdict") == "rejected"
+
+
+def approved_conflicting_current_head(
+    pr: Optional[Dict[str, object]],
+) -> bool:
+    """Whether an open PR is an approved head that now cannot merge.
+
+    ``UNKNOWN`` is deliberately not enough: GitHub has not established that
+    state as a conflict, so handing it back would reintroduce the unconditional
+    open-PR re-offer that this predicate is meant to avoid.
+    """
+    if not isinstance(pr, dict):
+        return False
+    if str(pr.get("state") or "").upper() != "OPEN":
+        return False
+    if str(pr.get("mergeable") or "").upper() != "CONFLICTING":
+        return False
+    verdict = pr.get("verdict")
+    return (
+        isinstance(verdict, dict)
+        and verdict.get("verdict") == "approved"
+        and verdict_covers_head(verdict, pr.get("headRefOid"))
+    )
+
+
+def approved_conflicting_refs(
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]],
+) -> Set[str]:
+    """Return refs whose approved current-head PR is definitively conflicting."""
+    if pr_facts is None:
+        return set()
+    return {
+        ref for ref, pr in pr_facts.items()
+        if approved_conflicting_current_head(pr)
+    }
+
+
 def awaiting_review(items: Sequence[Item]) -> Set[str]:
     """Tickets whose work is already in an open PR, waiting to be reviewed.
 
@@ -1864,7 +2077,8 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
     blocked: Set[str] = set()
     for repo in sorted(repos):
         rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "open",
-                        "--json", "headRefName,number", "--limit", "100") or []
+                        "--json", "headRefName,headRefOid,number",
+                        "--limit", "100") or []
         for row in rows:
             head = row.get("headRefName") or ""
             if not head.startswith("ticket/"):
@@ -1872,9 +2086,11 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
             # A PR whose review asked for changes is *not* blocked: its ticket
             # goes back to the engineer to fix. Without this a rejected PR has no
             # owner — the reviewer will not revisit it and the engineer is never
-            # offered it — so it waits for Nate. That is #39.
+            # offered it — so it waits for Nate. That is #39. The hand-back
+            # lasts only while the rejected head is still the head: once the
+            # engineer pushes, the ticket is review work again (#487).
             verdict = latest_verdict(repo, row.get("number"))
-            if verdict and verdict.get("verdict") == "rejected":
+            if rejected_at_current_head(verdict, row.get("headRefOid")):
                 continue
             blocked.add("{}#{}".format(repo, head.split("/", 1)[1]))
     return blocked
@@ -2080,29 +2296,44 @@ def working_tree_touched(now: datetime) -> List[Dict[str, object]]:
 
 
 def unattended_merges(now: datetime) -> List[Dict[str, object]]:
-    """Merges Claude made without Nate, read from its own heartbeat records.
+    """Merges a reviewer made without Nate, read from every live agent's heartbeat.
 
     plan.md makes these a condition of unattended merging being allowed at all:
-    they must appear in the brief as a record.
+    they must appear in the brief as a record. Until 2026-09-10 this read only
+    the retired Claude routine's spool, so every Muse merge since the review
+    handover was missing from the brief (#489). The reader set is the live
+    provider set -- ``heartbeat.PROVIDERS`` minus ``heartbeat.RETIRED_AGENTS`` --
+    the same pattern ``agent_health`` and ``working_tree_touched`` use, so the
+    next rotation cannot reintroduce the blind spot. Each record carries the
+    ``agent`` that merged, oldest first.
     """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import heartbeat
-
-        rows = heartbeat.read("claude")
     except Exception:
         return []
 
     cutoff = (now - MAINTENANCE_WINDOW).timestamp()
-    return [
-        {
-            "pr": row.get("merged"),
-            "at": datetime.fromtimestamp(row["ts"], timezone.utc).isoformat(),
-            "note": row.get("note"),
-        }
-        for row in rows
-        if row.get("merged") and (row.get("ts") or 0) >= cutoff
-    ]
+    found: List[Dict[str, object]] = []
+    for agent in sorted(heartbeat.PROVIDERS):
+        if agent in heartbeat.RETIRED_AGENTS:
+            # A stopped schedule must not read as activity (#431).
+            continue
+        try:
+            rows = heartbeat.read(agent)
+        except Exception:
+            continue
+        for row in rows:
+            if not row.get("merged") or (row.get("ts") or 0) < cutoff:
+                continue
+            found.append({
+                "pr": row.get("merged"),
+                "at": datetime.fromtimestamp(row["ts"], timezone.utc).isoformat(),
+                "note": row.get("note"),
+                "agent": agent,
+            })
+    found.sort(key=lambda record: (record["at"], record["pr"] or 0))
+    return found
 
 
 def _self_approval_transition_times(item: Item, now: datetime) -> List[datetime]:
@@ -3887,11 +4118,97 @@ _GRAPHQL_SPEND: Dict[str, object] = {
     "calls": 0, "cost": 0, "remaining": None, "reset_at": None,
 }
 
+#: Number of GraphQL responses whose own rate-limit block exposed a usable
+#: integer `cost`.  A zero cost is a real measurement; a missing block is not.
+#: Keep this separate from `_GRAPHQL_SPEND` so the existing doctor/report
+#: contract remains unchanged while a heartbeat finish can fail closed on an
+#: unreadable point total.
+_GRAPHQL_COST_READS = 0
+
 #: Every attempted `gh` call in the current funnel command, split at the
 #: boundary where the response can expose a cost.  GraphQL gives us a true
 #: per-query point cost; the `gh` CLI does not expose one, so its calls remain
 #: visible as a separate count rather than being assigned a guessed cost.
 _API_USAGE: Dict[str, int] = {"graphql_calls": 0, "cli_calls": 0}
+
+#: The parsed command's optional provenance values, used only by the process
+#: exit hook below.  Commands without `--run` still resolve an unambiguous open
+#: heartbeat start through `_heartbeat_context`.
+_ACTIVE_HEARTBEAT_RUN: Optional[str] = None
+_ACTIVE_HEARTBEAT_AGENT: Optional[str] = None
+
+#: Once one response says the GraphQL route is exhausted, every later
+#: GraphQL-backed call in this process is refused without being attempted.
+#: Measured 2026-09-09: after the hourly budget hit zero, a single funnel
+#: command went on issuing a `gh` call per ticket or PR it examined, each one
+#: failing the same way, and the schedules re-fired into it every five minutes
+#: (#429). A refused call is counted here and named in the error; the run
+#: stops and the next scheduled run picks the work up after the reset.
+_ROUTE_EXHAUSTED: Dict[str, Optional[Dict[str, object]]] = {"graphql": None}
+
+#: What GitHub says when the route has nothing left. Matched case-insensitively
+#: against `gh`'s stderr; a transient failure never matches.
+EXHAUSTED_SIGNALS = (
+    "api rate limit already exceeded",
+    "api rate limit exceeded",
+    "rate limit exceeded",
+)
+
+
+def route_exhausted() -> Optional[Dict[str, object]]:
+    """The exhaustion record for this process, or None while the route is live."""
+    return _ROUTE_EXHAUSTED["graphql"]
+
+
+def reset_route_state() -> None:
+    """Forget an exhaustion seen earlier; tests and fresh processes only."""
+    _ROUTE_EXHAUSTED["graphql"] = None
+
+
+def _uses_graphql(command: Sequence[str]) -> bool:
+    """Whether a `gh` invocation spends the GraphQL budget.
+
+    `gh api <path>` is REST and has its own counter; everything else the
+    funnel runs -- `gh api graphql`, `gh pr`, `gh issue`, `gh project` -- is
+    GraphQL-backed and shares the one exhausted route.
+    """
+    command = list(command)
+    if command[:2] == ["gh", "api"]:
+        return command[:3] == ["gh", "api", "graphql"]
+    return True
+
+
+def _mark_exhausted(message: str, reset_at: Optional[str] = None) -> None:
+    if _ROUTE_EXHAUSTED["graphql"] is not None:
+        return
+    _ROUTE_EXHAUSTED["graphql"] = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "reset_at": reset_at or _GRAPHQL_SPEND.get("reset_at"),
+        "message": (message or "").strip()[:200],
+    }
+
+
+def _is_exhausted_signal(stderr: object) -> bool:
+    text = (stderr or "") if isinstance(stderr, str) else ""
+    lowered = text.lower()
+    return any(signal in lowered for signal in EXHAUSTED_SIGNALS)
+
+
+def _refuse_if_exhausted(command: Sequence[str]) -> None:
+    state = _ROUTE_EXHAUSTED["graphql"]
+    if state is None or not _uses_graphql(command):
+        return
+    _API_USAGE["refused_exhausted"] = int(_API_USAGE.get("refused_exhausted", 0)) + 1
+    reset = state.get("reset_at")
+    raise GitHubError(
+        "GitHub GraphQL budget exhausted earlier in this run{}; not attempted: {}. "
+        "Stopping rather than retrying into it -- the next scheduled run picks "
+        "this up after the reset.".format(
+            " (resets {})".format(reset) if reset else "",
+            " ".join(str(part) for part in list(command)[:6]),
+        )
+    )
+
 
 
 def graphql_spend() -> Dict[str, object]:
@@ -3901,10 +4218,12 @@ def graphql_spend() -> Dict[str, object]:
 
 def reset_api_usage() -> None:
     """Start a fresh per-command API measurement."""
-    _API_USAGE.update({"graphql_calls": 0, "cli_calls": 0})
+    global _GRAPHQL_COST_READS
+    _API_USAGE.update({"graphql_calls": 0, "cli_calls": 0, "refused_exhausted": 0})
     _GRAPHQL_SPEND.update(
         {"calls": 0, "cost": 0, "remaining": None, "reset_at": None}
     )
+    _GRAPHQL_COST_READS = 0
 
 
 def api_usage() -> Dict[str, object]:
@@ -3916,20 +4235,54 @@ def api_usage() -> Dict[str, object]:
         "calls": graphql_calls + cli_calls,
         "graphql_calls": graphql_calls,
         "cli_calls": cli_calls,
+        "refused_exhausted": int(_API_USAGE.get("refused_exhausted", 0)),
         "cost": spend["cost"],
         "remaining": spend["remaining"],
         "reset_at": spend["reset_at"],
     }
 
 
+def api_cost() -> Dict[str, Optional[int]]:
+    """Return the two per-command measurements used by heartbeat records.
+
+    GraphQL points are known only when every attempted GraphQL response exposed
+    an integer `rateLimit.cost`; a missing block is reported as ``None`` rather
+    than the misleading zero held by the doctor counter.  The total `gh_calls`
+    value is the same call count used by the API-scaling guard: every actual
+    invocation through `_run_gh`, whether GraphQL or another `gh` command.
+    A command with no calls has no measurement at all and returns two nulls.
+    """
+    usage = api_usage()
+    calls = int(usage["calls"])
+    if not calls:
+        return {"graphql_points": None, "gh_calls": None}
+
+    graphql_calls = int(usage["graphql_calls"])
+    if not graphql_calls or _GRAPHQL_COST_READS == graphql_calls:
+        points = int(usage["cost"])
+    else:
+        points = None
+    return {"graphql_points": points, "gh_calls": calls}
+
+
 def _run_gh(args: Sequence[str], **kwargs):
-    """Run `gh` and count the attempted call in the right bucket."""
+    """Run `gh` and count the attempted call in the right bucket.
+
+    Refuses without running when this process has already seen the GraphQL
+    route exhausted and the call would spend it (#429); learns the exhaustion
+    from `gh`'s own stderr when the output is captured.
+    """
     command = list(args)
+    _refuse_if_exhausted(command)
     if command[:3] == ["gh", "api", "graphql"]:
         _API_USAGE["graphql_calls"] += 1
     else:
         _API_USAGE["cli_calls"] += 1
-    return subprocess.run(command, **kwargs)
+    proc = subprocess.run(command, **kwargs)
+    if (getattr(proc, "returncode", 0) != 0 and _uses_graphql(command)
+            and _is_exhausted_signal(getattr(proc, "stderr", None))):
+        _mark_exhausted(proc.stderr)
+    return proc
 
 
 def _record_rate_limit(block: object) -> None:
@@ -3942,11 +4295,13 @@ def _record_rate_limit(block: object) -> None:
     `gh` use and every other agent on it. A delta would attribute their spend
     to the funnel.
     """
+    global _GRAPHQL_COST_READS
     _GRAPHQL_SPEND["calls"] = int(_GRAPHQL_SPEND["calls"]) + 1
     if not isinstance(block, dict):
         return
     cost = block.get("cost")
     if isinstance(cost, int) and not isinstance(cost, bool):
+        _GRAPHQL_COST_READS += 1
         _GRAPHQL_SPEND["cost"] = int(_GRAPHQL_SPEND["cost"]) + cost
     remaining = block.get("remaining")
     if isinstance(remaining, int) and not isinstance(remaining, bool):
@@ -3978,7 +4333,10 @@ def gh_graphql(query: str, **variables) -> dict:
         raise GitHubError(json.dumps(payload["errors"]))
     data = payload["data"]
     if isinstance(data, dict):
-        _record_rate_limit(data.get("rateLimit"))
+        block = data.get("rateLimit")
+        _record_rate_limit(block)
+        if isinstance(block, dict) and block.get("remaining") == 0:
+            _mark_exhausted("rateLimit.remaining is 0", block.get("resetAt"))
     return data
 
 
@@ -5251,6 +5609,12 @@ def cmd_next(
             object.__setattr__(declined, "in_motion_since", None)
             print("released {} (declined)".format(declined.ref), file=sys.stderr)
     blocked = awaiting_review(items)
+    # An approved current head that GitHub now reports as conflicting is no
+    # longer review work: the reviewer already judged it, and the engineer must
+    # rebase it. Every other open PR remains withheld, including UNKNOWN and
+    # approvals for an older head.
+    blocked.difference_update(approved_conflicting_refs(pr_facts))
+    blocked.update(finished_by_comments(items))
     ticket = next_ticket_for_tier(
         items, now, tier=tier, blocked=blocked, excluded=excluded,
         agent=agent,
@@ -5282,32 +5646,69 @@ def cmd_next(
     return 0
 
 
+def _brief_timed(
+    section: str,
+    reader: Callable[[], object],
+    timings: Dict[str, float],
+) -> object:
+    """Run one brief section and record its elapsed time in seconds."""
+    started = time.perf_counter()
+    try:
+        return reader()
+    finally:
+        timings[section] = round(
+            max(0.0, time.perf_counter() - started), 6
+        )
+
+
 def cmd_brief(
     items: List[Item],
     now: datetime,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
     missing: Optional[List[Dict[str, str]]] = None,
+    timings: Optional[Dict[str, float]] = None,
 ) -> int:
     missing = list(missing or [])
-    decisions = awaiting_decision(items)
-    by_ref = {i.ref: i for i in items}
-    counts = {}
-    for stage in STAGES:
-        if stage == "Ideas":
-            continue  # Ideas is unbounded and guilt-free; counting it is pressure
-        counts[stage] = sum(
-            1 for i in items if i.status == stage and i.state == "OPEN"
-        )
+    timings = dict(timings or {})
 
-    running = _brief_read(
-        "in_motion",
-        lambda: in_motion(items, now, pr_facts=pr_facts),
-        missing,
+    def decision_payload():
+        decisions = awaiting_decision(items)
+        by_ref = {i.ref: i for i in items}
+        rows = [item_json(i, now, by_ref) for i in decisions]
+        return decisions, by_ref, rows
+
+    decisions, by_ref, decision_rows = _brief_timed(
+        "items", decision_payload, timings
     )
-    stale = _brief_read(
+    counts = _brief_timed(
+        "counts_by_gate",
+        lambda: {
+            stage: sum(
+                1 for i in items if i.status == stage and i.state == "OPEN"
+            )
+            for stage in STAGES
+            if stage != "Ideas"
+        },
+        timings,
+    )
+
+    running = _brief_timed(
+        "in_motion",
+        lambda: _brief_read(
+            "in_motion",
+            lambda: in_motion(items, now, pr_facts=pr_facts),
+            missing,
+        ),
+        timings,
+    )
+    stale = _brief_timed(
         "stale_locks_taken_over",
-        lambda: stale_locks(items, now, pr_facts=pr_facts),
-        missing,
+        lambda: _brief_read(
+            "stale_locks_taken_over",
+            lambda: stale_locks(items, now, pr_facts=pr_facts),
+            missing,
+        ),
+        timings,
     )
     blocked_comment_errors = [
         "{}: {}".format(item.ref, item.block_comments_error)
@@ -5321,35 +5722,68 @@ def cmd_brief(
             "section": "blocked",
             "error": "; ".join(blocked_comment_errors),
         })
+
+    def read_timed(section: str, reader: Callable[[], object]) -> object:
+        return _brief_timed(
+            section, lambda: _brief_read(section, reader, missing), timings
+        )
+
     brief = {
         "generated_at": now.isoformat(),
         "total_needing_nate": len(decisions),
         "counts_by_gate": counts,
-        "items": [item_json(i, now, by_ref) for i in decisions],
-        "parked": _brief_read(
-            "parked", lambda: parked_json(items), missing
+        "items": decision_rows,
+        "parked": read_timed("parked", lambda: parked_json(items)),
+        "closed_itself": read_timed(
+            "closed_itself", lambda: closed_itself_json(items, now)
         ),
-        "closed_itself": _brief_read(
-            "closed_itself", lambda: closed_itself_json(items, now), missing
+        "cleared_blocks": read_timed(
+            "cleared_blocks", lambda: cleared_blocks_json(items, now)
         ),
-        "cleared_blocks": _brief_read(
-            "cleared_blocks", lambda: cleared_blocks_json(items, now), missing
+        "blocked": _brief_timed(
+            "blocked", lambda: blocked_json(items), timings
         ),
-        "blocked": blocked_json(items),
-        "prose_dependencies": prose_dependencies(items),
-        "suspected_human_steps": suspected_human_step_json(items),
-        "human_steps": human_step_json(items),
-        "closed_with_access_vocabulary": closed_with_access_vocabulary_json(
-            items
+        "prose_dependencies": _brief_timed(
+            "prose_dependencies", lambda: prose_dependencies(items), timings
         ),
-        "unclassed_captures": unclassed_captures_json(items),
-        "needs_class": [item_json(i, now, by_ref) for i in items if needs_class(i)],
-        "awaiting_breakdown": [
-            item_json(i, now, by_ref) for i in awaiting_breakdown(items)
-        ],
-        "stranded": _brief_read(
-            "stranded", lambda: stranded_json(items, now, pr_facts=pr_facts),
-            missing,
+        "suspected_human_steps": _brief_timed(
+            "suspected_human_steps",
+            lambda: suspected_human_step_json(items),
+            timings,
+        ),
+        "human_steps": _brief_timed(
+            "human_steps", lambda: human_step_json(items), timings
+        ),
+        "closed_with_access_vocabulary": _brief_timed(
+            "closed_with_access_vocabulary",
+            lambda: closed_with_access_vocabulary_json(items),
+            timings,
+        ),
+        "unclassed_captures": _brief_timed(
+            "unclassed_captures",
+            lambda: unclassed_captures_json(items),
+            timings,
+        ),
+        "needs_class": _brief_timed(
+            "needs_class",
+            lambda: [item_json(i, now, by_ref) for i in items if needs_class(i)],
+            timings,
+        ),
+        "awaiting_breakdown": _brief_timed(
+            "awaiting_breakdown",
+            lambda: [
+                item_json(i, now, by_ref) for i in awaiting_breakdown(items)
+            ],
+            timings,
+        ),
+        "stranded": _brief_timed(
+            "stranded",
+            lambda: _brief_read(
+                "stranded",
+                lambda: stranded_json(items, now, pr_facts=pr_facts),
+                missing,
+            ),
+            timings,
         ),
         "in_motion": (
             [i.ref for i in running] if running is not None else None
@@ -5358,25 +5792,29 @@ def cmd_brief(
         "stale_locks_taken_over": [
             i.ref for i in stale
         ] if stale is not None else None,
-        "maintenance_load": maintenance_load(items, now),
-        "resend_ratio": _brief_read(
-            "resend_ratio", lambda: recent_resend_ratio(now), missing
+        "maintenance_load": _brief_timed(
+            "maintenance_load", lambda: maintenance_load(items, now), timings
         ),
-        "unattended_merges": _brief_read(
-            "unattended_merges", lambda: unattended_merges(now), missing
+        "resend_ratio": read_timed(
+            "resend_ratio", lambda: recent_resend_ratio(now)
         ),
-        "unattended_approvals": _brief_read(
+        "unattended_merges": read_timed(
+            "unattended_merges", lambda: unattended_merges(now)
+        ),
+        "unattended_approvals": read_timed(
             "unattended_approvals",
             lambda: unattended_approvals(items, now),
-            missing,
         ),
-        "agent_health": _brief_read(
-            "agent_health", lambda: agent_health(now), missing
+        "agent_health": read_timed(
+            "agent_health", lambda: agent_health(now)
         ),
-        "working_tree_touched": _brief_read(
-            "working_tree_touched", lambda: working_tree_touched(now), missing
+        "working_tree_touched": read_timed(
+            "working_tree_touched", lambda: working_tree_touched(now)
         ),
-        "rejected_merges": rejected_merges(items, now),
+        "rejected_merges": _brief_timed(
+            "rejected_merges", lambda: rejected_merges(items, now), timings
+        ),
+        "timings": timings,
         "missing": missing,
     }
     print(json.dumps(brief, indent=2))
@@ -5867,9 +6305,10 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
 
     Writes the plan into the issue body — `plan.md` puts it there through Ideas
     and Shaped, and it only becomes a repo's own `plan.md` at the Ready gate —
-    then moves the item to `Ready` only when the plan's explicit Needs section
-    declares nothing open. Otherwise it stays at `Shaped`, which asks Nate the
-    next gate: is the plan good?
+    then moves the item to `Ready` only when the unattended self-approval
+    predicate accepts the effective Class, origin, Needs section, and risk.
+    Otherwise it stays at `Shaped`, which asks Nate the next gate: is the plan
+    good?
     """
     item = find(items, ref)
     if klass is not None and klass not in LADDER:
@@ -5879,8 +6318,13 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
             )
         )
 
-    origin = parse_origin(item.body or "")
+    original_body = item.body or ""
+    origin = parse_origin(original_body)
     origin_voice = origin["voice"] if origin is not None else None
+    captured_origin = (
+        _marked_json_block(original_body, ORIGIN_MARKER)
+        if origin is not None else None
+    )
     class_missing = item.klass not in LADDER
     if class_missing and origin_voice == "agent" and klass is None:
         raise GitHubError(
@@ -5906,6 +6350,8 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
         )
     authority_signals = needs_nate_signals(plan)
     body = append_provenance(plan, "agent", at=now, run=run, agent=agent)
+    if captured_origin is not None:
+        body = "{}\n\n{}".format(body, captured_origin)
     overlaps = shaping_plan_overlap_candidates(items, item, plan)
 
     out = _run_gh(
@@ -5918,7 +6364,38 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
 
     if not item.item_id:
         raise GitHubError("{} is not in the Project".format(item.ref))
-    status, reason = shaped_plan_status(plan)
+    plan_status, plan_reason = shaped_plan_status(plan)
+    by_ref = {candidate.ref: candidate for candidate in items}
+    effective_klass = effective_class(item, by_ref)
+    if class_missing and origin_voice == "agent" and klass is not None:
+        effective_klass = klass
+    override = parse_origin_override(item.body or "")
+    override_target = override["target"] if override is not None else None
+    escalation_reasons = plan_is_escalated(plan)
+    needs_nate = plan_status != "Ready"
+    eligible = self_approval_eligible(
+        effective_klass,
+        origin_voice,
+        override_target,
+        needs_nate=needs_nate,
+        escalated=bool(escalation_reasons),
+    )
+    status = "Ready" if eligible else "Shaped"
+    failed_conditions = []
+    if effective_klass not in SELF_APPROVABLE_CLASSES:
+        class_name = effective_klass or "unset"
+        failed_conditions.append(
+            "class {} is not self-approvable".format(class_name)
+        )
+    if effective_shape_owner(origin_voice, override_target) != "agents":
+        failed_conditions.append("origin is Nate's")
+    if needs_nate:
+        failed_conditions.append(plan_reason)
+    if escalation_reasons:
+        failed_conditions.append(
+            "escalated risk ({})".format(", ".join(escalation_reasons))
+        )
+    reason = plan_reason if status == "Ready" else "; ".join(failed_conditions)
     if class_missing and origin_voice == "agent":
         # This recovery write is the only place shaping may assign a Class.
         # Keep it immediately before the Status mutation so the latter never
@@ -5931,6 +6408,10 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
                     "--remove-label", "needs-shaping"], capture_output=True)
     if status == "Ready":
         basis = "{}; no escalated risk".format(reason)
+        if authority_signals:
+            basis += "; authority signals: {}".format(
+                ", ".join(authority_signals)
+            )
         comment = _run_gh(
             ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
              "--body", self_approval_comment(
@@ -5953,8 +6434,8 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     else:
         print("  none found")
     if authority_signals:
-        print("\n--- self-approval refused ---")
-        print("The plan stays at Shaped for Nate because:")
+        print("\n--- self-approval advisory ---")
+        print("Authority signals are recorded in the Self-approved basis:")
         for signal in authority_signals:
             print("  {}: {}".format(
                 signal, NEEDS_NATE_SIGNAL_REASONS[signal]
@@ -6463,7 +6944,7 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
             if ticket is None:
                 continue
             verdict = latest_verdict(repo, row.get("number"))
-            if verdict and verdict.get("head_sha") == row.get("headRefOid"):
+            if verdict_covers_head(verdict, row.get("headRefOid")):
                 continue  # this exact diff has already been judged
             needed = required_tier(
                 ticket.title, _ticket_body(repo, ticket.number))
@@ -6549,6 +7030,105 @@ def approved_merge_candidates(items: Sequence[Item]) -> List[Dict[str, object]]:
         candidate["repo"], str(candidate["pr"])
     ))
     return candidates
+
+
+def reconcile_orphaned_starts(
+    items: Sequence[Item], now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> List[Dict[str, object]]:
+    """Close a work-issuing start whose ticket PR merged under another run (#497).
+
+    The run that opened a PR sometimes never records its finish -- a session
+    that lost its id, a rate-limit death after the push -- while a reviewer
+    run merges the PR and records `merged` on its own finish. The start then
+    stands open until the watchdog calls it dead, for work that demonstrably
+    shipped. This writes the missing finish, naming the run that merged and
+    carrying no `merged` field of its own, so the brief's unattended-merge
+    record stays exactly once. A start whose PR has not merged, or whose merge
+    no finish record claims, is left alone: the dead-run signal catches
+    rate-limit deaths and must stay loud. Idempotent, because a closed start
+    is no longer open.
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import heartbeat
+    except Exception:
+        return []
+    by_ref = {item.ref: item for item in items}
+    spools: Dict[str, List[Dict]] = {}
+    for agent in sorted(heartbeat.PROVIDERS):
+        if agent in heartbeat.RETIRED_AGENTS:
+            continue
+        try:
+            spools[agent] = heartbeat.read(agent)
+        except Exception:
+            continue
+
+    # Which run recorded each merged PR, across every live agent.
+    merged_by: Dict[int, Tuple[str, str]] = {}
+    for agent, records in spools.items():
+        for row in records:
+            if row.get("phase") == "finish" and row.get("merged") and row.get("run"):
+                try:
+                    merged_by[int(row["merged"])] = (str(row["run"]), agent)
+                except (TypeError, ValueError):
+                    continue
+
+    candidates = []
+    for agent, records in spools.items():
+        bound = heartbeat.bindings(records)
+        for start in heartbeat.open_starts(records):
+            binding = bound.get(start.get("run"))
+            if not binding or binding.get("do") != "ticket":
+                continue
+            ref = str(binding.get("work"))
+            if ref in by_ref:
+                candidates.append((agent, start, ref))
+    if not candidates:
+        return []
+    if pr_facts is None:
+        try:
+            pr_facts = ticket_pr_facts([by_ref[ref] for _, _, ref in candidates])
+        except GitHubError:
+            return []
+
+    closed: List[Dict[str, object]] = []
+    for agent, start, ref in candidates:
+        fact = pr_facts.get(ref) or {}
+        merged = bool(fact.get("mergedAt")) or fact.get("state") == "MERGED"
+        number = fact.get("number")
+        if not merged or number is None:
+            continue
+        try:
+            number = int(number)
+        except (TypeError, ValueError):
+            continue
+        under = merged_by.get(number)
+        if under is None:
+            continue
+        other_run, other_agent = under
+        if other_run == start.get("run"):
+            continue
+        record = {
+            "run": start.get("run"),
+            "agent": agent,
+            "phase": "finish",
+            "ts": int(now.timestamp()),
+            "outcome": "done",
+            "note": "reconciled: PR #{} for {} merged under run {} ({}); "
+                    "this start never recorded its finish".format(
+                        number, ref, other_run, other_agent),
+            "reconciled_from": other_run,
+        }
+        try:
+            kept = heartbeat.append(agent, record)
+        except Exception:
+            continue
+        closed.append({
+            "run": start.get("run"), "agent": agent, "ref": ref,
+            "pr": number, "merged_under": other_run, "kept": kept,
+        })
+    return closed
 
 
 def reconcile_approved_merges(
@@ -6706,6 +7286,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     reconciled = reconcile_closed_items(items)
     if reconciled:
         out["reconciled"] = reconciled
+    orphaned = reconcile_orphaned_starts(items, now)
+    if orphaned:
+        out["reconciled_starts"] = orphaned
 
     if agent == "codex":
         cleared = clear_satisfied_blocks(
@@ -6723,6 +7306,12 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             print(json.dumps(out, indent=2))
             return 0
         blocked = awaiting_review(items)
+        # Keep the normal open-PR exclusion as the default. Only the
+        # machine-readable approved-plus-conflicting state hands ownership back
+        # to the engineer; the supplied PR snapshot is also the one used by the
+        # claim/WIP checks below.
+        blocked.difference_update(approved_conflicting_refs(pr_facts))
+        blocked.update(finished_by_comments(items))
         ticket = next_ticket_for_tier(
             items, now, tier=tier, blocked=blocked,
             agent=agent,
@@ -6758,6 +7347,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     do="ticket",
                     work=item_json(ticket, now, {i.ref: i for i in items}),
                 )
+        _bind_run(agent, out)
         print(json.dumps(out, indent=2))
         return 0
 
@@ -6836,8 +7426,38 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         out.update(reserve)
         heartbeat.record_event(agent, out["run"], "skipped-api-reserve",
                                note=out["why"])
+    _bind_run(agent, out)
     print(json.dumps(out, indent=2))
     return 0
+
+
+def _bind_run(agent: str, out: Dict[str, object]) -> None:
+    """Bind the work this run was issued to its start record (#497).
+
+    A finish that names other work is then refused by the heartbeat rather
+    than filed under a run that never issued it. The binding is also printed
+    under ``bound`` so the routine can hand it back on ``finish --work``.
+    Bookkeeping never stops the run: a binding that cannot be written is
+    reported by the heartbeat and the run proceeds with the work.
+    """
+    do = out.get("do")
+    work = out.get("work")
+    run = out.get("run")
+    if do not in ("ticket", "review", "breakdown", "shape") or not run:
+        return
+    if not isinstance(work, dict):
+        return
+    subject = work.get("pr") if do == "review" else work.get("ref")
+    if subject is None:
+        return
+    out["bound"] = {"do": do, "work": str(subject)}
+    try:
+        import heartbeat
+
+        heartbeat.record_binding(agent, str(run), str(do), str(subject))
+    except Exception:
+        # Instrumentation must not gate the thing it instruments.
+        pass
 
 
 def _reserve_verdict(do: object) -> Optional[Dict[str, object]]:
@@ -7620,7 +8240,10 @@ def _needs_decision_comment_body(question: str) -> str:
     return "{} {}".format(NEEDS_DECISION_PREFIX, question)
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Optional[Sequence[str]] = None, *,
+         _items: Optional[List[Item]] = None,
+         _items_loader: Optional[Callable[[], List[Item]]] = None,
+         _reset_api_usage: bool = True) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("queue", help="everything, ordered")
@@ -7806,6 +8429,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         help="compare the checked-in routine's normalized sha256 to this literal",
     )
 
+    session_server = sub.add_parser(
+        "session-server",
+        help="serve one in-memory Project view for a single Muse run",
+    )
+    session_server.add_argument(
+        "--parent-pid", type=int, default=None,
+        help="stop when the owning runner process exits",
+    )
+
     nxr = sub.add_parser(
         "next-review", help="the single PR this reviewer should read, or nothing")
     nxr.add_argument("--tier", choices=TIERS, default=None,
@@ -7823,17 +8455,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             and args.klass is None):
         parser.error("--class is required with --origin agent")
 
+    global _ACTIVE_HEARTBEAT_RUN, _ACTIVE_HEARTBEAT_AGENT
+    _ACTIVE_HEARTBEAT_RUN = getattr(args, "run", None)
+    _ACTIVE_HEARTBEAT_AGENT = getattr(args, "agent", None)
+
     # A process normally serves one CLI command. Resetting here also keeps
     # repeated `main()` calls in tests from blending two commands' readings.
-    reset_api_usage()
+    if _reset_api_usage:
+        reset_api_usage()
     now = datetime.now(timezone.utc)
+    if args.command == "session-server":
+        return serve_session(args.parent_pid)
     # Doctor keeps its fixed checks runnable when the Project cannot be loaded;
     # the data-dependent consistency check is added when that read succeeds.
     if args.command == "doctor":
         return cmd_doctor()
 
     try:
-        items = load_items()
+        if _items is not None:
+            items = _items
+        elif _items_loader is not None:
+            items = _items_loader()
+        else:
+            items = load_items()
     except GitHubError as exc:
         if args.command == "brief":
             print(json.dumps({
@@ -7925,6 +8569,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
         if args.command == "brief":
             missing = []
+            timings: Dict[str, float] = {}
+            started = time.perf_counter()
             try:
                 pr_facts = ticket_pr_facts(items)
             except GitHubError as exc:
@@ -7934,8 +8580,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     for section in BRIEF_PR_FACT_SECTIONS
                 ]
                 pr_facts = {}
+            finally:
+                timings["ticket_pr_facts"] = round(
+                    max(0.0, time.perf_counter() - started), 6
+                )
             return cmd_brief(
-                items, now, pr_facts=pr_facts, missing=missing
+                items, now, pr_facts=pr_facts, missing=missing,
+                timings=timings,
             )
         if args.command == "queue":
             return cmd_queue(items, now, repo_readiness=repo_readiness)
@@ -7943,6 +8594,330 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except GitHubError as exc:
         print("funnel: {}".format(exc), file=sys.stderr)
         return 2
+
+
+SESSION_ENV = "FUNNEL_SESSION"
+SESSION_SERVER_ENV = "FUNNEL_SESSION_SERVER"
+SESSION_TIMEOUT_SECONDS = 30
+SESSION_STDIN_LIMIT = 1_000_000
+# The stdin limit is a content limit. JSON framing and escaped characters add
+# overhead before the request reaches the server, so the request reader needs
+# a larger bound than the existing one-megabyte reply reader.
+SESSION_REQUEST_LIMIT = SESSION_STDIN_LIMIT * 6 + 4_096
+
+
+class FunnelSession:
+    """Serve one run's commands from one in-memory Project read.
+
+    This is deliberately a per-run session, not a cache or a daemon. The
+    Project is loaded lazily on the first command so a ``begin`` claim still
+    reads GitHub at claim time. Later commands in the same Muse run reuse the
+    already-loaded objects and their locally updated mutation state.
+    """
+
+    def __init__(self, loader=None):
+        self._loader = load_items if loader is None else loader
+        self.items: Optional[List[Item]] = None
+
+    def _load_items(self) -> List[Item]:
+        if self.items is None:
+            self.items = self._loader()
+        return self.items
+
+    def dispatch(self, argv: Sequence[str], stdin=None):
+        """Run one normal funnel command and return ``(code, stdout, stderr)``.
+
+        ``stdin`` is optional because an interactive client must not have its
+        terminal consumed by the session shim. When present, it is visible as
+        ``sys.stdin`` only while this command's ``main()`` runs.
+        """
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        code = 2
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                # Reset before the lazy load so its GraphQL work is measured as
+                # part of the first command rather than erased by ``main``.
+                reset_api_usage()
+                if stdin is None:
+                    code = main(list(argv), _items=self.items,
+                                _items_loader=self._load_items,
+                                _reset_api_usage=False)
+                else:
+                    if isinstance(stdin, bytes):
+                        stdin = stdin.decode("utf-8")
+                    if not isinstance(stdin, str):
+                        raise ValueError("invalid session stdin payload")
+                    previous_stdin = sys.stdin
+                    sys.stdin = io.StringIO(stdin)
+                    try:
+                        code = main(list(argv), _items=self.items,
+                                    _items_loader=self._load_items,
+                                    _reset_api_usage=False)
+                    finally:
+                        sys.stdin = previous_stdin
+            except SystemExit as exc:
+                code = exc.code if isinstance(exc.code, int) else 2
+            except Exception as exc:
+                print("funnel: {}".format(exc), file=sys.stderr)
+            finally:
+                # A session has one process but several commands. Keep the
+                # existing per-command heartbeat measurements, while the
+                # in-memory Project read is shared across them.
+                report_api_cost()
+                report_graphql_spend()
+        return int(code), stdout.getvalue(), stderr.getvalue()
+
+
+class _SessionServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
+
+class _SessionHandler(socketserver.StreamRequestHandler):
+    """One newline-delimited request from a funnel client shim."""
+
+    def _reply(self, payload: Dict[str, Any]) -> None:
+        wire = (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8")
+        self.wfile.write(wire)
+        self.wfile.flush()
+
+    def handle(self) -> None:
+        line = self.rfile.readline(SESSION_REQUEST_LIMIT)
+        try:
+            request = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            self._reply({
+                "code": 2,
+                "stdout": "",
+                "stderr": "funnel: invalid session request\n",
+            })
+            return
+
+        token = request.get("token") if isinstance(request, dict) else None
+        if not isinstance(token, str) or not hmac.compare_digest(
+                token, self.server.token):
+            self._reply({
+                "code": 2,
+                "stdout": "",
+                "stderr": "funnel: invalid session token\n",
+            })
+            return
+
+        if request.get("shutdown") is True:
+            self.server.stop_requested = True
+            self._reply({"code": 0, "stdout": "", "stderr": ""})
+            return
+
+        argv = request.get("argv")
+        if (not isinstance(argv, list)
+                or not all(isinstance(part, str) for part in argv)):
+            self._reply({
+                "code": 2,
+                "stdout": "",
+                "stderr": "funnel: invalid session arguments\n",
+            })
+            return
+
+        stdin = request.get("stdin")
+        if "stdin" in request and not isinstance(stdin, str):
+            self._reply({
+                "code": 2,
+                "stdout": "",
+                "stderr": "funnel: invalid session stdin\n",
+            })
+            return
+
+        if "stdin" in request:
+            code, stdout, stderr = self.server.session.dispatch(argv, stdin=stdin)
+        else:
+            code, stdout, stderr = self.server.session.dispatch(argv)
+        self._reply({"code": code, "stdout": stdout, "stderr": stderr})
+
+
+def _process_is_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def serve_session(parent_pid: Optional[int] = None) -> int:
+    """Serve a disposable funnel session on loopback until it is stopped."""
+    server = _SessionServer(("127.0.0.1", 0), _SessionHandler)
+    server.token = secrets.token_hex(24)
+    server.session = FunnelSession()
+    server.stop_requested = False
+    server.timeout = 1
+    host, port = server.server_address
+    print("{}:{}:{}".format(host, port, server.token), flush=True)
+
+    try:
+        while not server.stop_requested:
+            if parent_pid is not None and not _process_is_alive(parent_pid):
+                break
+            server.handle_request()
+    finally:
+        server.server_close()
+    return 0
+
+
+def _read_session_stdin() -> Optional[str]:
+    """Read piped stdin for a session request, or return ``None`` for a TTY."""
+    try:
+        if sys.stdin.isatty():
+            return None
+    except (AttributeError, OSError):
+        # A real CLI stdin always has `isatty`; if a test double or unusual
+        # wrapper cannot answer, do not risk blocking it as though it were a
+        # pipe.
+        return None
+
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    data = stream.read(SESSION_STDIN_LIMIT + 1)
+    if isinstance(data, str):
+        encoding = getattr(sys.stdin, "encoding", None) or "utf-8"
+        data = data.encode(encoding)
+    elif not isinstance(data, bytes):
+        data = bytes(data)
+
+    if len(data) > SESSION_STDIN_LIMIT:
+        raise ValueError(
+            "stdin exceeds the {}-byte session limit".format(SESSION_STDIN_LIMIT)
+        )
+
+    encoding = getattr(sys.stdin, "encoding", None) or "utf-8"
+    try:
+        return data.decode(encoding)
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            "stdin is not decodable as {}: {}".format(encoding, exc)
+        ) from exc
+
+
+def _session_command_uses_stdin(argv: Sequence[str]) -> bool:
+    """Return whether this command's arguments request a piped plan."""
+    parts = list(argv)
+    if not parts or parts[0] != "shaped":
+        return False
+    for index, part in enumerate(parts):
+        if part == "--plan" and index + 1 < len(parts):
+            return parts[index + 1] == "-"
+        if part == "--plan=-":
+            return True
+    return False
+
+
+def _session_client(argv: Sequence[str]) -> int:
+    """Forward one CLI invocation to the current Muse run's session."""
+    endpoint = os.environ.get(SESSION_ENV, "")
+    try:
+        host, port_text, token = endpoint.split(":", 2)
+        port = int(port_text)
+        if not host or not token or not 1 <= port <= 65535:
+            raise ValueError
+    except (TypeError, ValueError):
+        print("funnel: invalid {} endpoint".format(SESSION_ENV), file=sys.stderr)
+        return 2
+
+    request = {
+        "token": token,
+        "argv": list(argv),
+    }
+    if list(argv) == ["session-stop"]:
+        request["shutdown"] = True
+    elif _session_command_uses_stdin(argv):
+        try:
+            stdin = _read_session_stdin()
+        except (OSError, TypeError, ValueError) as exc:
+            print("funnel: {}".format(exc), file=sys.stderr)
+            return 2
+        if stdin is not None:
+            request["stdin"] = stdin
+
+    try:
+        connection = socket.create_connection(
+            (host, port), timeout=SESSION_TIMEOUT_SECONDS
+        )
+    except socket.timeout as exc:
+        print(
+            "funnel: connect-timeout: {} session unreachable within {}s: {}"
+            .format(SESSION_ENV, SESSION_TIMEOUT_SECONDS, exc),
+            file=sys.stderr,
+        )
+        return 2
+    except OSError as exc:
+        print("funnel: could not reach {}: {}".format(SESSION_ENV, exc),
+              file=sys.stderr)
+        return 2
+
+    try:
+        with connection:
+            stream = connection.makefile("rwb")
+            with stream:
+                stream.write(
+                    (json.dumps(request, separators=(",", ":")) + "\n")
+                    .encode("utf-8")
+                )
+                stream.flush()
+                line = stream.readline(1_000_000)
+    except socket.timeout as exc:
+        print(
+            "funnel: reply-timeout: {} session busy past the {}s reply "
+            "budget (slow section unknown): {}".format(
+                SESSION_ENV, SESSION_TIMEOUT_SECONDS, exc
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    except OSError as exc:
+        print("funnel: could not reach {}: {}".format(SESSION_ENV, exc),
+              file=sys.stderr)
+        return 2
+
+    try:
+        response = json.loads(line.decode("utf-8"))
+        code = int(response["code"])
+        stdout = response.get("stdout", "")
+        stderr = response.get("stderr", "")
+        if not isinstance(stdout, str) or not isinstance(stderr, str):
+            raise ValueError
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+        print("funnel: invalid session response", file=sys.stderr)
+        return 2
+
+    sys.stdout.write(stdout)
+    sys.stderr.write(stderr)
+    return code
+
+
+def report_api_cost(run: Optional[str] = None,
+                    agent: Optional[str] = None) -> None:
+    """Append this command's API measurements to its open heartbeat run.
+
+    This is best-effort telemetry. The command must still return its real
+    result when the heartbeat spool or GitHub is unavailable, so every failure
+    here is deliberately swallowed; `heartbeat finish` will then report nulls
+    for the missing measurement.
+    """
+    if not api_usage()["calls"]:
+        return
+    try:
+        run, agent = _heartbeat_context(
+            run if run is not None else _ACTIVE_HEARTBEAT_RUN,
+            agent if agent is not None else _ACTIVE_HEARTBEAT_AGENT,
+        )
+        if not run or not agent:
+            return
+        import heartbeat
+
+        heartbeat.record_api_cost(agent, run, api_cost())
+    except Exception:
+        # Instrumentation must not gate the command it instruments.  The
+        # absence of this event is represented by nulls at heartbeat finish.
+        return
 
 
 def report_graphql_spend(stream=None) -> None:
@@ -7966,10 +8941,18 @@ def report_graphql_spend(stream=None) -> None:
 
 
 if __name__ == "__main__":
-    try:
+    if os.environ.get(SESSION_ENV) and not os.environ.get(SESSION_SERVER_ENV):
+        code = _session_client(sys.argv[1:])
+    elif os.environ.get(SESSION_SERVER_ENV):
+        # The session server reports each forwarded command itself. Do not let
+        # the normal process-exit hook record the last command a second time.
         code = main()
-    finally:
-        # In a `finally` so a run that dies on an exhausted budget still says
-        # what it spent — that run is exactly the one whose numbers matter.
-        report_graphql_spend()
+    else:
+        try:
+            code = main()
+        finally:
+            report_api_cost()
+            # In a `finally` so a run that dies on an exhausted budget still says
+            # what it spent — that run is exactly the one whose numbers matter.
+            report_graphql_spend()
     sys.exit(code)

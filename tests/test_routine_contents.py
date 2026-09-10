@@ -9,6 +9,37 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
+ROUTINES = ("codex-work", "claude", "muse", "zcode")
+
+
+@pytest.mark.parametrize("routine", ROUTINES)
+def test_finish_uses_the_run_id_from_this_runs_begin(routine):
+    """Routine retries must not reuse a prior begin id in the same session."""
+    body = (ROOT / "routines" / (routine + ".md")).read_text(encoding="utf-8")
+    normalized = " ".join(body.split()).lower()
+
+    assert "pass the run id printed by this run's `begin` output as `--run <id>`" in normalized
+    assert "never an id from an earlier `begin` in the same session" in normalized
+    assert "if `heartbeat finish` refuses a run/work mismatch" in normalized
+    assert "use that id in `--run` and retry" in normalized
+    assert "never wrap the id in `run=$(...)`" in normalized
+
+
+def test_claude_reports_codex_automation_drift_without_gating_the_run():
+    body = (ROOT / "routines" / "claude.md").read_text(encoding="utf-8")
+    normalized = " ".join(body.split()).lower()
+
+    assert (
+        "if [ -d \"$home/.codex/automations\" ]; then python3 "
+        "/users/nateprich/.claude/command-center-run/scripts/"
+        "sync_codex_automations.py --check || true fi"
+    ) in normalized
+    assert "reuses the sync script's existing detector" in normalized
+    assert "report one short `codex automation drift:` diagnostic" in normalized
+    assert "do not treat the check's nonzero drift exit as a failed run" in normalized
+    assert "do not run write mode or edit the live automations" in normalized
+    assert "if `~/.codex/automations` is absent" in normalized
+
 
 @pytest.mark.parametrize(
     ("routine", "tier_phrase"),
@@ -58,6 +89,32 @@ def test_breakdown_docs_record_and_resume_needs_decisions():
             "comment on the issue saying precisely what is undecided, and leave it"
             not in normalized
         )
+
+
+def test_needs_guidance_uses_the_parser_ready_all_clear_form():
+    """The shaping docs must teach the syntax accepted by shaped_plan_status."""
+    example = " ".join(
+        """- Exposure: nothing outstanding. No new credentials or reachable surface.
+        - Gates: nothing outstanding. No gate ownership changes.
+        - Scope and priority: nothing outstanding. The scoped change is documented.
+        - Preference: nothing outstanding. No user-facing choice remains.""".split()
+    ).lower()
+    old_guidance = (
+        "explicit answer under every category, including when nothing is outstanding"
+    )
+    documents = (
+        ROOT / "routines" / "muse.md",
+        ROOT / "routines" / "claude.md",
+        ROOT / "skills" / "shape" / "SKILL.md",
+    )
+
+    for path in documents:
+        normalized = " ".join(path.read_text(encoding="utf-8").split()).lower()
+        assert example in normalized
+        assert old_guidance not in normalized
+        assert "a self-approvable class with `agent` origin" in normalized
+        assert "a `self-approved:` marker that `funnel brief` shows" in normalized
+        assert "stays at `shaped`, with the reason printed" in normalized
 
 
 @pytest.mark.parametrize("routine", ["claude", "muse"])

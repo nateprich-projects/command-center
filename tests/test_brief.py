@@ -253,7 +253,10 @@ def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
     old = _approval_item(
         82, NOW - funnel.MAINTENANCE_WINDOW - timedelta(seconds=1)
     )
-    basis = "plan declares nothing open; no escalated risk"
+    basis = (
+        "plan declares nothing open; no escalated risk; authority signals: "
+        "gate authority, policy authority"
+    )
     comments = {
         80: [{"body": funnel.SELF_APPROVED_PREFIX + basis}],
         81: [{"body": "Approved at the Shaped gate — Ready."}],
@@ -280,6 +283,8 @@ def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
         "at": (NOW - timedelta(hours=1)).isoformat(),
         "basis": basis,
     }]
+    assert "authority signals: gate authority, policy authority" in \
+        brief["unattended_approvals"][0]["basis"]
     assert [call[3] for call in calls] == ["81", "80"]
 
 
@@ -855,3 +860,27 @@ def test_main_brief_reports_an_unreadable_project_load(
         "section": "items",
         "error": "Project offline",
     }]
+
+
+def test_brief_emits_elapsed_seconds_for_each_section(monkeypatch, capsys):
+    item = funnel.Item(
+        repo="nateprich/beta", number=93, title="Timed project",
+        url="https://example.invalid/93", state="OPEN", status="Ready",
+        status_since=NOW,
+    )
+    clock = [0.0]
+
+    def fake_perf_counter():
+        clock[0] += 0.1
+        return clock[0]
+
+    monkeypatch.setattr(funnel.time, "perf_counter", fake_perf_counter)
+    monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
+
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["timings"]["items"] == pytest.approx(0.1)
+    assert brief["timings"]["rejected_merges"] == pytest.approx(0.1)
+    assert brief["timings"]["unattended_merges"] == pytest.approx(0.1)
+    assert all(value >= 0 for value in brief["timings"].values())

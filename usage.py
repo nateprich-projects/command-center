@@ -77,8 +77,18 @@ BUDGETED_MODEL = "opus"
 #: very likely carry weight. Set above the largest stretch actually observed, so
 #: this window does not produce false refusals; the weekly window, which
 #: calibrates cleanly, is the load-bearing gate.
-FIVE_HOUR_CAPACITY = 900_000.0
-WEEKLY_CAPACITY = 1_822_000.0
+#:
+#: **Scaled 5× on 2026-09-10 from Nate's plan change, not from a panel reading.**
+#: The figures above (1,822,000 weekly, 900,000 five-hour) were calibrated on the
+#: plan he had on 2026-09-05; he has since moved to a plan with five times the
+#: bandwidth, and the constants had not moved with it. A gate five times too
+#: tight is worse than one scaled from a known ratio, so the ratio is applied
+#: here with its provenance stated. Recalibrate from Claude's own panel at the
+#: first opportunity — tokens since the weekly reset against the percentage it
+#: shows — and replace both numbers and this paragraph when that is done. The
+#: five-hour figure carries the same 5× and the same caveats as before.
+FIVE_HOUR_CAPACITY = 4_500_000.0
+WEEKLY_CAPACITY = 9_110_000.0
 
 #: No inflation. The capacities above are calibrated from the real panel using
 #: these same token counts, so any systematic blind spot is already absorbed
@@ -485,9 +495,20 @@ def opened_idle(agent: str, resets_at: Optional[float]) -> Optional[bool]:
     return False
 
 
-#: **The idle rule is temporarily suspended.** Nate's instruction, 2026-09-07:
-#: "remove that limit for now while we force-move things through the pipe and I
-#: have those usage resets."
+#: **The idle rule is off, and staying off.** It was first suspended on
+#: 2026-09-07 as a temporary measure ("remove that limit for now while we
+#: force-move things through the pipe"), with a restore issue filed. On
+#: 2026-09-09 Nate made it the standing decision: "For the luna sessions, we can
+#: remove the 'is idle' check. These don't use enough bandwidth to warrant the
+#: check and I'd rather just let them run free."
+#:
+#: The measurement behind that is in LEARNINGS.md ("What a Codex session costs
+#: the Plus weekly window, by lane"): a worked Luna run is ~0.10% of the week and
+#: an empty one ~0.04%, against ~1.6% for a worked Sol run. The proxy exists to
+#: keep a scheduled run from eating the five-hour window Nate is working in, and
+#: the only schedule that ever paid it is the all-day Luna one — the lane that
+#: barely moves the window. The Sol schedules never paid it; their hours are the
+#: presence signal. So the rule guarded the one lane that did not need guarding.
 #:
 #: It lives here rather than in `scripts/sync_codex_automations.py`, where it was
 #: first put, because that only stops the flag being *written* into the automation
@@ -495,12 +516,10 @@ def opened_idle(agent: str, resets_at: Optional[float]) -> Optional[bool]:
 #: 18:14:50 on 2026-09-07, three minutes after the flag was removed, and the next
 #: run refused on the proxy again. A switch the app can overwrite is not a switch.
 #:
-#: So the suspension is enforced where the rule is *applied*: a run may still pass
-#: `--idle`, and it is ignored. Both call sites go through this function.
-#:
-#: **Restore to False once the backlog is through and the resets are spent** — see
-#: the restore issue filed 2026-09-07. The reasoning below is unchanged and the
-#: rule should come back intact.
+#: So it is enforced where the rule is *applied*: a run may still pass `--idle`,
+#: and it is ignored. Both call sites go through this function. The rule and its
+#: tests stay intact underneath, so it can be turned back on if a lane that does
+#: move the window ever fires all day.
 IDLE_RULE_SUSPENDED = True
 
 

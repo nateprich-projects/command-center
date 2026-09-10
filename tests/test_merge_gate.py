@@ -181,7 +181,9 @@ def _gate_rejection_wired(monkeypatch, pr_json, comments):
 
     def fake_gh_json(*args):
         if "list" in args:
-            return [{"headRefName": "ticket/9", "number": 5}]
+            # The gate rejection is written at SHA, which is still the head:
+            # the hand-back to the engineer lasts exactly while that holds (#487).
+            return [{"headRefName": "ticket/9", "headRefOid": SHA, "number": 5}]
         if "comments" in args:
             return {"comments": [
                 {"body": body} for body in comments + posted
@@ -243,6 +245,66 @@ def test_moved_head_refusal_does_not_write_a_gate_rejection(monkeypatch):
     )
     assert funnel.cmd_merge(items(), NOW, REPO, 5, False) == 1
     assert posted == []
+
+
+def _next_with_pr(monkeypatch, fact, comment):
+    """Run the engineer selector against one open ticket PR snapshot."""
+    monkeypatch.setattr(funnel, "finished_by_comments", lambda rows: set())
+
+    def fake_gh_json(*args):
+        if "comments" in args:
+            return {"comments": [{"body": comment}]}
+        return [{
+            "headRefName": "ticket/9",
+            "headRefOid": fact["headRefOid"],
+            "number": 5,
+        }]
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    return funnel.cmd_next(
+        items(), NOW, pr_facts={REPO + "#9": fact}
+    )
+
+
+def test_approved_conflicting_current_head_is_offered_to_engineer(
+        monkeypatch, capsys):
+    """Replay #185: approval plus a conflicting head needs engineering work."""
+    fact = pr(
+        mergeable="CONFLICTING",
+        verdict={"verdict": "approved", "head_sha": SHA},
+    )
+
+    assert _next_with_pr(monkeypatch, fact, verdict()) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ref"] == REPO + "#9"
+
+
+def test_an_ordinary_open_pr_is_not_unconditionally_reoffered(
+        monkeypatch, capsys):
+    """Only the narrow approved-conflict state bypasses awaiting-review."""
+    fact = pr(
+        mergeable="MERGEABLE",
+        verdict={"verdict": "approved", "head_sha": SHA},
+    )
+
+    assert _next_with_pr(monkeypatch, fact, verdict()) == 1
+    assert capsys.readouterr().out == ""
+
+
+def test_a_conflicting_approval_for_an_old_head_stays_withheld(
+        monkeypatch, capsys):
+    """A moved head needs review, not an engineer re-hand."""
+    fact = pr(
+        mergeable="CONFLICTING",
+        headRefOid="new-head",
+        verdict={"verdict": "approved", "head_sha": "old-head"},
+    )
+
+    assert _next_with_pr(
+        monkeypatch, fact, verdict(head_sha="old-head")
+    ) == 1
+    assert capsys.readouterr().out == ""
 
 
 # -- closing the ticket the PR finished ---------------------------------------

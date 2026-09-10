@@ -8,6 +8,194 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Route-local rate-limit windows are not the `/rate_limit` counter
+
+**2026-09-10 · GitHub API / ticket #532 · measured**
+
+One credential was used for four probes, spaced roughly a minute apart. The raw
+rate-limit headers were:
+
+| probe (response `Date`) | `X-RateLimit-Resource` | `Limit` | `Used` | `Remaining` | `Reset` |
+|---|---:|---:|---:|---:|---:|
+| `GET /repos/nateprich-projects/command-center` (`2026-09-10T10:43:38Z`) | `core` | 5000 | 541 | 4459 | 1789037564 |
+| `GET /repos/nateprich-projects/command-center/issues/38/dependencies/blocked_by` (`2026-09-10T10:44:50Z`) | `core` | 5000 | 18 | 4982 | 1789039856 |
+| GraphQL `rateLimit` query (`2026-09-10T10:46:01Z`) | `graphql` | 5000 | 2936 | 2064 | 1789038143 |
+| `GET /rate_limit` (`2026-09-10T10:47:08Z`) | `core` | 5000 | 0 | 5000 | 1789040828 |
+
+The GraphQL response also contained its own in-query reading:
+`{limit: 5000, cost: 1, remaining: 2064, resetAt: "2026-09-10T11:02:23Z", used: 2936}`.
+The `/rate_limit` JSON body independently reported both `core` and `graphql` as
+`5000/5000` with reset `1789040828`, so it did not match either the live REST route
+headers or the live GraphQL reading.
+
+This pass saw four distinct counter snapshots/windows: the ordinary REST route, the
+dependency REST route, GraphQL, and `/rate_limit`. The two REST responses both named
+`core` but exposed different reset epochs and usage; the GraphQL response named
+`graphql`; and `/rate_limit` exposed a fresh `core` snapshot plus a body-level GraphQL
+snapshot. The measurements establish route-local disagreement, not separate
+principals: the headers do not identify why the windows differ, so a split-principal
+explanation remains unconfirmed.
+
+The constraint for #237 consumers is therefore call-local rate data: use the
+`X-RateLimit-*` headers returned by the REST call being evaluated, or GraphQL's own
+`rateLimit` block for a GraphQL call. Never use `GET /rate_limit` as a budget or
+headroom pre-check.
+
+### A disposable Muse session removes duplicate Project loads without stale claims
+
+**2026-09-10 · GitHub GraphQL / ticket #291 · measured (full-run total derived)**
+
+Before the change, the heartbeat branch recorded two-command Muse paths at **46 points**
+(run `e6ab9fbeedad`: 23 + 23, with 17 and 11 `gh` calls) and a three-command path at
+**69 points** (run `a23b74f4fa45`: 23 + 23 + 23, with 17, 11 and 12 `gh` calls). Each
+invocation cold-loaded the same Project. The corrected load measurement from #274 is
+~**12 points**, so the duplicated load component was ~12 points in the two-command path
+and ~24 in the three-command path.
+
+On `ticket/291`, the session harness dispatched multiple commands and measured exactly one
+lazy `load_items()` call. Its first-command reset happens before that load, and later
+commands reuse the live in-memory view; no cache or snapshot is involved. Holding the
+non-load work constant, the measured replay is therefore **46 → ~34 points** for two
+commands and **69 → ~45 points** for three. Applied to the corrected five-invocation
+Muse estimate of ~175 points, the duplicate-load component predicts **~175 → ~127
+points**; that whole-run number is arithmetic from measured components, not a shared-token
+remaining delta. The first load remains at command time, so a claim still reads GitHub
+immediately before it writes the lock.
+
+### If Muse took the escalated coding lane
+
+**2026-09-10 · planning · inferred**
+
+Nate's question: what if Muse (spark 1.3 at max effort) covered the escalated coding jobs
+Codex's Sol schedules do now? Worked through on the measured prices, recorded here so it
+is not re-derived.
+
+- **Escalated is a small slice of the work.** In the Codex cycle Sol merged 12 PRs of
+  ~160 — 7–8% of tickets — for 22% of Codex's week, most of it idle: 42 of 54 Sol fires
+  found nothing. A worked Sol session's token profile (72k uncached in, 2.2M cached,
+  11k out) priced at Muse's contributor rate is ~0.45 points; at max effort on a hard
+  ticket call it 0.5–1.0. Muse has never coded a ticket, so that is an estimate.
+- **Per parent it adds ~15%**: 1.53 (shaping, breakdown, 3.2 reviews) + 0.2 escalated
+  tickets × ~1.5 sessions × ~0.75 ≈ **1.75 points**.
+- **Where the limit moves.** On the $15 plan the pipeline stays Muse-bound at ~51
+  parents (~135 PRs) a week — what it clears now. On the $50 plan Muse (~170 parents)
+  stops being the limit and Codex's Luna cadence is: ~75 parents a week at 20-minute
+  fires with the cascade, ~125 with #245 fixed; with Sol's 22% handed back, Luna every
+  10 minutes fits the same Codex budget and reaches ~200 parents before Codex walls.
+- **The gain is the idle tax, not the coding.** Dropping the four Sol schedules
+  recovers ~22% of the Codex week; Muse's extra cost for the same dozen PRs is ~4
+  points of its week. The system gets cheaper either way.
+- **What it needs**: an implementation routine for Muse and a Luna-style clone/branch
+  sandbox — `scripts/muse-review` runs `--disable-write` in an empty workspace on
+  purpose — plus a plist. Shaping-sized, not a config change. Not filed; Nate asked for
+  it to be recorded here for now.
+
+### What a Muse job costs its weekly window, and the cadence that meters it
+
+**2026-09-10 · usage · measured (prices `inferred`)**
+
+Muse exposes no usage reading, so this is the only way to meter it: price every
+session from its own snapshots and journals under `~/.local/share/muse/sessions`
+(prompt, cache-read and output tokens per turn; tier from the prompt; job from the
+heartbeat finish record joined on `--run`), then scale to the panel figure Nate read.
+The panel read **80% at Wed 23:30 PDT from a Sat 17:00 reset**, but the schedules did
+not fire until Mon 18:00, so 80 points went in **53.6 hours over 486 sessions**.
+Nate confirmed on 2026-09-10 that the Muse Code Personal Plan ($15/month) meters at
+the **contributor** rate ($0.10 in / $0.002 cached / $0.20 out per 1M), so the cycle is
+~$2.47 and a Muse week is ~$3.09 of API compute against a $3.46/week plan price — the
+plan is priced at cost. The table below is at the standard-tier weighting it was first
+computed with; at contributor rates the per-run prices become review 0.28, breakdown
+0.23, shaping 0.40, **empty fire 0.12** (relatively dearer, because cache reads are
+near-free and the routine's uncached read dominates), and a parent costs **1.53
+points**: 59 parents a week on the $15 plan at 90%, 195 on the $50 plan (3.33× the
+window), $0.059 per parent on either.
+
+| job | runs | points each | points |
+|---|---|---|---|
+| review, approved and merged (standard, high) | 118 | 0.28 | 32.5 |
+| review, approved and merged (escalated, max) | 6 | 0.43 | 2.6 |
+| review, rejected | 7 | 0.26 | 2.0 |
+| breakdown | 11 | 0.23 | 2.6 |
+| shaping | 11 | **0.46** | 4.9 |
+| errored (mostly `gh` 429 at begin) | 31 | 0.21 | 6.5 |
+| **nothing to do** | **236** | **0.10** | **24.0** |
+
+Two facts overturned the working assumptions. **An empty Muse fire is not cheap**:
+139k prompt tokens over ~5 turns to run `funnel begin` and hear stop — a tenth of a
+point, as much as a worked Codex Luna run — and 236 of them took 30% of the cycle.
+And **shaping is the dearest job**, 1.5× a review, because it reads the idea, the plan
+history and writes the plan; the two costliest runs of the night were shapings.
+
+The stable 8 hours (Wed 15:24–23:20, queue full) are the number to plan on: 44 jobs
+in 44 standard fires — 34 reviews, 10 shapings, 1 breakdown — for 16.5 points, about
+**2 points an hour**. Reviews then cost 0.32, shapings 0.46. Of the 8 reviews that did
+not merge, only 2 were rejections on substance; 6 were "approved on substance, merge
+refused: branch conflicting", each re-reviewed 10–40 minutes later after Codex merged
+main. That is #245's cascade from the reviewer's side: ~12% of the window on second
+looks at PRs already approved. The review ratio it produced, **1.31 review runs per
+merged PR**, is the one used below.
+
+**Codex, for the same picture** (see the entry below for the per-lane prices): in the
+same 8 hours every PR was written in one session and none was sent back by review,
+but 45 of 64 ticket sessions were re-hands of a ticket whose PR was already up — the
+rejection side of the same cascade (#245, #487) plus an Investigate ticket that can
+never finish (#498). Codex's cost is re-verification; Muse's is re-review.
+
+**The planning model** (Nate's assumptions, 2026-09-10): each shaped parent needs one
+shaping, one breakdown, and one review per sub-issue at the observed ratio. Over the
+whole Project history — every parent that was broken down, Parked and Done included,
+82 of them — the mean is **2.62 sub-issues per parent** (median 2; 28 had one, four had
+6–11). So a parent costs 0.46 + 0.26 + 3.4 × 0.32 = **1.82 points and 5.4 Muse jobs**,
+and the average job costs 0.335 points whatever N is — N moves throughput, not
+spacing. A 90-point week is **50 parents, 269 jobs, one job every 37 minutes**: on the
+two schedules, standard every 45 minutes with escalated hourly (~92 on a full queue,
+~17 of it escalated's idle fires), or standard every 40 with escalated every 2 hours
+(~88). Codex's share of that plan is 26–44% of its own week, so its 20-minute Luna
+cadence needs no change; **Muse's window is the throughput ceiling of the whole
+funnel**, at roughly 50 parents or 130 PRs a week.
+
+Not yet acted on: the Muse plists still fire standard every 5 minutes and escalated
+hourly. Also worth its own idea: `scripts/muse-review` is our shell, so the
+nothing-to-do check can run *before* `muse exec` is spawned, which makes empty fires
+free and lets a fast cadence back — the same thing the Codex app will not let us do.
+
+### What a Codex session costs the Plus weekly window, by lane
+
+**2026-09-09 · usage · measured**
+
+From the `rate_limits` readings in `~/.codex/sessions`, the weekly window reset at
+2026-09-08 04:15Z and read 95% at 2026-09-10 05:37Z: 49.4 hours, 509 sessions, all but
+two of them Command Center automations. Priced at API list rates (Luna $0.20 / $0.02
+cached / $1.20 out; Sol $4 / $0.40 / $20 promo, per 1M) the cycle comes to ~$80, so
+**one Plus week is worth roughly $84 of API compute** and 1% of it is ~$0.84.
+
+| lane | class | sessions | $/session | % of week / session |
+|---|---|---|---|---|
+| standard (`tickets-hourly`, Luna/max) | worked | 357 | $0.086 | 0.10% |
+| standard | fired, nothing to pick up | 97 (21%) | $0.030 | 0.04% |
+| escalated (four windows, Sol/high) | worked | 30 | $1.37 | 1.63% |
+| escalated | fired, nothing to pick up | 21 (41%) | $0.19 | 0.23% |
+
+Two things the raw token counts hid. **A worked Sol ticket costs sixteen worked Luna
+tickets**, so the 30 escalated jobs took more of the week (52%) than the 357 standard
+ones (38%). And **an escalated fire that finds nothing is not free**: it re-reads
+~216k cached tokens at Sol's cached rate, 0.23% of the week — more than two worked
+Luna tickets — and 41% of escalated fires did exactly that. Blended per fire at those
+no-op rates: standard 0.088%, escalated 1.06%.
+
+The cadence that burned the window — standard every 5 minutes, escalated every 15
+inside its windows — projects to ~360% of a week, which is why 95% went in 29% of one.
+Set on 2026-09-09 (Nate's call, from a 20/30/15-minute frontier): **standard every 20
+minutes, escalated hourly** inside the same windows (39 window-hours a week), ~85–88%
+of the week. Written straight into each `automation.toml` `rrule` with a `.bak`
+beside it, the same path `scripts/sync_codex_automations.py` uses for the prompt.
+
+Attribution assumes the Plus meter weights compute like the API price list, which is
+`inferred`; the per-session token counts and the 95% endpoint are measured. The
+counter also mis-reported once, 69% → 44% → 69% across an hour on 2026-09-09 16:41Z
+with the same `limit_id`, so hour-by-hour rates from these readings are noisy even
+though the endpoints agree.
+
 ### zcode was retired, and what an empty poll actually costs each pool
 
 **2026-09-09 · heartbeat · measured**
@@ -21,19 +209,39 @@ from 2026-09-07 02:11Z) lived only in the zcode app and is recorded in
 policy all stay; `heartbeat.RETIRED_AGENTS` is what keeps the watchdog and
 `agent_health` from reading the silence as a run that died.
 
-**The hypothesis it was retired on was wrong, and the measurement is worth keeping.**
-The guess was that zcode starved itself by polling — that each budget check burned the
-tokens that would have let it run. From the readings every run records at start and
-finish (z.ai weekly window, 24h): 62 refused polls cost **+1.0 point in total**, 10
-empty runs cost 0, and 18 working runs cost **+19 points — about 1% of the week each**.
-Polling was free; the jobs were expensive.
+**The measurement below was wrong, and is corrected here (2026-09-10).** The original
+read: *62 refused polls cost +1.0 point in total, 10 empty runs cost 0, 18 working runs
+cost +19 points — polling was free; the jobs were expensive.* Two defects sat under it.
+First, `heartbeat.usage_snapshot()` records **Codex's** meter for every agent that is
+not Claude (#514), so 137 of the 241 zcode records — every one from the afternoon of
+2026-09-07 — carry Codex's `resets_at`, and the "+14-point review" was Codex's 09:41
+counter glitch. Second, on the 104 runs with z.ai readings at both ends, **27 of 31
+points landed between runs**, in the fifteen-minute gap after a finish, and only 4
+inside one: z.ai's meter lags, so within-run deltas measure almost nothing.
 
-The same method on Codex (OpenAI): a working run costs ~0.5% of the weekly window and
-~0.4% of the five-hour one, **an errored run costs the same as a working one**, and a
-refused poll costs ~0 on the weekly window. So for both metered pools the lever is
-jobs per day, not poll cadence. `measured`, from `usage.seven_day.used_percent` deltas;
-readings are account-wide and integer-coarse, so per-run means are reliable and sums
-are not.
+Re-measured with lagged attribution (a run's cost is the rise from its start reading to
+the next run's start reading; the weekly cap is 10,000 credits, read whole-percent, so
+100 credits of resolution — stretches, not single runs):
+
+| stretch | fires | credits | per refused fire |
+|---|---|---|---|
+| Mon 00:38–09:23, Nate asleep | 36 refusals | 400 | **~11** (five-hour window: ~17) |
+| Mon 10:38–Wed 10:08, his own use mixed in | 44 refusals | 1,700 | 39 |
+
+A refused fire costs **11–17 credits**, not zero — at every fifteen minutes that is
+~8,000 of the 10,000 a week on runs that did nothing, and the `zai` pace gate was
+self-starving: each refusal spent what the gate was waiting to recover. The jobs were
+the cheap part: 12 breakdowns totalled ~200 credits, two shapings ~100, eight empty
+runs ~200. Credits meter calls, not tokens. Nate's hypothesis was 3–4 credits per
+refused fire; the coefficient was low by 3–4× and the direction was right. The
+retirement (#431) stands on its stated reason — Muse is cheaper and its models are
+better — not on the numbers above.
+
+The Codex half of the original paragraph (working run ~0.5% of the week, errored run the
+same, refused poll ~0) was taken from Codex's own rate-limit records, which are not
+subject to #514, and is superseded by the finer per-lane prices in the entry below.
+`measured` for the stretch figures; `inferred` for the per-job credits, which sit at
+the meter's resolution.
 
 ### The routines ran a ticket branch's funnel.py for hours, because the canonical checkout is a working tree
 

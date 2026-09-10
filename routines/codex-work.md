@@ -50,8 +50,12 @@ python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent code
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, finds the
-next ticket, and claims it. It always prints JSON. Keep its `run` value and pass
-it to every `finish` below as `--run <id>`.
+next ticket, and claims it. It always prints JSON. Keep its `run` value. Pass
+the run id printed by this run's `begin` output as `--run <id>` to every
+`finish` below — never an id from an earlier `begin` in the same session. If
+`heartbeat finish` refuses a run/work mismatch, it names the still-open run id
+to use; use that id in `--run` and retry. Never wrap the id in `RUN=$(...)` —
+command substitution cannot be permission-matched and caused a prompt storm.
 
 - **`"do": "stop"`** — finish immediately. `gate: over` means
   `skipped-over-pace`; `gate: unknown` means `skipped-usage-unknown`; otherwise
@@ -165,6 +169,25 @@ return to the decline-and-re-ask rule in step 3. Do not commit or open a PR for 
 declined ticket. The dedicated human-step handoff above is different: after
 filing that human ticket, release and finish as instructed there; do not continue
 past that handoff.
+
+### When the deliverable is comments, not a branch
+
+Some tickets end in comments on the issue — an investigation's evidence, a set
+of proposals — with no code change, so no `ticket/*` branch and no PR are
+possible. Post the comments, then release the claim and finish as **waiting on
+Nate**:
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py release <current-number>
+python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent codex --run <id> --outcome skipped-human-step --note "finished by comments: <comment URLs>; waiting on Nate to close #<current-number>"
+```
+
+The `finished by comments:` prefix is the marker the queue reads: the ticket
+leaves the engineering queue until Nate closes it, or until a later run finishes
+it another way. Do not close the ticket and do not change `Status` or `Class`;
+closing is his gate. Without the marker the next fire re-offers the ticket — on
+2026-09-09 eleven consecutive runs re-claimed #277 and re-verified the same
+nine comments in 85 minutes (#498).
 
 ### Mid-work discovery: convert, record, stop
 

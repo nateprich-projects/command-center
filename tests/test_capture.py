@@ -142,12 +142,56 @@ def test_shaped_preserves_plan_bytes_above_agent_stamp(tmp_path, monkeypatch):
     )
     body = edit[-1]
     assert body.startswith(plan)
+    assert funnel.parse_origin(body) is None
     assert funnel.parse_provenance(body) == {
         "agent": "claude",
         "at": NOW.isoformat(),
         "run": "shape-run",
         "voice": "agent",
     }
+
+
+def test_shaped_carries_the_captured_origin_block_verbatim(tmp_path, monkeypatch):
+    plan = "# Plan\n\nProposed class: Broken\n\n## Needs you\nNothing.\n"
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text(plan)
+    captured_origin = funnel.origin_block(
+        "agent", at=NOW, run="capture-run", agent="muse"
+    )
+    item = Item(
+        repo="owner/repo", number=42, title="An idea",
+        url="https://github.com/owner/repo/issues/42", state="OPEN",
+        status="Ideas", klass="Broken", item_id="project-item-42",
+        body="Captured note.\n\n" + captured_origin,
+    )
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, variables))
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
+        return {"node": {"options": [{"id": "ready-option", "name": "Ready"}]}}
+
+    def run(args, capture_output, text=True):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file),
+        run="shape-run", agent="claude",
+    ) == 0
+
+    edit = next(call for call in calls if call[0] == "run"
+                and call[1][:3] == ("gh", "issue", "edit"))
+    shaped_body = edit[1][-1]
+    assert shaped_body.endswith(captured_origin)
+    assert funnel.parse_origin(shaped_body) == funnel.parse_origin(captured_origin)
+    assert funnel.parse_provenance(shaped_body)["run"] == "shape-run"
 
 
 def test_shaped_prints_advisory_overlap_candidates(tmp_path, monkeypatch, capsys):
@@ -232,15 +276,94 @@ def test_shaped_without_overlap_still_succeeds_and_reports_none(tmp_path, monkey
     assert "  none found" in output
 
 
-def test_shaped_refuses_and_names_each_authority_signal(tmp_path, monkeypatch,
-                                                         capsys):
+def test_shaped_records_each_authority_signal_on_a_ready_marker(
+    tmp_path, monkeypatch, capsys
+):
     plan_file = tmp_path / "plan.md"
     plan_file.write_text("""
-Proposed class: Improve
+Proposed class: Broken
 
 The check refuses a self-approval and does not add a decision he must answer
 on the happy path. The plan also records why unattended approvals are visible.
 It changes the gate's question and who answers it.
+
+## Needs you
+
+Exposure: nothing outstanding. no new surface.
+Gates: nothing outstanding. no gate change.
+Scope and priority: nothing outstanding. bounded.
+Preference: nothing outstanding. no taste choice.
+""")
+    item = Item(
+        repo="owner/repo", number=42, title="An idea",
+        url="https://github.com/owner/repo/issues/42", state="OPEN",
+        status="Ideas", klass="Broken", item_id="project-item-42",
+        body=funnel.origin_block(
+            "agent", at=NOW, run="capture-run", agent="claude"
+        ),
+    )
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
+        return {"node": {"options": [
+            {"id": "shaped-option", "name": "Shaped"},
+            {"id": "ready-option", "name": "Ready"},
+        ]}}
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    def run(args, capture_output, text=True):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file),
+        run="shape-run", agent="claude",
+    ) == 0
+
+    status_write = next(variables for query, variables in calls
+                        if query == funnel.SET_FIELD)
+    assert status_write["option"] == "ready-option"
+    marker_comments = [
+        call for call in calls
+        if call[0] == "run" and call[1][:3] == ("gh", "issue", "comment")
+    ]
+    assert len(marker_comments) == 1
+    marker_body = marker_comments[0][1][marker_comments[0][1].index("--body") + 1]
+    assert funnel.parse_self_approval(marker_body) == (
+        "plan declares nothing open; no escalated risk; authority signals: "
+        "gate authority, unattended authority"
+    )
+    output = capsys.readouterr().out
+    assert "--- self-approval advisory ---" in output
+    assert "self-approval refused" not in output
+    assert (
+        "gate authority: changes a gate's question, answer, or owner"
+        in output
+    )
+    assert (
+        "unattended authority: changes what an agent may do unattended"
+        in output
+    )
+    assert "owner/repo#42 → Ready" in output
+    assert "It now waits on you: is the plan good?" not in output
+
+
+def test_shaped_all_clear_plan_without_origin_stays_at_shaped(
+    tmp_path, monkeypatch, capsys
+):
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text("""
+Proposed class: Broken
+
+The plan discusses a gate and a Status field as subject matter, but changes
+neither and grants no additional authority to an agent.
 
 ## Needs you
 
@@ -249,7 +372,7 @@ Nothing.
     item = Item(
         repo="owner/repo", number=42, title="An idea",
         url="https://github.com/owner/repo/issues/42", state="OPEN",
-        status="Ideas", item_id="project-item-42",
+        status="Ideas", klass="Broken", item_id="project-item-42",
     )
     calls = []
 
@@ -277,66 +400,10 @@ Nothing.
                         if query == funnel.SET_FIELD)
     assert status_write["option"] == "shaped-option"
     output = capsys.readouterr().out
-    assert "--- self-approval refused ---" in output
-    assert "The plan stays at Shaped for Nate because:" in output
-    assert (
-        "gate authority: changes a gate's question, answer, or owner"
-        in output
-    )
-    assert (
-        "unattended authority: changes what an agent may do unattended"
-        in output
-    )
-    assert "It now waits on you: is the plan good?" in output
-
-
-def test_shaped_all_clear_plan_does_not_report_a_refusal(tmp_path, monkeypatch,
-                                                         capsys):
-    plan_file = tmp_path / "plan.md"
-    plan_file.write_text("""
-Proposed class: Improve
-
-The plan discusses a gate and a Status field as subject matter, but changes
-neither and grants no additional authority to an agent.
-
-## Needs you
-
-Nothing.
-""")
-    item = Item(
-        repo="owner/repo", number=42, title="An idea",
-        url="https://github.com/owner/repo/issues/42", state="OPEN",
-        status="Ideas", item_id="project-item-42",
-    )
-    calls = []
-
-    def graphql(query, **variables):
-        calls.append((query, variables))
-        if query == funnel.SET_FIELD:
-            return {"updateProjectV2ItemFieldValue": {
-                "projectV2Item": {"id": item.item_id},
-            }}
-        return {"node": {"options": [{"id": "ready-option", "name": "Ready"}]}}
-
-    monkeypatch.setattr(funnel, "gh_graphql", graphql)
-    monkeypatch.setattr(
-        funnel.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
-    )
-
-    assert funnel.cmd_shaped(
-        [item], NOW, item.ref, str(plan_file),
-        run="shape-run", agent="claude",
-    ) == 0
-
-    status_write = next(variables for query, variables in calls
-                        if query == funnel.SET_FIELD)
-    assert status_write["option"] == "ready-option"
-    output = capsys.readouterr().out
     assert "self-approval refused" not in output
-    assert "owner/repo#42 → Ready" in output
-    assert "It now waits on you: is the plan good?" not in output
+    assert "owner/repo#42 → Shaped" in output
+    assert "origin is Nate's" in output
+    assert "It now waits on you: is the plan good?" in output
 
 
 def test_capture_always_labels_the_issue_and_reports_it(monkeypatch, capsys):
@@ -705,12 +772,14 @@ def test_shaped_leaves_nate_origin_class_unset_when_plan_proposes_one(
     assert funnel.needs_class(item)
 
 
-def _shaped_status_fixture(monkeypatch, plan_file, plan, status_option):
+def _shaped_status_fixture(
+    monkeypatch, plan_file, plan, status_option, **item_kwargs
+):
     plan_file.write_text(plan)
     item = Item(
         repo="owner/repo", number=44, title="An idea",
         url="https://github.com/owner/repo/issues/44", state="OPEN",
-        status="Ideas", item_id="project-item-44",
+        status="Ideas", item_id="project-item-44", **item_kwargs
     )
     calls = []
 
@@ -730,13 +799,115 @@ def _shaped_status_fixture(monkeypatch, plan_file, plan, status_option):
     return item, calls
 
 
+@pytest.mark.parametrize(
+    ("klass", "origin", "extra", "expected"),
+    (
+        (
+            "New", "agent", "",
+            "class New is not self-approvable",
+        ),
+        (
+            "Broken", "nate-relayed", "",
+            "origin is Nate's",
+        ),
+        (
+            "Broken", "agent", "Risk: escalated — destructive\n",
+            "escalated risk (declared: destructive)",
+        ),
+    ),
+)
+def test_shaped_holds_when_a_self_approval_condition_fails(
+    tmp_path, monkeypatch, capsys, klass, origin, extra, expected
+):
+    plan_file = tmp_path / "plan.md"
+    plan = (
+        "# Plan\n\nProposed class: {}\n\n{}"
+        "## Needs you\n"
+        "Exposure: nothing outstanding. no new surface.\n"
+        "Gates: nothing outstanding. no gate change.\n"
+        "Scope and priority: nothing outstanding. bounded.\n"
+        "Preference: nothing outstanding. no taste choice.\n"
+    ).format(klass, extra)
+    item, calls = _shaped_status_fixture(
+        monkeypatch,
+        plan_file,
+        plan,
+        {"Shaped": "shaped-option"},
+        klass=klass,
+        body=funnel.origin_block(
+            origin, at=NOW, run="capture-run", agent="claude"
+        ),
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file), run="shape-run", agent="claude"
+    ) == 0
+
+    status_writes = [
+        call for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+    ]
+    assert status_writes[0][2]["option"] == "shaped-option"
+    assert not [
+        call for call in calls
+        if call[0] == "run" and call[1][:3] == ("gh", "issue", "comment")
+    ]
+    assert expected in capsys.readouterr().out
+
+
+def test_investigate_agent_plan_can_self_approve(tmp_path, monkeypatch, capsys):
+    plan_file = tmp_path / "plan.md"
+    plan = (
+        "# Plan\n\nProposed class: Investigate\n\n"
+        "## Needs you\n"
+        "Exposure: nothing outstanding. no new surface.\n"
+        "Gates: nothing outstanding. no gate change.\n"
+        "Scope and priority: nothing outstanding. bounded.\n"
+        "Preference: nothing outstanding. no taste choice.\n"
+    )
+    item, calls = _shaped_status_fixture(
+        monkeypatch,
+        plan_file,
+        plan,
+        {"Ready": "ready-option"},
+        klass="Investigate",
+        body=funnel.origin_block(
+            "agent", at=NOW, run="capture-run", agent="claude"
+        ),
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file), run="shape-run", agent="claude"
+    ) == 0
+
+    status_writes = [
+        call for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+    ]
+    assert status_writes[0][2]["option"] == "ready-option"
+    marker_comments = [
+        call for call in calls
+        if call[0] == "run" and call[1][:3] == ("gh", "issue", "comment")
+    ]
+    assert len(marker_comments) == 1
+    marker_body = marker_comments[0][1][marker_comments[0][1].index("--body") + 1]
+    assert funnel.parse_self_approval(marker_body) == (
+        "plan declares nothing open; no escalated risk"
+    )
+    assert "owner/repo#44 → Ready" in capsys.readouterr().out
+
+
 def test_shaped_advances_a_plan_that_declares_nothing_open(
     tmp_path, monkeypatch, capsys
 ):
     plan_file = tmp_path / "plan.md"
-    plan = "# Plan\n\nProposed class: New\n\n## Needs you\nNothing.\n"
+    plan = "# Plan\n\nProposed class: Broken\n\n## Needs you\nNothing.\n"
     item, calls = _shaped_status_fixture(
-        monkeypatch, plan_file, plan, {"Ready": "ready-option"}
+        monkeypatch, plan_file, plan, {"Ready": "ready-option"},
+        klass="Broken",
+        body=funnel.origin_block(
+            "agent", at=NOW, run="capture-run", agent="claude"
+        ),
     )
 
     assert funnel.cmd_shaped(
@@ -764,9 +935,9 @@ def test_shaped_advances_a_plan_that_declares_nothing_open(
 @pytest.mark.parametrize(
     ("plan", "reason"),
     (
-        ("# Plan\n\nProposed class: New\n\n## Needs you\nWhich repository should this use?\n",
+        ("# Plan\n\nProposed class: Broken\n\n## Needs you\nWhich repository should this use?\n",
          "plan has an open question"),
-        ("# Plan\n\nProposed class: New\n\n## Decided\nUse the existing repository.\n",
+        ("# Plan\n\nProposed class: Broken\n\n## Decided\nUse the existing repository.\n",
          "plan has no ## Needs you section"),
     ),
 )
@@ -775,7 +946,11 @@ def test_shaped_holds_when_the_plan_needs_nate(
 ):
     plan_file = tmp_path / "plan.md"
     item, calls = _shaped_status_fixture(
-        monkeypatch, plan_file, plan, {"Shaped": "shaped-option"}
+        monkeypatch, plan_file, plan, {"Shaped": "shaped-option"},
+        klass="Broken",
+        body=funnel.origin_block(
+            "agent", at=NOW, run="capture-run", agent="claude"
+        ),
     )
 
     assert funnel.cmd_shaped(

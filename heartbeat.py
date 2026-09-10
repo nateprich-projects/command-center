@@ -756,9 +756,14 @@ def usage_snapshot(agent: str) -> Optional[Dict]:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import usage
 
-        reading = usage.read_claude() if agent == "claude" else usage.read_codex()
+        reading = usage.read_agent(agent, time.time())
         if not reading:
             return None
+        if reading.get("unmetered"):
+            return {
+                "source": reading.get("source"),
+                "unmetered": True,
+            }
         # Both figures, not just the percentage. `resets_at` is what identifies
         # *which* five-hour window a run belonged to, and the idle gate in
         # usage.py needs that to ask whether this window was already open.

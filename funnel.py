@@ -2727,7 +2727,7 @@ def _legacy_invocation_count(checkout_root: pathlib.Path,
 
 def _git_ahead_behind(root: pathlib.Path) -> Tuple[int, int]:
     """Return commits ahead/behind ``origin/main`` without changing the tree."""
-    proc = subprocess.run(
+    proc = _run_bounded_subprocess(
         ["git", "-C", str(root), "rev-list", "--left-right", "--count",
          "HEAD...origin/main"],
         capture_output=True,
@@ -2762,7 +2762,7 @@ def check_repository_drift(
         # disabled. Doctor must not write even that incidental repository
         # metadata while it is inspecting the checkout.
         git_env["GIT_OPTIONAL_LOCKS"] = "0"
-        status = subprocess.run(
+        status = _run_bounded_subprocess(
             ["git", "-C", str(root), "status", "--porcelain=v1",
              "--untracked-files=all"],
             capture_output=True,
@@ -2779,7 +2779,7 @@ def check_repository_drift(
             if line.strip()
         ]
 
-        branch = subprocess.run(
+        branch = _run_bounded_subprocess(
             ["git", "-C", str(root), "symbolic-ref", "--quiet", "--short",
              "HEAD"],
             capture_output=True,
@@ -4327,7 +4327,7 @@ def _run_gh(args: Sequence[str], **kwargs):
         else:
             kwargs["timeout"] = min(float(existing_timeout), brief_timeout)
     try:
-        proc = subprocess.run(command, **kwargs)
+        proc = _run_bounded_subprocess(command, **kwargs)
     except subprocess.TimeoutExpired as exc:
         state = _BRIEF_SECTION_STATE.get()
         if state:
@@ -7499,7 +7499,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     import usage
 
     out: Dict[str, object] = {"agent": agent}
-    run = subprocess.run(
+    run = _run_bounded_subprocess(
         [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                       "heartbeat.py"), "start", "--agent", agent],
         capture_output=True, text=True)
@@ -8910,6 +8910,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
 SESSION_ENV = "FUNNEL_SESSION"
 SESSION_SERVER_ENV = "FUNNEL_SESSION_SERVER"
 SESSION_TIMEOUT_SECONDS = 30
+# Leave one second for the session handler to format and send its response
+# before the client's transport budget expires. The child process doing the
+# external work receives this deadline through `_run_bounded_subprocess`, so a
+# timed-out command releases the serialized session lock for the next command.
+SESSION_COMMAND_BUDGET_SECONDS = SESSION_TIMEOUT_SECONDS - 1.0
 SESSION_HEALTH_TIMEOUT_SECONDS = 1
 SESSION_STDIN_LIMIT = 1_000_000
 # The stdin limit is a content limit. JSON framing and escaped characters add
@@ -8918,6 +8923,52 @@ SESSION_STDIN_LIMIT = 1_000_000
 SESSION_REQUEST_LIMIT = SESSION_STDIN_LIMIT * 6 + 4_096
 SESSION_RESPONSE_LIMIT = 1_000_000
 _SESSION_STDIN_UNSET = object()
+_SESSION_COMMAND_STATE: contextvars.ContextVar = contextvars.ContextVar(
+    "session_command_state", default=None
+)
+
+
+class SessionCommandTimeout(RuntimeError):
+    """A session command ran out of server-side time before it answered."""
+
+    def __init__(self, command: str):
+        self.command = command
+        self.budget = SESSION_COMMAND_BUDGET_SECONDS
+        super().__init__(
+            "{} exceeded the {:.1f}s server-side budget".format(
+                command, self.budget
+            )
+        )
+
+
+def _session_command_remaining() -> Optional[float]:
+    """Return the active command's remaining budget, or ``None`` outside it."""
+    state = _SESSION_COMMAND_STATE.get()
+    if state is None:
+        return None
+    command, deadline = state
+    remaining = float(deadline) - time.monotonic()
+    if remaining <= 0:
+        raise SessionCommandTimeout(command)
+    return remaining
+
+
+def _run_bounded_subprocess(command: Sequence[str], **kwargs):
+    """Run a child process with the current session command's deadline."""
+    remaining = _session_command_remaining()
+    if remaining is not None:
+        existing_timeout = kwargs.get("timeout")
+        if existing_timeout is None:
+            kwargs["timeout"] = remaining
+        else:
+            kwargs["timeout"] = min(float(existing_timeout), remaining)
+    try:
+        return subprocess.run(command, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        state = _SESSION_COMMAND_STATE.get()
+        if state is not None:
+            raise SessionCommandTimeout(state[0]) from exc
+        raise
 
 
 class FunnelSession:
@@ -8974,6 +9025,26 @@ class FunnelSession:
                                     _reset_api_usage=False)
                     finally:
                         sys.stdin = previous_stdin
+                # A command that only did Python work still has to answer
+                # inside the same server-side envelope as its GitHub calls.
+                _session_command_remaining()
+            except SessionCommandTimeout as exc:
+                # A timed-out GitHub mutation may have reached the server
+                # before its response was lost. Throw away the local view so
+                # the next command reloads GitHub state rather than acting on
+                # a stale Project snapshot. Never retry the command here.
+                self.items = None
+                self._brief_cache.clear()
+                stdout.seek(0)
+                stdout.truncate(0)
+                stderr.seek(0)
+                stderr.truncate(0)
+                print(
+                    "funnel: command-timeout: {}; session remains usable; "
+                    "the next command will reload Project state".format(exc),
+                    file=sys.stderr,
+                )
+                code = 2
             except SystemExit as exc:
                 code = exc.code if isinstance(exc.code, int) else 2
             except Exception as exc:
@@ -8994,8 +9065,9 @@ class _SessionServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     Normal commands remain serialised because ``FunnelSession`` owns mutable
     in-memory Project and stdin state.  The transport is threaded so a health
     request can report the command holding that lock while the command itself
-    is still reading GitHub.  This is instrumentation only; #557 owns the
-    later decision about bounding or cancelling that work.
+    is still reading GitHub. Each command also carries a deadline; bounded
+    child processes fail loud before the transport timeout so the lock is
+    released for the next request.
     """
 
     allow_reuse_address = True
@@ -9017,6 +9089,10 @@ class _SessionServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         """Run one command and return it with its server-side timing."""
         command = self._command_name(argv)
         with self.command_lock:
+            command_token = _SESSION_COMMAND_STATE.set((
+                command,
+                time.monotonic() + SESSION_COMMAND_BUDGET_SECONDS,
+            ))
             started = time.perf_counter()
             with self._activity_lock:
                 self._active_command = command
@@ -9039,6 +9115,7 @@ class _SessionServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
                     self._active_command = None
                     self._active_started = None
                     self._last_timing = timing
+                _SESSION_COMMAND_STATE.reset(command_token)
         return code, stdout, stderr, timing
 
     def health_payload(self) -> Dict[str, object]:

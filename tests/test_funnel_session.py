@@ -6,6 +6,7 @@ import io
 import json
 import pathlib
 import socket
+import subprocess
 import sys
 import threading
 
@@ -337,6 +338,77 @@ def test_session_server_health_answers_while_a_command_is_busy():
         assert not server_thread.is_alive()
 
 
+def test_session_command_timeout_discards_view_and_leaves_next_command_usable(
+    monkeypatch,
+):
+    loaded = []
+
+    def fake_main(argv, *, _items=None, _items_loader=None, _reset_api_usage=True):
+        if argv == ["slow"]:
+            funnel._run_bounded_subprocess(
+                ["gh", "api", "graphql"], capture_output=True, text=True
+            )
+        else:
+            assert _items_loader() == ["fresh"]
+        return 0
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout"))
+
+    monkeypatch.setattr(funnel, "main", fake_main)
+    monkeypatch.setattr(funnel, "report_api_cost", lambda: None)
+    monkeypatch.setattr(funnel, "report_graphql_spend", lambda: None)
+    monkeypatch.setattr(funnel.subprocess, "run", timeout)
+
+    server = funnel._SessionServer(("127.0.0.1", 0), funnel._SessionHandler)
+    server.session = funnel.FunnelSession(
+        loader=lambda: loaded.append("load") or ["fresh"]
+    )
+    try:
+        code, stdout, stderr, timing = server.dispatch(["slow"])
+        assert code == 2
+        assert stdout == ""
+        assert "funnel: command-timeout: slow exceeded" in stderr
+        assert "next command will reload Project state" in stderr
+        assert timing["command"] == "slow"
+        assert server.session.items is None
+
+        code, stdout, stderr, _ = server.dispatch(["next"])
+        assert (code, stdout, stderr) == (0, "", "")
+        assert loaded == ["load"]
+    finally:
+        server.server_close()
+
+
+def test_session_command_bounds_child_work_inside_transport_budget(monkeypatch):
+    observed = []
+
+    def fake_main(argv, *, _items=None, _items_loader=None, _reset_api_usage=True):
+        funnel._run_bounded_subprocess(
+            ["gh", "api", "graphql"], capture_output=True, text=True
+        )
+        return 0
+
+    def completed(command, **kwargs):
+        observed.append(kwargs["timeout"])
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(funnel, "main", fake_main)
+    monkeypatch.setattr(funnel, "report_api_cost", lambda: None)
+    monkeypatch.setattr(funnel, "report_graphql_spend", lambda: None)
+    monkeypatch.setattr(funnel.subprocess, "run", completed)
+
+    server = funnel._SessionServer(("127.0.0.1", 0), funnel._SessionHandler)
+    server.session = funnel.FunnelSession(loader=lambda: [])
+    try:
+        assert server.dispatch(["bounded"])[0] == 0
+    finally:
+        server.server_close()
+
+    assert len(observed) == 1
+    assert 0 < observed[0] <= funnel.SESSION_COMMAND_BUDGET_SECONDS
+
+
 def test_session_client_forwards_piped_stdin_in_the_request(monkeypatch):
     monkeypatch.setenv(funnel.SESSION_ENV, "127.0.0.1:1234:token")
     plan = "# Plan\n☃\n"
@@ -515,3 +587,5 @@ def test_muse_documents_direct_piped_shaped_calls_without_a_session_workaround()
     routine = (ROOT / "routines" / "muse.md").read_text()
     assert "shaped --plan -" in routine
     assert "env -u FUNNEL_SESSION" not in routine
+    assert "29-second server-side budget" in routine
+    assert "never repeat `begin`" in routine

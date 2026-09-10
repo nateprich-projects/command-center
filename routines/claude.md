@@ -248,9 +248,22 @@ shaping path for escalated ideas.
 **Do not grill.** There is nobody to ask in an unattended run. Settle what
 precedent covers, cite the source in the plan, and do not invent an answer where
 the decision is genuinely Nate's. Record that open question in the per-category
-`Needs you` section instead — Exposure, Gates, Scope and priority, and
-Preference — with an explicit answer under every category, including when
-nothing is outstanding.
+`Needs you` section instead. Put the answer first on each category line, using
+this four-line form when the category is clear:
+
+```text
+- Exposure: nothing outstanding. No new credentials or reachable surface.
+- Gates: nothing outstanding. No gate ownership changes.
+- Scope and priority: nothing outstanding. The scoped change is documented.
+- Preference: nothing outstanding. No user-facing choice remains.
+```
+
+The bare answer must be `nothing outstanding`; any elaboration follows after a
+period. When a category is open, replace that answer with the question itself in
+one sentence, for example `- Gates: Who may write Ready for an all-clear plan?`.
+When all four categories are clear, a self-approvable Class with `agent` origin
+advances to `Ready` and gets a `Self-approved:` marker that `funnel brief` shows.
+Any other case stays at `Shaped`, with the reason printed.
 
 Write the plan to a file. If the idea's capture origin is `agent` and its Class is
 unset, choose the Class from the ladder (`Broken`, `Maintenance`, `Improve`, `New`,

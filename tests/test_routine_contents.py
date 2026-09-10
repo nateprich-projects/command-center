@@ -58,3 +58,13 @@ def test_breakdown_docs_record_and_resume_needs_decisions():
             "comment on the issue saying precisely what is undecided, and leave it"
             not in normalized
         )
+
+
+@pytest.mark.parametrize("routine", ["claude", "muse"])
+def test_unattended_shaping_can_recover_an_unclassed_agent_idea(routine):
+    body = (ROOT / "routines" / (routine + ".md")).read_text(encoding="utf-8")
+    normalized = " ".join(body.split()).lower()
+
+    assert "capture origin is `agent`" in normalized
+    assert "--class <broken|maintenance|improve|new|replace>" in normalized
+    assert "proposed class:" in normalized

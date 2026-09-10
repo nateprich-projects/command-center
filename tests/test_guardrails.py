@@ -16,6 +16,7 @@ Both agents run from prompts, and a prompt cannot enforce anything. This can.
 from __future__ import annotations
 
 import pathlib
+import re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -70,6 +71,14 @@ def command_files():
     return [p for p in found if p.exists()]
 
 
+def agent_markdown_files():
+    """Markdown files that agents are instructed to read or follow."""
+    found = sorted((ROOT / "routines").rglob("*.md"))
+    found += sorted((ROOT / "skills").rglob("*.md"))
+    found += [ROOT / "AGENTS.md", ROOT / "CLAUDE.md"]
+    return [p for p in found if p.exists()]
+
+
 def test_there_are_command_files_to_check():
     """A glob that matches nothing would make every test below vacuously pass."""
     assert len(command_files()) >= 5
@@ -106,6 +115,22 @@ def test_every_script_invocation_uses_the_canonical_spelling():
     assert not offenders, (
         "Every invocation must spell the path {!r} so the permission rule "
         "matches:\n  {}".format(CANONICAL, "\n  ".join(offenders))
+    )
+
+
+def test_agent_markdown_uses_python_module_for_pytest():
+    """Agent-facing Markdown must not teach an unavailable bare pytest command."""
+    bare_pytest = re.compile(r"(?<!python3 -m )\bpytest\b")
+    offenders = []
+    for path in agent_markdown_files():
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if bare_pytest.search(line):
+                offenders.append("{}:{}: {}".format(
+                    path.relative_to(ROOT), number, line.strip()))
+
+    assert not offenders, (
+        "Agent-facing Markdown must invoke pytest as `python3 -m pytest`, not as "
+        "a bare command:\n  {}".format("\n  ".join(offenders))
     )
 
 

@@ -288,6 +288,7 @@ Nate where to obtain it and have **him** put it in `.env`.
 ## Verification
 
 - **Verify against the running system, not the documentation.**
+- **The canonical test command is `python3 -m pytest`; invoke it with Python rather than as a standalone executable.**
 - **Report failures plainly, with the output.** If something is untested, say so rather
   than implying coverage. "Built" is not "verified".
 - Prefer evidence that would fail if the thing were broken.

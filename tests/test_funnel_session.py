@@ -7,6 +7,7 @@ import json
 import pathlib
 import socket
 import sys
+import threading
 
 import pytest
 
@@ -203,6 +204,7 @@ def test_session_client_reports_a_reply_timeout_as_a_busy_session(
     monkeypatch, capsys
 ):
     monkeypatch.setenv(funnel.SESSION_ENV, "127.0.0.1:1234:token")
+    connections = []
 
     class TimeoutStream:
         def __enter__(self):
@@ -230,15 +232,109 @@ def test_session_client_reports_a_reply_timeout_as_a_busy_session(
         def makefile(self, mode):
             return TimeoutStream()
 
+    class HealthStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def write(self, payload):
+            return len(payload)
+
+        def flush(self):
+            pass
+
+        def readline(self, limit):
+            return (
+                b'{"code":0,"stdout":"","stderr":"",'
+                b'"health":{"ok":true,"status":"busy",'
+                b'"busy":true,"command":"brief",'
+                b'"elapsed_seconds":30.5}}\n'
+            )
+
+    class HealthConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def makefile(self, mode):
+            return HealthStream()
+
     monkeypatch.setattr(
-        funnel.socket, "create_connection", lambda *args, **kwargs: Connection()
+        funnel.socket,
+        "create_connection",
+        lambda *args, **kwargs: connections.append(kwargs["timeout"])
+        or (Connection() if len(connections) == 1 else HealthConnection()),
     )
 
     assert funnel._session_client(["brief"]) == 2
     assert capsys.readouterr().err == (
         "funnel: reply-timeout: FUNNEL_SESSION session busy past the 30s "
-        "reply budget (slow section unknown): timed out\n"
+        "reply budget (slow command: brief): timed out\n"
     )
+    assert connections == [30, 1]
+
+
+def test_session_server_health_answers_while_a_command_is_busy():
+    server = funnel._SessionServer(("127.0.0.1", 0), funnel._SessionHandler)
+    server.token = "token"
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingSession:
+        def dispatch(self, argv, stdin=None):
+            started.set()
+            assert release.wait(2)
+            return 0, "", ""
+
+    server.session = BlockingSession()
+    server_thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}
+    )
+    server_thread.start()
+    command_connection = None
+    health_connection = None
+    try:
+        command_connection = socket.create_connection(server.server_address, 1)
+        command_connection.sendall(
+            (json.dumps({"token": "token", "argv": ["brief"]}) + "\n")
+            .encode("utf-8")
+        )
+        assert started.wait(1)
+
+        health_connection = socket.create_connection(server.server_address, 1)
+        health_connection.sendall(
+            (json.dumps({"token": "token", "health": True}) + "\n")
+            .encode("utf-8")
+        )
+        health_connection.settimeout(1)
+        health = json.loads(
+            health_connection.makefile("rb").readline().decode("utf-8")
+        )
+        assert health["health"]["status"] == "busy"
+        assert health["health"]["command"] == "brief"
+        assert health["health"]["elapsed_seconds"] > 0
+
+        release.set()
+        command_connection.settimeout(1)
+        response = json.loads(
+            command_connection.makefile("rb").readline().decode("utf-8")
+        )
+        assert response["timing"]["command"] == "brief"
+        assert response["timing"]["elapsed_seconds"] > 0
+    finally:
+        release.set()
+        if command_connection is not None:
+            command_connection.close()
+        if health_connection is not None:
+            health_connection.close()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(1)
+        assert not server_thread.is_alive()
 
 
 def test_session_client_forwards_piped_stdin_in_the_request(monkeypatch):

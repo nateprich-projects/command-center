@@ -29,6 +29,7 @@ import socket
 import socketserver
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -8909,11 +8910,14 @@ def main(argv: Optional[Sequence[str]] = None, *,
 SESSION_ENV = "FUNNEL_SESSION"
 SESSION_SERVER_ENV = "FUNNEL_SESSION_SERVER"
 SESSION_TIMEOUT_SECONDS = 30
+SESSION_HEALTH_TIMEOUT_SECONDS = 1
 SESSION_STDIN_LIMIT = 1_000_000
 # The stdin limit is a content limit. JSON framing and escaped characters add
 # overhead before the request reaches the server, so the request reader needs
 # a larger bound than the existing one-megabyte reply reader.
 SESSION_REQUEST_LIMIT = SESSION_STDIN_LIMIT * 6 + 4_096
+SESSION_RESPONSE_LIMIT = 1_000_000
+_SESSION_STDIN_UNSET = object()
 
 
 class FunnelSession:
@@ -8984,8 +8988,86 @@ class FunnelSession:
         return int(code), stdout.getvalue(), stderr.getvalue()
 
 
-class _SessionServer(socketserver.TCPServer):
+class _SessionServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    """A per-run server with a lock-free health request.
+
+    Normal commands remain serialised because ``FunnelSession`` owns mutable
+    in-memory Project and stdin state.  The transport is threaded so a health
+    request can report the command holding that lock while the command itself
+    is still reading GitHub.  This is instrumentation only; #557 owns the
+    later decision about bounding or cancelling that work.
+    """
+
     allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.command_lock = threading.Lock()
+        self._activity_lock = threading.Lock()
+        self._active_command: Optional[str] = None
+        self._active_started: Optional[float] = None
+        self._last_timing: Optional[Dict[str, object]] = None
+
+    @staticmethod
+    def _command_name(argv: Sequence[str]) -> str:
+        return argv[0] if argv else "<empty>"
+
+    def dispatch(self, argv: Sequence[str], stdin=_SESSION_STDIN_UNSET):
+        """Run one command and return it with its server-side timing."""
+        command = self._command_name(argv)
+        with self.command_lock:
+            started = time.perf_counter()
+            with self._activity_lock:
+                self._active_command = command
+                self._active_started = started
+            try:
+                if stdin is _SESSION_STDIN_UNSET:
+                    code, stdout, stderr = self.session.dispatch(argv)
+                else:
+                    code, stdout, stderr = self.session.dispatch(
+                        argv, stdin=stdin
+                    )
+            finally:
+                timing = {
+                    "command": command,
+                    "elapsed_seconds": round(
+                        max(0.0, time.perf_counter() - started), 6
+                    ),
+                }
+                with self._activity_lock:
+                    self._active_command = None
+                    self._active_started = None
+                    self._last_timing = timing
+        return code, stdout, stderr, timing
+
+    def health_payload(self) -> Dict[str, object]:
+        """Return cheap liveness and current-command instrumentation."""
+        with self._activity_lock:
+            command = self._active_command
+            started = self._active_started
+            last_timing = self._last_timing
+            elapsed = (
+                round(max(0.0, time.perf_counter() - started), 6)
+                if started is not None else 0.0
+            )
+
+        status = "busy" if command is not None else "idle"
+        health: Dict[str, object] = {
+            "ok": True,
+            "status": status,
+            "busy": status == "busy",
+            "command": command,
+            "elapsed_seconds": elapsed,
+        }
+        if last_timing is not None:
+            health["last_timing"] = dict(last_timing)
+        return {
+            "code": 0,
+            "stdout": "",
+            "stderr": "",
+            "health": health,
+        }
 
 
 class _SessionHandler(socketserver.StreamRequestHandler):
@@ -9023,6 +9105,10 @@ class _SessionHandler(socketserver.StreamRequestHandler):
             self._reply({"code": 0, "stdout": "", "stderr": ""})
             return
 
+        if request.get("health") is True:
+            self._reply(self.server.health_payload())
+            return
+
         argv = request.get("argv")
         if (not isinstance(argv, list)
                 or not all(isinstance(part, str) for part in argv)):
@@ -9043,10 +9129,17 @@ class _SessionHandler(socketserver.StreamRequestHandler):
             return
 
         if "stdin" in request:
-            code, stdout, stderr = self.server.session.dispatch(argv, stdin=stdin)
+            code, stdout, stderr, timing = self.server.dispatch(
+                argv, stdin=stdin
+            )
         else:
-            code, stdout, stderr = self.server.session.dispatch(argv)
-        self._reply({"code": code, "stdout": stdout, "stderr": stderr})
+            code, stdout, stderr, timing = self.server.dispatch(argv)
+        self._reply({
+            "code": code,
+            "stdout": stdout,
+            "stderr": stderr,
+            "timing": timing,
+        })
 
 
 def _process_is_alive(pid: int) -> bool:
@@ -9125,6 +9218,32 @@ def _session_command_uses_stdin(argv: Sequence[str]) -> bool:
     return False
 
 
+def _session_health(host: str, port: int, token: str) -> Optional[Dict[str, object]]:
+    """Ask the live server for status without waiting on its command lock."""
+    request = {"token": token, "health": True}
+    try:
+        with socket.create_connection(
+            (host, port), timeout=SESSION_HEALTH_TIMEOUT_SECONDS
+        ) as connection:
+            stream = connection.makefile("rwb")
+            with stream:
+                stream.write(
+                    (json.dumps(request, separators=(",", ":")) + "\n")
+                    .encode("utf-8")
+                )
+                stream.flush()
+                line = stream.readline(SESSION_RESPONSE_LIMIT)
+    except (OSError, TypeError, ValueError):
+        return None
+
+    try:
+        response = json.loads(line.decode("utf-8"))
+        health = response["health"]
+    except (UnicodeDecodeError, ValueError, KeyError, TypeError):
+        return None
+    return health if isinstance(health, dict) else None
+
+
 def _session_client(argv: Sequence[str]) -> int:
     """Forward one CLI invocation to the current Muse run's session."""
     endpoint = os.environ.get(SESSION_ENV, "")
@@ -9177,12 +9296,22 @@ def _session_client(argv: Sequence[str]) -> int:
                     .encode("utf-8")
                 )
                 stream.flush()
-                line = stream.readline(1_000_000)
+                line = stream.readline(SESSION_RESPONSE_LIMIT)
     except socket.timeout as exc:
+        health = _session_health(host, port, token)
+        slow_command = None
+        if health is not None and health.get("status") == "busy":
+            candidate = health.get("command")
+            if isinstance(candidate, str) and candidate:
+                slow_command = candidate
+        detail = (
+            "slow command: {}".format(slow_command)
+            if slow_command is not None else "slow command unknown"
+        )
         print(
             "funnel: reply-timeout: {} session busy past the {}s reply "
-            "budget (slow section unknown): {}".format(
-                SESSION_ENV, SESSION_TIMEOUT_SECONDS, exc
+            "budget ({}): {}".format(
+                SESSION_ENV, SESSION_TIMEOUT_SECONDS, detail, exc
             ),
             file=sys.stderr,
         )

@@ -40,6 +40,7 @@ def _allow_begin(monkeypatch):
 
 def _begin(monkeypatch, capsys, *, breakdown):
     _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     assert funnel.cmd_begin([], NOW, "zcode", "standard", False, breakdown) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -72,6 +73,7 @@ def _ticket(number, parent, *, body="Risk: standard", klass="Improve",
 
 def _codex_begin(monkeypatch, capsys, items, *, tier="standard"):
     _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
     bodies = {item.number: item.body for item in items}
     monkeypatch.setattr(
@@ -83,6 +85,156 @@ def _codex_begin(monkeypatch, capsys, items, *, tier="standard"):
     )
     assert funnel.cmd_begin(items, NOW, "codex", tier, False) == 0
     return json.loads(capsys.readouterr().out), writes
+
+
+def _reconcile_begin(monkeypatch, capsys, items, rows, verdicts, merge_result=0):
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: rows)
+    monkeypatch.setattr(
+        funnel, "latest_verdict", lambda repo, pr: verdicts.get(pr)
+    )
+    calls = []
+
+    def merge(rows, now, repo, pr, confirmed):
+        calls.append((repo, pr, confirmed))
+        return merge_result
+
+    monkeypatch.setattr(funnel, "cmd_merge", merge)
+    monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+    monkeypatch.setattr(funnel, "next_ticket_for_tier", lambda *args, **kwargs: None)
+    assert funnel.cmd_begin(items, NOW, "codex", "standard", False) == 0
+    return json.loads(capsys.readouterr().out), calls
+
+
+def test_begin_retries_an_approval_at_the_current_head(monkeypatch, capsys):
+    project, ticket = _ticket(7, 6)
+    result, calls = _reconcile_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        [{"number": 70, "headRefName": "ticket/7", "headRefOid": "new-head"}],
+        {70: {"verdict": "approved", "head_sha": "new-head"}},
+    )
+
+    assert calls == [(ticket.repo, 70, True)]
+    assert result["reconciled"] == [{
+        "repo": ticket.repo,
+        "pr": 70,
+        "ref": ticket.ref,
+        "result": "merged",
+    }]
+    assert ticket.state == "CLOSED"
+    assert ticket.state_reason == "COMPLETED"
+
+
+def test_begin_does_not_retry_an_old_or_rejected_verdict(monkeypatch, capsys):
+    project, ticket = _ticket(8, 6)
+    rows = [
+        {"number": 80, "headRefName": "ticket/8", "headRefOid": "new-head"},
+        {"number": 81, "headRefName": "ticket/8", "headRefOid": "new-head"},
+    ]
+    result, calls = _reconcile_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        rows,
+        {
+            80: {"verdict": "approved", "head_sha": "old-head"},
+            81: {"verdict": "rejected", "head_sha": "new-head"},
+        },
+    )
+
+    assert calls == []
+    assert "reconciled" not in result
+    assert ticket.state == "OPEN"
+
+
+def test_begin_reports_a_merge_gate_refusal_without_closing_the_ticket(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(9, 6)
+    result, calls = _reconcile_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        [{"number": 90, "headRefName": "ticket/9", "headRefOid": "head"}],
+        {90: {"verdict": "approved", "head_sha": "head"}},
+        merge_result=1,
+    )
+
+    assert calls == [(ticket.repo, 90, True)]
+    assert result["reconciled"] == [{
+        "repo": ticket.repo,
+        "pr": 90,
+        "ref": ticket.ref,
+        "result": "refused",
+    }]
+    assert ticket.state == "OPEN"
+
+
+def test_begin_reconcile_runs_before_codex_queue_lookup(monkeypatch, capsys):
+    project, ticket = _ticket(10, 6)
+    events = []
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(
+        funnel,
+        "reconcile_approved_merges",
+        lambda *args: events.append("reconcile") or [],
+    )
+    monkeypatch.setattr(
+        funnel,
+        "clear_satisfied_blocks",
+        lambda *args, **kwargs: events.append("clear") or [],
+    )
+    monkeypatch.setattr(
+        funnel,
+        "awaiting_review",
+        lambda rows: events.append("awaiting") or set(),
+    )
+    monkeypatch.setattr(
+        funnel,
+        "next_ticket_for_tier",
+        lambda *args, **kwargs: events.append("next") or None,
+    )
+
+    assert funnel.cmd_begin([project, ticket], NOW, "codex", "standard", False) == 0
+    capsys.readouterr()
+    assert events == ["reconcile", "clear", "awaiting", "next"]
+
+
+def test_begin_reconcile_is_idempotent_when_the_pr_is_no_longer_open(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(11, 6)
+    rows = [
+        {"number": 110, "headRefName": "ticket/11", "headRefOid": "head"}
+    ]
+    calls = []
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: rows)
+    monkeypatch.setattr(
+        funnel, "latest_verdict", lambda repo, pr: {
+            "verdict": "approved", "head_sha": "head"
+        }
+    )
+
+    def merge(items, now, repo, pr, confirmed):
+        calls.append(pr)
+        rows.clear()
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_merge", merge)
+    monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+    monkeypatch.setattr(funnel, "next_ticket_for_tier", lambda *args, **kwargs: None)
+
+    assert funnel.cmd_begin([project, ticket], NOW, "codex", "standard", False) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["reconciled"][0]["result"] == "merged"
+
+    assert funnel.cmd_begin([project, ticket], NOW, "codex", "standard", False) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert calls == [110]
+    assert "reconciled" not in second
 
 
 def _completed_project(number, *, klass="Improve", children_done=2,
@@ -113,6 +265,21 @@ def _completed_project(number, *, klass="Improve", children_done=2,
         for offset in (1, 2)
     ]
     return [project] + children
+
+
+def _closed_project_item(number, *, status, state_reason, labels=None):
+    repo = "nateprich/example"
+    return funnel.Item(
+        repo=repo,
+        number=number,
+        title="Closed project {}".format(number),
+        url="https://github.com/{}/issues/{}".format(repo, number),
+        state="CLOSED",
+        state_reason=state_reason,
+        status=status,
+        labels=list(labels or []),
+        item_id="project-{}".format(number),
+    )
 
 
 def _begin_with_reconcile_wired(monkeypatch, capsys, items):
@@ -242,6 +409,83 @@ def test_begin_reconcile_is_idempotent(monkeypatch, capsys):
     ]
 
 
+def test_begin_repairs_closed_terminal_statuses_and_stale_shaping_labels(
+    monkeypatch, capsys
+):
+    completed = _closed_project_item(
+        230, status="Building", state_reason="COMPLETED"
+    )
+    parked = _closed_project_item(
+        231, status="Ideas", state_reason="NOT_PLANNED",
+        labels=["needs-shaping"],
+    )
+    already_done = _closed_project_item(
+        232, status="Done", state_reason="COMPLETED"
+    )
+    already_parked = _closed_project_item(
+        233, status="Parked", state_reason="NOT_PLANNED"
+    )
+    open_item = funnel.Item(
+        repo="nateprich/example",
+        number=234,
+        title="Open idea",
+        url="https://github.com/nateprich/example/issues/234",
+        state="OPEN",
+        state_reason="NOT_PLANNED",
+        status="Ideas",
+        labels=["needs-shaping"],
+        item_id="project-234",
+    )
+    items = [completed, parked, already_done, already_parked, open_item]
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert result["reconciled"] == [completed.ref, parked.ref]
+    assert completed.status == "Done"
+    assert parked.status == "Parked"
+    assert parked.labels == []
+    assert already_done.status == "Done"
+    assert already_parked.status == "Parked"
+    assert open_item.status == "Ideas"
+    assert open_item.labels == ["needs-shaping"]
+    assert [variables for query, variables in graphql_calls] == [
+        {
+            "project": funnel.PROJECT_ID,
+            "item": "project-230",
+            "field": funnel.STATUS_FIELD_ID,
+            "option": "done-option",
+        },
+        {
+            "project": funnel.PROJECT_ID,
+            "item": "project-231",
+            "field": funnel.STATUS_FIELD_ID,
+            "option": "done-option",
+        },
+    ]
+    assert [
+        call for call in calls
+        if call[:3] == ["gh", "issue", "edit"]
+    ] == [[
+        "gh", "issue", "edit", "231", "--repo", "nateprich/example",
+        "--remove-label", "needs-shaping",
+    ]]
+
+    calls.clear()
+    graphql_calls.clear()
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert "reconciled" not in result
+    assert not graphql_calls
+    assert not [
+        call for call in calls
+        if call[:3] == ["gh", "issue", "edit"]
+    ]
+
+
 def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
     monkeypatch, capsys
 ):
@@ -254,6 +498,11 @@ def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
         return SimpleNamespace(stdout="run-id\n")
 
     monkeypatch.setattr(funnel.subprocess, "run", heartbeat)
+    monkeypatch.setattr(
+        funnel,
+        "reconcile_approved_merges",
+        lambda *args: events.append("reconcile") or [],
+    )
     monkeypatch.setattr(usage, "read_agent", lambda agent, timestamp: {"windows": {}})
     monkeypatch.setattr(
         usage, "pace", lambda reading, timestamp, provider: {"over_pace": False}
@@ -278,7 +527,7 @@ def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
 
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == ticket.ref
-    assert events == ["heartbeat", "clear", "next", "claim"]
+    assert events == ["heartbeat", "reconcile", "clear", "next", "claim"]
 
 
 def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):
@@ -363,19 +612,33 @@ def test_begin_stop_reason_names_both_empty_queues_when_both_were_consulted(
     assert result["why"] == "nothing to review and nothing to break down"
 
 
-def test_begin_does_not_consult_breakdown_when_review_work_exists(monkeypatch, capsys):
+def test_begin_keeps_review_first_against_same_class_later_jobs(monkeypatch, capsys):
     work = {"pr": 7, "repo": "nateprich/beta", "ref": "nateprich/beta#19"}
+    pending = SimpleNamespace(
+        ref="nateprich-projects/command-center#20",
+        url="https://github.com/nateprich-projects/command-center/issues/20",
+        title="Break down project",
+        repo="nateprich-projects/command-center",
+        number=20,
+        klass="Improve",
+    )
+    idea = SimpleNamespace(klass="Improve")
+    breakdown_calls = []
     monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [work])
-
-    def unexpected_breakdown_lookup(items):
-        raise AssertionError("breakdown queue was consulted after review work was found")
-
-    monkeypatch.setattr(funnel, "awaiting_breakdown", unexpected_breakdown_lookup)
+    monkeypatch.setattr(
+        funnel,
+        "awaiting_breakdown",
+        lambda items: breakdown_calls.append(items) or [pending],
+    )
+    monkeypatch.setattr(
+        funnel, "shapeable_idea", lambda items, tier, reading: idea
+    )
 
     result = _begin(monkeypatch, capsys, breakdown=True)
 
     assert result["do"] == "review"
     assert result["work"] == work
+    assert breakdown_calls == [[]]
 
 
 def test_begin_offers_shape_when_needs_decision_blocks_breakdown(monkeypatch, capsys):
@@ -405,6 +668,7 @@ def test_begin_offers_shape_when_needs_decision_blocks_breakdown(monkeypatch, ca
     monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
 
     _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     assert funnel.cmd_begin(
         [blocked, idea], NOW, "zcode", "standard", False, True
     ) == 0
@@ -435,7 +699,7 @@ def test_breakdown_work_carries_plan_access_signals(monkeypatch, capsys):
     assert result["work"]["access_signals"] == ["token", "tunnel"]
 
 
-def _idea(number, title, body):
+def _idea(number, title, body, klass=None):
     return SimpleNamespace(
         ref="nateprich-projects/command-center#{}".format(number),
         repo="nateprich-projects/command-center",
@@ -443,7 +707,139 @@ def _idea(number, title, body):
         url="https://github.com/nateprich-projects/command-center/issues/{}".format(number),
         title=title,
         body=body,
+        klass=klass,
     )
+
+
+def _review_job(ticket, pr=7):
+    return {"pr": pr, "repo": ticket.repo, "ref": ticket.ref}
+
+
+def _reviewer_begin(
+    monkeypatch,
+    capsys,
+    items,
+    *,
+    review=None,
+    breakdown_item=None,
+    idea=None,
+    breakdown=False,
+):
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+    monkeypatch.setattr(
+        funnel,
+        "review_queue",
+        lambda rows, tier: [review] if review is not None else [],
+    )
+    monkeypatch.setattr(
+        funnel,
+        "awaiting_breakdown",
+        lambda rows: ([breakdown_item] if breakdown_item is not None else []),
+    )
+    monkeypatch.setattr(
+        funnel,
+        "shapeable_idea",
+        lambda rows, tier, reading: idea,
+    )
+    monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: "")
+
+    assert funnel.cmd_begin(
+        items, NOW, "zcode", "standard", False, breakdown
+    ) == 0
+    return json.loads(capsys.readouterr().out)
+
+
+def test_broken_idea_preempts_an_improve_review(monkeypatch, capsys):
+    project, ticket = _ticket(101, 100, klass="Improve")
+    idea = _idea(102, "Broken idea", "Risk: standard", klass="Broken")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        review=_review_job(ticket),
+        idea=idea,
+    )
+
+    assert result["do"] == "shape"
+    assert result["work"]["ref"] == idea.ref
+
+
+def test_improve_idea_does_not_preempt_an_improve_review(monkeypatch, capsys):
+    project, ticket = _ticket(103, 100, klass="Improve")
+    idea = _idea(104, "Improve idea", "Risk: standard", klass="Improve")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        review=_review_job(ticket),
+        idea=idea,
+    )
+
+    assert result["do"] == "review"
+    assert result["work"] == _review_job(ticket)
+
+
+def test_broken_review_is_before_a_broken_idea(monkeypatch, capsys):
+    project, ticket = _ticket(105, 100, klass="Broken")
+    idea = _idea(106, "Broken idea", "Risk: standard", klass="Broken")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        review=_review_job(ticket),
+        idea=idea,
+    )
+
+    assert result["do"] == "review"
+    assert result["work"] == _review_job(ticket)
+
+
+def test_unclassed_idea_does_not_preempt_an_improve_review(monkeypatch, capsys):
+    project, ticket = _ticket(107, 100, klass="Improve")
+    idea = _idea(108, "Unclassed idea", "Risk: standard")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        review=_review_job(ticket),
+        idea=idea,
+    )
+
+    assert result["do"] == "review"
+    assert result["work"] == _review_job(ticket)
+
+
+def test_same_class_candidates_keep_bottom_up_order(monkeypatch, capsys):
+    project, ticket = _ticket(109, 100, klass="Improve")
+    pending = funnel.Item(
+        repo="nateprich/example",
+        number=110,
+        title="Project 110",
+        url="https://github.com/nateprich/example/issues/110",
+        state="OPEN",
+        status="Ready",
+        klass="Improve",
+        children_total=0,
+    )
+    idea = _idea(111, "Improve idea", "Risk: standard", klass="Improve")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        review=_review_job(ticket),
+        breakdown_item=pending,
+        idea=idea,
+        breakdown=True,
+    )
+
+    assert result["do"] == "review"
+    assert result["work"] == _review_job(ticket)
 
 
 def test_shape_is_not_offered_when_the_first_idea_is_the_other_tier(

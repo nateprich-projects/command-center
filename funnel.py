@@ -13,9 +13,11 @@ stored or passed by this program.
 from __future__ import annotations
 
 import argparse
+import contextlib
 from collections import namedtuple
 import glob
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -4411,6 +4413,70 @@ def _approved_current_head(pr: Optional[Dict[str, object]]) -> bool:
     return not head or not reviewed_head or head == reviewed_head
 
 
+def _block_cycle_reasons(
+    items: Sequence[Item], by_ref: Dict[str, Item]
+) -> Dict[str, List[str]]:
+    """Return one diagnostic reason for each detected open block cycle.
+
+    Edges point from a waiting item to its blocker. Native dependency facts and
+    parsed comment references are deliberately combined here: either source
+    can be stale or incomplete on its own, while a cycle may cross both. Only
+    open items in the loaded Project can participate in a stranded cycle;
+    missing or closed references are ignored just as they are by the other
+    derived dependency checks.
+
+    A cycle is searched from its lowest-numbered member, and candidate edges
+    back to an earlier member are skipped. That makes the displayed path
+    canonical and prevents the same loop from being reported once per member.
+    The walk is iterative so malformed dependency data cannot exhaust Python's
+    call stack while producing a diagnostic.
+    """
+    open_refs = {
+        item.ref for item in items if item.state == "OPEN"
+    }
+    graph: Dict[str, Set[str]] = {ref: set() for ref in open_refs}
+    for item in items:
+        if item.ref not in open_refs:
+            continue
+        for value in list(item.open_blockers) + list(item.block_references):
+            ref = _dependency_ref(item, value)
+            if ref in open_refs:
+                graph[item.ref].add(ref)
+
+    def order(ref: str) -> Tuple[int, str]:
+        item = by_ref[ref]
+        return item.number, item.repo
+
+    def display(refs: Sequence[str]) -> str:
+        cycle_items = [by_ref[ref] for ref in refs]
+        same_repo = len({item.repo for item in cycle_items}) == 1
+        labels = (
+            ["#{}".format(item.number) for item in cycle_items]
+            if same_repo
+            else list(refs)
+        )
+        return "block cycle: " + " → ".join(labels)
+
+    reasons: Dict[str, List[str]] = {}
+    for start in sorted(graph, key=order):
+        pending = [(start, [start])]
+        cycle = None
+        while pending:
+            current, path = pending.pop()
+            for target in sorted(graph[current], key=order, reverse=True):
+                if target == start:
+                    cycle = path + [start]
+                    break
+                if target in path or order(target) < order(start):
+                    continue
+                pending.append((target, path + [target]))
+            if cycle is not None:
+                break
+        if cycle is not None:
+            reasons.setdefault(start, []).append(display(cycle))
+    return reasons
+
+
 def stranded_items(
     items: Iterable[Item],
     now: datetime,
@@ -4422,7 +4488,8 @@ def stranded_items(
     uses facts the funnel already knows how to read: an approved current-head
     verdict on a conflicting PR, a stale claim with no PR, a childless
     ``Building`` project, a native or named dependency closed as
-    ``not_planned``, and two PR-side strands when PR facts were requested:
+    ``not_planned``, plus cycles formed by native or parsed block edges, and
+    two PR-side strands when PR facts were requested:
     an open PR on a closed ticket or an open PR whose project's Status is not
     ``Building``. Missing CI history is intentionally absent; no fetched fact
     distinguishes that from a PR whose first check is still pending.
@@ -4435,6 +4502,7 @@ def stranded_items(
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
     stale = {item.ref for item in stale_locks(rows, now)}
+    cycle_reasons = _block_cycle_reasons(rows, by_ref)
     found: List[Dict[str, object]] = []
 
     for item in rows:
@@ -4488,6 +4556,8 @@ def stranded_items(
                 "blocked on blocker that will never close: {}".format(
                     ", ".join(dead))
             )
+
+        reasons.extend(cycle_reasons.get(item.ref, []))
 
         if reasons:
             found.append({
@@ -5098,11 +5168,20 @@ def cmd_ideas(items: List[Item], now: datetime) -> int:
 def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
                 repo: Optional[str], run: Optional[str] = None,
                 agent: Optional[str] = None,
-                origin: Optional[str] = None) -> int:
+                origin: Optional[str] = None,
+                klass: Optional[str] = None) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
     if origin not in ORIGIN_VOICES:
         raise GitHubError(
             "capture requires an explicit --origin (nate-relayed or agent)"
+        )
+    if origin == "agent" and klass is None:
+        raise GitHubError("capture requires --class when --origin agent")
+    if klass is not None and klass not in LADDER:
+        raise GitHubError(
+            "unknown capture class {!r}; choose one of {}".format(
+                klass, ", ".join(LADDER)
+            )
         )
     repo = resolve_repo(repo)
     body = append_provenance(
@@ -5128,6 +5207,14 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         item_id = json.loads(add.stdout)["id"]
         gh_graphql(SET_FIELD, project=PROJECT_ID, item=item_id,
                    field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Ideas"))
+        if klass is not None:
+            gh_graphql(
+                SET_FIELD,
+                project=PROJECT_ID,
+                item=item_id,
+                field=CLASS_FIELD_ID,
+                option=_option_id(CLASS_FIELD_ID, klass),
+            )
         print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
     else:
         print("{} in {}\nnote: created, but not added to the Project".format(
@@ -5712,6 +5799,112 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     return None
 
 
+def approved_merge_candidates(items: Sequence[Item]) -> List[Dict[str, object]]:
+    """Find open ticket PRs whose latest verdict approves their current head."""
+    tickets = {
+        item.ref: item
+        for item in items
+        if (getattr(item, "state", "OPEN") or "OPEN").upper() == "OPEN"
+    }
+    if not tickets:
+        return []
+
+    candidates: List[Dict[str, object]] = []
+    for repo in sorted({item.repo for item in tickets.values()}):
+        rows = _gh_json(
+            "gh", "pr", "list", "--repo", repo, "--state", "open",
+            "--json", "number,headRefName,headRefOid", "--limit", "100",
+        ) or []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            branch = row.get("headRefName") or ""
+            ref = ticket_ref_from_branch(repo, branch)
+            if ref is None or ref not in tickets or row.get("number") is None:
+                continue
+            verdict = latest_verdict(repo, row.get("number"))
+            # The current-head proof is deliberately strict here. The stranded
+            # diagnostic accepts fixture rows without SHAs, but reconciliation
+            # must never turn missing evidence into an unattended merge.
+            if not row.get("headRefOid") or not isinstance(verdict, dict):
+                continue
+            if not verdict.get("head_sha"):
+                continue
+            probe = dict(row)
+            probe["verdict"] = verdict
+            if not _approved_current_head(probe):
+                continue
+            candidates.append({"repo": repo, "pr": row["number"], "ref": ref})
+
+    candidates.sort(key=lambda candidate: (
+        candidate["repo"], str(candidate["pr"])
+    ))
+    return candidates
+
+
+def reconcile_approved_merges(
+    items: List[Item], now: datetime
+) -> List[Dict[str, object]]:
+    """Retry the merge gate for every approved current-head ticket PR.
+
+    ``cmd_merge`` owns all merge conditions and the actual writes. This wrapper
+    only finds the half-applied approval sequence, keeps its human-readable
+    output on stderr so ``begin`` remains JSON, and records the result for the
+    caller. A refusal is a normal reconciliation result, not a queue failure.
+    """
+    results: List[Dict[str, object]] = []
+    by_ref = {item.ref: item for item in items}
+    for candidate in approved_merge_candidates(items):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = cmd_merge(
+                    items,
+                    now,
+                    candidate["repo"],
+                    candidate["pr"],
+                    True,
+                )
+        except GitHubError as exc:
+            code = None
+            error = str(exc)
+        else:
+            error = None
+
+        if stdout.getvalue():
+            print(stdout.getvalue(), end="", file=sys.stderr)
+        if stderr.getvalue():
+            print(stderr.getvalue(), end="", file=sys.stderr)
+
+        result: Dict[str, object] = dict(candidate)
+        if code == 0:
+            result["result"] = "merged"
+            ticket = by_ref.get(candidate["ref"])
+            if ticket is not None:
+                # ``load_items`` ran before the merge. Keep this process's
+                # queue consistent with the GitHub close that just happened.
+                ticket.state = "CLOSED"
+                ticket.state_reason = "COMPLETED"
+                ticket.in_motion_since = None
+        elif code == 1:
+            result["result"] = "refused"
+            reasons = [
+                line[4:]
+                for line in stderr.getvalue().splitlines()
+                if line.startswith("  - ")
+            ]
+            if reasons:
+                result["reasons"] = reasons
+        else:
+            result["result"] = "error"
+            result["error"] = error or "merge gate failed without a result"
+        results.append(result)
+    return results
+
+
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
               routine_sha_literal: Optional[str] = None) -> int:
@@ -5792,9 +5985,17 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # passed a check.
         out["unmetered"] = True
 
+    reconciled = reconcile_approved_merges(items, now)
+    if reconciled:
+        out["reconciled"] = reconciled
+
     auto_closed = reconcile_auto_closeable_projects(items)
     if auto_closed:
         out["auto_closed"] = auto_closed
+
+    reconciled = reconcile_closed_items(items)
+    if reconciled:
+        out["reconciled"] = reconciled
 
     if agent == "codex":
         cleared = clear_satisfied_blocks(
@@ -5830,48 +6031,74 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         return 0
 
     queue = review_queue(items, tier)
-    if queue:
-        out.update(do="review", work=queue[0])
-    else:
-        # Breakdown is opt-in per routine. Claude reviews only — its breakdown
-        # job moved to the cheaper pool — so offering it one would send the
-        # scarce reviewer off to do mechanical decomposition.
-        if breakdown:
-            pending = awaiting_breakdown(items)
-            if pending:
-                item = pending[0]
-                work = {
-                    "ref": item.ref,
-                    "url": item.url,
-                    "title": item.title,
-                    "access_signals": access_signals(
-                        _ticket_body(item.repo, item.number)
-                    ),
-                }
-                out.update(do="breakdown", work=work)
-            else:
-                item = shapeable_idea(items, tier, reading)
-                if item is not None:
-                    out.update(
-                        do="shape",
-                        work={"ref": item.ref, "url": item.url,
-                              "title": item.title},
-                    )
-                else:
-                    out.update(
-                        do="stop",
-                        why="nothing to review and nothing to break down",
-                    )
+    review = queue[0] if queue else None
+
+    # The fixed job order remains the tiebreak within a class group, but a
+    # finite preempting class can cross stages. Build only the head of each
+    # queue: the next run gets the next item if this run preempts it.
+    by_ref = {item.ref: item for item in items}
+    pending = awaiting_breakdown(items) if breakdown else []
+    breakdown_item = pending[0] if pending else None
+    shape_item = shapeable_idea(items, tier, reading)
+    candidates: List[Tuple[int, int, str, object]] = []
+
+    if review is not None:
+        review_item = by_ref.get(review.get("ref"))
+        review_class = (
+            effective_class(review_item, by_ref)
+            if review_item is not None else None
+        )
+        candidates.append((
+            0 if review_class in PREEMPTING_CLASSES else 1,
+            0,
+            "review",
+            review,
+        ))
+    if breakdown_item is not None:
+        breakdown_class = getattr(breakdown_item, "klass", None)
+        candidates.append((
+            0 if breakdown_class in PREEMPTING_CLASSES else 1,
+            1,
+            "breakdown",
+            breakdown_item,
+        ))
+    if shape_item is not None:
+        shape_class = getattr(shape_item, "klass", None)
+        candidates.append((
+            0 if shape_class in PREEMPTING_CLASSES else 1,
+            2,
+            "shape",
+            shape_item,
+        ))
+
+    if candidates:
+        _, _, job, payload = min(candidates, key=lambda candidate: candidate[:2])
+        if job == "review":
+            out.update(do="review", work=payload)
+        elif job == "breakdown":
+            item = payload
+            work = {
+                "ref": item.ref,
+                "url": item.url,
+                "title": item.title,
+                "access_signals": access_signals(
+                    _ticket_body(item.repo, item.number)
+                ),
+            }
+            out.update(do="breakdown", work=work)
         else:
-            item = shapeable_idea(items, tier, reading)
-            if item is not None:
-                out.update(
-                    do="shape",
-                    work={"ref": item.ref, "url": item.url,
-                          "title": item.title},
-                )
-            else:
-                out.update(do="stop", why="nothing to review")
+            item = payload
+            out.update(
+                do="shape",
+                work={"ref": item.ref, "url": item.url,
+                      "title": item.title},
+            )
+    else:
+        out.update(
+            do="stop",
+            why=("nothing to review and nothing to break down"
+                 if breakdown else "nothing to review"),
+        )
 
     reserve = _reserve_verdict(out.get("do"))
     if reserve is not None:
@@ -6166,6 +6393,68 @@ def reconcile_auto_closeable_projects(items: Sequence[Item]) -> List[str]:
         if _close_auto_closeable_project(items, project):
             closed.append(project.ref)
     return closed
+
+
+def reconcile_closed_items(items: Sequence[Item]) -> List[str]:
+    """Repair terminal Project state and stale shaping labels on closed items.
+
+    Closing an issue outside the funnel does not update its Project item. The
+    issue's state reason is the authoritative terminal choice, and a closed
+    item cannot still be waiting in Ideas. Only closed items participate so an
+    open issue is never changed by this unattended repair.
+    """
+    repaired: List[str] = []
+    terminal_statuses = {
+        "COMPLETED": "Done",
+        "NOT_PLANNED": "Parked",
+    }
+    candidates = sorted(
+        (item for item in items if item.state == "CLOSED"),
+        key=lambda item: (item.repo, item.number),
+    )
+    for item in candidates:
+        reason = str(item.state_reason or "").upper().replace("-", "_")
+        target = terminal_statuses.get(reason)
+        changed = False
+
+        if target is not None and not item.parent and item.status != target:
+            if not item.item_id:
+                raise GitHubError(
+                    "{} is not in the Project; cannot set Status to {}".format(
+                        item.ref, target
+                    )
+                )
+            gh_graphql(
+                SET_FIELD,
+                project=PROJECT_ID,
+                item=item.item_id,
+                field=STATUS_FIELD_ID,
+                option=_option_id(STATUS_FIELD_ID, target),
+            )
+            item.status = target
+            changed = True
+
+        if "needs-shaping" in item.labels and item.status != "Ideas":
+            edit = subprocess.run(
+                [
+                    "gh", "issue", "edit", str(item.number), "--repo", item.repo,
+                    "--remove-label", "needs-shaping",
+                ],
+                capture_output=True, text=True,
+            )
+            if edit.returncode != 0:
+                raise GitHubError(
+                    "reconciled {} but could not remove its needs-shaping "
+                    "label: {}".format(item.ref, edit.stderr.strip())
+                )
+            item.labels = [
+                label for label in item.labels if label != "needs-shaping"
+            ]
+            changed = True
+
+        if changed:
+            repaired.append(item.ref)
+    return repaired
 
 
 def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
@@ -6658,6 +6947,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--origin", required=True, choices=ORIGIN_VOICES,
         help="idea origin: nate-relayed if Nate raised it, agent if observed",
     )
+    capture.add_argument(
+        "--class", dest="klass", choices=LADDER, default=None,
+        help="ladder class; required when --origin agent",
+    )
     shaped = sub.add_parser("shaped", help="record a grilled plan and move to Shaped")
     shaped.add_argument("ref", help="issue number, owner/repo#number, or URL")
     shaped.add_argument("--plan", required=True,
@@ -6795,6 +7088,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             parser.error("--because is required with --blocked-on")
         if args.because is not None and not args.blocked_on:
             parser.error("--because requires --blocked-on")
+    if (args.command == "capture" and args.origin == "agent"
+            and args.klass is None):
+        parser.error("--class is required with --origin agent")
 
     now = datetime.now(timezone.utc)
     # Doctor keeps its fixed checks runnable when the Project cannot be loaded;
@@ -6851,7 +7147,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_ideas(items, now)
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
-                               args.run, args.agent, args.origin)
+                               args.run, args.agent, args.origin, args.klass)
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan,
                               args.run, args.agent, args.klass)

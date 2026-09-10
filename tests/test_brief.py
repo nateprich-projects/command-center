@@ -44,6 +44,23 @@ def _dependency_item(number, *, body=None, state="OPEN", open_blockers=()):
     )
 
 
+def _approval_item(number, at, *, previous="Shaped"):
+    return funnel.Item(
+        repo="nateprich/beta",
+        number=number,
+        title="Approval {}".format(number),
+        url="https://example.invalid/{}".format(number),
+        state="OPEN",
+        status="Ready",
+        status_since=at,
+        status_events=[{
+            "previous_status": previous,
+            "status": "Ready",
+            "at": at,
+        }],
+    )
+
+
 def test_prose_dependencies_reports_open_named_issues_without_native_edges():
     blocker = _dependency_item(7)
     missing_edge = _dependency_item(8, body="Depends on #7")
@@ -192,6 +209,46 @@ def test_brief_surfaces_unclassed_captures_with_origin_without_counting_them(
     }
     assert "Ideas" not in brief["counts_by_gate"]
     assert brief["total_needing_nate"] == 0
+
+
+def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
+    monkeypatch, capsys
+):
+    self_approved = _approval_item(
+        80, NOW - timedelta(hours=1), previous="Ideas"
+    )
+    nate_approved = _approval_item(81, NOW - timedelta(hours=2))
+    old = _approval_item(
+        82, NOW - funnel.MAINTENANCE_WINDOW - timedelta(seconds=1)
+    )
+    basis = "plan declares nothing open; no escalated risk"
+    comments = {
+        80: [{"body": funnel.SELF_APPROVED_PREFIX + basis}],
+        81: [{"body": "Approved at the Shaped gate — Ready."}],
+        82: [{"body": funnel.SELF_APPROVED_PREFIX + "old basis"}],
+    }
+    calls = []
+
+    def gh_json(*args):
+        calls.append(args)
+        return {"comments": comments[int(args[3])]}
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief(
+        [old, nate_approved, self_approved], NOW
+    ) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["unattended_approvals"] == [{
+        "ref": self_approved.ref,
+        "title": self_approved.title,
+        "url": self_approved.url,
+        "at": (NOW - timedelta(hours=1)).isoformat(),
+        "basis": basis,
+    }]
+    assert [call[3] for call in calls] == ["81", "80"]
 
 
 def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(

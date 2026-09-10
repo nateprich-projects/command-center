@@ -54,6 +54,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `awaiting_breakdown` | Approved plans with no tickets yet. Claude owes these a breakdown; they are not startable until it happens |
 | `prose_dependencies` | Open tickets whose dependency sentence names an open issue without a matching native `blocked_by` edge. Each row carries the ticket `ref`, named issue `names`, and original `sentence`; diagnostic only |
 | `unattended_merges` | Merges an agent made without him, read from heartbeat records. `plan.md` makes these appearing in the brief a condition of unattended merging being allowed at all |
+| `unattended_approvals` | Recent plans moved to `Ready` by the unattended shaping path, with each row's issue `ref`, title, URL, transition time `at`, and stated `basis`; a marker-backed record, not a notification or review request |
 | `agent_health` | Raised watchdog conditions, each with the heartbeat agent and the watchdog's condition wording. Empty when all agents are healthy |
 | `rejected_merges` | Merges he checked and found broken, over `window_days`. `stop_auto_merging` true means three in a week — auto-merging stops until he fixes the review bar |
 | `closed_with_access_vocabulary` | Projects that closed with access-shaped words in the plan and no human-step ticket. The detective backstop for when every preventive layer missed one |
@@ -87,10 +88,14 @@ Then `cleared_blocks`, whenever it is non-empty, as its own short list, newest f
 Name the ticket, the conditions found closed, and the clear time. This is a record of a
 mechanical move, not a decision request; never add it to `total_needing_nate`.
 
+Then `unattended_approvals`, whenever it is non-empty, as its own short list, newest
+first. Show the issue, transition time, and stated basis. This is a record Nate can read
+when he chooses, not a notification and not a request for review.
+
 Then the gate counts on one line. Then anything unusual, and only if present:
 `prose_dependencies`, `suspected_human_steps`, `unclassed_captures`, `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`,
 `working_tree_touched`,
-`awaiting_breakdown`, `unattended_merges`, `agent_health`, `resend_ratio`, `rejected_merges`, and
+`awaiting_breakdown`, `unattended_merges`, `unattended_approvals`, `agent_health`, `resend_ratio`, `rejected_merges`, and
 `closed_with_access_vocabulary`. A suspected human step is report-only: do not clear its
 `blocked` label, restate it, or split it while rendering the brief.
 

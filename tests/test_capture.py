@@ -748,6 +748,15 @@ def test_shaped_advances_a_plan_that_declares_nothing_open(
         if call[0] == "graphql" and call[1] == funnel.SET_FIELD
     ]
     assert status_writes[0][2]["option"] == "ready-option"
+    marker_comments = [
+        call for call in calls
+        if call[0] == "run" and call[1][:3] == ("gh", "issue", "comment")
+    ]
+    assert len(marker_comments) == 1
+    marker_body = marker_comments[0][1][marker_comments[0][1].index("--body") + 1]
+    assert funnel.parse_self_approval(marker_body) == (
+        "plan declares nothing open; no escalated risk"
+    )
     output = capsys.readouterr().out
     assert "advanced to Ready: plan declares nothing open" in output
 

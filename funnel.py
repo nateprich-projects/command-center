@@ -258,6 +258,16 @@ PARK_COMMENT_PREFIX = "**Parked:** "
 #: ticket names and drift list for that later reader.
 CLOSED_ITSELF_PREFIX = "**Closed itself:** "
 
+#: The shaping path records its own Ready transition because the Project event
+#: cannot say whether Nate or an agent wrote the field. The brief uses this
+#: stable line only after finding a recent Shaped-to-Ready candidate.
+SELF_APPROVED_PREFIX = "Self-approved: "
+SELF_APPROVED_LINE = re.compile(
+    r"^\s*(?:\*\*)?Self-approved:(?:\*\*)?\s*"
+    r"(?P<basis>\S.*?)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 #: A blocked comment names an optional, knowable condition after this marker.
 #: The parser below owns the rest of the fixed header shape.
 BLOCK_COMMENT_PREFIX = "**Blocked"
@@ -352,6 +362,9 @@ class Item:
     klass: Optional[str] = None
     pinned: bool = False
     status_since: Optional[datetime] = None
+    # ProjectV2 status history retained from the load query. The brief uses it
+    # to find likely unattended shaping transitions before reading comments.
+    status_events: List[Dict[str, object]] = field(default_factory=list)
     labels: List[str] = field(default_factory=list)
     block_references: List[str] = field(default_factory=list)
     block_reason: Optional[str] = None
@@ -1484,6 +1497,17 @@ def _marked_json(body: str, marker: str) -> Optional[Dict]:
     return found if isinstance(found, dict) else None
 
 
+def parse_self_approval(body: str) -> Optional[str]:
+    """Return the stated basis from a self-approval marker line."""
+    if not isinstance(body, str):
+        return None
+    match = SELF_APPROVED_LINE.search(body)
+    if match is None:
+        return None
+    basis = match.group("basis").strip()
+    return basis or None
+
+
 def parse_verdict(body: str) -> Optional[Dict]:
     """The verdict carried by one comment, or None if it is not one."""
     return _marked_json(body, REVIEW_MARKER)
@@ -1694,6 +1718,18 @@ def append_provenance(body: str, voice: str, at: Optional[datetime] = None,
     """Append one provenance block without changing the supplied body."""
     return "{}\n\n{}".format(
         body, provenance_block(voice, at=at, run=run, agent=agent)
+    )
+
+
+def self_approval_comment(basis: str, at: Optional[datetime] = None,
+                          run: Optional[str] = None,
+                          agent: Optional[str] = None) -> str:
+    """Build the durable marker for an unattended shaping decision."""
+    if not isinstance(basis, str) or not basis.strip():
+        raise ValueError("self-approval basis must not be empty")
+    return append_provenance(
+        SELF_APPROVED_PREFIX + basis.strip(), "agent",
+        at=at, run=run, agent=agent,
     )
 
 
@@ -2006,6 +2042,103 @@ def unattended_merges(now: datetime) -> List[Dict[str, object]]:
         for row in rows
         if row.get("merged") and (row.get("ts") or 0) >= cutoff
     ]
+
+
+def _self_approval_transition_times(item: Item, now: datetime) -> List[datetime]:
+    """Find recent Ready transitions that could have been self-approval."""
+    cutoff = now - MAINTENANCE_WINDOW
+    found: Set[datetime] = set()
+    for event in item.status_events:
+        if not isinstance(event, dict) or event.get("status") != "Ready":
+            continue
+        previous = event.get("previous_status")
+        if previous is None:
+            previous = event.get("previousStatus")
+        # `cmd_shaped` writes Ideas -> Ready on a clear first pass, while a
+        # plan held at Shaped produces Shaped -> Ready when it is later
+        # approved by the path. Both need the marker check below; Nate's
+        # explicit approval has no Self-approved line and is omitted.
+        if previous not in ("Ideas", "Shaped"):
+            continue
+        at = event.get("at")
+        if not isinstance(at, datetime):
+            created = event.get("created_at")
+            if created is None:
+                created = event.get("createdAt")
+            at = parse_time(created)
+        if at is None or at < cutoff:
+            continue
+        found.add(at)
+    return sorted(found)
+
+
+def _self_approval_markers(item: Item) -> List[Dict[str, object]]:
+    """Read marker comments for one already-identified candidate item."""
+    comments = (_gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "comments",
+    ) or {}).get("comments", [])
+    if not isinstance(comments, list):
+        return []
+
+    found: List[Dict[str, object]] = []
+    for comment in comments:
+        if not isinstance(comment, dict):
+            continue
+        basis = parse_self_approval(comment.get("body") or "")
+        if basis is None:
+            continue
+        found.append({
+            "basis": basis,
+            "at": parse_time(comment.get("createdAt")),
+        })
+    return found
+
+
+def unattended_approvals(
+    items: Iterable[Item], now: datetime
+) -> List[Dict[str, object]]:
+    """Recent agent Ready transitions carrying their own approval marker.
+
+    Status history is already part of the Project load. Only items with a
+    recent Ideas/Shaped-to-Ready candidate pay for an issue-comment lookup,
+    and a record is emitted only when the marker is present. That makes a
+    Nate-authored ``approve`` transition invisible here without reading every
+    issue's comments.
+    """
+    found: List[Dict[str, object]] = []
+    for item in items:
+        transition_times = _self_approval_transition_times(item, now)
+        if not transition_times:
+            continue
+        markers = _self_approval_markers(item)
+        if not markers:
+            continue
+
+        used: Set[int] = set()
+        for at in transition_times:
+            matched = None
+            for index, marker in enumerate(markers):
+                if index in used:
+                    continue
+                marker_at = marker.get("at")
+                if isinstance(marker_at, datetime) and marker_at < at:
+                    continue
+                matched = (index, marker)
+                break
+            if matched is None:
+                continue
+            index, marker = matched
+            used.add(index)
+            found.append({
+                "ref": item.ref,
+                "title": item.title,
+                "url": item.url,
+                "at": at.isoformat(),
+                "basis": marker["basis"],
+            })
+
+    return sorted(found, key=lambda row: (row["at"], row["ref"]), reverse=True)
 
 
 def agent_health(now: datetime) -> List[Dict[str, str]]:
@@ -3626,7 +3759,7 @@ query($login: String!, $number: Int!, $cursor: String) {
                 nodes {
                   __typename
                   ... on ProjectV2ItemStatusChangedEvent {
-                    createdAt status project { number }
+                    createdAt previousStatus status project { number }
                   }
                   ... on LabeledEvent {
                     createdAt label { name }
@@ -3833,7 +3966,8 @@ def _from_node(node: dict) -> Optional[Item]:
     # actually holds, in *this* project. Events arrive oldest-first, and an
     # issue may sit in several projects — filtering on the project is what stops
     # time-at-gate being silently wrong.
-    for event in content["timelineItems"]["nodes"]:
+    timeline_nodes = ((content.get("timelineItems") or {}).get("nodes") or [])
+    for event in timeline_nodes:
         if not event:
             continue
         label = (event.get("label") or {}).get("name")
@@ -3845,6 +3979,14 @@ def _from_node(node: dict) -> Optional[Item]:
             continue
         if (event.get("project") or {}).get("number") != PROJECT_NUMBER:
             continue
+        if event.get("__typename") == "ProjectV2ItemStatusChangedEvent":
+            at = parse_time(event.get("createdAt"))
+            if at is not None:
+                item.status_events.append({
+                    "previous_status": event.get("previousStatus"),
+                    "status": event.get("status"),
+                    "at": at,
+                })
         if event.get("status") == status:
             item.status_since = parse_time(event.get("createdAt"))
     return item
@@ -5028,6 +5170,7 @@ def cmd_brief(
         "maintenance_load": maintenance_load(items, now),
         "resend_ratio": recent_resend_ratio(now),
         "unattended_merges": unattended_merges(now),
+        "unattended_approvals": unattended_approvals(items, now),
         "agent_health": agent_health(now),
         "working_tree_touched": working_tree_touched(now),
         "rejected_merges": rejected_merges(items, now),
@@ -5569,6 +5712,17 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
                field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, status))
     subprocess.run(["gh", "issue", "edit", str(item.number), "--repo", item.repo,
                     "--remove-label", "needs-shaping"], capture_output=True)
+    if status == "Ready":
+        basis = "{}; no escalated risk".format(reason)
+        comment = subprocess.run(
+            ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+             "--body", self_approval_comment(
+                 basis, at=now, run=run, agent=agent
+             )],
+            capture_output=True, text=True,
+        )
+        if comment.returncode != 0:
+            raise GitHubError(comment.stderr.strip())
     print("{} → {}\n{}".format(item.ref, status, item.url))
     if status == "Ready":
         print("advanced to Ready: {}".format(reason))

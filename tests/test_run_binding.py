@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,8 +21,11 @@ import funnel  # noqa: E402
 import heartbeat  # noqa: E402
 
 
-def _start(run, agent="codex", ts=100):
-    return {"run": run, "agent": agent, "phase": "start", "ts": ts}
+def _start(run, agent="codex", ts=100, session_id=None):
+    record = {"run": run, "agent": agent, "phase": "start", "ts": ts}
+    if session_id is not None:
+        record["session_id"] = session_id
+    return record
 
 
 def _bind(run, do, work, agent="codex", ts=101):
@@ -151,6 +155,45 @@ def test_two_overlapping_starts_each_finish_under_their_own_id(spool):
     assert heartbeat.main(["finish", "--agent", "muse", "--run", "a",
                            "--outcome", "done", "--merged", "96"]) == 0
     assert [r["run"] for r in spool["appended"]] == ["b", "a"]
+
+
+def test_same_session_rebegin_closes_only_its_open_bound_start(
+        spool, monkeypatch):
+    spool["records"] = [
+        _start("old", ts=100, session_id="session-a"),
+        _bind("old", "ticket", "o/r#9", ts=101),
+        _start("other-session", ts=110, session_id="session-b"),
+        _bind("other-session", "ticket", "o/r#10", ts=111),
+        _start("other-agent", agent="muse", ts=120, session_id="session-a"),
+        _bind("other-agent", "ticket", "o/r#11", agent="muse", ts=121),
+    ]
+    monkeypatch.setattr(heartbeat, "session_id", lambda agent: "session-a")
+    monkeypatch.setattr(
+        heartbeat.uuid, "uuid4",
+        lambda: SimpleNamespace(hex="fresh-run-id-0000"),
+    )
+
+    def append(agent, record):
+        spool["records"].append(record)
+        spool["appended"].append(record)
+        return "spooled"
+
+    monkeypatch.setattr(heartbeat, "append", append)
+
+    assert heartbeat.main(["start", "--agent", "codex"]) == 0
+
+    close, fresh = spool["appended"]
+    assert close["phase"] == "finish"
+    assert close["run"] == "old"
+    assert close["outcome"] == "skipped-blocked"
+    assert close["re_begun_by"] == "fresh-run-id"
+    assert "fresh-run-id" in close["note"]
+    assert fresh["phase"] == "start"
+    assert fresh["run"] == "fresh-run-id"
+    assert fresh["session_id"] == "session-a"
+
+    open_runs = [row["run"] for row in heartbeat.open_starts(spool["records"])]
+    assert open_runs == ["other-session", "other-agent", "fresh-run-id"]
 
 
 def test_an_omitted_id_with_one_open_start_still_resolves(spool):

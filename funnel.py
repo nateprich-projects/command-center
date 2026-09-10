@@ -3962,6 +3962,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         checks.append(check_class_assignments(items))
         checks.append(check_block_comments(items))
         checks.append(check_block_conditions(items))
+        checks.append(check_prose_dependencies(items))
         checks.append(check_suspected_human_steps(items))
     return checks
 
@@ -4853,7 +4854,8 @@ def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
 
 PROSE_DEPENDENCY_RE = re.compile(
     r"\b(?:depends\s+on|blocked\s+on)\s+"
-    r"(?P<references>#[0-9]+(?:\s*(?:,|and)\s*#[0-9]+)*)"
+    r"(?P<references>#[0-9]+(?:\s*(?:,|and)\s*#[0-9]+)*"
+    r"|(?P<unnumbered>(?![^.!?]*#[0-9]+)[^.!?]+))"
     r"|\bafter\s+(?P<after>#[0-9]+)\s+lands\b"
     r"|\b(?:until|requires)\s+(?P<single>#[0-9]+)\b",
     re.IGNORECASE,
@@ -4890,7 +4892,7 @@ def _prose_dependency_sentences(body: str) -> Iterable[Tuple[str, List[str]]]:
                 or match.group("after")
                 or match.group("single")
             )
-            yield sentence, re.findall(r"#[0-9]+", references)
+            yield sentence, re.findall(r"#[0-9]+", references or "")
 
 
 def prose_dependencies(items: Iterable[Item]) -> List[Dict[str, object]]:
@@ -4914,6 +4916,19 @@ def prose_dependencies(items: Iterable[Item]) -> List[Dict[str, object]]:
             for value in item.open_blockers
         }
         for sentence, numbers in _prose_dependency_sentences(item.body or ""):
+            if not numbers:
+                # An unnumbered dependency cannot be matched to one edge. It
+                # is reportable only while the ticket has no native dependency
+                # at all; the repair run reads the sentence before choosing
+                # which blocker to write.
+                if native or item.dead_blockers:
+                    continue
+                found.append({
+                    "ref": item.ref,
+                    "names": [],
+                    "sentence": sentence,
+                })
+                continue
             names: List[str] = []
             for number in numbers:
                 ref = item.repo + number
@@ -4934,6 +4949,27 @@ def prose_dependencies(items: Iterable[Item]) -> List[Dict[str, object]]:
                 })
 
     return sorted(found, key=lambda row: row["ref"])
+
+
+def prose_dependency_findings(items: Iterable[Item]) -> List[str]:
+    """Render the shared prose-dependency rows for ``funnel doctor``."""
+    findings = []
+    for row in prose_dependencies(items):
+        names = row["names"]
+        if names:
+            detail = "missing native blocked_by edge for {}: {}".format(
+                ", ".join(names), row["sentence"]
+            )
+        else:
+            detail = "unnumbered dependency: {}".format(row["sentence"])
+        findings.append("{}: {}".format(row["ref"], detail))
+    return findings
+
+
+def check_prose_dependencies(items: Iterable[Item]) -> Check:
+    """Build the report-only prose-dependency doctor check."""
+    findings = prose_dependency_findings(items)
+    return Check("prose dependencies", not findings, "\n".join(findings), "")
 
 
 def has_proposed_class(plan: str) -> bool:

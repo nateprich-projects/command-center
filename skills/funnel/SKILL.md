@@ -52,7 +52,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `closed_itself` | Projects the funnel closed in the recent named window, newest first, with the drift recorded at close |
 | `cleared_blocks` | Tickets whose fully parsed conditions all closed and whose `blocked` label the funnel mechanically cleared in the last seven days |
 | `awaiting_breakdown` | Approved plans with no tickets yet. Claude owes these a breakdown; they are not startable until it happens |
-| `prose_dependencies` | Open tickets whose dependency sentence names an open issue without a matching native `blocked_by` edge. Each row carries the ticket `ref`, named issue `names`, and original `sentence`; diagnostic only |
+| `prose_dependencies` | Open tickets whose recognised dependency sentence has no matching native `blocked_by` edge. Numbered sentences carry the open named issue refs in `names`; unnumbered `Depends on` or `Blocked on` sentences carry `names: []`; every row carries the ticket `ref` and original `sentence`; diagnostic only |
 | `unattended_merges` | Merges an agent made without him, read from every live reviewer's heartbeat records (retired agents excluded); each record carries `pr`, `at`, `note` and the `agent` that merged. `plan.md` makes these appearing in the brief a condition of unattended merging being allowed at all |
 | `unattended_approvals` | Recent plans moved to `Ready` by the unattended shaping path, with each row's issue `ref`, title, URL, transition time `at`, and stated `basis`; a marker-backed record, not a notification or review request |
 | `agent_health` | Raised watchdog conditions, each with the heartbeat agent and the watchdog's condition wording. Empty when all agents are healthy |
@@ -123,8 +123,10 @@ entries are for Nate to class. This is a diagnostic, not a decision request; do 
 it to either count.
 
 `prose_dependencies` is also report-only. For each row, show the ticket ref, the named
-open issue refs, and the sentence that produced them. Do not write a native edge while
-rendering the brief; the separate backfill ticket owns that action.
+open issue refs, and the sentence that produced them. For an unnumbered row, show the
+empty `names` list and make clear that a person must read the sentence before choosing
+an edge. Do not write a native edge while rendering the brief; the separate backfill
+ticket owns that action.
 
 Offer the `launch` command for the top item. Do not run it.
 

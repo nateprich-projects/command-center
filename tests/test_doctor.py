@@ -850,10 +850,10 @@ def test_doctor_includes_class_assignment_dump_with_loaded_items(monkeypatch):
     ])
 
     assert [check.name for check in checks][-5:] == [
-        "item consistency", "Class assignments", "block comments",
-        "block conditions", "suspected human steps",
+        "Class assignments", "block comments", "block conditions",
+        "prose dependencies", "suspected human steps",
     ]
-    assert checks[-4].found == "owner/repo#1 | issue number 1 | Class Broken"
+    assert checks[-5].found == "owner/repo#1 | issue number 1 | Class Broken"
 
 
 def test_doctor_reports_unparseable_block_comments_with_loaded_items(monkeypatch):
@@ -870,7 +870,7 @@ def test_doctor_reports_unparseable_block_comments_with_loaded_items(monkeypatch
         ),
     ])
 
-    result = checks[-3]
+    result = checks[-4]
     assert result == funnel.Check(
         "block comments", False,
         "owner/repo#7: **Blocked on #77, 2026-09-07.** Legacy format.",
@@ -900,6 +900,40 @@ def test_doctor_reports_reference_less_human_step_without_writing(monkeypatch):
     assert result == funnel.Check(
         "suspected human steps", False,
         "owner/repo#8: suspected human step (entering a credential)",
+        "",
+    )
+
+
+def test_doctor_reports_the_shared_prose_dependency_rows(monkeypatch):
+    stub_heartbeat_checks(monkeypatch)
+    stub_github_checks(monkeypatch)
+
+    blocker = funnel.Item(
+        repo="owner/repo", number=7, title="pricing-watch", url="",
+        state="OPEN",
+    )
+    unnumbered = funnel.Item(
+        repo="owner/repo", number=8, title="watch job", url="", state="OPEN",
+        parent="owner/repo#99",
+        body="Depends on the pricing-watch ticket having landed",
+    )
+    with_edge = funnel.Item(
+        repo="owner/repo", number=9, title="repaired job", url="", state="OPEN",
+        parent="owner/repo#99",
+        body="Depends on the pricing-watch ticket having landed",
+        open_blockers=[blocker.ref],
+    )
+
+    result = next(
+        check for check in funnel.doctor_checks(
+            items=[with_edge, unnumbered, blocker]
+        ) if check.name == "prose dependencies"
+    )
+
+    assert result == funnel.Check(
+        "prose dependencies", False,
+        "owner/repo#8: unnumbered dependency: "
+        "Depends on the pricing-watch ticket having landed",
         "",
     )
 

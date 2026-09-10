@@ -57,6 +57,7 @@ def _allow_begin(monkeypatch):
         "pace",
         lambda reading, timestamp, provider: {"over_pace": False},
     )
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda rows: {})
 
 
 def _routine(tmp_path, body, filename="zcode.md"):

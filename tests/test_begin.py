@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -36,6 +36,7 @@ def _allow_begin(monkeypatch):
         "pace",
         lambda reading, timestamp, provider: {"over_pace": False},
     )
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda rows: {})
 
 
 def _begin(monkeypatch, capsys, *, breakdown):
@@ -72,10 +73,13 @@ def _ticket(number, parent, *, body="Risk: standard", klass="Improve",
 
 
 def _codex_begin(monkeypatch, capsys, items, *, tier="standard",
-                 repo_readiness=None):
+                 repo_readiness=None, pr_facts=None):
     _allow_begin(monkeypatch)
     monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+    monkeypatch.setattr(
+        funnel, "ticket_pr_facts", lambda rows: pr_facts or {}
+    )
     bodies = {item.number: item.body for item in items}
     monkeypatch.setattr(
         funnel, "_ticket_body", lambda repo, number: bodies.get(number) or ""
@@ -512,6 +516,7 @@ def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
         usage, "pace", lambda reading, timestamp, provider: {"over_pace": False}
     )
     monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda rows: {})
     monkeypatch.setattr(
         funnel,
         "clear_satisfied_blocks",
@@ -586,6 +591,31 @@ def test_codex_begin_allows_broken_preemption_at_the_wip_limit(
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == ticket.ref
     assert [ref for ref, value in writes if value] == [ticket.ref]
+
+
+def test_codex_begin_takes_over_the_five_branchless_claims(monkeypatch, capsys):
+    items = []
+    claims = []
+    for index, number in enumerate((221, 214, 223, 224, 301)):
+        project, claimed_ticket = _ticket(
+            number,
+            500 + index,
+            in_motion_since=NOW - timedelta(minutes=31 + index),
+        )
+        items.extend((project, claimed_ticket))
+        claims.append(claimed_ticket)
+    facts = {item.ref: None for item in claims}
+
+    result, writes = _codex_begin(
+        monkeypatch, capsys, items, pr_facts=facts
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] in facts
+    assert {ref for ref, value in writes if not value} == (
+        set(facts) - {result["work"]["ref"]}
+    )
+    assert [ref for ref, value in writes if value] == [result["work"]["ref"]]
 
 
 def test_codex_begin_reports_repo_readiness_when_work_is_withheld(

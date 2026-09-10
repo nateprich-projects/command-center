@@ -722,6 +722,55 @@ def test_a_claim_past_the_ttl_is_stale_and_takeable():
     assert [i.number for i in stale_locks([stale], NOW)] == [1]
 
 
+def test_a_31_minute_claim_without_a_ticket_branch_is_stale():
+    claimed_ticket = ticket(1, 9, in_motion_since=claimed(31))
+    facts = {claimed_ticket.ref: None}
+
+    assert funnel.in_motion([claimed_ticket], NOW, pr_facts=facts) == []
+    assert stale_locks([claimed_ticket], NOW, pr_facts=facts) == [claimed_ticket]
+
+
+def test_a_31_minute_claim_with_a_ticket_branch_is_live():
+    claimed_ticket = ticket(1, 9, in_motion_since=claimed(31))
+    facts = {claimed_ticket.ref: {"branch_exists": True}}
+
+    assert funnel.in_motion([claimed_ticket], NOW, pr_facts=facts) == [
+        claimed_ticket
+    ]
+    assert stale_locks([claimed_ticket], NOW, pr_facts=facts) == []
+
+
+def test_a_20_minute_claim_without_a_ticket_branch_is_live():
+    claimed_ticket = ticket(1, 9, in_motion_since=claimed(20))
+    facts = {claimed_ticket.ref: None}
+
+    assert funnel.in_motion([claimed_ticket], NOW, pr_facts=facts) == [
+        claimed_ticket
+    ]
+    assert stale_locks([claimed_ticket], NOW, pr_facts=facts) == []
+
+
+def test_the_two_hour_ttl_stays_stale_even_with_a_ticket_branch():
+    claimed_ticket = ticket(1, 9, in_motion_since=claimed(180))
+    facts = {claimed_ticket.ref: {"branch_exists": True}}
+
+    assert funnel.in_motion([claimed_ticket], NOW, pr_facts=facts) == []
+    assert stale_locks([claimed_ticket], NOW, pr_facts=facts) == [claimed_ticket]
+
+
+def test_the_five_ghost_claims_replay_as_five_takeovers():
+    claims = [
+        ticket(number, 9, in_motion_since=claimed(31 + offset))
+        for offset, number in enumerate((221, 214, 223, 224, 301))
+    ]
+    facts = {item.ref: None for item in claims}
+
+    assert {item.number for item in stale_locks(claims, NOW, pr_facts=facts)} == {
+        221, 214, 223, 224, 301,
+    }
+    assert funnel.in_motion(claims, NOW, pr_facts=facts) == []
+
+
 def test_assignment_no_longer_has_anything_to_do_with_the_lock():
     """Codex acts as Nate, so an assignment says nothing about who is working."""
     rows = [project(1, "Building", "New"), ticket(2, 1, assignees=["nateprich"])]
@@ -891,6 +940,7 @@ def test_next_cli_accepts_repeatable_not_filters(monkeypatch, capsys):
     ]
     monkeypatch.setattr(funnel, "load_items", lambda: rows)
     monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda items: {})
     monkeypatch.setattr(
         funnel,
         "repo_readiness_for_items",
@@ -922,6 +972,7 @@ def test_next_cli_filters_machine_local_work_by_requesting_agent(
     ]
     monkeypatch.setattr(funnel, "load_items", lambda: rows)
     monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda items: {})
     monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: rows[1].body)
     monkeypatch.setattr(
         funnel,

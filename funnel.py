@@ -3980,11 +3980,24 @@ _GRAPHQL_SPEND: Dict[str, object] = {
     "calls": 0, "cost": 0, "remaining": None, "reset_at": None,
 }
 
+#: Number of GraphQL responses whose own rate-limit block exposed a usable
+#: integer `cost`.  A zero cost is a real measurement; a missing block is not.
+#: Keep this separate from `_GRAPHQL_SPEND` so the existing doctor/report
+#: contract remains unchanged while a heartbeat finish can fail closed on an
+#: unreadable point total.
+_GRAPHQL_COST_READS = 0
+
 #: Every attempted `gh` call in the current funnel command, split at the
 #: boundary where the response can expose a cost.  GraphQL gives us a true
 #: per-query point cost; the `gh` CLI does not expose one, so its calls remain
 #: visible as a separate count rather than being assigned a guessed cost.
 _API_USAGE: Dict[str, int] = {"graphql_calls": 0, "cli_calls": 0}
+
+#: The parsed command's optional provenance values, used only by the process
+#: exit hook below.  Commands without `--run` still resolve an unambiguous open
+#: heartbeat start through `_heartbeat_context`.
+_ACTIVE_HEARTBEAT_RUN: Optional[str] = None
+_ACTIVE_HEARTBEAT_AGENT: Optional[str] = None
 
 #: Once one response says the GraphQL route is exhausted, every later
 #: GraphQL-backed call in this process is refused without being attempted.
@@ -4067,10 +4080,12 @@ def graphql_spend() -> Dict[str, object]:
 
 def reset_api_usage() -> None:
     """Start a fresh per-command API measurement."""
+    global _GRAPHQL_COST_READS
     _API_USAGE.update({"graphql_calls": 0, "cli_calls": 0, "refused_exhausted": 0})
     _GRAPHQL_SPEND.update(
         {"calls": 0, "cost": 0, "remaining": None, "reset_at": None}
     )
+    _GRAPHQL_COST_READS = 0
 
 
 def api_usage() -> Dict[str, object]:
@@ -4087,6 +4102,29 @@ def api_usage() -> Dict[str, object]:
         "remaining": spend["remaining"],
         "reset_at": spend["reset_at"],
     }
+
+
+def api_cost() -> Dict[str, Optional[int]]:
+    """Return the two per-command measurements used by heartbeat records.
+
+    GraphQL points are known only when every attempted GraphQL response exposed
+    an integer `rateLimit.cost`; a missing block is reported as ``None`` rather
+    than the misleading zero held by the doctor counter.  The total `gh_calls`
+    value is the same call count used by the API-scaling guard: every actual
+    invocation through `_run_gh`, whether GraphQL or another `gh` command.
+    A command with no calls has no measurement at all and returns two nulls.
+    """
+    usage = api_usage()
+    calls = int(usage["calls"])
+    if not calls:
+        return {"graphql_points": None, "gh_calls": None}
+
+    graphql_calls = int(usage["graphql_calls"])
+    if not graphql_calls or _GRAPHQL_COST_READS == graphql_calls:
+        points = int(usage["cost"])
+    else:
+        points = None
+    return {"graphql_points": points, "gh_calls": calls}
 
 
 def _run_gh(args: Sequence[str], **kwargs):
@@ -4119,11 +4157,13 @@ def _record_rate_limit(block: object) -> None:
     `gh` use and every other agent on it. A delta would attribute their spend
     to the funnel.
     """
+    global _GRAPHQL_COST_READS
     _GRAPHQL_SPEND["calls"] = int(_GRAPHQL_SPEND["calls"]) + 1
     if not isinstance(block, dict):
         return
     cost = block.get("cost")
     if isinstance(cost, int) and not isinstance(cost, bool):
+        _GRAPHQL_COST_READS += 1
         _GRAPHQL_SPEND["cost"] = int(_GRAPHQL_SPEND["cost"]) + cost
     remaining = block.get("remaining")
     if isinstance(remaining, int) and not isinstance(remaining, bool):
@@ -7992,6 +8032,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             and args.klass is None):
         parser.error("--class is required with --origin agent")
 
+    global _ACTIVE_HEARTBEAT_RUN, _ACTIVE_HEARTBEAT_AGENT
+    _ACTIVE_HEARTBEAT_RUN = getattr(args, "run", None)
+    _ACTIVE_HEARTBEAT_AGENT = getattr(args, "agent", None)
+
     # A process normally serves one CLI command. Resetting here also keeps
     # repeated `main()` calls in tests from blending two commands' readings.
     reset_api_usage()
@@ -8093,6 +8137,33 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
 
+def report_api_cost(run: Optional[str] = None,
+                    agent: Optional[str] = None) -> None:
+    """Append this command's API measurements to its open heartbeat run.
+
+    This is best-effort telemetry. The command must still return its real
+    result when the heartbeat spool or GitHub is unavailable, so every failure
+    here is deliberately swallowed; `heartbeat finish` will then report nulls
+    for the missing measurement.
+    """
+    if not api_usage()["calls"]:
+        return
+    try:
+        run, agent = _heartbeat_context(
+            run if run is not None else _ACTIVE_HEARTBEAT_RUN,
+            agent if agent is not None else _ACTIVE_HEARTBEAT_AGENT,
+        )
+        if not run or not agent:
+            return
+        import heartbeat
+
+        heartbeat.record_api_cost(agent, run, api_cost())
+    except Exception:
+        # Instrumentation must not gate the command it instruments.  The
+        # absence of this event is represented by nulls at heartbeat finish.
+        return
+
+
 def report_graphql_spend(stream=None) -> None:
     """Print what this process spent on GraphQL, if it spent anything.
 
@@ -8117,6 +8188,7 @@ if __name__ == "__main__":
     try:
         code = main()
     finally:
+        report_api_cost()
         # In a `finally` so a run that dies on an exhausted budget still says
         # what it spent — that run is exactly the one whose numbers matter.
         report_graphql_spend()

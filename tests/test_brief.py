@@ -422,6 +422,29 @@ def test_brief_surfaces_blocked_projects_and_tickets_oldest_first(
     assert calls == []
 
 
+def test_brief_carries_breakdown_question_on_decision_and_blocked_rows(
+    monkeypatch, capsys
+):
+    item = funnel.Item(
+        repo="nateprich/beta", number=36, title="Needs an answer",
+        url="https://example.invalid/36", state="OPEN", status="Ready",
+        status_since=NOW - timedelta(days=1), labels=["blocked"],
+        needs_decision="Where should this connector live?",
+    )
+
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["items"][0]["needs_decision"] == (
+        "Where should this connector live?"
+    )
+    assert brief["blocked"][0]["needs_decision"] == (
+        "Where should this connector live?"
+    )
+
+
 def test_brief_surfaces_suspected_human_steps_separately(
     monkeypatch, capsys
 ):

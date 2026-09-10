@@ -77,3 +77,15 @@ def test_blocked_finish_example_names_all_three_declined_refs():
     )
 
     assert finish in body
+
+
+def test_human_step_stop_uses_only_the_human_step_outcome():
+    body = routine()
+    start = body.index("### Mid-work discovery: convert, record, stop")
+    end = body.index("## 4. Open a pull request")
+    handoff = body[start:end]
+
+    assert handoff.count("--outcome skipped-human-step") == 1
+    assert "--outcome errored" not in handoff
+    assert "`skipped-human-step` outcome records" in handoff
+    assert 'finish with `--outcome errored --note "<what broke>"`' in body

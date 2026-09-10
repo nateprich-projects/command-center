@@ -42,6 +42,16 @@ def finish(run, at, outcome="done"):
             "ts": int(at), "outcome": outcome}
 
 
+def api_event(run, graphql_points, gh_calls, at=NOW):
+    return {
+        "run": run, "agent": "claude", "phase": "api_cost", "ts": int(at),
+        "api_cost": {
+            "graphql_points": graphql_points,
+            "gh_calls": gh_calls,
+        },
+    }
+
+
 def unresolved(at, candidates, outcome="done"):
     return {"run": None, "agent": "claude", "phase": "finish", "ts": int(at),
             "outcome": outcome, "unresolved": True, "candidates": candidates}
@@ -211,6 +221,95 @@ def test_finish_omits_input_usage_when_harness_does_not_expose_both_counts(
         "--outcome", "done",
     ]) == 0
     assert "input_usage" not in records[0]
+
+
+def test_finish_sums_api_cost_events_from_two_funnel_commands(monkeypatch):
+    records = [
+        start("run-id", NOW),
+        api_event("run-id", 7, 2),
+        api_event("run-id", 5, 3),
+    ]
+    written = []
+    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(heartbeat, "input_usage", lambda agent: None)
+    monkeypatch.setattr(
+        heartbeat, "append",
+        lambda agent, record: written.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    assert heartbeat.main([
+        "finish", "--agent", "claude", "--run", "run-id",
+        "--outcome", "done",
+    ]) == 0
+
+    assert written[0]["api_cost"] == {
+        "graphql_points": 12,
+        "gh_calls": 5,
+    }
+
+
+def test_finish_reports_null_api_cost_without_funnel_commands(monkeypatch):
+    records = [start("run-id", NOW)]
+    written = []
+    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(heartbeat, "input_usage", lambda agent: None)
+    monkeypatch.setattr(
+        heartbeat, "append",
+        lambda agent, record: written.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    assert heartbeat.main([
+        "finish", "--agent", "claude", "--run", "run-id",
+        "--outcome", "done",
+    ]) == 0
+
+    assert written[0]["api_cost"] == {
+        "graphql_points": None,
+        "gh_calls": None,
+    }
+
+
+def test_finish_keeps_only_unreadable_api_cost_field_null(monkeypatch):
+    records = [start("run-id", NOW), api_event("run-id", None, 2)]
+    written = []
+    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(heartbeat, "input_usage", lambda agent: None)
+    monkeypatch.setattr(
+        heartbeat, "append",
+        lambda agent, record: written.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    assert heartbeat.main([
+        "finish", "--agent", "claude", "--run", "run-id",
+        "--outcome", "done",
+    ]) == 0
+
+    assert written[0]["api_cost"] == {
+        "graphql_points": None,
+        "gh_calls": 2,
+    }
+
+
+def test_heartbeat_read_includes_api_cost_events(monkeypatch, capsys):
+    monkeypatch.setattr(
+        heartbeat, "read",
+        lambda agent: [api_event("run-id", 4, 1)],
+    )
+
+    assert heartbeat.main(["read", "--agent", "claude"]) == 0
+    assert '"api_cost"' in capsys.readouterr().out
 
 
 def test_finish_rejects_an_unknown_outcome():

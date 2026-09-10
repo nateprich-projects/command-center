@@ -141,21 +141,28 @@ merge either decision section into the other or use the decision headings for op
 questions.
 
 "Needs you" (or the existing "Needs Nate" spelling) is **not** answered by an empty
-section. Write one explicit answer under each category, even when the answer is that
-nothing is outstanding:
+section. Put the answer first on each category line. When all four categories are
+clear, use this exact form:
 
-- **Exposure** — credentials, internet-reachable surface, and what an unattended run may
-  touch.
-- **Gates** — anything touching a gate or who may write one.
-- **Scope and priority** — whether to build it at all, and how much.
-- **Preference** — anything the plan would encode as preference rather than deduction.
+```text
+- Exposure: nothing outstanding. No new credentials or reachable surface.
+- Gates: nothing outstanding. No gate ownership changes.
+- Scope and priority: nothing outstanding. The scoped change is documented.
+- Preference: nothing outstanding. No user-facing choice remains.
+```
 
-An absent category is unanswered, not clear. State the open question instead of inventing
-an answer; otherwise write an explicit "nothing outstanding" answer. These four answers
-are claims for the verifier to check against the rest of the plan. If the plan implies a
-gate concern that the section says is clear, the agent has made a **recorded wrong claim**
-rather than a silent omission, which makes the miss findable afterwards. #84's own
-"Needs Nate" section is the worked example: use its four explicit answers as the model.
+The bare answer must be `nothing outstanding`; any elaboration follows after a
+period. When a category is open, replace that answer with the question itself in
+one sentence, for example `- Gates: Who may write Ready for an all-clear plan?`.
+An absent category is unanswered, not clear. These four answers are claims for the
+verifier to check against the rest of the plan. If the plan implies a gate concern
+that the section says is clear, the agent has made a **recorded wrong claim** rather
+than a silent omission, which makes the miss findable afterwards. #84's own
+"Needs Nate" section is the worked example: use its four category lines as the model.
+
+When all four categories are clear, a self-approvable Class with `agent` origin
+advances to `Ready` and gets a `Self-approved:` marker that `funnel brief` shows.
+Any other case stays at `Shaped`, with the reason printed.
 
 If an idea genuinely turns on his judgement, **grill him** rather than writing the
 plan at him. Prefer his local `grilling` skill if it is installed

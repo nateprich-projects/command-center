@@ -134,6 +134,62 @@ def test_api_usage_counts_cli_calls_separately_from_graphql(monkeypatch):
     }
 
 
+def test_api_cost_keeps_points_and_all_gh_calls_separate(monkeypatch):
+    reset()
+
+    def run(args, **kwargs):
+        if args[:3] == ["gh", "api", "graphql"]:
+            return Proc({
+                "data": {
+                    "rateLimit": {"cost": 7, "remaining": 4993,
+                                   "resetAt": "z"},
+                }
+            })
+        return Proc({"items": []})
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    funnel.gh_graphql("{viewer{login}}")
+    funnel._gh_json("gh", "pr", "list")
+
+    assert funnel.api_cost() == {"graphql_points": 7, "gh_calls": 2}
+
+
+def test_api_cost_marks_unreadable_graphql_points_null(monkeypatch):
+    reset()
+    monkeypatch.setattr(funnel.subprocess, "run",
+                        lambda *a, **k: Proc({"data": {"viewer": {}}}))
+
+    funnel.gh_graphql("{viewer{login}}")
+
+    assert funnel.api_cost() == {"graphql_points": None, "gh_calls": 1}
+
+
+def test_report_api_cost_attaches_measurement_to_the_resolved_run(monkeypatch):
+    reset()
+    funnel._API_USAGE["graphql_calls"] = 1
+    funnel._API_USAGE["cli_calls"] = 2
+    funnel._GRAPHQL_SPEND.update({"calls": 1, "cost": 7})
+    funnel._GRAPHQL_COST_READS = 1
+    captured = []
+
+    monkeypatch.setattr(
+        funnel, "_heartbeat_context",
+        lambda run, agent: (run or "run-id", agent or "codex"),
+    )
+    import heartbeat
+    monkeypatch.setattr(
+        heartbeat, "record_api_cost",
+        lambda agent, run, cost: captured.append((agent, run, cost)),
+    )
+
+    funnel.report_api_cost(run="run-id", agent="codex")
+
+    assert captured == [(
+        "codex", "run-id", {"graphql_points": 7, "gh_calls": 3}
+    )]
+
+
 def test_doctor_api_usage_uses_graphql_remaining_and_never_rest(monkeypatch, capsys):
     def run(args, **kwargs):
         assert args[:3] == ["gh", "api", "graphql"]

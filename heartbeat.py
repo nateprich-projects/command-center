@@ -74,6 +74,11 @@ OUTCOMES = [
     "errored",             # tried and failed
 ]
 
+#: The per-command GitHub measurements funnel records as non-terminal events.
+#: Keep the names here so finish can aggregate each budget independently and
+#: never turn an unreadable value into zero.
+API_COST_FIELDS = ("graphql_points", "gh_calls")
+
 
 #: Which pool an agent spends. Deliberately separate from the model: routing will
 #: put more than one model on a pool, and the budget is per pool.
@@ -919,6 +924,7 @@ def main(argv=None) -> int:
             "human_intervention_required": args.human_intervention or None,
             "repo": repo_state(),
             "runtime": runtime_state(),
+            "api_cost": api_cost_for_run(records, run_id),
             **detect_model(args.agent),
         }
         metric = input_usage(args.agent)

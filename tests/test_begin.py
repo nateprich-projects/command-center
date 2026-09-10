@@ -126,6 +126,37 @@ def _reconcile_begin(monkeypatch, capsys, items, rows, verdicts, merge_result=0)
     return json.loads(capsys.readouterr().out), calls
 
 
+def test_begin_keeps_merge_and_status_reconciles_in_separate_keys(
+    monkeypatch, capsys
+):
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(
+        funnel,
+        "reconcile_approved_merges",
+        lambda *args: [{"ref": "nateprich/example#70", "result": "merged"}],
+    )
+    monkeypatch.setattr(
+        funnel,
+        "reconcile_closed_items",
+        lambda *args: ["nateprich/example#71"],
+    )
+    monkeypatch.setattr(funnel, "reconcile_auto_closeable_projects", lambda *args: [])
+    monkeypatch.setattr(funnel, "clear_satisfied_blocks", lambda *args, **kwargs: [])
+    monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+    monkeypatch.setattr(
+        funnel, "next_ticket_for_tier", lambda *args, **kwargs: None
+    )
+
+    assert funnel.cmd_begin([], NOW, "codex", "standard", False) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["reconciled_merges"] == [
+        {"ref": "nateprich/example#70", "result": "merged"}
+    ]
+    assert result["reconciled_statuses"] == ["nateprich/example#71"]
+    assert "reconciled" not in result
+
+
 def test_begin_retries_an_approval_at_the_current_head(monkeypatch, capsys):
     project, ticket = _ticket(7, 6)
     result, calls = _reconcile_begin(
@@ -137,7 +168,7 @@ def test_begin_retries_an_approval_at_the_current_head(monkeypatch, capsys):
     )
 
     assert calls == [(ticket.repo, 70, True)]
-    assert result["reconciled"] == [{
+    assert result["reconciled_merges"] == [{
         "repo": ticket.repo,
         "pr": 70,
         "ref": ticket.ref,
@@ -165,7 +196,7 @@ def test_begin_does_not_retry_an_old_or_rejected_verdict(monkeypatch, capsys):
     )
 
     assert calls == []
-    assert "reconciled" not in result
+    assert "reconciled_merges" not in result
     assert ticket.state == "OPEN"
 
 
@@ -183,7 +214,7 @@ def test_begin_reports_a_merge_gate_refusal_without_closing_the_ticket(
     )
 
     assert calls == [(ticket.repo, 90, True)]
-    assert result["reconciled"] == [{
+    assert result["reconciled_merges"] == [{
         "repo": ticket.repo,
         "pr": 90,
         "ref": ticket.ref,
@@ -249,12 +280,12 @@ def test_begin_reconcile_is_idempotent_when_the_pr_is_no_longer_open(
 
     assert funnel.cmd_begin([project, ticket], NOW, "codex", "standard", False) == 0
     first = json.loads(capsys.readouterr().out)
-    assert first["reconciled"][0]["result"] == "merged"
+    assert first["reconciled_merges"][0]["result"] == "merged"
 
     assert funnel.cmd_begin([project, ticket], NOW, "codex", "standard", False) == 0
     second = json.loads(capsys.readouterr().out)
     assert calls == [110]
-    assert "reconciled" not in second
+    assert "reconciled_merges" not in second
 
 
 def _completed_project(number, *, klass="Improve", children_done=2,
@@ -462,7 +493,7 @@ def test_begin_repairs_closed_terminal_statuses_and_stale_shaping_labels(
         monkeypatch, capsys, items
     )
 
-    assert result["reconciled"] == [completed.ref, parked.ref]
+    assert result["reconciled_statuses"] == [completed.ref, parked.ref]
     assert completed.status == "Done"
     assert parked.status == "Parked"
     assert parked.labels == []
@@ -498,7 +529,7 @@ def test_begin_repairs_closed_terminal_statuses_and_stale_shaping_labels(
         monkeypatch, capsys, items
     )
 
-    assert "reconciled" not in result
+    assert "reconciled_statuses" not in result
     assert not graphql_calls
     assert not [
         call for call in calls

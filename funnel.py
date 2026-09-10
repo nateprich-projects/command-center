@@ -6976,24 +6976,6 @@ def fetch_drift_facts(item: Item) -> DriftFacts:
     )
 
 
-def dependency_facts(repo: str, number: int) -> Dict[str, List[str]]:
-    """Return the dependency states that affect whether a ticket can finish.
-
-    GitHub's endpoint returns full issue objects for both open and closed
-    blockers. Open blockers still belong in the queue's exclusion set. A
-    blocker closed as ``not_planned`` is different: it will never close as the
-    prerequisite the ticket names, so retain that ref for the stranded-work
-    diagnostic without treating it as an ordinary open blocker.
-    """
-    endpoint = "repos/{}/issues/{}/dependencies/blocked_by".format(repo, number)
-    blockers = _gh_json("gh", "api", endpoint)
-    if blockers is None:
-        raise GitHubError("could not read blockers for {}#{}".format(repo, number))
-    if not isinstance(blockers, list):
-        raise GitHubError("invalid blockers response for {}#{}".format(repo, number))
-    return classify_blockers(blockers, repo)
-
-
 def classify_blockers(blockers: Iterable[dict], repo: str) -> Dict[str, List[str]]:
     """Split blocker objects into the two states the funnel acts on.
 
@@ -7022,16 +7004,6 @@ def classify_blockers(blockers: Iterable[dict], repo: str) -> Dict[str, List[str
         elif state_reason == "not_planned":
             refs["dead"].append(ref)
     return refs
-
-
-def open_blockers(repo: str, number: int) -> List[str]:
-    """Return open native dependency blockers for one ticket.
-
-    The public helper keeps its original narrow contract. ``load_items`` uses
-    ``dependency_facts`` directly so the same endpoint read can also preserve
-    blockers that were explicitly parked or marked not planned.
-    """
-    return dependency_facts(repo, number)["open"]
 
 
 def _load_block_comment(item: Item) -> None:

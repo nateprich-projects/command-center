@@ -6210,7 +6210,7 @@ def reconcile_closed_items(items: Sequence[Item]) -> List[str]:
         target = terminal_statuses.get(reason)
         changed = False
 
-        if target is not None and item.status != target:
+        if target is not None and not item.parent and item.status != target:
             if not item.item_id:
                 raise GitHubError(
                     "{} is not in the Project; cannot set Status to {}".format(

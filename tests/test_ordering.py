@@ -62,6 +62,21 @@ def item(number, status=None, klass=None, days=1.0, **kw) -> Item:
     )
 
 
+def repo_project(repo, number, status="Building", klass="New") -> Item:
+    return Item(
+        repo=repo, number=number, title="project {}".format(number), url="",
+        state="OPEN", status=status, klass=klass, status_since=at(1),
+        children_total=1,
+    )
+
+
+def repo_ticket(repo, number, parent) -> Item:
+    return Item(
+        repo=repo, number=number, title="ticket {}".format(number), url="",
+        state="OPEN", parent="{}#{}".format(repo, parent),
+    )
+
+
 # -- Nate's queue: bottom-up ------------------------------------------------
 
 
@@ -224,6 +239,13 @@ def test_ticket_inherits_broken_for_decision_ordering():
     assert [i.number for i in awaiting_decision([parent, child, older])] == [2, 3]
 
 
+def test_ticket_inherits_investigate_for_decision_ordering():
+    parent = project(1, "Ideas", "Investigate")
+    child = item(2, "Shaped", None, days=1, parent=parent.ref)
+    older = project(3, "Shaped", "Broken", days=30)
+    assert [i.number for i in awaiting_decision([parent, child, older])] == [2, 3]
+
+
 def test_a_closed_item_waits_on_nobody():
     assert gate_question(item(1, "Ready", "New", state="CLOSED")) is None
 
@@ -311,14 +333,25 @@ def test_unset_class_sorts_last_and_never_preempts():
 
 
 def test_ladder_is_in_the_documented_order():
-    ranks = [ladder_index(c) for c in ["Broken", "Maintenance", "Improve", "New", "Replace"]]
-    assert ranks == sorted(ranks) and len(set(ranks)) == 5
+    ranks = [ladder_index(c) for c in [
+        "Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"
+    ]]
+    assert ranks == sorted(ranks) and len(set(ranks)) == 6
+
+
+def test_investigate_is_first_without_gaining_preemption_or_self_approval():
+    assert ladder_index("Investigate") == 0
+    assert funnel.PREEMPTING_CLASSES == frozenset({"Broken", "Maintenance"})
+    assert funnel.SELF_APPROVABLE_CLASSES == frozenset(
+        {"Broken", "Maintenance", "Improve"}
+    )
 
 
 def test_anything_past_ideas_must_carry_a_class():
     assert needs_class(item(1, "Shaped", None))
     assert needs_class(item(2, "Ready", None))
     assert needs_class(item(3, "Building", None))
+    assert not needs_class(item(4, "Building", "Investigate"))
 
 
 def test_a_ticket_is_exempt_because_it_inherits():
@@ -354,9 +387,22 @@ def test_ideas_done_and_parked_are_exempt_from_class():
 def test_ladder_orders_what_to_start():
     items = []
     for n, klass in ((1, "Replace"), (2, "Broken"), (3, "New"), (4, "Maintenance"),
-                     (5, "Improve")):
+                     (5, "Improve"), (6, "Investigate")):
         items += [project(n, "Building", klass), ticket(10 + n, n)]
-    assert [i.number for i in startable(items)] == [12, 14, 15, 13, 11]
+    # Finite Broken/Maintenance work preempts in-flight work; Investigate is
+    # first among the non-preempting classes.
+    assert [i.number for i in startable(items)] == [12, 14, 16, 15, 13, 11]
+
+
+def test_an_investigate_ticket_is_startable_without_preempting_broken_work():
+    investigate_parent = project(1, "Building", "Investigate")
+    investigate_ticket = ticket(2, 1)
+    broken_parent = project(3, "Building", "Broken")
+    broken_ticket = ticket(4, 3)
+
+    assert [i.number for i in startable([
+        broken_parent, broken_ticket, investigate_parent, investigate_ticket,
+    ])] == [4, 2]
 
 
 def test_pins_do_not_change_codex_startable_output():
@@ -474,6 +520,41 @@ def test_ready_and_building_parents_are_both_startable():
         [project(1, "Ready", "New"), ticket(2, 1)])] == [2]
     assert [i.number for i in startable(
         [project(1, "Building", "New"), ticket(2, 1)])] == [2]
+
+
+def test_startable_withholds_only_repos_missing_blocking_readiness():
+    no_ci = "owner/no-ci"
+    advisory = "owner/advisory"
+    no_topic = "owner/no-topic"
+    rows = [
+        repo_project(no_ci, 1), repo_ticket(no_ci, 2, 1),
+        repo_project(advisory, 3), repo_ticket(advisory, 4, 3),
+        repo_project(no_topic, 5), repo_ticket(no_topic, 6, 5),
+    ]
+    readiness = {
+        no_ci: funnel.MemberRepoReadiness(
+            no_ci, topic=True, ci_workflow=False,
+            stock_labels=("bug",), dependabot=False,
+        ),
+        advisory: funnel.MemberRepoReadiness(
+            advisory, topic=True, ci_workflow=True,
+            stock_labels=("bug",), dependabot=False,
+        ),
+        no_topic: funnel.MemberRepoReadiness(
+            no_topic, topic=False, ci_workflow=True,
+            stock_labels=(), dependabot=True,
+        ),
+    }
+
+    assert [candidate.ref for candidate in startable(
+        rows, repo_readiness=readiness
+    )] == ["owner/advisory#4"]
+    assert funnel.readiness_blockers(rows, repo_readiness=readiness) == [
+        {"ref": "owner/no-ci#2", "repo": no_ci,
+         "reasons": ["no CI workflow"]},
+        {"ref": "owner/no-topic#6", "repo": no_topic,
+         "reasons": ["missing command-center topic"]},
+    ]
 
 
 def test_shaped_work_is_not_startable():
@@ -699,6 +780,11 @@ def test_maintenance_does_not_preempt_the_limit():
     assert next_ticket(rows, NOW) is None
 
 
+def test_investigate_does_not_preempt_the_limit():
+    rows = _at_limit([project(3, "Building", "Investigate"), ticket(4, 3)])
+    assert next_ticket(rows, NOW) is None
+
+
 def test_broken_does_not_stack_on_broken_work_already_running():
     """Preemption is for getting a fix moving, not for piling fixes on fixes."""
     rows = [project(1, "Building", "Broken"),
@@ -805,6 +891,16 @@ def test_next_cli_accepts_repeatable_not_filters(monkeypatch, capsys):
     ]
     monkeypatch.setattr(funnel, "load_items", lambda: rows)
     monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
+    monkeypatch.setattr(
+        funnel,
+        "repo_readiness_for_items",
+        lambda items: {
+            "nateprich/beta": funnel.MemberRepoReadiness(
+                "nateprich/beta", topic=True, ci_workflow=True,
+                stock_labels=(), dependabot=True,
+            ),
+        },
+    )
 
     assert funnel.main([
         "next", "--not", rows[1].ref, "--not", rows[3].ref,
@@ -827,6 +923,16 @@ def test_next_cli_filters_machine_local_work_by_requesting_agent(
     monkeypatch.setattr(funnel, "load_items", lambda: rows)
     monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
     monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: rows[1].body)
+    monkeypatch.setattr(
+        funnel,
+        "repo_readiness_for_items",
+        lambda items: {
+            rows[0].repo: funnel.MemberRepoReadiness(
+                rows[0].repo, topic=True, ci_workflow=True,
+                stock_labels=(), dependabot=True,
+            ),
+        },
+    )
 
     assert funnel.main(["next", "--agent", "codex"]) == 1
     capsys.readouterr()

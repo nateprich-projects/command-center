@@ -294,3 +294,49 @@ def test_pr_side_strands_are_absent_without_pr_facts():
     assert funnel.stranded_json(
         [project, ticket, closed_ticket], NOW
     ) == []
+
+
+def test_stranded_reports_finished_upkeep_projects_without_acceptance():
+    finished = issue(
+        86,
+        title="Finished upkeep",
+        status="Building",
+        klass="Improve",
+        children_total=5,
+        children_done=5,
+    )
+    carried_human_step = issue(
+        87,
+        title="Upkeep with human step",
+        status="Building",
+        klass="Improve",
+        children_total=5,
+        children_done=5,
+        carried_human_step=True,
+    )
+    new_project = issue(
+        88,
+        title="New project",
+        status="Building",
+        klass="New",
+        children_total=5,
+        children_done=5,
+    )
+    incomplete = issue(
+        89,
+        title="Incomplete upkeep",
+        status="Building",
+        klass="Improve",
+        children_total=5,
+        children_done=4,
+    )
+
+    assert funnel.stranded_json(
+        [finished, carried_human_step, new_project, incomplete], NOW
+    ) == [{
+        "ref": finished.ref,
+        "title": finished.title,
+        "url": finished.url,
+        "reason": "finished upkeep project not closed",
+    }]
+    assert funnel.gate_question(carried_human_step) == "Accept it?"

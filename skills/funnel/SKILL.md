@@ -45,6 +45,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `stranded` | Open items for which no current agent or gate can make progress. Diagnostic only; it does not add to `total_needing_nate` |
 | `working_tree_touched` | Runs during which Nate's own checkout changed. No routine should write it — engineers use their own clones, reviewers are read-only. Reports a *change*, not a crime: him committing mid-run looks the same. A grouped HEAD transition carries an `observers` list of the observing `agent` and `run`; dirty-only rows stay one row per run without that list. Say it plainly when present |
 | `maintenance_load` | `upkeep_share` is the fraction of work closed in the last 30 days that was `Broken` or `Maintenance` |
+| `resend_ratio` | Recent total-input over fresh-input ratio for metered agents (`codex` and `zcode`); agents without usable telemetry are omitted |
 | `human_steps` | Open tickets only Nate can do, with the `reason` each declares. **Work he owes, not a decision he owes** — deliberately outside `total_needing_nate`, the same distinction that keeps `blocked` out. No agent can pick these up: `startable()` excludes them, so this list is the only place they surface |
 | `suspected_human_steps` | Blocked child tickets whose block has no machine-readable condition but whose reason matches the known human-step vocabulary. Diagnostic only: leave the ticket blocked and let Nate decide whether to restate or split it |
 | `parked` | Stopped items with the written reason each carries. The reason is the artifact that makes re-encountering an idea a 30-second decision |
@@ -94,7 +95,7 @@ when he chooses, not a notification and not a request for review.
 Then the gate counts on one line. Then anything unusual, and only if present:
 `prose_dependencies`, `suspected_human_steps`, `unclassed_captures`, `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`,
 `working_tree_touched`,
-`awaiting_breakdown`, `unattended_merges`, `unattended_approvals`, `agent_health`, `rejected_merges`, and
+`awaiting_breakdown`, `unattended_merges`, `unattended_approvals`, `agent_health`, `resend_ratio`, `rejected_merges`, and
 `closed_with_access_vocabulary`. A suspected human step is report-only: do not clear its
 `blocked` label, restate it, or split it while rendering the brief.
 
@@ -130,6 +131,12 @@ is exactly what he should know before saying yes.
 
 `funnel approve` / `accept` answer the two gates. They are **dry runs
 unless `--yes` is passed**.
+
+An investigation that records evidence and produces no follow-up tickets uses the
+existing explicit escape hatch: `funnel accept <ref> --no-tickets --yes`. That flag is
+only for work that happened outside the ticket path; it is not a new gate or a way to
+accept a project whose tickets are still open. If an investigation produced tickets,
+wait for the ordinary all-children-closed accept path instead.
 
 **The decision is always his. The typing does not have to be.** Nate authorised agents
 to run both on his explicit instruction (2026-09-05), replacing an earlier rule

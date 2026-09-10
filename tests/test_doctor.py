@@ -31,6 +31,11 @@ def stub_heartbeat_checks(monkeypatch):
         lambda spool_dir=None, now=None: funnel.Check(
             "heartbeat branch", True, "ok", ""),
     )
+    monkeypatch.setattr(
+        funnel, "check_repository_drift",
+        lambda checkout_root=None: funnel.Check(
+            "repository drift", True, "", ""),
+    )
 
 
 def stub_github_checks(monkeypatch):
@@ -80,7 +85,7 @@ def test_all_local_checks_pass_and_discover_every_skill(tmp_path, monkeypatch):
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
     assert [check.name for check in checks] == [
-        "install symlinks", "checkout staleness", "settings.json", "gh auth", "Project fields",
+        "install symlinks", "checkout staleness", "repository drift", "settings.json", "gh auth", "Project fields",
         "command-center topic", "member repo owner/repo", "usage cache", "heartbeat branch",
     ]
     assert all(check.ok for check in checks)
@@ -183,7 +188,7 @@ def test_doctor_does_not_require_a_self_referential_checkout_link(tmp_path, monk
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
-    assert len(checks) == 9
+    assert len(checks) == 10
     assert checks[0].ok
     assert checks[2].ok
 
@@ -259,6 +264,108 @@ def test_checkout_staleness_reports_current_legacy_checkout(
 
     assert result.ok
     assert "matches origin/main" in result.found
+
+
+# -- repository drift --------------------------------------------------------
+
+
+def test_repository_drift_reports_uncommitted_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda args, **kwargs: SimpleNamespace(
+            returncode=0,
+            stdout=(" M funnel.py\n?? tests/new test.py\n" if args[3] == "status"
+                    else "main\n" if args[3] == "symbolic-ref" else "0 0\n"),
+            stderr="",
+        ),
+    )
+
+    result = funnel.check_repository_drift(tmp_path)
+
+    assert not result.ok
+    assert result.found.splitlines() == [
+        "uncommitted changes: funnel.py, tests/new test.py",
+    ]
+
+
+@pytest.mark.parametrize(
+    "symbolic_ref_output, expected",
+    [("feature/drift\n", "current branch is feature/drift, not main"),
+     ("", "detached HEAD (not main)")],
+)
+def test_repository_drift_reports_non_main_or_detached_head(
+    tmp_path, monkeypatch, symbolic_ref_output, expected
+):
+    def run(args, **kwargs):
+        if args[3] == "status":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[3] == "symbolic-ref":
+            return SimpleNamespace(
+                returncode=0 if symbolic_ref_output else 1,
+                stdout=symbolic_ref_output,
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="0 0\n", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    result = funnel.check_repository_drift(tmp_path)
+
+    assert not result.ok
+    assert result.found == expected
+
+
+def test_repository_drift_reports_commits_not_on_origin_main(tmp_path, monkeypatch):
+    def run(args, **kwargs):
+        if args[3] == "status":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[3] == "symbolic-ref":
+            return SimpleNamespace(returncode=0, stdout="main\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="2 0\n", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    result = funnel.check_repository_drift(tmp_path)
+
+    assert not result.ok
+    assert result.found == (
+        "2 commit(s) on the current branch are not present on origin/main"
+    )
+
+
+def test_repository_drift_is_silent_for_a_clean_main_checkout(tmp_path, monkeypatch):
+    def run(args, **kwargs):
+        if args[3] == "status":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[3] == "symbolic-ref":
+            return SimpleNamespace(returncode=0, stdout="main\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="0 0\n", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.check_repository_drift(tmp_path) == funnel.Check(
+        "repository drift", True, "", ""
+    )
+
+
+def test_repository_drift_uses_only_read_only_git_commands(tmp_path, monkeypatch):
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append((args, kwargs))
+        if args[3] == "status":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[3] == "symbolic-ref":
+            return SimpleNamespace(returncode=0, stdout="main\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="0 0\n", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.check_repository_drift(tmp_path).ok
+    assert [args[3] for args, _ in calls] == [
+        "status", "symbolic-ref", "rev-list",
+    ]
+    assert calls[0][1]["env"]["GIT_OPTIONAL_LOCKS"] == "0"
 
 
 # -- GitHub wiring ------------------------------------------------------------

@@ -781,7 +781,10 @@ def usage_snapshot(agent: str) -> Optional[Dict]:
 
 def read(agent: str, timeout: Optional[float] = None) -> List[Dict]:
     """Every record this machine knows about — pushed and still spooled."""
-    content, _ = _fetch(agent, timeout=timeout)
+    if timeout is None:
+        content, _ = _fetch(agent)
+    else:
+        content, _ = _fetch(agent, timeout=timeout)
     records = []
     for line in (content or "").splitlines():
         try:

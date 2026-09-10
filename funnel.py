@@ -3627,7 +3627,6 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         *check_member_repos(),
         check_usage_cache(cache_path=usage_cache),
         check_heartbeat(spool_dir=heartbeat_spool),
-        check_api_usage(),
     ]
     if items is not None:
         items = list(items)
@@ -3732,6 +3731,7 @@ def cmd_doctor() -> int:
             checks = doctor_checks(
                 items=items, merged_pr_facts=merged_facts
             )
+    checks.append(check_api_usage())
     render_checks(checks)
     return 0 if all(check.ok for check in checks) else 1
 

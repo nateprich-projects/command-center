@@ -164,7 +164,6 @@ def test_doctor_api_usage_uses_graphql_remaining_and_never_rest(monkeypatch, cap
         funnel, "doctor_checks",
         lambda items=None, merged_pr_facts=None: [
             funnel.Check("local", True, "ok", ""),
-            funnel.check_api_usage(),
         ],
     )
 

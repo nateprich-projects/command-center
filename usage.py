@@ -77,8 +77,18 @@ BUDGETED_MODEL = "opus"
 #: very likely carry weight. Set above the largest stretch actually observed, so
 #: this window does not produce false refusals; the weekly window, which
 #: calibrates cleanly, is the load-bearing gate.
-FIVE_HOUR_CAPACITY = 900_000.0
-WEEKLY_CAPACITY = 1_822_000.0
+#:
+#: **Scaled 5× on 2026-09-10 from Nate's plan change, not from a panel reading.**
+#: The figures above (1,822,000 weekly, 900,000 five-hour) were calibrated on the
+#: plan he had on 2026-09-05; he has since moved to a plan with five times the
+#: bandwidth, and the constants had not moved with it. A gate five times too
+#: tight is worse than one scaled from a known ratio, so the ratio is applied
+#: here with its provenance stated. Recalibrate from Claude's own panel at the
+#: first opportunity — tokens since the weekly reset against the percentage it
+#: shows — and replace both numbers and this paragraph when that is done. The
+#: five-hour figure carries the same 5× and the same caveats as before.
+FIVE_HOUR_CAPACITY = 4_500_000.0
+WEEKLY_CAPACITY = 9_110_000.0
 
 #: No inflation. The capacities above are calibrated from the real panel using
 #: these same token counts, so any systematic blind spot is already absorbed

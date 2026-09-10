@@ -127,6 +127,7 @@ def test_api_usage_counts_cli_calls_separately_from_graphql(monkeypatch):
         "calls": 2,
         "graphql_calls": 1,
         "cli_calls": 1,
+        "refused_exhausted": 0,
         "cost": 7,
         "remaining": 4993,
         "reset_at": "z",

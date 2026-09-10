@@ -3950,6 +3950,79 @@ _GRAPHQL_SPEND: Dict[str, object] = {
 #: visible as a separate count rather than being assigned a guessed cost.
 _API_USAGE: Dict[str, int] = {"graphql_calls": 0, "cli_calls": 0}
 
+#: Once one response says the GraphQL route is exhausted, every later
+#: GraphQL-backed call in this process is refused without being attempted.
+#: Measured 2026-09-09: after the hourly budget hit zero, a single funnel
+#: command went on issuing a `gh` call per ticket or PR it examined, each one
+#: failing the same way, and the schedules re-fired into it every five minutes
+#: (#429). A refused call is counted here and named in the error; the run
+#: stops and the next scheduled run picks the work up after the reset.
+_ROUTE_EXHAUSTED: Dict[str, Optional[Dict[str, object]]] = {"graphql": None}
+
+#: What GitHub says when the route has nothing left. Matched case-insensitively
+#: against `gh`'s stderr; a transient failure never matches.
+EXHAUSTED_SIGNALS = (
+    "api rate limit already exceeded",
+    "api rate limit exceeded",
+    "rate limit exceeded",
+)
+
+
+def route_exhausted() -> Optional[Dict[str, object]]:
+    """The exhaustion record for this process, or None while the route is live."""
+    return _ROUTE_EXHAUSTED["graphql"]
+
+
+def reset_route_state() -> None:
+    """Forget an exhaustion seen earlier; tests and fresh processes only."""
+    _ROUTE_EXHAUSTED["graphql"] = None
+
+
+def _uses_graphql(command: Sequence[str]) -> bool:
+    """Whether a `gh` invocation spends the GraphQL budget.
+
+    `gh api <path>` is REST and has its own counter; everything else the
+    funnel runs -- `gh api graphql`, `gh pr`, `gh issue`, `gh project` -- is
+    GraphQL-backed and shares the one exhausted route.
+    """
+    command = list(command)
+    if command[:2] == ["gh", "api"]:
+        return command[:3] == ["gh", "api", "graphql"]
+    return True
+
+
+def _mark_exhausted(message: str, reset_at: Optional[str] = None) -> None:
+    if _ROUTE_EXHAUSTED["graphql"] is not None:
+        return
+    _ROUTE_EXHAUSTED["graphql"] = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "reset_at": reset_at or _GRAPHQL_SPEND.get("reset_at"),
+        "message": (message or "").strip()[:200],
+    }
+
+
+def _is_exhausted_signal(stderr: object) -> bool:
+    text = (stderr or "") if isinstance(stderr, str) else ""
+    lowered = text.lower()
+    return any(signal in lowered for signal in EXHAUSTED_SIGNALS)
+
+
+def _refuse_if_exhausted(command: Sequence[str]) -> None:
+    state = _ROUTE_EXHAUSTED["graphql"]
+    if state is None or not _uses_graphql(command):
+        return
+    _API_USAGE["refused_exhausted"] = int(_API_USAGE.get("refused_exhausted", 0)) + 1
+    reset = state.get("reset_at")
+    raise GitHubError(
+        "GitHub GraphQL budget exhausted earlier in this run{}; not attempted: {}. "
+        "Stopping rather than retrying into it -- the next scheduled run picks "
+        "this up after the reset.".format(
+            " (resets {})".format(reset) if reset else "",
+            " ".join(str(part) for part in list(command)[:6]),
+        )
+    )
+
+
 
 def graphql_spend() -> Dict[str, object]:
     """What this process has spent on GraphQL so far, read from responses."""
@@ -3958,7 +4031,7 @@ def graphql_spend() -> Dict[str, object]:
 
 def reset_api_usage() -> None:
     """Start a fresh per-command API measurement."""
-    _API_USAGE.update({"graphql_calls": 0, "cli_calls": 0})
+    _API_USAGE.update({"graphql_calls": 0, "cli_calls": 0, "refused_exhausted": 0})
     _GRAPHQL_SPEND.update(
         {"calls": 0, "cost": 0, "remaining": None, "reset_at": None}
     )
@@ -3973,6 +4046,7 @@ def api_usage() -> Dict[str, object]:
         "calls": graphql_calls + cli_calls,
         "graphql_calls": graphql_calls,
         "cli_calls": cli_calls,
+        "refused_exhausted": int(_API_USAGE.get("refused_exhausted", 0)),
         "cost": spend["cost"],
         "remaining": spend["remaining"],
         "reset_at": spend["reset_at"],
@@ -3980,13 +4054,23 @@ def api_usage() -> Dict[str, object]:
 
 
 def _run_gh(args: Sequence[str], **kwargs):
-    """Run `gh` and count the attempted call in the right bucket."""
+    """Run `gh` and count the attempted call in the right bucket.
+
+    Refuses without running when this process has already seen the GraphQL
+    route exhausted and the call would spend it (#429); learns the exhaustion
+    from `gh`'s own stderr when the output is captured.
+    """
     command = list(args)
+    _refuse_if_exhausted(command)
     if command[:3] == ["gh", "api", "graphql"]:
         _API_USAGE["graphql_calls"] += 1
     else:
         _API_USAGE["cli_calls"] += 1
-    return subprocess.run(command, **kwargs)
+    proc = subprocess.run(command, **kwargs)
+    if (getattr(proc, "returncode", 0) != 0 and _uses_graphql(command)
+            and _is_exhausted_signal(getattr(proc, "stderr", None))):
+        _mark_exhausted(proc.stderr)
+    return proc
 
 
 def _record_rate_limit(block: object) -> None:
@@ -4035,7 +4119,10 @@ def gh_graphql(query: str, **variables) -> dict:
         raise GitHubError(json.dumps(payload["errors"]))
     data = payload["data"]
     if isinstance(data, dict):
-        _record_rate_limit(data.get("rateLimit"))
+        block = data.get("rateLimit")
+        _record_rate_limit(block)
+        if isinstance(block, dict) and block.get("remaining") == 0:
+            _mark_exhausted("rateLimit.remaining is 0", block.get("resetAt"))
     return data
 
 

@@ -27,7 +27,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from agent_health import assess as assess_agent_health
 
@@ -224,6 +224,13 @@ MAINTENANCE_WINDOW = timedelta(days=30)
 # the re-send metric. Claude is unscheduled and Muse is unmetered, so their
 # absence from the brief is intentional rather than missing data.
 METERED_AGENTS = ("codex", "zcode")
+
+# Sections that depend on the bounded PR/branch snapshot collected by the
+# command-line entry point. A failed shared read must not let them infer a
+# clean result from an incomplete fact set.
+BRIEF_PR_FACT_SECTIONS = (
+    "stranded", "in_motion", "stale_locks_taken_over",
+)
 
 # A doctor run asks for one row beyond the bound so it can distinguish a full
 # result from a truncated one without an unbounded history scan. The bound is
@@ -2128,12 +2135,7 @@ def _self_approval_transition_times(item: Item, now: datetime) -> List[datetime]
 
 def _self_approval_markers(item: Item) -> List[Dict[str, object]]:
     """Read marker comments for one already-identified candidate item."""
-    comments = (_gh_json(
-        "gh", "issue", "view", str(item.number), "--repo", item.repo,
-        "--json", "comments",
-    ) or {}).get("comments", [])
-    if not isinstance(comments, list):
-        return []
+    comments = _issue_comments(item)
 
     found: List[Dict[str, object]] = []
     for comment in comments:
@@ -4269,10 +4271,7 @@ def _parked_item_json(item: Item) -> Dict[str, object]:
     parked items are uncommon and the normal Project load must not pay for a
     comment request for every issue.
     """
-    comments = (_gh_json(
-        "gh", "issue", "view", str(item.number), "--repo", item.repo,
-        "--json", "comments",
-    ) or {}).get("comments", [])
+    comments = _issue_comments(item)
     reason = None
     for comment in reversed(comments):
         body = comment.get("body") or ""
@@ -4314,10 +4313,7 @@ def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
 
 def _closed_itself_item_json(item: Item) -> Optional[Dict[str, object]]:
     """Render one funnel-close marker, or omit an ordinary accepted close."""
-    comments = (_gh_json(
-        "gh", "issue", "view", str(item.number), "--repo", item.repo,
-        "--json", "comments",
-    ) or {}).get("comments", [])
+    comments = _issue_comments(item)
     for comment in reversed(comments):
         if not isinstance(comment, dict):
             continue
@@ -4370,10 +4366,7 @@ def cleared_block_items(items: Iterable[Item], now: datetime) -> List[Item]:
 
 def _cleared_block_item_json(item: Item) -> Optional[Dict[str, object]]:
     """Render the newest valid satisfied-block record on one unblocked item."""
-    comments = (_gh_json(
-        "gh", "issue", "view", str(item.number), "--repo", item.repo,
-        "--json", "comments",
-    ) or {}).get("comments", [])
+    comments = _issue_comments(item)
     for comment in reversed(comments):
         if not isinstance(comment, dict):
             continue
@@ -5195,6 +5188,34 @@ def cmd_queue(
     return 0
 
 
+def _brief_error(exc: BaseException) -> str:
+    """Return a short, useful diagnostic for one unreadable brief section."""
+    return str(exc).strip() or exc.__class__.__name__
+
+
+def _brief_read(
+    section: str,
+    reader: Callable[[], object],
+    missing: List[Dict[str, str]],
+    default: object = None,
+) -> object:
+    """Read one brief section without hiding an unreadable response.
+
+    A caller may pre-record a section when a shared read failed before the
+    renderer was entered. That keeps dependent sections from guessing from a
+    partial fact set. Successful sections retain their existing JSON shape;
+    failed ones become ``null`` and are named in the top-level ``missing``
+    list.
+    """
+    if any(entry.get("section") == section for entry in missing):
+        return default
+    try:
+        return reader()
+    except Exception as exc:
+        missing.append({"section": section, "error": _brief_error(exc)})
+        return default
+
+
 def cmd_next(
     items: List[Item],
     now: datetime,
@@ -5265,7 +5286,9 @@ def cmd_brief(
     items: List[Item],
     now: datetime,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+    missing: Optional[List[Dict[str, str]]] = None,
 ) -> int:
+    missing = list(missing or [])
     decisions = awaiting_decision(items)
     by_ref = {i.ref: i for i in items}
     counts = {}
@@ -5276,15 +5299,30 @@ def cmd_brief(
             1 for i in items if i.status == stage and i.state == "OPEN"
         )
 
-    running = in_motion(items, now, pr_facts=pr_facts)
+    running = _brief_read(
+        "in_motion",
+        lambda: in_motion(items, now, pr_facts=pr_facts),
+        missing,
+    )
+    stale = _brief_read(
+        "stale_locks_taken_over",
+        lambda: stale_locks(items, now, pr_facts=pr_facts),
+        missing,
+    )
     brief = {
         "generated_at": now.isoformat(),
         "total_needing_nate": len(decisions),
         "counts_by_gate": counts,
         "items": [item_json(i, now, by_ref) for i in decisions],
-        "parked": parked_json(items),
-        "closed_itself": closed_itself_json(items, now),
-        "cleared_blocks": cleared_blocks_json(items, now),
+        "parked": _brief_read(
+            "parked", lambda: parked_json(items), missing
+        ),
+        "closed_itself": _brief_read(
+            "closed_itself", lambda: closed_itself_json(items, now), missing
+        ),
+        "cleared_blocks": _brief_read(
+            "cleared_blocks", lambda: cleared_blocks_json(items, now), missing
+        ),
         "blocked": blocked_json(items),
         "prose_dependencies": prose_dependencies(items),
         "suspected_human_steps": suspected_human_step_json(items),
@@ -5297,19 +5335,37 @@ def cmd_brief(
         "awaiting_breakdown": [
             item_json(i, now, by_ref) for i in awaiting_breakdown(items)
         ],
-        "stranded": stranded_json(items, now, pr_facts=pr_facts),
-        "in_motion": [i.ref for i in running],
+        "stranded": _brief_read(
+            "stranded", lambda: stranded_json(items, now, pr_facts=pr_facts),
+            missing,
+        ),
+        "in_motion": (
+            [i.ref for i in running] if running is not None else None
+        ),
         "wip_limit": WIP_LIMIT,
         "stale_locks_taken_over": [
-            i.ref for i in stale_locks(items, now, pr_facts=pr_facts)
-        ],
+            i.ref for i in stale
+        ] if stale is not None else None,
         "maintenance_load": maintenance_load(items, now),
-        "resend_ratio": recent_resend_ratio(now),
-        "unattended_merges": unattended_merges(now),
-        "unattended_approvals": unattended_approvals(items, now),
-        "agent_health": agent_health(now),
-        "working_tree_touched": working_tree_touched(now),
+        "resend_ratio": _brief_read(
+            "resend_ratio", lambda: recent_resend_ratio(now), missing
+        ),
+        "unattended_merges": _brief_read(
+            "unattended_merges", lambda: unattended_merges(now), missing
+        ),
+        "unattended_approvals": _brief_read(
+            "unattended_approvals",
+            lambda: unattended_approvals(items, now),
+            missing,
+        ),
+        "agent_health": _brief_read(
+            "agent_health", lambda: agent_health(now), missing
+        ),
+        "working_tree_touched": _brief_read(
+            "working_tree_touched", lambda: working_tree_touched(now), missing
+        ),
         "rejected_merges": rejected_merges(items, now),
+        "missing": missing,
     }
     print(json.dumps(brief, indent=2))
     return 0
@@ -5963,6 +6019,18 @@ def _gh_json(*args: str):
         return json.loads(out.stdout)
     except ValueError:
         return None
+
+
+def _issue_comments(item: Item) -> List[dict]:
+    """Read one issue's comments, keeping a failed response distinguishable."""
+    payload = _gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "comments",
+    )
+    comments = payload.get("comments") if isinstance(payload, dict) else None
+    if not isinstance(comments, list):
+        raise GitHubError("could not read comments for {}".format(item.ref))
+    return comments
 
 
 def _project_status_times(item: Item) -> Dict[str, Optional[datetime]]:
@@ -7755,6 +7823,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         items = load_items()
     except GitHubError as exc:
+        if args.command == "brief":
+            print(json.dumps({
+                "generated_at": now.isoformat(),
+                "missing": [{
+                    "section": "items",
+                    "error": _brief_error(exc),
+                }],
+            }, indent=2))
+            return 0
         print("funnel: {}".format(exc), file=sys.stderr)
         return 2
 
@@ -7835,7 +7912,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 pr_facts=ticket_pr_facts(items),
             )
         if args.command == "brief":
-            return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
+            missing = []
+            try:
+                pr_facts = ticket_pr_facts(items)
+            except GitHubError as exc:
+                error = "could not read ticket branch facts: {}".format(exc)
+                missing = [
+                    {"section": section, "error": error}
+                    for section in BRIEF_PR_FACT_SECTIONS
+                ]
+                pr_facts = {}
+            return cmd_brief(
+                items, now, pr_facts=pr_facts, missing=missing
+            )
         if args.command == "queue":
             return cmd_queue(items, now, repo_readiness=repo_readiness)
         return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))

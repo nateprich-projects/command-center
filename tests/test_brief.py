@@ -743,3 +743,95 @@ def test_brief_surfaces_agent_health_without_counting_it_as_a_decision(
 
     assert brief["agent_health"] == health
     assert brief["total_needing_nate"] == 1
+
+
+def test_brief_keeps_readable_sections_when_one_section_cannot_be_read(
+    monkeypatch, capsys
+):
+    item = funnel.Item(
+        repo="nateprich/beta", number=90, title="Readable project",
+        url="https://example.invalid/90", state="OPEN", status="Ready",
+        status_since=NOW,
+    )
+
+    def unreadable(_now):
+        raise funnel.GitHubError("rate limit")
+
+    monkeypatch.setattr(funnel, "unattended_merges", unreadable)
+
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["counts_by_gate"]["Ready"] == 1
+    assert brief["unattended_merges"] is None
+    assert brief["missing"] == [{
+        "section": "unattended_merges",
+        "error": "rate limit",
+    }]
+
+
+def test_brief_marks_an_unreadable_comment_section_instead_of_empty_result(
+    monkeypatch, capsys
+):
+    parked = funnel.Item(
+        repo="nateprich/beta", number=91, title="Parked project",
+        url="https://example.invalid/91", state="CLOSED", status="Parked",
+        status_since=NOW,
+    )
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: None)
+
+    assert funnel.cmd_brief([parked], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["parked"] is None
+    assert brief["missing"] == [{
+        "section": "parked",
+        "error": "could not read comments for nateprich/beta#91",
+    }]
+
+
+def test_main_brief_marks_sections_depending_on_unreadable_pr_facts(
+    monkeypatch, capsys
+):
+    item = funnel.Item(
+        repo="nateprich/beta", number=92, title="A ticket",
+        url="https://example.invalid/92", state="OPEN",
+        parent="nateprich/beta#1",
+    )
+    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+
+    def unreadable(_items):
+        raise funnel.GitHubError("PR scan offline")
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", unreadable)
+
+    assert funnel.main(["brief"]) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["stranded"] is None
+    assert brief["in_motion"] is None
+    assert brief["stale_locks_taken_over"] is None
+    assert brief["missing"] == [
+        {
+            "section": section,
+            "error": "could not read ticket branch facts: PR scan offline",
+        }
+        for section in funnel.BRIEF_PR_FACT_SECTIONS
+    ]
+
+
+def test_main_brief_reports_an_unreadable_project_load(
+    monkeypatch, capsys
+):
+    def unreadable():
+        raise funnel.GitHubError("Project offline")
+
+    monkeypatch.setattr(funnel, "load_items", unreadable)
+
+    assert funnel.main(["brief"]) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["missing"] == [{
+        "section": "items",
+        "error": "Project offline",
+    }]

@@ -30,6 +30,16 @@ from funnel import (  # noqa: E402
     startable,
 )
 
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _next_reads_no_live_heartbeat(monkeypatch):
+    """`cmd_next` now consults the heartbeat for tickets finished by comments
+    (#498); the fixtures here describe the queue, not the spool."""
+    monkeypatch.setattr(funnel, "finished_by_comments", lambda items: set())
+
+
 NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "project_items.json"
 

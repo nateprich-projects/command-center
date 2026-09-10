@@ -28,6 +28,7 @@ def _bindings_never_touch_the_real_spool(monkeypatch):
     import heartbeat
 
     monkeypatch.setattr(heartbeat, "record_binding", lambda *args, **kwargs: "pushed")
+    monkeypatch.setattr(funnel, "finished_by_comments", lambda items: set())
 
 
 def _allow_begin(monkeypatch):

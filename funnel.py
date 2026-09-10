@@ -1905,6 +1905,60 @@ def latest_verdict(repo: str, pr) -> Optional[Dict]:
     return None
 
 
+#: A run that finished its ticket by comments -- an investigation or proposal
+#: with no code change, so no `ticket/*` branch and no PR possible -- says so
+#: with this prefix in its finish note. The queue withholds the bound ticket
+#: until Nate closes it or a later run finishes it another way (#498).
+COMMENTS_DELIVERABLE_PREFIX = "finished by comments:"
+
+
+def finished_by_comments(items: Sequence[Item]) -> Set[str]:
+    """Open tickets whose latest run finished them by comments, waiting on Nate.
+
+    Read from the heartbeat records the way ``awaiting_review`` reads PRs: the
+    run's ``bind`` record names the ticket, and its finish carries the
+    ``skipped-human-step`` outcome with ``COMMENTS_DELIVERABLE_PREFIX`` in the
+    note. The latest finish per ticket decides, so a later run that finishes
+    the ticket another way returns it to the queue, and a closed ticket is
+    never withheld. Observed 2026-09-09: eleven consecutive runs re-claimed
+    #277 and re-verified the same nine comments in 85 minutes, because nothing
+    recorded that the deliverable had already been delivered.
+    """
+    open_refs = {i.ref for i in items if i.state == "OPEN" and i.parent}
+    if not open_refs:
+        return set()
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import heartbeat
+    except Exception:
+        return set()
+    latest: Dict[str, Tuple[float, bool]] = {}
+    for agent in sorted(heartbeat.PROVIDERS):
+        if agent in heartbeat.RETIRED_AGENTS:
+            continue
+        try:
+            records = heartbeat.read(agent)
+        except Exception:
+            continue
+        bound = heartbeat.bindings(records)
+        for row in records:
+            if row.get("phase") != "finish" or not row.get("run"):
+                continue
+            binding = bound.get(row["run"])
+            if not binding or binding.get("do") != "ticket":
+                continue
+            ref = str(binding.get("work"))
+            if ref not in open_refs:
+                continue
+            ts = float(row.get("ts") or 0)
+            note = str(row.get("note") or "").lower()
+            marker = (row.get("outcome") == "skipped-human-step"
+                      and COMMENTS_DELIVERABLE_PREFIX in note)
+            if ref not in latest or ts >= latest[ref][0]:
+                latest[ref] = (ts, marker)
+    return {ref for ref, (_, marker) in latest.items() if marker}
+
+
 def verdict_covers_head(verdict: Optional[Dict], head_oid: Optional[str]) -> bool:
     """Whether a verdict judged exactly the commit that is the branch head now."""
     return bool(verdict) and bool(head_oid) and verdict.get("head_sha") == head_oid
@@ -5451,7 +5505,7 @@ def cmd_next(
             write_lock(declined, "")
             object.__setattr__(declined, "in_motion_since", None)
             print("released {} (declined)".format(declined.ref), file=sys.stderr)
-    blocked = awaiting_review(items)
+    blocked = awaiting_review(items) | finished_by_comments(items)
     ticket = next_ticket_for_tier(
         items, now, tier=tier, blocked=blocked, excluded=excluded,
         agent=agent,
@@ -6900,7 +6954,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             )
             print(json.dumps(out, indent=2))
             return 0
-        blocked = awaiting_review(items)
+        blocked = awaiting_review(items) | finished_by_comments(items)
         ticket = next_ticket_for_tier(
             items, now, tier=tier, blocked=blocked,
             agent=agent,

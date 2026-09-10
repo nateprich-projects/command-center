@@ -74,3 +74,22 @@ def test_the_keys_were_actually_found():
     assert "human_steps" in keys
     assert "total_needing_nate" in keys
     assert len(keys) > 10
+
+
+def test_working_tree_touched_rendering_keeps_observers_visible():
+    """The grouped transition signal must survive the JSON-to-voice boundary."""
+    rendering = SKILL.read_text().split("## How to render it", 1)[1]
+    required = (
+        "`working_tree_touched`",
+        "observers",
+        "`agent`",
+        "`run`",
+        "one observer",
+        "multiple observers",
+        "dirty-only",
+    )
+    missing = [phrase for phrase in required if phrase not in rendering]
+    assert not missing, (
+        "the /funnel rendering instructions hide working-tree observer details: "
+        + ", ".join(missing)
+    )

@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import sys
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -947,13 +948,56 @@ def write_usage_cache(path, captured_at):
     }))
 
 
-def test_missing_usage_cache_names_opening_claude_code(tmp_path):
+def write_claude_transcript(path, timestamp):
+    path.write_text(json.dumps({
+        "type": "assistant",
+        "timestamp": datetime.fromtimestamp(
+            timestamp, timezone.utc).isoformat().replace("+00:00", "Z"),
+        "message": {
+            "role": "assistant",
+            "model": "claude-opus-5",
+            "usage": {"output_tokens": 100},
+        },
+    }) + "\n")
+
+
+def disable_transcript_estimate(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        funnel, "CLAUDE_TRANSCRIPTS", str(tmp_path / "none" / "*.jsonl")
+    )
+
+
+def test_missing_usage_cache_uses_a_readable_transcript_estimate(
+    tmp_path, monkeypatch
+):
+    transcript = tmp_path / "project" / "session.jsonl"
+    transcript.parent.mkdir()
+    write_claude_transcript(transcript, NOW - 5 * 60)
+    monkeypatch.setattr(
+        funnel, "CLAUDE_TRANSCRIPTS", str(tmp_path / "project" / "*.jsonl")
+    )
+
+    result = funnel.check_usage_cache(tmp_path / "missing.json", now=NOW)
+
+    assert result.ok
+    assert "transcript estimate" in result.found
+    assert str(transcript) in result.found
+    assert "age 5 minutes" in result.found
+    assert result.fix == ""
+
+
+def test_missing_usage_cache_fails_with_a_run_fix_when_no_estimate_exists(
+    tmp_path, monkeypatch
+):
+    disable_transcript_estimate(monkeypatch, tmp_path)
+
     result = funnel.check_usage_cache(tmp_path / "missing.json", now=NOW)
 
     assert not result.ok
     assert "missing" in result.found
     assert "age unavailable" in result.found
-    assert result.fix == "open Claude Code on the Mac mini"
+    assert "transcript estimate is unavailable" in result.found
+    assert result.fix == "run a Claude Code session so a transcript exists"
 
 
 def test_fresh_usage_cache_reports_its_age(tmp_path):
@@ -963,11 +1007,13 @@ def test_fresh_usage_cache_reports_its_age(tmp_path):
     result = funnel.check_usage_cache(cache, now=NOW)
 
     assert result.ok
+    assert "statusline cache" in result.found
     assert "present and fresh" in result.found
     assert "age 5 minutes" in result.found
 
 
-def test_unparseable_usage_cache_is_distinct_from_missing(tmp_path):
+def test_unparseable_usage_cache_is_distinct_from_missing(tmp_path, monkeypatch):
+    disable_transcript_estimate(monkeypatch, tmp_path)
     cache = tmp_path / "usage.json"
     cache.write_text("{not valid json")
 
@@ -976,10 +1022,11 @@ def test_unparseable_usage_cache_is_distinct_from_missing(tmp_path):
     assert not result.ok
     assert "present but unparseable" in result.found
     assert "missing" not in result.found
-    assert result.fix == "open Claude Code on the Mac mini"
+    assert result.fix == "run a Claude Code session so a transcript exists"
 
 
-def test_old_usage_cache_reports_age_and_is_broken(tmp_path):
+def test_old_usage_cache_reports_age_and_is_broken(tmp_path, monkeypatch):
+    disable_transcript_estimate(monkeypatch, tmp_path)
     cache = tmp_path / "usage.json"
     write_usage_cache(cache, NOW - 2 * 3600)
 
@@ -988,7 +1035,27 @@ def test_old_usage_cache_reports_age_and_is_broken(tmp_path):
     assert not result.ok
     assert "stale" in result.found
     assert "age 2 hours" in result.found
-    assert "open Claude Code on the Mac mini" == result.fix
+    assert "freshness threshold is 15 minutes" in result.found
+    assert "run a Claude Code session so a transcript exists" == result.fix
+
+
+def test_stale_usage_cache_prefers_a_readable_transcript_estimate(
+    tmp_path, monkeypatch
+):
+    transcript = tmp_path / "project" / "session.jsonl"
+    transcript.parent.mkdir()
+    write_claude_transcript(transcript, NOW - 20 * 60)
+    monkeypatch.setattr(
+        funnel, "CLAUDE_TRANSCRIPTS", str(tmp_path / "project" / "*.jsonl")
+    )
+    cache = tmp_path / "usage.json"
+    write_usage_cache(cache, NOW - 2 * 3600)
+
+    result = funnel.check_usage_cache(cache, now=NOW)
+
+    assert result.ok
+    assert "transcript estimate" in result.found
+    assert "age 20 minutes" in result.found
 
 
 # -- heartbeat branch and spool --------------------------------------------
@@ -1002,6 +1069,20 @@ def test_existing_heartbeat_branch_with_empty_spool_passes(tmp_path, monkeypatch
     assert result.ok
     assert "heartbeat branch `heartbeat` exists" in result.found
     assert "spool" in result.found and "empty" in result.found
+
+
+def test_four_drained_spool_files_pass(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    for name in ("claude.jsonl", "codex.jsonl", "muse.jsonl", "zcode.jsonl"):
+        (spool / name).touch()
+    monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
+
+    result = funnel.check_heartbeat(spool, now=NOW)
+
+    assert result.ok
+    assert "4 file(s), all drained" in result.found
+    assert "no pending records" in result.found
 
 
 def test_absent_heartbeat_branch_is_broken(tmp_path, monkeypatch):
@@ -1045,12 +1126,28 @@ def test_three_spool_files_report_count_and_oldest_age(tmp_path, monkeypatch):
                       ("two.jsonl", 3600),
                       ("three.jsonl", 60)):
         path = spool / name
-        path.write_text("record\n")
-        os.utime(path, (NOW - age, NOW - age))
+        path.write_text(json.dumps({"phase": "start", "ts": NOW - age}) + "\n")
+        os.utime(path, (NOW - 30, NOW - 30))
     monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
 
     result = funnel.check_heartbeat(spool, now=NOW)
 
     assert not result.ok
-    assert "3 file(s)" in result.found
+    assert "3 pending record(s) across 3 file(s)" in result.found
     assert "oldest is 2 days" in result.found
+
+
+def test_spool_record_age_does_not_use_file_mtime(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    path = spool / "codex.jsonl"
+    path.write_text(json.dumps({"phase": "start", "ts": NOW - 5 * 60}) + "\n")
+    os.utime(path, (NOW - 2 * 86400, NOW - 2 * 86400))
+    monkeypatch.setattr(funnel, "gh_branch_exists", lambda: True)
+
+    result = funnel.check_heartbeat(spool, now=NOW)
+
+    assert not result.ok
+    assert "1 pending record(s) across 1 file(s)" in result.found
+    assert "oldest is 5 minutes" in result.found
+    assert "2 days" not in result.found

@@ -23,6 +23,102 @@ def fixture_items():
     ]
 
 
+def _dependency_item(number, *, body=None, state="OPEN", open_blockers=()):
+    return funnel.Item(
+        repo="nateprich/beta",
+        number=number,
+        title="Issue {}".format(number),
+        url="https://example.invalid/{}".format(number),
+        state=state,
+        parent="nateprich/beta#1",
+        body=body,
+        open_blockers=list(open_blockers),
+    )
+
+
+def test_prose_dependencies_reports_open_named_issues_without_native_edges():
+    blocker = _dependency_item(7)
+    missing_edge = _dependency_item(8, body="Depends on #7")
+    native_edge = _dependency_item(
+        9, body="Blocked on #7", open_blockers=[blocker.ref]
+    )
+    closed_blocker = _dependency_item(10, state="CLOSED")
+    closed_target = _dependency_item(11, body="until #10")
+    unrecognised = _dependency_item(12, body="See #7 when ready")
+
+    assert funnel.prose_dependencies([
+        unrecognised,
+        closed_target,
+        closed_blocker,
+        native_edge,
+        missing_edge,
+        blocker,
+    ]) == [{
+        "ref": missing_edge.ref,
+        "names": [blocker.ref],
+        "sentence": "Depends on #7",
+    }]
+
+
+def test_prose_dependencies_recognises_each_supported_sentence_shape():
+    blocker_numbers = [7, 8, 9, 10, 11]
+    blockers = [_dependency_item(number) for number in blocker_numbers]
+    ticket = _dependency_item(
+        20,
+        body=(
+            "Depends on #7.\n"
+            "Blocked on #8.\n"
+            "Work starts after #9 lands.\n"
+            "Wait until #10.\n"
+            "This requires #11.\n"
+        ),
+    )
+
+    assert funnel.prose_dependencies([ticket, *blockers]) == [
+        {
+            "ref": ticket.ref,
+            "names": ["nateprich/beta#7"],
+            "sentence": "Depends on #7.",
+        },
+        {
+            "ref": ticket.ref,
+            "names": ["nateprich/beta#8"],
+            "sentence": "Blocked on #8.",
+        },
+        {
+            "ref": ticket.ref,
+            "names": ["nateprich/beta#9"],
+            "sentence": "Work starts after #9 lands.",
+        },
+        {
+            "ref": ticket.ref,
+            "names": ["nateprich/beta#10"],
+            "sentence": "Wait until #10.",
+        },
+        {
+            "ref": ticket.ref,
+            "names": ["nateprich/beta#11"],
+            "sentence": "This requires #11.",
+        },
+    ]
+
+
+def test_brief_includes_prose_dependencies_without_counting_them(monkeypatch, capsys):
+    blocker = _dependency_item(7)
+    ticket = _dependency_item(8, body="Depends on #7")
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([ticket, blocker], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["prose_dependencies"] == [{
+        "ref": ticket.ref,
+        "names": [blocker.ref],
+        "sentence": "Depends on #7",
+    }]
+    assert brief["total_needing_nate"] == 0
+
+
 def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
     monkeypatch, capsys
 ):
@@ -324,6 +420,29 @@ def test_brief_surfaces_blocked_projects_and_tickets_oldest_first(
     assert [row["ref"] for row in brief["items"]] == ["nateprich/beta#31"]
     assert all(row["ref"] != "nateprich/beta#33" for row in brief["blocked"])
     assert calls == []
+
+
+def test_brief_carries_breakdown_question_on_decision_and_blocked_rows(
+    monkeypatch, capsys
+):
+    item = funnel.Item(
+        repo="nateprich/beta", number=36, title="Needs an answer",
+        url="https://example.invalid/36", state="OPEN", status="Ready",
+        status_since=NOW - timedelta(days=1), labels=["blocked"],
+        needs_decision="Where should this connector live?",
+    )
+
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["items"][0]["needs_decision"] == (
+        "Where should this connector live?"
+    )
+    assert brief["blocked"][0]["needs_decision"] == (
+        "Where should this connector live?"
+    )
 
 
 def test_brief_surfaces_suspected_human_steps_separately(

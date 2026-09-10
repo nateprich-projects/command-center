@@ -42,7 +42,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `in_motion` | Tickets currently claimed, as a list. `wip_limit` is how many may run at once — the cap is policy, the per-ticket claim is correctness |
 | `stale_locks_taken_over` | Claims past the 2-hour TTL that were taken over |
 | `stranded` | Open items for which no current agent or gate can make progress. Diagnostic only; it does not add to `total_needing_nate` |
-| `working_tree_touched` | Runs during which Nate's own checkout changed. No routine should write it — engineers use their own clones, reviewers are read-only. Reports a *change*, not a crime: him committing mid-run looks the same. Say it plainly when present |
+| `working_tree_touched` | Runs during which Nate's own checkout changed. No routine should write it — engineers use their own clones, reviewers are read-only. Reports a *change*, not a crime: him committing mid-run looks the same. A grouped HEAD transition carries an `observers` list of the observing `agent` and `run`; dirty-only rows stay one row per run without that list. Say it plainly when present |
 | `maintenance_load` | `upkeep_share` is the fraction of work closed in the last 30 days that was `Broken` or `Maintenance` |
 | `human_steps` | Open tickets only Nate can do, with the `reason` each declares. **Work he owes, not a decision he owes** — deliberately outside `total_needing_nate`, the same distinction that keeps `blocked` out. No agent can pick these up: `startable()` excludes them, so this list is the only place they surface |
 | `suspected_human_steps` | Blocked child tickets whose block has no machine-readable condition but whose reason matches the known human-step vocabulary. Diagnostic only: leave the ticket blocked and let Nate decide whether to restate or split it |
@@ -50,6 +50,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `closed_itself` | Projects the funnel closed in the recent named window, newest first, with the drift recorded at close |
 | `cleared_blocks` | Tickets whose fully parsed conditions all closed and whose `blocked` label the funnel mechanically cleared in the last seven days |
 | `awaiting_breakdown` | Approved plans with no tickets yet. Claude owes these a breakdown; they are not startable until it happens |
+| `prose_dependencies` | Open tickets whose dependency sentence names an open issue without a matching native `blocked_by` edge. Each row carries the ticket `ref`, named issue `names`, and original `sentence`; diagnostic only |
 | `unattended_merges` | Merges an agent made without him, read from heartbeat records. `plan.md` makes these appearing in the brief a condition of unattended merging being allowed at all |
 | `agent_health` | Raised watchdog conditions, each with the heartbeat agent and the watchdog's condition wording. Empty when all agents are healthy |
 | `rejected_merges` | Merges he checked and found broken, over `window_days`. `stop_auto_merging` true means three in a week — auto-merging stops until he fixes the review bar |
@@ -60,6 +61,13 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 Lead with the count and the ordered list. For each item: its Class, a pin marker when
 `pinned` is `true`, the question, the repo and issue title as a link, and how long it has
 waited. Keep it scannable — this is read to decide, not to browse.
+
+**Then `working_tree_touched`, whenever it is non-empty**, as its own short diagnostic
+list. For each grouped HEAD transition, show `before.head → after.head` and every
+`observers` entry as its `agent`/`run`; explicitly distinguish **one observer** from
+**multiple observers** and do not collapse the list to a count. For a dirty-only row, show
+its `agent`/`run` and the before/after dirty counts. Say it plainly as a checkout change,
+not a crime — Nate committing while a run was open looks the same.
 
 **Then `human_steps`, whenever it is non-empty**, as its own short list with each item's
 reason. Never fold it into the decision list and never count it in the total: it answers a
@@ -78,10 +86,15 @@ Name the ticket, the conditions found closed, and the clear time. This is a reco
 mechanical move, not a decision request; never add it to `total_needing_nate`.
 
 Then the gate counts on one line. Then anything unusual, and only if present:
-`suspected_human_steps`, `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`,
+`prose_dependencies`, `suspected_human_steps`, `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`,
+`working_tree_touched`,
 `awaiting_breakdown`, `unattended_merges`, `agent_health`, `rejected_merges`, and
 `closed_with_access_vocabulary`. A suspected human step is report-only: do not clear its
 `blocked` label, restate it, or split it while rendering the brief.
+
+`prose_dependencies` is also report-only. For each row, show the ticket ref, the named
+open issue refs, and the sentence that produced them. Do not write a native edge while
+rendering the brief; the separate backfill ticket owns that action.
 
 Offer the `launch` command for the top item. Do not run it.
 

@@ -9,6 +9,7 @@ old one-ticket-and-stop behaviour.
 from __future__ import annotations
 
 import pathlib
+import re
 
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -22,7 +23,17 @@ def routine() -> str:
 def test_the_opening_is_one_begin_call_that_already_claims_the_ticket():
     body = routine()
 
-    assert body.count("funnel.py begin --agent codex --tier standard") == 1
+    opening = [
+        line.strip()
+        for line in body.splitlines()
+        if "funnel.py begin --agent codex --tier standard" in line
+    ]
+    assert len(opening) == 1
+    assert re.search(
+        r"funnel\.py begin --agent codex --tier standard"
+        r"(?: --routine-sha [0-9a-f]{64})?\s*$",
+        opening[0],
+    )
     assert "heartbeat.py start --agent codex" not in body
     assert "usage.py gate codex" not in body
     assert "already claimed" in body

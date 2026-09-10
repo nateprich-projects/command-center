@@ -8,6 +8,36 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### A vendor policy page that "returns no readable content" may just be a JavaScript shell
+
+**2026-09-09 · web fetching · measured**
+
+Meta's Model API Terms of Service and Acceptable Use Policy were recorded in `AGENTS.md`
+as having "returned no readable content when fetched on 2026-09-07", and a risk decision
+was taken on the inference that followed. They were readable the whole time.
+
+A plain fetch of `https://ai.developer.meta.com/legal/terms-of-service` returns a page
+whose entire body is the header `Model API`. The content is client-rendered, so a
+fetch-and-convert-to-markdown tool sees an empty shell and reports it as unreadable — a
+result indistinguishable from a paywall, a 403, or a document that does not exist.
+**Loaded in a browser the same URL renders 57,000 characters of terms.**
+
+Two further traps in the same attempt:
+
+- **The host had moved.** `llama.developer.meta.com/legal/...` 302s to
+  `ai.developer.meta.com/legal/...`. A tool that does not follow cross-host redirects
+  reports a redirect rather than content, which reads like another kind of failure.
+- **Searching the web for the clause text found only adjacent documents** — Llama model
+  licences, Graph API scraping rules, `automated_data_collection_terms`. Those are
+  different agreements governing different products, and quoting them as if they bound
+  the Model API subscription would have been confidently wrong in the direction of
+  alarm.
+
+**So: "unreadable" is a claim about the tool, not about the document.** Before recording
+that a document could not be read — especially before letting a decision rest on that —
+try a real browser, and follow the redirect by hand. Downgrading a fact to an inference
+costs more than the second attempt does.
+
 ### zcode was retired, and what an empty poll actually costs each pool
 
 **2026-09-09 · heartbeat · measured**

@@ -81,7 +81,11 @@ what your work is. It always prints JSON:
 - `"do": "shape"` — skip to step 7. `work` names one standard-tier idea.
 
 **Keep `run`.** Every exit path finishes it: a start with no finish is read by the
-watchdog as a run that died.
+watchdog as a run that died. Pass the run id printed by this run's `begin` output
+as `--run <id>` — never an id from an earlier `begin` in the same session. If
+`heartbeat finish` refuses a run/work mismatch, it names the still-open run id
+to use; use that id in `--run` and retry. Never wrap the id in `RUN=$(...)` —
+command substitution cannot be permission-matched and caused a prompt storm.
 
 **Why one command rather than three.** Every separate tool call is another model
 turn carrying the whole context, and on a credit-metered pool an empty poll is

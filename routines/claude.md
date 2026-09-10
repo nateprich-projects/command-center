@@ -43,9 +43,11 @@ your work. It always prints JSON.
 - `"do": "shape"` — go to the third job below. `work` names one escalated idea.
 
 **Keep `run`.** Every exit path finishes it: a start with no finish is read by the
-watchdog as a run that died. Pass it as `--run <id>`, and never wrap it in
-`RUN=$(...)` — command substitution cannot be permission-matched and caused a
-prompt storm.
+watchdog as a run that died. Pass the run id printed by this run's `begin` output
+as `--run <id>` — never an id from an earlier `begin` in the same session. If
+`heartbeat finish` refuses a run/work mismatch, it names the still-open run id
+to use; use that id in `--run` and retry. Never wrap the id in `RUN=$(...)` —
+command substitution cannot be permission-matched and caused a prompt storm.
 
 **Why one command rather than three.** This routine runs on Nate's own Anthropic
 subscription — the pool he does his real work on — and every separate tool call

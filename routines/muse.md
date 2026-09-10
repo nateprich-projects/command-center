@@ -90,7 +90,11 @@ usage, so nothing was gated. It is a standing exception recorded in `AGENTS.md`,
 not a failure to read a budget.
 
 **Keep `run`.** Every exit path finishes it: a start with no finish is read by the
-watchdog as a run that died.
+watchdog as a run that died. Pass the run id printed by this run's `begin` output
+as `--run <id>` — never an id from an earlier `begin` in the same session. If
+`heartbeat finish` refuses a run/work mismatch, it names the still-open run id
+to use; use that id in `--run` and retry. Never wrap the id in `RUN=$(...)` —
+command substitution cannot be permission-matched and caused a prompt storm.
 
 ## 2. Reconcile before you review
 

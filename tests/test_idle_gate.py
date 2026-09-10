@@ -28,11 +28,13 @@ import usage  # noqa: E402
 def _rule_active(monkeypatch):
     """Exercise the rule even while it is suspended in production.
 
-    `IDLE_RULE_SUSPENDED` was set on 2026-09-07 to force a backlog through, and
-    it makes `idle_verdict` return `None` for everything. Left alone, every test
-    below would pass by doing nothing — the rule would be untested for as long
-    as the suspension lasts, which is exactly when it is most likely to be
-    changed by someone who cannot see it working.
+    `IDLE_RULE_SUSPENDED` was set on 2026-09-07 to force a backlog through and
+    made permanent on 2026-09-09, when the Luna lane it guarded measured at
+    ~0.1% of the week per run (see `usage.py` beside the switch). It makes
+    `idle_verdict` return `None` for everything. Left alone, every test below
+    would pass by doing nothing — the rule would be untested for as long as it
+    is off, which is exactly when it is most likely to be changed by someone
+    who cannot see it working.
     """
     monkeypatch.setattr(usage, "IDLE_RULE_SUSPENDED", False)
 

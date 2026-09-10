@@ -790,6 +790,26 @@ def test_brief_marks_an_unreadable_comment_section_instead_of_empty_result(
     }]
 
 
+def test_brief_surfaces_blocked_comment_load_failures(
+    monkeypatch, capsys
+):
+    item = funnel.Item(
+        repo="nateprich/beta", number=93, title="Blocked ticket",
+        url="https://example.invalid/93", state="OPEN", status="Building",
+        labels=["blocked"], block_comments_error="could not read comments",
+        parent="nateprich/beta#1",
+    )
+
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["blocked"][0]["ref"] == item.ref
+    assert brief["missing"] == [{
+        "section": "blocked",
+        "error": "nateprich/beta#93: could not read comments",
+    }]
+
+
 def test_main_brief_marks_sections_depending_on_unreadable_pr_facts(
     monkeypatch, capsys
 ):

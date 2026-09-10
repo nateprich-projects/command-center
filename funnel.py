@@ -5309,6 +5309,18 @@ def cmd_brief(
         lambda: stale_locks(items, now, pr_facts=pr_facts),
         missing,
     )
+    blocked_comment_errors = [
+        "{}: {}".format(item.ref, item.block_comments_error)
+        for item in items
+        if item.block_comments_error
+    ]
+    if blocked_comment_errors and not any(
+        entry.get("section") == "blocked" for entry in missing
+    ):
+        missing.append({
+            "section": "blocked",
+            "error": "; ".join(blocked_comment_errors),
+        })
     brief = {
         "generated_at": now.isoformat(),
         "total_needing_nate": len(decisions),

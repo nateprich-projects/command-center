@@ -100,6 +100,16 @@ RETIRED_AGENTS = frozenset({"zcode"})
 HARNESSES = {"claude": "claude-code", "codex": "codex", "zcode": "zcode",
              "muse": "muse-code"}
 
+# Harness session ids let a fresh `begin` distinguish its own abandoned start
+# from another run of the same agent. Missing ids are deliberately treated as
+# unknown: closing an uncertain start would hide a genuinely live run.
+SESSION_ENVS = {
+    "claude": ("CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"),
+    "codex": ("CODEX_SESSION_ID",),
+    "zcode": ("ZCODE_SESSION_ID",),
+    "muse": ("MUSE_SESSION_ID",),
+}
+
 #: Where each agent records what it actually is. **Read, never asked.** A prompt
 #: that reports its own model reports what it believes, and one confident wrong
 #: answer silently poisons the routing dataset this exists to build.
@@ -349,6 +359,69 @@ def record_binding(agent: str, run: str, do: str, work: str) -> str:
     kept = append(agent, record)
     _report(kept)
     return kept
+
+
+def session_id(agent: str) -> Optional[str]:
+    """Return the current harness session id, when the harness exposes one."""
+    for name in SESSION_ENVS.get(agent, ()):
+        value = os.environ.get(name)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _record_session_id(record: Dict) -> Optional[str]:
+    """Read the session id while tolerating the pre-feature record shape."""
+    value = record.get("session_id")
+    if value is None:
+        value = record.get("session")
+    return value if isinstance(value, str) and value else None
+
+
+def close_rebegun_starts(agent: str, records: List[Dict], run: str,
+                         current_session: Optional[str]) -> List[Dict]:
+    """Close bound starts re-begun by this same harness session.
+
+    A new begin is an honest blocked decline of the previous work: the earlier
+    start no longer represents a run that may still be progressing. Matching
+    both the agent and the harness session is required, and a missing session
+    id never authorizes a close. The append-only finish is written before the
+    caller records the fresh start.
+    """
+    if not run or not current_session:
+        return []
+
+    bound = bindings(records)
+    closed = []
+    for start in open_starts(records):
+        old_run = start.get("run")
+        if (
+            start.get("agent") != agent
+            or not old_run
+            or _record_session_id(start) != current_session
+            or old_run not in bound
+        ):
+            continue
+        record = {
+            "run": old_run,
+            "agent": agent,
+            "phase": "finish",
+            "ts": int(time.time()),
+            "outcome": "skipped-blocked",
+            "note": "same-session re-begin by run {}; closed the prior "
+                    "bound start as skipped-blocked".format(run),
+            "re_begun_by": run,
+            "session_id": current_session,
+        }
+        kept = append(agent, record)
+        _report(kept)
+        closed.append({
+            "run": old_run,
+            "agent": agent,
+            "re_begun_by": run,
+            "kept": kept,
+        })
+    return closed
 
 
 def api_cost_for_run(records: List[Dict], run: Optional[str]) -> Dict[str, Optional[int]]:
@@ -932,12 +1005,18 @@ def main(argv=None) -> int:
 
         if args.command == "start":
             run_id = uuid.uuid4().hex[:12]
+            current_session = session_id(args.agent)
+            records = read(args.agent)
+            close_rebegun_starts(
+                args.agent, records, run_id, current_session
+            )
             kept = append(args.agent, {
                 "run": run_id,
                 "agent": args.agent,
                 "phase": "start",
                 "ts": int(time.time()),
                 "ticket": args.ticket,
+                "session_id": current_session,
                 "usage": usage_snapshot(args.agent),
                 "attempt": args.attempt,
                 "escalated_from": args.escalated_from,

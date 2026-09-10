@@ -39,6 +39,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `class` | The item's Project `Class`; tickets inherit their parent's Class |
 | `pinned` | Present as `true` when Nate pinned the Project within its current gate; absent otherwise |
 | `needs_class` | Items with no `Class` set. Invalid and not startable — a one-word fix in the Project |
+| `unclassed_captures` | Open Ideas with no `Class`, each with its recorded capture origin: `agent`, `nate-relayed`, or `unknown`. Diagnostic only — Ideas stays out of `counts_by_gate` and `total_needing_nate`; an agent-origin entry is the agent's to fix, while a Nate-origin (or unknown) entry is his |
 | `in_motion` | Tickets currently claimed, as a list. `wip_limit` is how many may run at once — the cap is policy, the per-ticket claim is correctness |
 | `stale_locks_taken_over` | Claims past the 2-hour TTL that were taken over |
 | `stranded` | Open items for which no current agent or gate can make progress. Diagnostic only; it does not add to `total_needing_nate` |
@@ -86,11 +87,16 @@ Name the ticket, the conditions found closed, and the clear time. This is a reco
 mechanical move, not a decision request; never add it to `total_needing_nate`.
 
 Then the gate counts on one line. Then anything unusual, and only if present:
-`prose_dependencies`, `suspected_human_steps`, `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`,
+`prose_dependencies`, `suspected_human_steps`, `unclassed_captures`, `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`,
 `working_tree_touched`,
 `awaiting_breakdown`, `unattended_merges`, `agent_health`, `rejected_merges`, and
 `closed_with_access_vocabulary`. A suspected human step is report-only: do not clear its
 `blocked` label, restate it, or split it while rendering the brief.
+
+For `unclassed_captures`, show each Idea's origin and make the repair owner clear:
+agent-origin entries are for the shaping agent to class, while Nate-origin and unknown
+entries are for Nate to class. This is a diagnostic, not a decision request; do not add
+it to either count.
 
 `prose_dependencies` is also report-only. For each row, show the ticket ref, the named
 open issue refs, and the sentence that produced them. Do not write a native edge while

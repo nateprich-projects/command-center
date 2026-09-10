@@ -40,6 +40,7 @@ def _allow_begin(monkeypatch):
 
 def _begin(monkeypatch, capsys, *, breakdown):
     _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     assert funnel.cmd_begin([], NOW, "zcode", "standard", False, breakdown) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -561,6 +562,7 @@ def test_begin_offers_shape_when_needs_decision_blocks_breakdown(monkeypatch, ca
     monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
 
     _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     assert funnel.cmd_begin(
         [blocked, idea], NOW, "zcode", "standard", False, True
     ) == 0

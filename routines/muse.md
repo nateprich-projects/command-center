@@ -56,7 +56,9 @@ loads the Project once and keeps its locally updated view for the rest of the
 run. The first load happens when `begin` arrives, so the claim lock still reads
 GitHub at claim time. The session is discarded when the runner exits: there is
 no cache, snapshot file, or long-lived daemon. Use the exact funnel path shown
-in the commands; the forwarding is transparent.
+in the commands; the forwarding is transparent. A non-TTY pipe is carried with
+the request (up to 1 MB), so `shaped --plan -` works directly inside the session;
+TTY stdin is left untouched.
 
 **Shell commands run in the background and their output arrives asynchronously.**
 A tool result comes back `background_running` with guidance not to poll — the

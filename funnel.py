@@ -234,6 +234,13 @@ MAINTENANCE_WINDOW = timedelta(days=30)
 # absence from the brief is intentional rather than missing data.
 METERED_AGENTS = ("codex", "zcode")
 
+# Sections that depend on the bounded PR/branch snapshot collected by the
+# command-line entry point. A failed shared read must not let them infer a
+# clean result from an incomplete fact set.
+BRIEF_PR_FACT_SECTIONS = (
+    "stranded", "in_motion", "stale_locks_taken_over",
+)
+
 # A doctor run asks for one row beyond the bound so it can distinguish a full
 # result from a truncated one without an unbounded history scan. The bound is
 # per member repository; a hand merge older than the newest 100 PRs is outside
@@ -2398,12 +2405,7 @@ def _self_approval_transition_times(item: Item, now: datetime) -> List[datetime]
 
 def _self_approval_markers(item: Item) -> List[Dict[str, object]]:
     """Read marker comments for one already-identified candidate item."""
-    comments = (_gh_json(
-        "gh", "issue", "view", str(item.number), "--repo", item.repo,
-        "--json", "comments",
-    ) or {}).get("comments", [])
-    if not isinstance(comments, list):
-        return []
+    comments = _issue_comments(item)
 
     found: List[Dict[str, object]] = []
     for comment in comments:
@@ -4681,10 +4683,7 @@ def _parked_item_json(item: Item) -> Dict[str, object]:
     parked items are uncommon and the normal Project load must not pay for a
     comment request for every issue.
     """
-    comments = (_gh_json(
-        "gh", "issue", "view", str(item.number), "--repo", item.repo,
-        "--json", "comments",
-    ) or {}).get("comments", [])
+    comments = _issue_comments(item)
     reason = None
     for comment in reversed(comments):
         body = comment.get("body") or ""
@@ -4726,10 +4725,7 @@ def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
 
 def _closed_itself_item_json(item: Item) -> Optional[Dict[str, object]]:
     """Render one funnel-close marker, or omit an ordinary accepted close."""
-    comments = (_gh_json(
-        "gh", "issue", "view", str(item.number), "--repo", item.repo,
-        "--json", "comments",
-    ) or {}).get("comments", [])
+    comments = _issue_comments(item)
     for comment in reversed(comments):
         if not isinstance(comment, dict):
             continue
@@ -4782,10 +4778,7 @@ def cleared_block_items(items: Iterable[Item], now: datetime) -> List[Item]:
 
 def _cleared_block_item_json(item: Item) -> Optional[Dict[str, object]]:
     """Render the newest valid satisfied-block record on one unblocked item."""
-    comments = (_gh_json(
-        "gh", "issue", "view", str(item.number), "--repo", item.repo,
-        "--json", "comments",
-    ) or {}).get("comments", [])
+    comments = _issue_comments(item)
     for comment in reversed(comments):
         if not isinstance(comment, dict):
             continue
@@ -5607,6 +5600,38 @@ def cmd_queue(
     return 0
 
 
+def _brief_error(exc: BaseException) -> str:
+    """Return a short, useful diagnostic for one unreadable brief section."""
+    return str(exc).strip() or exc.__class__.__name__
+
+
+def _brief_read(
+    section: str,
+    reader: Callable[[], object],
+    missing: List[Dict[str, str]],
+    default: object = None,
+) -> object:
+    """Read one brief section without hiding an unreadable response.
+
+    A caller may pre-record a section when a shared read failed before the
+    renderer was entered. That keeps dependent sections from guessing from a
+    partial fact set. Successful sections retain their existing JSON shape;
+    failed ones become ``null`` and are named in the top-level ``missing``
+    list.
+    """
+    if any(entry.get("section") == section for entry in missing):
+        return default
+    try:
+        return reader()
+    except BriefSectionTimeout:
+        # The timing wrapper owns the budget diagnostic and must see this
+        # exception rather than turning it into an ordinary missing read.
+        raise
+    except Exception as exc:
+        missing.append({"section": section, "error": _brief_error(exc)})
+        return default
+
+
 def cmd_next(
     items: List[Item],
     now: datetime,
@@ -5858,11 +5883,13 @@ def cmd_brief(
     items: List[Item],
     now: datetime,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+    missing: Optional[List[Dict[str, str]]] = None,
     timings: Optional[Dict[str, float]] = None,
     degraded: Optional[List[Dict[str, object]]] = None,
     deadline: Optional[float] = None,
     brief_cache: Optional[BriefCache] = None,
 ) -> int:
+    missing = list(missing or [])
     timings = dict(timings or {})
     degraded = list(degraded or [])
     if deadline is None:
@@ -5873,7 +5900,7 @@ def cmd_brief(
     def section(name: str, reader: Callable[[], object], default):
         value = _brief_timed(
             name,
-            reader,
+            lambda: _brief_read(name, reader, missing),
             timings,
             degraded,
             deadline=deadline,
@@ -5888,17 +5915,13 @@ def cmd_brief(
         ]
 
     try:
-        decision_payload = section(
-            "items",
-            decision_payload,
-            None,
-        )
-        if decision_payload is None:
+        decision_result = section("items", decision_payload, None)
+        if decision_result is None:
             decisions = []
             by_ref = {i.ref: i for i in items}
             decision_rows = []
         else:
-            decisions, by_ref, decision_rows = decision_payload
+            decisions, by_ref, decision_rows = decision_result
 
         counts = section(
             "counts_by_gate",
@@ -5985,6 +6008,19 @@ def cmd_brief(
             "rejected_merges", lambda: rejected_merges(items, now), {}
         )
 
+        blocked_comment_errors = [
+            "{}: {}".format(item.ref, item.block_comments_error)
+            for item in items
+            if item.block_comments_error
+        ]
+        if blocked_comment_errors and not any(
+            entry.get("section") == "blocked" for entry in missing
+        ):
+            missing.append({
+                "section": "blocked",
+                "error": "; ".join(blocked_comment_errors),
+            })
+
         brief = {
             "generated_at": now.isoformat(),
             "total_needing_nate": len(decisions),
@@ -6002,9 +6038,11 @@ def cmd_brief(
             "needs_class": needs,
             "awaiting_breakdown": breakdown,
             "stranded": stranded,
-            "in_motion": [i.ref for i in running],
+            "in_motion": [i.ref for i in running] if running is not None else None,
             "wip_limit": WIP_LIMIT,
-            "stale_locks_taken_over": [i.ref for i in stale],
+            "stale_locks_taken_over": [
+                i.ref for i in stale
+            ] if stale is not None else None,
             "maintenance_load": maintenance,
             "resend_ratio": resend,
             "unattended_merges": merges,
@@ -6014,6 +6052,7 @@ def cmd_brief(
             "rejected_merges": rejected,
             "degraded": degraded,
             "timings": timings,
+            "missing": missing,
         }
         print(json.dumps(brief, indent=2))
         return 0
@@ -6719,6 +6758,18 @@ def _gh_json(*args: str):
         return json.loads(out.stdout)
     except ValueError:
         return None
+
+
+def _issue_comments(item: Item) -> List[dict]:
+    """Read one issue's comments, keeping a failed response distinguishable."""
+    payload = _gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "comments",
+    )
+    comments = payload.get("comments") if isinstance(payload, dict) else None
+    if not isinstance(comments, list):
+        raise GitHubError("could not read comments for {}".format(item.ref))
+    return comments
 
 
 def _project_status_times(item: Item) -> Dict[str, Optional[datetime]]:
@@ -8674,6 +8725,15 @@ def main(argv: Optional[Sequence[str]] = None, *,
         else:
             items = load_items()
     except GitHubError as exc:
+        if args.command == "brief":
+            print(json.dumps({
+                "generated_at": now.isoformat(),
+                "missing": [{
+                    "section": "items",
+                    "error": _brief_error(exc),
+                }],
+            }, indent=2))
+            return 0
         print("funnel: {}".format(exc), file=sys.stderr)
         return 2
 
@@ -8754,13 +8814,31 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 pr_facts=ticket_pr_facts(items),
             )
         if args.command == "brief":
+            missing = []
             timings: Dict[str, float] = {}
             degraded: List[Dict[str, object]] = []
             deadline = time.perf_counter() + BRIEF_TOTAL_BUDGET_SECONDS
             cache = _ACTIVE_BRIEF_CACHE.get() or BriefCache()
+
+            pr_facts_error: List[str] = []
+
+            def read_pr_facts():
+                try:
+                    return cache.get_pr_facts(items)
+                except GitHubError as exc:
+                    pr_facts_error.append(
+                        "could not read ticket branch facts: {}".format(exc)
+                    )
+                    for section in BRIEF_PR_FACT_SECTIONS:
+                        missing.append({
+                            "section": section,
+                            "error": pr_facts_error[-1],
+                        })
+                    return {}
+
             pr_facts = _brief_timed(
                 "ticket_pr_facts",
-                lambda: cache.get_pr_facts(items),
+                read_pr_facts,
                 timings,
                 degraded,
                 deadline=deadline,
@@ -8770,10 +8848,15 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 # false diagnostic. An empty mapping says those facts are
                 # unavailable, so the pure consumers preserve the safe side.
                 pr_facts = {}
+                if not pr_facts_error:
+                    error = "could not read ticket branch facts: brief section read timed out"
+                    for section in BRIEF_PR_FACT_SECTIONS:
+                        missing.append({"section": section, "error": error})
             return cmd_brief(
                 items,
                 now,
                 pr_facts=pr_facts,
+                missing=missing,
                 timings=timings,
                 degraded=degraded,
                 deadline=deadline,
@@ -8790,6 +8873,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
 SESSION_ENV = "FUNNEL_SESSION"
 SESSION_SERVER_ENV = "FUNNEL_SESSION_SERVER"
 SESSION_TIMEOUT_SECONDS = 30
+SESSION_STDIN_LIMIT = 1_000_000
+# The stdin limit is a content limit. JSON framing and escaped characters add
+# overhead before the request reaches the server, so the request reader needs
+# a larger bound than the existing one-megabyte reply reader.
+SESSION_REQUEST_LIMIT = SESSION_STDIN_LIMIT * 6 + 4_096
 
 
 class FunnelSession:
@@ -8811,8 +8899,13 @@ class FunnelSession:
             self.items = self._loader()
         return self.items
 
-    def dispatch(self, argv: Sequence[str]):
-        """Run one normal funnel command and return ``(code, stdout, stderr)``."""
+    def dispatch(self, argv: Sequence[str], stdin=None):
+        """Run one normal funnel command and return ``(code, stdout, stderr)``.
+
+        ``stdin`` is optional because an interactive client must not have its
+        terminal consumed by the session shim. When present, it is visible as
+        ``sys.stdin`` only while this command's ``main()`` runs.
+        """
         stdout = io.StringIO()
         stderr = io.StringIO()
         code = 2
@@ -8824,9 +8917,23 @@ class FunnelSession:
                 # Reset before the lazy load so its GraphQL work is measured as
                 # part of the first command rather than erased by ``main``.
                 reset_api_usage()
-                code = main(list(argv), _items=self.items,
-                            _items_loader=self._load_items,
-                            _reset_api_usage=False)
+                if stdin is None:
+                    code = main(list(argv), _items=self.items,
+                                _items_loader=self._load_items,
+                                _reset_api_usage=False)
+                else:
+                    if isinstance(stdin, bytes):
+                        stdin = stdin.decode("utf-8")
+                    if not isinstance(stdin, str):
+                        raise ValueError("invalid session stdin payload")
+                    previous_stdin = sys.stdin
+                    sys.stdin = io.StringIO(stdin)
+                    try:
+                        code = main(list(argv), _items=self.items,
+                                    _items_loader=self._load_items,
+                                    _reset_api_usage=False)
+                    finally:
+                        sys.stdin = previous_stdin
             except SystemExit as exc:
                 code = exc.code if isinstance(exc.code, int) else 2
             except Exception as exc:
@@ -8854,7 +8961,7 @@ class _SessionHandler(socketserver.StreamRequestHandler):
         self.wfile.flush()
 
     def handle(self) -> None:
-        line = self.rfile.readline(1_000_000)
+        line = self.rfile.readline(SESSION_REQUEST_LIMIT)
         try:
             request = json.loads(line.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
@@ -8890,7 +8997,19 @@ class _SessionHandler(socketserver.StreamRequestHandler):
             })
             return
 
-        code, stdout, stderr = self.server.session.dispatch(argv)
+        stdin = request.get("stdin")
+        if "stdin" in request and not isinstance(stdin, str):
+            self._reply({
+                "code": 2,
+                "stdout": "",
+                "stderr": "funnel: invalid session stdin\n",
+            })
+            return
+
+        if "stdin" in request:
+            code, stdout, stderr = self.server.session.dispatch(argv, stdin=stdin)
+        else:
+            code, stdout, stderr = self.server.session.dispatch(argv)
         self._reply({"code": code, "stdout": stdout, "stderr": stderr})
 
 
@@ -8924,6 +9043,52 @@ def serve_session(parent_pid: Optional[int] = None) -> int:
     return 0
 
 
+def _read_session_stdin() -> Optional[str]:
+    """Read piped stdin for a session request, or return ``None`` for a TTY."""
+    try:
+        if sys.stdin.isatty():
+            return None
+    except (AttributeError, OSError):
+        # A real CLI stdin always has `isatty`; if a test double or unusual
+        # wrapper cannot answer, do not risk blocking it as though it were a
+        # pipe.
+        return None
+
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    data = stream.read(SESSION_STDIN_LIMIT + 1)
+    if isinstance(data, str):
+        encoding = getattr(sys.stdin, "encoding", None) or "utf-8"
+        data = data.encode(encoding)
+    elif not isinstance(data, bytes):
+        data = bytes(data)
+
+    if len(data) > SESSION_STDIN_LIMIT:
+        raise ValueError(
+            "stdin exceeds the {}-byte session limit".format(SESSION_STDIN_LIMIT)
+        )
+
+    encoding = getattr(sys.stdin, "encoding", None) or "utf-8"
+    try:
+        return data.decode(encoding)
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            "stdin is not decodable as {}: {}".format(encoding, exc)
+        ) from exc
+
+
+def _session_command_uses_stdin(argv: Sequence[str]) -> bool:
+    """Return whether this command's arguments request a piped plan."""
+    parts = list(argv)
+    if not parts or parts[0] != "shaped":
+        return False
+    for index, part in enumerate(parts):
+        if part == "--plan" and index + 1 < len(parts):
+            return parts[index + 1] == "-"
+        if part == "--plan=-":
+            return True
+    return False
+
+
 def _session_client(argv: Sequence[str]) -> int:
     """Forward one CLI invocation to the current Muse run's session."""
     endpoint = os.environ.get(SESSION_ENV, "")
@@ -8942,6 +9107,14 @@ def _session_client(argv: Sequence[str]) -> int:
     }
     if list(argv) == ["session-stop"]:
         request["shutdown"] = True
+    elif _session_command_uses_stdin(argv):
+        try:
+            stdin = _read_session_stdin()
+        except (OSError, TypeError, ValueError) as exc:
+            print("funnel: {}".format(exc), file=sys.stderr)
+            return 2
+        if stdin is not None:
+            request["stdin"] = stdin
 
     try:
         connection = socket.create_connection(

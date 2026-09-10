@@ -58,6 +58,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `agent_health` | Raised watchdog conditions, each with the heartbeat agent and the watchdog's condition wording. Empty when all agents are healthy |
 | `rejected_merges` | Merges he checked and found broken, over `window_days`. `stop_auto_merging` true means three in a week — auto-merging stops until he fixes the review bar |
 | `closed_with_access_vocabulary` | Projects that closed with access-shaped words in the plan and no human-step ticket. The detective backstop for when every preventive layer missed one |
+| `missing` | Sections that could not be read, each with the section name and error. A non-empty list means the brief is partial; do not treat a null or empty value in a named section as an all-clear |
 | `timings` | Diagnostic elapsed seconds for each brief section, including the shared `ticket_pr_facts` read. Use it to identify the slow section when a brief is close to the session reply budget |
 | `degraded` | Informational sections that exceeded their time budget, with the section name, elapsed time, budget, and reason. A gate-feeding section never appears here: it fails the brief closed instead |
 
@@ -66,6 +67,11 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 Lead with the count and the ordered list. For each item: its Class, a pin marker when
 `pinned` is `true`, the question, the repo and issue title as a link, and how long it has
 waited. Keep it scannable — this is read to decide, not to browse.
+
+If `missing` is non-empty, say that the brief is partial and name every missing section
+and its error before interpreting any other empty or null diagnostic value. A missing
+`items` section means the Project could not be read; it is not evidence that nothing is
+waiting.
 
 **Then `working_tree_touched`, whenever it is non-empty**, as its own short diagnostic
 list. For each grouped HEAD transition, show `before.head → after.head` and every

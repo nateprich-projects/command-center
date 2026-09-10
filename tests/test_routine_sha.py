@@ -19,6 +19,16 @@ import heartbeat  # noqa: E402
 import usage  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _bindings_never_touch_the_real_spool(monkeypatch):
+    """`begin` now writes a binding record through the heartbeat (#497). The
+    subprocess stubs in these tests cover the push but not the local spool, so
+    stub the writer itself; tests that care patch it again explicitly."""
+    import heartbeat
+
+    monkeypatch.setattr(heartbeat, "record_binding", lambda *args, **kwargs: "pushed")
+
+
 NOW = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)
 
 

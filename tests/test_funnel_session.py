@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import socket
 import sys
 
 import pytest
@@ -147,3 +148,62 @@ def test_the_muse_runner_starts_a_session_and_stops_it_with_the_run():
     assert "FUNNEL_SESSION" in runner
     assert "session-stop" in runner
     assert "--parent-pid \"$$\"" in runner
+
+
+def test_session_client_reports_a_connect_timeout_as_session_unreachable(
+    monkeypatch, capsys
+):
+    monkeypatch.setenv(funnel.SESSION_ENV, "127.0.0.1:1234:token")
+
+    def connect_timeout(*args, **kwargs):
+        raise socket.timeout("timed out")
+
+    monkeypatch.setattr(funnel.socket, "create_connection", connect_timeout)
+
+    assert funnel._session_client(["brief"]) == 2
+    assert capsys.readouterr().err == (
+        "funnel: connect-timeout: FUNNEL_SESSION session unreachable within "
+        "30s: timed out\n"
+    )
+
+
+def test_session_client_reports_a_reply_timeout_as_a_busy_session(
+    monkeypatch, capsys
+):
+    monkeypatch.setenv(funnel.SESSION_ENV, "127.0.0.1:1234:token")
+
+    class TimeoutStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def write(self, payload):
+            return len(payload)
+
+        def flush(self):
+            pass
+
+        def readline(self, limit):
+            raise socket.timeout("timed out")
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def makefile(self, mode):
+            return TimeoutStream()
+
+    monkeypatch.setattr(
+        funnel.socket, "create_connection", lambda *args, **kwargs: Connection()
+    )
+
+    assert funnel._session_client(["brief"]) == 2
+    assert capsys.readouterr().err == (
+        "funnel: reply-timeout: FUNNEL_SESSION session busy past the 30s "
+        "reply budget (slow section unknown): timed out\n"
+    )

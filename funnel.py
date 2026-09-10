@@ -5118,11 +5118,20 @@ def cmd_ideas(items: List[Item], now: datetime) -> int:
 def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
                 repo: Optional[str], run: Optional[str] = None,
                 agent: Optional[str] = None,
-                origin: Optional[str] = None) -> int:
+                origin: Optional[str] = None,
+                klass: Optional[str] = None) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
     if origin not in ORIGIN_VOICES:
         raise GitHubError(
             "capture requires an explicit --origin (nate-relayed or agent)"
+        )
+    if origin == "agent" and klass is None:
+        raise GitHubError("capture requires --class when --origin agent")
+    if klass is not None and klass not in LADDER:
+        raise GitHubError(
+            "unknown capture class {!r}; choose one of {}".format(
+                klass, ", ".join(LADDER)
+            )
         )
     repo = resolve_repo(repo)
     body = append_provenance(
@@ -5148,6 +5157,14 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         item_id = json.loads(add.stdout)["id"]
         gh_graphql(SET_FIELD, project=PROJECT_ID, item=item_id,
                    field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Ideas"))
+        if klass is not None:
+            gh_graphql(
+                SET_FIELD,
+                project=PROJECT_ID,
+                item=item_id,
+                field=CLASS_FIELD_ID,
+                option=_option_id(CLASS_FIELD_ID, klass),
+            )
         print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
     else:
         print("{} in {}\nnote: created, but not added to the Project".format(
@@ -6786,6 +6803,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--origin", required=True, choices=ORIGIN_VOICES,
         help="idea origin: nate-relayed if Nate raised it, agent if observed",
     )
+    capture.add_argument(
+        "--class", dest="klass", choices=LADDER, default=None,
+        help="ladder class; required when --origin agent",
+    )
     shaped = sub.add_parser("shaped", help="record a grilled plan and move to Shaped")
     shaped.add_argument("ref", help="issue number, owner/repo#number, or URL")
     shaped.add_argument("--plan", required=True,
@@ -6919,6 +6940,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             parser.error("--because is required with --blocked-on")
         if args.because is not None and not args.blocked_on:
             parser.error("--because requires --blocked-on")
+    if (args.command == "capture" and args.origin == "agent"
+            and args.klass is None):
+        parser.error("--class is required with --origin agent")
 
     now = datetime.now(timezone.utc)
     # Doctor keeps its fixed checks runnable when the Project cannot be loaded;
@@ -6975,7 +6999,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_ideas(items, now)
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
-                               args.run, args.agent, args.origin)
+                               args.run, args.agent, args.origin, args.klass)
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan,
                               args.run, args.agent)

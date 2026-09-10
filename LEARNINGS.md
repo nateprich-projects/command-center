@@ -8,6 +8,39 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Route-local rate-limit windows are not the `/rate_limit` counter
+
+**2026-09-10 · GitHub API / ticket #532 · measured**
+
+One credential was used for four probes, spaced roughly a minute apart. The raw
+rate-limit headers were:
+
+| probe (response `Date`) | `X-RateLimit-Resource` | `Limit` | `Used` | `Remaining` | `Reset` |
+|---|---:|---:|---:|---:|---:|
+| `GET /repos/nateprich-projects/command-center` (`2026-09-10T10:43:38Z`) | `core` | 5000 | 541 | 4459 | 1789037564 |
+| `GET /repos/nateprich-projects/command-center/issues/38/dependencies/blocked_by` (`2026-09-10T10:44:50Z`) | `core` | 5000 | 18 | 4982 | 1789039856 |
+| GraphQL `rateLimit` query (`2026-09-10T10:46:01Z`) | `graphql` | 5000 | 2936 | 2064 | 1789038143 |
+| `GET /rate_limit` (`2026-09-10T10:47:08Z`) | `core` | 5000 | 0 | 5000 | 1789040828 |
+
+The GraphQL response also contained its own in-query reading:
+`{limit: 5000, cost: 1, remaining: 2064, resetAt: "2026-09-10T11:02:23Z", used: 2936}`.
+The `/rate_limit` JSON body independently reported both `core` and `graphql` as
+`5000/5000` with reset `1789040828`, so it did not match either the live REST route
+headers or the live GraphQL reading.
+
+This pass saw four distinct counter snapshots/windows: the ordinary REST route, the
+dependency REST route, GraphQL, and `/rate_limit`. The two REST responses both named
+`core` but exposed different reset epochs and usage; the GraphQL response named
+`graphql`; and `/rate_limit` exposed a fresh `core` snapshot plus a body-level GraphQL
+snapshot. The measurements establish route-local disagreement, not separate
+principals: the headers do not identify why the windows differ, so a split-principal
+explanation remains unconfirmed.
+
+The constraint for #237 consumers is therefore call-local rate data: use the
+`X-RateLimit-*` headers returned by the REST call being evaluated, or GraphQL's own
+`rateLimit` block for a GraphQL call. Never use `GET /rate_limit` as a budget or
+headroom pre-check.
+
 ### A disposable Muse session removes duplicate Project loads without stale claims
 
 **2026-09-10 · GitHub GraphQL / ticket #291 · measured (full-run total derived)**

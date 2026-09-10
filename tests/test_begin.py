@@ -40,6 +40,7 @@ def _allow_begin(monkeypatch):
 
 def _begin(monkeypatch, capsys, *, breakdown):
     _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     assert funnel.cmd_begin([], NOW, "zcode", "standard", False, breakdown) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -72,6 +73,7 @@ def _ticket(number, parent, *, body="Risk: standard", klass="Improve",
 
 def _codex_begin(monkeypatch, capsys, items, *, tier="standard"):
     _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
     bodies = {item.number: item.body for item in items}
     monkeypatch.setattr(
@@ -83,6 +85,156 @@ def _codex_begin(monkeypatch, capsys, items, *, tier="standard"):
     )
     assert funnel.cmd_begin(items, NOW, "codex", tier, False) == 0
     return json.loads(capsys.readouterr().out), writes
+
+
+def _reconcile_begin(monkeypatch, capsys, items, rows, verdicts, merge_result=0):
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: rows)
+    monkeypatch.setattr(
+        funnel, "latest_verdict", lambda repo, pr: verdicts.get(pr)
+    )
+    calls = []
+
+    def merge(rows, now, repo, pr, confirmed):
+        calls.append((repo, pr, confirmed))
+        return merge_result
+
+    monkeypatch.setattr(funnel, "cmd_merge", merge)
+    monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+    monkeypatch.setattr(funnel, "next_ticket_for_tier", lambda *args, **kwargs: None)
+    assert funnel.cmd_begin(items, NOW, "codex", "standard", False) == 0
+    return json.loads(capsys.readouterr().out), calls
+
+
+def test_begin_retries_an_approval_at_the_current_head(monkeypatch, capsys):
+    project, ticket = _ticket(7, 6)
+    result, calls = _reconcile_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        [{"number": 70, "headRefName": "ticket/7", "headRefOid": "new-head"}],
+        {70: {"verdict": "approved", "head_sha": "new-head"}},
+    )
+
+    assert calls == [(ticket.repo, 70, True)]
+    assert result["reconciled"] == [{
+        "repo": ticket.repo,
+        "pr": 70,
+        "ref": ticket.ref,
+        "result": "merged",
+    }]
+    assert ticket.state == "CLOSED"
+    assert ticket.state_reason == "COMPLETED"
+
+
+def test_begin_does_not_retry_an_old_or_rejected_verdict(monkeypatch, capsys):
+    project, ticket = _ticket(8, 6)
+    rows = [
+        {"number": 80, "headRefName": "ticket/8", "headRefOid": "new-head"},
+        {"number": 81, "headRefName": "ticket/8", "headRefOid": "new-head"},
+    ]
+    result, calls = _reconcile_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        rows,
+        {
+            80: {"verdict": "approved", "head_sha": "old-head"},
+            81: {"verdict": "rejected", "head_sha": "new-head"},
+        },
+    )
+
+    assert calls == []
+    assert "reconciled" not in result
+    assert ticket.state == "OPEN"
+
+
+def test_begin_reports_a_merge_gate_refusal_without_closing_the_ticket(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(9, 6)
+    result, calls = _reconcile_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        [{"number": 90, "headRefName": "ticket/9", "headRefOid": "head"}],
+        {90: {"verdict": "approved", "head_sha": "head"}},
+        merge_result=1,
+    )
+
+    assert calls == [(ticket.repo, 90, True)]
+    assert result["reconciled"] == [{
+        "repo": ticket.repo,
+        "pr": 90,
+        "ref": ticket.ref,
+        "result": "refused",
+    }]
+    assert ticket.state == "OPEN"
+
+
+def test_begin_reconcile_runs_before_codex_queue_lookup(monkeypatch, capsys):
+    project, ticket = _ticket(10, 6)
+    events = []
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(
+        funnel,
+        "reconcile_approved_merges",
+        lambda *args: events.append("reconcile") or [],
+    )
+    monkeypatch.setattr(
+        funnel,
+        "clear_satisfied_blocks",
+        lambda *args, **kwargs: events.append("clear") or [],
+    )
+    monkeypatch.setattr(
+        funnel,
+        "awaiting_review",
+        lambda rows: events.append("awaiting") or set(),
+    )
+    monkeypatch.setattr(
+        funnel,
+        "next_ticket_for_tier",
+        lambda *args, **kwargs: events.append("next") or None,
+    )
+
+    assert funnel.cmd_begin([project, ticket], NOW, "codex", "standard", False) == 0
+    capsys.readouterr()
+    assert events == ["reconcile", "clear", "awaiting", "next"]
+
+
+def test_begin_reconcile_is_idempotent_when_the_pr_is_no_longer_open(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(11, 6)
+    rows = [
+        {"number": 110, "headRefName": "ticket/11", "headRefOid": "head"}
+    ]
+    calls = []
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: rows)
+    monkeypatch.setattr(
+        funnel, "latest_verdict", lambda repo, pr: {
+            "verdict": "approved", "head_sha": "head"
+        }
+    )
+
+    def merge(items, now, repo, pr, confirmed):
+        calls.append(pr)
+        rows.clear()
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_merge", merge)
+    monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+    monkeypatch.setattr(funnel, "next_ticket_for_tier", lambda *args, **kwargs: None)
+
+    assert funnel.cmd_begin([project, ticket], NOW, "codex", "standard", False) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["reconciled"][0]["result"] == "merged"
+
+    assert funnel.cmd_begin([project, ticket], NOW, "codex", "standard", False) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert calls == [110]
+    assert "reconciled" not in second
 
 
 def _completed_project(number, *, klass="Improve", children_done=2,
@@ -346,6 +498,11 @@ def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
         return SimpleNamespace(stdout="run-id\n")
 
     monkeypatch.setattr(funnel.subprocess, "run", heartbeat)
+    monkeypatch.setattr(
+        funnel,
+        "reconcile_approved_merges",
+        lambda *args: events.append("reconcile") or [],
+    )
     monkeypatch.setattr(usage, "read_agent", lambda agent, timestamp: {"windows": {}})
     monkeypatch.setattr(
         usage, "pace", lambda reading, timestamp, provider: {"over_pace": False}
@@ -370,7 +527,7 @@ def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
 
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == ticket.ref
-    assert events == ["heartbeat", "clear", "next", "claim"]
+    assert events == ["heartbeat", "reconcile", "clear", "next", "claim"]
 
 
 def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):
@@ -511,6 +668,7 @@ def test_begin_offers_shape_when_needs_decision_blocks_breakdown(monkeypatch, ca
     monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
 
     _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     assert funnel.cmd_begin(
         [blocked, idea], NOW, "zcode", "standard", False, True
     ) == 0
@@ -568,6 +726,7 @@ def _reviewer_begin(
     breakdown=False,
 ):
     _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     monkeypatch.setattr(
         funnel,
         "review_queue",

@@ -270,10 +270,25 @@ Some plans cannot be broken up honestly, and forcing it produces tickets that
 look like work and are not.
 
 If the plan is too vague to size — it says what to achieve but not what to build
-— **do not invent the missing decisions.** Comment on the issue saying precisely
-what is undecided, and leave it. It needs another grilling pass, which is
-interactive and not yours to do. A ticket built on an invented decision is worse
-than no ticket, because someone will implement it.
+— first read the issue's comments for an earlier `**Needs a decision:**` header
+and the answer that followed it. If Nate answered that question, act on that
+answer and continue the breakdown; do not declare the same decision undecided
+again.
+
+If the plan still leaves a decision undecided, **do not invent the missing
+decision.** Post the precise question with:
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py comment <ref> --voice agent --needs-decision "<the undecided question>"
+```
+
+Create no tickets. Finish the run with `--outcome done` and a note naming the
+question. The command applies `blocked`, so the item leaves
+`awaiting_breakdown()` and enters Nate's queue with the gate question
+**"Answer the breakdown's question?"**. After Nate records his answer and
+removes the `blocked` label, the item returns to `awaiting_breakdown()`; the
+next breakdown run reads that answer before deciding again. A ticket built on
+an invented decision is worse than no ticket, because someone will implement it.
 
 If the plan is genuinely one indivisible piece of work, make it one ticket and
 say why in a comment.

@@ -46,6 +46,7 @@ def _allow_begin(monkeypatch):
         "run",
         lambda *args, **kwargs: SimpleNamespace(stdout="run-id\n"),
     )
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     monkeypatch.setattr(
         usage,
         "read_agent",

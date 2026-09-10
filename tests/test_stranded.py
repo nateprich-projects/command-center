@@ -171,6 +171,60 @@ def test_conflicting_pr_with_a_moved_head_is_not_called_stranded():
     ) == []
 
 
+def _comment_block(number, blocker):
+    references, reason = funnel.parse_block_comment([
+        "**Blocked on #{}:** waiting for the other ticket.".format(blocker)
+    ])
+    return issue(
+        number,
+        block_references=references,
+        block_reason=reason,
+    )
+
+
+def test_native_block_cycle_is_reported_once_on_lowest_numbered_member():
+    first = issue(21, open_blockers=["{}#31".format(REPO)])
+    second = issue(31, open_blockers=["{}#21".format(REPO)])
+
+    assert funnel.stranded_json([second, first], NOW) == [{
+        "ref": first.ref,
+        "title": "issue 21",
+        "url": "https://example.invalid/21",
+        "reason": "block cycle: #21 → #31 → #21",
+    }]
+
+
+def test_comment_block_cycle_is_reported_once_on_lowest_numbered_member():
+    first = _comment_block(41, 51)
+    second = _comment_block(51, 41)
+
+    assert funnel.stranded_json([first, second], NOW) == [{
+        "ref": first.ref,
+        "title": "issue 41",
+        "url": "https://example.invalid/41",
+        "reason": "block cycle: #41 → #51 → #41",
+    }]
+
+
+def test_mixed_native_and_comment_block_cycle_is_reported_once():
+    first = issue(61, open_blockers=["{}#71".format(REPO)])
+    second = _comment_block(71, 81)
+    third = issue(81, open_blockers=["{}#61".format(REPO)])
+
+    rows = funnel.stranded_json([third, first, second], NOW)
+
+    assert [row["ref"] for row in rows] == [first.ref]
+    assert rows[0]["reason"] == "block cycle: #61 → #71 → #81 → #61"
+
+
+def test_block_chain_is_not_reported_as_a_cycle():
+    first = issue(91, open_blockers=["{}#101".format(REPO)])
+    second = issue(101, open_blockers=["{}#111".format(REPO)])
+    third = issue(111)
+
+    assert funnel.stranded_json([first, second, third], NOW) == []
+
+
 def test_pr_side_strands_report_closed_and_non_building_tickets():
     closed_ticket = issue(
         338,

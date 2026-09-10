@@ -2916,7 +2916,7 @@ def check_usage_cache(cache_path: Optional[os.PathLike] = None,
 
 def gh_auth_status() -> dict:
     """Read the active GitHub account without ever requesting its token."""
-    proc = subprocess.run(
+    proc = _run_gh(
         ["gh", "auth", "status", "--active", "--hostname", "github.com",
          "--json", "hosts"],
         capture_output=True,
@@ -3094,7 +3094,7 @@ def check_project_fields() -> Check:
 def gh_branch_exists() -> bool:
     """Return whether the heartbeat branch exists, or raise on other failures."""
     try:
-        proc = subprocess.run(
+        proc = _run_gh(
             ["gh", "api", "repos/{}/git/ref/heads/{}".format(
                 REPO, HEARTBEAT_BRANCH)],
             capture_output=True,
@@ -3640,6 +3640,42 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
     return checks
 
 
+def check_api_usage(command: str = "funnel doctor") -> Check:
+    """Report this command's calls and measured GraphQL headroom.
+
+    A `gh` CLI response does not carry the GraphQL point cost, so keep those
+    invocations visible as a separate count. The remaining figure is only the
+    latest value returned in a GraphQL `rateLimit` block; REST's
+    `/rate_limit` endpoint is a different counter and is deliberately never
+    consulted here.
+    """
+    usage = api_usage()
+    if not usage["calls"]:
+        return Check("API usage", True, "", "")
+
+    remaining = usage["remaining"]
+    found = (
+        "{} made {} API call(s) ({} GraphQL, {} gh CLI); cost {} GraphQL "
+        "point(s); {} remaining".format(
+            command,
+            usage["calls"],
+            usage["graphql_calls"],
+            usage["cli_calls"],
+            usage["cost"],
+            "unknown" if remaining is None else remaining,
+        )
+    )
+    if usage["reset_at"]:
+        found += ", resets {}".format(usage["reset_at"])
+
+    if remaining is None:
+        return Check(
+            "API usage", False, found,
+            "restore GraphQL rate-limit data, then rerun funnel doctor",
+        )
+    return Check("API usage", True, found, "")
+
+
 def render_checks(checks: Iterable[Check]) -> None:
     """Render one stable, actionable line for each doctor check."""
     for check in checks:
@@ -3695,6 +3731,7 @@ def cmd_doctor() -> int:
             checks = doctor_checks(
                 items=items, merged_pr_facts=merged_facts
             )
+    checks.append(check_api_usage())
     render_checks(checks)
     return 0 if all(check.ok for check in checks) else 1
 
@@ -3794,10 +3831,49 @@ _GRAPHQL_SPEND: Dict[str, object] = {
     "calls": 0, "cost": 0, "remaining": None, "reset_at": None,
 }
 
+#: Every attempted `gh` call in the current funnel command, split at the
+#: boundary where the response can expose a cost.  GraphQL gives us a true
+#: per-query point cost; the `gh` CLI does not expose one, so its calls remain
+#: visible as a separate count rather than being assigned a guessed cost.
+_API_USAGE: Dict[str, int] = {"graphql_calls": 0, "cli_calls": 0}
+
 
 def graphql_spend() -> Dict[str, object]:
     """What this process has spent on GraphQL so far, read from responses."""
     return dict(_GRAPHQL_SPEND)
+
+
+def reset_api_usage() -> None:
+    """Start a fresh per-command API measurement."""
+    _API_USAGE.update({"graphql_calls": 0, "cli_calls": 0})
+    _GRAPHQL_SPEND.update(
+        {"calls": 0, "cost": 0, "remaining": None, "reset_at": None}
+    )
+
+
+def api_usage() -> Dict[str, object]:
+    """Return attempted calls plus measured GraphQL cost and headroom."""
+    graphql_calls = int(_API_USAGE["graphql_calls"])
+    cli_calls = int(_API_USAGE["cli_calls"])
+    spend = graphql_spend()
+    return {
+        "calls": graphql_calls + cli_calls,
+        "graphql_calls": graphql_calls,
+        "cli_calls": cli_calls,
+        "cost": spend["cost"],
+        "remaining": spend["remaining"],
+        "reset_at": spend["reset_at"],
+    }
+
+
+def _run_gh(args: Sequence[str], **kwargs):
+    """Run `gh` and count the attempted call in the right bucket."""
+    command = list(args)
+    if command[:3] == ["gh", "api", "graphql"]:
+        _API_USAGE["graphql_calls"] += 1
+    else:
+        _API_USAGE["cli_calls"] += 1
+    return subprocess.run(command, **kwargs)
 
 
 def _record_rate_limit(block: object) -> None:
@@ -3838,7 +3914,7 @@ def gh_graphql(query: str, **variables) -> dict:
     for key, value in variables.items():
         flag = "-F" if isinstance(value, (int, bool)) else "-f"
         cmd += [flag, "{}={}".format(key, value)]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    proc = _run_gh(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         raise GitHubError(proc.stderr.strip() or "gh exited {}".format(proc.returncode))
     payload = json.loads(proc.stdout)
@@ -4740,7 +4816,7 @@ def clear_satisfied_blocks(
             continue
 
         if not _record_covers_current_block(item, conditions):
-            comment = subprocess.run(
+            comment = _run_gh(
                 [
                     "gh", "issue", "comment", str(item.number),
                     "--repo", item.repo,
@@ -4757,7 +4833,7 @@ def clear_satisfied_blocks(
                     )
                 )
 
-        edit = subprocess.run(
+        edit = _run_gh(
             [
                 "gh", "issue", "edit", str(item.number),
                 "--repo", item.repo, "--remove-label", "blocked",
@@ -5361,7 +5437,7 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
         option=_option_id(STATUS_FIELD_ID, "Parked"),
     )
 
-    close = subprocess.run(
+    close = _run_gh(
         ["gh", "issue", "close", str(item.number), "--repo", item.repo,
          "--reason", "not planned"],
         capture_output=True, text=True,
@@ -5369,7 +5445,7 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
     if close.returncode != 0:
         raise GitHubError(close.stderr.strip())
 
-    comment = subprocess.run(
+    comment = _run_gh(
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
          "--body", append_provenance(
              PARK_COMMENT_PREFIX + reason, "nate-relayed", at=now,
@@ -5436,7 +5512,7 @@ def _set_pinned(items: List[Item], now: datetime, ref: str, pinned: bool,
             field=PINNED_FIELD_ID,
         )
 
-    comment = subprocess.run(
+    comment = _run_gh(
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
          "--body", append_provenance(
              "**{}:** Nate decided to {} this project.".format(state, verb),
@@ -5458,7 +5534,7 @@ def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
     if not body.strip():
         raise GitHubError("a non-empty comment body is required")
     item = find(items, ref)
-    comment = subprocess.run(
+    comment = _run_gh(
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
          "--body", append_provenance(body, voice, at=now, run=run, agent=agent)],
         capture_output=True, text=True,
@@ -5466,7 +5542,7 @@ def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
     if apply_blocked:
-        edit = subprocess.run(
+        edit = _run_gh(
             [
                 "gh", "issue", "edit", str(item.number), "--repo", item.repo,
                 "--add-label", "blocked",
@@ -5499,7 +5575,7 @@ def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -
     repo = REPO
 
     def run(*args: str) -> str:
-        out = subprocess.run(list(args), capture_output=True, text=True)
+        out = _run_gh(args, capture_output=True, text=True)
         if out.returncode != 0:
             raise GitHubError(out.stderr.strip())
         return out.stdout.strip()
@@ -5613,12 +5689,12 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         "gh", "issue", "create", "--repo", repo, "--title", title,
         "--body", body, "--label", "needs-shaping",
     ]
-    out = subprocess.run(args, capture_output=True, text=True)
+    out = _run_gh(args, capture_output=True, text=True)
     if out.returncode != 0:
         raise GitHubError(out.stderr.strip())
     url = out.stdout.strip().splitlines()[-1]
 
-    add = subprocess.run(
+    add = _run_gh(
         ["gh", "project", "item-add", str(PROJECT_NUMBER), "--owner", PROJECT_OWNER,
          "--url", url, "--format", "json"],
         capture_output=True, text=True,
@@ -5691,7 +5767,7 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     body = append_provenance(plan, "agent", at=now, run=run, agent=agent)
     overlaps = shaping_plan_overlap_candidates(items, item, plan)
 
-    out = subprocess.run(
+    out = _run_gh(
         ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
          "--body", body],
         capture_output=True, text=True,
@@ -5710,11 +5786,11 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
                    field=CLASS_FIELD_ID, option=_option_id(CLASS_FIELD_ID, klass))
     gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
                field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, status))
-    subprocess.run(["gh", "issue", "edit", str(item.number), "--repo", item.repo,
+    _run_gh(["gh", "issue", "edit", str(item.number), "--repo", item.repo,
                     "--remove-label", "needs-shaping"], capture_output=True)
     if status == "Ready":
         basis = "{}; no escalated risk".format(reason)
-        comment = subprocess.run(
+        comment = _run_gh(
             ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
              "--body", self_approval_comment(
                  basis, at=now, run=run, agent=agent
@@ -5807,7 +5883,7 @@ query($owner: String!, $name: String!, $number: Int!) {
 
 
 def _gh_json(*args: str):
-    out = subprocess.run(list(args), capture_output=True, text=True)
+    out = _run_gh(args, capture_output=True, text=True)
     if out.returncode != 0:
         return None
     try:
@@ -6663,7 +6739,7 @@ def _write_verdict(repo: str, pr: int, sha: str, verdict: str, ci: str,
         comment += "\n\nBlocking:\n" + "\n".join("- " + b for b in blocking)
     comment = append_provenance(comment, "agent", run=run, agent=agent)
 
-    out = subprocess.run(
+    out = _run_gh(
         ["gh", "pr", "comment", str(pr), "--repo", repo, "--body", comment],
         capture_output=True, text=True)
     if out.returncode != 0:
@@ -6794,7 +6870,7 @@ def _close_auto_closeable_project(items: Sequence[Item], project: Item,
         option=_option_id(STATUS_FIELD_ID, "Done"),
     )
 
-    close = subprocess.run(
+    close = _run_gh(
         ["gh", "issue", "close", str(project.number), "--repo", project.repo,
          "--reason", "completed"],
         capture_output=True, text=True,
@@ -6806,7 +6882,7 @@ def _close_auto_closeable_project(items: Sequence[Item], project: Item,
             )
         )
 
-    comment = subprocess.run(
+    comment = _run_gh(
         ["gh", "issue", "comment", str(project.number), "--repo", project.repo,
          "--body", closed_itself_comment(tickets, drift)],
         capture_output=True, text=True,
@@ -6880,7 +6956,7 @@ def reconcile_closed_items(items: Sequence[Item]) -> List[str]:
             changed = True
 
         if "needs-shaping" in item.labels and item.status != "Ideas":
-            edit = subprocess.run(
+            edit = _run_gh(
                 [
                     "gh", "issue", "edit", str(item.number), "--repo", item.repo,
                     "--remove-label", "needs-shaping",
@@ -7062,7 +7138,7 @@ def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
                        "--json", "headRefName") or {}).get("headRefName") or ""
     ref = ticket_ref_from_branch(repo, branch)
 
-    out = subprocess.run(
+    out = _run_gh(
         ["gh", "pr", "merge", str(pr), "--repo", repo, "--squash",
          "--delete-branch"], capture_output=True, text=True)
     if out.returncode != 0:
@@ -7081,7 +7157,7 @@ def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
     state = (_gh_json("gh", "issue", "view", number, "--repo", repo,
                       "--json", "state") or {}).get("state")
     if str(state).upper() != "CLOSED":
-        closed = subprocess.run(
+        closed = _run_gh(
             ["gh", "issue", "close", number, "--repo", repo,
              "--reason", "completed"],
             capture_output=True, text=True)
@@ -7268,7 +7344,7 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
         # Done and Parked must stay distinguishable: `completed` here,
         # `not planned` for a park. That ratio is the only way to tell whether
         # the gates are set right.
-        subprocess.run(
+        _run_gh(
             ["gh", "issue", "close", str(item.number), "--repo", item.repo,
              "--reason", "completed"], capture_output=True)
 
@@ -7537,6 +7613,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             and args.klass is None):
         parser.error("--class is required with --origin agent")
 
+    # A process normally serves one CLI command. Resetting here also keeps
+    # repeated `main()` calls in tests from blending two commands' readings.
+    reset_api_usage()
     now = datetime.now(timezone.utc)
     # Doctor keeps its fixed checks runnable when the Project cannot be loaded;
     # the data-dependent consistency check is added when that read succeeds.

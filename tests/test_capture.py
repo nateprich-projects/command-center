@@ -142,12 +142,56 @@ def test_shaped_preserves_plan_bytes_above_agent_stamp(tmp_path, monkeypatch):
     )
     body = edit[-1]
     assert body.startswith(plan)
+    assert funnel.parse_origin(body) is None
     assert funnel.parse_provenance(body) == {
         "agent": "claude",
         "at": NOW.isoformat(),
         "run": "shape-run",
         "voice": "agent",
     }
+
+
+def test_shaped_carries_the_captured_origin_block_verbatim(tmp_path, monkeypatch):
+    plan = "# Plan\n\nProposed class: Broken\n\n## Needs you\nNothing.\n"
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text(plan)
+    captured_origin = funnel.origin_block(
+        "agent", at=NOW, run="capture-run", agent="muse"
+    )
+    item = Item(
+        repo="owner/repo", number=42, title="An idea",
+        url="https://github.com/owner/repo/issues/42", state="OPEN",
+        status="Ideas", klass="Broken", item_id="project-item-42",
+        body="Captured note.\n\n" + captured_origin,
+    )
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, variables))
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
+        return {"node": {"options": [{"id": "ready-option", "name": "Ready"}]}}
+
+    def run(args, capture_output, text=True):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file),
+        run="shape-run", agent="claude",
+    ) == 0
+
+    edit = next(call for call in calls if call[0] == "run"
+                and call[1][:3] == ("gh", "issue", "edit"))
+    shaped_body = edit[1][-1]
+    assert shaped_body.endswith(captured_origin)
+    assert funnel.parse_origin(shaped_body) == funnel.parse_origin(captured_origin)
+    assert funnel.parse_provenance(shaped_body)["run"] == "shape-run"
 
 
 def test_shaped_prints_advisory_overlap_candidates(tmp_path, monkeypatch, capsys):

@@ -18,6 +18,7 @@ from funnel import (  # noqa: E402
     Item,
     effective_class,
     awaiting_decision,
+    awaiting_breakdown,
     gate_question,
     ladder_index,
     lock_holder,
@@ -241,6 +242,25 @@ def test_a_blocked_ticket_asks_only_whether_to_unblock():
     assert gate_question(blocked) == "Unblock?"
 
 
+def test_a_blocked_ticket_with_a_breakdown_question_still_asks_to_unblock():
+    blocked = ticket(
+        1, 9, labels=["blocked"], needs_decision="Where should this live?"
+    )
+
+    assert gate_question(blocked) == "Unblock?"
+
+
+def test_a_ready_project_with_a_breakdown_question_leaves_breakdown_queue():
+    blocked = project(
+        1, "Ready", "New", children=0, labels=["blocked"],
+        needs_decision="Where should this connector live?",
+    )
+
+    assert awaiting_breakdown([blocked]) == []
+    assert awaiting_decision([blocked]) == [blocked]
+    assert gate_question(blocked) == "Answer the breakdown's question?"
+
+
 def test_blocked_ticket_without_status_starts_when_the_label_is_applied():
     blocked = ticket(
         1, 9, labels=["blocked"],
@@ -367,6 +387,61 @@ def test_in_flight_work_finishes_before_anything_new_starts():
     assert order == [4, 2]  # ladder first: New outranks Replace
 
 
+def test_a_ready_broken_ticket_preempts_in_flight_improve_work():
+    """plan.md: "Broken and Maintenance preempt in-flight work — only classes
+    that are finite may preempt." Nate, 2026-09-09: broken items in Ready move
+    past improvement items in Building (#435)."""
+    rows = [project(1, "Building", "Improve", days=30), ticket(2, 1, days=30),
+            project(3, "Ready", "Broken", days=1), ticket(4, 3, days=1)]
+    assert [i.number for i in startable(rows)] == [4, 2]
+
+
+def test_in_flight_broken_work_still_finishes_before_a_ready_broken_start():
+    """Among the finite classes, commitment still comes first."""
+    rows = [project(1, "Building", "Broken", days=1), ticket(2, 1, days=1),
+            project(3, "Ready", "Broken", days=30), ticket(4, 3, days=30)]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
+def test_a_ready_improve_ticket_still_waits_behind_in_flight_improve_work():
+    """plan.md's rejection stands: an unbounded class never preempts."""
+    rows = [project(1, "Building", "Improve", days=1), ticket(2, 1, days=1),
+            project(3, "Ready", "Improve", days=30), ticket(4, 3, days=30)]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
+def test_maintenance_preempts_in_flight_ranking_like_broken():
+    rows = [project(1, "Building", "New"), ticket(2, 1),
+            project(3, "Ready", "Maintenance"), ticket(4, 3)]
+    assert [i.number for i in startable(rows)] == [4, 2]
+
+
+def test_new_never_preempts_in_flight_work():
+    rows = [project(1, "Building", "Replace"), ticket(2, 1),
+            project(3, "Ready", "New"), ticket(4, 3)]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
+def test_a_blocker_of_a_broken_ticket_preempts_with_it():
+    """The descendants rule carries preemption to whatever a Broken fix waits on."""
+    rows = [project(1, "Building", "Improve", days=30), ticket(2, 1, days=30),
+            project(3, "Ready", "Broken"), ticket(4, 3),
+            project(5, "Ready", "New"), ticket(6, 5)]
+    rows[3].open_blockers = [rows[5].ref]          # #4 (Broken) is blocked by #6 (New)
+    order = [i.number for i in startable(rows)]
+    assert order.index(6) < order.index(2)
+
+
+def test_a_class_above_broken_on_the_ladder_does_not_preempt_by_position(monkeypatch):
+    """Preemption is granted by name (plan.md: only finite classes), not by
+    where a class sits on the ladder — so #130 landing Investigate first does
+    not widen it unless Investigate is added to PREEMPTING_CLASSES."""
+    monkeypatch.setattr(funnel, "LADDER", ["Investigate"] + funnel.LADDER)
+    rows = [project(1, "Building", "Improve"), ticket(2, 1),
+            project(3, "Ready", "Investigate"), ticket(4, 3)]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
 def test_tickets_inherit_their_parents_class():
     """The ladder ranks projects, not individual tickets."""
     broken_parent = project(1, "Building", "Broken")
@@ -412,22 +487,43 @@ def test_blocked_work_is_not_startable_at_either_level():
     assert startable([parent, ticket(4, 3)]) == []
 
 
-def test_a_human_step_ticket_is_not_startable():
+def test_a_machine_local_ticket_is_startable_by_claude_only():
+    rows = [
+        project(1, "Building", "New"),
+        ticket(
+            2, 1,
+            body="Human step: {}".format(funnel.MACHINE_LOCAL_REASON),
+        ),
+    ]
+
+    assert startable(rows, agent="codex") == []
+    assert [candidate.number for candidate in startable(
+        rows, agent="claude"
+    )] == [2]
+
+
+def test_a_human_step_ticket_is_not_startable_by_any_agent():
     rows = [
         project(1, "Building", "New"),
         ticket(2, 1, body="Human step: entering a credential"),
     ]
 
-    assert startable(rows) == []
+    assert startable(rows, agent="codex") == []
+    assert startable(rows, agent="claude") == []
 
 
-def test_an_unmarked_ticket_is_still_startable():
+def test_an_unmarked_ticket_is_startable_by_both_agents():
     rows = [
         project(1, "Building", "New"),
         ticket(2, 1, body="Enter a value supplied through the environment."),
     ]
 
-    assert [candidate.number for candidate in startable(rows)] == [2]
+    assert [candidate.number for candidate in startable(
+        rows, agent="codex"
+    )] == [2]
+    assert [candidate.number for candidate in startable(
+        rows, agent="claude"
+    )] == [2]
 
 
 def test_a_ticket_with_an_open_native_blocker_is_not_startable():
@@ -645,6 +741,53 @@ def test_next_excludes_declined_refs_without_changing_queue_order():
     ).number == 6
 
 
+def test_next_releases_the_claim_held_on_a_declined_ref(monkeypatch, capsys):
+    """A declined ticket's claim is released by the decline itself (#395)."""
+    released = []
+    monkeypatch.setattr(funnel, "write_lock",
+                        lambda item, value: released.append((item.ref, value)))
+    rows = [
+        project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(60)),
+        project(3, "Building", "New"), ticket(4, 3),
+    ]
+
+    assert funnel.cmd_next(rows, NOW, excluded={rows[1].ref}) == 0
+
+    assert released == [(rows[1].ref, "")]
+    assert rows[1].in_motion_since is None
+    assert "released {} (declined)".format(rows[1].ref) in capsys.readouterr().err
+    assert funnel.in_motion(rows, NOW) == []
+
+
+def test_next_excludes_a_declined_ticket_given_as_a_bare_number(monkeypatch, capsys):
+    """#436: the routine may pass the number it copied; it must still exclude."""
+    released = []
+    monkeypatch.setattr(funnel, "write_lock",
+                        lambda item, value: released.append((item.ref, value)))
+    rows = [
+        project(1, "Building", "New"), ticket(2, 1, in_motion_since=claimed(60)),
+        project(3, "Building", "New"), ticket(4, 3),
+    ]
+
+    assert funnel.cmd_next(rows, NOW, excluded={"2"}) == 0
+
+    assert '"ref": "nateprich/beta#4"' in capsys.readouterr().out
+    assert released == [(rows[1].ref, "")]
+
+
+def test_next_leaves_an_unclaimed_declined_ref_alone(monkeypatch, capsys):
+    released = []
+    monkeypatch.setattr(funnel, "write_lock",
+                        lambda item, value: released.append((item.ref, value)))
+    rows = [project(1, "Building", "New"), ticket(2, 1),
+            project(3, "Building", "New"), ticket(4, 3)]
+
+    assert funnel.cmd_next(rows, NOW, excluded={rows[1].ref}) == 0
+
+    assert released == []
+    capsys.readouterr()
+
+
 def test_next_returns_nothing_when_every_candidate_is_excluded():
     rows = [
         project(1, "Building", "New"), ticket(2, 1),
@@ -669,6 +812,28 @@ def test_next_cli_accepts_repeatable_not_filters(monkeypatch, capsys):
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["ref"] == rows[5].ref
+
+
+def test_next_cli_filters_machine_local_work_by_requesting_agent(
+    monkeypatch, capsys
+):
+    rows = [
+        project(1, "Building", "New"),
+        ticket(
+            2, 1,
+            body="Human step: {}".format(funnel.MACHINE_LOCAL_REASON),
+        ),
+    ]
+    monkeypatch.setattr(funnel, "load_items", lambda: rows)
+    monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())
+    monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: rows[1].body)
+
+    assert funnel.main(["next", "--agent", "codex"]) == 1
+    capsys.readouterr()
+
+    assert funnel.main(["next", "--agent", "claude"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ref"] == rows[1].ref
 
 
 # -- The portfolio signal ---------------------------------------------------

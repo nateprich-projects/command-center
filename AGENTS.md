@@ -35,19 +35,12 @@ prose. _(confirmed by Nate 2026-09-06)_
 
 ## Capability boundary
 
-For the closed-world test of whether a plan or step needs Nate, an agent has:
-
-- a shell
-- `gh`
-- a GitHub token available to `gh`
-- the filesystem of its checkout
-
-An agent does not have a browser session, application UIs, a credential store, account or
-billing settings, physical access, or an identity of its own. It acts through Nate's
-token. Ask whether the step requires anything outside this boundary. The named access
-cases — an app UI with no API, entering a credential, an account or billing setting, or
-physical access — are examples of the boundary, not an exhaustive checklist; an unnamed
-capability gap still counts. _(confirmed by Nate 2026-09-07)_
+For the closed-world test of whether a plan or step needs Nate, use the
+[shared capability boundary](skills/capability-boundary.md). It distinguishes work
+that is workable by any agent, workable only where the Claude Code environment is
+present, and workable by no agent. The named examples are illustrative rather than
+an exhaustive checklist; an unnamed capability gap still counts. _(confirmed by Nate
+2026-09-07)_
 
 ## The rule that is easy to skip
 
@@ -85,6 +78,29 @@ wrong.
   **The rule is vendor-specific, not a general principle** — it is about what Anthropic
   and OpenAI permit on these plans, and it has been misread as universal.
   _(confirmed by Nate 2026-09-07.)_
+
+  **The rule bans unattended *prompt execution*, not a listener.** `claude rc`
+  (`claude remote-control`) started from launchd is outside it: the server idles and
+  issues no prompt of its own, consuming nothing until Nate sends a message from a
+  device. What the clause in Anthropic's consumer terms prohibits is accessing the
+  Services "through automated or non-human means"; a process that waits for a human is
+  not that, and the terms carve out "where we otherwise explicitly permit it".
+  _(confirmed by Nate 2026-09-09.)_
+
+  What is established here, and it is first-party rather than inference: Anthropic ships
+  auto-connect as a supported setting — `remoteControlAtStartup: true`, "connect
+  automatically when an interactive session starts", exposed in `/config`, the desktop
+  app, and the VS Code extension. Their Remote Control documentation describes server
+  mode as a persistent server accepting multiple concurrent sessions, and tells you to
+  run it under `tmux` or `screen` to survive a disconnect. The Usage Policy's automation
+  prohibitions are all abuse shapes this is nowhere near: automation in account
+  creation, spammy behaviour, bypassing guardrails, model scraping, ban circumvention.
+
+  **The line to watch is who issues the prompts, not what starts the process.** If
+  anything on this Mac ever drives the sessions the listener spawns — a channel, a
+  scheduled task, cross-session messaging — then a machine is issuing prompts through
+  it and the carve-out no longer applies. That would be the banned shape wearing the
+  listener's clothes. Do not widen this paragraph to cover it.
 
   **Muse Code is exempt, on Nate's judgement.** Asked whether the schedules were within
   Meta's terms, he answered *"I think we're good."* That settles it as a decision and
@@ -236,6 +252,32 @@ Repos opt in by carrying the topic `command-center`, across both `nateprich` and
 
 `braven112/mfl.football.v2` is explicitly out. No agent-authored PRs land in a
 collaborator's repo.
+
+## Member-repo entry standard
+
+Onboarding is a one-repo-at-a-time ritual. A repo meets the entry standard only when
+both of these **blocking** judgements are satisfied:
+
+- **Correct long-term home — Nate's judgement.** Nate decides that the repo is the
+  correct long-term home for its work. An agent must not infer or automate this
+  decision.
+- **Triaged backlog — Nate's judgement.** Nate decides that the repo's backlog has
+  been triaged. Backlog triage is not machine-checkable; an agent must not fake a
+  check for it.
+
+The onboarding steps are:
+
+- **`command-center` topic — blocking membership requirement.** The topic is the
+  membership state in GitHub; there is no allowlist or denylist for repos.
+- **CI workflow — blocking.** A member repo must have CI, because the merge gate
+  refuses to merge work when no CI checks are reported.
+- **Stock GitHub labels deleted — advisory.** Remove the ten stock labels so they do
+  not duplicate Command Center's vocabulary, but their presence does not block work.
+- **Dependabot swept — advisory.** Sweep Dependabot during onboarding, but an
+  outstanding sweep does not block work.
+
+The two entry-standard judgements remain Nate's even when the checkable onboarding
+steps are reported by tooling. _(confirmed by Nate 2026-09-08)_
 
 ## Secrets
 

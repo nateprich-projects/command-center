@@ -18,6 +18,7 @@ A skip is honest here: absence of the directory is not evidence of no drift.
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
 
@@ -76,7 +77,7 @@ def test_only_the_schedules_that_need_it_get_the_presence_check():
         if sync.needs_presence_check(name):
             assert command.endswith("--idle"), name
         else:
-            assert command.endswith("--tier " + sync.tier_for(name)), name
+            assert "--tier " + sync.tier_for(name) in command, name
 
 
 def test_the_tier_follows_the_schedule_too():
@@ -145,6 +146,45 @@ def test_the_routine_still_separates_setup_notes_from_the_runtime_prompt():
     body = sync.prompt_text()
     assert "Paste this into" not in body
     assert body.startswith("# Codex routine")
+
+
+def test_derived_lane_prompts_pin_the_current_routine_sha(tmp_path, monkeypatch):
+    monkeypatch.setattr(sync, "AUTOMATIONS", tmp_path)
+    for name, rrule in (
+        ("all-day", "FREQ=HOURLY;INTERVAL=1;BYMINUTE=0"),
+        ("overnight", "FREQ=WEEKLY;BYDAY=SA;BYHOUR=2;BYMINUTE=0"),
+    ):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "automation.toml").write_text(
+            'rrule = "RRULE:{}"\n'.format(rrule)
+        )
+
+    expected = sync.funnel.routine_sha(sync.ROUTINE)
+    for name in ("all-day", "overnight"):
+        command = next(
+            line.strip()
+            for line in sync.prompt_text(name).splitlines()
+            if line.strip().startswith("python3") and sync.GATE_LINE in line
+        )
+        assert command.count("--routine-sha " + expected) == 1
+
+
+def test_check_accepts_a_lane_prompt_with_the_current_routine_sha(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(sync, "AUTOMATIONS", tmp_path)
+    directory = tmp_path / "command-center-lane"
+    directory.mkdir()
+    (directory / "automation.toml").write_text(
+        'rrule = "RRULE:FREQ=HOURLY;BYMINUTE=0"\n'
+        "prompt = {}\n".format(json.dumps(sync.prompt_text("command-center-lane")))
+    )
+
+    assert sync.main(["--check"]) == 0
+    output = capsys.readouterr().out
+    assert "ok       command-center-lane" in output
+    assert "DRIFTED" not in output
 
 
 def test_the_trailing_newline_the_codex_app_strips_is_not_drift():

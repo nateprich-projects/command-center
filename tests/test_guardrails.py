@@ -27,6 +27,40 @@ CANONICAL = "/Users/nateprich/.claude/command-center"
 #: trap — but never in a file an agent executes from.
 RESOLVED = "/Volumes/"
 
+CAPTURE_ROUTINES = (
+    "claude.md",
+    "muse.md",
+    "zcode.md",
+    "codex-work.md",
+)
+AGENT_CAPTURE_ROUTINES = (
+    "claude.md",
+    "muse.md",
+    "codex-work.md",
+)
+CAPTURE_RULE = (
+    "When this run observes a defect (broken behaviour, a failing command, or a "
+    "misbehaving run — evidence, not speculation), record it before finishing "
+    "with `funnel capture`. Put the observed evidence in the note, choose its "
+    "class at capture using `skills/shape`'s \"Class it when you file it\" rule, "
+    "and say why. Agents class their own captures, never his existing issues."
+)
+CAPTURE_EXCEPTION = (
+    "This is the sanctioned exception to the review rule to act only on the PR "
+    "you were given: capture records the observed defect; it does not act on the "
+    "thing observed."
+)
+
+# These are the load-bearing plan sections described by skills/shape. Keep the
+# canonical names here so a prose edit cannot silently drift away from the
+# vocabulary the plan parser and self-approval path understand.
+PLAN_SECTION_NAMES = (
+    "Decided from precedent",
+    "Decided by the agent",
+    "Needs Nate",
+)
+NEEDS_SECTION_ALIASES = ("Needs Nate", "Needs you")
+
 
 def command_files():
     """Files an agent reads and runs commands out of."""
@@ -84,4 +118,49 @@ def test_the_permission_rule_itself_is_intact():
         "The allow rule the routines depend on is gone from .claude/settings.json. "
         "Without it every command-center call prompts, and a scheduled run cannot "
         "answer a prompt."
+    )
+
+
+def test_every_work_routine_captures_observed_defects_before_finishing():
+    offenders = []
+    for filename in CAPTURE_ROUTINES:
+        path = ROOT / "routines" / filename
+        body = " ".join(path.read_text(encoding="utf-8").split())
+        for rule in (CAPTURE_RULE, CAPTURE_EXCEPTION):
+            if rule not in body:
+                offenders.append("{} is missing: {}".format(filename, rule))
+        if "funnel.py capture" not in body:
+            offenders.append("{} is missing the funnel capture command".format(filename))
+
+    assert not offenders, "\n".join(offenders)
+
+
+def test_active_work_routines_pass_origin_and_class_to_capture():
+    offenders = []
+    expected = "--origin agent --class <Broken|Maintenance|Improve|New|Replace>"
+    for filename in AGENT_CAPTURE_ROUTINES:
+        body = " ".join(
+            (ROOT / "routines" / filename).read_text(encoding="utf-8").split()
+        )
+        if expected not in body:
+            offenders.append(
+                "{} is missing the agent capture arguments: {}".format(
+                    filename, expected
+                )
+            )
+
+    assert not offenders, "\n".join(offenders)
+
+def test_shape_skill_pins_plan_section_names():
+    skill = (ROOT / "skills" / "shape" / "SKILL.md").read_text()
+    missing = [name for name in PLAN_SECTION_NAMES if name not in skill]
+    assert not missing, (
+        "skills/shape/SKILL.md must keep the plan section names stable; missing: {}"
+        .format(", ".join(missing))
+    )
+
+    missing_aliases = [name for name in NEEDS_SECTION_ALIASES if name not in skill]
+    assert not missing_aliases, (
+        "skills/shape/SKILL.md must document both Needs-section spellings; missing: {}"
+        .format(", ".join(missing_aliases))
     )

@@ -27,7 +27,7 @@ preempt.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha f00eb79dc232826ead5ba9845701c0e8e0e7b79860251e10a329a830346f4ade
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha ac65a15aca0d0ff7dd7f457a9136d734fa646968074bfc650f79016f9f670ebb
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and names
@@ -252,14 +252,41 @@ the decision is genuinely Nate's. Record that open question in the per-category
 Preference — with an explicit answer under every category, including when
 nothing is outstanding.
 
-Write the plan to a file, then run:
+Write the plan to a file. If the idea's capture origin is `agent` and its Class is
+unset, choose the Class from the ladder (`Broken`, `Maintenance`, `Improve`, `New`,
+or `Replace`) and pass it so the recovery write happens before the Status write:
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --class <Broken|Maintenance|Improve|New|Replace> --plan <file>
+```
+
+For a `nate-relayed` idea, or one with no readable origin marker, do not pass
+`--class` and do not infer one. Include a non-empty `Proposed class: <one-word proposal>`
+line in the plan so Nate can make the one-word correction after it reaches `Shaped`.
 
 ```bash
 python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --plan <file>
 ```
 
 Moving the item to `Shaped` records that a plan exists; **Shaped is not approval**.
-Do not set `Ready`, answer the Shaped gate, or change `Status` or `Class` yourself.
+Do not set `Ready`, answer the Shaped gate, or use `--class` for a Nate-origin idea or
+an already-classed item. The only Class write in this step is the recovery path for an
+explicitly agent-origin, unclassed idea.
+
+## Capture observed defects before finishing
+
+When this run observes a defect (broken behaviour, a failing command, or a
+misbehaving run — evidence, not speculation), record it before finishing with
+`funnel capture`. Put the observed evidence in the note, choose its class at
+capture using `skills/shape`'s "Class it when you file it" rule, and say why.
+Agents class their own captures, never his existing issues.
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --origin agent --class <Broken|Maintenance|Improve|New|Replace> --note "<observed evidence; say why you chose this class, and say plainly when you are unsure>"
+```
+
+This is the sanctioned exception to the review rule to act only on the PR you were
+given: capture records the observed defect; it does not act on the thing observed.
 
 ## 8. Finish, always
 

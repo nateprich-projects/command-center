@@ -1,3 +1,22 @@
+# RETIRED 2026-09-09 — this routine no longer runs
+
+Nate's decision, 2026-09-09: *"kill those and just use muse going forward since
+muse is cheaper, and the models are better."* Measured over the preceding 24 hours
+from the heartbeat: zcode did work in 18 of 93 runs and was refused on the z.ai pace
+line in 63; each job it did cost about 1% of the z.ai weekly quota. Muse's standard
+schedule carries every job below — review, breakdown and (since #366) standard-tier
+shaping — on an unmetered pool. Tracked as #431.
+
+**Schedule it ran on**, recorded here because the zcode app holds it where nothing can
+read it (#52): every 15 minutes at :08, :23, :38 and :53, first run 2026-09-07 02:11Z.
+
+**To re-enable:** paste the `begin` command below (regenerate its `--routine-sha` with
+`scripts/paste_routine_sha.py`), schedule it in the app, and remove `"zcode"` from
+`heartbeat.RETIRED_AGENTS`. Nothing else was removed — records, `PROVIDERS` entries
+and the `zai` policy in `usage.py` are all still in place.
+
+---
+
 # zcode routine — one job per run: review, otherwise breakdown, otherwise shaping
 
 Paste this into a **zcode scheduled task**. It requires the zcode app to be open
@@ -41,7 +60,7 @@ asked of it.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha c05bb4f1914aa72c834d6da42cc3595797838484202154731c0b20e78bb390b9
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha a3f6f4bb433f77b46e6597064908d6b472190c8c2d462b0c787771abe2871159
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and says
@@ -291,6 +310,21 @@ python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --pla
 
 Moving the item to `Shaped` records that a plan exists; **Shaped is not approval**.
 Do not set `Ready`, answer the Shaped gate, or change `Status` or `Class` yourself.
+
+## Capture observed defects before finishing
+
+When this run observes a defect (broken behaviour, a failing command, or a
+misbehaving run — evidence, not speculation), record it before finishing with
+`funnel capture`. Put the observed evidence in the note, choose its class at
+capture using `skills/shape`'s "Class it when you file it" rule, and say why.
+Agents class their own captures, never his existing issues.
+
+```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --note "<observed evidence; chosen class and why>"
+```
+
+This is the sanctioned exception to the review rule to act only on the PR you were
+given: capture records the observed defect; it does not act on the thing observed.
 
 ## 8. Finish, always
 

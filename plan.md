@@ -45,7 +45,8 @@ gate unless an agent is actively working it.
 | Ready | Broken into issues | No |
 | Building | Codex is working it | Only when all children close |
 | Done | Shipped and accepted (`state_reason: completed`) | No |
-| Parked | Stopped, **written reason required** (`state_reason: not_planned`) | No |
+| Parked | Stopped, **written reason required** (`state_reason: not_planned`). Means *later*: the reason is what makes re-encountering it a 30-second decision | No |
+| *(archived)* | Disposed for good — a duplicate, a superseded item, or one whose condition can no longer arise. Closed and Parked first, then the Project item is archived, so it leaves every funnel view and the default board views while the issue and its reason remain; one click to reverse. Nate's call, 2026-09-09, so that `Parked` holds only what he might revisit | No |
 
 **One unconditional gate, plus one that fires only when it has something to ask:**
 **worth shaping? → (is the plan good?) → accept it?**

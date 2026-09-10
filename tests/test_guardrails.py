@@ -29,7 +29,13 @@ RESOLVED = "/Volumes/"
 
 CAPTURE_ROUTINES = (
     "claude.md",
+    "muse.md",
     "zcode.md",
+    "codex-work.md",
+)
+AGENT_CAPTURE_ROUTINES = (
+    "claude.md",
+    "muse.md",
     "codex-work.md",
 )
 CAPTURE_RULE = (
@@ -125,6 +131,23 @@ def test_every_work_routine_captures_observed_defects_before_finishing():
                 offenders.append("{} is missing: {}".format(filename, rule))
         if "funnel.py capture" not in body:
             offenders.append("{} is missing the funnel capture command".format(filename))
+
+    assert not offenders, "\n".join(offenders)
+
+
+def test_active_work_routines_pass_origin_and_class_to_capture():
+    offenders = []
+    expected = "--origin agent --class <Broken|Maintenance|Improve|New|Replace>"
+    for filename in AGENT_CAPTURE_ROUTINES:
+        body = " ".join(
+            (ROOT / "routines" / filename).read_text(encoding="utf-8").split()
+        )
+        if expected not in body:
+            offenders.append(
+                "{} is missing the agent capture arguments: {}".format(
+                    filename, expected
+                )
+            )
 
     assert not offenders, "\n".join(offenders)
 

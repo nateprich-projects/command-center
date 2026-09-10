@@ -74,6 +74,28 @@ def test_show_does_not_offer_a_start_gate(monkeypatch, capsys):
     assert "Answer it:" not in output
 
 
+def test_show_carries_the_breakdown_question(monkeypatch, capsys):
+    item = Item(
+        repo="nateprich/beta",
+        number=9,
+        title="A project needing an answer",
+        url="https://github.com/nateprich/beta/issues/9",
+        state="OPEN",
+        status="Ready",
+        status_since=NOW,
+        labels=["blocked"],
+        needs_decision="Where should this connector live?",
+    )
+
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: {"comments": []})
+
+    assert funnel.cmd_show([item], NOW, item.ref) == 0
+
+    output = capsys.readouterr().out
+    assert "GATE: Answer the breakdown's question?" in output
+    assert "NEEDS DECISION: Where should this connector live?" in output
+
+
 def test_start_command_is_rejected_by_argument_parsing(monkeypatch, capsys):
     monkeypatch.setattr(
         funnel, "load_items", lambda: pytest.fail("GitHub should not be loaded")

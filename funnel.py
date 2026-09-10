@@ -13,8 +13,11 @@ stored or passed by this program.
 from __future__ import annotations
 
 import argparse
+import contextlib
 from collections import namedtuple
+import glob
 import hashlib
+import io
 import json
 import os
 import pathlib
@@ -24,7 +27,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from agent_health import assess as assess_agent_health
 
@@ -64,7 +67,8 @@ def routine_sha(path: os.PathLike) -> str:
 
 def routine_path(agent: str) -> pathlib.Path:
     """The checked-in routine whose pasted copy identifies itself."""
-    return CHECKOUT_ROOT / "routines" / (agent + ".md")
+    filename = "codex-work.md" if agent == "codex" else agent + ".md"
+    return CHECKOUT_ROOT / "routines" / filename
 
 # One small, shared shape for every doctor check. Later doctor tickets add
 # checks to the fixed list without changing the report contract.
@@ -168,16 +172,16 @@ LOCK_TTL = timedelta(hours=2)
 #: look at. The premise that made two right — Codex outrunning a metered Claude
 #: reviewer — no longer holds.
 #:
-#: **What this does not fix, and what to watch.** Parallelism multiplies whatever
-#: the queue hands out. Six of the top twelve startable tickets carry a prose
-#: dependency `startable()` cannot read, so extra sessions can be handed chained
-#: work, decline it, and record `errored` (#175) only to be handed it again
-#: (#177) — on 2026-09-08 three runs opened within one minute and all three took
-#: the same unworkable ticket. More branches against a faster-moving `main` also
-#: means more conflicts, and `merge_blockers` still does not read the `mergeable`
-#: it fetches (#161), so the gate passes a conflicting branch and fails at
-#: `gh pr merge`. If this raise goes badly, those are the two reasons; #129's
-#: #153/#154 and #161 are the fixes, not a lower number.
+#: **What this does not fix, and what to watch.** Parallelism still multiplies
+#: whatever the queue hands out, but the old risks are resolved: #129 and #161,
+#: together with #175 and #177, shipped on 2026-09-08. The live risk from the
+#: #178 investigation is stale Codex prompts, not a stale queue: all five Codex
+#: automations have drifted from `routines/codex-work.md`; four escalated-lane
+#: copies predate #268's decline handling, and the standard lane calls the
+#: nonexistent `funnel next --not` flag. At four concurrent sessions that is
+#: four runs executing an unparseable command instead of one. #178 is the fix,
+#: not a lower number. Whether `WIP_LIMIT = 4` is still right is open and
+#: unanswered; that is Nate's decision, not this comment's.
 WIP_LIMIT = 4
 
 #: Funnel order. Index is the stage's depth; later means further along.
@@ -185,6 +189,14 @@ STAGES = ["Ideas", "Shaped", "Ready", "Building", "Done", "Parked"]
 
 #: The ladder, best-first. Only finite classes may preempt in-flight work.
 LADDER = ["Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"]
+
+#: The finite classes. `plan.md`: "Broken and Maintenance preempt in-flight
+#: work — and this is only safe because both are finite. The governing rule:
+#: only classes that are finite may preempt." `startable()` ranks these ahead
+#: of in-flight work of the unbounded classes (#435). The WIP-cap preemption in
+#: `claim_ticket()` stays Broken-only: Maintenance may preempt ranking, not the
+#: cap (`test_maintenance_does_not_preempt_the_limit`).
+PREEMPTING_CLASSES = frozenset({"Broken", "Maintenance"})
 PREEMPTING = {"Broken", "Maintenance"}
 
 #: Existing-work classes may take the unattended shaping path. Origin remains
@@ -202,6 +214,11 @@ GATES = {
 DECISION_ORDER = ["Building", "Ready", "Shaped"]
 
 MAINTENANCE_WINDOW = timedelta(days=30)
+
+# Only these harnesses expose the complete pair of input-token counts used by
+# the re-send metric. Claude is unscheduled and Muse is unmetered, so their
+# absence from the brief is intentional rather than missing data.
+METERED_AGENTS = ("codex", "zcode")
 
 # A doctor run asks for one row beyond the bound so it can distinguish a full
 # result from a truncated one without an unbounded history scan. The bound is
@@ -249,6 +266,20 @@ BLOCK_COMMENT_RE = re.compile(
     + r"(?: on (?P<references>#[0-9]+(?: and #[0-9]+)*))?:\*\*"
 )
 
+#: A breakdown can leave a project waiting on Nate's answer. The header is
+#: deliberately strict and anchored just like the ordinary block header so a
+#: quoted or embedded sentence cannot become a gate question by accident.
+NEEDS_DECISION_PREFIX = "**Needs a decision:**"
+NEEDS_DECISION_RE = re.compile(
+    r"\A" + re.escape(NEEDS_DECISION_PREFIX)
+    + r"[ \t]+(?P<question>.+)", flags=re.DOTALL
+)
+
+#: A satisfied block is recorded before its label is removed. The structured
+#: payload makes a partial failure idempotent: the next run can retry the label
+#: write without posting a second provenance comment for the same block.
+SATISFIED_BLOCK_PREFIX = "**Satisfied block:** "
+
 #: Existing comments have no machine-readable provenance. Until the provenance
 #: marker lands, show must fail closed rather than treat the GitHub account as
 #: authorship.
@@ -282,6 +313,10 @@ REJECTED_MERGE_WINDOW = timedelta(days=7)
 #: brief is hourly, so a one-run window would make the record disappear before
 #: Nate could reasonably see it.
 CLOSED_ITSELF_WINDOW = timedelta(days=7)
+
+#: Keep mechanical block clears visible across several unattended brief runs,
+#: for the same reason funnel-closed projects remain visible for a week.
+CLEARED_BLOCK_WINDOW = timedelta(days=7)
 
 #: Drift is reported, never used as a gate. Keep these names short and stable:
 #: callers put them verbatim into comments and the brief.
@@ -320,8 +355,10 @@ class Item:
     labels: List[str] = field(default_factory=list)
     block_references: List[str] = field(default_factory=list)
     block_reason: Optional[str] = None
+    needs_decision: Optional[str] = None
     unparseable_block_comments: List[str] = field(default_factory=list)
     block_comments_error: Optional[str] = None
+    satisfied_block_record: Optional[Dict[str, object]] = None
     open_blockers: List[str] = field(default_factory=list)
     dead_blockers: List[str] = field(default_factory=list)
     assignees: List[str] = field(default_factory=list)
@@ -337,6 +374,7 @@ class Item:
     first_child_created_at: Optional[datetime] = None
     last_child_closed_at: Optional[datetime] = None
     blocked_since: Optional[datetime] = None
+    blocked_cleared_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
 
     @property
@@ -503,6 +541,8 @@ def gate_question(item: Item) -> Optional[str]:
         # can be parked; a ticket can only be unblocked.
         if item.block_references:
             return None
+        if item.parent is None and item.needs_decision:
+            return "Answer the breakdown's question?"
         return "Unblock?" if item.parent else "Unblock or park?"
     if item.status == "Building":
         # New work and replacements always stop for acceptance. Upkeep closes
@@ -662,9 +702,18 @@ TIERS = ("standard", "escalated")
 RISK_LINE = re.compile(r"^\s*Risk:\s*(standard|escalated)\b(.*)$",
                        re.IGNORECASE | re.MULTILINE)
 
-#: A ticket declares a step that only Nate can perform in its body, written at
-#: breakdown. The reason is deliberately an allowlist: inability to figure out
-#: engineering work is not a reason to route that work to him.
+#: A ticket declares a step that is not workable in every agent environment in
+#: its body, written at breakdown. An unmarked ticket is workable by any agent;
+#: this reason is the middle outcome, workable only where Claude Code's local
+#: environment is present. It is deliberately an allowlist: a lack of access
+#: to the Claude Code environment is not the same as an engineer finding work
+#: difficult.
+MACHINE_LOCAL_REASON = "a Claude Code environment"
+MACHINE_LOCAL_REASONS = (MACHINE_LOCAL_REASON,)
+
+#: These reasons still mean that no agent can perform the step. Keep them
+#: separate from MACHINE_LOCAL_REASONS so the next capability-aware consumer
+#: can distinguish Claude-Code-only work from work Nate must perform.
 HUMAN_STEP_PREFIX = "Human step: "
 HUMAN_STEP_REASONS = (
     "an app UI with no API",
@@ -672,26 +721,47 @@ HUMAN_STEP_REASONS = (
     "an account or billing setting",
     "physical access to a machine",
 )
+HUMAN_STEP_MARKER_REASONS = MACHINE_LOCAL_REASONS + HUMAN_STEP_REASONS
 HUMAN_STEP_LINE = re.compile(
     r"^\s*" + re.escape(HUMAN_STEP_PREFIX)
     + r"(?P<reason>"
-    + "|".join(re.escape(reason) for reason in HUMAN_STEP_REASONS)
+    + "|".join(re.escape(reason) for reason in HUMAN_STEP_MARKER_REASONS)
     + r")\s*$",
     re.IGNORECASE | re.MULTILINE,
 )
 
 
 def parse_human_step(body: str) -> Optional[str]:
-    """Return an allowlisted human-step reason from a ticket body.
+    """Return an allowlisted capability reason from a ticket body.
 
     Like ``RISK_LINE``, the marker must begin a body line. Matching only the
-    stated access reasons keeps a ticket from becoming Nate's work merely
-    because an agent found it difficult.
+    stated access reasons keeps a ticket from becoming restricted merely
+    because an agent found it difficult. ``None`` means any agent may work the
+    ticket; ``MACHINE_LOCAL_REASON`` means only Claude Code may work it; and a
+    reason in ``HUMAN_STEP_REASONS`` means no agent may work it.
     """
     if not isinstance(body, str):
         return None
     match = HUMAN_STEP_LINE.search(body)
     return match.group("reason") if match else None
+
+
+def matching_human_step_reason(text: object) -> Optional[str]:
+    """Return an allowlisted human-step reason found in block-comment text.
+
+    A malformed block header may put the reason on the same line as the
+    header, so ``parse_human_step`` cannot read it directly. This narrower
+    scanner is used only on a parsed block reason or on the first line already
+    recorded for a malformed block comment. It returns the canonical spelling
+    from ``HUMAN_STEP_REASONS`` rather than trusting the comment's casing.
+    """
+    if not isinstance(text, str):
+        return None
+    for reason in HUMAN_STEP_REASONS:
+        pattern = r"(?<!\w){}(?!\w)".format(re.escape(reason))
+        if re.search(pattern, text, re.IGNORECASE):
+            return reason
+    return None
 
 
 def mark_projects_that_carried_human_steps(items: Sequence[Item]) -> None:
@@ -815,6 +885,15 @@ NEEDS_NATE_PATTERNS = {
         r"\b(?:set|written|changed|edited|updated|assigned)\b[^.!?]{0,100}"
         r"\b(?:by|who|agent|agents|Nate)\b"
     ),
+}
+
+NEEDS_NATE_SIGNAL_REASONS = {
+    "policy authority": (
+        "cites plan.md or AGENTS.md on a gate, membership, or who may write"
+    ),
+    "unattended authority": "changes what an agent may do unattended",
+    "gate authority": "changes a gate's question, answer, or owner",
+    "field authority": "changes who may set a field that other rules act on",
 }
 
 
@@ -1106,9 +1185,118 @@ def required_tier(title: str, body: str, failed_before: bool = False) -> str:
     return "escalated" if escalation_reasons(title, body, failed_before) else "standard"
 
 
-def startable(items: Sequence[Item],
-              awaiting_review: Optional[Set[str]] = None) -> List[Item]:
-    """Tickets Codex may pick up, best-first.
+def _startable_without_repo_readiness(
+    item: Item,
+    by_ref: Dict[str, Item],
+    awaiting_review: Set[str],
+    agent: str = "codex",
+) -> bool:
+    """Apply the queue exclusions that do not require a repository read."""
+    capability_reason = parse_human_step(item.body or "")
+    machine_local = (
+        capability_reason is not None
+        and capability_reason.casefold() == MACHINE_LOCAL_REASON.casefold()
+    )
+    if (
+        item.state != "OPEN"
+        or item.is_blocked
+        or item.open_blockers
+        or item.children_total
+        # A machine-local marker is the middle capability outcome: Claude
+        # Code may work it, while every other requester must leave it in
+        # the queue. All other parsed markers remain human steps and are
+        # excluded from every agent, as #141 established.
+        or (capability_reason is not None
+            and (not machine_local or agent != "claude"))
+    ):
+        return False
+    if item.ref in awaiting_review:
+        return False
+    parent = by_ref.get(item.parent or "")
+    if parent is None:
+        # A parentless item is a project, never a ticket — that is the whole
+        # basis of the model. One with no children is awaiting its breakdown,
+        # not waiting to be worked. Treating it as both is what made an issue
+        # appear in two queues at once.
+        return False
+    # `Ready` or `Building`. `plan.md`: "Codex draws tickets from any
+    # `Ready` or `Building` parent, so it stalls only if every parent lacks
+    # tickets." `Building` is not a precondition for work but the record that
+    # work began — `cmd_claim` writes it on the first claim.
+    return parent.status in ("Ready", "Building") and not parent.is_blocked
+
+
+def _repo_blocking_reasons(
+    item: Item,
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]],
+) -> Tuple[str, ...]:
+    """Return blocking onboarding reasons for one loaded ticket.
+
+    ``None`` means the caller did not request the optional repository snapshot;
+    this keeps the ordering function usable with its existing fixture-only
+    callers. Once a snapshot is supplied, a missing repo entry fails closed so
+    a partial read cannot quietly offer work from an unchecked repository.
+    """
+    if repo_readiness is None:
+        return ()
+    readiness = repo_readiness.get(item.repo)
+    if readiness is None:
+        return ("repository readiness unavailable",)
+    return readiness.blocking_reasons
+
+
+def readiness_blockers(
+    items: Sequence[Item],
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+    awaiting_review: Optional[Set[str]] = None,
+    agent: str = "codex",
+) -> List[Dict[str, object]]:
+    """Return otherwise-eligible tickets withheld by repo readiness.
+
+    The result is deliberately separate from ``startable()``'s list: callers
+    such as ``begin`` need to say why a queue is empty without changing the
+    shared ordering or turning diagnostics into another queue.
+    """
+    if repo_readiness is None:
+        return []
+    awaiting_review = awaiting_review or frozenset()
+    rows = list(items)
+    by_ref = {i.ref: i for i in rows}
+    found: List[Dict[str, object]] = []
+    for item in rows:
+        if not _startable_without_repo_readiness(
+            item, by_ref, awaiting_review, agent
+        ):
+            continue
+        reasons = _repo_blocking_reasons(item, repo_readiness)
+        if not reasons:
+            continue
+        found.append({
+            "ref": item.ref,
+            "repo": item.repo,
+            "reasons": list(reasons),
+        })
+    return sorted(found, key=lambda row: (str(row["repo"]), str(row["ref"])))
+
+
+def _readiness_blocker_summary(blockers: Sequence[Dict[str, object]]) -> str:
+    """Render the stable queue-empty explanation for repository blockers."""
+    details = []
+    for blocker in blockers:
+        reasons = ", ".join(str(reason) for reason in blocker["reasons"])
+        details.append("{}: {}".format(blocker["ref"], reasons))
+    return "tickets withheld by repository readiness — {}".format(
+        "; ".join(details)
+    )
+
+
+def startable(
+    items: Sequence[Item],
+    awaiting_review: Optional[Set[str]] = None,
+    agent: str = "codex",
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+) -> List[Item]:
+    """Tickets the requesting agent may pick up, best-first.
 
     A ticket is an open issue with no children of its own, whose parent has
     passed the Ready gate. Tickets inherit their parent's Class — the ladder
@@ -1120,6 +1308,10 @@ def startable(items: Sequence[Item],
     and then spent the 09:00 and 10:00 runs re-verifying the same branch, because
     Claude's routine was over pace and could not review it. Passing it in rather
     than querying here keeps this function pure and testable from fixtures.
+
+    ``repo_readiness`` is an optional, caller-supplied snapshot from the member
+    repository checks. Its blocking requirements are applied here; advisory
+    facts remain available to ``doctor`` but never affect queue membership.
     """
     awaiting_review = awaiting_review or frozenset()
     by_ref = {i.ref: i for i in items}
@@ -1131,36 +1323,24 @@ def startable(items: Sequence[Item],
         )
         for ref in by_ref
     }
+    # Membership, not a rank threshold: a class added above Broken in LADDER
+    # (#130's Investigate) must not acquire preemption rights by position.
+    # plan.md grants them only to the finite classes named in
+    # PREEMPTING_CLASSES; a ticket that blocks one preempts with it.
+    preempting = {
+        ref: any(
+            effective_class(by_ref[related], by_ref) in PREEMPTING_CLASSES
+            for related in {ref} | descendants[ref]
+        )
+        for ref in by_ref
+    }
 
     def eligible(item: Item) -> bool:
-        if (
-            item.state != "OPEN"
-            or item.is_blocked
-            or item.open_blockers
-            or item.children_total
-            or parse_human_step(item.body or "") is not None
+        if not _startable_without_repo_readiness(
+            item, by_ref, awaiting_review, agent
         ):
             return False
-        if item.ref in awaiting_review:
-            return False
-        parent = by_ref.get(item.parent or "")
-        if parent is None:
-            # A parentless item is a project, never a ticket — that is the whole
-            # basis of the model. One with no children is awaiting its breakdown,
-            # not waiting to be worked. Treating it as both is what made an issue
-            # appear in two queues at once.
-            return False
-        # `Ready` or `Building`. `plan.md`: "Codex draws tickets from any
-        # `Ready` or `Building` parent, so it stalls only if every parent lacks
-        # tickets." `Building` is not a precondition for work but the record
-        # that work began — `cmd_claim` writes it on the first claim.
-        #
-        # This read `Building` only, and #287 deleted the `start` gate that was
-        # the sole writer of it. Nothing replaced it, so every `Ready` project
-        # was unstartable and the accept gate unreachable: nine of them on
-        # 2026-09-09, failing silently and worsening as the pre-#287 backlog
-        # drained (#343).
-        return parent.status in ("Ready", "Building") and not parent.is_blocked
+        return not _repo_blocking_reasons(item, repo_readiness)
 
     def in_flight(item: Item) -> bool:
         """Once a project is Building, its remaining tickets finish first.
@@ -1173,6 +1353,12 @@ def startable(items: Sequence[Item],
     def key(item: Item):
         since = question_since(item) or datetime.max.replace(tzinfo=timezone.utc)
         return (
+            # Finite classes preempt in-flight work of unbounded ones — the half
+            # of plan.md's rule this key never implemented until #435. Measured
+            # 2026-09-09: six Broken projects at Ready sat behind ten in-flight
+            # Improve tickets all afternoon. Read through `effective_rank` so a
+            # ticket that blocks a Broken one preempts with it.
+            0 if preempting[item.ref] else 1,
             not in_flight(item),
             effective_rank[item.ref],
             # A blocker with the same effective rank as its dependent still
@@ -1353,6 +1539,42 @@ def parse_block_comment(bodies: Iterable[str]) -> Optional[Tuple[List[str], str]
             body[match.end():].strip(),
         )
     return None
+
+
+def parse_needs_decision_comment(bodies: Iterable[str]) -> Optional[str]:
+    """Return the newest parseable breakdown question, if one exists."""
+    for body in reversed(list(bodies)):
+        if not isinstance(body, str):
+            continue
+        match = NEEDS_DECISION_RE.match(body)
+        if not match:
+            continue
+        question = _visible_comment(match.group("question")).strip()
+        if question:
+            return question
+    return None
+
+
+def parse_satisfied_block_comment(body: str) -> Optional[Dict[str, object]]:
+    """Return a valid agent-authored satisfied-block record, or ``None``.
+
+    Both markers are load-bearing. The first carries the mechanical facts;
+    the ordinary provenance marker says an agent, rather than Nate, recorded
+    the unattended action.
+    """
+    found = _marked_json(body, SATISFIED_BLOCK_PREFIX)
+    provenance = parse_provenance(body)
+    if found is None or provenance is None or provenance.get("voice") != "agent":
+        return None
+    conditions = found.get("conditions")
+    if (
+        not isinstance(conditions, list)
+        or not conditions
+        or not all(isinstance(value, str) and value for value in conditions)
+        or parse_time(found.get("found_closed_at")) is None
+    ):
+        return None
+    return found
 
 
 def unparseable_block_comment_lines(bodies: Iterable[str]) -> List[str]:
@@ -1570,8 +1792,11 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
 
 def next_ticket(items: Sequence[Item], now: datetime,
                 blocked: Optional[Set[str]] = None,
-                excluded: Optional[Set[str]] = None) -> Optional[Item]:
-    """The single ticket Codex should work, or None.
+                excluded: Optional[Set[str]] = None,
+                agent: str = "codex",
+                repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+                ) -> Optional[Item]:
+    """The single ticket the requesting agent should work, or None.
 
     Returns None when the funnel is at its work-in-progress limit. A Broken
     ticket may start anyway; that is the one sanctioned preemption. `excluded`
@@ -1580,7 +1805,12 @@ def next_ticket(items: Sequence[Item], now: datetime,
     """
     excluded = excluded or frozenset()
     queue = [
-        item for item in startable(items, awaiting_review=blocked)
+        item for item in startable(
+            items,
+            awaiting_review=blocked,
+            agent=agent,
+            repo_readiness=repo_readiness,
+        )
         if item.ref not in excluded
     ]
     if not queue:
@@ -1609,7 +1839,11 @@ def next_ticket(items: Sequence[Item], now: datetime,
 def next_ticket_for_tier(items: Sequence[Item], now: datetime,
                          tier: Optional[str] = None,
                          blocked: Optional[Set[str]] = None,
-                         excluded: Optional[Set[str]] = None) -> Optional[Item]:
+                         excluded: Optional[Set[str]] = None,
+                         agent: str = "codex",
+                         repo_readiness: Optional[
+                             Mapping[str, MemberRepoReadiness]
+                         ] = None) -> Optional[Item]:
     """Return the first shared-order ticket belonging to ``tier``.
 
     Tier filtering has to happen by asking ``next_ticket`` repeatedly rather
@@ -1621,7 +1855,9 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
     excluded = set(excluded or ())
     while True:
         ticket = next_ticket(
-            items, now, blocked=blocked, excluded=excluded
+            items, now, blocked=blocked, excluded=excluded,
+            agent=agent,
+            repo_readiness=repo_readiness,
         )
         if ticket is None or tier is None:
             return ticket
@@ -1671,8 +1907,13 @@ def working_tree_touched(now: datetime) -> List[Dict[str, object]]:
     looks identical from here. The point is that a routine moving his checkout
     stops being invisible, which on 2026-09-06 it was — a run added worktrees and
     ran `git pull` in it, and nothing recorded that but the transcript.
+
+    HEAD changes are one checkout transition even when several runs were open
+    across it. Changes where only the dirty count moved stay one row per run:
+    the heartbeat has no identity for a dirty-only event to group on.
     """
     found: List[Dict[str, object]] = []
+    transitions: Dict[Tuple[object, object], Dict[str, object]] = {}
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import heartbeat
@@ -1688,18 +1929,56 @@ def working_tree_touched(now: datetime) -> List[Dict[str, object]]:
                 after = row.get("repo")
                 if not before or not after or before == after:
                     continue
-                if (row.get("ts") or 0) < (now - MAINTENANCE_WINDOW).timestamp():
+                timestamp = row.get("ts") or 0
+                if timestamp < (now - MAINTENANCE_WINDOW).timestamp():
+                    continue
+                at = datetime.fromtimestamp(
+                    timestamp, timezone.utc
+                ).isoformat()
+                before_head = before.get("head") if isinstance(before, dict) else None
+                after_head = after.get("head") if isinstance(after, dict) else None
+                if (before_head is not None and after_head is not None
+                        and before_head != after_head):
+                    key = (before_head, after_head)
+                    transition = transitions.get(key)
+                    if transition is None:
+                        transition = {
+                            "at": at,
+                            "before": before,
+                            "after": after,
+                            "observers": [],
+                            "_at_ts": timestamp,
+                            "_observers": [],
+                        }
+                        transitions[key] = transition
+                    if timestamp < transition["_at_ts"]:
+                        transition.update(
+                            at=at, before=before, after=after, _at_ts=timestamp
+                        )
+                    transition["_observers"].append((
+                        timestamp,
+                        {"agent": agent, "run": row.get("run")},
+                    ))
                     continue
                 found.append({
                     "agent": agent,
                     "run": row.get("run"),
-                    "at": datetime.fromtimestamp(
-                        row["ts"], timezone.utc).isoformat(),
+                    "at": at,
                     "before": before,
                     "after": after,
                 })
     except Exception:
         return []
+
+    for transition in transitions.values():
+        observers = sorted(
+            transition.pop("_observers"),
+            key=lambda entry: (entry[0], entry[1]["agent"],
+                               str(entry[1]["run"])),
+        )
+        transition["observers"] = [entry[1] for entry in observers]
+        transition.pop("_at_ts")
+    found.extend(transitions.values())
     return sorted(found, key=lambda r: str(r["at"]))
 
 
@@ -1739,7 +2018,10 @@ def agent_health(now: datetime) -> List[Dict[str, str]]:
         return []
 
     found: List[Dict[str, str]] = []
+    retired = getattr(heartbeat, "RETIRED_AGENTS", frozenset())
     for agent in providers:
+        if agent in retired:
+            continue  # a stopped schedule is not a dying one (#431)
         try:
             conditions = assess_agent_health(
                 agent, heartbeat.read(agent), now.timestamp()
@@ -1753,6 +2035,68 @@ def agent_health(now: datetime) -> List[Dict[str, str]]:
             for condition in conditions
         )
     return found
+
+
+def recent_resend_ratio(now: datetime) -> Dict[str, Optional[float]]:
+    """Return recent weighted input re-send ratios for metered agents.
+
+    Heartbeat finish records carry total and fresh input counts when the
+    harness exposes both. Sum those counts across the existing diagnostic
+    window before dividing so a short run cannot outweigh a long one merely
+    because its individual ratio is larger. Malformed or partial telemetry is
+    ignored; a diagnostic must not invent a figure from an incomplete record.
+    """
+    try:
+        import heartbeat
+    except Exception:
+        return {}
+
+    cutoff = (now - MAINTENANCE_WINDOW).timestamp()
+    ratios: Dict[str, Optional[float]] = {}
+    for agent in METERED_AGENTS:
+        try:
+            rows = heartbeat.read(agent)
+        except Exception:
+            continue
+
+        total = 0
+        fresh = 0
+        found = False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("phase") != "finish":
+                continue
+            timestamp = row.get("ts")
+            if (
+                isinstance(timestamp, bool)
+                or not isinstance(timestamp, (int, float))
+            ):
+                continue
+            if timestamp < cutoff:
+                continue
+            usage = row.get("input_usage")
+            if not isinstance(usage, dict):
+                continue
+            row_total = usage.get("total_input_tokens")
+            row_fresh = usage.get("fresh_input_tokens")
+            if (
+                isinstance(row_total, bool)
+                or not isinstance(row_total, int)
+                or row_total < 0
+                or isinstance(row_fresh, bool)
+                or not isinstance(row_fresh, int)
+                or row_fresh < 0
+                or row_fresh > row_total
+            ):
+                continue
+            total += row_total
+            fresh += row_fresh
+            found = True
+
+        if found:
+            ratios[agent] = total / fresh if fresh else None
+    return ratios
 
 
 def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
@@ -1805,12 +2149,22 @@ STATUSLINE_COMMAND = "~/.claude/statusline.sh"
 USAGE_CACHE = pathlib.Path.home() / ".claude" / "command-center-usage.json"
 
 # `usage.py:174` uses fifteen minutes to decide whether one gate reading is
-# usable. Doctor answers a different question: has the status line stopped
-# writing altogether? Claude Code refreshes this file repeatedly while open, so
-# one hour (four missed gate intervals) distinguishes a stopped status line from
-# a single stale reading without calling a 20-minute gap a broken install.
-USAGE_CACHE_BROKEN_AFTER = timedelta(hours=1)
-USAGE_CACHE_FIX = "open Claude Code on the Mac mini"
+# usable. Doctor reports the source the gate would choose, so it uses the same
+# freshness boundary before trying the transcript estimate.
+USAGE_CACHE_BROKEN_AFTER = timedelta(minutes=15)
+USAGE_CACHE_FIX = "run a Claude Code session so a transcript exists"
+
+# Keep the fallback's discovery local for the same reason the cache path lives
+# here: doctor must still be able to diagnose an install when usage.py is one of
+# the things that is missing. These mirror usage.py's estimate inputs without
+# making the doctor depend on that module.
+CLAUDE_TRANSCRIPTS = str(
+    pathlib.Path.home() / ".claude" / "projects" / "*" / "*.jsonl"
+)
+CLAUDE_ESTIMATE_FIVE_HOUR = timedelta(hours=5)
+CLAUDE_ESTIMATE_RESET_WEEKDAY = 5  # usage.py: Saturday, local time
+CLAUDE_ESTIMATE_RESET_HOUR = 12
+CLAUDE_ESTIMATE_MODEL = "opus"
 
 # These mirror `heartbeat.py:38` and `heartbeat.py:52`. They are intentionally
 # local constants so doctor still works when heartbeat.py itself is unavailable.
@@ -1929,6 +2283,84 @@ def _git_ahead_behind(root: pathlib.Path) -> Tuple[int, int]:
         return int(fields[0]), int(fields[1])
     except ValueError as exc:
         raise OSError("git returned an invalid ahead/behind count") from exc
+
+
+def check_repository_drift(
+    checkout_root: Optional[os.PathLike] = None,
+) -> Check:
+    """Report local repository state that can make the checkout misleading.
+
+    This is deliberately diagnostic and read-only. A dirty tree, a branch
+    other than ``main`` (including detached HEAD), or commits that are not on
+    ``origin/main`` all make it harder to tell which committed code a local
+    command is actually exercising.
+    """
+    root = _path(checkout_root, CHECKOUT_ROOT)
+    try:
+        git_env = os.environ.copy()
+        # `git status` may refresh the index unless optional locks are
+        # disabled. Doctor must not write even that incidental repository
+        # metadata while it is inspecting the checkout.
+        git_env["GIT_OPTIONAL_LOCKS"] = "0"
+        status = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain=v1",
+             "--untracked-files=all"],
+            capture_output=True,
+            text=True,
+            env=git_env,
+        )
+        if status.returncode != 0:
+            detail = (status.stderr or status.stdout or "").strip()
+            raise OSError(detail or "git status exited {}".format(
+                status.returncode))
+        paths = [
+            line[3:] if len(line) >= 3 else line
+            for line in status.stdout.splitlines()
+            if line.strip()
+        ]
+
+        branch = subprocess.run(
+            ["git", "-C", str(root), "symbolic-ref", "--quiet", "--short",
+             "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        if branch.returncode == 0:
+            current_branch = branch.stdout.strip()
+            if not current_branch:
+                raise OSError("git returned an empty branch name")
+        elif branch.returncode == 1:
+            current_branch = None
+        else:
+            detail = (branch.stderr or branch.stdout or "").strip()
+            raise OSError(detail or "git symbolic-ref exited {}".format(
+                branch.returncode))
+
+        ahead, _ = _git_ahead_behind(root)
+    except OSError as exc:
+        return Check(
+            "repository drift", False,
+            "could not inspect {} ({})".format(
+                root, str(exc) or "unknown error"),
+            "",
+        )
+
+    findings: List[str] = []
+    if paths:
+        findings.append("uncommitted changes: {}".format(", ".join(paths)))
+    if current_branch is None:
+        findings.append("detached HEAD (not main)")
+    elif current_branch != "main":
+        findings.append(
+            "current branch is {}, not main".format(current_branch)
+        )
+    if ahead:
+        findings.append(
+            "{} commit(s) on the current branch are not present on "
+            "origin/main".format(ahead)
+        )
+
+    return Check("repository drift", not findings, "\n".join(findings), "")
 
 
 def check_checkout_staleness(
@@ -2197,26 +2629,105 @@ def _mtime_age(path: pathlib.Path, now: float) -> Optional[float]:
         return None
 
 
+def _claude_estimate_reset(now: float) -> float:
+    """Return the local-time weekly reset used by Claude's estimate."""
+    here = datetime.fromtimestamp(now)
+    candidate = here.replace(
+        hour=CLAUDE_ESTIMATE_RESET_HOUR, minute=0, second=0, microsecond=0
+    ) - timedelta(
+        days=(here.weekday() - CLAUDE_ESTIMATE_RESET_WEEKDAY) % 7
+    )
+    if candidate > here:
+        candidate -= timedelta(days=7)
+    return candidate.timestamp()
+
+
+def _latest_claude_estimate(transcript_glob: os.PathLike,
+                            now: float) -> Optional[Tuple[pathlib.Path, float]]:
+    """Find the newest transcript record the Claude estimate can read.
+
+    This is deliberately the small availability slice of
+    ``usage.read_claude_local``. It does not calculate a percentage; doctor only
+    needs to know whether that fallback source exists and how old its newest
+    usable record is.
+    """
+    cutoff = min(
+        _claude_estimate_reset(now),
+        now - CLAUDE_ESTIMATE_FIVE_HOUR.total_seconds(),
+    )
+    newest: Optional[Tuple[float, pathlib.Path]] = None
+
+    for name in glob.glob(os.path.expanduser(str(transcript_glob))):
+        path = pathlib.Path(name)
+        try:
+            with path.open(errors="replace") as stream:
+                for line in stream:
+                    if '"usage"' not in line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    message = record.get("message")
+                    if not isinstance(message, dict):
+                        continue
+                    model = str(message.get("model") or "").lower()
+                    if CLAUDE_ESTIMATE_MODEL not in model:
+                        continue
+                    usage = message.get("usage")
+                    tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
+                    if not isinstance(tokens, (int, float)) or isinstance(tokens, bool) or tokens <= 0:
+                        continue
+                    stamp = _timestamp(record.get("timestamp"))
+                    if stamp is None or stamp < cutoff:
+                        continue
+                    if newest is None or stamp > newest[0]:
+                        newest = (stamp, path)
+        except OSError:
+            continue
+
+    if newest is None:
+        return None
+    return newest[1], now - newest[0]
+
+
 def check_usage_cache(cache_path: Optional[os.PathLike] = None,
                       now: Optional[float] = None) -> Check:
-    """Check the Claude usage cache directly, including its writing age.
+    """Report the source the Claude usage gate would use.
 
-    This intentionally does not import usage.py. Its tolerant readers are right
-    for a budget gate but would erase the distinction between a missing file,
-    malformed JSON, and a cache that simply stopped being refreshed.
+    A fresh statusline cache is preferred. When it is absent or too old, the
+    same recent transcript records used by ``usage.read_claude_local`` are the
+    fallback. This intentionally does not import usage.py: doctor must diagnose
+    a broken install even when that module is one of the missing links.
     """
     cache = _path(cache_path, USAGE_CACHE)
     now = time.time() if now is None else now
+
+    def fallback(cache_finding: str) -> Check:
+        estimate = _latest_claude_estimate(CLAUDE_TRANSCRIPTS, now)
+        if estimate is not None:
+            transcript, age = estimate
+            return Check(
+                "usage cache", True,
+                "transcript estimate {} is readable ({})".format(
+                    transcript, _age_text(age)),
+                "",
+            )
+        return Check(
+            "usage cache", False,
+            "{}; transcript estimate is unavailable".format(cache_finding),
+            USAGE_CACHE_FIX,
+        )
 
     try:
         exists = cache.exists()
     except OSError:
         exists = False
     if not exists:
-        return Check(
-            "usage cache", False,
-            "{} is missing (age unavailable)".format(cache),
-            USAGE_CACHE_FIX,
+        return fallback(
+            "{} is missing (age unavailable)".format(cache)
         )
 
     file_age = _mtime_age(cache, now)
@@ -2224,61 +2735,48 @@ def check_usage_cache(cache_path: Optional[os.PathLike] = None,
         with cache.open(encoding="utf-8") as stream:
             data = json.load(stream)
     except FileNotFoundError:
-        return Check(
-            "usage cache", False,
-            "{} is missing (age unavailable)".format(cache),
-            USAGE_CACHE_FIX,
+        return fallback(
+            "{} is missing (age unavailable)".format(cache)
         )
     except (OSError, UnicodeError) as exc:
-        return Check(
-            "usage cache", False,
+        return fallback(
             "{} is present but cannot be read ({}; {})".format(
-                cache, exc, _age_text(file_age)),
-            USAGE_CACHE_FIX,
+                cache, exc, _age_text(file_age))
         )
     except ValueError:
-        return Check(
-            "usage cache", False,
+        return fallback(
             "{} is present but unparseable ({})".format(
-                cache, _age_text(file_age)),
-            USAGE_CACHE_FIX,
+                cache, _age_text(file_age))
         )
 
     if not isinstance(data, dict):
-        return Check(
-            "usage cache", False,
+        return fallback(
             "{} is present but unparseable (top-level JSON is not an object; {})".format(
-                cache, _age_text(file_age)),
-            USAGE_CACHE_FIX,
+                cache, _age_text(file_age))
         )
 
     captured_at = _timestamp(data.get("captured_at"))
     if captured_at is None:
-        return Check(
-            "usage cache", False,
+        return fallback(
             "{} is present but unparseable (captured_at is missing or invalid; {})".format(
-                cache, _age_text(file_age)),
-            USAGE_CACHE_FIX,
+                cache, _age_text(file_age))
         )
 
     age = now - captured_at
-    if age < 0:
-        return Check(
-            "usage cache", False,
+    if age < -60:
+        return fallback(
             "{} is present but its timestamp is from the future ({})".format(
-                cache, _age_text(age)),
-            USAGE_CACHE_FIX,
+                cache, _age_text(age))
         )
-    if age >= USAGE_CACHE_BROKEN_AFTER.total_seconds():
-        return Check(
-            "usage cache", False,
-            "{} is present but stale ({}; health threshold is 1 hour)".format(
-                cache, _age_text(age)),
-            USAGE_CACHE_FIX,
+    if age > USAGE_CACHE_BROKEN_AFTER.total_seconds():
+        return fallback(
+            "{} is present but stale ({}; freshness threshold is 15 minutes)".format(
+                cache, _age_text(age))
         )
     return Check(
         "usage cache", True,
-        "{} is present and fresh ({})".format(cache, _age_text(age)),
+        "statusline cache {} is present and fresh ({})".format(
+            cache, _age_text(age)),
         "",
     )
 
@@ -2487,7 +2985,7 @@ def gh_branch_exists() -> bool:
 
 
 def _spool_files(spool_dir: pathlib.Path) -> List[pathlib.Path]:
-    """List pending spool files without importing heartbeat.py."""
+    """List spool files without importing heartbeat.py."""
     try:
         if not spool_dir.exists():
             return []
@@ -2501,6 +2999,31 @@ def _spool_files(spool_dir: pathlib.Path) -> List[pathlib.Path]:
         return []
 
 
+def _spool_pending_records(files: Iterable[pathlib.Path]) -> List[object]:
+    """Read non-empty spool lines without importing heartbeat.py.
+
+    A drained spool file remains on disk as a zero-byte file. Count records
+    from its non-empty lines instead of treating the file itself as pending.
+    Keep the raw decoded values so a malformed line is still visible as a
+    pending record, while a well-formed heartbeat record can supply its own
+    timestamp for the age diagnostic.
+    """
+    records: List[object] = []
+    for path in files:
+        try:
+            with path.open(encoding="utf-8") as stream:
+                for line in stream:
+                    if not line.strip():
+                        continue
+                    try:
+                        records.append(json.loads(line))
+                    except ValueError:
+                        records.append(None)
+        except (OSError, UnicodeError) as exc:
+            raise OSError("{}: {}".format(path, exc)) from exc
+    return records
+
+
 def check_heartbeat(spool_dir: Optional[os.PathLike] = None,
                     now: Optional[float] = None) -> Check:
     """Check the remote heartbeat branch and any undrained local spool files."""
@@ -2508,6 +3031,8 @@ def check_heartbeat(spool_dir: Optional[os.PathLike] = None,
     now = time.time() if now is None else now
     findings: List[str] = []
     branch_ok: Optional[bool]
+    files: List[pathlib.Path] = []
+    pending_records: List[object] = []
 
     try:
         branch_ok = gh_branch_exists()
@@ -2526,7 +3051,6 @@ def check_heartbeat(spool_dir: Optional[os.PathLike] = None,
     try:
         files = _spool_files(spool)
     except OSError as exc:
-        files = []
         findings.append("local heartbeat spool {} cannot be read ({})".format(
             spool, exc))
     else:
@@ -2534,22 +3058,41 @@ def check_heartbeat(spool_dir: Optional[os.PathLike] = None,
             findings.append("local heartbeat spool {} is empty".format(spool))
         else:
             try:
-                oldest = min(path.stat().st_mtime for path in files)
+                pending_records = _spool_pending_records(files)
             except OSError as exc:
-                findings.append(
-                    "local heartbeat spool {} has {} file(s), but its age cannot "
-                    "be read ({})".format(spool, len(files), exc)
-                )
+                findings.append("local heartbeat spool {} cannot be read ({})".format(
+                    spool, exc))
             else:
-                age = _age_text(now - oldest)
-                findings.append(
-                    "local heartbeat spool {} has {} file(s); oldest is {} old".format(
-                        spool, len(files), age[4:] if age.startswith("age ") else age)
-                )
+                if not pending_records:
+                    findings.append(
+                        "local heartbeat spool {} has {} file(s), all drained "
+                        "(no pending records)".format(spool, len(files))
+                    )
+                else:
+                    timestamps = [
+                        _timestamp(record.get("ts"))
+                        for record in pending_records
+                        if isinstance(record, dict)
+                    ]
+                    valid_timestamps = [
+                        timestamp for timestamp in timestamps
+                        if timestamp is not None
+                    ]
+                    oldest = min(valid_timestamps) if valid_timestamps else None
+                    age = _age_text(None if oldest is None else now - oldest)
+                    findings.append(
+                        "local heartbeat spool {} has {} pending record(s) "
+                        "across {} file(s); oldest is {} old".format(
+                            spool,
+                            len(pending_records),
+                            len(files),
+                            age[4:] if age.startswith("age ") else age,
+                        )
+                    )
 
     broken = (
         branch_ok is not True
-        or bool(files)
+        or bool(pending_records)
         or any("cannot be read" in finding for finding in findings)
     )
     if broken:
@@ -2720,6 +3263,16 @@ def check_member_repos(repos: Optional[Iterable[str]] = None) -> List[Check]:
     ]
 
 
+def repo_readiness_for_items(
+    items: Iterable[Item],
+) -> Dict[str, MemberRepoReadiness]:
+    """Read onboarding facts once for each repository in the loaded funnel."""
+    return {
+        repo: member_repo_readiness(repo)
+        for repo in sorted({item.repo for item in items})
+    }
+
+
 def _status_for_consistency(item: Item) -> str:
     """Name an unset Project Status without inventing a value for it."""
     return item.status or "unset"
@@ -2836,6 +3389,24 @@ def check_block_comments(items: Iterable[Item]) -> Check:
     return Check("block comments", not findings, "\n".join(findings), "")
 
 
+def suspected_human_step_findings(items: Iterable[Item]) -> List[str]:
+    """Return blocked tickets whose human requirement is not machine-readable."""
+    return [
+        "{}: suspected human step ({})".format(
+            item.ref, suspected_human_step_reason(item)
+        )
+        for item in suspected_human_step_items(items)
+    ]
+
+
+def check_suspected_human_steps(items: Iterable[Item]) -> Check:
+    """Build the read-only suspected-human-step doctor check."""
+    findings = suspected_human_step_findings(items)
+    return Check(
+        "suspected human steps", not findings, "\n".join(findings), ""
+    )
+
+
 def check_block_conditions(items: Iterable[Item]) -> Check:
     """Report blocked items whose conditions are satisfied or unresolvable.
 
@@ -2915,6 +3486,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         check_symlinks(claude_dir=claude_dir, checkout_root=checkout_root),
         check_checkout_staleness(
             claude_dir=claude_dir, checkout_root=checkout_root),
+        check_repository_drift(checkout_root=checkout_root),
         check_settings(claude_dir=claude_dir),
         check_auth_scope(),
         check_project_fields(),
@@ -2931,6 +3503,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         checks.append(check_class_assignments(items))
         checks.append(check_block_comments(items))
         checks.append(check_block_conditions(items))
+        checks.append(check_suspected_human_steps(items))
     return checks
 
 
@@ -3049,13 +3622,16 @@ query($login: String!, $number: Int!, $cursor: String) {
               blockedBy(first: 50) {
                 nodes { number state stateReason repository { nameWithOwner } }
               }
-              timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT]) {
+              timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
                 nodes {
                   __typename
                   ... on ProjectV2ItemStatusChangedEvent {
                     createdAt status project { number }
                   }
                   ... on LabeledEvent {
+                    createdAt label { name }
+                  }
+                  ... on UnlabeledEvent {
                     createdAt label { name }
                   }
                 }
@@ -3261,8 +3837,11 @@ def _from_node(node: dict) -> Optional[Item]:
         if not event:
             continue
         label = (event.get("label") or {}).get("name")
-        if label == "blocked":
+        if label == "blocked" and event.get("__typename") == "LabeledEvent":
             item.blocked_since = parse_time(event.get("createdAt"))
+            continue
+        if label == "blocked" and event.get("__typename") == "UnlabeledEvent":
+            item.blocked_cleared_at = parse_time(event.get("createdAt"))
             continue
         if (event.get("project") or {}).get("number") != PROJECT_NUMBER:
             continue
@@ -3387,6 +3966,8 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
     }
     if item.pinned:
         rendered["pinned"] = True
+    if item.needs_decision is not None:
+        rendered["needs_decision"] = item.needs_decision
     return rendered
 
 
@@ -3499,6 +4080,59 @@ def closed_itself_json(
     return rows
 
 
+def cleared_block_items(items: Iterable[Item], now: datetime) -> List[Item]:
+    """Recently unblocked issues that may carry a mechanical-clear record."""
+    cutoff = now - CLEARED_BLOCK_WINDOW
+    return sorted(
+        (
+            item for item in items
+            if not item.is_blocked
+            and item.blocked_cleared_at is not None
+            and item.blocked_cleared_at >= cutoff
+        ),
+        key=lambda item: (
+            -item.blocked_cleared_at.timestamp(), item.repo, item.number
+        ),
+    )
+
+
+def _cleared_block_item_json(item: Item) -> Optional[Dict[str, object]]:
+    """Render the newest valid satisfied-block record on one unblocked item."""
+    comments = (_gh_json(
+        "gh", "issue", "view", str(item.number), "--repo", item.repo,
+        "--json", "comments",
+    ) or {}).get("comments", [])
+    for comment in reversed(comments):
+        if not isinstance(comment, dict):
+            continue
+        record = parse_satisfied_block_comment(comment.get("body") or "")
+        if record is None:
+            continue
+        return {
+            "ref": item.ref,
+            "title": item.title,
+            "url": item.url,
+            "conditions": record["conditions"],
+            "cleared_at": (
+                item.blocked_cleared_at.isoformat()
+                if item.blocked_cleared_at else None
+            ),
+        }
+    return None
+
+
+def cleared_blocks_json(
+    items: Iterable[Item], now: datetime
+) -> List[Dict[str, object]]:
+    """The brief's recent provenance-backed mechanical block clears."""
+    rows = []
+    for item in cleared_block_items(items, now):
+        row = _cleared_block_item_json(item)
+        if row is not None:
+            rows.append(row)
+    return rows
+
+
 def blocked_items(items: Iterable[Item]) -> List[Item]:
     """Open, label-blocked items, oldest first.
 
@@ -3522,7 +4156,7 @@ def blocked_items(items: Iterable[Item]) -> List[Item]:
 
 def _blocked_item_json(item: Item) -> Dict[str, object]:
     """Render one blocked item from the parsed block-comment state."""
-    return {
+    rendered = {
         "ref": item.ref,
         "title": item.title,
         "url": item.url,
@@ -3530,11 +4164,200 @@ def _blocked_item_json(item: Item) -> Dict[str, object]:
         "conditions": item.block_references,
         "blocked_at": item.status_since.isoformat() if item.status_since else None,
     }
+    if item.needs_decision is not None:
+        rendered["needs_decision"] = item.needs_decision
+    return rendered
 
 
 def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     """The brief's blocked section, reusing one load-time comment fetch."""
     return [_blocked_item_json(item) for item in blocked_items(items)]
+
+
+PROSE_DEPENDENCY_RE = re.compile(
+    r"\b(?:depends\s+on|blocked\s+on)\s+"
+    r"(?P<references>#[0-9]+(?:\s*(?:,|and)\s*#[0-9]+)*)"
+    r"|\bafter\s+(?P<after>#[0-9]+)\s+lands\b"
+    r"|\b(?:until|requires)\s+(?P<single>#[0-9]+)\b",
+    re.IGNORECASE,
+)
+
+# A Nate-origin idea may move through the shaping command without an assigned
+# Class, but only when the plan leaves him a visible proposal to answer. This
+# is a presence check, not a parser for a value: no agent infers or writes a
+# Class from plan prose on Nate's behalf.
+PROPOSED_CLASS_RE = re.compile(
+    r"^[ \t]*Proposed[ \t]+class:[ \t]*\S.*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _prose_dependency_sentences(body: str) -> Iterable[Tuple[str, List[str]]]:
+    """Yield recognised dependency sentences and their named issue numbers."""
+    if not isinstance(body, str):
+        return
+
+    for line in body.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        for sentence in re.split(r"(?<=[.!?])\s+", line):
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            match = PROSE_DEPENDENCY_RE.search(sentence)
+            if match is None:
+                continue
+            references = (
+                match.group("references")
+                or match.group("after")
+                or match.group("single")
+            )
+            yield sentence, re.findall(r"#[0-9]+", references)
+
+
+def prose_dependencies(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """Report open prose dependencies that have no matching native edge.
+
+    This is deliberately pure over the Project items already loaded by the
+    funnel. A named issue is reportable only when it is present and open in
+    that set; resolving an absent issue would require a new API call and would
+    turn a diagnostic into a second dependency source.
+    """
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    found: List[Dict[str, object]] = []
+
+    for item in rows:
+        if item.state != "OPEN" or item.parent is None:
+            continue
+
+        native = {
+            _dependency_ref(item, value) or str(value).strip()
+            for value in item.open_blockers
+        }
+        for sentence, numbers in _prose_dependency_sentences(item.body or ""):
+            names: List[str] = []
+            for number in numbers:
+                ref = item.repo + number
+                blocker = by_ref.get(ref)
+                if (
+                    blocker is None
+                    or blocker.state != "OPEN"
+                    or ref in native
+                    or ref in names
+                ):
+                    continue
+                names.append(ref)
+            if names:
+                found.append({
+                    "ref": item.ref,
+                    "names": names,
+                    "sentence": sentence,
+                })
+
+    return sorted(found, key=lambda row: row["ref"])
+
+
+def has_proposed_class(plan: str) -> bool:
+    """Whether a plan gives Nate a non-empty ``Proposed class:`` line."""
+    return isinstance(plan, str) and PROPOSED_CLASS_RE.search(plan) is not None
+
+
+def capture_origin(item: Item) -> str:
+    """Return the recorded capture origin, or ``unknown`` when absent."""
+    origin = parse_origin(item.body or "")
+    if origin is None:
+        return "unknown"
+    return origin["voice"]
+
+
+def unclassed_capture_items(items: Iterable[Item]) -> List[Item]:
+    """Open Ideas whose Project Class is missing or invalid.
+
+    Ideas stay outside the decision counts. This diagnostic only makes the
+    forgotten assignment visible, preserving the funnel's unbounded Ideas
+    stage and leaving the origin-specific repair to the right actor.
+    """
+    return [item for item in ideas(items) if item.klass not in LADDER]
+
+
+def _unclassed_capture_item_json(item: Item) -> Dict[str, object]:
+    return {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "origin": capture_origin(item),
+    }
+
+
+def unclassed_captures_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """Render the diagnostic list without adding a human decision."""
+    return [
+        _unclassed_capture_item_json(item)
+        for item in unclassed_capture_items(items)
+    ]
+
+
+def suspected_human_step_reason(item: Item) -> Optional[str]:
+    """Return a human-step reason hidden inside an unreadable block.
+
+    This is deliberately narrower than ``human_step_items``. It only reports
+    open child issues that are already blocked and whose block has no
+    machine-readable references. A named block stays an ordinary machine
+    block, even when its prose happens to mention a human-step reason.
+    """
+    if (
+        item.state != "OPEN"
+        or item.parent is None
+        or not item.is_blocked
+        or item.block_references
+    ):
+        return None
+
+    reason = matching_human_step_reason(item.block_reason)
+    if reason is not None:
+        return reason
+
+    # ``_load_block_comment`` keeps the first line of malformed block comments
+    # so the existing doctor check can report it without another fetch. Use the
+    # newest recorded line first, and fail closed when it contains no exact
+    # allowlisted reason.
+    for first_line in reversed(item.unparseable_block_comments):
+        reason = matching_human_step_reason(first_line)
+        if reason is not None:
+            return reason
+    return None
+
+
+def suspected_human_step_items(items: Iterable[Item]) -> List[Item]:
+    """Return blocked child issues that may hide an unrecognised human step."""
+    return sorted(
+        (
+            item for item in items
+            if suspected_human_step_reason(item) is not None
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+
+
+def _suspected_human_step_item_json(item: Item) -> Dict[str, object]:
+    return {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "reason": suspected_human_step_reason(item),
+    }
+
+
+def suspected_human_step_json(
+    items: Iterable[Item],
+) -> List[Dict[str, object]]:
+    """Render suspected human steps without changing any GitHub state."""
+    return [
+        _suspected_human_step_item_json(item)
+        for item in suspected_human_step_items(items)
+    ]
 
 
 def _item_human_step_reason(item: Item) -> Optional[str]:
@@ -3712,6 +4535,109 @@ def satisfied_block_refs(
     return sorted(satisfied)
 
 
+def satisfied_block_comment(
+    conditions: Sequence[str], now: datetime,
+    run: Optional[str] = None, agent: Optional[str] = None,
+) -> str:
+    """Build the durable, provenance-marked record for one mechanical clear."""
+    refs = sorted(set(conditions))
+    found_closed_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload = {
+        "conditions": refs,
+        "found_closed_at": found_closed_at,
+    }
+    body = (
+        SATISFIED_BLOCK_PREFIX
+        + "all machine-readable conditions were found closed: {}.\n\n"
+          "Found closed at `{}`.\n\n```json\n{}\n```".format(
+              ", ".join(refs), found_closed_at,
+              json.dumps(payload, indent=2, sort_keys=True),
+          )
+    )
+    return append_provenance(
+        body, "agent", at=now, run=run, agent=agent
+    )
+
+
+def _record_covers_current_block(item: Item, conditions: Sequence[str]) -> bool:
+    """Whether the loaded record already covers this exact blocking episode."""
+    record = item.satisfied_block_record
+    if not isinstance(record, dict):
+        return False
+    if sorted(record.get("conditions") or []) != sorted(set(conditions)):
+        return False
+    recorded_at = parse_time(record.get("found_closed_at"))
+    return recorded_at is not None and (
+        item.blocked_since is None or recorded_at >= item.blocked_since
+    )
+
+
+def clear_satisfied_blocks(
+    items: Sequence[Item], now: datetime,
+    run: Optional[str] = None, agent: Optional[str] = None,
+) -> List[Dict[str, object]]:
+    """Clear every fully parsed satisfied block and return what moved.
+
+    The record is posted first. If removing the label then fails, a later run
+    sees that record on the still-blocked issue and retries only the label
+    write. A partial network failure therefore cannot erase the reason for an
+    unattended clear or manufacture duplicate comments.
+    """
+    by_ref = {item.ref: item for item in items}
+    cleared: List[Dict[str, object]] = []
+    candidates = sorted(
+        (
+            item for item in items
+            if item.state == "OPEN" and item.is_blocked
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+    for item in candidates:
+        conditions = satisfied_block_refs(item, by_ref)
+        if not conditions:
+            continue
+
+        if not _record_covers_current_block(item, conditions):
+            comment = subprocess.run(
+                [
+                    "gh", "issue", "comment", str(item.number),
+                    "--repo", item.repo,
+                    "--body", satisfied_block_comment(
+                        conditions, now, run=run, agent=agent
+                    ),
+                ],
+                capture_output=True, text=True,
+            )
+            if comment.returncode != 0:
+                raise GitHubError(
+                    "could not record satisfied block on {}: {}".format(
+                        item.ref, comment.stderr.strip()
+                    )
+                )
+
+        edit = subprocess.run(
+            [
+                "gh", "issue", "edit", str(item.number),
+                "--repo", item.repo, "--remove-label", "blocked",
+            ],
+            capture_output=True, text=True,
+        )
+        if edit.returncode != 0:
+            raise GitHubError(
+                "recorded satisfied block on {}, but could not remove its "
+                "blocked label: {}".format(item.ref, edit.stderr.strip())
+            )
+
+        item.labels = [label for label in item.labels if label != "blocked"]
+        item.blocked_cleared_at = now
+        cleared.append({
+            "ref": item.ref,
+            "conditions": conditions,
+            "cleared_at": now.isoformat(),
+        })
+    return cleared
+
+
 def _approved_current_head(pr: Optional[Dict[str, object]]) -> bool:
     """Whether a PR carries approval for the head currently being inspected."""
     if not isinstance(pr, dict):
@@ -3732,19 +4658,87 @@ def _approved_current_head(pr: Optional[Dict[str, object]]) -> bool:
     return not head or not reviewed_head or head == reviewed_head
 
 
+def _block_cycle_reasons(
+    items: Sequence[Item], by_ref: Dict[str, Item]
+) -> Dict[str, List[str]]:
+    """Return one diagnostic reason for each detected open block cycle.
+
+    Edges point from a waiting item to its blocker. Native dependency facts and
+    parsed comment references are deliberately combined here: either source
+    can be stale or incomplete on its own, while a cycle may cross both. Only
+    open items in the loaded Project can participate in a stranded cycle;
+    missing or closed references are ignored just as they are by the other
+    derived dependency checks.
+
+    A cycle is searched from its lowest-numbered member, and candidate edges
+    back to an earlier member are skipped. That makes the displayed path
+    canonical and prevents the same loop from being reported once per member.
+    The walk is iterative so malformed dependency data cannot exhaust Python's
+    call stack while producing a diagnostic.
+    """
+    open_refs = {
+        item.ref for item in items if item.state == "OPEN"
+    }
+    graph: Dict[str, Set[str]] = {ref: set() for ref in open_refs}
+    for item in items:
+        if item.ref not in open_refs:
+            continue
+        for value in list(item.open_blockers) + list(item.block_references):
+            ref = _dependency_ref(item, value)
+            if ref in open_refs:
+                graph[item.ref].add(ref)
+
+    def order(ref: str) -> Tuple[int, str]:
+        item = by_ref[ref]
+        return item.number, item.repo
+
+    def display(refs: Sequence[str]) -> str:
+        cycle_items = [by_ref[ref] for ref in refs]
+        same_repo = len({item.repo for item in cycle_items}) == 1
+        labels = (
+            ["#{}".format(item.number) for item in cycle_items]
+            if same_repo
+            else list(refs)
+        )
+        return "block cycle: " + " → ".join(labels)
+
+    reasons: Dict[str, List[str]] = {}
+    for start in sorted(graph, key=order):
+        pending = [(start, [start])]
+        cycle = None
+        while pending:
+            current, path = pending.pop()
+            for target in sorted(graph[current], key=order, reverse=True):
+                if target == start:
+                    cycle = path + [start]
+                    break
+                if target in path or order(target) < order(start):
+                    continue
+                pending.append((target, path + [target]))
+            if cycle is not None:
+                break
+        if cycle is not None:
+            reasons.setdefault(start, []).append(display(cycle))
+    return reasons
+
+
 def stranded_items(
     items: Iterable[Item],
     now: datetime,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
 ) -> List[Dict[str, object]]:
-    """Render open items for which no current agent or gate can make progress.
+    """Render items for which no current agent or gate can make progress.
 
     This is deliberately a diagnostic, not a queue. The first release only
     uses facts the funnel already knows how to read: an approved current-head
     verdict on a conflicting PR, a stale claim with no PR, a childless
-    ``Building`` project, and a native or named dependency closed as
-    ``not_planned``. Missing CI history is intentionally absent; no fetched
-    fact distinguishes that from a PR whose first check is still pending.
+    ``Building`` project, a self-approvable ``Building`` project whose upkeep
+    children all closed but the project itself did not, a native or named
+    dependency closed as ``not_planned``, plus cycles formed by native or
+    parsed block edges, and two PR-side strands when PR facts were requested:
+    an open PR on a closed ticket or an open PR whose project's Status is not
+    ``Building``. Missing CI history is intentionally absent; no fetched fact
+    distinguishes that from a PR whose first check is still pending.
 
     ``pr_facts`` is optional so the function remains fixture-pure. ``None``
     means the caller has not requested PR lookups and therefore treats a stale
@@ -3754,15 +4748,40 @@ def stranded_items(
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
     stale = {item.ref for item in stale_locks(rows, now)}
+    cycle_reasons = _block_cycle_reasons(rows, by_ref)
     found: List[Dict[str, object]] = []
 
     for item in rows:
-        if item.state != "OPEN":
-            continue
-
         reasons: List[str] = []
         pr_known = pr_facts is None or item.ref in pr_facts
         pr = None if pr_facts is None else pr_facts.get(item.ref)
+
+        if (
+            isinstance(pr, dict)
+            and str(pr.get("state") or "").upper() == "OPEN"
+            and item.parent is not None
+        ):
+            if item.state == "CLOSED":
+                reasons.append("open PR on closed ticket")
+            elif item.state == "OPEN":
+                parent = by_ref.get(item.parent)
+                if parent is not None and parent.status != "Building":
+                    status = parent.status or "unset"
+                    reasons.append(
+                        "open PR on open ticket whose project Status is {}; "
+                        "merge gate will refuse it".format(status)
+                    )
+
+        if item.state != "OPEN":
+            if reasons:
+                found.append({
+                    "ref": item.ref,
+                    "title": item.title,
+                    "url": item.url,
+                    "reason": "; ".join(reasons),
+                })
+            continue
+
         if (
             pr
             and str(pr.get("state") or "").upper() == "OPEN"
@@ -3777,12 +4796,23 @@ def stranded_items(
         if item.parent is None and item.status == "Building" and not item.children_total:
             reasons.append("Building project has no tickets")
 
+        if (
+            item.parent is None
+            and item.status == "Building"
+            and item.klass in SELF_APPROVABLE_CLASSES
+            and item.children_all_closed
+            and not item.carried_human_step
+        ):
+            reasons.append("finished upkeep project not closed")
+
         dead = _dead_dependency_refs(item, by_ref)
         if dead:
             reasons.append(
                 "blocked on blocker that will never close: {}".format(
                     ", ".join(dead))
             )
+
+        reasons.extend(cycle_reasons.get(item.ref, []))
 
         if reasons:
             found.append({
@@ -3803,44 +4833,85 @@ def stranded_json(
     return stranded_items(items, now, pr_facts=pr_facts)
 
 
-def cmd_queue(items: List[Item], now: datetime) -> int:
+def _print_queue_section(items: Sequence[Item], render) -> None:
+    """Print a queue section, grouping by repo only when it spans repos."""
+    if not items:
+        print("  nothing")
+        return
+
+    by_repo: Dict[str, List[Item]] = {}
+    for item in items:
+        by_repo.setdefault(item.repo, []).append(item)
+
+    if len(by_repo) == 1:
+        for item in items:
+            print(render(item, "  "))
+        return
+
+    for repo, repo_items in by_repo.items():
+        print("  {}:".format(repo))
+        for item in repo_items:
+            print(render(item, "    "))
+
+
+def cmd_queue(
+    items: List[Item],
+    now: datetime,
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+) -> int:
     """Everything, ordered — both queues, each under its own heading.
 
     They are genuinely different orderings over different subsets, so a single
     merged list would have to pick one and misrepresent the other.
     """
     decisions = awaiting_decision(items)
-    tickets = startable(items)
+    tickets = startable(items, repo_readiness=repo_readiness)
 
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
-    if not decisions:
-        print("  nothing")
     by_ref = {i.ref: i for i in items}
-    for item in decisions:
-        print(
-            "  {:<10} {:<24} {:<34} {:<18} {}".format(
-                item.status or "-",
-                class_display(item, by_ref),
-                item.ref,
-                humanise(item.waited(now)),
-                gate_question(item),
-            )
-        )
+    _print_queue_section(
+        decisions,
+        lambda item, prefix: "{}{:<10} {:<24} {:<34} {:<18} {}".format(
+            prefix,
+            item.status or "-",
+            class_display(item, by_ref),
+            item.ref,
+            humanise(item.waited(now)),
+            gate_question(item),
+        ),
+    )
 
     print("\nStartable by Codex ({}), ladder order:".format(len(tickets)))
-    if not tickets:
-        print("  nothing")
-    for item in tickets:
-        print("  {:<24} {:<34} {}".format(
-            class_display(item, by_ref), item.ref, item.title))
+    _print_queue_section(
+        tickets,
+        lambda item, prefix: "{}{:<24} {:<34} {}".format(
+            prefix,
+            class_display(item, by_ref),
+            item.ref,
+            item.title,
+        ),
+    )
+
+    withheld = readiness_blockers(items, repo_readiness=repo_readiness)
+    if withheld:
+        print("\nWithheld by repository readiness ({}):".format(len(withheld)))
+        for blocker in withheld:
+            print("  {:<34} {}".format(
+                blocker["ref"], ", ".join(blocker["reasons"])))
 
     pending = awaiting_breakdown(items)
     if pending:
         print("\nApproved, awaiting breakdown into tickets ({}):".format(len(pending)))
-        for item in pending:
-            print("  {:<24} {:<34} {:<18} {}".format(
-                class_display(item, by_ref), item.ref,
-                humanise(item.waited(now)), item.title))
+        _print_queue_section(
+            pending,
+            lambda item, prefix: "{}{:<24} {:<34} {:<18} {}".format(
+                prefix,
+                class_display(item, by_ref),
+                item.ref,
+                humanise(item.waited(now)),
+                item.title,
+            ),
+        )
 
     missing = [i for i in items if needs_class(i)]
     if missing:
@@ -3855,8 +4926,20 @@ def cmd_next(
     now: datetime,
     tier: Optional[str] = None,
     excluded: Optional[Set[str]] = None,
+    agent: str = "codex",
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
 ) -> int:
-    excluded = excluded or frozenset()
+    # Accept bare numbers as well as refs (#436). The routine passes whatever
+    # the model copied from the ticket JSON, and a bare number matched nothing
+    # in `next_ticket`'s ref comparison — so the run released its claim and
+    # was handed the same ticket straight back.
+    resolved = set()
+    for ref in excluded or ():
+        try:
+            resolved.add(find(items, ref).ref)
+        except (GitHubError, SystemExit, ValueError):
+            resolved.add(ref)
+    excluded = frozenset(resolved)
     # A ref reaches `--not` only from the run that was offered it, and `next`
     # never offers a claimed ticket to a second run — so the caller holds the
     # claim it is declining. Release it here rather than trusting the routine
@@ -3873,11 +4956,17 @@ def cmd_next(
             print("released {} (declined)".format(declined.ref), file=sys.stderr)
     blocked = awaiting_review(items)
     ticket = next_ticket_for_tier(
-        items, now, tier=tier, blocked=blocked, excluded=excluded
+        items, now, tier=tier, blocked=blocked, excluded=excluded,
+        agent=agent,
+        repo_readiness=repo_readiness,
     )
 
     if ticket is None:
         holder = lock_holder(items, now)
+        withheld = readiness_blockers(
+            items, repo_readiness=repo_readiness, awaiting_review=blocked,
+            agent=agent,
+        )
         if holder is not None:
             print(
                 "nothing — lock held by {} (claimed {} ago)".format(
@@ -3885,6 +4974,10 @@ def cmd_next(
                 ),
                 file=sys.stderr,
             )
+        elif withheld:
+            print("nothing — {}".format(
+                _readiness_blocker_summary(withheld)
+            ), file=sys.stderr)
         elif tier:
             print("nothing — no {} work waiting".format(tier), file=sys.stderr)
         return 1
@@ -3915,11 +5008,15 @@ def cmd_brief(
         "items": [item_json(i, now, by_ref) for i in decisions],
         "parked": parked_json(items),
         "closed_itself": closed_itself_json(items, now),
+        "cleared_blocks": cleared_blocks_json(items, now),
         "blocked": blocked_json(items),
+        "prose_dependencies": prose_dependencies(items),
+        "suspected_human_steps": suspected_human_step_json(items),
         "human_steps": human_step_json(items),
         "closed_with_access_vocabulary": closed_with_access_vocabulary_json(
             items
         ),
+        "unclassed_captures": unclassed_captures_json(items),
         "needs_class": [item_json(i, now, by_ref) for i in items if needs_class(i)],
         "awaiting_breakdown": [
             item_json(i, now, by_ref) for i in awaiting_breakdown(items)
@@ -3929,6 +5026,7 @@ def cmd_brief(
         "wip_limit": WIP_LIMIT,
         "stale_locks_taken_over": [i.ref for i in stale_locks(items, now)],
         "maintenance_load": maintenance_load(items, now),
+        "resend_ratio": recent_resend_ratio(now),
         "unattended_merges": unattended_merges(now),
         "agent_health": agent_health(now),
         "working_tree_touched": working_tree_touched(now),
@@ -4211,7 +5309,8 @@ def _set_pinned(items: List[Item], now: datetime, ref: str, pinned: bool,
 
 def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
                 voice: str, run: Optional[str] = None,
-                agent: Optional[str] = None) -> int:
+                agent: Optional[str] = None,
+                apply_blocked: bool = False) -> int:
     """Post an issue comment with an explicit, stamped voice."""
     if not body.strip():
         raise GitHubError("a non-empty comment body is required")
@@ -4223,6 +5322,21 @@ def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
     )
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
+    if apply_blocked:
+        edit = subprocess.run(
+            [
+                "gh", "issue", "edit", str(item.number), "--repo", item.repo,
+                "--add-label", "blocked",
+            ],
+            capture_output=True, text=True,
+        )
+        if edit.returncode != 0:
+            raise GitHubError(
+                "recorded needs-decision comment on {}, but could not add its "
+                "blocked label: {}".format(item.ref, edit.stderr.strip())
+            )
+        if not item.is_blocked:
+            item.labels.append("blocked")
     print("recorded {} comment on {}".format(voice, item.ref))
     return 0
 
@@ -4331,11 +5445,20 @@ def cmd_ideas(items: List[Item], now: datetime) -> int:
 def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
                 repo: Optional[str], run: Optional[str] = None,
                 agent: Optional[str] = None,
-                origin: Optional[str] = None) -> int:
+                origin: Optional[str] = None,
+                klass: Optional[str] = None) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
     if origin not in ORIGIN_VOICES:
         raise GitHubError(
             "capture requires an explicit --origin (nate-relayed or agent)"
+        )
+    if origin == "agent" and klass is None:
+        raise GitHubError("capture requires --class when --origin agent")
+    if klass is not None and klass not in LADDER:
+        raise GitHubError(
+            "unknown capture class {!r}; choose one of {}".format(
+                klass, ", ".join(LADDER)
+            )
         )
     repo = resolve_repo(repo)
     body = append_provenance(
@@ -4361,6 +5484,14 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         item_id = json.loads(add.stdout)["id"]
         gh_graphql(SET_FIELD, project=PROJECT_ID, item=item_id,
                    field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Ideas"))
+        if klass is not None:
+            gh_graphql(
+                SET_FIELD,
+                project=PROJECT_ID,
+                item=item_id,
+                field=CLASS_FIELD_ID,
+                option=_option_id(CLASS_FIELD_ID, klass),
+            )
         print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
     else:
         print("{} in {}\nnote: created, but not added to the Project".format(
@@ -4370,7 +5501,8 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
 
 
 def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
-               run: Optional[str] = None, agent: Optional[str] = None) -> int:
+               run: Optional[str] = None, agent: Optional[str] = None,
+               klass: Optional[str] = None) -> int:
     """Record that an idea has been grilled and a plan now exists.
 
     Writes the plan into the issue body — `plan.md` puts it there through Ideas
@@ -4380,6 +5512,23 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     next gate: is the plan good?
     """
     item = find(items, ref)
+    if klass is not None and klass not in LADDER:
+        raise GitHubError(
+            "unknown shaping class {!r}; choose one of {}".format(
+                klass, ", ".join(LADDER)
+            )
+        )
+
+    origin = parse_origin(item.body or "")
+    origin_voice = origin["voice"] if origin is not None else None
+    class_missing = item.klass not in LADDER
+    if class_missing and origin_voice == "agent" and klass is None:
+        raise GitHubError(
+            "agent-origin idea has no Class; pass --class with one of {}".format(
+                ", ".join(LADDER)
+            )
+        )
+
     try:
         if plan_file == "-":
             # Muse runs with --disable-write and cannot write a plan file; a
@@ -4391,6 +5540,11 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
         raise GitHubError("cannot read {}: {}".format(plan_file, exc))
     if not plan.strip():
         raise GitHubError("the plan is empty; nothing to record")
+    if class_missing and origin_voice != "agent" and not has_proposed_class(plan):
+        raise GitHubError(
+            "unclassed idea requires a non-empty Proposed class: line"
+        )
+    authority_signals = needs_nate_signals(plan)
     body = append_provenance(plan, "agent", at=now, run=run, agent=agent)
     overlaps = shaping_plan_overlap_candidates(items, item, plan)
 
@@ -4405,6 +5559,12 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     if not item.item_id:
         raise GitHubError("{} is not in the Project".format(item.ref))
     status, reason = shaped_plan_status(plan)
+    if class_missing and origin_voice == "agent":
+        # This recovery write is the only place shaping may assign a Class.
+        # Keep it immediately before the Status mutation so the latter never
+        # makes an unclassed idea look like it advanced cleanly.
+        gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
+                   field=CLASS_FIELD_ID, option=_option_id(CLASS_FIELD_ID, klass))
     gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
                field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, status))
     subprocess.run(["gh", "issue", "edit", str(item.number), "--repo", item.repo,
@@ -4421,6 +5581,13 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
             print("  {}".format(overlap))
     else:
         print("  none found")
+    if authority_signals:
+        print("\n--- self-approval refused ---")
+        print("The plan stays at Shaped for Nate because:")
+        for signal in authority_signals:
+            print("  {}: {}".format(
+                signal, NEEDS_NATE_SIGNAL_REASONS[signal]
+            ))
     if status != "Ready":
         print("\nIt now waits on you: is the plan good? Answer by moving it to Ready.")
     return 0
@@ -4743,6 +5910,12 @@ def _load_block_comment(item: Item) -> None:
     parsed = parse_block_comment(bodies)
     if parsed is not None:
         item.block_references, item.block_reason = parsed
+    item.needs_decision = parse_needs_decision_comment(bodies)
+    for body in reversed(bodies):
+        record = parse_satisfied_block_comment(body)
+        if record is not None:
+            item.satisfied_block_record = record
+            break
 
 
 def _ticket_body(repo: str, number: int) -> str:
@@ -4808,8 +5981,7 @@ def ticket_pr_facts(
     """
     wanted = {
         item.ref: item for item in items
-        if item.state == "OPEN"
-        and (item.parent or item.in_motion_since is not None)
+        if item.parent or (item.state == "OPEN" and item.in_motion_since is not None)
     }
     facts: Dict[str, Optional[Dict[str, object]]] = {}
 
@@ -4820,7 +5992,10 @@ def ticket_pr_facts(
                 continue
             if ref in index:
                 pr = dict(index[ref])
-                if str(pr.get("state") or "").upper() == "OPEN":
+                if (
+                    item.state == "OPEN"
+                    and str(pr.get("state") or "").upper() == "OPEN"
+                ):
                     if str(pr.get("mergeable") or "").upper() == "CONFLICTING":
                         # Kept conditional: a verdict lookup per ticket would
                         # undo the saving this scan exists for.
@@ -4901,9 +6076,118 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     return None
 
 
+def approved_merge_candidates(items: Sequence[Item]) -> List[Dict[str, object]]:
+    """Find open ticket PRs whose latest verdict approves their current head."""
+    tickets = {
+        item.ref: item
+        for item in items
+        if (getattr(item, "state", "OPEN") or "OPEN").upper() == "OPEN"
+    }
+    if not tickets:
+        return []
+
+    candidates: List[Dict[str, object]] = []
+    for repo in sorted({item.repo for item in tickets.values()}):
+        rows = _gh_json(
+            "gh", "pr", "list", "--repo", repo, "--state", "open",
+            "--json", "number,headRefName,headRefOid", "--limit", "100",
+        ) or []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            branch = row.get("headRefName") or ""
+            ref = ticket_ref_from_branch(repo, branch)
+            if ref is None or ref not in tickets or row.get("number") is None:
+                continue
+            verdict = latest_verdict(repo, row.get("number"))
+            # The current-head proof is deliberately strict here. The stranded
+            # diagnostic accepts fixture rows without SHAs, but reconciliation
+            # must never turn missing evidence into an unattended merge.
+            if not row.get("headRefOid") or not isinstance(verdict, dict):
+                continue
+            if not verdict.get("head_sha"):
+                continue
+            probe = dict(row)
+            probe["verdict"] = verdict
+            if not _approved_current_head(probe):
+                continue
+            candidates.append({"repo": repo, "pr": row["number"], "ref": ref})
+
+    candidates.sort(key=lambda candidate: (
+        candidate["repo"], str(candidate["pr"])
+    ))
+    return candidates
+
+
+def reconcile_approved_merges(
+    items: List[Item], now: datetime
+) -> List[Dict[str, object]]:
+    """Retry the merge gate for every approved current-head ticket PR.
+
+    ``cmd_merge`` owns all merge conditions and the actual writes. This wrapper
+    only finds the half-applied approval sequence, keeps its human-readable
+    output on stderr so ``begin`` remains JSON, and records the result for the
+    caller. A refusal is a normal reconciliation result, not a queue failure.
+    """
+    results: List[Dict[str, object]] = []
+    by_ref = {item.ref: item for item in items}
+    for candidate in approved_merge_candidates(items):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                code = cmd_merge(
+                    items,
+                    now,
+                    candidate["repo"],
+                    candidate["pr"],
+                    True,
+                )
+        except GitHubError as exc:
+            code = None
+            error = str(exc)
+        else:
+            error = None
+
+        if stdout.getvalue():
+            print(stdout.getvalue(), end="", file=sys.stderr)
+        if stderr.getvalue():
+            print(stderr.getvalue(), end="", file=sys.stderr)
+
+        result: Dict[str, object] = dict(candidate)
+        if code == 0:
+            result["result"] = "merged"
+            ticket = by_ref.get(candidate["ref"])
+            if ticket is not None:
+                # ``load_items`` ran before the merge. Keep this process's
+                # queue consistent with the GitHub close that just happened.
+                ticket.state = "CLOSED"
+                ticket.state_reason = "COMPLETED"
+                ticket.in_motion_since = None
+        elif code == 1:
+            result["result"] = "refused"
+            reasons = [
+                line[4:]
+                for line in stderr.getvalue().splitlines()
+                if line.startswith("  - ")
+            ]
+            if reasons:
+                result["reasons"] = reasons
+        else:
+            result["result"] = "error"
+            result["error"] = error or "merge gate failed without a result"
+        results.append(result)
+    return results
+
+
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
-              routine_sha_literal: Optional[str] = None) -> int:
+              routine_sha_literal: Optional[str] = None,
+              repo_readiness: Optional[
+                  Mapping[str, MemberRepoReadiness]
+              ] = None) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
     A polling routine spends most of its runs discovering there is nothing to
@@ -4981,16 +6265,44 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # passed a check.
         out["unmetered"] = True
 
+    reconciled = reconcile_approved_merges(items, now)
+    if reconciled:
+        out["reconciled"] = reconciled
+
+    auto_closed = reconcile_auto_closeable_projects(items)
+    if auto_closed:
+        out["auto_closed"] = auto_closed
+
+    reconciled = reconcile_closed_items(items)
+    if reconciled:
+        out["reconciled"] = reconciled
+
     if agent == "codex":
+        cleared = clear_satisfied_blocks(
+            items, now, run=out.get("run"), agent=agent
+        )
+        if cleared:
+            out["cleared_blocks"] = cleared
         blocked = awaiting_review(items)
         ticket = next_ticket_for_tier(
-            items, now, tier=tier, blocked=blocked
+            items, now, tier=tier, blocked=blocked,
+            agent=agent,
+            repo_readiness=repo_readiness,
         )
         if ticket is None:
             holder = lock_holder(items, now)
+            withheld = readiness_blockers(
+                items, repo_readiness=repo_readiness, awaiting_review=blocked
+            )
+            if withheld:
+                out["withheld"] = withheld
             if holder is not None:
                 why = "nothing — lock held by {} (claimed {} ago)".format(
                     holder.ref, humanise(now - holder.in_motion_since)
+                )
+            elif withheld:
+                why = "nothing — {}".format(
+                    _readiness_blocker_summary(withheld)
                 )
             elif tier:
                 why = "nothing — no {} work waiting".format(tier)
@@ -5010,48 +6322,74 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         return 0
 
     queue = review_queue(items, tier)
-    if queue:
-        out.update(do="review", work=queue[0])
-    else:
-        # Breakdown is opt-in per routine. Claude reviews only — its breakdown
-        # job moved to the cheaper pool — so offering it one would send the
-        # scarce reviewer off to do mechanical decomposition.
-        if breakdown:
-            pending = awaiting_breakdown(items)
-            if pending:
-                item = pending[0]
-                work = {
-                    "ref": item.ref,
-                    "url": item.url,
-                    "title": item.title,
-                    "access_signals": access_signals(
-                        _ticket_body(item.repo, item.number)
-                    ),
-                }
-                out.update(do="breakdown", work=work)
-            else:
-                item = shapeable_idea(items, tier, reading)
-                if item is not None:
-                    out.update(
-                        do="shape",
-                        work={"ref": item.ref, "url": item.url,
-                              "title": item.title},
-                    )
-                else:
-                    out.update(
-                        do="stop",
-                        why="nothing to review and nothing to break down",
-                    )
+    review = queue[0] if queue else None
+
+    # The fixed job order remains the tiebreak within a class group, but a
+    # finite preempting class can cross stages. Build only the head of each
+    # queue: the next run gets the next item if this run preempts it.
+    by_ref = {item.ref: item for item in items}
+    pending = awaiting_breakdown(items) if breakdown else []
+    breakdown_item = pending[0] if pending else None
+    shape_item = shapeable_idea(items, tier, reading)
+    candidates: List[Tuple[int, int, str, object]] = []
+
+    if review is not None:
+        review_item = by_ref.get(review.get("ref"))
+        review_class = (
+            effective_class(review_item, by_ref)
+            if review_item is not None else None
+        )
+        candidates.append((
+            0 if review_class in PREEMPTING_CLASSES else 1,
+            0,
+            "review",
+            review,
+        ))
+    if breakdown_item is not None:
+        breakdown_class = getattr(breakdown_item, "klass", None)
+        candidates.append((
+            0 if breakdown_class in PREEMPTING_CLASSES else 1,
+            1,
+            "breakdown",
+            breakdown_item,
+        ))
+    if shape_item is not None:
+        shape_class = getattr(shape_item, "klass", None)
+        candidates.append((
+            0 if shape_class in PREEMPTING_CLASSES else 1,
+            2,
+            "shape",
+            shape_item,
+        ))
+
+    if candidates:
+        _, _, job, payload = min(candidates, key=lambda candidate: candidate[:2])
+        if job == "review":
+            out.update(do="review", work=payload)
+        elif job == "breakdown":
+            item = payload
+            work = {
+                "ref": item.ref,
+                "url": item.url,
+                "title": item.title,
+                "access_signals": access_signals(
+                    _ticket_body(item.repo, item.number)
+                ),
+            }
+            out.update(do="breakdown", work=work)
         else:
-            item = shapeable_idea(items, tier, reading)
-            if item is not None:
-                out.update(
-                    do="shape",
-                    work={"ref": item.ref, "url": item.url,
-                          "title": item.title},
-                )
-            else:
-                out.update(do="stop", why="nothing to review")
+            item = payload
+            out.update(
+                do="shape",
+                work={"ref": item.ref, "url": item.url,
+                      "title": item.title},
+            )
+    else:
+        out.update(
+            do="stop",
+            why=("nothing to review and nothing to break down"
+                 if breakdown else "nothing to review"),
+        )
 
     reserve = _reserve_verdict(out.get("do"))
     if reserve is not None:
@@ -5259,14 +6597,163 @@ def closed_itself_comment(tickets: Sequence[Item], drift: Sequence[str]) -> str:
     )
 
 
+def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
+                            ) -> bool:
+    """Whether a project has earned the funnel's unattended close.
+
+    ``funnel merge`` sees the Project summary before GitHub closes the ticket,
+    so it supplies the post-merge child count. Every other caller uses the
+    count already loaded on the project.
+    """
+    completed = item.children_done if children_done is None else children_done
+    return (
+        item.parent is None
+        and item.state == "OPEN"
+        and item.status == "Building"
+        and item.klass in SELF_APPROVABLE_CLASSES
+        and item.children_total > 0
+        and completed == item.children_total
+        and not item.carried_human_step
+    )
+
+
+def _close_auto_closeable_project(items: Sequence[Item], project: Item,
+                                  *, children_done: Optional[int] = None
+                                  ) -> bool:
+    """Move one eligible project to Done, close it, and record its marker."""
+    if not _auto_closeable_project(project, children_done=children_done):
+        return False
+    if not project.item_id:
+        raise GitHubError(
+            "{} is not in the Project; cannot auto-close it".format(project.ref)
+        )
+
+    drift = drift_since_approval(project)
+    tickets = [item for item in items if item.parent == project.ref]
+    tickets.sort(key=lambda item: (item.repo, item.number))
+
+    gh_graphql(
+        SET_FIELD,
+        project=PROJECT_ID,
+        item=project.item_id,
+        field=STATUS_FIELD_ID,
+        option=_option_id(STATUS_FIELD_ID, "Done"),
+    )
+
+    close = subprocess.run(
+        ["gh", "issue", "close", str(project.number), "--repo", project.repo,
+         "--reason", "completed"],
+        capture_output=True, text=True,
+    )
+    if close.returncode != 0:
+        raise GitHubError(
+            "could not auto-close {}: {}".format(
+                project.ref, close.stderr.strip()
+            )
+        )
+
+    comment = subprocess.run(
+        ["gh", "issue", "comment", str(project.number), "--repo", project.repo,
+         "--body", closed_itself_comment(tickets, drift)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(
+            "{} was moved to Done and closed, but its closing comment could not "
+            "be recorded: {}".format(project.ref, comment.stderr.strip())
+        )
+
+    # Keep fixture and same-process callers in sync with the writes. A fresh
+    # `begin` reloads these facts from GitHub, where the closed state is the
+    # idempotence guard.
+    project.status = "Done"
+    project.state = "CLOSED"
+    project.state_reason = "COMPLETED"
+    print("auto-closed {}".format(project.ref), file=sys.stderr)
+    return True
+
+
+def reconcile_auto_closeable_projects(items: Sequence[Item]) -> List[str]:
+    """Close every already-finished upkeep project before queue selection."""
+    closed: List[str] = []
+    projects = sorted(
+        (item for item in items if _auto_closeable_project(item)),
+        key=lambda item: (item.repo, item.number),
+    )
+    for project in projects:
+        if _close_auto_closeable_project(items, project):
+            closed.append(project.ref)
+    return closed
+
+
+def reconcile_closed_items(items: Sequence[Item]) -> List[str]:
+    """Repair terminal Project state and stale shaping labels on closed items.
+
+    Closing an issue outside the funnel does not update its Project item. The
+    issue's state reason is the authoritative terminal choice, and a closed
+    item cannot still be waiting in Ideas. Only closed items participate so an
+    open issue is never changed by this unattended repair.
+    """
+    repaired: List[str] = []
+    terminal_statuses = {
+        "COMPLETED": "Done",
+        "NOT_PLANNED": "Parked",
+    }
+    candidates = sorted(
+        (item for item in items if item.state == "CLOSED"),
+        key=lambda item: (item.repo, item.number),
+    )
+    for item in candidates:
+        reason = str(item.state_reason or "").upper().replace("-", "_")
+        target = terminal_statuses.get(reason)
+        changed = False
+
+        if target is not None and not item.parent and item.status != target:
+            if not item.item_id:
+                raise GitHubError(
+                    "{} is not in the Project; cannot set Status to {}".format(
+                        item.ref, target
+                    )
+                )
+            gh_graphql(
+                SET_FIELD,
+                project=PROJECT_ID,
+                item=item.item_id,
+                field=STATUS_FIELD_ID,
+                option=_option_id(STATUS_FIELD_ID, target),
+            )
+            item.status = target
+            changed = True
+
+        if "needs-shaping" in item.labels and item.status != "Ideas":
+            edit = subprocess.run(
+                [
+                    "gh", "issue", "edit", str(item.number), "--repo", item.repo,
+                    "--remove-label", "needs-shaping",
+                ],
+                capture_output=True, text=True,
+            )
+            if edit.returncode != 0:
+                raise GitHubError(
+                    "reconciled {} but could not remove its needs-shaping "
+                    "label: {}".format(item.ref, edit.stderr.strip())
+                )
+            item.labels = [
+                label for label in item.labels if label != "needs-shaping"
+            ]
+            changed = True
+
+        if changed:
+            repaired.append(item.ref)
+    return repaired
+
+
 def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
     """Close a finished upkeep project after its last ticket merge.
 
-    The class is the only decision here. Drift is fetched for the durable
-    comment, but it never changes whether a ``Broken``, ``Maintenance`` or
-    ``Improve`` project closes itself. The Project summary is read before the
-    merge, so exactly one closed child is the evidence that this merge was the
-    last open ticket rather than a later reconciliation of an old project.
+    The Project summary is read before the merge, so exactly one open child is
+    the evidence that this merge was the last open ticket. The project-level
+    eligibility decision is shared with the begin reconcile.
     """
     parent = next((item for item in items if item.ref == ticket.parent), None)
     if parent is None:
@@ -5275,55 +6762,16 @@ def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
         ticket.state != "OPEN"
         or parent.state != "OPEN"
         or parent.status != "Building"
-        or parent.klass not in SELF_APPROVABLE_CLASSES
         or parent.children_total <= 0
         or parent.children_done != parent.children_total - 1
     ):
         return False
-    if not parent.item_id:
-        raise GitHubError(
-            "{} is not in the Project; cannot auto-close it".format(parent.ref)
-        )
-
-    drift = drift_since_approval(parent)
-    tickets = [item for item in items if item.parent == parent.ref]
-    if not any(item.ref == ticket.ref for item in tickets):
-        tickets.append(ticket)
-    tickets.sort(key=lambda item: (item.repo, item.number))
-
-    gh_graphql(
-        SET_FIELD,
-        project=PROJECT_ID,
-        item=parent.item_id,
-        field=STATUS_FIELD_ID,
-        option=_option_id(STATUS_FIELD_ID, "Done"),
+    merge_items = list(items)
+    if not any(item.ref == ticket.ref for item in merge_items):
+        merge_items.append(ticket)
+    return _close_auto_closeable_project(
+        merge_items, parent, children_done=parent.children_total
     )
-
-    close = subprocess.run(
-        ["gh", "issue", "close", str(parent.number), "--repo", parent.repo,
-         "--reason", "completed"],
-        capture_output=True, text=True,
-    )
-    if close.returncode != 0:
-        raise GitHubError(
-            "could not auto-close {}: {}".format(
-                parent.ref, close.stderr.strip()
-            )
-        )
-
-    comment = subprocess.run(
-        ["gh", "issue", "comment", str(parent.number), "--repo", parent.repo,
-         "--body", closed_itself_comment(tickets, drift)],
-        capture_output=True, text=True,
-    )
-    if comment.returncode != 0:
-        raise GitHubError(
-            "{} was moved to Done and closed, but its closing comment could not "
-            "be recorded: {}".format(parent.ref, comment.stderr.strip())
-        )
-
-    print("auto-closed {}".format(parent.ref))
-    return True
 
 
 def merged_pr_facts(items: Sequence[Item]) -> MergedPRFacts:
@@ -5518,6 +6966,8 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
     print("=" * 72)
     question = gate_question(item)
     print("GATE: {}".format(question or "not waiting on you"))
+    if item.needs_decision is not None:
+        print("NEEDS DECISION: {}".format(item.needs_decision))
     print("")
 
     owner, name = item.repo.split("/")
@@ -5697,6 +7147,16 @@ def _comment_reason(value: str) -> str:
     return reason
 
 
+def _decision_question(value: str) -> str:
+    """Reject blank questions before loading GitHub."""
+    question = value.strip()
+    if not question:
+        raise argparse.ArgumentTypeError(
+            "a non-empty decision question is required"
+        )
+    return question
+
+
 def _blocked_reference(value: str) -> str:
     """Normalise one issue number for the strict block-comment header."""
     reference = value.strip()
@@ -5715,17 +7175,26 @@ def _blocked_comment_body(blocked_on: Sequence[str], because: str) -> str:
     return "**Blocked on {}:** {}".format(references, because)
 
 
+def _needs_decision_comment_body(question: str) -> str:
+    """Render the breakdown-question header owned by its parser."""
+    return "{} {}".format(NEEDS_DECISION_PREFIX, question)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("queue", help="everything, ordered")
     nxt = sub.add_parser(
-        "next", help="the single next ticket Codex should work, or nothing")
+        "next", help="the single next ticket this agent should work, or nothing")
     nxt.add_argument(
         "--tier", choices=TIERS, default=None,
         help="what this engine is allowed to work. `standard` skips tickets "
              "needing the escalated engine; `escalated` may take anything. "
              "Declared by the routine, never by the model.")
+    nxt.add_argument(
+        "--agent", default="codex",
+        help="agent whose capabilities filter the queue (default: codex)",
+    )
     nxt.add_argument(
         "--not", dest="excluded", action="append", default=[], metavar="<ref>",
         help="exclude a candidate for this call; repeat for multiple refs",
@@ -5769,6 +7238,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--origin", required=True, choices=ORIGIN_VOICES,
         help="idea origin: nate-relayed if Nate raised it, agent if observed",
     )
+    capture.add_argument(
+        "--class", dest="klass", choices=LADDER, default=None,
+        help="ladder class; required when --origin agent",
+    )
     shaped = sub.add_parser("shaped", help="record a grilled plan and move to Shaped")
     shaped.add_argument("ref", help="issue number, owner/repo#number, or URL")
     shaped.add_argument("--plan", required=True,
@@ -5780,6 +7253,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     shaped.add_argument(
         "--agent", default=None,
         help="agent that wrote the body; otherwise read the heartbeat spool",
+    )
+    shaped.add_argument(
+        "--class", dest="klass", choices=LADDER, default=None,
+        help="fill an unset Class on an agent-origin idea",
     )
     claim = sub.add_parser("claim", help="take the single-in-motion lock on a ticket")
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
@@ -5831,6 +7308,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     comment_body.add_argument(
         "--blocked-on", action="append", type=_blocked_reference, metavar="N",
         help="post a canonical block header; repeat for multiple issue numbers",
+    )
+    comment_body.add_argument(
+        "--needs-decision", type=_decision_question, metavar="QUESTION",
+        help="post a breakdown question and apply the blocked label",
     )
     comment.add_argument(
         "--because", type=_comment_reason,
@@ -5898,6 +7379,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             parser.error("--because is required with --blocked-on")
         if args.because is not None and not args.blocked_on:
             parser.error("--because requires --blocked-on")
+    if (args.command == "capture" and args.origin == "agent"
+            and args.klass is None):
+        parser.error("--class is required with --origin agent")
 
     now = datetime.now(timezone.utc)
     # Doctor keeps its fixed checks runnable when the Project cannot be loaded;
@@ -5912,6 +7396,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     try:
+        repo_readiness = None
+        if (
+            args.command in ("next", "queue")
+            or (args.command == "begin" and args.agent == "codex")
+        ):
+            repo_readiness = repo_readiness_for_items(items)
         if args.command == "claim":
             return cmd_claim(items, now, args.ref)
         if args.command == "release":
@@ -5926,7 +7416,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_park(items, now, args.ref, args.reason,
                             args.run, args.agent)
         if args.command == "comment":
-            if args.blocked_on:
+            if args.needs_decision is not None:
+                body = _needs_decision_comment_body(args.needs_decision)
+            elif args.blocked_on:
                 body = _blocked_comment_body(args.blocked_on, args.because)
             else:
                 body = args.body
@@ -5937,8 +7429,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     raise GitHubError(
                         "cannot read {}: {}".format(args.body_file, exc)
                     )
-            return cmd_comment(items, now, args.ref, body or "", args.voice,
-                               args.run, args.agent)
+            return cmd_comment(
+                items, now, args.ref, body or "", args.voice,
+                args.run, args.agent, apply_blocked=args.needs_decision is not None,
+            )
         if args.command == "reject":
             return cmd_reject(items, now, args.pr, args.note)
         if args.command in ANSWERS:
@@ -5950,13 +7444,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_ideas(items, now)
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
-                               args.run, args.agent, args.origin)
+                               args.run, args.agent, args.origin, args.klass)
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan,
-                              args.run, args.agent)
+                              args.run, args.agent, args.klass)
         if args.command == "begin":
             return cmd_begin(items, now, args.agent, args.tier, args.idle,
-                             args.breakdown, args.routine_sha)
+                             args.breakdown, args.routine_sha,
+                             repo_readiness=repo_readiness)
         if args.command == "next-review":
             return cmd_next_review(items, args.tier)
         if args.command == "review":
@@ -5970,12 +7465,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 now,
                 tier=getattr(args, "tier", None),
                 excluded=set(getattr(args, "excluded", [])),
+                agent=getattr(args, "agent", "codex"),
+                repo_readiness=repo_readiness,
             )
         if args.command == "brief":
             return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
-        return {"queue": cmd_queue, "brief": cmd_brief}[args.command](
-            items, now
-        )
+        if args.command == "queue":
+            return cmd_queue(items, now, repo_readiness=repo_readiness)
+        return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
     except GitHubError as exc:
         print("funnel: {}".format(exc), file=sys.stderr)
         return 2

@@ -35,6 +35,15 @@ def wire(monkeypatch, rows):
     monkeypatch.setattr(heartbeat, "PROVIDERS", {"zcode": "zai"})
 
 
+def wire_agents(monkeypatch, rows_by_agent):
+    monkeypatch.setattr(heartbeat, "read",
+                        lambda agent: rows_by_agent.get(agent, []))
+    monkeypatch.setattr(
+        heartbeat, "PROVIDERS",
+        {agent: agent for agent in rows_by_agent},
+    )
+
+
 def test_an_unchanged_tree_reports_nothing(monkeypatch):
     state = {"head": "aaaaaaaaaaaa", "dirty": 0}
     wire(monkeypatch, [rec("start", "r1", state), rec("finish", "r1", state)])
@@ -46,7 +55,80 @@ def test_a_moved_head_is_reported(monkeypatch):
     wire(monkeypatch, [rec("start", "r1", {"head": "aaaaaaaaaaaa", "dirty": 0}),
                        rec("finish", "r1", {"head": "bbbbbbbbbbbb", "dirty": 0})])
     found = funnel.working_tree_touched(NOW)
-    assert len(found) == 1 and found[0]["run"] == "r1"
+    assert len(found) == 1
+    assert found[0]["observers"] == [{"agent": "zcode", "run": "r1"}]
+
+
+def test_repeated_head_transitions_collapse_and_carry_observers(monkeypatch):
+    transitions = [
+        ("aaaaaaaaaaaa", "bbbbbbbbbbbb", ["r1", "r2"]),
+        ("bbbbbbbbbbbb", "cccccccccccc", ["r3", "r4", "r5"]),
+        ("cccccccccccc", "dddddddddddd", ["r6", "r7", "r8", "r9"]),
+        ("dddddddddddd", "eeeeeeeeeeee", ["r10"]),
+    ]
+    rows = []
+    for index, (before, after, runs) in enumerate(transitions):
+        for offset, run in enumerate(runs):
+            hours_ago = index * 2 + offset / 10
+            rows.extend([
+                rec("start", run, {"head": before, "dirty": 0}, hours_ago),
+                rec("finish", run, {"head": after, "dirty": 0}, hours_ago),
+            ])
+    wire(monkeypatch, rows)
+
+    found = funnel.working_tree_touched(NOW)
+
+    assert len(found) == 4
+    grouped = {
+        (row["before"]["head"], row["after"]["head"]): row
+        for row in found
+    }
+    for before, after, runs in transitions:
+        assert sorted(grouped[(before, after)]["observers"],
+                      key=lambda observer: observer["run"]) == [
+            {"agent": "zcode", "run": run} for run in runs
+        ]
+
+
+def test_dirty_only_changes_stay_one_row_per_run(monkeypatch):
+    rows = []
+    for run, dirty_before, dirty_after in (
+        ("r1", 0, 1),
+        ("r2", 1, 3),
+    ):
+        rows.extend([
+            rec("start", run, {"head": "aaaaaaaaaaaa", "dirty": dirty_before}),
+            rec("finish", run, {"head": "aaaaaaaaaaaa", "dirty": dirty_after}),
+        ])
+    wire(monkeypatch, rows)
+
+    found = funnel.working_tree_touched(NOW)
+
+    assert [row["run"] for row in found] == ["r1", "r2"]
+    assert all("observers" not in row for row in found)
+
+
+def test_a_single_observer_is_still_explicit(monkeypatch):
+    rows_by_agent = {
+        "zcode": [
+            rec("start", "z1", {"head": "aaaaaaaaaaaa", "dirty": 0}),
+            rec("finish", "z1", {"head": "bbbbbbbbbbbb", "dirty": 0}),
+        ],
+        "codex": [
+            rec("start", "c1", {"head": "cccccccccccc", "dirty": 0}),
+            rec("finish", "c1", {"head": "dddddddddddd", "dirty": 0}),
+        ],
+    }
+    wire_agents(monkeypatch, rows_by_agent)
+
+    found = funnel.working_tree_touched(NOW)
+
+    assert len(found) == 2
+    assert all(len(row["observers"]) == 1 for row in found)
+    assert {
+        (row["observers"][0]["agent"], row["observers"][0]["run"])
+        for row in found
+    } == {("zcode", "z1"), ("codex", "c1")}
 
 
 def test_new_uncommitted_files_are_reported(monkeypatch):

@@ -147,6 +147,67 @@ def test_start_records_the_runtime_checkout(monkeypatch):
     }
 
 
+def test_usage_snapshot_reads_the_agent_own_provider(monkeypatch):
+    import usage
+
+    now = 1_700_000_000.0
+    readings = {
+        "claude": {
+            "source": "anthropic", "captured_at": now,
+            "windows": {"five_hour": {
+                "used_percent": 11.0, "resets_at": now + 11,
+            }},
+        },
+        "codex": {
+            "source": "openai", "captured_at": now,
+            "windows": {"five_hour": {
+                "used_percent": 22.0, "resets_at": now + 22,
+            }},
+        },
+        "zcode": {
+            "source": "zai", "captured_at": now,
+            "windows": {"five_hour": {
+                "used_percent": 33.0, "resets_at": now + 33,
+            }},
+        },
+    }
+    monkeypatch.setattr(heartbeat.time, "time", lambda: now)
+    monkeypatch.setattr(usage, "read_claude", lambda: readings["claude"])
+    monkeypatch.setattr(usage, "read_codex", lambda: readings["codex"])
+    monkeypatch.setattr(usage, "read_zai", lambda timestamp: readings["zcode"])
+
+    assert heartbeat.usage_snapshot("claude") == {
+        "five_hour": {"used_percent": 11.0, "resets_at": now + 11}
+    }
+    assert heartbeat.usage_snapshot("codex") == {
+        "five_hour": {"used_percent": 22.0, "resets_at": now + 22}
+    }
+    zcode = heartbeat.usage_snapshot("zcode")
+    assert zcode == {
+        "five_hour": {"used_percent": 33.0, "resets_at": now + 33}
+    }
+    assert str(now + 22) not in str(zcode)
+
+
+def test_usage_snapshot_records_an_unmetered_provider(monkeypatch):
+    assert heartbeat.usage_snapshot("muse") == {
+        "source": "meta", "unmetered": True
+    }
+
+
+def test_usage_snapshot_fails_closed_for_unreadable_or_unknown_usage(
+        monkeypatch):
+    import usage
+
+    def boom():
+        raise RuntimeError("reader failed")
+
+    monkeypatch.setattr(usage, "read_codex", boom)
+
+    assert heartbeat.usage_snapshot("codex") is None
+    assert heartbeat.usage_snapshot("nobody") is None
+
+
 def test_finish_accepts_skipped_human_step(monkeypatch):
     records = []
     monkeypatch.setattr(heartbeat, "read", lambda agent: [])

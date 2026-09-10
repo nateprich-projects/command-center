@@ -932,6 +932,18 @@ def needs_nate_signals(plan_body: str) -> List[str]:
 PLAN_HEADING = re.compile(r"^\s{0,3}(?P<marks>#{1,6})\s+(?P<title>.*?)\s*#*\s*$")
 NEEDS_NATE_HEADINGS = {"needs nate", "needs you"}
 EMPTY_NEEDS_NATE = {"", "nothing", "nothing."}
+NEEDS_NATE_CATEGORIES = (
+    "Exposure",
+    "Gates",
+    "Scope and priority",
+    "Preference",
+)
+NEEDS_NATE_CLEAR_ANSWERS = {
+    "nothing",
+    "nothing outstanding",
+    "none",
+}
+NEEDS_NATE_CLAUSE_END = re.compile(r"[.;\u2013\u2014]| - ")
 
 
 def _needs_nate_sections(plan_body: str) -> List[str]:
@@ -967,20 +979,67 @@ def _needs_nate_sections(plan_body: str) -> List[str]:
     return sections
 
 
+def _needs_nate_category_line(line: str) -> Optional[Tuple[str, str]]:
+    """Return a category and answer from one supported Needs line."""
+    text = re.sub(r"^(?:[-+*]|\d+[.)])\s+", "", line.strip())
+    for category in NEEDS_NATE_CATEGORIES:
+        escaped = re.escape(category)
+        patterns = (
+            rf"\*\*{escaped}\s*[:.]\s*\*\*\s*(?P<answer>.*)",
+            rf"\*\*{escaped}\*\*\s*[:.]\s*(?P<answer>.*)",
+            rf"{escaped}\s*[:.]\s*(?P<answer>.*)",
+        )
+        for pattern in patterns:
+            match = re.fullmatch(pattern, text, re.IGNORECASE)
+            if match:
+                return category, match.group("answer").strip()
+    return None
+
+
+def _needs_nate_answer_is_clear(answer: str) -> bool:
+    """Whether an answer's first clause is an explicit all-clear token."""
+    clause = NEEDS_NATE_CLAUSE_END.split(answer, maxsplit=1)[0].strip().lower()
+    return clause in NEEDS_NATE_CLEAR_ANSWERS
+
+
+def _needs_nate_section_reason(section: str) -> Optional[str]:
+    """Return a hold reason, or ``None`` when one Needs section is clear."""
+    if section.strip().lower() in EMPTY_NEEDS_NATE:
+        return None
+
+    lines = [line for line in section.splitlines() if line.strip()]
+    found = set()
+    for line in lines:
+        parsed = _needs_nate_category_line(line)
+        if parsed is None:
+            return "plan has an open question"
+        category, answer = parsed
+        if category in found or not _needs_nate_answer_is_clear(answer):
+            return "open question under {}".format(category)
+        found.add(category)
+
+    for category in NEEDS_NATE_CATEGORIES:
+        if category not in found:
+            return "open question under {}".format(category)
+    return None
+
+
 def shaped_plan_status(plan_body: str) -> Tuple[str, str]:
     """Return the status and reason earned by a newly recorded plan.
 
     The all-clear is deliberately narrow: a recognised Needs section must be
-    present, explicitly empty, and free of authority signals that contradict
-    its claim. Everything else stays at Shaped with a reason the caller can
-    print.
+    present, either explicitly empty or made up of the four category lines with
+    an explicit all-clear as each answer's first clause, and be free of
+    authority signals that contradict its claim. Everything else stays at
+    Shaped with a reason the caller can print.
     """
     sections = _needs_nate_sections(plan_body)
     if not sections:
         return "Shaped", "plan has no ## Needs you section"
-    if any(section.strip().lower() not in EMPTY_NEEDS_NATE
-           for section in sections):
-        return "Shaped", "plan has an open question"
+    for section in sections:
+        reason = _needs_nate_section_reason(section)
+        if reason:
+            return "Shaped", reason
     signals = needs_nate_signals(plan_body)
     if signals:
         return "Shaped", "plan contains authority signal: {}".format(

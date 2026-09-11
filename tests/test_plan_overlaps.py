@@ -151,3 +151,39 @@ def test_shaping_scan_ignores_closed_ideas_and_child_tickets():
 
     assert shaping_plan_overlap_candidates([current] + ignored, current,
                                            current.body) == []
+
+
+def test_shaping_scan_ignores_recorded_overlap_check_on_both_plans():
+    current_body = "Implement `startable()` in `funnel.py`."
+    other_body = "Implement `brief()` in `tests/test_brief.py`."
+    recorded_overlap = """
+
+## Overlap check
+
+Checked: #27 and #89 (the other open plans considered)
+
+Candidates:
+- #27 and #89 both touch `skills/shape/SKILL.md`
+
+Conclusion:
+- Keep one mechanism and narrow the plan accordingly.
+"""
+    plain_current = _item(27, status="Ideas", body=current_body)
+    plain_other = _item(89, status="Shaped", body=other_body)
+    recorded_current = _item(
+        27, status="Ideas", body=current_body + recorded_overlap
+    )
+    recorded_other = _item(
+        89, status="Shaped", body=other_body + recorded_overlap
+    )
+
+    without_record = shaping_plan_overlap_candidates(
+        [plain_current, plain_other], plain_current, current_body
+    )
+    with_record = shaping_plan_overlap_candidates(
+        [recorded_current, recorded_other], recorded_current,
+        recorded_current.body,
+    )
+
+    assert without_record == []
+    assert with_record == without_record

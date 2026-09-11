@@ -7641,17 +7641,17 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # passed a check.
         out["unmetered"] = True
 
-    reconciled = reconcile_approved_merges(items, now)
-    if reconciled:
-        out["reconciled"] = reconciled
+    reconciled_merges = reconcile_approved_merges(items, now)
+    if reconciled_merges:
+        out["reconciled_merges"] = reconciled_merges
 
     auto_closed = reconcile_auto_closeable_projects(items)
     if auto_closed:
         out["auto_closed"] = auto_closed
 
-    reconciled = reconcile_closed_items(items)
-    if reconciled:
-        out["reconciled"] = reconciled
+    reconciled_statuses = reconcile_closed_items(items)
+    if reconciled_statuses:
+        out["reconciled_statuses"] = reconciled_statuses
     orphaned = reconcile_orphaned_starts(items, now)
     if orphaned:
         out["reconciled_starts"] = orphaned

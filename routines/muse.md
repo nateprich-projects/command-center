@@ -60,8 +60,8 @@ in the commands; the forwarding is transparent. A non-TTY pipe is carried with
 the request (up to 1 MB), so `shaped --plan -` works directly inside the session;
 TTY stdin is left untouched.
 
-Each forwarded command has a 29-second server-side budget, just inside the
-30-second transport timeout. GitHub and other child-process work receives the
+Each forwarded command has a 179-second server-side budget, just inside the
+180-second transport timeout. GitHub and other child-process work receives the
 remaining time and is killed when that budget expires, so a slow command
 returns `command-timeout` and releases the session for the next command. The
 session discards its in-memory Project view after that failure and reloads it on

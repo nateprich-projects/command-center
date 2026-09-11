@@ -350,12 +350,13 @@ CLOSED_ITSELF_WINDOW = timedelta(days=7)
 #: for the same reason funnel-closed projects remain visible for a week.
 CLEARED_BLOCK_WINDOW = timedelta(days=7)
 
-# A brief has to answer before the 30-second session reply timeout leaves the
-# caller unable to tell whether the session is alive. Keep a little room for
-# JSON encoding and the session wrapper's bookkeeping; the section allocations
+# A brief has to answer well inside the session reply timeout (three minutes,
+# see SESSION_TIMEOUT_SECONDS) so the caller can tell a slow brief from a dead
+# session. It was 29 s while that timeout was 30 s, and a single Project load
+# already took longer than that on 2026-09-10 (#595). The section allocations
 # below are deliberately explicit so the slowest reads stay visible and
 # reviewable instead of turning into one arbitrary global timeout.
-BRIEF_TOTAL_BUDGET_SECONDS = 29.0
+BRIEF_TOTAL_BUDGET_SECONDS = 120.0
 BRIEF_SECTION_BUDGETS = {
     "ticket_pr_facts": 8.0,
     "items": 0.25,
@@ -8909,7 +8910,12 @@ def main(argv: Optional[Sequence[str]] = None, *,
 
 SESSION_ENV = "FUNNEL_SESSION"
 SESSION_SERVER_ENV = "FUNNEL_SESSION_SERVER"
-SESSION_TIMEOUT_SECONDS = 30
+# Measured 2026-09-11: one Project load takes 31.7 s on the board of that day
+# and `begin` does more, so the 30 s this started at (#581) timed every Muse
+# run out at `begin` and no PR was reviewed for hours (#595). Three minutes
+# fits the slowest honest command with room for the API's slow hours; the
+# bound itself stays -- a hung child still fails loud and releases the session.
+SESSION_TIMEOUT_SECONDS = 180
 # Leave one second for the session handler to format and send its response
 # before the client's transport budget expires. The child process doing the
 # external work receives this deadline through `_run_bounded_subprocess`, so a

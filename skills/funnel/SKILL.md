@@ -55,7 +55,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `cleared_blocks` | Tickets whose fully parsed conditions all closed and whose `blocked` label the funnel mechanically cleared in the last seven days |
 | `awaiting_breakdown` | Approved plans with no tickets yet. Claude owes these a breakdown; they are not startable until it happens |
 | `prose_dependencies` | Open tickets whose recognised dependency sentence has no matching native `blocked_by` edge. Numbered sentences carry the open named issue refs in `names`; unnumbered `Depends on` or `Blocked on` sentences carry `names: []`; every row carries the ticket `ref` and original `sentence`; diagnostic only |
-| `unattended_merges` | Merges an agent made without him, read from every live reviewer's heartbeat records (retired agents excluded); each record carries `pr`, `at`, `note` and the `agent` that merged. `plan.md` makes these appearing in the brief a condition of unattended merging being allowed at all |
+| `unattended_merges` | Merges an agent made without him, read from every live reviewer's heartbeat records (retired agents excluded); each record carries `pr`, `at`, `note` and the `agent` that merged, plus `self_reviewed: true` when the authoring and reviewing runs used the same agent. `plan.md` makes these appearing in the brief a condition of unattended merging being allowed at all |
 | `unattended_approvals` | Recent plans moved to `Ready` by the unattended shaping path, with each row's issue `ref`, title, URL, transition time `at`, and stated `basis`; a marker-backed record, not a notification or review request |
 | `agent_health` | Raised watchdog conditions, each with the heartbeat agent and the watchdog's condition wording. Empty when all agents are healthy |
 | `rejected_merges` | Merges he checked and found broken, over `window_days`. `stop_auto_merging` true means three in a week — auto-merging stops until he fixes the review bar |
@@ -108,6 +108,10 @@ Then the gate counts on one line. Then anything unusual, and only if present:
 `awaiting_breakdown`, `unattended_merges`, `unattended_approvals`, `agent_health`, `resend_ratio`, `rejected_merges`, `degraded`, and
 `closed_with_access_vocabulary`. A suspected human step is report-only: do not clear its
 `blocked` label, restate it, or split it while rendering the brief.
+
+For `unattended_merges`, call out a row with `self_reviewed: true` as
+**self-reviewed**. The marker is derived from the authoring and reviewing run
+agents; do not infer it from the GitHub account or from the PR author.
 
 Use `timings` diagnostically when a brief is slow: name the largest section in the
 report, but do not treat timing as a queue or gate signal. A session reply timeout

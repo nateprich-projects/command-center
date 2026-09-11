@@ -29,6 +29,17 @@ def _finish(agent, merged=None, days_ago=1, note=None):
     return row
 
 
+def _authored(agent, pr, days_ago=1, run=None):
+    return {
+        "agent": agent,
+        "phase": "finish",
+        "run": run or "author-%s-%s" % (agent, pr),
+        "ts": (NOW - timedelta(days=days_ago)).timestamp(),
+        "outcome": "done",
+        "note": "PR #%s" % pr,
+    }
+
+
 def _wire(monkeypatch, spools, retired=frozenset({"zcode"})):
     monkeypatch.setattr(heartbeat, "PROVIDERS",
                         {"claude": "anthropic", "codex": "openai",
@@ -95,7 +106,27 @@ def test_one_unreadable_spool_does_not_hide_the_others(monkeypatch):
     assert [m["pr"] for m in funnel.unattended_merges(NOW)] == [202]
 
 
+def test_marks_only_a_same_agent_merge_as_self_reviewed(monkeypatch):
+    spools = {
+        "muse": [
+            _authored("muse", 202),
+            _finish("muse", merged=202, note="merged PR #202"),
+        ],
+        "codex": [_authored("codex", 303)],
+        "claude": [_finish("claude", merged=303, note="merged PR #303")],
+    }
+    _wire(monkeypatch, spools)
+
+    found = {
+        merge["pr"]: merge for merge in funnel.unattended_merges(NOW)
+    }
+
+    assert found[202]["self_reviewed"] is True
+    assert "self_reviewed" not in found[303]
+
+
 def test_the_skill_names_the_agent_field():
     text = (ROOT / "skills" / "funnel" / "SKILL.md").read_text()
     row = next(line for line in text.splitlines() if line.startswith("| `unattended_merges`"))
     assert "`agent`" in row and "retired" in row
+    assert "`self_reviewed: true`" in row

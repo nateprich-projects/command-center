@@ -371,6 +371,13 @@ CLEARED_BLOCK_WINDOW = timedelta(days=7)
 # already took longer than that on 2026-09-10 (#595). The section allocations
 # below are deliberately explicit so the slowest reads stay visible and
 # reviewable instead of turning into one arbitrary global timeout.
+#
+# Measured 2026-09-11 on the 377-item Project board over three ordinary
+# sequential passes: p90 was 44.438 s for closed_itself (101 candidates),
+# 6.098 s for cleared_blocks (13 candidates), and 48.017 s for
+# unattended_approvals (109 candidates). Round each up to a simple cap while
+# leaving the existing fixed floors for the cheap sections unchanged; the
+# 120 s total remains the transport envelope.
 BRIEF_TOTAL_BUDGET_SECONDS = 120.0
 BRIEF_SECTION_BUDGETS = {
     "ticket_pr_facts": 8.0,
@@ -378,8 +385,8 @@ BRIEF_SECTION_BUDGETS = {
     "counts_by_gate": 0.25,
     "in_motion": 0.25,
     "parked": 2.0,
-    "closed_itself": 2.0,
-    "cleared_blocks": 2.0,
+    "closed_itself": 45.0,
+    "cleared_blocks": 7.0,
     "blocked": 0.25,
     "prose_dependencies": 0.25,
     "suspected_human_steps": 0.25,
@@ -394,7 +401,7 @@ BRIEF_SECTION_BUDGETS = {
     "disposal": 0.25,
     "resend_ratio": 3.0,
     "unattended_merges": 3.0,
-    "unattended_approvals": 2.0,
+    "unattended_approvals": 49.0,
     "agent_health": 1.0,
     "working_tree_touched": 1.0,
     "rejected_merges": 0.25,

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The escalated Muse implementer: one ticket per run, then stop.
+
+  The canonical copy lives here in the repo. launchd refuses a symlinked plist
+  (Bootstrap failed: 5: Input/output error, measured 2026-09-07), so the
+  installed file is a copy and tests/test_launchd_drift.py compares them.
+
+  /bin/bash <script>, not the script directly: this repository used to live on
+  an external volume that a launchd job could not read at all. It now lives on
+  the internal disk, but invoking through bash costs nothing and survives a move.
+
+  Note for editors: XML forbids a double hyphen inside a comment. Use an em dash
+  or a semicolon; plutil accepts the double hyphen and plistlib rejects it, so a
+  file can lint clean and still be unparseable.
+
+  After editing, re-install:
+    cp launchd/com.nateprich.command-center-muse-implement.plist ~/Library/LaunchAgents/
+    launchctl bootout gui/$(id -u)/com.nateprich.command-center-muse-implement
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nateprich.command-center-muse-implement.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nateprich.command-center-muse-implement</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/nateprich/.claude/command-center-run/scripts/muse-implement</string>
+        <string>escalated</string>
+        <string>max</string>
+    </array>
+
+    <!--
+      Every three hours at :37. The minute is outside the standard review
+      schedule's :00/:05 slots and the escalated review schedule's :07 slot, so
+      two Muse jobs are not started by these launchd schedules together.
+    -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>37</integer></dict>
+        <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>37</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>37</integer></dict>
+        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>37</integer></dict>
+        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>37</integer></dict>
+        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>37</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>37</integer></dict>
+        <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>37</integer></dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-muse-implement.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-muse-implement.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/nateprich/.local/bin</string>
+        <key>HOME</key>
+        <string>/Users/nateprich</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

@@ -27,10 +27,12 @@ REVIEWER_NAMES = [
     "com.nateprich.command-center-muse-review.plist",           # escalated, hourly
     "com.nateprich.command-center-muse-review-standard.plist",  # standard, /5
 ]
+IMPLEMENTER_NAME = "com.nateprich.command-center-muse-implement.plist"
+MUSE_SCHEDULE_NAMES = REVIEWER_NAMES + [IMPLEMENTER_NAME]
 KEEPER_NAME = "com.nateprich.command-center-run-keeper.plist"
 #: The Remote Control listener. Not a schedule; see the carve-out in `AGENTS.md`.
 REMOTE_CONTROL_NAME = "com.nateprich.command-center-remote-control.plist"
-NAMES = REVIEWER_NAMES + [KEEPER_NAME, REMOTE_CONTROL_NAME]
+NAMES = MUSE_SCHEDULE_NAMES + [KEEPER_NAME, REMOTE_CONTROL_NAME]
 LAUNCH_AGENTS = pathlib.Path.home() / "Library" / "LaunchAgents"
 
 
@@ -70,7 +72,7 @@ def test_the_installed_plist_matches_the_repo(name):
     )
 
 
-@pytest.mark.parametrize("name", REVIEWER_NAMES)
+@pytest.mark.parametrize("name", MUSE_SCHEDULE_NAMES)
 def test_the_plist_points_at_the_stable_path(name):
     """`/Users/nateprich/.claude/command-center` is a symlink to the working
     tree. The plist must use it rather than the resolved external-volume path,
@@ -83,7 +85,8 @@ def test_the_plist_points_at_the_stable_path(name):
         plist = plistlib.load(handle)
     args = plist["ProgramArguments"]
     assert args[0] == "/bin/bash"
-    assert any(a.endswith("/scripts/muse-review") for a in args), args
+    script = "muse-implement" if name == IMPLEMENTER_NAME else "muse-review"
+    assert any(a.endswith("/scripts/{}".format(script)) for a in args), args
     # Checked against the arguments, not the file text: the header explains the
     # TCC blocker and has to name `/Volumes/External SSD` to do so. Asserting on
     # the whole file made a correct comment fail a test about a path.
@@ -117,6 +120,21 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
 
     assert args(NAMES[0]) == ["escalated", "max"]
     assert args(NAMES[1]) == ["standard", "high"]
+    assert args(IMPLEMENTER_NAME) == ["escalated", "max"]
+
+
+def test_the_implementer_fires_every_three_hours_off_review_slots():
+    """The implementation lane is periodic, but its calendar slot does not
+    collide with either review schedule's minute."""
+    import plistlib
+
+    with (ROOT / "launchd" / IMPLEMENTER_NAME).open("rb") as handle:
+        schedule = plistlib.load(handle)["StartCalendarInterval"]
+
+    assert [entry["Hour"] for entry in schedule] == list(range(0, 24, 3))
+    assert {entry["Minute"] for entry in schedule} == {37}
+    assert not {entry["Minute"] for entry in schedule} & {7}
+    assert not {entry["Minute"] for entry in schedule} & set(range(0, 60, 5))
 
 
 def test_the_keeper_only_fast_forwards_the_run_clone():

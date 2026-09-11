@@ -2399,6 +2399,47 @@ def working_tree_touched(now: datetime) -> List[Dict[str, object]]:
     return sorted(found, key=lambda r: str(r["at"]))
 
 
+AUTHORING_PR_RE = re.compile(r"^\s*PR\s+#(?P<pr>\d+)\b")
+
+
+def _authoring_pr_agents(rows: Iterable[Dict[str, object]]) -> Dict[str, Set[str]]:
+    """Return the agents whose completed ticket runs opened each PR.
+
+    Implementing routines finish with ``PR #n`` while reviewing routines use
+    the structured ``merged`` field (and may also mention a PR in prose).
+    Restricting the note parser to completed, non-merge runs keeps a review
+    record from masquerading as the authoring run. A bound review run is
+    excluded as an additional guard for older notes that start with ``PR``.
+    """
+    bindings = {
+        row.get("run"): row.get("do")
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("phase") == "bind"
+        and row.get("run")
+    }
+    found: Dict[str, Set[str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if (
+            row.get("phase") != "finish"
+            or row.get("outcome") != "done"
+            or row.get("merged") is not None
+            or bindings.get(row.get("run")) == "review"
+        ):
+            continue
+        note = row.get("note")
+        if not isinstance(note, str):
+            continue
+        match = AUTHORING_PR_RE.match(note)
+        agent = row.get("agent")
+        if match is None or not isinstance(agent, str) or not agent:
+            continue
+        found.setdefault(match.group("pr"), set()).add(agent)
+    return found
+
+
 def unattended_merges(now: datetime) -> List[Dict[str, object]]:
     """Merges a reviewer made without Nate, read from every live agent's heartbeat.
 
@@ -2419,6 +2460,7 @@ def unattended_merges(now: datetime) -> List[Dict[str, object]]:
 
     cutoff = (now - MAINTENANCE_WINDOW).timestamp()
     found: List[Dict[str, object]] = []
+    live_rows: List[Tuple[str, List[Dict[str, object]]]] = []
     for agent in sorted(heartbeat.PROVIDERS):
         if agent in heartbeat.RETIRED_AGENTS:
             # A stopped schedule must not read as activity (#431).
@@ -2427,15 +2469,26 @@ def unattended_merges(now: datetime) -> List[Dict[str, object]]:
             rows = _brief_heartbeat_rows(agent)
         except Exception:
             continue
+        live_rows.append((agent, rows))
+
+    authored_by: Dict[str, Set[str]] = {}
+    for _agent, rows in live_rows:
+        for pr, agents in _authoring_pr_agents(rows).items():
+            authored_by.setdefault(pr, set()).update(agents)
+
+    for agent, rows in live_rows:
         for row in rows:
             if not row.get("merged") or (row.get("ts") or 0) < cutoff:
                 continue
-            found.append({
+            record = {
                 "pr": row.get("merged"),
                 "at": datetime.fromtimestamp(row["ts"], timezone.utc).isoformat(),
                 "note": row.get("note"),
                 "agent": agent,
-            })
+            }
+            if authored_by.get(str(row.get("merged"))) == {agent}:
+                record["self_reviewed"] = True
+            found.append(record)
     found.sort(key=lambda record: (record["at"], record["pr"] or 0))
     return found
 

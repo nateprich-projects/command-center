@@ -964,22 +964,30 @@ def test_brief_marks_an_over_budget_informational_section_degraded(
     assert brief["timings"]["working_tree_touched"] == 0.0
 
 
+@pytest.mark.parametrize(
+    "section, reader",
+    [
+        ("closed_itself", "closed_itself_json"),
+        ("cleared_blocks", "cleared_blocks_json"),
+        ("unattended_approvals", "unattended_approvals"),
+        ("rejected_merges", "rejected_merges"),
+    ],
+)
 def test_brief_fails_closed_without_partial_json_when_gate_section_is_slow(
-    monkeypatch, capsys
+    monkeypatch, capsys, section, reader
 ):
     item = funnel.Item(
         repo="nateprich/beta", number=95, title="Gate project",
         url="https://example.invalid/95", state="OPEN", status="Ready",
         status_since=NOW,
     )
-    monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS,
-                        "rejected_merges", 0.0)
-    monkeypatch.setattr(funnel, "rejected_merges", lambda items, now: {})
+    monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS, section, 0.0)
+    monkeypatch.setattr(funnel, reader, lambda *args: {})
 
     assert funnel.cmd_brief([item], NOW) == 2
     captured = capsys.readouterr()
 
     assert captured.out == ""
     assert "brief failed closed" in captured.err
-    assert "rejected_merges" in captured.err
+    assert section in captured.err
     assert "no partial JSON emitted" in captured.err

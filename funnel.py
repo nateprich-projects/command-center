@@ -400,10 +400,15 @@ BRIEF_SECTION_BUDGETS = {
     "rejected_merges": 0.25,
 }
 
-# This is the brief's current gate-feeding section. Keep the set explicit so
-# adding another value consumed by a merge routine cannot accidentally make a
-# partial brief look safe.
-BRIEF_GATE_SECTIONS = frozenset({"rejected_merges"})
+# These brief sections either feed a gate or carry records that an unattended
+# path promises to surface. Keep the set explicit so a slow read cannot turn a
+# required record into an authoritative-looking empty list.
+BRIEF_GATE_SECTIONS = frozenset({
+    "closed_itself",
+    "cleared_blocks",
+    "unattended_approvals",
+    "rejected_merges",
+})
 
 #: Drift is reported, never used as a gate. Keep these names short and stable:
 #: callers put them verbatim into comments and the brief.

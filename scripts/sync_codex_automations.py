@@ -181,6 +181,13 @@ def current(text: str):
     return match.group(1), json.loads(match.group(1))
 
 
+def _print_write_summary(ledger):
+    """Print the result for every schedule considered by a write run."""
+    print("\nSync summary:")
+    for name, outcome in ledger:
+        print("  {:16} {}".format(outcome, name))
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true",
@@ -194,18 +201,34 @@ def main(argv=None) -> int:
         return 1
 
     drifted = []
+    ledger = []
+    stale = []
     for path in files:
-        wanted = prompt_text(path.parent.name)
-        text = path.read_text()
+        name = path.parent.name
+        wanted = prompt_text(name)
+        try:
+            text = path.read_text()
+        except OSError as exc:
+            if args.check:
+                raise
+            print("{}: unreadable — {}".format(name, exc), file=sys.stderr)
+            ledger.append((name, "unwritable"))
+            stale.append(name)
+            continue
         raw, existing = current(text)
         if raw is None:
-            print("{}: no prompt field — skipped".format(path.parent.name),
+            print("{}: no prompt field — skipped".format(name),
                   file=sys.stderr)
+            if not args.check:
+                ledger.append((name, "unwritable"))
+                stale.append(name)
             continue
         if same_prompt(existing, wanted):
-            print("  ok       {}".format(path.parent.name))
+            print("  ok       {}".format(name))
+            if not args.check:
+                ledger.append((name, "already current"))
             continue
-        drifted.append(path.parent.name)
+        drifted.append(name)
         if args.check:
             # Record *when* it changed, not only that it did. Without this the
             # only evidence is a mismatch, which cannot tell a file someone
@@ -234,18 +257,33 @@ def main(argv=None) -> int:
                     wanted.splitlines()[first][:88]))
             continue
 
-        shutil.copy2(path, path.with_suffix(".toml.bak"))
-        text = text.replace(raw, json.dumps(wanted), 1)
-        text = re.sub(r"^updated_at = \d+$",
-                      "updated_at = {}".format(int(time.time() * 1000)),
-                      text, count=1, flags=re.MULTILINE)
-        path.write_text(text)
+        try:
+            shutil.copy2(path, path.with_suffix(".toml.bak"))
+            text = text.replace(raw, json.dumps(wanted), 1)
+            text = re.sub(r"^updated_at = \d+$",
+                          "updated_at = {}".format(int(time.time() * 1000)),
+                          text, count=1, flags=re.MULTILINE)
+            path.write_text(text)
 
-        _, written = current(path.read_text())
-        if written != wanted:
-            raise SystemExit("{}: wrote the prompt but it did not read back "
-                             "identically — restore from the .bak".format(path))
-        print("  updated  {}".format(path.parent.name))
+            _, written = current(path.read_text())
+            if written != wanted:
+                raise SystemExit("{}: wrote the prompt but it did not read back "
+                                 "identically — restore from the .bak".format(path))
+        except OSError as exc:
+            print("{}: unwritable — {}".format(name, exc), file=sys.stderr)
+            ledger.append((name, "unwritable"))
+            stale.append(name)
+            continue
+        ledger.append((name, "updated"))
+        print("  updated  {}".format(name))
+
+    if not args.check:
+        _print_write_summary(ledger)
+        if stale:
+            print("\nStale prompts remain:")
+            for name in stale:
+                print("  {}".format(name))
+            return 1
 
     if args.check and drifted:
         print("\n{} of {} automations have drifted from {}".format(

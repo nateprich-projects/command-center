@@ -187,6 +187,106 @@ def test_check_accepts_a_lane_prompt_with_the_current_routine_sha(
     assert "DRIFTED" not in output
 
 
+def _write_fixture_automation(root, name, prompt):
+    directory = root / name
+    directory.mkdir()
+    (directory / "automation.toml").write_text(
+        'rrule = "RRULE:FREQ=HOURLY;BYMINUTE=0"\n'
+        "prompt = {}\n"
+        "updated_at = 1\n".format(json.dumps(prompt))
+    )
+    return directory / "automation.toml"
+
+
+def test_write_attempts_remaining_schedules_after_an_unwritable_one(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(sync, "AUTOMATIONS", tmp_path)
+    bad = "command-center-a-unwritable"
+    good = "command-center-z-updated"
+    _write_fixture_automation(tmp_path, bad, "stale")
+    good_path = _write_fixture_automation(tmp_path, good, "stale")
+
+    attempted = []
+    real_copy2 = sync.shutil.copy2
+
+    def copy2(source, destination):
+        attempted.append(pathlib.Path(source).parent.name)
+        if pathlib.Path(source).parent.name == bad:
+            raise OSError("protected schedule")
+        return real_copy2(source, destination)
+
+    monkeypatch.setattr(sync.shutil, "copy2", copy2)
+
+    assert sync.main([]) == 1
+    assert attempted == [bad, good]
+    assert sync.current(good_path.read_text())[1] == sync.prompt_text(good)
+    output = capsys.readouterr()
+    assert "unwritable" in output.err
+    assert bad in output.out
+    assert good in output.out
+    assert "Stale prompts remain:" in output.out
+
+
+def test_write_summary_names_updated_current_and_unwritable_outcomes(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(sync, "AUTOMATIONS", tmp_path)
+    current = "command-center-a-current"
+    updated = "command-center-b-updated"
+    unwritable = "command-center-c-unwritable"
+    _write_fixture_automation(tmp_path, current, sync.prompt_text(current))
+    _write_fixture_automation(tmp_path, updated, "stale")
+    _write_fixture_automation(tmp_path, unwritable, "stale")
+
+    real_copy2 = sync.shutil.copy2
+
+    def copy2(source, destination):
+        if pathlib.Path(source).parent.name == unwritable:
+            raise OSError("protected schedule")
+        return real_copy2(source, destination)
+
+    monkeypatch.setattr(sync.shutil, "copy2", copy2)
+
+    assert sync.main([]) == 1
+    output = capsys.readouterr().out
+    summary = output.split("Sync summary:\n", 1)[1].split(
+        "\nStale prompts remain:", 1
+    )[0]
+    lines = summary.splitlines()
+    assert len(lines) == 3  # one line per schedule
+    assert any("already current" in line and current in line for line in lines)
+    assert any("updated" in line and updated in line for line in lines)
+    assert any("unwritable" in line and unwritable in line for line in lines)
+
+
+def test_write_exit_is_zero_only_when_all_fixture_prompts_are_current(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(sync, "AUTOMATIONS", tmp_path)
+    current = "command-center-a-current"
+    stale = "command-center-b-stale"
+    _write_fixture_automation(tmp_path, current, sync.prompt_text(current))
+    stale_path = _write_fixture_automation(tmp_path, stale, "stale")
+
+    assert sync.main([]) == 0
+    capsys.readouterr()
+    stale_path.write_text(
+        stale_path.read_text().replace(
+            json.dumps(sync.prompt_text(stale)), json.dumps("stale"), 1
+        )
+    )
+
+    def fail_copy2(source, destination):
+        raise OSError("protected schedule")
+
+    monkeypatch.setattr(sync.shutil, "copy2", fail_copy2)
+    assert sync.main([]) == 1
+    output = capsys.readouterr().out
+    assert "Stale prompts remain:" in output
+    assert stale in output
+
+
 def test_the_trailing_newline_the_codex_app_strips_is_not_drift():
     """The app drops the final newline when it saves an automation.
 

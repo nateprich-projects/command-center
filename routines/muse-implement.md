@@ -85,7 +85,7 @@ this prompt could run. A launched run therefore receives `"do": "ticket"`, and
 read, so this pool proceeds under the explicit exception in `AGENTS.md`; it is
 not permission to bypass any other gate.
 
-Keep the result's `run` value. Pass the run id printed by **this run's** `begin`
+Keep the result's `run` value. Pass the run id printed by this run's `begin`
 output as `--run <id>` to every finish below — never an id from an earlier
 `begin` in the same session. If `heartbeat finish` refuses a run/work mismatch,
 it names the still-open run id to use; use that id in `--run` and retry. Never
@@ -263,17 +263,19 @@ it is not blocked or rerouted here.
 
 ## Capture observed defects before finishing
 
-When the run observes a defect — broken behaviour, a failing command, or a
-misbehaving run, with evidence rather than speculation — record it before
-finishing. Choose its class using `skills/shape`'s “Class it when you file it”
-rule and say why:
+When this run observes a defect (broken behaviour, a failing command, or a
+misbehaving run — evidence, not speculation), record it before finishing with
+`funnel capture`. Put the observed evidence in the note, choose its class at
+capture using `skills/shape`'s "Class it when you file it" rule, and say why.
+Agents class their own captures, never his existing issues.
 
 ```bash
 python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --origin agent --class <Broken|Maintenance|Improve|New|Replace> --note "<observed evidence; why this class; say plainly when unsure>"
 ```
 
-Capture records the defect; it does not authorise work outside the current
-ticket.
+This is the sanctioned exception to the review rule to act only on the PR you
+were given: capture records the observed defect; it does not act on the thing
+observed.
 
 ## 5. Finish, always
 

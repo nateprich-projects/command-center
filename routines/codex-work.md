@@ -142,6 +142,18 @@ system exists to solve.
 
 Do not change `Status` or `Class` on anything. Those are Nate's gates.
 
+### Verify Python changes before opening the PR
+
+Use the canonical no-bytecode forms for Python verification in this checkout:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile funnel.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q
+```
+
+Keep the environment prefix on every Python verification command. It prevents
+the managed checkout from attempting to write a bytecode cache.
+
 ### Investigate-class work
 
 When the ticket inherits `Class: Investigate`, the run answers the question rather than

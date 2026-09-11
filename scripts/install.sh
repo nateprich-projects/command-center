@@ -77,6 +77,27 @@ for skill in "$REPO"/skills/*/; do
   link "${skill%/}" "$CLAUDE/skills/$(basename "$skill")"
 done
 
+# launchd rejects symlinked plists, so keep copies of the Muse schedules in the
+# user LaunchAgents directory. Re-running the installer refreshes all three
+# schedule copies together, including the new implementation lane.
+LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+MUSE_PLISTS=(
+  com.nateprich.command-center-muse-review.plist
+  com.nateprich.command-center-muse-review-standard.plist
+  com.nateprich.command-center-muse-implement.plist
+)
+for name in "${MUSE_PLISTS[@]}"; do
+  src="$REPO/launchd/$name"
+  dst="$LAUNCH_AGENTS/$name"
+  if $DRY; then
+    say "would copy: $dst"
+  else
+    mkdir -p "$LAUNCH_AGENTS"
+    cp "$src" "$dst"
+    say "copied: $dst"
+  fi
+done
+
 # ---------------------------------------------------------------------------
 # settings.json — a user-global file that may hold unrelated settings, so it is
 # merged key-by-key and backed up first, never rewritten from a template.

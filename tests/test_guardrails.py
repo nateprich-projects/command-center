@@ -18,6 +18,8 @@ from __future__ import annotations
 import pathlib
 import re
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 #: The spelling every command must use. Not `~`, which the permission rule's
@@ -62,6 +64,18 @@ PLAN_SECTION_NAMES = (
 )
 NEEDS_SECTION_ALIASES = ("Needs Nate", "Needs you")
 
+# Python's default cache location is not writable in the managed checkout.
+# Reject explicit bytecode writers in agent-run documents: py_compile and
+# compileall both write bytecode even when the environment disables implicit
+# cache writes. The fast syntax check instead uses in-memory compile().
+_VERIFICATION_COMMAND = re.compile(
+    r"(?P<prefix>PYTHONDONTWRITEBYTECODE=1[ \t]+)?"
+    r"(?P<command>(?<![\w-])"
+    r"(?:python(?:3)?[ \t]+-[ \t]*m[ \t]+"
+    r"(?:py_compile|compileall|pytest)|pytest)"
+    r"(?=$|[\s`'\";|&)>]))"
+)
+
 
 def command_files():
     """Files an agent reads and runs commands out of."""
@@ -77,6 +91,25 @@ def agent_markdown_files():
     found += sorted((ROOT / "skills").rglob("*.md"))
     found += [ROOT / "AGENTS.md", ROOT / "CLAUDE.md"]
     return [p for p in found if p.exists()]
+
+
+def verification_command_files():
+    """Agent-run documents whose Python verification commands we guard."""
+    found = sorted(ROOT.glob("routines/*.md"))
+    found += sorted(ROOT.glob("skills/*/SKILL.md"))
+    return [p for p in found if p.exists()]
+
+
+def verification_command_offenders(text):
+    """Return cache-writing or unprotected Python verification commands."""
+    offenders = []
+    for number, line in enumerate(text.splitlines(), 1):
+        for match in _VERIFICATION_COMMAND.finditer(line):
+            command = match.group("command")
+            if (command.endswith(("py_compile", "compileall"))
+                    or match.group("prefix") is None):
+                offenders.append((number, line.strip()))
+    return offenders
 
 
 def test_there_are_command_files_to_check():
@@ -109,6 +142,12 @@ def test_every_script_invocation_uses_the_canonical_spelling():
                 # Prose may name a script without invoking it.
                 if "python3 " not in line:
                     continue
+                # A syntax-check target such as ``py_compile funnel.py``
+                # names a file; it is not a Command Center invocation.
+                if not re.search(
+                    r"python3\s+\S*/{}\b".format(re.escape(script)), line
+                ):
+                    continue
                 if CANONICAL not in line:
                     offenders.append("{}:{}: {}".format(
                         path.relative_to(ROOT), number, line.strip()))
@@ -132,6 +171,53 @@ def test_agent_markdown_uses_python_module_for_pytest():
         "Agent-facing Markdown must invoke pytest as `python3 -m pytest`, not as "
         "a bare command:\n  {}".format("\n  ".join(offenders))
     )
+
+
+@pytest.mark.parametrize(
+    ("snippet", "is_offender"),
+    (
+        ("python3 -m py_compile funnel.py", True),
+        ("python3 -m compileall .", True),
+        ("pytest -q", True),
+        ("PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile funnel.py", True),
+        ("PYTHONDONTWRITEBYTECODE=1 python3 -m compileall .", True),
+        (
+            "PYTHONDONTWRITEBYTECODE=1 python3 -c 'from pathlib import Path; "
+            "compile(Path(\"funnel.py\").read_text(), \"funnel.py\", \"exec\")'",
+            False,
+        ),
+        ("PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q", False),
+    ),
+)
+def test_verification_guardrail_rejects_bytecode_writes(snippet, is_offender):
+    assert bool(verification_command_offenders(snippet)) is is_offender
+
+
+def test_agent_run_documents_use_no_bytecode_verification_commands():
+    offenders = []
+    for path in verification_command_files():
+        for number, line in verification_command_offenders(
+            path.read_text(encoding="utf-8")
+        ):
+            offenders.append("{}:{}: {}".format(
+                path.relative_to(ROOT), number, line
+            ))
+    assert not offenders, (
+        "Agent-run documents must use in-memory compile() for fast syntax checks, "
+        "PYTHONDONTWRITEBYTECODE=1 for pytest, and must not use py_compile or "
+        "compileall:\n  {}"
+        .format("\n  ".join(offenders))
+    )
+
+
+def test_codex_routine_documents_the_canonical_verification_commands():
+    body = (ROOT / "routines" / "codex-work.md").read_text(encoding="utf-8")
+    assert (
+        "PYTHONDONTWRITEBYTECODE=1 python3 -c 'from pathlib import Path; "
+        "compile(Path(\"funnel.py\").read_text(), \"funnel.py\", \"exec\")'"
+    ) in body
+    assert "PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile funnel.py" not in body
+    assert "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q" in body
 
 
 def test_the_permission_rule_itself_is_intact():

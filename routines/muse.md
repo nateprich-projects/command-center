@@ -60,8 +60,8 @@ in the commands; the forwarding is transparent. A non-TTY pipe is carried with
 the request (up to 1 MB), so `shaped --plan -` works directly inside the session;
 TTY stdin is left untouched.
 
-Each forwarded command has a 29-second server-side budget, just inside the
-30-second transport timeout. GitHub and other child-process work receives the
+Each forwarded command has a 179-second server-side budget, just inside the
+180-second transport timeout. GitHub and other child-process work receives the
 remaining time and is killed when that budget expires, so a slow command
 returns `command-timeout` and releases the session for the next command. The
 session discards its in-memory Project view after that failure and reloads it on
@@ -88,12 +88,21 @@ read-only by instruction and by `--disable-write`. Behave accordingly.
 
 ## 1. Start, and find out whether there is anything to do
 
+The runner has already run the opening command before handing you this prompt:
+
 ```bash
 python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent muse OPENING_FLAGS
 ```
 
-One call: records the heartbeat, checks the gate, and names your work. It always
-prints JSON.
+Its JSON result is inserted into the code block below:
+
+```json
+BEGIN_JSON
+```
+
+Do not run `begin` again. Use this exact result to follow the job it already chose;
+if it says `"do": "stop"`, the runner has finished the heartbeat and will not launch
+you.
 
 - `"do": "stop"` — finish with the outcome below and **stop immediately**. Do not
   investigate, do not look around. Most runs end here and that is the design.

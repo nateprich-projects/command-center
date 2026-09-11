@@ -31,6 +31,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 
 | Field | Meaning |
 |---|---|
+| `generated_at` | UTC timestamp recording when the brief was generated; transport metadata, never surfaced in the voice brief |
 | `total_needing_nate` | How many decisions are waiting |
 | `counts_by_gate` | Open items at each gate. `Ideas` is deliberately excluded — it is unbounded and guilt-free, and counting it turns it into pressure |
 | `items` | The decisions, **already ordered**. Bottom-up: closest to shipping first |
@@ -45,6 +46,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `stranded` | Open items for which no current agent or gate can make progress. Diagnostic only; it does not add to `total_needing_nate` |
 | `working_tree_touched` | Runs during which Nate's own checkout changed. No routine should write it — engineers use their own clones, reviewers are read-only. Reports a *change*, not a crime: him committing mid-run looks the same. A grouped HEAD transition carries an `observers` list of the observing `agent` and `run`; dirty-only rows stay one row per run without that list. Say it plainly when present |
 | `maintenance_load` | `upkeep_share` is the fraction of work closed in the last 30 days that was `Broken` or `Maintenance` |
+| `disposal` | In the same 30-day window, parentless projects accepted to `Done` (`done`), parked (`parked`), their `finished_vs_abandoned` ratio, and created-minus-closed `net_open_growth`; `finished_vs_abandoned` is `null` when no project was parked |
 | `resend_ratio` | Recent total-input over fresh-input ratio for metered agents (`codex` and `zcode`); agents without usable telemetry are omitted |
 | `human_steps` | Open tickets only Nate can do, with the `reason` each declares. **Work he owes, not a decision he owes** — deliberately outside `total_needing_nate`, the same distinction that keeps `blocked` out. No agent can pick these up: `startable()` excludes them, so this list is the only place they surface |
 | `suspected_human_steps` | Blocked child tickets whose block has no machine-readable condition but whose reason matches the known human-step vocabulary. Diagnostic only: leave the ticket blocked and let Nate decide whether to restate or split it |
@@ -53,7 +55,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `cleared_blocks` | Tickets whose fully parsed conditions all closed and whose `blocked` label the funnel mechanically cleared in the last seven days |
 | `awaiting_breakdown` | Approved plans with no tickets yet. Claude owes these a breakdown; they are not startable until it happens |
 | `prose_dependencies` | Open tickets whose recognised dependency sentence has no matching native `blocked_by` edge. Numbered sentences carry the open named issue refs in `names`; unnumbered `Depends on` or `Blocked on` sentences carry `names: []`; every row carries the ticket `ref` and original `sentence`; diagnostic only |
-| `unattended_merges` | Merges an agent made without him, read from every live reviewer's heartbeat records (retired agents excluded); each record carries `pr`, `at`, `note` and the `agent` that merged. `plan.md` makes these appearing in the brief a condition of unattended merging being allowed at all |
+| `unattended_merges` | Merges an agent made without him, read from every live reviewer's heartbeat records (retired agents excluded); each record carries `pr`, `at`, `note` and the `agent` that merged, plus `self_reviewed: true` when the authoring and reviewing runs used the same agent. `plan.md` makes these appearing in the brief a condition of unattended merging being allowed at all |
 | `unattended_approvals` | Recent plans moved to `Ready` by the unattended shaping path, with each row's issue `ref`, title, URL, transition time `at`, and stated `basis`; a marker-backed record, not a notification or review request |
 | `agent_health` | Raised watchdog conditions, each with the heartbeat agent and the watchdog's condition wording. Empty when all agents are healthy |
 | `rejected_merges` | Merges he checked and found broken, over `window_days`. `stop_auto_merging` true means three in a week — auto-merging stops until he fixes the review bar |
@@ -106,6 +108,10 @@ Then the gate counts on one line. Then anything unusual, and only if present:
 `awaiting_breakdown`, `unattended_merges`, `unattended_approvals`, `agent_health`, `resend_ratio`, `rejected_merges`, `degraded`, and
 `closed_with_access_vocabulary`. A suspected human step is report-only: do not clear its
 `blocked` label, restate it, or split it while rendering the brief.
+
+For `unattended_merges`, call out a row with `self_reviewed: true` as
+**self-reviewed**. The marker is derived from the authoring and reviewing run
+agents; do not infer it from the GitHub account or from the PR author.
 
 Use `timings` diagnostically when a brief is slow: name the largest section in the
 report, but do not treat timing as a queue or gate signal. A session reply timeout
@@ -205,6 +211,10 @@ is the signal to reassess how many plates are spinning.
 
 `upkeep_share` is `null` when nothing closed in the window. That is *unknown*, not
 healthy — do not report it as zero.
+
+Show `disposal.finished_vs_abandoned` beside `maintenance_load.upkeep_share` as a
+bare number (or `null` when there is no parked project), with the `done`, `parked`,
+and `net_open_growth` context. Do not attach a target, colour, or warning to it.
 
 ## Do not
 

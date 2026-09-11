@@ -5,41 +5,9 @@ from __future__ import annotations
 import pathlib
 import sys
 
-import pytest
-
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
-
-
-def test_open_blockers_returns_refs_for_open_issues_only(monkeypatch):
-    calls = []
-
-    def gh_json(*args):
-        calls.append(args)
-        return [
-            {
-                "number": 42,
-                "state": "open",
-                "repository": {"full_name": "other/repo"},
-            },
-            {
-                "number": 43,
-                "state": "closed",
-                "repository": {"full_name": "owner/repo"},
-            },
-        ]
-
-    monkeypatch.setattr(funnel, "_gh_json", gh_json)
-
-    assert funnel.open_blockers("owner/repo", 7) == ["other/repo#42"]
-    assert calls == [("gh", "api", "repos/owner/repo/issues/7/dependencies/blocked_by")]
-
-
-def test_open_blockers_returns_none_for_a_ticket_without_dependencies(monkeypatch):
-    monkeypatch.setattr(funnel, "_gh_json", lambda *args: [])
-
-    assert funnel.open_blockers("owner/repo", 7) == []
 
 
 def test_load_items_attaches_dependencies_to_open_tickets(monkeypatch):
@@ -120,10 +88,3 @@ def test_load_items_attaches_dependencies_to_open_tickets(monkeypatch):
     assert [item.open_blockers for item in items] == [[], ["owner/repo#9"], []]
     assert [item.dead_blockers for item in items] == [[], ["other/repo#10"], []]
     assert calls == []
-
-
-def test_open_blockers_fails_closed_when_the_endpoint_cannot_be_read(monkeypatch):
-    monkeypatch.setattr(funnel, "_gh_json", lambda *args: None)
-
-    with pytest.raises(funnel.GitHubError, match="could not read blockers"):
-        funnel.open_blockers("owner/repo", 7)

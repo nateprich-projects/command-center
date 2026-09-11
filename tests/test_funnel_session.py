@@ -197,7 +197,7 @@ def test_session_client_reports_a_connect_timeout_as_session_unreachable(
     assert funnel._session_client(["brief"]) == 2
     assert capsys.readouterr().err == (
         "funnel: connect-timeout: FUNNEL_SESSION session unreachable within "
-        "30s: timed out\n"
+        "180s: timed out\n"
     )
 
 
@@ -273,10 +273,10 @@ def test_session_client_reports_a_reply_timeout_as_a_busy_session(
 
     assert funnel._session_client(["brief"]) == 2
     assert capsys.readouterr().err == (
-        "funnel: reply-timeout: FUNNEL_SESSION session busy past the 30s "
+        "funnel: reply-timeout: FUNNEL_SESSION session busy past the 180s "
         "reply budget (slow command: brief): timed out\n"
     )
-    assert connections == [30, 1]
+    assert connections == [180, 1]
 
 
 def test_session_server_health_answers_while_a_command_is_busy():
@@ -587,5 +587,5 @@ def test_muse_documents_direct_piped_shaped_calls_without_a_session_workaround()
     routine = (ROOT / "routines" / "muse.md").read_text()
     assert "shaped --plan -" in routine
     assert "env -u FUNNEL_SESSION" not in routine
-    assert "29-second server-side budget" in routine
+    assert "179-second server-side budget" in routine
     assert "never repeat `begin`" in routine

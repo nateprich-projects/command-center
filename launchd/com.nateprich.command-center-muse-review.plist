@@ -34,21 +34,30 @@
     </array>
 
     <!--
-      Hourly at :07. Nate's call, 2026-09-07: escalated work is rare (two of
-      thirty startable tickets when measured, and the queue is usually empty),
-      so a quarter of the polls give the same practical latency. The failure
-      this fixes was two merge-ready PRs sitting two hours because nobody was
-      around; an hour still caps that well.
+      Every two hours at :07, anchored to the even hours from 00:07 through
+      22:07. Nate's amended call, 2026-09-10: escalated work is rare (about
+      twenty jobs a week), so the escalated review lane should not double its
+      idle fires for the same work. The standard schedule carries the volume.
 
       A calendar minute rather than an interval, so it cannot drift into the
       standard schedule's slots. Both run as agent `muse`, and two open runs at
       once make heartbeat attribution guesswork.
     -->
     <key>StartCalendarInterval</key>
-    <dict>
-        <key>Minute</key>
-        <integer>7</integer>
-    </dict>
+    <array>
+        <dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>7</integer></dict>
+        <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>7</integer></dict>
+        <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>7</integer></dict>
+        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>7</integer></dict>
+        <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>7</integer></dict>
+        <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>7</integer></dict>
+        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>7</integer></dict>
+        <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>7</integer></dict>
+        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>7</integer></dict>
+        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>7</integer></dict>
+        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>7</integer></dict>
+        <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>7</integer></dict>
+    </array>
 
 
     <key>RunAtLoad</key>

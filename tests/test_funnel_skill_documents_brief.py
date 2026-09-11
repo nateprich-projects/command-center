@@ -21,10 +21,6 @@ import funnel  # noqa: E402
 
 SKILL = pathlib.Path(__file__).resolve().parent.parent / "skills" / "funnel" / "SKILL.md"
 
-#: Transport metadata rather than a field to render. Kept as a narrow, named
-#: exception so the test cannot be quietly widened to whatever is failing.
-NOT_RENDERED = {"generated_at"}
-
 
 def brief_keys() -> set:
     """The brief's top-level keys, read from the source rather than a live run.
@@ -57,14 +53,13 @@ def test_every_brief_key_is_documented_in_the_skill():
     documented = SKILL.read_text()
     missing = sorted(
         key for key in brief_keys()
-        if key not in NOT_RENDERED and "`{}`".format(key) not in documented
+        if "`{}`".format(key) not in documented
     )
     assert not missing, (
         "these keys are emitted by `funnel brief` and never mentioned in "
         "skills/funnel/SKILL.md, so nothing renders them:\n  "
         + "\n  ".join(missing)
-        + "\n\nDocument each in the field table and say when to surface it, or "
-          "add it to NOT_RENDERED with a reason if it is transport metadata."
+        + "\n\nDocument each in the field table and say when to surface it."
     )
 
 

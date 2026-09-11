@@ -8,6 +8,18 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Batched dependency reads fail closed at Project load
+
+**2026-09-10 · GitHub dependencies / ticket #330 · measured**
+
+Before `ff35327`, the per-ticket REST helper raised `GitHubError` when the
+`dependencies/blocked_by` response was unreadable or malformed. After `ff35327`,
+`load_items()` reads `blockedBy` from the existing batched Project query and
+classifies it in memory. An unreadable or malformed Project response therefore
+fails earlier and as a whole, rather than failing in one ticket's REST helper.
+The helper's narrow fail-closed contract is gone with the dead functions; the
+active contract is fail-closed Project loading.
+
 ### Route-local rate-limit windows are not the `/rate_limit` counter
 
 **2026-09-10 · GitHub API / ticket #532 · measured**

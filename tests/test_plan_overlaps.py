@@ -75,6 +75,57 @@ def test_current_plan_is_not_compared_with_itself():
     ) == []
 
 
+def test_overlap_check_record_is_not_a_signal():
+    recorded = """
+
+## Overlap check
+
+Checked: #27 and #89 (the other open plans considered)
+
+Candidates:
+- #27 and #89 both name `startable()`
+- #27 and #89 both touch `funnel.py`
+- #27 and #89 both reference #91
+"""
+
+    assert candidates(
+        ("#27", "The plan's only signals are recorded below." + recorded),
+        [("#89", "Use `startable()` in `funnel.py` and see #91.")],
+    ) == []
+
+
+def test_printed_overlap_candidates_are_idempotent_when_recorded():
+    current = ("#27", "Change `funnel.py` and see #91.")
+    other = ("#89", "Update `funnel.py` and see #91.")
+    first = candidates(current, [other])
+    record = "\n\n## Overlap check\n\nCandidates:\n{}\n".format(
+        "\n".join("- {}".format(line) for line in first)
+    )
+
+    assert first == [
+        "#27 and #89 both touch `funnel.py`",
+        "#27 and #89 both reference #91",
+    ]
+    assert candidates(
+        (current[0], current[1] + record),
+        [(other[0], other[1] + record)],
+    ) == first
+
+
+def test_own_ref_pairs_are_excluded_for_bare_and_owner_prefixed_forms():
+    assert candidates(
+        ("owner/repo#27", "Use `startable()` and `funnel.py`."),
+        [("#27", "Use `startable()` and `funnel.py`.")],
+    ) == []
+
+
+def test_each_plan_own_issue_ref_is_excluded_from_shared_references():
+    assert candidates(
+        ("owner/repo#27", "See #27 and #89."),
+        [("owner/repo#89", "See owner/repo#27 and #89.")],
+    ) == []
+
+
 COLLISION_FIXTURES = [
     pytest.param(
         ("#27", "The capability categories live in `skills/shape/SKILL.md`."),
@@ -137,7 +188,6 @@ def test_shaping_scan_uses_other_open_project_plans_in_flight():
         "owner/repo#27 and owner/repo#89 both name `startable()`",
         "owner/repo#27 and owner/repo#89 both reference #91",
         "owner/repo#27 and owner/repo#90 both name `startable()`",
-        "owner/repo#27 and owner/repo#91 both reference #91",
     ]
 
 
@@ -151,3 +201,39 @@ def test_shaping_scan_ignores_closed_ideas_and_child_tickets():
 
     assert shaping_plan_overlap_candidates([current] + ignored, current,
                                            current.body) == []
+
+
+def test_shaping_scan_ignores_recorded_overlap_check_on_both_plans():
+    current_body = "Implement `startable()` in `funnel.py`."
+    other_body = "Implement `brief()` in `tests/test_brief.py`."
+    recorded_overlap = """
+
+## Overlap check
+
+Checked: #27 and #89 (the other open plans considered)
+
+Candidates:
+- #27 and #89 both touch `skills/shape/SKILL.md`
+
+Conclusion:
+- Keep one mechanism and narrow the plan accordingly.
+"""
+    plain_current = _item(27, status="Ideas", body=current_body)
+    plain_other = _item(89, status="Shaped", body=other_body)
+    recorded_current = _item(
+        27, status="Ideas", body=current_body + recorded_overlap
+    )
+    recorded_other = _item(
+        89, status="Shaped", body=other_body + recorded_overlap
+    )
+
+    without_record = shaping_plan_overlap_candidates(
+        [plain_current, plain_other], plain_current, current_body
+    )
+    with_record = shaping_plan_overlap_candidates(
+        [recorded_current, recorded_other], recorded_current,
+        recorded_current.body,
+    )
+
+    assert without_record == []
+    assert with_record == without_record

@@ -17,8 +17,21 @@ def _stub_repo(tmp_path):
     repo = tmp_path / "repo"
     (repo / "routines").mkdir(parents=True)
     shutil.copy(ROOT / "routines" / "muse.md", repo / "routines" / "muse.md")
-    shutil.copy(ROOT / "funnel.py", repo / "funnel.py")
-    shutil.copy(ROOT / "agent_health.py", repo / "agent_health.py")
+    (repo / "begin.json").write_text(
+        '{"agent":"muse","run":"bound-run","gate":"ok","do":"review"}'
+    )
+    (repo / "funnel.py").write_text(
+        "import pathlib, sys\n"
+        "root = pathlib.Path(__file__).parent\n"
+        "if sys.argv[1] == 'session-server':\n"
+        "    print('127.0.0.1:1:stub', flush=True)\n"
+        "elif sys.argv[1] == 'begin':\n"
+        "    print((root / 'begin.json').read_text(), end='')\n"
+        "elif sys.argv[1] == 'session-stop':\n"
+        "    pass\n"
+        "else:\n"
+        "    raise SystemExit('unexpected funnel command')\n"
+    )
     (repo / "heartbeat.py").write_text(
         "import sys, pathlib\n"
         "pathlib.Path(sys.argv[0]).with_name('heartbeat.log').write_text(' '.join(sys.argv[1:]))\n"
@@ -28,7 +41,9 @@ def _stub_repo(tmp_path):
 
 def _stub_muse(tmp_path, seconds):
     muse = tmp_path / "muse"
-    muse.write_text("#!/bin/bash\nsleep {}\nexit 0\n".format(seconds))
+    # Replace the wrapper so the signal targets the timed process directly;
+    # otherwise its child keeps the captured pipes open during teardown.
+    muse.write_text("#!/bin/bash\nexec sleep {}\n".format(seconds))
     muse.chmod(muse.stat().st_mode | stat.S_IEXEC)
     return muse
 
@@ -48,16 +63,18 @@ def _run(tmp_path, muse_seconds, bound_seconds):
 
 
 def test_a_run_past_the_bound_is_killed_and_finished_errored(tmp_path):
-    proc, heartbeat = _run(tmp_path, muse_seconds=30, bound_seconds=2)
+    # The runner's termination grace is fixed, so keep the exercised boundary
+    # short without weakening the past-bound assertion.
+    proc, heartbeat = _run(tmp_path, muse_seconds=2, bound_seconds=1)
 
     assert proc.returncode == 124
-    assert "killing run after 2s" in proc.stderr
+    assert "killing run after 1s" in proc.stderr
     assert heartbeat.startswith("finish --agent muse --outcome errored")
     assert "killed after 0 minutes" in heartbeat
 
 
 def test_a_run_inside_the_bound_is_left_alone(tmp_path):
-    proc, heartbeat = _run(tmp_path, muse_seconds=1, bound_seconds=20)
+    proc, heartbeat = _run(tmp_path, muse_seconds=1, bound_seconds=3)
 
     assert proc.returncode == 0
     assert "killing run" not in proc.stderr

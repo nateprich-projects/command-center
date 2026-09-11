@@ -129,28 +129,22 @@ def test_brief_keeps_stranded_diagnostics_out_of_decision_counts(
     }]
 
 
-def test_dependency_facts_preserves_not_planned_blockers(monkeypatch):
-    monkeypatch.setattr(
-        funnel,
-        "_gh_json",
-        lambda *args: [
-            {"number": 9, "state": "open", "repository": {"full_name": REPO}},
-            {
-                "number": 10,
-                "state": "closed",
-                "state_reason": "not_planned",
-                "repository": {"full_name": REPO},
-            },
-            {
-                "number": 11,
-                "state": "closed",
-                "state_reason": "completed",
-                "repository": {"full_name": REPO},
-            },
-        ],
-    )
-
-    assert funnel.dependency_facts(REPO, 7) == {
+def test_classify_blockers_preserves_not_planned_blockers():
+    assert funnel.classify_blockers([
+        {"number": 9, "state": "open", "repository": {"full_name": REPO}},
+        {
+            "number": 10,
+            "state": "closed",
+            "state_reason": "not_planned",
+            "repository": {"full_name": REPO},
+        },
+        {
+            "number": 11,
+            "state": "closed",
+            "state_reason": "completed",
+            "repository": {"full_name": REPO},
+        },
+    ], REPO) == {
         "open": ["owner/repo#9"],
         "dead": ["owner/repo#10"],
     }

@@ -350,12 +350,13 @@ CLOSED_ITSELF_WINDOW = timedelta(days=7)
 #: for the same reason funnel-closed projects remain visible for a week.
 CLEARED_BLOCK_WINDOW = timedelta(days=7)
 
-# A brief has to answer before the 30-second session reply timeout leaves the
-# caller unable to tell whether the session is alive. Keep a little room for
-# JSON encoding and the session wrapper's bookkeeping; the section allocations
+# A brief has to answer well inside the session reply timeout (three minutes,
+# see SESSION_TIMEOUT_SECONDS) so the caller can tell a slow brief from a dead
+# session. It was 29 s while that timeout was 30 s, and a single Project load
+# already took longer than that on 2026-09-10 (#595). The section allocations
 # below are deliberately explicit so the slowest reads stay visible and
 # reviewable instead of turning into one arbitrary global timeout.
-BRIEF_TOTAL_BUDGET_SECONDS = 29.0
+BRIEF_TOTAL_BUDGET_SECONDS = 120.0
 BRIEF_SECTION_BUDGETS = {
     "ticket_pr_facts": 8.0,
     "items": 0.25,
@@ -375,6 +376,7 @@ BRIEF_SECTION_BUDGETS = {
     "stranded": 0.25,
     "stale_locks_taken_over": 0.25,
     "maintenance_load": 0.25,
+    "disposal": 0.25,
     "resend_ratio": 3.0,
     "unattended_merges": 3.0,
     "unattended_approvals": 2.0,
@@ -446,6 +448,7 @@ class Item:
     carried_human_step: bool = False
     first_child_created_at: Optional[datetime] = None
     last_child_closed_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
     blocked_since: Optional[datetime] = None
     blocked_cleared_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
@@ -1159,10 +1162,39 @@ PLAN_ISSUE_RE = re.compile(
 )
 
 
+OVERLAP_CHECK_SECTION_RE = re.compile(
+    r"(?ms)^[ \t]*##[ \t]+Overlap check[ \t]*(?:\r?\n|\Z)"
+    r".*?(?=^[ \t]*##[ \t]+|\Z)"
+)
+
+
+PLAN_REF_RE = re.compile(
+    r"^(?:(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+)?#(?P<number>\d+)$"
+)
+
+
+def _without_overlap_check(plan_body: object) -> object:
+    """Remove the recorded overlap result before extracting plan signals."""
+    if not isinstance(plan_body, str):
+        return plan_body
+    return OVERLAP_CHECK_SECTION_RE.sub("", plan_body, count=1)
+
+
+def _normalized_plan_ref(ref: object) -> object:
+    """Compare bare and owner-prefixed issue refs by their issue number."""
+    if not isinstance(ref, str):
+        return ref
+    match = PLAN_REF_RE.fullmatch(ref.strip())
+    if match is None:
+        return ref
+    return "#{}".format(match.group("number"))
+
+
 def _plan_overlap_signals(plan_body: object) -> Tuple[Set[str], Set[str], Set[str]]:
     """Extract the three checkable overlap signals from one plan body."""
     if not isinstance(plan_body, str):
         return set(), set(), set()
+    plan_body = _without_overlap_check(plan_body)
 
     functions = {
         match.group("name")
@@ -1195,14 +1227,31 @@ def plan_overlap_candidates(
     surface can print it without adding state or doing its own ranking.
     """
     current = _plan_overlap_signals(plan_body)
+    normalized_plan_ref = _normalized_plan_ref(plan_ref)
+    current = (
+        current[0],
+        current[1],
+        {
+            issue for issue in current[2]
+            if _normalized_plan_ref(issue) != normalized_plan_ref
+        },
+    )
     candidates: List[str] = []
     seen: Set[str] = set()
     pairs = sorted(other_plans, key=lambda pair: pair[0])
 
     for other_ref, other_body in pairs:
-        if other_ref == plan_ref:
+        if _normalized_plan_ref(other_ref) == normalized_plan_ref:
             continue
         other = _plan_overlap_signals(other_body)
+        other = (
+            other[0],
+            other[1],
+            {
+                issue for issue in other[2]
+                if _normalized_plan_ref(issue) != _normalized_plan_ref(other_ref)
+            },
+        )
 
         for function in sorted(current[0] & other[0]):
             line = "{} and {} both name `{}()`".format(
@@ -1232,6 +1281,19 @@ def plan_overlap_candidates(
 SHAPING_PLAN_STATUSES = frozenset(("Shaped", "Ready", "Building"))
 
 
+OVERLAP_CHECK_SECTION_RE = re.compile(
+    r"(?ms)^[ \t]*##[ \t]+Overlap check[ \t]*(?:\r?\n|\Z)"
+    r".*?(?=^[ \t]*##[ \t]+|\Z)"
+)
+
+
+def _without_overlap_check(plan_body: object) -> object:
+    """Remove the recorded overlap result before extracting plan signals."""
+    if not isinstance(plan_body, str):
+        return plan_body
+    return OVERLAP_CHECK_SECTION_RE.sub("", plan_body, count=1)
+
+
 def shaping_plan_overlap_candidates(
     items: Iterable[Item], item: Item, plan_body: str
 ) -> List[str]:
@@ -1242,14 +1304,16 @@ def shaping_plan_overlap_candidates(
     are not in flight and must not keep influencing a newly shaped plan.
     """
     other_plans = (
-        (other.ref, other.body or "")
+        (other.ref, _without_overlap_check(other.body or ""))
         for other in items
         if other.ref != item.ref
         and other.parent is None
         and other.state == "OPEN"
         and other.status in SHAPING_PLAN_STATUSES
     )
-    return plan_overlap_candidates(item.ref, plan_body, other_plans)
+    return plan_overlap_candidates(
+        item.ref, _without_overlap_check(plan_body), other_plans
+    )
 
 
 # These are evidence words, not a closed list of human-step categories. A plan
@@ -2335,6 +2399,47 @@ def working_tree_touched(now: datetime) -> List[Dict[str, object]]:
     return sorted(found, key=lambda r: str(r["at"]))
 
 
+AUTHORING_PR_RE = re.compile(r"^\s*PR\s+#(?P<pr>\d+)\b")
+
+
+def _authoring_pr_agents(rows: Iterable[Dict[str, object]]) -> Dict[str, Set[str]]:
+    """Return the agents whose completed ticket runs opened each PR.
+
+    Implementing routines finish with ``PR #n`` while reviewing routines use
+    the structured ``merged`` field (and may also mention a PR in prose).
+    Restricting the note parser to completed, non-merge runs keeps a review
+    record from masquerading as the authoring run. A bound review run is
+    excluded as an additional guard for older notes that start with ``PR``.
+    """
+    bindings = {
+        row.get("run"): row.get("do")
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("phase") == "bind"
+        and row.get("run")
+    }
+    found: Dict[str, Set[str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if (
+            row.get("phase") != "finish"
+            or row.get("outcome") != "done"
+            or row.get("merged") is not None
+            or bindings.get(row.get("run")) == "review"
+        ):
+            continue
+        note = row.get("note")
+        if not isinstance(note, str):
+            continue
+        match = AUTHORING_PR_RE.match(note)
+        agent = row.get("agent")
+        if match is None or not isinstance(agent, str) or not agent:
+            continue
+        found.setdefault(match.group("pr"), set()).add(agent)
+    return found
+
+
 def unattended_merges(now: datetime) -> List[Dict[str, object]]:
     """Merges a reviewer made without Nate, read from every live agent's heartbeat.
 
@@ -2355,6 +2460,7 @@ def unattended_merges(now: datetime) -> List[Dict[str, object]]:
 
     cutoff = (now - MAINTENANCE_WINDOW).timestamp()
     found: List[Dict[str, object]] = []
+    live_rows: List[Tuple[str, List[Dict[str, object]]]] = []
     for agent in sorted(heartbeat.PROVIDERS):
         if agent in heartbeat.RETIRED_AGENTS:
             # A stopped schedule must not read as activity (#431).
@@ -2363,15 +2469,26 @@ def unattended_merges(now: datetime) -> List[Dict[str, object]]:
             rows = _brief_heartbeat_rows(agent)
         except Exception:
             continue
+        live_rows.append((agent, rows))
+
+    authored_by: Dict[str, Set[str]] = {}
+    for _agent, rows in live_rows:
+        for pr, agents in _authoring_pr_agents(rows).items():
+            authored_by.setdefault(pr, set()).update(agents)
+
+    for agent, rows in live_rows:
         for row in rows:
             if not row.get("merged") or (row.get("ts") or 0) < cutoff:
                 continue
-            found.append({
+            record = {
                 "pr": row.get("merged"),
                 "at": datetime.fromtimestamp(row["ts"], timezone.utc).isoformat(),
                 "note": row.get("note"),
                 "agent": agent,
-            })
+            }
+            if authored_by.get(str(row.get("merged"))) == {agent}:
+                record["self_reviewed"] = True
+            found.append(record)
     found.sort(key=lambda record: (record["at"], record["pr"] or 0))
     return found
 
@@ -2589,6 +2706,48 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
         "closed_in_window": len(recent),
         "upkeep_share": round(len(upkeep) / len(recent), 3) if recent else None,
         "days_since_anything_new_started": days_since_new,
+    }
+
+
+def disposal(items: Iterable[Item], now: datetime) -> Dict[str, object]:
+    """Report recent project completion, parking, and open growth.
+
+    A Project issue is the parentless unit. Child tickets are deliberately
+    excluded from every count, including the created/closed context, because
+    their lifecycle is implementation detail rather than portfolio disposal.
+    ``Done`` divided by ``Parked`` is the finished-vs-abandoned ratio; when no
+    project was parked there is no denominator, so the ratio is unknown rather
+    than an invented zero or infinity.
+    """
+    cutoff = now - MAINTENANCE_WINDOW
+    projects = [item for item in items if item.parent is None]
+
+    def in_window(at: Optional[datetime]) -> bool:
+        return at is not None and at >= cutoff
+
+    done = [
+        item for item in projects
+        if item.state == "CLOSED"
+        and item.status == "Done"
+        and in_window(item.closed_at)
+    ]
+    parked = [
+        item for item in projects
+        if item.state == "CLOSED"
+        and item.status == "Parked"
+        and in_window(item.closed_at)
+    ]
+    created = [item for item in projects if in_window(item.created_at)]
+    closed = [item for item in projects if in_window(item.closed_at)]
+
+    return {
+        "window_days": MAINTENANCE_WINDOW.days,
+        "done": len(done),
+        "parked": len(parked),
+        "finished_vs_abandoned": (
+            round(len(done) / len(parked), 3) if parked else None
+        ),
+        "net_open_growth": len(created) - len(closed),
     }
 
 
@@ -4108,7 +4267,7 @@ query($login: String!, $number: Int!, $cursor: String) {
           }
           content {
             ... on Issue {
-              number title url body state stateReason closedAt
+              number title url body state stateReason createdAt closedAt
               repository { nameWithOwner }
               labels(first: 25) { nodes { name } }
               assignees(first: 10) { nodes { login } }
@@ -4480,6 +4639,7 @@ def _from_node(node: dict) -> Optional[Item]:
         state=content["state"],
         body=content.get("body"),
         state_reason=content.get("stateReason"),
+        created_at=parse_time(content.get("createdAt")),
         status=status,
         klass=(node.get("class") or {}).get("name"),
         pinned=(node.get("pinned") or {}).get("name") == "Pinned",
@@ -6028,6 +6188,9 @@ def cmd_brief(
         maintenance = section(
             "maintenance_load", lambda: maintenance_load(items, now), {}
         )
+        disposal_report = section(
+            "disposal", lambda: disposal(items, now), {}
+        )
         resend = section("resend_ratio", lambda: recent_resend_ratio(now), {})
         merges = section(
             "unattended_merges", lambda: unattended_merges(now), []
@@ -6081,6 +6244,7 @@ def cmd_brief(
                 i.ref for i in stale
             ] if stale is not None else None,
             "maintenance_load": maintenance,
+            "disposal": disposal_report,
             "resend_ratio": resend,
             "unattended_merges": merges,
             "unattended_approvals": approvals,
@@ -6976,24 +7140,6 @@ def fetch_drift_facts(item: Item) -> DriftFacts:
     )
 
 
-def dependency_facts(repo: str, number: int) -> Dict[str, List[str]]:
-    """Return the dependency states that affect whether a ticket can finish.
-
-    GitHub's endpoint returns full issue objects for both open and closed
-    blockers. Open blockers still belong in the queue's exclusion set. A
-    blocker closed as ``not_planned`` is different: it will never close as the
-    prerequisite the ticket names, so retain that ref for the stranded-work
-    diagnostic without treating it as an ordinary open blocker.
-    """
-    endpoint = "repos/{}/issues/{}/dependencies/blocked_by".format(repo, number)
-    blockers = _gh_json("gh", "api", endpoint)
-    if blockers is None:
-        raise GitHubError("could not read blockers for {}#{}".format(repo, number))
-    if not isinstance(blockers, list):
-        raise GitHubError("invalid blockers response for {}#{}".format(repo, number))
-    return classify_blockers(blockers, repo)
-
-
 def classify_blockers(blockers: Iterable[dict], repo: str) -> Dict[str, List[str]]:
     """Split blocker objects into the two states the funnel acts on.
 
@@ -7022,16 +7168,6 @@ def classify_blockers(blockers: Iterable[dict], repo: str) -> Dict[str, List[str
         elif state_reason == "not_planned":
             refs["dead"].append(ref)
     return refs
-
-
-def open_blockers(repo: str, number: int) -> List[str]:
-    """Return open native dependency blockers for one ticket.
-
-    The public helper keeps its original narrow contract. ``load_items`` uses
-    ``dependency_facts`` directly so the same endpoint read can also preserve
-    blockers that were explicitly parked or marked not planned.
-    """
-    return dependency_facts(repo, number)["open"]
 
 
 def _load_block_comment(item: Item) -> None:
@@ -7558,17 +7694,17 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # passed a check.
         out["unmetered"] = True
 
-    reconciled = reconcile_approved_merges(items, now)
-    if reconciled:
-        out["reconciled"] = reconciled
+    reconciled_merges = reconcile_approved_merges(items, now)
+    if reconciled_merges:
+        out["reconciled_merges"] = reconciled_merges
 
     auto_closed = reconcile_auto_closeable_projects(items)
     if auto_closed:
         out["auto_closed"] = auto_closed
 
-    reconciled = reconcile_closed_items(items)
-    if reconciled:
-        out["reconciled"] = reconciled
+    reconciled_statuses = reconcile_closed_items(items)
+    if reconciled_statuses:
+        out["reconciled_statuses"] = reconciled_statuses
     orphaned = reconcile_orphaned_starts(items, now)
     if orphaned:
         out["reconciled_starts"] = orphaned
@@ -8909,7 +9045,12 @@ def main(argv: Optional[Sequence[str]] = None, *,
 
 SESSION_ENV = "FUNNEL_SESSION"
 SESSION_SERVER_ENV = "FUNNEL_SESSION_SERVER"
-SESSION_TIMEOUT_SECONDS = 30
+# Measured 2026-09-11: one Project load takes 31.7 s on the board of that day
+# and `begin` does more, so the 30 s this started at (#581) timed every Muse
+# run out at `begin` and no PR was reviewed for hours (#595). Three minutes
+# fits the slowest honest command with room for the API's slow hours; the
+# bound itself stays -- a hung child still fails loud and releases the session.
+SESSION_TIMEOUT_SECONDS = 180
 # Leave one second for the session handler to format and send its response
 # before the client's transport budget expires. The child process doing the
 # external work receives this deadline through `_run_bounded_subprocess`, so a

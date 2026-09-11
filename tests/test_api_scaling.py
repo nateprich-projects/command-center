@@ -131,4 +131,3 @@ def test_fixture_load_api_calls_do_not_scale_with_item_count(monkeypatch):
         "fixture-load API calls must be bounded by pages and fixed work, "
         "not by item count"
     )
-

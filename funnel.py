@@ -1159,10 +1159,39 @@ PLAN_ISSUE_RE = re.compile(
 )
 
 
+OVERLAP_CHECK_SECTION_RE = re.compile(
+    r"(?ms)^[ \t]*##[ \t]+Overlap check[ \t]*(?:\r?\n|\Z)"
+    r".*?(?=^[ \t]*##[ \t]+|\Z)"
+)
+
+
+PLAN_REF_RE = re.compile(
+    r"^(?:(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+)?#(?P<number>\d+)$"
+)
+
+
+def _without_overlap_check(plan_body: object) -> object:
+    """Remove the recorded overlap result before extracting plan signals."""
+    if not isinstance(plan_body, str):
+        return plan_body
+    return OVERLAP_CHECK_SECTION_RE.sub("", plan_body, count=1)
+
+
+def _normalized_plan_ref(ref: object) -> object:
+    """Compare bare and owner-prefixed issue refs by their issue number."""
+    if not isinstance(ref, str):
+        return ref
+    match = PLAN_REF_RE.fullmatch(ref.strip())
+    if match is None:
+        return ref
+    return "#{}".format(match.group("number"))
+
+
 def _plan_overlap_signals(plan_body: object) -> Tuple[Set[str], Set[str], Set[str]]:
     """Extract the three checkable overlap signals from one plan body."""
     if not isinstance(plan_body, str):
         return set(), set(), set()
+    plan_body = _without_overlap_check(plan_body)
 
     functions = {
         match.group("name")
@@ -1195,14 +1224,31 @@ def plan_overlap_candidates(
     surface can print it without adding state or doing its own ranking.
     """
     current = _plan_overlap_signals(plan_body)
+    normalized_plan_ref = _normalized_plan_ref(plan_ref)
+    current = (
+        current[0],
+        current[1],
+        {
+            issue for issue in current[2]
+            if _normalized_plan_ref(issue) != normalized_plan_ref
+        },
+    )
     candidates: List[str] = []
     seen: Set[str] = set()
     pairs = sorted(other_plans, key=lambda pair: pair[0])
 
     for other_ref, other_body in pairs:
-        if other_ref == plan_ref:
+        if _normalized_plan_ref(other_ref) == normalized_plan_ref:
             continue
         other = _plan_overlap_signals(other_body)
+        other = (
+            other[0],
+            other[1],
+            {
+                issue for issue in other[2]
+                if _normalized_plan_ref(issue) != _normalized_plan_ref(other_ref)
+            },
+        )
 
         for function in sorted(current[0] & other[0]):
             line = "{} and {} both name `{}()`".format(

@@ -275,6 +275,7 @@ def derive_outcome(
     details = pr_details or {}
     merged_rows: List[Mapping[str, object]] = []
     all_verdicts: List[Dict[str, object]] = []
+    verdicts_by_pr: Dict[int, List[Dict[str, object]]] = {}
     pr_rows: List[Mapping[str, object]] = []
     direct_human = any(
         _direct_nate_comment(row) for row in (issue_comments or [])
@@ -292,8 +293,18 @@ def derive_outcome(
         if isinstance(detail, Mapping):
             combined.update(detail)
         pr_rows.append(combined)
+        if _is_merged(combined):
+            merged_rows.append(combined)
+
+    pr_rows.sort(key=_pr_sort_key)
+    merged_rows.sort(key=_pr_sort_key)
+    for combined in pr_rows:
+        pr_number = _pr_number(combined) or 0
         verdicts = _verdicts(combined.get("comments"))
-        all_verdicts.extend(verdicts)
+        verdicts_by_pr[pr_number] = verdicts
+        all_verdicts.extend(
+            dict(verdict, pr_number=pr_number) for verdict in verdicts
+        )
         if any(_direct_nate_comment(comment) for comment in _comment_rows(combined)):
             direct_human = True
         if any(
@@ -302,23 +313,19 @@ def derive_outcome(
             if isinstance(review, Mapping)
         ):
             direct_human = True
-        if _is_merged(combined):
-            merged_rows.append(combined)
-
-    pr_rows.sort(key=_pr_sort_key)
-    merged_rows.sort(key=_pr_sort_key)
+    all_verdicts.sort(key=lambda row: (
+        row["at"] is None,
+        row["at"] or datetime.min.replace(tzinfo=timezone.utc),
+        int(row.get("pr_number") or 0),
+        int(row.get("index") or 0),
+    ))
     final_pr = pr_rows[-1] if pr_rows else None
     final_ci = ci_green(final_pr.get("statusCheckRollup")) if final_pr else None
     merged_pr_numbers = [
         _pr_number(row) for row in merged_rows if _pr_number(row) is not None
     ]
     intervention = direct_human or any(
-        _merged_without_approval(
-            row,
-            _verdicts((details.get(_pr_number(row)) or {}).get("comments"))
-            if isinstance(details.get(_pr_number(row)), Mapping)
-            else _verdicts(row.get("comments")),
-        )
+        _merged_without_approval(row, verdicts_by_pr.get(_pr_number(row), []))
         for row in merged_rows
     )
 
@@ -375,11 +382,17 @@ def list_closed_tickets(repo: str, limit: int = PR_SCAN_LIMIT) -> List[Dict[str,
     """Read closed issues, excluding pull requests via the ``gh issue`` API."""
     rows = gh_json(
         "issue", "list", "--repo", repo, "--state", "closed",
-        "--limit", str(limit),
+        "--limit", str(limit + 1),
         "--json", "number,title,url,closedAt,stateReason",
     )
     if not isinstance(rows, list):
         raise OutcomeError("invalid closed-ticket response for {}".format(repo))
+    if len(rows) > limit:
+        raise OutcomeError(
+            "closed-ticket scan for {} exceeded {}; refusing partial outcome records".format(
+                repo, limit
+            )
+        )
     found = [dict(row) for row in rows if isinstance(row, Mapping) and _pr_number(row)]
     found.sort(key=lambda row: (_timestamp(row.get("closedAt")) or datetime.max.replace(
         tzinfo=timezone.utc), _pr_number(row) or 0))
@@ -425,7 +438,8 @@ def _pr_observation(repo: str, number: int) -> Dict[str, object]:
 
 
 def derive_repository(
-    repo: str, limit: int = PR_SCAN_LIMIT, now: Optional[datetime] = None
+    repo: str, limit: int = PR_SCAN_LIMIT, now: Optional[datetime] = None,
+    ticket_numbers: Optional[Iterable[int]] = None,
 ) -> List[Dict[str, object]]:
     """Derive every closed-ticket record in one repository.
 
@@ -434,6 +448,13 @@ def derive_repository(
     complete and would be harder to notice than a failed run.
     """
     tickets = list_closed_tickets(repo, limit=limit)
+    wanted_numbers = None
+    if ticket_numbers is not None:
+        wanted_numbers = {int(number) for number in ticket_numbers}
+        tickets = [
+            ticket for ticket in tickets
+            if _pr_number(ticket) in wanted_numbers
+        ]
     index, truncated = funnel.ticket_pr_index(repo, limit=limit)
     if truncated:
         raise OutcomeError(
@@ -594,6 +615,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     derive.add_argument("--limit", type=int, default=PR_SCAN_LIMIT)
     derive.add_argument(
+        "--ticket", action="append", type=int, default=None,
+        help="only derive these closed issue numbers; repeat to sample a run",
+    )
+    derive.add_argument(
         "--dry-run", action="store_true",
         help="print records without writing the heartbeat branch",
     )
@@ -611,7 +636,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         repos = args.repo or [REPO]
         records: List[Dict[str, object]] = []
         for repo in repos:
-            records.extend(derive_repository(repo, limit=args.limit))
+            records.extend(derive_repository(
+                repo, limit=args.limit, ticket_numbers=args.ticket
+            ))
         if args.dry_run:
             print(json.dumps(records, indent=2, sort_keys=True))
             return 0

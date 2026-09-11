@@ -26,6 +26,16 @@ ranks anything itself.
 | `funnel unpin <ref> [--yes]` | Clear a project's pin; dry-run by default |
 | `funnel comment <ref> --body "<text>" --voice <voice>` | Post a comment with explicit provenance |
 | `funnel comment <ref> --blocked-on N [--blocked-on M] --because "<reason>" --voice <voice>` | Post a canonical block comment |
+| `python3 outcomes.py derive [--dry-run]` | Derive closed-ticket outcomes from GitHub; durable records append to `heartbeat:outcomes.jsonl` |
+| `python3 outcomes.py read` | Read the durable derived outcome records |
+
+`outcomes.py derive --dry-run --ticket N` is the read-only form for checking a
+small live sample. The job scans pull requests once per repository, counts every
+`ticket/<n>` PR as an attempt, and refuses to write if the evidence scan is
+truncated. Missing review or check history remains unknown rather than being
+reported as a successful or zero-value outcome. The intervention predicate is
+documented beside its implementation and treats an unmarked Nate comment, or a
+merge without a recorded Command Center approval, as human involvement.
 
 ## Documentation
 

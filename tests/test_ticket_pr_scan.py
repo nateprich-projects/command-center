@@ -183,3 +183,14 @@ def test_index_returns_truncation_so_callers_choose_their_own_safe_answer(monkey
 
     assert truncated is True
     assert len(index) == limit
+
+
+def test_index_keeps_all_rows_for_history_consumers(monkeypatch):
+    rows = [pr_row(10, "ticket/10"), pr_row(11, "ticket/10")]
+    monkeypatch.setattr(funnel, "_gh_json", lambda *a: rows)
+
+    index, truncated = funnel.ticket_pr_index("nateprich/beta", limit=10)
+
+    assert truncated is False
+    assert index["nateprich/beta#10"]["number"] == 10
+    assert [row["number"] for row in index.all_rows] == [10, 11]

@@ -95,6 +95,23 @@ def test_attempts_and_turns_cover_every_pr_on_one_ticket_branch():
     assert [row["number"] for row in record["prs"]] == [10, 11]
 
 
+def test_latest_verdict_is_chronological_not_pr_list_order():
+    older = pr(10, created="2026-09-10T08:00:00Z")
+    newer = pr(11, created="2026-09-10T09:00:00Z")
+    record = outcomes.derive_outcome(
+        ticket(),
+        [newer, older],
+        {
+            10: {"comments": [verdict_comment("approved", at="2026-09-10T08:30:00Z")]},
+            11: {"comments": [verdict_comment("rejected", at="2026-09-10T09:30:00Z")]},
+        },
+        now=NOW,
+    )
+
+    assert record["review_result"] == "rejected"
+    assert record["turns"] == 2
+
+
 def test_no_verdicts_are_unknown_turns_not_zero():
     record = outcomes.derive_outcome(
         ticket(),
@@ -219,6 +236,14 @@ def test_repository_walk_uses_index_rows_once_and_writes_no_partial_scan(
     assert calls == [(REPO, 77)]
     assert records[0]["attempts"] == 2
     assert records[0]["merged"] is True
+
+
+def test_repository_walk_rejects_a_truncated_pr_scan(monkeypatch):
+    monkeypatch.setattr(outcomes, "list_closed_tickets", lambda repo, limit: [])
+    monkeypatch.setattr(funnel, "ticket_pr_index", lambda repo, limit: ({}, True))
+
+    with pytest.raises(outcomes.OutcomeError, match="refusing partial"):
+        outcomes.derive_repository(REPO, limit=77, now=NOW)
 
 
 def test_remote_append_uses_sha_and_retries_a_contents_conflict(monkeypatch):

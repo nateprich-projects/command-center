@@ -770,6 +770,24 @@ def awaiting_breakdown(items: Iterable[Item]) -> List[Item]:
 #: its own tier in its prompt.
 TIERS = ("standard", "escalated")
 
+#: Capabilities belong to roles, not harness names. The tier membership keeps
+#: Muse on the escalated implementation lane without turning its standard
+#: review/breakdown/shaping schedule into the rejected standard overflow lane.
+#: Keeping both agent names in this one registry prevents a second inline
+#: literal from drifting.
+AGENTS_BY_ROLE = {
+    "implement": {
+        "codex": frozenset(TIERS),
+        "muse": frozenset({"escalated"}),
+    },
+}
+
+
+def agent_has_role(agent: str, role: str, tier: Optional[str]) -> bool:
+    """Whether ``agent`` owns ``role`` in the requested execution tier."""
+    tiers = AGENTS_BY_ROLE.get(role, {}).get(agent, frozenset())
+    return tier in tiers
+
 #: A ticket declares its risk in its body, written by Claude at breakdown when
 #: the plan is in front of it. `funnel.py` reads it; the engineer never decides.
 #:
@@ -7709,7 +7727,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if orphaned:
         out["reconciled_starts"] = orphaned
 
-    if agent == "codex":
+    if agent_has_role(agent, "implement", tier):
         cleared = clear_satisfied_blocks(
             items, now, run=out.get("run"), agent=agent
         )
@@ -8914,7 +8932,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
         repo_readiness = None
         if (
             args.command in ("next", "queue")
-            or (args.command == "begin" and args.agent == "codex")
+            or (
+                args.command == "begin"
+                and agent_has_role(args.agent, "implement", args.tier)
+            )
         ):
             repo_readiness = repo_readiness_for_items(items)
         if args.command == "claim":

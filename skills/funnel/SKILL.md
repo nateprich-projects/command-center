@@ -45,6 +45,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `stranded` | Open items for which no current agent or gate can make progress. Diagnostic only; it does not add to `total_needing_nate` |
 | `working_tree_touched` | Runs during which Nate's own checkout changed. No routine should write it — engineers use their own clones, reviewers are read-only. Reports a *change*, not a crime: him committing mid-run looks the same. A grouped HEAD transition carries an `observers` list of the observing `agent` and `run`; dirty-only rows stay one row per run without that list. Say it plainly when present |
 | `maintenance_load` | `upkeep_share` is the fraction of work closed in the last 30 days that was `Broken` or `Maintenance` |
+| `disposal` | In the same 30-day window, parentless projects accepted to `Done` (`done`), parked (`parked`), their `finished_vs_abandoned` ratio, and created-minus-closed `net_open_growth`; `finished_vs_abandoned` is `null` when no project was parked |
 | `resend_ratio` | Recent total-input over fresh-input ratio for metered agents (`codex` and `zcode`); agents without usable telemetry are omitted |
 | `human_steps` | Open tickets only Nate can do, with the `reason` each declares. **Work he owes, not a decision he owes** — deliberately outside `total_needing_nate`, the same distinction that keeps `blocked` out. No agent can pick these up: `startable()` excludes them, so this list is the only place they surface |
 | `suspected_human_steps` | Blocked child tickets whose block has no machine-readable condition but whose reason matches the known human-step vocabulary. Diagnostic only: leave the ticket blocked and let Nate decide whether to restate or split it |
@@ -205,6 +206,10 @@ is the signal to reassess how many plates are spinning.
 
 `upkeep_share` is `null` when nothing closed in the window. That is *unknown*, not
 healthy — do not report it as zero.
+
+Show `disposal.finished_vs_abandoned` beside `maintenance_load.upkeep_share` as a
+bare number (or `null` when there is no parked project), with the `done`, `parked`,
+and `net_open_growth` context. Do not attach a target, colour, or warning to it.
 
 ## Do not
 

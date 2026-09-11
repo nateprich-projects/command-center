@@ -376,6 +376,7 @@ BRIEF_SECTION_BUDGETS = {
     "stranded": 0.25,
     "stale_locks_taken_over": 0.25,
     "maintenance_load": 0.25,
+    "disposal": 0.25,
     "resend_ratio": 3.0,
     "unattended_merges": 3.0,
     "unattended_approvals": 2.0,
@@ -447,6 +448,7 @@ class Item:
     carried_human_step: bool = False
     first_child_created_at: Optional[datetime] = None
     last_child_closed_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
     blocked_since: Optional[datetime] = None
     blocked_cleared_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
@@ -2593,6 +2595,48 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
     }
 
 
+def disposal(items: Iterable[Item], now: datetime) -> Dict[str, object]:
+    """Report recent project completion, parking, and open growth.
+
+    A Project issue is the parentless unit. Child tickets are deliberately
+    excluded from every count, including the created/closed context, because
+    their lifecycle is implementation detail rather than portfolio disposal.
+    ``Done`` divided by ``Parked`` is the finished-vs-abandoned ratio; when no
+    project was parked there is no denominator, so the ratio is unknown rather
+    than an invented zero or infinity.
+    """
+    cutoff = now - MAINTENANCE_WINDOW
+    projects = [item for item in items if item.parent is None]
+
+    def in_window(at: Optional[datetime]) -> bool:
+        return at is not None and at >= cutoff
+
+    done = [
+        item for item in projects
+        if item.state == "CLOSED"
+        and item.status == "Done"
+        and in_window(item.closed_at)
+    ]
+    parked = [
+        item for item in projects
+        if item.state == "CLOSED"
+        and item.status == "Parked"
+        and in_window(item.closed_at)
+    ]
+    created = [item for item in projects if in_window(item.created_at)]
+    closed = [item for item in projects if in_window(item.closed_at)]
+
+    return {
+        "window_days": MAINTENANCE_WINDOW.days,
+        "done": len(done),
+        "parked": len(parked),
+        "finished_vs_abandoned": (
+            round(len(done) / len(parked), 3) if parked else None
+        ),
+        "net_open_growth": len(created) - len(closed),
+    }
+
+
 # --------------------------------------------------------------------------
 # Local doctor checks. These deliberately do not import usage.py or
 # heartbeat.py: those modules are among the things a broken install can make
@@ -4109,7 +4153,7 @@ query($login: String!, $number: Int!, $cursor: String) {
           }
           content {
             ... on Issue {
-              number title url body state stateReason closedAt
+              number title url body state stateReason createdAt closedAt
               repository { nameWithOwner }
               labels(first: 25) { nodes { name } }
               assignees(first: 10) { nodes { login } }
@@ -4481,6 +4525,7 @@ def _from_node(node: dict) -> Optional[Item]:
         state=content["state"],
         body=content.get("body"),
         state_reason=content.get("stateReason"),
+        created_at=parse_time(content.get("createdAt")),
         status=status,
         klass=(node.get("class") or {}).get("name"),
         pinned=(node.get("pinned") or {}).get("name") == "Pinned",
@@ -6029,6 +6074,9 @@ def cmd_brief(
         maintenance = section(
             "maintenance_load", lambda: maintenance_load(items, now), {}
         )
+        disposal_report = section(
+            "disposal", lambda: disposal(items, now), {}
+        )
         resend = section("resend_ratio", lambda: recent_resend_ratio(now), {})
         merges = section(
             "unattended_merges", lambda: unattended_merges(now), []
@@ -6082,6 +6130,7 @@ def cmd_brief(
                 i.ref for i in stale
             ] if stale is not None else None,
             "maintenance_load": maintenance,
+            "disposal": disposal_report,
             "resend_ratio": resend,
             "unattended_merges": merges,
             "unattended_approvals": approvals,

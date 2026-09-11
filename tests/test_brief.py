@@ -551,6 +551,24 @@ def test_parked_items_stay_out_of_gate_counts_and_maintenance_load(monkeypatch, 
     assert brief["maintenance_load"] == funnel.maintenance_load(without_parked, NOW)
 
 
+def test_brief_reports_disposal_next_to_maintenance_load(monkeypatch, capsys):
+    report = {
+        "window_days": 30,
+        "done": 2,
+        "parked": 1,
+        "finished_vs_abandoned": 2.0,
+        "net_open_growth": 3,
+    }
+    monkeypatch.setattr(funnel, "disposal", lambda items, now: report)
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["maintenance_load"] == funnel.maintenance_load([], NOW)
+    assert brief["disposal"] == report
+
+
 def test_brief_surfaces_blocked_projects_and_tickets_oldest_first(
     monkeypatch, capsys
 ):

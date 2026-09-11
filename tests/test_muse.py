@@ -14,8 +14,13 @@ genuinely broken reader silently waves work through.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import stat
+import subprocess
 import sys
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -24,6 +29,62 @@ import heartbeat  # noqa: E402
 import usage  # noqa: E402
 
 NOW = 1_788_800_000.0
+
+
+def _stubbed_runner(tmp_path, begin):
+    """Run the shell harness against a tiny funnel/heartbeat/Muse clone."""
+    repo = tmp_path / "repo"
+    (repo / "routines").mkdir(parents=True)
+    (repo / "routines" / "muse.md").write_text(
+        (ROOT / "routines" / "muse.md").read_text()
+    )
+    (repo / "begin.json").write_text(json.dumps(begin))
+    (repo / "funnel.py").write_text(
+        "import pathlib, sys\n"
+        "root = pathlib.Path(__file__).parent\n"
+        "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+        "with (root / 'funnel.calls').open('a') as fh:\n"
+        "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "if command == 'session-server':\n"
+        "    print('127.0.0.1:1:stub', flush=True)\n"
+        "elif command == 'begin':\n"
+        "    print((root / 'begin.json').read_text(), end='')\n"
+        "elif command == 'session-stop':\n"
+        "    pass\n"
+        "else:\n"
+        "    raise SystemExit('unexpected funnel command: ' + command)\n"
+    )
+    (repo / "heartbeat.py").write_text(
+        "import pathlib, sys\n"
+        "with (pathlib.Path(__file__).parent / 'heartbeat.log').open('a') as fh:\n"
+        "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
+    )
+    muse = tmp_path / "muse"
+    muse.write_text(
+        "#!/bin/bash\n"
+        "printf '%s' \"$*\" > \"$MUSE_LOG\"\n"
+        "printf '%s' \"${!#}\" > \"$MUSE_PROMPT\"\n"
+    )
+    muse.chmod(muse.stat().st_mode | stat.S_IEXEC)
+    env = dict(
+        os.environ,
+        HOME=str(tmp_path),
+        TMPDIR=str(tmp_path),
+        MUSE_REVIEW_REPO=str(repo),
+        MUSE_BIN=str(muse),
+        MUSE_REVIEW_BOUND_SECONDS="20",
+        MUSE_LOG=str(repo / "muse.log"),
+        MUSE_PROMPT=str(repo / "muse.prompt"),
+    )
+    proc = subprocess.run(
+        ["/bin/bash", str(ROOT / "scripts" / "muse-review"), "standard", "high"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return proc, repo
 
 
 def test_the_two_registries_agree_about_muse():
@@ -113,9 +174,10 @@ def test_the_prompt_is_the_routine_file_not_a_copy():
     routine = (ROOT / "routines" / "muse.md").read_text()
     assert "\n---\n" in routine, "the runner splits the prompt on the --- separator"
     prompt = routine.split("\n---\n", 1)[1]
-    # The tier is a placeholder the runner substitutes, so one routine serves
-    # both schedules. A second routine would be a second thing to drift.
+    # The runner substitutes both the tier flags and the opening result, so one
+    # routine serves both schedules without a second thing to drift.
     assert "funnel.py begin --agent muse OPENING_FLAGS" in prompt
+    assert "BEGIN_JSON" in prompt
 
 
 def test_the_runner_substitutes_the_tier_and_refuses_a_bad_one():
@@ -132,6 +194,49 @@ def test_the_runner_substitutes_the_tier_and_refuses_a_bad_one():
     body = (ROOT / "scripts" / "muse-review").read_text()
     assert "OPENING_FLAGS" in body, "the runner must know the placeholder"
     assert "grep -q OPENING_FLAGS" in body, "and must verify it was replaced"
+
+
+@pytest.mark.parametrize(
+    ("gate", "outcome"),
+    (("over", "skipped-over-pace"),
+     ("unknown", "skipped-usage-unknown"),
+     ("ok", "nothing-to-do")),
+)
+def test_the_runner_finishes_a_stop_without_launching_muse(tmp_path, gate, outcome):
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        {"agent": "muse", "run": "stop-run", "gate": gate, "do": "stop"},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert not (repo / "muse.log").exists()
+    assert (repo / "heartbeat.log").read_text() == (
+        "finish --agent muse --run stop-run --outcome {}\n".format(outcome)
+    )
+
+
+def test_the_runner_injects_begin_json_before_launching_muse(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        {
+            "agent": "muse",
+            "run": "review-run",
+            "gate": "ok",
+            "do": "review",
+            "work": {"pr": 123},
+        },
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    prompt = (repo / "muse.prompt").read_text()
+    assert '"run": "review-run"' in prompt
+    assert '"do": "review"' in prompt
+    assert "BEGIN_JSON" not in prompt
+    assert "OPENING_FLAGS" not in prompt
+    assert "--tier standard --breakdown" in prompt
+    assert "begin --agent muse --tier standard --breakdown" in (
+        repo / "funnel.calls"
+    ).read_text()
 
 
 def test_breakdown_rides_with_standard_and_not_with_escalated():

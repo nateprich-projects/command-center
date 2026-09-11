@@ -129,6 +129,21 @@ class MemberRepoReadiness:
 # bounded-scan warning along with the refs that were found.
 MergedPRFacts = namedtuple("MergedPRFacts", "ticket_refs truncated")
 
+
+class TicketPRIndex(dict):
+    """A ticket-branch index plus the rows from the bounded repository scan.
+
+    Most funnel callers need only the newest PR for each ticket branch. Outcome
+    derivation also needs every PR on a branch so it can count attempts and
+    turns without falling back to one lookup per ticket. Keeping the complete
+    bounded scan as an attribute preserves the existing mapping contract while
+    letting that consumer reuse the same repository-wide read.
+    """
+
+    def __init__(self, *args, all_rows: Iterable[Dict] = ()):
+        super().__init__(*args)
+        self.all_rows = tuple(all_rows)
+
 #: The single-in-motion lock. Codex acts as Nate through the gh CLI — no bot
 #: identity, no originating-app marker — so no GitHub write can identify it and
 #: assignment cannot serve as the lock. See LEARNINGS.md. The marker is instead a
@@ -7208,28 +7223,44 @@ def _ticket_body(repo: str, number: int) -> str:
     return row.get("body") or ""
 
 
-def ticket_pr_index(repo: str) -> Tuple[Dict[str, Dict], bool]:
+def ticket_pr_index(
+    repo: str, limit: int = MERGED_PR_SCAN_LIMIT
+) -> Tuple[Dict[str, Dict], bool]:
     """Every `ticket/<n>` PR in one repo, indexed by ticket ref.
 
     One bounded ``gh pr list`` for the whole repository, so a caller pays once
     however many tickets it is about to ask about. Returns the index and whether
     the scan was truncated, because a truncated scan cannot tell "no PR" from
     "PR older than the window" and only the caller knows which answer is safe.
+
+    ``limit`` defaults to the small bound used by the brief. The outcome walker
+    passes a larger bound for its full-history read, but still uses this helper
+    so it cannot regress to one PR lookup per ticket. The returned mapping also
+    exposes the rows in the scan as ``all_rows`` for consumers that need to
+    count more than one PR on a branch.
     """
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        raise ValueError("ticket PR scan limit must be an integer")
+    if limit <= 0:
+        raise ValueError("ticket PR scan limit must be positive")
     rows = _gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "all",
         "--json",
-        "number,state,url,headRefName,headRefOid,mergeable,mergedAt,reviews",
-        "--limit", str(MERGED_PR_SCAN_LIMIT + 1),
+        "number,state,url,headRefName,headRefOid,mergeable,mergedAt,reviews,"
+        "createdAt,closedAt,statusCheckRollup,author,mergedBy",
+        "--limit", str(limit + 1),
     )
     if rows is None:
         raise GitHubError("could not read PRs for {}".format(repo))
     if not isinstance(rows, list):
         raise GitHubError("invalid PR response for {}".format(repo))
 
-    truncated = len(rows) > MERGED_PR_SCAN_LIMIT
-    index: Dict[str, Dict] = {}
-    for row in rows[:MERGED_PR_SCAN_LIMIT]:
+    bounded_rows = [row for row in rows[:limit] if isinstance(row, dict)]
+    truncated = len(rows) > limit
+    index = TicketPRIndex(all_rows=bounded_rows)
+    for row in bounded_rows:
         if not isinstance(row, dict):
             continue
         ref = ticket_ref_from_branch(repo, row.get("headRefName") or "")

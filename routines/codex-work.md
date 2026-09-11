@@ -147,12 +147,14 @@ Do not change `Status` or `Class` on anything. Those are Nate's gates.
 Use the canonical no-bytecode forms for Python verification in this checkout:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile funnel.py
+PYTHONDONTWRITEBYTECODE=1 python3 -c 'from pathlib import Path; compile(Path("funnel.py").read_text(), "funnel.py", "exec")'
 PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q
 ```
 
-Keep the environment prefix on every Python verification command. It prevents
-the managed checkout from attempting to write a bytecode cache.
+The first command reads `funnel.py` and compiles it in memory, so it performs no
+bytecode-cache write. Keep the environment prefix on the test command too; it
+prevents imports from attempting to write a bytecode cache in the managed
+checkout.
 
 ### Investigate-class work
 

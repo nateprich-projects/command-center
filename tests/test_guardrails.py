@@ -65,9 +65,9 @@ PLAN_SECTION_NAMES = (
 NEEDS_SECTION_ALIASES = ("Needs Nate", "Needs you")
 
 # Python's default cache location is not writable in the managed checkout.
-# Keep verification examples in agent-run documents on the exact no-bytecode
-# form, and reject compileall because it explicitly writes bytecode even when
-# the environment disables implicit cache writes.
+# Reject explicit bytecode writers in agent-run documents: py_compile and
+# compileall both write bytecode even when the environment disables implicit
+# cache writes. The fast syntax check instead uses in-memory compile().
 _VERIFICATION_COMMAND = re.compile(
     r"(?P<prefix>PYTHONDONTWRITEBYTECODE=1[ \t]+)?"
     r"(?P<command>(?<![\w-])"
@@ -93,12 +93,13 @@ def verification_command_files():
 
 
 def verification_command_offenders(text):
-    """Return unprotected or explicitly-writing Python verification commands."""
+    """Return cache-writing or unprotected Python verification commands."""
     offenders = []
     for number, line in enumerate(text.splitlines(), 1):
         for match in _VERIFICATION_COMMAND.finditer(line):
             command = match.group("command")
-            if command.endswith("compileall") or match.group("prefix") is None:
+            if (command.endswith(("py_compile", "compileall"))
+                    or match.group("prefix") is None):
                 offenders.append((number, line.strip()))
     return offenders
 
@@ -154,7 +155,13 @@ def test_every_script_invocation_uses_the_canonical_spelling():
         ("python3 -m py_compile funnel.py", True),
         ("python3 -m compileall .", True),
         ("pytest -q", True),
-        ("PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile funnel.py", False),
+        ("PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile funnel.py", True),
+        ("PYTHONDONTWRITEBYTECODE=1 python3 -m compileall .", True),
+        (
+            "PYTHONDONTWRITEBYTECODE=1 python3 -c 'from pathlib import Path; "
+            "compile(Path(\"funnel.py\").read_text(), \"funnel.py\", \"exec\")'",
+            False,
+        ),
         ("PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q", False),
     ),
 )
@@ -172,15 +179,20 @@ def test_agent_run_documents_use_no_bytecode_verification_commands():
                 path.relative_to(ROOT), number, line
             ))
     assert not offenders, (
-        "Python verification commands in agent-run documents must use "
-        "PYTHONDONTWRITEBYTECODE=1 (and must not use compileall):\n  {}"
+        "Agent-run documents must use in-memory compile() for fast syntax checks, "
+        "PYTHONDONTWRITEBYTECODE=1 for pytest, and must not use py_compile or "
+        "compileall:\n  {}"
         .format("\n  ".join(offenders))
     )
 
 
 def test_codex_routine_documents_the_canonical_verification_commands():
     body = (ROOT / "routines" / "codex-work.md").read_text(encoding="utf-8")
-    assert "PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile funnel.py" in body
+    assert (
+        "PYTHONDONTWRITEBYTECODE=1 python3 -c 'from pathlib import Path; "
+        "compile(Path(\"funnel.py\").read_text(), \"funnel.py\", \"exec\")'"
+    ) in body
+    assert "PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile funnel.py" not in body
     assert "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q" in body
 
 

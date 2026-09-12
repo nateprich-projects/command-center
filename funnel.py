@@ -16,6 +16,7 @@ import argparse
 import contextlib
 import contextvars
 from collections import namedtuple
+import errno
 import glob
 import hashlib
 import hmac
@@ -23,6 +24,7 @@ import io
 import json
 import os
 import pathlib
+import random
 import re
 import secrets
 import socket
@@ -9228,6 +9230,17 @@ _SESSION_COMMAND_STATE: contextvars.ContextVar = contextvars.ContextVar(
     "session_command_state", default=None
 )
 
+# A fork can fail before a child exists when the host is briefly at its
+# process limit.  Retry only that launch-time signature; a non-zero child exit
+# or an ordinary OSError must keep its existing one-shot behaviour.  The
+# backoff schedule leaves room below the total window even at its maximum
+# jitter, while reaching a third retry near the observed 30–40 second recovery
+# range.
+FORK_RETRY_WINDOW_SECONDS = 60.0
+FORK_RETRY_MAX_ATTEMPTS = 4
+FORK_RETRY_BACKOFF_SECONDS = (5.0, 15.0, 30.0)
+FORK_RETRY_JITTER = 0.10
+
 
 class SessionCommandTimeout(RuntimeError):
     """A session command ran out of server-side time before it answered."""
@@ -9254,22 +9267,110 @@ def _session_command_remaining() -> Optional[float]:
     return remaining
 
 
+def _is_transient_fork_error(error: BaseException) -> bool:
+    """Return whether an OSError means the process launch can be retried."""
+    if not isinstance(error, OSError):
+        return False
+    if error.errno in {
+        errno.EAGAIN,
+        errno.EWOULDBLOCK,
+        35,  # macOS reports this as ``os error 35`` in the launch failure.
+    }:
+        return True
+    message = str(error).lower()
+    return "resource temporarily unavailable" in message and (
+        "fork" in message or "createprocess" in message
+    )
+
+
+def _fork_retry_delay(retry_number: int) -> float:
+    """Return one jittered delay after ``retry_number`` launch failures."""
+    index = min(retry_number - 1, len(FORK_RETRY_BACKOFF_SECONDS) - 1)
+    base = FORK_RETRY_BACKOFF_SECONDS[index]
+    return base * random.uniform(
+        1.0 - FORK_RETRY_JITTER,
+        1.0 + FORK_RETRY_JITTER,
+    )
+
+
+def _fork_retry_error(
+    command: Sequence[str], attempts: int, elapsed: float, cause: OSError
+) -> OSError:
+    """Describe an exhausted transient launch retry in actionable terms."""
+    executable = str(command[0]) if command else "the command"
+    message = (
+        "could not launch {} after {} attempts over {:.1f}s: host process "
+        "pressure remained temporarily unavailable; retry on the next "
+        "scheduled run or close idle processes"
+    ).format(executable, attempts, elapsed)
+    if cause.errno is None:
+        return OSError(message)
+    return OSError(cause.errno, message)
+
+
 def _run_bounded_subprocess(command: Sequence[str], **kwargs):
-    """Run a child process with the current session command's deadline."""
-    remaining = _session_command_remaining()
-    if remaining is not None:
-        existing_timeout = kwargs.get("timeout")
-        if existing_timeout is None:
-            kwargs["timeout"] = remaining
-        else:
-            kwargs["timeout"] = min(float(existing_timeout), remaining)
-    try:
-        return subprocess.run(command, **kwargs)
-    except subprocess.TimeoutExpired as exc:
-        state = _SESSION_COMMAND_STATE.get()
-        if state is not None:
-            raise SessionCommandTimeout(state[0]) from exc
-        raise
+    """Run a child process with the current session command's deadline.
+
+    Process pressure can make ``Popen`` fail before a child exists.  Only that
+    transient fork signature gets a bounded retry; once a child starts, its
+    return code and every other launch error retain the normal one-shot path.
+    """
+    requested_timeout = kwargs.get("timeout")
+    retry_started = time.monotonic()
+    retry_deadline = retry_started + FORK_RETRY_WINDOW_SECONDS
+    attempts = 0
+    last_fork_error: Optional[OSError] = None
+
+    while True:
+        if last_fork_error is not None and (
+            attempts >= FORK_RETRY_MAX_ATTEMPTS
+            or time.monotonic() >= retry_deadline
+        ):
+            raise _fork_retry_error(
+                command,
+                attempts,
+                time.monotonic() - retry_started,
+                last_fork_error,
+            ) from last_fork_error
+
+        attempt_kwargs = dict(kwargs)
+        remaining = _session_command_remaining()
+        if remaining is not None:
+            if requested_timeout is None:
+                attempt_kwargs["timeout"] = remaining
+            else:
+                attempt_kwargs["timeout"] = min(
+                    float(requested_timeout), remaining
+                )
+
+        attempts += 1
+        try:
+            return subprocess.run(command, **attempt_kwargs)
+        except subprocess.TimeoutExpired as exc:
+            state = _SESSION_COMMAND_STATE.get()
+            if state is not None:
+                raise SessionCommandTimeout(state[0]) from exc
+            raise
+        except OSError as exc:
+            if not _is_transient_fork_error(exc):
+                raise
+            last_fork_error = exc
+            if attempts >= FORK_RETRY_MAX_ATTEMPTS:
+                continue
+
+            remaining_window = retry_deadline - time.monotonic()
+            if remaining_window <= 0:
+                continue
+            delay = min(
+                _fork_retry_delay(attempts),
+                remaining_window,
+            )
+            session_remaining = _session_command_remaining()
+            if session_remaining is not None:
+                delay = min(delay, session_remaining)
+            if delay <= 0:
+                continue
+            time.sleep(delay)
 
 
 class FunnelSession:

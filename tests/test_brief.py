@@ -965,6 +965,28 @@ def test_brief_marks_an_over_budget_informational_section_degraded(
 
 
 @pytest.mark.parametrize(
+    "section", ["closed_itself", "cleared_blocks", "unattended_approvals"]
+)
+def test_brief_record_sections_allow_the_observed_two_second_read(
+    monkeypatch, section
+):
+    """The latency that triggered #613 is below each measured section cap."""
+    clock = [0.0]
+
+    monkeypatch.setattr(funnel.time, "perf_counter", lambda: clock[0])
+
+    def reader():
+        clock[0] += 2.01
+        return []
+
+    timings = {}
+    degraded = []
+    assert funnel._brief_timed(section, reader, timings, degraded) == []
+    assert timings[section] == pytest.approx(2.01)
+    assert degraded == []
+
+
+@pytest.mark.parametrize(
     "section, reader",
     [
         ("closed_itself", "closed_itself_json"),

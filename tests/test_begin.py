@@ -84,8 +84,8 @@ def _ticket(number, parent, *, body="Risk: standard", klass="Improve",
     return project, ticket
 
 
-def _codex_begin(monkeypatch, capsys, items, *, tier="standard",
-                 repo_readiness=None, pr_facts=None):
+def _implementing_begin(monkeypatch, capsys, items, *, agent="codex",
+                        tier="standard", repo_readiness=None, pr_facts=None):
     _allow_begin(monkeypatch)
     monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
@@ -101,7 +101,7 @@ def _codex_begin(monkeypatch, capsys, items, *, tier="standard",
         funnel, "write_lock", lambda item, value: writes.append((item.ref, value))
     )
     assert funnel.cmd_begin(
-        items, NOW, "codex", tier, False,
+        items, NOW, agent, tier, False,
         repo_readiness=repo_readiness,
     ) == 0
     return json.loads(capsys.readouterr().out), writes
@@ -587,7 +587,7 @@ def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):
     escalated_project, escalated = _ticket(
         10, 11, body="Risk: escalated — concurrency"
     )
-    result, writes = _codex_begin(
+    result, writes = _implementing_begin(
         monkeypatch, capsys,
         [escalated_project, escalated, standard_project, standard],
         tier="standard",
@@ -596,6 +596,22 @@ def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == standard.ref
     assert [ref for ref, value in writes if value] == [standard.ref]
+
+
+def test_muse_escalated_begin_claims_a_ticket_as_an_implementer(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(
+        12, 13, body="Risk: escalated — concurrency"
+    )
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, [project, ticket], agent="muse", tier="escalated"
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert [ref for ref, value in writes if value] == [ticket.ref]
 
 
 def test_codex_begin_respects_the_wip_limit(monkeypatch, capsys):
@@ -609,7 +625,7 @@ def test_codex_begin_respects_the_wip_limit(monkeypatch, capsys):
     project, ticket = _ticket(40, 41)
     items.extend((project, ticket))
 
-    result, writes = _codex_begin(monkeypatch, capsys, items)
+    result, writes = _implementing_begin(monkeypatch, capsys, items)
 
     assert result["do"] == "stop"
     assert "lock held" in result["why"]
@@ -629,7 +645,7 @@ def test_codex_begin_allows_broken_preemption_at_the_wip_limit(
     project, ticket = _ticket(70, 71, klass="Broken")
     items.extend((project, ticket))
 
-    result, writes = _codex_begin(monkeypatch, capsys, items)
+    result, writes = _implementing_begin(monkeypatch, capsys, items)
 
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == ticket.ref
@@ -649,7 +665,7 @@ def test_codex_begin_takes_over_the_five_branchless_claims(monkeypatch, capsys):
         claims.append(claimed_ticket)
     facts = {item.ref: None for item in claims}
 
-    result, writes = _codex_begin(
+    result, writes = _implementing_begin(
         monkeypatch, capsys, items, pr_facts=facts
     )
 
@@ -672,7 +688,7 @@ def test_codex_begin_reports_repo_readiness_when_work_is_withheld(
         ),
     }
 
-    result, writes = _codex_begin(
+    result, writes = _implementing_begin(
         monkeypatch, capsys, [project, ticket],
         repo_readiness=readiness,
     )
@@ -687,7 +703,10 @@ def test_codex_begin_reports_repo_readiness_when_work_is_withheld(
     assert writes == []
 
 
-def test_main_supplies_repo_readiness_to_the_codex_begin_path(monkeypatch):
+@pytest.mark.parametrize("agent", sorted(funnel.AGENTS_BY_ROLE["implement"]))
+def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
+    monkeypatch, agent
+):
     project, ticket = _ticket(74, 75)
     rows = [project, ticket]
     readiness = {
@@ -712,9 +731,8 @@ def test_main_supplies_repo_readiness_to_the_codex_begin_path(monkeypatch):
         ),
     )
 
-    assert funnel.main([
-        "begin", "--agent", "codex", "--tier", "standard",
-    ]) == 0
+    tier = "escalated" if agent == "muse" else "standard"
+    assert funnel.main(["begin", "--agent", agent, "--tier", tier]) == 0
     assert received == [rows, readiness]
 
 
@@ -1093,7 +1111,7 @@ def test_begin_binds_the_ticket_it_issues_to_the_run(monkeypatch, capsys):
         lambda agent, run, do, work: bound.append((agent, run, do, work)) or "pushed",
     )
     project, ticket = _ticket(7, 6)
-    result, writes = _codex_begin(monkeypatch, capsys, [project, ticket])
+    result, writes = _implementing_begin(monkeypatch, capsys, [project, ticket])
 
     assert result["do"] == "ticket"
     assert result["bound"] == {"do": "ticket", "work": ticket.ref}
@@ -1108,7 +1126,7 @@ def test_a_stop_run_binds_nothing(monkeypatch, capsys):
         heartbeat, "record_binding",
         lambda *args: bound.append(args) or "pushed",
     )
-    result, writes = _codex_begin(monkeypatch, capsys, [])
+    result, writes = _implementing_begin(monkeypatch, capsys, [])
 
     assert result["do"] == "stop"
     assert "bound" not in result and bound == []

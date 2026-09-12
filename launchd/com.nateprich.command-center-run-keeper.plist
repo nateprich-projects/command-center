@@ -2,8 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Keep the read-only routine checkout current without touching Nate's working
-  tree. The command is deliberately only a fast-forward pull: if the checkout
-  ever acquires local state, the job refuses to reconcile it.
+  tree, then append a one-line machine-health record to the heartbeat branch.
+  The wrapper's refresh is deliberately only a fast-forward pull: if the
+  checkout ever acquires local state, the job refuses to reconcile it.
 
   The canonical copy lives here in the repo. launchd refuses a symlinked plist
   (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the
@@ -25,11 +26,8 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/git</string>
-        <string>-C</string>
-        <string>/Users/nateprich/.claude/command-center-run</string>
-        <string>pull</string>
-        <string>--ff-only</string>
+        <string>/bin/bash</string>
+        <string>/Users/nateprich/.claude/command-center-run/scripts/run-keeper</string>
     </array>
 
     <!--

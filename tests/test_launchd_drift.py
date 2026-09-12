@@ -35,6 +35,7 @@ KEEPER_NAME = "com.nateprich.command-center-run-keeper.plist"
 #: The Remote Control listener. Not a schedule; see the carve-out in `AGENTS.md`.
 REMOTE_CONTROL_NAME = "com.nateprich.command-center-remote-control.plist"
 NAMES = MUSE_SCHEDULE_NAMES + [KEEPER_NAME, REMOTE_CONTROL_NAME]
+INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [KEEPER_NAME]
 LAUNCH_AGENTS = pathlib.Path.home() / "Library" / "LaunchAgents"
 
 
@@ -95,6 +96,19 @@ def test_the_plist_points_at_the_stable_path(name):
     assert not any(a.startswith("/Volumes/") for a in args), args
 
 
+def test_the_keeper_points_at_the_stable_wrapper():
+    """The keeper must run the checked-in wrapper from the maintained clone."""
+    import plistlib
+
+    with (ROOT / "launchd" / KEEPER_NAME).open("rb") as handle:
+        args = plistlib.load(handle)["ProgramArguments"]
+
+    assert args == [
+        "/bin/bash",
+        "/Users/nateprich/.claude/command-center-run/scripts/run-keeper",
+    ]
+
+
 def test_the_two_schedules_do_not_collide():
     """Both run as agent `muse`, so two open runs at once make heartbeat
     attribution guesswork. Escalated fires at :07, standard on the quarter."""
@@ -139,7 +153,7 @@ def test_the_implementer_fires_every_three_hours_off_review_slots():
     assert not {entry["Minute"] for entry in schedule} & set(range(0, 60, 5))
 
 
-def test_the_installer_copies_all_muse_schedule_plists(tmp_path):
+def test_the_installer_copies_all_launchd_plists(tmp_path):
     """The launchd copies are refreshed with the rest of the installation."""
     env = os.environ.copy()
     env["HOME"] = str(tmp_path)
@@ -153,23 +167,20 @@ def test_the_installer_copies_all_muse_schedule_plists(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    for name in MUSE_SCHEDULE_NAMES:
+    for name in INSTALL_NAMES:
         installed = tmp_path / "Library" / "LaunchAgents" / name
         assert installed.read_text() == (ROOT / "launchd" / name).read_text()
 
 
-def test_the_keeper_only_fast_forwards_the_run_clone():
-    """The unattended job must never reconcile or mutate Nate's working tree."""
+def test_the_keeper_runs_the_read_only_wrapper():
+    """The unattended job must never run an agent CLI or touch Nate's tree."""
     import plistlib
 
     with (ROOT / "launchd" / KEEPER_NAME).open("rb") as handle:
         plist = plistlib.load(handle)
     assert plist["ProgramArguments"] == [
-        "/usr/bin/git",
-        "-C",
-        "/Users/nateprich/.claude/command-center-run",
-        "pull",
-        "--ff-only",
+        "/bin/bash",
+        "/Users/nateprich/.claude/command-center-run/scripts/run-keeper",
     ]
 
 

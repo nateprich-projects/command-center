@@ -1,0 +1,114 @@
+#!/bin/bash
+# Refresh the maintained checkout and append one machine-health line.
+#
+# This is deliberately a shell-only observer.  It never starts an agent, reads
+# a prompt, or writes the checkout used by the routines.  The health record is
+# committed to the existing orphan `heartbeat` branch through a temporary
+# worktree, so the maintained checkout stays on `main` for the next run.
+
+set -u
+
+REPO="${COMMAND_CENTER_RUN_REPO:-/Users/nateprich/.claude/command-center-run}"
+REMOTE="${COMMAND_CENTER_SENTINEL_REMOTE:-origin}"
+SENTINEL_FILE="${COMMAND_CENTER_SENTINEL_FILE:-sentinel.log}"
+GIT="${COMMAND_CENTER_SENTINEL_GIT:-/usr/bin/git}"
+PS="${COMMAND_CENTER_SENTINEL_PS:-/bin/ps}"
+PGREP="${COMMAND_CENTER_SENTINEL_PGREP:-/usr/bin/pgrep}"
+SYSCTL="${COMMAND_CENTER_SENTINEL_SYSCTL:-/usr/sbin/sysctl}"
+UPTIME="${COMMAND_CENTER_SENTINEL_UPTIME:-/usr/bin/uptime}"
+
+# Keep the existing keeper responsibility.  A failed refresh must not suppress
+# the health line: the sentinel is meant to remain useful during degradation.
+"$GIT" -C "$REPO" pull --ff-only || true
+
+trim_spaces() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+timestamp="$("$PS" -p "$$" -o lstart= 2>/dev/null || true)"
+timestamp="$(trim_spaces "$timestamp")"
+timestamp="${timestamp// /_}"
+[ -n "$timestamp" ] || timestamp="unknown"
+
+maxprocperuid="$("$SYSCTL" -n kern.maxprocperuid 2>/dev/null || true)"
+maxprocperuid="$(trim_spaces "$maxprocperuid")"
+[ -n "$maxprocperuid" ] || maxprocperuid="unknown"
+
+uid="$("$PS" -p "$$" -o uid= 2>/dev/null || true)"
+uid="$(trim_spaces "$uid")"
+process_table="$("$PS" -A -o uid= 2>/dev/null || true)"
+if [ -n "$uid" ] && [ -n "$process_table" ]; then
+  user_processes=0
+  while IFS= read -r process_uid; do
+    process_uid="${process_uid//[[:space:]]/}"
+    [ "$process_uid" = "$uid" ] && user_processes=$((user_processes + 1))
+  done <<< "$process_table"
+else
+  user_processes="unknown"
+fi
+
+uptime_line="$("$UPTIME" 2>/dev/null || true)"
+load_1="unknown"
+load_5="unknown"
+load_15="unknown"
+case "$uptime_line" in
+  *"load averages:"*)
+    loads="${uptime_line#*load averages:}"
+    loads="$(trim_spaces "$loads")"
+    read -r load_1 load_5 load_15 _ <<< "$loads"
+    ;;
+esac
+[ -n "$load_1" ] || load_1="unknown"
+[ -n "$load_5" ] || load_5="unknown"
+[ -n "$load_15" ] || load_15="unknown"
+
+has_process_family() {
+  if "$PGREP" -if "$1" >/dev/null 2>&1; then
+    printf '1'
+  else
+    printf '0'
+  fi
+}
+
+health_line="timestamp=$timestamp user_processes=$user_processes maxprocperuid=$maxprocperuid load_1=$load_1 load_5=$load_5 load_15=$load_15 codex=$(has_process_family codex) claude=$(has_process_family claude) muse=$(has_process_family muse)"
+
+WORKTREE="${TMPDIR:-/tmp}/command-center-sentinel.$$"
+
+remove_worktree() {
+  "$GIT" -C "$REPO" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
+}
+
+trap remove_worktree EXIT INT TERM
+
+push_health_line() {
+  local attempt
+  for attempt in 1 2 3; do
+    # Refresh only the heartbeat ref.  The main checkout remains on its current
+    # branch, and a failed fetch still leaves the subsequent push to fail closed.
+    "$GIT" -C "$REPO" fetch "$REMOTE" heartbeat >/dev/null 2>&1 || true
+    remove_worktree
+    if ! "$GIT" -C "$REPO" worktree add --detach "$WORKTREE" "$REMOTE/heartbeat" >/dev/null 2>&1; then
+      continue
+    fi
+
+    printf '%s\n' "$health_line" >> "$WORKTREE/$SENTINEL_FILE"
+    "$GIT" -C "$WORKTREE" add -- "$SENTINEL_FILE" || continue
+    "$GIT" -C "$WORKTREE" \
+      -c user.name="Command Center sentinel" \
+      -c user.email="command-center-sentinel@users.noreply.github.com" \
+      commit -m "heartbeat: sentinel health record" >/dev/null 2>&1 || continue
+
+    if "$GIT" -C "$WORKTREE" push "$REMOTE" HEAD:refs/heads/heartbeat >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! push_health_line; then
+  echo "run-keeper: could not push the sentinel record to heartbeat" >&2
+  exit 1
+fi

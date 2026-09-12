@@ -36,6 +36,10 @@ def stub_heartbeat_checks(monkeypatch):
         lambda checkout_root=None: funnel.Check(
             "repository drift", True, "", ""),
     )
+    monkeypatch.setattr(
+        funnel, "check_process_table",
+        lambda: funnel.Check("process table", True, "ok", ""),
+    )
 
 
 def stub_github_checks(monkeypatch):
@@ -85,7 +89,7 @@ def test_all_local_checks_pass_and_discover_every_skill(tmp_path, monkeypatch):
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
     assert [check.name for check in checks] == [
-        "install symlinks", "checkout staleness", "repository drift", "settings.json", "gh auth", "Project fields",
+        "install symlinks", "checkout staleness", "repository drift", "settings.json", "process table", "gh auth", "Project fields",
         "command-center topic", "member repo owner/repo", "usage cache", "heartbeat branch",
     ]
     assert all(check.ok for check in checks)
@@ -180,6 +184,77 @@ def test_settings_missing_or_wrong_statusline_is_distinct(tmp_path, payload, phr
     assert result.fix == funnel.INSTALL_FIX
 
 
+def test_process_table_reports_count_and_stays_quiet_at_threshold(monkeypatch):
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        if args[0] == "sysctl":
+            return SimpleNamespace(returncode=0, stdout="10\n", stderr="")
+        return SimpleNamespace(
+            returncode=0, stdout="101\n102\n103\n104\n105\n106\n", stderr=""
+        )
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    result = funnel.check_process_table()
+
+    assert result == funnel.Check(
+        "process table", True,
+        "6 / 10 processes (60.0%; alarm above 60%)",
+        "",
+    )
+    assert calls == [
+        ["sysctl", "-n", "kern.maxprocperuid"],
+        ["ps", "-u", str(os.getuid()), "-o", "pid="],
+    ]
+
+
+def test_process_table_alerts_above_threshold(monkeypatch):
+    def run(args, **kwargs):
+        if args[0] == "sysctl":
+            return SimpleNamespace(returncode=0, stdout="kern.maxprocperuid: 10\n",
+                                    stderr="")
+        return SimpleNamespace(
+            returncode=0, stdout="101\n102\n103\n104\n105\n106\n107\n", stderr=""
+        )
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    result = funnel.check_process_table()
+
+    assert not result.ok
+    assert "7 / 10" in result.found
+    assert "alert" in result.found
+    assert result.fix == funnel.PROCESS_TABLE_FIX
+
+
+@pytest.mark.parametrize(
+    "kind, expected",
+    [
+        ("sysctl", "could not read kern.maxprocperuid"),
+        ("parse", "could not parse kern.maxprocperuid output"),
+        ("ps", "could not count current-user processes"),
+    ],
+)
+def test_process_table_failures_are_nonzero_and_actionable(monkeypatch, kind, expected):
+    def run(args, **kwargs):
+        if args[0] == "sysctl":
+            if kind == "sysctl":
+                return SimpleNamespace(returncode=1, stdout="", stderr="sysctl failed")
+            output = "not-a-number\n" if kind == "parse" else "10\n"
+            return SimpleNamespace(returncode=0, stdout=output, stderr="")
+        return SimpleNamespace(returncode=1, stdout="", stderr="ps failed")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    result = funnel.check_process_table()
+
+    assert not result.ok
+    assert expected in result.found
+    assert result.fix == funnel.PROCESS_TABLE_FIX
+
+
 def test_doctor_does_not_require_a_self_referential_checkout_link(tmp_path, monkeypatch):
     checkout, claude = install_fixture(tmp_path)
     (claude / "command-center").unlink()
@@ -188,7 +263,7 @@ def test_doctor_does_not_require_a_self_referential_checkout_link(tmp_path, monk
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
-    assert len(checks) == 10
+    assert len(checks) == 11
     assert checks[0].ok
     assert checks[2].ok
 

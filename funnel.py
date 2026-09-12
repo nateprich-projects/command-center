@@ -9293,8 +9293,96 @@ def _fork_retry_delay(retry_number: int) -> float:
     )
 
 
+def _host_process_count() -> Optional[int]:
+    """Read a process count without launching another child process.
+
+    The retry path exists because the host may refuse ``fork`` itself, so a
+    diagnostic must not invoke ``ps`` or another subprocess.  macOS exposes
+    the current user's process table through libproc; Linux's procfs gives us
+    a useful host-wide count.  Other platforms report that the source is not
+    available rather than masking the launch failure.
+    """
+    try:
+        if sys.platform == "darwin":
+            import ctypes
+
+            libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+            listpids = libproc.proc_listpids
+            listpids.argtypes = [
+                ctypes.c_uint32,
+                ctypes.c_uint32,
+                ctypes.c_void_p,
+                ctypes.c_int,
+            ]
+            listpids.restype = ctypes.c_int
+
+            # PROC_UID_ONLY from <sys/proc_info.h>.  The doctor uses the same
+            # scope because the macOS failure being diagnosed is per-user.
+            pid_type = ctypes.c_int
+            pid_size = ctypes.sizeof(pid_type)
+            needed = listpids(4, os.getuid(), None, 0)
+            if needed < 0:
+                return None
+            if needed == 0:
+                return 0
+
+            slots = max(1, (needed + pid_size - 1) // pid_size)
+            pids = (pid_type * slots)()
+            returned = listpids(
+                4,
+                os.getuid(),
+                ctypes.cast(pids, ctypes.c_void_p),
+                ctypes.sizeof(pids),
+            )
+            if returned < 0:
+                return None
+            return returned // pid_size
+
+        procfs = pathlib.Path("/proc")
+        return sum(
+            1 for entry in procfs.iterdir()
+            if entry.name.isdigit()
+        )
+    except (OSError, AttributeError, TypeError, ValueError):
+        return None
+
+
+def _host_diagnostics(
+    failures: Sequence[Tuple[int, Tuple[str, ...], OSError]],
+) -> str:
+    """Render best-effort host facts for an exhausted fork retry."""
+    try:
+        loads = tuple(float(value) for value in os.getloadavg())
+        load_text = ", ".join("{:.2f}".format(value) for value in loads)
+    except (AttributeError, OSError, TypeError, ValueError):
+        load_text = "unavailable"
+
+    process_count = _host_process_count()
+    process_text = (
+        str(process_count) if process_count is not None else "unavailable"
+    )
+
+    recent = []
+    for attempt, failed_command, error in failures[-FORK_RETRY_MAX_ATTEMPTS:]:
+        command_text = " ".join(str(part) for part in failed_command)
+        command_text = " ".join(command_text.split())
+        if len(command_text) > 160:
+            command_text = command_text[:157] + "..."
+        detail = str(error).strip() or type(error).__name__
+        recent.append(
+            "attempt {} {} ({})".format(attempt, command_text, detail)
+        )
+
+    failures_text = "; ".join(recent) if recent else "none recorded"
+    return (
+        "host diagnostics: load average (1m, 5m, 15m) {}; process count {}; "
+        "recent launch failures: {}"
+    ).format(load_text, process_text, failures_text)
+
+
 def _fork_retry_error(
-    command: Sequence[str], attempts: int, elapsed: float, cause: OSError
+    command: Sequence[str], attempts: int, elapsed: float, cause: OSError,
+    failures: Optional[Sequence[Tuple[int, Tuple[str, ...], OSError]]] = None,
 ) -> OSError:
     """Describe an exhausted transient launch retry in actionable terms."""
     executable = str(command[0]) if command else "the command"
@@ -9303,6 +9391,10 @@ def _fork_retry_error(
         "pressure remained temporarily unavailable; retry on the next "
         "scheduled run or close idle processes"
     ).format(executable, attempts, elapsed)
+    observed_failures = failures or [
+        (attempts, tuple(str(part) for part in command), cause)
+    ]
+    message += "; " + _host_diagnostics(observed_failures)
     if cause.errno is None:
         return OSError(message)
     return OSError(cause.errno, message)
@@ -9320,6 +9412,7 @@ def _run_bounded_subprocess(command: Sequence[str], **kwargs):
     retry_deadline = retry_started + FORK_RETRY_WINDOW_SECONDS
     attempts = 0
     last_fork_error: Optional[OSError] = None
+    launch_failures: List[Tuple[int, Tuple[str, ...], OSError]] = []
 
     while True:
         if last_fork_error is not None and (
@@ -9331,6 +9424,7 @@ def _run_bounded_subprocess(command: Sequence[str], **kwargs):
                 attempts,
                 time.monotonic() - retry_started,
                 last_fork_error,
+                failures=launch_failures,
             ) from last_fork_error
 
         attempt_kwargs = dict(kwargs)
@@ -9355,6 +9449,9 @@ def _run_bounded_subprocess(command: Sequence[str], **kwargs):
             if not _is_transient_fork_error(exc):
                 raise
             last_fork_error = exc
+            launch_failures.append(
+                (attempts, tuple(str(part) for part in command), exc)
+            )
             if attempts >= FORK_RETRY_MAX_ATTEMPTS:
                 continue
 

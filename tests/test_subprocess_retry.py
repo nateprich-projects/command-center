@@ -106,3 +106,33 @@ def test_persistent_fork_failure_stays_inside_the_retry_window(monkeypatch):
     assert sum(sleeps) <= funnel.FORK_RETRY_WINDOW_SECONDS
     assert clock[0] <= funnel.FORK_RETRY_WINDOW_SECONDS
     assert "gh" in str(raised.value)
+
+
+def test_persistent_fork_failure_reports_host_diagnostics(monkeypatch):
+    sleeps = []
+    clock = [0.0]
+
+    def run(command, **kwargs):
+        raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(funnel.time, "sleep", sleep)
+    monkeypatch.setattr(funnel.random, "uniform", lambda low, high: 1.0)
+    monkeypatch.setattr(funnel.os, "getloadavg", lambda: (1.25, 2.5, 3.75))
+    monkeypatch.setattr(funnel, "_host_process_count", lambda: 42)
+
+    with pytest.raises(OSError) as raised:
+        funnel._run_bounded_subprocess(["gh", "api", "graphql"])
+
+    message = str(raised.value)
+    assert "host diagnostics: load average (1m, 5m, 15m) 1.25, 2.50, 3.75" in message
+    assert "process count 42" in message
+    assert "recent launch failures:" in message
+    assert "attempt 1 gh api graphql" in message
+    assert "attempt 4 gh api graphql" in message
+    assert sleeps == [5.0, 15.0, 30.0]

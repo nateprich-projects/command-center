@@ -37,6 +37,13 @@ reported as a successful or zero-value outcome. The intervention predicate is
 documented beside its implementation and treats an unmarked Nate comment, or a
 merge without a recorded Command Center approval, as human involvement.
 
+When a ticket has a durable heartbeat binding, the record also carries each
+implementation run's detected model, effort, harness, provider, session time
+and four token kinds read from that run's own transcript. Missing transcript
+data stays null; the heartbeat quota meter is not used as a cost proxy. The
+effective-dated rate table and notional dollar calculation are a separate
+consumer of these observations.
+
 ## Documentation
 
 - [`plan.md`](plan.md) — the design record, including what was rejected and why

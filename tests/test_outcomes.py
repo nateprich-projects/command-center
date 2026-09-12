@@ -189,6 +189,75 @@ def test_merge_without_an_approving_verdict_is_intervention():
     assert record["human_intervention_required"] is True
 
 
+def test_ticket_runs_join_bindings_to_session_usage_and_metadata(monkeypatch):
+    rows = {
+        "codex": [
+            {
+                "run": "run-1",
+                "agent": "codex",
+                "phase": "start",
+                "ts": 100,
+                "session_id": "session-1",
+                "provider": "openai",
+                "harness": "codex",
+                "model": "gpt-5.6-luna",
+                "reasoning_effort": "high",
+                "model_source": "detected",
+            },
+            {"run": "run-1", "agent": "codex", "phase": "bind",
+             "ts": 101, "do": "ticket", "work": "owner/repo#42"},
+            {"run": "run-1", "agent": "codex", "phase": "finish",
+             "ts": 110, "outcome": "done"},
+        ],
+    }
+    monkeypatch.setattr(
+        outcomes.session_usage,
+        "usage_for_session",
+        lambda agent, session_id, started_at=None, finished_at=None: {
+            "fresh_input_tokens": 40,
+            "cache_read_input_tokens": 60,
+            "cache_write_input_tokens": 2,
+            "output_tokens": 8,
+        },
+    )
+
+    runs = outcomes._ticket_runs("owner/repo#42", rows)
+    record = outcomes.derive_outcome(
+        ticket(), run_observations=runs, now=NOW
+    )
+
+    assert runs[0]["run"] == "run-1"
+    assert runs[0]["started_at"] == "1970-01-01T00:01:40Z"
+    assert record["token_usage"] == {
+        "fresh_input_tokens": 40,
+        "cache_read_input_tokens": 60,
+        "cache_write_input_tokens": 2,
+        "output_tokens": 8,
+    }
+    assert record["model"] == "gpt-5.6-luna"
+    assert record["reasoning_effort"] == "high"
+
+
+def test_ticket_run_with_unreadable_session_is_unknown_not_free(monkeypatch):
+    rows = {
+        "codex": [
+            {"run": "run-1", "phase": "start", "ts": 100,
+             "session_id": "missing"},
+            {"run": "run-1", "phase": "bind", "ts": 101,
+             "do": "ticket", "work": "owner/repo#42"},
+            {"run": "run-1", "phase": "finish", "ts": 110,
+             "outcome": "done"},
+        ],
+    }
+    monkeypatch.setattr(outcomes.session_usage, "usage_for_session", lambda *a, **k: None)
+
+    runs = outcomes._ticket_runs("owner/repo#42", rows)
+    record = outcomes.derive_outcome(ticket(), run_observations=runs, now=NOW)
+
+    assert record["runs"][0]["token_usage"] is None
+    assert record["token_usage"] is None
+
+
 def test_append_encoder_preserves_one_record_per_ticket():
     first = outcomes.derive_outcome(ticket(1), now=NOW)
     duplicate = dict(first)
@@ -221,6 +290,7 @@ def test_repository_walk_uses_index_rows_once_and_writes_no_partial_scan(
         return Index(), False
 
     monkeypatch.setattr(funnel, "ticket_pr_index", index)
+    monkeypatch.setattr(outcomes, "read_heartbeat_records", lambda: {})
 
     def gh_json(*args):
         if args[0] == "pr":

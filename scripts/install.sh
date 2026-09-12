@@ -77,16 +77,17 @@ for skill in "$REPO"/skills/*/; do
   link "${skill%/}" "$CLAUDE/skills/$(basename "$skill")"
 done
 
-# launchd rejects symlinked plists, so keep copies of the Muse schedules in the
-# user LaunchAgents directory. Re-running the installer refreshes all three
-# schedule copies together, including the new implementation lane.
+# launchd rejects symlinked plists, so keep copies of the schedules in the user
+# LaunchAgents directory. Re-running the installer refreshes the keeper and all
+# Muse schedule copies together.
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
-MUSE_PLISTS=(
+LAUNCHD_PLISTS=(
   com.nateprich.command-center-muse-review.plist
   com.nateprich.command-center-muse-review-standard.plist
   com.nateprich.command-center-muse-implement.plist
+  com.nateprich.command-center-run-keeper.plist
 )
-for name in "${MUSE_PLISTS[@]}"; do
+for name in "${LAUNCHD_PLISTS[@]}"; do
   src="$REPO/launchd/$name"
   dst="$LAUNCH_AGENTS/$name"
   if $DRY; then

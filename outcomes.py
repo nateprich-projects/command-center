@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import funnel
+import session_usage
 
 
 REPO = "nateprich-projects/command-center"
@@ -35,6 +36,10 @@ NATE_LOGIN = "nateprich"
 # attempts.  Backfill has its own ticket; this bound keeps the normal job
 # finite while covering the current repository history.
 PR_SCAN_LIMIT = 1000
+
+# Keep the retired zcode records readable: a historical outcome may still have
+# been produced by it even though no new run is scheduled.
+HEARTBEAT_AGENTS = ("claude", "codex", "muse", "zcode")
 
 STORE_BACKOFF = (1, 3, 7)
 SUCCESS_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
@@ -253,6 +258,163 @@ def _record_pr(row: Mapping[str, object]) -> Dict[str, object]:
     return result
 
 
+def _record_time(value: object) -> Optional[datetime]:
+    """Parse either GitHub ISO timestamps or heartbeat epoch seconds."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return _timestamp(value)
+
+
+def _heartbeat_remote_path(repo: str, agent: str, branch: str) -> str:
+    return "repos/{}/contents/{}.jsonl?ref={}".format(repo, agent, branch)
+
+
+def read_heartbeat_records(
+    repo: str = REPO,
+    branch: str = HEARTBEAT_BRANCH,
+) -> Dict[str, List[Dict[str, object]]]:
+    """Read durable heartbeat rows, best effort, without using quota readings.
+
+    The heartbeat branch supplies the run-to-ticket binding and the exact
+    harness session id.  A missing file, malformed row or temporarily
+    unreadable agent stream leaves that agent without usage rather than making
+    a GitHub-derived outcome look free.
+    """
+    found: Dict[str, List[Dict[str, object]]] = {}
+    for agent in HEARTBEAT_AGENTS:
+        result = _run_gh(["api", _heartbeat_remote_path(repo, agent, branch)])
+        if result.returncode != 0:
+            found[agent] = []
+            continue
+        try:
+            payload = json.loads(result.stdout)
+            content = base64.b64decode(payload.get("content", "")).decode("utf-8")
+        except (TypeError, ValueError, UnicodeDecodeError):
+            found[agent] = []
+            continue
+        rows = []
+        for line in content.splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, Mapping):
+                rows.append(dict(row))
+        found[agent] = rows
+    return found
+
+
+def _latest_by_run(
+    rows: Iterable[Mapping[str, object]],
+    phase: str,
+) -> Dict[str, Dict[str, object]]:
+    found: Dict[str, Dict[str, object]] = {}
+    for row in rows:
+        if row.get("phase") != phase or not isinstance(row.get("run"), str):
+            continue
+        run = row["run"]
+        old = found.get(run)
+        if old is None or (_record_time(row.get("ts")) or datetime.min.replace(
+            tzinfo=timezone.utc
+        )) >= (_record_time(old.get("ts")) or datetime.min.replace(
+            tzinfo=timezone.utc
+        )):
+            found[run] = dict(row)
+    return found
+
+
+def _run_metadata(
+    start: Mapping[str, object],
+    finish: Optional[Mapping[str, object]],
+    name: str,
+) -> object:
+    if finish is not None and finish.get(name) is not None:
+        return finish.get(name)
+    return start.get(name)
+
+
+def _ticket_runs(
+    ticket_ref: str,
+    heartbeat_records: Mapping[str, Sequence[Mapping[str, object]]],
+) -> List[Dict[str, object]]:
+    """Join one ticket to all of its bound implementation runs."""
+    found: List[Dict[str, object]] = []
+    for agent, rows in heartbeat_records.items():
+        starts = _latest_by_run(rows, "start")
+        finishes = _latest_by_run(rows, "finish")
+        bindings = _latest_by_run(rows, "bind")
+        for run, binding in bindings.items():
+            if binding.get("do") != "ticket" or str(binding.get("work")) != ticket_ref:
+                continue
+            start = starts.get(run, {})
+            finish = finishes.get(run)
+            started_at = _record_time(start.get("ts"))
+            finished_at = _record_time(finish.get("ts")) if finish else None
+            session_id = start.get("session_id") or (
+                finish.get("session_id") if finish else None
+            )
+            usage = session_usage.usage_for_session(
+                agent,
+                session_id if isinstance(session_id, str) else None,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+            found.append({
+                "run": run,
+                "agent": agent,
+                "started_at": _timestamp_text(started_at),
+                "finished_at": _timestamp_text(finished_at),
+                "outcome": finish.get("outcome") if finish else None,
+                "provider": _run_metadata(start, finish, "provider"),
+                "harness": _run_metadata(start, finish, "harness"),
+                "model": _run_metadata(start, finish, "model"),
+                "reasoning_effort": _run_metadata(start, finish, "reasoning_effort"),
+                "model_source": _run_metadata(start, finish, "model_source"),
+                "token_usage": usage,
+            })
+    found.sort(key=lambda row: (
+        row.get("started_at") is None,
+        row.get("started_at") or "",
+        row.get("run") or "",
+    ))
+    return found
+
+
+def _aggregate_token_usage(
+    runs: Sequence[Mapping[str, object]],
+) -> Optional[Dict[str, Optional[int]]]:
+    if not runs:
+        return None
+    totals = {kind: 0 for kind in session_usage.TOKEN_KINDS}
+    for run in runs:
+        usage = run.get("token_usage")
+        if not isinstance(usage, Mapping):
+            return None
+        for kind in session_usage.TOKEN_KINDS:
+            value = usage.get(kind)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                return None
+            totals[kind] += value
+    return totals
+
+
+def _top_level_run_metadata(
+    runs: Sequence[Mapping[str, object]],
+    name: str,
+) -> object:
+    # The Project display copy is singular.  Use the final implementation run
+    # that observed a value; the per-run list remains authoritative when a
+    # ticket changed models during rework.
+    for run in reversed(runs):
+        value = run.get(name)
+        if value is not None:
+            return value
+    return None
+
+
 def derive_outcome(
     ticket: Mapping[str, object],
     prs: Iterable[Mapping[str, object]] = (),
@@ -260,6 +422,7 @@ def derive_outcome(
     issue_comments: object = (),
     issue_events: object = (),
     now: Optional[datetime] = None,
+    run_observations: object = (),
 ) -> Dict[str, object]:
     """Derive one JSON-safe outcome record from supplied GitHub observations.
 
@@ -338,6 +501,11 @@ def derive_outcome(
     if recorded_at.tzinfo is None:
         recorded_at = recorded_at.replace(tzinfo=timezone.utc)
 
+    runs = [
+        dict(row) for row in (run_observations or [])
+        if isinstance(row, Mapping)
+    ]
+
     return {
         "schema_version": 1,
         "source": "github",
@@ -360,6 +528,16 @@ def derive_outcome(
         "reopened_after_merge": _reopened_after_merge(issue_events, merged_rows),
         "human_intervention_required": bool(intervention),
         "prs": [_record_pr(row) for row in pr_rows],
+        # Raw per-run usage is intentionally retained beside the aggregate.
+        # #165 prices these timestamped observations; this ticket does not
+        # invent a dollar value or reuse heartbeat's provider quota meter.
+        "runs": runs,
+        "token_usage": _aggregate_token_usage(runs),
+        "provider": _top_level_run_metadata(runs, "provider"),
+        "harness": _top_level_run_metadata(runs, "harness"),
+        "model": _top_level_run_metadata(runs, "model"),
+        "reasoning_effort": _top_level_run_metadata(runs, "reasoning_effort"),
+        "model_source": _top_level_run_metadata(runs, "model_source"),
     }
 
 
@@ -440,6 +618,7 @@ def _pr_observation(repo: str, number: int) -> Dict[str, object]:
 def derive_repository(
     repo: str, limit: int = PR_SCAN_LIMIT, now: Optional[datetime] = None,
     ticket_numbers: Optional[Iterable[int]] = None,
+    heartbeat_records: Optional[Mapping[str, Sequence[Mapping[str, object]]]] = None,
 ) -> List[Dict[str, object]]:
     """Derive every closed-ticket record in one repository.
 
@@ -455,6 +634,11 @@ def derive_repository(
             ticket for ticket in tickets
             if _pr_number(ticket) in wanted_numbers
         ]
+    heartbeat_rows = (
+        dict(heartbeat_records)
+        if heartbeat_records is not None
+        else read_heartbeat_records()
+    )
     index, truncated = funnel.ticket_pr_index(repo, limit=limit)
     if truncated:
         raise OutcomeError(
@@ -484,7 +668,15 @@ def derive_repository(
                 details[pr_number] = _pr_observation(repo, pr_number)
         comments, events = _issue_observations(repo, number)
         records.append(derive_outcome(
-            ticket, prs, details, comments, events, now=now
+            ticket,
+            prs,
+            details,
+            comments,
+            events,
+            now=now,
+            run_observations=_ticket_runs(
+                "{}#{}".format(repo, number), heartbeat_rows
+            ),
         ))
     return records
 

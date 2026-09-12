@@ -2839,6 +2839,11 @@ AUTH_LOGIN_FIX = "gh auth login"
 AUTH_SCOPE_FIX = "gh auth refresh -s project"
 TOPIC_FIX = "add the `command-center` topic to at least one repository"
 
+# Keep this operational alarm separate from the Project Class ladder. It is a
+# local capacity signal, not a queue-ranking rule.
+PROCESS_TABLE_ALARM_THRESHOLD = 0.60
+PROCESS_TABLE_FIX = "close idle sessions or processes, then rerun funnel doctor"
+
 
 PROJECT_FIELDS_QUERY = """
 query($login: String!, $number: Int!) {
@@ -3242,6 +3247,96 @@ def check_settings(claude_dir: Optional[os.PathLike] = None) -> Check:
         "settings.json", True,
         "valid JSON with statusLine pointing to {}".format(STATUSLINE_COMMAND),
         "",
+    )
+
+
+def _process_table_limit(proc: object) -> Optional[int]:
+    """Parse ``sysctl`` output in either quiet or labelled form."""
+    output = getattr(proc, "stdout", "") or ""
+    value = str(output).strip()
+    if ":" in value:
+        value = value.rsplit(":", 1)[1].strip()
+    if not value.isdigit():
+        return None
+    limit = int(value)
+    return limit if limit > 0 else None
+
+
+def check_process_table() -> Check:
+    """Report the current user's process count against macOS's per-user cap."""
+    try:
+        limit_proc = _run_bounded_subprocess(
+            ["sysctl", "-n", "kern.maxprocperuid"],
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Check(
+            "process table", False,
+            "could not read kern.maxprocperuid ({})".format(
+                str(exc) or "unknown error"
+            ),
+            PROCESS_TABLE_FIX,
+        )
+
+    if limit_proc.returncode != 0:
+        detail = (getattr(limit_proc, "stderr", "")
+                  or getattr(limit_proc, "stdout", "")
+                  or "sysctl exited {}".format(limit_proc.returncode)).strip()
+        return Check(
+            "process table", False,
+            "could not read kern.maxprocperuid ({})".format(detail),
+            PROCESS_TABLE_FIX,
+        )
+
+    limit = _process_table_limit(limit_proc)
+    if limit is None:
+        return Check(
+            "process table", False,
+            "could not parse kern.maxprocperuid output",
+            PROCESS_TABLE_FIX,
+        )
+
+    try:
+        process_proc = _run_bounded_subprocess(
+            ["ps", "-u", str(os.getuid()), "-o", "pid="],
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return Check(
+            "process table", False,
+            "could not count current-user processes ({})".format(
+                str(exc) or "unknown error"
+            ),
+            PROCESS_TABLE_FIX,
+        )
+
+    if process_proc.returncode != 0:
+        detail = (getattr(process_proc, "stderr", "")
+                  or getattr(process_proc, "stdout", "")
+                  or "ps exited {}".format(process_proc.returncode)).strip()
+        return Check(
+            "process table", False,
+            "could not count current-user processes ({})".format(detail),
+            PROCESS_TABLE_FIX,
+        )
+
+    count = sum(
+        1 for line in (getattr(process_proc, "stdout", "") or "").splitlines()
+        if line.strip()
+    )
+    ratio = count / limit
+    percent = ratio * 100
+    alarm = ratio > PROCESS_TABLE_ALARM_THRESHOLD
+    found = "{} / {} processes ({:.1f}%; alarm above {:.0f}%)".format(
+        count, limit, percent, PROCESS_TABLE_ALARM_THRESHOLD * 100
+    )
+    if alarm:
+        found += "; alert"
+    return Check(
+        "process table", not alarm, found,
+        PROCESS_TABLE_FIX if alarm else "",
     )
 
 
@@ -4152,6 +4247,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
             claude_dir=claude_dir, checkout_root=checkout_root),
         check_repository_drift(checkout_root=checkout_root),
         check_settings(claude_dir=claude_dir),
+        check_process_table(),
         check_auth_scope(),
         check_project_fields(),
         check_topic(),

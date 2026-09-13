@@ -96,6 +96,17 @@ is workable by no agent, use one of the existing allowlisted `Human step:` reaso
 for the specific human action. Keep this metadata in the ticket body rather than
 adding a Project field or label; the ticket is the unit being routed.
 
+Apply this marker narrowly to LaunchAgent work. A ticket whose step runs
+`launchctl bootstrap`, `launchctl bootout`, or `launchctl load`, or whose acceptance
+criterion requires that a plist loads, must carry the exact marker line above. This
+covers both sides of a reinstall pair: booting out the old job and loading the
+replacement. Reading both plist files and running
+`PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_launchd_drift.py` remain
+workable by any agent. If a
+plan item mixes those drift checks with a load action, split only the load action
+into its own human-step ticket, one human action per ticket; do not mark the whole
+LaunchAgent ticket or rely on a hand mark.
+
 If a ticket cannot start until another finishes, that is fine. If *every* ticket
 is chained, the plan has not really been broken up: it has been sliced into
 stages, and the funnel will process them one hourly run at a time with no

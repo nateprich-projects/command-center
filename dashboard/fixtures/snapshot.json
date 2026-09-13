@@ -1,0 +1,57 @@
+{
+  "generated_at": "2026-09-13T08:00:00Z",
+  "last_brief_failed": false,
+  "brief": {
+    "total_needing_nate": 2,
+    "counts_by_gate": { "Shaped": 1, "Building": 1 },
+    "items": [
+      {
+        "ref": "nateprich-projects/command-center#643",
+        "repo": "command-center",
+        "title": "Funnel dashboard on nateprich.com",
+        "url": "https://github.com/nateprich-projects/command-center/issues/643",
+        "class": "New",
+        "waiting_on": "Accept it?",
+        "waited": "2 hours"
+      },
+      {
+        "ref": "nateprich/example#12",
+        "repo": "example",
+        "title": "Example shaped project",
+        "url": "https://github.com/nateprich/example/issues/12",
+        "class": "Improve",
+        "waiting_on": "Is the plan good?",
+        "waited": "1 day"
+      }
+    ],
+    "human_steps": [
+      { "ref": "nateprich-projects/command-center#649", "reason": "an account or billing setting" }
+    ],
+    "maintenance_load": { "upkeep_share": 0.25 },
+    "disposal": { "finished_vs_abandoned": 3, "done": 3, "parked": 1, "net_open_growth": 0 },
+    "missing": []
+  },
+  "board": {
+    "columns": [
+      { "stage": "Ideas", "items": [] },
+      { "stage": "Shaped", "items": [] },
+      { "stage": "Ready", "items": [] },
+      {
+        "stage": "Building",
+        "items": [
+          {
+            "repo": "command-center",
+            "title": "Funnel dashboard on nateprich.com",
+            "url": "https://github.com/nateprich-projects/command-center/issues/643",
+            "class": "New",
+            "waited": "2 hours",
+            "tickets_closed": 0,
+            "tickets_total": 7
+          }
+        ]
+      },
+      { "stage": "Parked", "items": [] },
+      { "stage": "Done", "items": [] }
+    ]
+  }
+}

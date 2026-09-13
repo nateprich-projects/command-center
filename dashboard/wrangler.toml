@@ -1,0 +1,23 @@
+name = "command-center-funnel"
+main = "worker.js"
+compatibility_date = "2026-09-13"
+workers_dev = false
+
+routes = [
+  { pattern = "funnel.nateprich.com", custom_domain = true }
+]
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+run_worker_first = true
+
+[[kv_namespaces]]
+binding = "FUNNEL_SNAPSHOT"
+# Ticket #653 creates the namespace and replaces this local-only identifier before
+# the first deploy. Keeping the binding here makes local development deterministic.
+id = "local-funnel-snapshot"
+
+[vars]
+ACCESS_TEAM_DOMAIN = "https://winter-violet-59c6.cloudflareaccess.com"
+ACCESS_AUD = "1a9861b0619189a604b128fef7866fb4ca2612607672b916837915247b467ff1"

@@ -7,6 +7,8 @@ import pathlib
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
@@ -103,3 +105,70 @@ def test_brief_profile_records_graphql_operation_time_and_count(monkeypatch):
 
     assert timings["graphql.project_items"] >= 0
     assert timings["graphql.project_items.calls"] == 2
+
+
+@pytest.mark.parametrize(
+    "truncated",
+    [
+        SimpleNamespace(returncode=0, stdout='{"data":', stderr=""),
+        SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr=(
+                "unexpected end of JSON input; GraphQL request ID "
+                "DD41:627C:A3F5CB:EEDB4E:6AA66A60"
+            ),
+        ),
+    ],
+)
+def test_truncated_graphql_response_retries_then_succeeds(
+    monkeypatch, truncated
+):
+    funnel.reset_route_state()
+    funnel.reset_api_usage()
+    attempts = []
+    sleeps = []
+    responses = [
+        truncated,
+        SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"data": {"viewer": {"login": "n"}}}),
+            stderr="",
+        ),
+    ]
+
+    def run(args, **kwargs):
+        attempts.append(args)
+        return responses.pop(0)
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel.time, "sleep", sleeps.append)
+
+    assert funnel.gh_graphql("{viewer{login}}") == {
+        "viewer": {"login": "n"}
+    }
+    assert len(attempts) == 2
+    assert sleeps == [funnel.GRAPHQL_RETRY_DELAY_SECONDS]
+    assert funnel._API_USAGE["graphql_calls"] == 2
+    assert funnel.graphql_spend()["calls"] == 2
+
+
+def test_non_transient_graphql_failure_does_not_retry(monkeypatch):
+    funnel.reset_route_state()
+    funnel.reset_api_usage()
+    attempts = []
+
+    def run(args, **kwargs):
+        attempts.append(args)
+        return SimpleNamespace(
+            returncode=1, stdout="", stderr="permission denied"
+        )
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    with pytest.raises(funnel.GitHubError, match="permission denied"):
+        funnel.gh_graphql("{viewer{login}}")
+
+    assert len(attempts) == 1
+    assert funnel._API_USAGE["graphql_calls"] == 1
+    assert funnel.graphql_spend()["calls"] == 1

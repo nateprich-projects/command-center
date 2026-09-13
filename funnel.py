@@ -4696,10 +4696,34 @@ query($item: ID!) {
 
 
 class GitHubError(RuntimeError):
-    pass
+    def __init__(self, message: object, *, transient: bool = False,
+                 request_id: Optional[str] = None):
+        super().__init__(message)
+        self.transient = transient
+        self.request_id = request_id
 
 
-#: Per-process GraphQL spend, accumulated from the responses themselves.
+# `gh api graphql` occasionally returns a partial JSON document. The CLI
+# reports the same condition as `unexpected end of JSON input` when it cannot
+# decode the response itself. Keep this retry deliberately narrow: a real
+# GraphQL error, an exhausted route, or an ordinary CLI failure must still
+# stop on its first attempt.
+GRAPHQL_MAX_ATTEMPTS = 3
+GRAPHQL_RETRY_DELAY_SECONDS = 0.5
+GRAPHQL_TRUNCATED_RESPONSE_SIGNALS = (
+    "unexpected end of json input",
+    "unexpected end of input",
+    "unexpected eof",
+)
+GRAPHQL_REQUEST_ID_RE = re.compile(
+    r"(?:graphql\s+request\s+id|x-github-request-id|request[-\s]+id)"
+    r"\s*:?\s*([A-Za-z0-9][A-Za-z0-9:._-]*)",
+    re.IGNORECASE,
+)
+
+
+#: Per-process GraphQL spend, with one call counted per attempted response and
+#: points accumulated only from the responses themselves.
 #:
 #: Not state of record and it never outlives the process, so `GitHub is the
 #: state` is untouched. It exists because consumption was invisible until it
@@ -4833,6 +4857,30 @@ def _is_exhausted_signal(stderr: object) -> bool:
     return any(signal in lowered for signal in EXHAUSTED_SIGNALS)
 
 
+def _graphql_text(value: object) -> str:
+    """Return subprocess text in a form safe for matching and diagnostics."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value or "")
+
+
+def _graphql_request_id(text: object) -> Optional[str]:
+    """Extract GitHub's request identifier from a CLI diagnostic, if present."""
+    match = GRAPHQL_REQUEST_ID_RE.search(_graphql_text(text))
+    return match.group(1) if match else None
+
+
+def _is_truncated_graphql_text(text: object) -> bool:
+    """Whether CLI text identifies the known partial-response failure."""
+    lowered = _graphql_text(text).lower()
+    return any(signal in lowered for signal in GRAPHQL_TRUNCATED_RESPONSE_SIGNALS)
+
+
+def _record_graphql_attempt() -> None:
+    """Count one GraphQL subprocess attempt, even without a usable response."""
+    _GRAPHQL_SPEND["calls"] = int(_GRAPHQL_SPEND["calls"]) + 1
+
+
 def _refuse_if_exhausted(command: Sequence[str]) -> None:
     state = _ROUTE_EXHAUSTED["graphql"]
     if state is None or not _uses_graphql(command):
@@ -4950,7 +4998,6 @@ def _record_rate_limit(block: object) -> None:
     to the funnel.
     """
     global _GRAPHQL_COST_READS
-    _GRAPHQL_SPEND["calls"] = int(_GRAPHQL_SPEND["calls"]) + 1
     if not isinstance(block, dict):
         return
     cost = block.get("cost")
@@ -4981,21 +5028,102 @@ def gh_graphql(query: str, **variables) -> dict:
         for key, value in variables.items():
             flag = "-F" if isinstance(value, (int, bool)) else "-f"
             cmd += [flag, "{}={}".format(key, value)]
-        proc = _run_gh(cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            raise GitHubError(
-                proc.stderr.strip() or "gh exited {}".format(proc.returncode)
-            )
-        payload = json.loads(proc.stdout)
-        if payload.get("errors"):
-            raise GitHubError(json.dumps(payload["errors"]))
-        data = payload["data"]
-        if isinstance(data, dict):
+        last_request_id = None
+
+        for attempt in range(GRAPHQL_MAX_ATTEMPTS):
+            try:
+                proc = _run_gh(cmd, capture_output=True, text=True)
+            except GitHubError:
+                # The exhausted-route guard raises before a subprocess is run,
+                # so it is not an attempt and must not be counted a second time.
+                raise
+            except Exception:
+                # `_run_gh` has already counted this launch in `_API_USAGE`.
+                # Keep the GraphQL spend count aligned even when no child
+                # response exists to carry a rate-limit block.
+                _record_graphql_attempt()
+                raise
+
+            _record_graphql_attempt()
+            stderr = _graphql_text(getattr(proc, "stderr", ""))
+            stdout = getattr(proc, "stdout", "")
+            request_id = _graphql_request_id(stderr)
+            if request_id is None:
+                request_id = _graphql_request_id(stdout)
+            if request_id is not None:
+                last_request_id = request_id
+
+            if proc.returncode != 0:
+                detail = stderr.strip() or _graphql_text(stdout).strip()
+                detail = detail or "gh exited {}".format(proc.returncode)
+                # Rate-limit exhaustion is a deliberate fail-fast path, even
+                # if a CLI diagnostic happens to include another transport phrase.
+                if _is_exhausted_signal(detail):
+                    raise GitHubError(detail, request_id=request_id)
+                error = GitHubError(
+                    detail,
+                    transient=_is_truncated_graphql_text(stderr),
+                    request_id=request_id or last_request_id,
+                )
+                if not error.transient or attempt + 1 >= GRAPHQL_MAX_ATTEMPTS:
+                    raise error
+                time.sleep(GRAPHQL_RETRY_DELAY_SECONDS)
+                continue
+
+            try:
+                payload = json.loads(stdout)
+            except (TypeError, ValueError) as exc:
+                error = GitHubError(
+                    "malformed GraphQL response: {}".format(exc),
+                    transient=True,
+                    request_id=request_id or last_request_id,
+                )
+                if attempt + 1 >= GRAPHQL_MAX_ATTEMPTS:
+                    raise error from exc
+                time.sleep(GRAPHQL_RETRY_DELAY_SECONDS)
+                continue
+
+            if not isinstance(payload, dict):
+                error = GitHubError(
+                    "malformed GraphQL response: top-level JSON is not an object",
+                    transient=True,
+                    request_id=request_id or last_request_id,
+                )
+                if attempt + 1 >= GRAPHQL_MAX_ATTEMPTS:
+                    raise error
+                time.sleep(GRAPHQL_RETRY_DELAY_SECONDS)
+                continue
+
+            if payload.get("errors"):
+                raise GitHubError(
+                    json.dumps(payload["errors"]), request_id=request_id
+                )
+
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                error = GitHubError(
+                    "malformed GraphQL response: data is not an object",
+                    transient=True,
+                    request_id=request_id or last_request_id,
+                )
+                if attempt + 1 >= GRAPHQL_MAX_ATTEMPTS:
+                    raise error
+                time.sleep(GRAPHQL_RETRY_DELAY_SECONDS)
+                continue
+
             block = data.get("rateLimit")
             _record_rate_limit(block)
             if isinstance(block, dict) and block.get("remaining") == 0:
                 _mark_exhausted("rateLimit.remaining is 0", block.get("resetAt"))
-        return data
+            return data
+
+        # The loop always returns or raises. Keep a defensive error for static
+        # analyzers and for a future change to the attempt constants.
+        raise GitHubError(
+            "GraphQL request failed after {} attempts".format(GRAPHQL_MAX_ATTEMPTS),
+            transient=True,
+            request_id=last_request_id,
+        )
     finally:
         _record_brief_graphql_timing(
             query, time.perf_counter() - started
@@ -8449,6 +8577,21 @@ def reconcile_approved_merges(
     return results
 
 
+def _start_begin_heartbeat(agent: str) -> Optional[str]:
+    """Start the run used by ``begin`` and remember it for error recovery."""
+    global _ACTIVE_HEARTBEAT_RUN, _ACTIVE_HEARTBEAT_AGENT
+
+    run = _run_bounded_subprocess(
+        [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      "heartbeat.py"), "start", "--agent", agent],
+        capture_output=True, text=True)
+    run_id = ((run.stdout or "").strip().splitlines()[-1]
+              if run.stdout else None)
+    _ACTIVE_HEARTBEAT_RUN = run_id
+    _ACTIVE_HEARTBEAT_AGENT = agent
+    return run_id
+
+
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
               routine_sha_literal: Optional[str] = None,
@@ -8474,11 +8617,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     import usage
 
     out: Dict[str, object] = {"agent": agent}
-    run = _run_bounded_subprocess(
-        [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                      "heartbeat.py"), "start", "--agent", agent],
-        capture_output=True, text=True)
-    out["run"] = (run.stdout or "").strip().splitlines()[-1] if run.stdout else None
+    out["run"] = _start_begin_heartbeat(agent)
 
     if routine_sha_literal is not None:
         path = routine_path(agent)
@@ -8757,6 +8896,47 @@ def _bind_run(agent: str, out: Dict[str, object]) -> None:
     except Exception:
         # Instrumentation must not gate the thing it instruments.
         pass
+
+
+def _begin_error_envelope(agent: str, error: GitHubError) -> None:
+    """Print a parseable failed ``begin`` result and preserve its heartbeat."""
+    global _ACTIVE_HEARTBEAT_RUN, _ACTIVE_HEARTBEAT_AGENT
+
+    run = _ACTIVE_HEARTBEAT_RUN
+    start_error = None
+    if not run:
+        try:
+            run = _start_begin_heartbeat(agent)
+        except Exception as exc:
+            # The error envelope is the last useful contract if heartbeat
+            # startup itself is unavailable. Keep the original GitHub failure
+            # visible and say why no run id could be attached.
+            start_error = str(exc).strip() or type(exc).__name__
+            _ACTIVE_HEARTBEAT_AGENT = agent
+
+    transient = bool(getattr(error, "transient", False))
+    request_id = getattr(error, "request_id", None)
+    if not request_id:
+        request_id = _graphql_request_id(str(error))
+    why = str(error).strip() or type(error).__name__
+    if transient:
+        why = "transient GraphQL response: {}".format(why)
+    if request_id and request_id not in why:
+        why += " (GraphQL request ID {})".format(request_id)
+    if start_error:
+        why += "; heartbeat start failed: {}".format(start_error)
+
+    print(json.dumps({
+        "agent": agent,
+        "run": run,
+        # No budget or queue gate completed. `unknown` preserves the existing
+        # begin schema while the explicit flag distinguishes this from an
+        # unreadable usage record.
+        "gate": "unknown",
+        "do": "stop",
+        "why": why,
+        "transient": transient,
+    }, indent=2))
 
 
 def _reserve_verdict(do: object) -> Optional[Dict[str, object]]:
@@ -9785,25 +9965,27 @@ def main(argv: Optional[Sequence[str]] = None, *,
         time.perf_counter() if brief_timings is not None else None
     )
     try:
-        try:
-            if _items is not None:
-                items = _items
-            elif _items_loader is not None:
-                items = _items_loader()
-            else:
-                items = load_items()
-        except GitHubError as exc:
-            if args.command == "brief":
-                print(json.dumps({
-                    "generated_at": now.isoformat(),
-                    "missing": [{
-                        "section": "items",
-                        "error": _brief_error(exc),
-                    }],
-                }, indent=2))
-                return 0
-            print("funnel: {}".format(exc), file=sys.stderr)
+        if _items is not None:
+            items = _items
+        elif _items_loader is not None:
+            items = _items_loader()
+        else:
+            items = load_items()
+    except GitHubError as exc:
+        if args.command == "brief":
+            print(json.dumps({
+                "generated_at": now.isoformat(),
+                "missing": [{
+                    "section": "items",
+                    "error": _brief_error(exc),
+                }],
+            }, indent=2))
+            return 0
+        if args.command == "begin":
+            _begin_error_envelope(args.agent, exc)
             return 2
+        print("funnel: {}".format(exc), file=sys.stderr)
+        return 2
     finally:
         if brief_timings is not None:
             brief_timings["project_load"] = round(
@@ -9950,6 +10132,9 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_queue(items, now, repo_readiness=repo_readiness)
         return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
     except GitHubError as exc:
+        if args.command == "begin":
+            _begin_error_envelope(args.agent, exc)
+            return 2
         print("funnel: {}".format(exc), file=sys.stderr)
         return 2
 

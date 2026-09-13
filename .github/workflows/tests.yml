@@ -30,8 +30,20 @@ jobs:
         with:
           python-version: "3.12"
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
       - name: Install pytest
         run: python3 -m pip install --quiet pytest
 
       - name: Run the suite
         run: python3 -m pytest tests/ -q
+
+      - name: Install dashboard dependencies
+        run: npm --prefix dashboard ci
+
+      - name: Check dashboard JavaScript
+        run: npm --prefix dashboard test

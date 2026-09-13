@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 from datetime import datetime, timezone
@@ -15,6 +16,22 @@ from agent_health import assess  # noqa: E402
 
 
 NOW = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
+SILENCE_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "heartbeat_silence_window.json"
+
+
+def _silence_fixture():
+    payload = json.loads(SILENCE_FIXTURE.read_text())
+    now = datetime.fromisoformat(payload["now"].replace("Z", "+00:00"))
+    rows = {
+        agent: [
+            dict(row, ts=datetime.fromisoformat(
+                row["ts"].replace("Z", "+00:00")
+            ).timestamp())
+            for row in agent_rows
+        ]
+        for agent, agent_rows in payload["agents"].items()
+    }
+    return now, rows
 
 
 def _start(run, minutes_ago):
@@ -75,6 +92,32 @@ def test_healthy_heartbeat_rows_render_no_agent_health(monkeypatch):
     )
 
     assert funnel.agent_health(NOW) == []
+
+
+def test_sparse_history_uses_the_absolute_silence_floor_and_reaches_the_brief(
+    monkeypatch,
+):
+    now, rows = _silence_fixture()
+
+    conditions = assess("codex", rows["codex"], now.timestamp())
+
+    assert len(conditions) == 1
+    assert "absolute silence floor 6h exceeded" in conditions[0]
+    assert "Nothing recorded for 1d8h1m" in conditions[0]
+    assert "normal gap" not in conditions[0]
+
+    monkeypatch.setattr(heartbeat, "PROVIDERS", {
+        "codex": "openai",
+        "muse": "meta",
+    })
+    monkeypatch.setattr(
+        funnel, "_brief_heartbeat_rows", lambda agent: rows.get(agent, [])
+    )
+
+    assert funnel.agent_health(now) == [{
+        "agent": "codex",
+        "condition": conditions[0],
+    }]
 
 
 def test_one_open_start_older_than_ten_times_median_is_reported():

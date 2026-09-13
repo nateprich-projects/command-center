@@ -1,0 +1,184 @@
+"""The dashboard snapshot is a best-effort consumer of ``funnel brief``."""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import sys
+from datetime import datetime, timedelta, timezone
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+import funnel  # noqa: E402
+
+
+NOW = datetime(2026, 9, 13, 12, 0, tzinfo=timezone.utc)
+
+
+def _item(number, status, *, repo="nateprich-projects/command-center", **kwargs):
+    values = {
+        "repo": repo,
+        "number": number,
+        "title": "Project {}".format(number),
+        "url": "https://github.com/{}/issues/{}".format(repo, number),
+        "state": "OPEN",
+        "status": status,
+        "klass": "New",
+        "status_since": NOW - timedelta(days=number),
+    }
+    values.update(kwargs)
+    return funnel.Item(**values)
+
+
+def _brief_output(generated_at="2026-09-13T12:00:00+00:00"):
+    return json.dumps({
+        "generated_at": generated_at,
+        "total_needing_nate": 0,
+        "items": [],
+    }, indent=2)
+
+
+def _spooled(spool):
+    paths = sorted(spool.glob("*.json"))
+    assert len(paths) == 1
+    return json.loads(paths[0].read_text())
+
+
+def test_dashboard_board_contains_ordered_parent_projects_and_recent_done_only():
+    old_done = _item(
+        1,
+        "Done",
+        state="CLOSED",
+        closed_at=NOW - timedelta(days=8),
+    )
+    recent_done = _item(
+        2,
+        "Done",
+        state="CLOSED",
+        closed_at=NOW - timedelta(days=2),
+    )
+    older_ready = _item(8, "Ready")
+    newer_ready = _item(3, "Ready")
+    child = _item(4, "Building", parent=newer_ready.ref)
+    parked = _item(
+        5,
+        "Parked",
+        state="CLOSED",
+        closed_at=NOW - timedelta(days=30),
+    )
+
+    board = funnel.dashboard_board(
+        [newer_ready, child, old_done, parked, recent_done, older_ready], NOW
+    )
+
+    assert [column["stage"] for column in board["columns"]] == [
+        "Ideas", "Shaped", "Ready", "Building", "Parked", "Done",
+    ]
+    ready = board["columns"][2]["items"]
+    assert [row["title"] for row in ready] == [
+        older_ready.title, newer_ready.title,
+    ]
+    assert board["columns"][3]["items"] == []
+    assert board["columns"][4]["items"][0]["title"] == parked.title
+    assert [row["title"] for row in board["columns"][5]["items"]] == [
+        recent_done.title,
+    ]
+    assert ready[0] == {
+        "repo": "command-center",
+        "title": older_ready.title,
+        "url": older_ready.url,
+        "class": "New",
+        "waited": "8 days",
+        "tickets_closed": 0,
+        "tickets_total": 0,
+    }
+
+
+def test_successful_brief_spools_without_changing_stdout(
+    monkeypatch, tmp_path, capsys
+):
+    spool = tmp_path / "dashboard-spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    project = _item(7, "Building", children_total=3, children_done=1)
+    expected = _brief_output()
+    monkeypatch.setattr(funnel, "load_items", lambda: [project])
+
+    def fake_cmd_brief(items, now, **kwargs):
+        assert items == [project]
+        print(expected)
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
+
+    assert funnel.main(["brief"]) == 0
+    assert capsys.readouterr().out == expected + "\n"
+
+    snapshot = _spooled(spool)
+    assert snapshot["brief"] == json.loads(expected)
+    assert snapshot["board"]["columns"][3]["items"] == [{
+        "repo": "command-center",
+        "title": project.title,
+        "url": project.url,
+        "class": "New",
+        "waited": "7 days",
+        "tickets_closed": 1,
+        "tickets_total": 3,
+    }]
+    assert snapshot["generated_at"] == json.loads(expected)["generated_at"]
+
+
+def test_spool_write_failure_preserves_brief_output_and_exit_code(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(tmp_path / "spool"))
+    expected = _brief_output()
+    monkeypatch.setattr(funnel, "load_items", lambda: [])
+
+    def fake_cmd_brief(items, now, **kwargs):
+        print(expected)
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
+
+    def fail_to_spool(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(funnel, "write_dashboard_snapshot", fail_to_spool)
+
+    assert funnel.main(["brief"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == expected + "\n"
+    assert "could not spool dashboard brief: disk full" in captured.err
+
+
+def test_nonzero_brief_is_not_spooled(monkeypatch, tmp_path, capsys):
+    spool = tmp_path / "spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    expected = _brief_output()
+    monkeypatch.setattr(funnel, "load_items", lambda: [])
+
+    def fake_cmd_brief(items, now, **kwargs):
+        print(expected)
+        return 2
+
+    monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
+
+    assert funnel.main(["brief"]) == 2
+    assert capsys.readouterr().out == expected + "\n"
+    assert not spool.exists()
+
+
+def test_unreadable_project_brief_is_not_spooled(monkeypatch, tmp_path, capsys):
+    spool = tmp_path / "spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+
+    def fail_to_load():
+        raise funnel.GitHubError("Project offline")
+
+    monkeypatch.setattr(funnel, "load_items", fail_to_load)
+
+    assert funnel.main(["brief"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["missing"][0]["error"] == "Project offline"
+    assert not spool.exists()

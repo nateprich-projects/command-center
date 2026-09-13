@@ -299,6 +299,14 @@ DECISION_ORDER = ["Building", "Ready", "Shaped"]
 
 MAINTENANCE_WINDOW = timedelta(days=30)
 
+# The dashboard is a display-only consumer of a successful brief. Its spool is
+# deliberately outside the repository and is a buffer, not another source of
+# funnel state. Keep the board order separate from the funnel's decision order:
+# the dashboard puts Parked before the recent Done column.
+DASHBOARD_SPOOL_ENV = "COMMAND_CENTER_DASHBOARD_SPOOL"
+DASHBOARD_BOARD_STAGES = ("Ideas", "Shaped", "Ready", "Building", "Parked", "Done")
+DASHBOARD_DONE_WINDOW = timedelta(days=7)
+
 # Only these harnesses expose the complete pair of input-token counts used by
 # the re-send metric. Claude is unscheduled and Muse is unmetered, so their
 # absence from the brief is intentional rather than missing data.
@@ -5471,6 +5479,135 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
     return rendered
 
 
+def _dashboard_spool_dir() -> pathlib.Path:
+    """Return the display snapshot spool, allowing tests and installs to override it."""
+    configured = os.environ.get(DASHBOARD_SPOOL_ENV)
+    if configured:
+        return pathlib.Path(configured).expanduser()
+    return pathlib.Path.home() / ".claude" / "command-center-dashboard-spool"
+
+
+def _dashboard_stage_since(item: Item) -> Optional[datetime]:
+    """Return the best-known time the Project item entered its board stage."""
+    if item.status_since is not None:
+        return item.status_since
+    # A closed Done item can lack the Project timeline event in an old or
+    # partial fixture. Its issue close is still a useful lower-fidelity age;
+    # never use a gate timestamp here because the board means time at stage.
+    if item.status == "Done":
+        return item.closed_at
+    return None
+
+
+def _dashboard_stage_age(item: Item, now: datetime) -> str:
+    since = _dashboard_stage_since(item)
+    if since is None:
+        return "unknown"
+    return humanise(max(timedelta(0), now - since))
+
+
+def _dashboard_item(
+    item: Item, now: datetime, by_ref: Dict[str, Item]
+) -> Dict[str, object]:
+    """Render the small parent-project row consumed by the dashboard page."""
+    return {
+        "repo": item.repo.rsplit("/", 1)[-1],
+        "title": item.title,
+        "url": item.url,
+        "class": effective_class(item, by_ref),
+        "waited": _dashboard_stage_age(item, now),
+        "tickets_closed": item.children_done,
+        "tickets_total": item.children_total,
+    }
+
+
+def dashboard_board(
+    items: Iterable[Item], now: datetime
+) -> Dict[str, List[Dict[str, object]]]:
+    """Build the ordered parent-project board for one already-loaded brief.
+
+    Only recent closed ``Done`` projects are retained. All other rows are
+    selected by their Project Status; the existing Project facts are enough,
+    so building this display never performs another GitHub read.
+    """
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    done_cutoff = now - DASHBOARD_DONE_WINDOW
+    max_time = datetime.max.replace(tzinfo=timezone.utc)
+
+    def stage_since(item: Item) -> Optional[datetime]:
+        return _dashboard_stage_since(item)
+
+    def board_key(item: Item):
+        since = stage_since(item)
+        return (
+            since is None,
+            since or max_time,
+            item.repo,
+            item.number,
+        )
+
+    def include(item: Item, stage: str) -> bool:
+        if item.parent is not None or item.status != stage:
+            return False
+        if stage != "Done":
+            return True
+        return (
+            item.state == "CLOSED"
+            and item.closed_at is not None
+            and item.closed_at >= done_cutoff
+        )
+
+    return {
+        "columns": [
+            {
+                "stage": stage,
+                "items": [
+                    _dashboard_item(item, now, by_ref)
+                    for item in sorted(
+                        (item for item in rows if include(item, stage)),
+                        key=board_key,
+                    )
+                ],
+            }
+            for stage in DASHBOARD_BOARD_STAGES
+        ]
+    }
+
+
+def write_dashboard_snapshot(
+    brief: Mapping[str, object],
+    board: Mapping[str, object],
+    generated_at: str,
+) -> pathlib.Path:
+    """Atomically append one display snapshot to the local dashboard spool."""
+    spool_dir = _dashboard_spool_dir()
+    payload = {
+        "brief": brief,
+        "board": board,
+        "generated_at": generated_at,
+    }
+    text = json.dumps(payload, indent=2) + "\n"
+    name = "brief-{}-{}.json".format(
+        time.time_ns(), secrets.token_hex(8)
+    )
+    target = spool_dir / name
+    temporary = spool_dir / ("." + name + ".tmp")
+
+    spool_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            stream.write(text)
+        os.replace(temporary, target)
+    except Exception:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+    return target
+
+
 def parked_items(items: Iterable[Item]) -> List[Item]:
     """Parked projects, newest first.
 
@@ -10337,17 +10474,52 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
                 if outcome_signals is _BRIEF_UNAVAILABLE:
                     outcome_signals = None
-                return cmd_brief(
-                    items,
-                    now,
-                    pr_facts=pr_facts,
-                    missing=missing,
-                    timings=timings,
-                    degraded=degraded,
-                    deadline=deadline,
-                    brief_cache=cache,
-                    outcome_signals=outcome_signals,
-                )
+                # Keep the existing brief JSON as the command's stdout. The
+                # display snapshot is a separate, best-effort side effect and
+                # must not change what callers parse or whether the command
+                # succeeds. Capturing here also lets us spool the exact brief
+                # object without adding a field to its /funnel contract.
+                brief_stdout = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(brief_stdout):
+                        brief_code = cmd_brief(
+                            items,
+                            now,
+                            pr_facts=pr_facts,
+                            missing=missing,
+                            timings=timings,
+                            degraded=degraded,
+                            deadline=deadline,
+                            brief_cache=cache,
+                            outcome_signals=outcome_signals,
+                        )
+                finally:
+                    output = brief_stdout.getvalue()
+                    sys.stdout.write(output)
+
+                if brief_code != 0 or not output.strip():
+                    return brief_code
+
+                try:
+                    brief_payload = json.loads(output)
+                    if not isinstance(brief_payload, dict):
+                        raise ValueError("brief output was not a JSON object")
+                    generated_at = brief_payload.get("generated_at")
+                    if not isinstance(generated_at, str) or not generated_at:
+                        generated_at = now.isoformat()
+                    write_dashboard_snapshot(
+                        brief_payload,
+                        dashboard_board(items, now),
+                        generated_at,
+                    )
+                except Exception as exc:
+                    # The dashboard is downstream instrumentation. A missing
+                    # or unwritable spool must never gate the live brief.
+                    print(
+                        "funnel: could not spool dashboard brief: {}".format(exc),
+                        file=sys.stderr,
+                    )
+                return brief_code
             finally:
                 _ACTIVE_BRIEF_TIMINGS.reset(brief_timing_token)
         if args.command == "queue":

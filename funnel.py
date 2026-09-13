@@ -7222,6 +7222,50 @@ def cmd_ideas(items: List[Item], now: datetime) -> int:
     return 0
 
 
+# `gh project item-add` can fail transiently after the issue has already been
+# created. Keep this retry local to capture so a retry never creates a second
+# issue or repeats the later field writes.
+CAPTURE_ITEM_ADD_MAX_ATTEMPTS = 3
+CAPTURE_ITEM_ADD_RETRY_DELAY_SECONDS = 0.5
+CAPTURE_ITEM_ADD_TRANSIENT_SIGNALS = (
+    "something went wrong while executing your query",
+    "internal server error",
+    "server error",
+    "bad gateway",
+    "service unavailable",
+    "gateway timeout",
+    "connection reset by peer",
+    "connection refused",
+    "connection timed out",
+    "context deadline exceeded",
+    "i/o timeout",
+    "tls handshake timeout",
+    "temporary failure in name resolution",
+    "network is unreachable",
+    "no such host",
+    "unexpected eof",
+)
+
+
+def _capture_item_add_error(add) -> str:
+    """Return the most useful error text from a failed Project add."""
+    for stream in ("stderr", "stdout"):
+        detail = str(getattr(add, stream, "") or "").strip()
+        if detail:
+            return detail
+    return "gh project item-add exited with status {}".format(
+        getattr(add, "returncode", "unknown")
+    )
+
+
+def _capture_item_add_is_transient(error: str) -> bool:
+    """Return whether an item-add error is an explicitly known transient."""
+    lowered = error.lower()
+    if any(signal in lowered for signal in CAPTURE_ITEM_ADD_TRANSIENT_SIGNALS):
+        return True
+    return bool(re.search(r"\b(?:500|502|503|504)\b", lowered))
+
+
 def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str],
                 repo: Optional[str], run: Optional[str] = None,
                 agent: Optional[str] = None,
@@ -7255,12 +7299,22 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         raise GitHubError(out.stderr.strip())
     url = out.stdout.strip().splitlines()[-1]
 
-    add = _run_gh(
-        ["gh", "project", "item-add", str(PROJECT_NUMBER), "--owner", PROJECT_OWNER,
-         "--url", url, "--format", "json"],
-        capture_output=True, text=True,
-    )
-    if add.returncode == 0:
+    add_args = [
+        "gh", "project", "item-add", str(PROJECT_NUMBER), "--owner", PROJECT_OWNER,
+        "--url", url, "--format", "json",
+    ]
+    add = None
+    for attempt in range(CAPTURE_ITEM_ADD_MAX_ATTEMPTS):
+        add = _run_gh(add_args, capture_output=True, text=True)
+        if add.returncode == 0:
+            break
+        error = _capture_item_add_error(add)
+        if (attempt + 1 >= CAPTURE_ITEM_ADD_MAX_ATTEMPTS
+                or not _capture_item_add_is_transient(error)):
+            break
+        time.sleep(CAPTURE_ITEM_ADD_RETRY_DELAY_SECONDS)
+
+    if add is not None and add.returncode == 0:
         item_id = json.loads(add.stdout)["id"]
         gh_graphql(SET_FIELD, project=PROJECT_ID, item=item_id,
                    field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, "Ideas"))
@@ -7274,9 +7328,7 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
             )
         print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
     else:
-        print("{} in {}\nnote: created, but not added to the Project".format(
-                  url, repo),
-              file=sys.stderr)
+        raise GitHubError(_capture_item_add_error(add))
     return 0
 
 

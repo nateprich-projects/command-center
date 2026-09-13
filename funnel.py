@@ -2178,9 +2178,17 @@ def _heartbeat_context(run: Optional[str], agent: Optional[str]):
         providers = sorted(heartbeat.PROVIDERS)
         if agent and agent in heartbeat.PROVIDERS:
             providers = [agent]
+        cache = (
+            _ACTIVE_BRIEF_CACHE.get()
+            if "_ACTIVE_BRIEF_CACHE" in globals() else None
+        )
         candidates = []
         for provider in providers:
-            for row in heartbeat.open_starts(heartbeat.read(provider)):
+            rows = (
+                cache.heartbeat_rows(provider)
+                if cache is not None else heartbeat.read(provider)
+            )
+            for row in heartbeat.open_starts(rows):
                 if run and row.get("run") != run:
                     continue
                 candidates.append(row)

@@ -28,12 +28,15 @@ import base64
 import json
 import os
 import glob
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 import sys
 import time
 import uuid
 from typing import Dict, List, Optional
+
+import session_usage
 
 REPO = "nateprich-projects/command-center"
 BRANCH = "heartbeat"
@@ -698,6 +701,84 @@ def detect_model(agent: str) -> Dict[str, Optional[str]]:
     return found
 
 
+def _heartbeat_datetime(value) -> Optional[datetime]:
+    """Turn a heartbeat epoch value into the boundary used by transcript reads."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _empty_token_usage() -> Dict[str, Optional[int]]:
+    """Return an explicit unknown value for every token kind."""
+    return {kind: None for kind in session_usage.TOKEN_KINDS}
+
+
+def _start_for_run(records: List[Dict], run_id: Optional[str]) -> Dict:
+    """Find the latest start row for a run, if the durable records have one."""
+    if not run_id:
+        return {}
+    starts = [
+        row for row in records
+        if isinstance(row, dict)
+        and row.get("phase") == "start"
+        and row.get("run") == run_id
+    ]
+    if not starts:
+        return {}
+    return max(
+        starts,
+        key=lambda row: (
+            isinstance(row.get("ts"), (int, float))
+            and not isinstance(row.get("ts"), bool),
+            row.get("ts") if isinstance(row.get("ts"), (int, float)) else 0,
+        ),
+    )
+
+
+def token_usage_for_run(
+    agent: str,
+    records: List[Dict],
+    run_id: Optional[str],
+    finished_at,
+) -> Dict[str, Optional[int]]:
+    """Capture one run's four token kinds from its bound session, best effort.
+
+    Token telemetry must never prevent a heartbeat finish.  A missing binding,
+    session id, transcript or token kind therefore remains an explicit null
+    rather than becoming a zero or raising from the instrumentation path.
+    """
+    unknown = _empty_token_usage()
+    start = _start_for_run(records, run_id)
+    session = start.get("session_id")
+    if not isinstance(session, str) or not session:
+        return unknown
+
+    try:
+        usage = session_usage.usage_for_session(
+            agent,
+            session,
+            started_at=_heartbeat_datetime(start.get("ts")),
+            finished_at=_heartbeat_datetime(finished_at),
+        )
+    except Exception:
+        return unknown
+    if not isinstance(usage, dict):
+        return unknown
+
+    found = {}
+    for kind in session_usage.TOKEN_KINDS:
+        value = usage.get(kind)
+        found[kind] = (
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            else None
+        )
+    return found
+
+
 def _number(value):
     """Return a non-negative integer token count, or nothing."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -1073,11 +1154,12 @@ def main(argv=None) -> int:
                     len(candidates) if candidates else 0),
                 file=sys.stderr,
             )
+        finished_at = time.time()
         record = {
             "run": run_id,
             "agent": args.agent,
             "phase": "finish",
-            "ts": int(time.time()),
+            "ts": int(finished_at),
             "outcome": args.outcome,
             "note": args.note,
             # Recorded as a field, not scraped out of the note. plan.md requires
@@ -1092,6 +1174,9 @@ def main(argv=None) -> int:
             "human_intervention_required": args.human_intervention or None,
             "repo": repo_state(),
             "runtime": runtime_state(),
+            "token_usage": token_usage_for_run(
+                args.agent, records, run_id, finished_at
+            ),
             "api_cost": api_cost_for_run(records, run_id),
             **detect_model(args.agent),
         }

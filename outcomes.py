@@ -335,6 +335,35 @@ def _run_metadata(
     return start.get(name)
 
 
+_NO_DURABLE_TOKEN_USAGE = object()
+
+
+def _durable_token_usage(
+    finish: Optional[Mapping[str, object]],
+) -> object:
+    """Read the token snapshot captured by a heartbeat finish.
+
+    The field is present, including when every value is null, once #164 is in
+    effect. A missing field identifies a pre-#164 record and is the only case
+    where the legacy transcript fallback remains appropriate.
+    """
+    if finish is None or "token_usage" not in finish:
+        return _NO_DURABLE_TOKEN_USAGE
+    raw = finish.get("token_usage")
+    if not isinstance(raw, Mapping):
+        return None
+    found = {}
+    for kind in session_usage.TOKEN_KINDS:
+        value = raw.get(kind)
+        found[kind] = (
+            value
+            if value is None
+            or (isinstance(value, int) and not isinstance(value, bool) and value >= 0)
+            else None
+        )
+    return found
+
+
 def _ticket_runs(
     ticket_ref: str,
     heartbeat_records: Mapping[str, Sequence[Mapping[str, object]]],
@@ -355,12 +384,17 @@ def _ticket_runs(
             session_id = start.get("session_id") or (
                 finish.get("session_id") if finish else None
             )
-            usage = session_usage.usage_for_session(
-                agent,
-                session_id if isinstance(session_id, str) else None,
-                started_at=started_at,
-                finished_at=finished_at,
-            )
+            usage = _durable_token_usage(finish)
+            if usage is _NO_DURABLE_TOKEN_USAGE:
+                # Heartbeats written before #164 have no durable token
+                # snapshot. Keep those historical records readable, but new
+                # finishes never depend on local transcripts at report time.
+                usage = session_usage.usage_for_session(
+                    agent,
+                    session_id if isinstance(session_id, str) else None,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                )
             found.append({
                 "run": run,
                 "agent": agent,

@@ -284,6 +284,81 @@ def test_finish_omits_input_usage_when_harness_does_not_expose_both_counts(
     assert "input_usage" not in records[0]
 
 
+def test_finish_records_four_token_kinds_from_the_bound_session(monkeypatch):
+    records = [start("run-id", NOW)]
+    records[0]["agent"] = "codex"
+    records[0]["session_id"] = "session-1"
+    written = []
+    seen = {}
+
+    def usage_for_session(agent, session_id, started_at=None, finished_at=None):
+        seen.update({
+            "agent": agent,
+            "session_id": session_id,
+            "started_at": started_at,
+            "finished_at": finished_at,
+        })
+        return {
+            "fresh_input_tokens": 40,
+            "cache_read_input_tokens": 60,
+            "cache_write_input_tokens": 2,
+            "output_tokens": 8,
+        }
+
+    monkeypatch.setattr(
+        heartbeat.session_usage, "usage_for_session", usage_for_session
+    )
+    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "runtime_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(heartbeat, "input_usage", lambda agent: None)
+    monkeypatch.setattr(
+        heartbeat, "append",
+        lambda agent, record: written.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+    monkeypatch.setattr(heartbeat.time, "time", lambda: NOW + 60)
+
+    assert heartbeat.main([
+        "finish", "--agent", "codex", "--run", "run-id", "--outcome", "done",
+    ]) == 0
+
+    assert written[0]["token_usage"] == {
+        "fresh_input_tokens": 40,
+        "cache_read_input_tokens": 60,
+        "cache_write_input_tokens": 2,
+        "output_tokens": 8,
+    }
+    assert seen["agent"] == "codex"
+    assert seen["session_id"] == "session-1"
+    assert seen["started_at"].timestamp() == NOW
+    assert seen["finished_at"].timestamp() == NOW + 60
+
+
+def test_unreadable_token_usage_is_four_nulls_and_does_not_raise(
+        monkeypatch):
+    monkeypatch.setattr(
+        heartbeat.session_usage,
+        "usage_for_session",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("unreadable")),
+    )
+
+    assert heartbeat.token_usage_for_run(
+        "codex",
+        [{"run": "run-id", "phase": "start", "ts": NOW,
+          "session_id": "missing"}],
+        "run-id",
+        NOW + 60,
+    ) == {
+        "fresh_input_tokens": None,
+        "cache_read_input_tokens": None,
+        "cache_write_input_tokens": None,
+        "output_tokens": None,
+    }
+
+
 def test_finish_sums_api_cost_events_from_two_funnel_commands(monkeypatch):
     records = [
         start("run-id", NOW),

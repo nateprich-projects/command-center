@@ -35,6 +35,26 @@ def test_unmarked_and_marked_bodies_cover_all_three_capability_outcomes():
     ) == funnel.HUMAN_STEP_REASONS[0]
 
 
+def test_human_and_machine_local_items_use_separate_allowlists():
+    machine_local = funnel.Item(
+        repo="nateprich/beta", number=20, title="Run Claude locally",
+        url="https://example.invalid/20", state="OPEN",
+        parent="nateprich/beta#19",
+        body=funnel.HUMAN_STEP_PREFIX + funnel.MACHINE_LOCAL_REASON.upper(),
+    )
+    human = funnel.Item(
+        repo="nateprich/beta", number=21, title="Create the account",
+        url="https://example.invalid/21", state="OPEN",
+        parent="nateprich/beta#19",
+        body=funnel.HUMAN_STEP_PREFIX + funnel.HUMAN_STEP_REASONS[0],
+    )
+
+    assert funnel.human_step_items([machine_local, human]) == [human]
+    assert funnel.machine_local_step_items([machine_local, human]) == [
+        machine_local
+    ]
+
+
 def test_difficulty_is_not_a_human_step_reason():
     assert funnel.parse_human_step(
         funnel.HUMAN_STEP_PREFIX + "this is hard"

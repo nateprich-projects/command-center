@@ -86,7 +86,7 @@ def _ticket(number, parent, *, body="Risk: standard", klass="Improve",
 
 def _implementing_begin(monkeypatch, capsys, items, *, agent="codex",
                         tier="standard", repo_readiness=None, pr_facts=None,
-                        caller_role=None):
+                        caller_role=None, current_claims=None):
     _allow_begin(monkeypatch)
     monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
@@ -96,6 +96,15 @@ def _implementing_begin(monkeypatch, capsys, items, *, agent="codex",
     bodies = {item.number: item.body for item in items}
     monkeypatch.setattr(
         funnel, "_ticket_body", lambda repo, number: bodies.get(number) or ""
+    )
+    monkeypatch.setattr(
+        funnel,
+        "read_lock",
+        lambda item: (
+            item.in_motion_since
+            if current_claims is None
+            else current_claims.get(item.ref)
+        ),
     )
     writes = []
     monkeypatch.setattr(
@@ -575,13 +584,80 @@ def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
     monkeypatch.setattr(
         funnel, "write_lock", lambda item, value: events.append("claim")
     )
+    monkeypatch.setattr(
+        funnel, "read_lock", lambda item: events.append("read-lock") or None
+    )
 
     assert funnel.cmd_begin(items, NOW, "codex", "standard", False) == 0
     result = json.loads(capsys.readouterr().out)
 
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == ticket.ref
-    assert events == ["heartbeat", "reconcile", "clear", "next", "claim"]
+    assert events == [
+        "heartbeat", "reconcile", "clear", "next", "read-lock", "claim"
+    ]
+
+
+def test_two_same_minute_begins_claim_different_tickets(monkeypatch, capsys):
+    first_project, first = _ticket(8, 7)
+    second_project, second = _ticket(10, 9)
+    items = [first_project, first, second_project, second]
+    current_claims = {}
+
+    first_result, first_writes = _implementing_begin(
+        monkeypatch,
+        capsys,
+        items,
+        current_claims=current_claims,
+    )
+    current_claims[first.ref] = NOW
+    second_result, second_writes = _implementing_begin(
+        monkeypatch,
+        capsys,
+        items,
+        current_claims=current_claims,
+    )
+
+    assert first_result["work"]["ref"] == first.ref
+    assert second_result["work"]["ref"] == second.ref
+    assert [ref for ref, value in first_writes if value] == [first.ref]
+    assert [ref for ref, value in second_writes if value] == [second.ref]
+
+
+def test_begin_offers_a_ticket_whose_refreshed_claim_is_over_60_seconds_old(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(12, 11)
+
+    result, writes = _implementing_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        current_claims={
+            ticket.ref: (
+                NOW
+                - funnel.BEGIN_CLAIM_COLLISION_WINDOW
+                - timedelta(seconds=1)
+            ),
+        },
+    )
+
+    assert result["work"]["ref"] == ticket.ref
+    assert [ref for ref, value in writes if value] == [ticket.ref]
+
+
+def test_read_lock_reads_the_selected_project_item(monkeypatch):
+    project, ticket = _ticket(14, 13)
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        return {"node": {"lock": {"text": "2026-09-05T12:00:00Z"}}}
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    assert funnel.read_lock(ticket) == NOW
+    assert calls == [(funnel.ITEM_LOCK_QUERY, {"item": ticket.item_id})]
 
 
 def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):

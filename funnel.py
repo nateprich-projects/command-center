@@ -163,6 +163,14 @@ LOCK_TTL = timedelta(hours=2)
 #: from one bounded repository scan, never from a per-ticket lookup.
 CLAIM_BRANCH_GRACE = timedelta(minutes=30)
 
+#: A ``begin`` can spend long enough reading and reconciling the Project for a
+#: second lane to select the same unclaimed ticket from its own earlier view.
+#: Re-read the selected ticket immediately before its claim and pass over only
+#: a claim written inside this short collision window. The one-minute bound is
+#: deliberately narrower than the normal lock lifetime: it catches concurrent
+#: lane starts without hiding a ticket that has become available again.
+BEGIN_CLAIM_COLLISION_WINDOW = timedelta(seconds=60)
+
 #: How many tickets may be worked at once, across the whole funnel.
 #:
 #: This used to be implicit in the claim: `cmd_claim` refused whenever *any*
@@ -4599,6 +4607,19 @@ query($login: String!, $number: Int!, $cursor: String) {
 }
 """
 
+ITEM_LOCK_QUERY = """
+query($item: ID!) {
+  rateLimit { cost remaining resetAt }
+  node(id: $item) {
+    ... on ProjectV2Item {
+      lock: fieldValueByName(name: "In motion since") {
+        ... on ProjectV2ItemFieldTextValue { text }
+      }
+    }
+  }
+}
+"""
+
 
 class GitHubError(RuntimeError):
     pass
@@ -6734,6 +6755,20 @@ def write_lock(item: Item, value: str) -> None:
     )
 
 
+def read_lock(item: Item) -> Optional[datetime]:
+    """Read one ticket's current Project lock immediately before claiming it."""
+    if not item.item_id:
+        raise GitHubError(
+            "{} is not in the Project; cannot read its claim".format(item.ref)
+        )
+    node = gh_graphql(ITEM_LOCK_QUERY, item=item.item_id).get("node")
+    if node is None:
+        raise GitHubError(
+            "{} left the Project before its claim could be read".format(item.ref)
+        )
+    return parse_time((node.get("lock") or {}).get("text"))
+
+
 def find(items: Sequence[Item], ref: str) -> Item:
     """Resolve an exact ref or URL before considering a bare issue number."""
     for i in items:
@@ -8352,6 +8387,36 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
         )
+        recently_claimed: Set[str] = set()
+        while ticket is not None:
+            try:
+                current_claim = read_lock(ticket)
+            except GitHubError as exc:
+                out.update(
+                    do="stop",
+                    why="could not re-read {} claim: {}".format(ticket.ref, exc),
+                )
+                ticket = None
+                break
+            if (
+                current_claim is None
+                or now - current_claim >= BEGIN_CLAIM_COLLISION_WINDOW
+            ):
+                break
+
+            # This process has not claimed its selected ticket yet, so a new
+            # value in the live Project view belongs to another begin. Keep the
+            # local view honest for the WIP check and pass over it without
+            # changing the shared ordering.
+            ticket.in_motion_since = current_claim
+            recently_claimed.add(ticket.ref)
+            ticket = next_ticket_for_tier(
+                items, now, tier=tier, blocked=blocked,
+                excluded=recently_claimed,
+                agent=agent,
+                repo_readiness=repo_readiness,
+                pr_facts=pr_facts,
+            )
         if ticket is None:
             holder = lock_holder(items, now, pr_facts=pr_facts)
             withheld = readiness_blockers(
@@ -8359,7 +8424,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             )
             if withheld:
                 out["withheld"] = withheld
-            if holder is not None:
+            if out.get("why"):
+                why = str(out["why"])
+            elif holder is not None:
                 why = "nothing — lock held by {} (claimed {} ago)".format(
                     holder.ref, humanise(now - holder.in_motion_since)
                 )

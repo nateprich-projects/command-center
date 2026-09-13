@@ -4737,6 +4737,38 @@ def member_repos() -> List[str]:
     return sorted(members)
 
 
+def capture_repo(repo: Optional[str], run: Optional[str] = None,
+                 agent: Optional[str] = None) -> str:
+    """Where a capture goes: the flag, else the run's own work, else the sole member.
+
+    With one member repo the answer was never in doubt. When a second repo
+    joined on 2026-09-12, ``resolve_repo`` refused every routine capture,
+    because no routine passes ``--repo`` -- the agents' only channel for
+    reporting defects closed (#668). A routine captures what it saw while
+    working its ticket or reviewing its PR, so the run's ``bind`` record is
+    the right default; the explicit flag still wins, and two members with no
+    binding still refuse rather than guess.
+    """
+    if repo:
+        return repo
+    run, agent = _heartbeat_context(run, agent)
+    if run and agent:
+        try:
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import heartbeat
+
+            bound = heartbeat.bindings(heartbeat.read(agent)).get(run)
+        except Exception:
+            bound = None
+        if bound:
+            if bound.get("repo"):
+                return str(bound["repo"])
+            work = str(bound.get("work") or "")
+            if "#" in work and "/" in work.split("#", 1)[0]:
+                return work.split("#", 1)[0]
+    return resolve_repo(None)
+
+
 def resolve_repo(repo: Optional[str]) -> str:
     """Choose a member repo only when that choice is unambiguous."""
     if repo:
@@ -6848,7 +6880,7 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
                 klass, ", ".join(LADDER)
             )
         )
-    repo = resolve_repo(repo)
+    repo = capture_repo(repo, run, agent)
     body = append_provenance(
         note or "Captured from chat. Not yet thought through.", "agent",
         at=now, run=run, agent=agent,
@@ -8028,11 +8060,15 @@ def _bind_run(agent: str, out: Dict[str, object]) -> None:
     subject = work.get("pr") if do == "review" else work.get("ref")
     if subject is None:
         return
+    repo = work.get("repo") if do == "review" else None
     out["bound"] = {"do": do, "work": str(subject)}
+    if repo:
+        out["bound"]["repo"] = str(repo)
     try:
         import heartbeat
 
-        heartbeat.record_binding(agent, str(run), str(do), str(subject))
+        heartbeat.record_binding(agent, str(run), str(do), str(subject),
+                                 repo=str(repo) if repo else None)
     except Exception:
         # Instrumentation must not gate the thing it instruments.
         pass

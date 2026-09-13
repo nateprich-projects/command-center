@@ -340,7 +340,8 @@ def record_api_cost(agent: str, run: Optional[str], api_cost: Dict) -> str:
     return kept
 
 
-def record_binding(agent: str, run: str, do: str, work: str) -> str:
+def record_binding(agent: str, run: str, do: str, work: str,
+                   repo: Optional[str] = None) -> str:
     """Bind the work `funnel begin` issued to the run that received it (#497).
 
     Its own record, because the spool is append-only and the start record is
@@ -356,6 +357,10 @@ def record_binding(agent: str, run: str, do: str, work: str) -> str:
         "do": do,
         "work": work,
     }
+    if repo:
+        # A ticket ref carries its repo; a review PR is a bare number, so the
+        # repo travels beside it for anything that must write there (#668).
+        record["repo"] = repo
     kept = append(agent, record)
     _report(kept)
     return kept
@@ -472,6 +477,7 @@ def bindings(records: List[Dict]) -> Dict[str, Dict]:
     for rec in rows:
         found[rec["run"]] = {
             "do": rec.get("do"), "work": rec.get("work"), "ts": rec.get("ts"),
+            "repo": rec.get("repo"),
         }
     return found
 

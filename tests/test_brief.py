@@ -1099,3 +1099,23 @@ def test_brief_fails_closed_without_partial_json_when_gate_section_is_slow(
     assert "brief failed closed" in captured.err
     assert section in captured.err
     assert "no partial JSON emitted" in captured.err
+
+
+def test_closed_itself_gate_timeout_names_candidate_count(
+    monkeypatch, capsys
+):
+    item = funnel.Item(
+        repo="nateprich/beta", number=96, title="Closed project",
+        url="https://example.invalid/96", state="CLOSED", status="Done",
+        klass="Improve", children_total=1, children_done=1, closed_at=NOW,
+    )
+    monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS, "closed_itself", 0.0)
+
+    assert funnel.cmd_brief([item], NOW) == 2
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    assert "section='closed_itself'" in captured.err
+    assert "elapsed=0.000s" in captured.err
+    assert "budget=0.000s" in captured.err
+    assert "candidate count=1" in captured.err

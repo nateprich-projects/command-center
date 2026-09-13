@@ -1,0 +1,221 @@
+#!/bin/bash
+# A Muse implementer: one escalated ticket, then stop.
+#
+# Usage: muse-implement [tier] [reasoning-effort]
+#   tier   -- escalated (default and only accepted tier)
+#   effort -- max (default and only accepted effort)
+#
+# This is deliberately a separate runner from muse-review. The reviewer has
+# write access disabled; putting both flag sets behind a mode switch would let
+# a flag error turn a reviewer into a writer.
+#
+# The prompt is routines/muse-implement.md, read from the maintained clone at
+# run time. The writable workspace is a fresh clone of the claimed ticket's
+# repository. It is removed when the run exits, so no later run can inherit it;
+# meaningful work survives because the routine pushes each step.
+
+set -uo pipefail
+
+TIER="${1:-escalated}"
+EFFORT="${2:-max}"
+if [[ "$TIER" != "escalated" ]]; then
+  echo "muse-implement: tier must be escalated, got '$TIER'" >&2
+  exit 1
+fi
+if [[ "$EFFORT" != "max" ]]; then
+  echo "muse-implement: reasoning effort must be max, got '$EFFORT'" >&2
+  exit 1
+fi
+
+# The maintained read-only clone, not Nate's working tree. The routine and the
+# funnel it invokes must come from the same checkout.
+REPO="${MUSE_IMPLEMENT_REPO:-/Users/nateprich/.claude/command-center-run}"
+MUSE_BIN="${MUSE_BIN:-$HOME/.local/bin/muse}"
+GH_BIN="${GH_BIN:-gh}"
+BOUND_SECONDS="${MUSE_IMPLEMENT_BOUND_SECONDS:-1200}"
+ROUTINE="$REPO/routines/muse-implement.md"
+WORKSPACE_ROOT="${MUSE_IMPLEMENT_WORKSPACE_ROOT:-$HOME/.claude/command-center-muse-implement-workspaces}"
+WORKSPACE=""
+
+if [[ ! -r "$ROUTINE" ]]; then
+  echo "muse-implement: cannot read $ROUTINE — refusing to run without a prompt" >&2
+  exit 1
+fi
+
+PROMPT_TEMPLATE="$(awk 'f{print} /^---$/{f=1}' "$ROUTINE")"
+if [[ "$PROMPT_TEMPLATE" != *[![:space:]]* ]]; then
+  echo "muse-implement: $ROUTINE has no prompt after its --- separator" >&2
+  exit 1
+fi
+
+# Keep the funnel's Project view in one disposable process for this run. The
+# first request is begin, so the claim still reads live GitHub state.
+exec 3< <(
+  FUNNEL_SESSION= FUNNEL_SESSION_SERVER=1 \
+    python3 "$REPO/funnel.py" session-server --parent-pid "$$"
+)
+FUNNEL_SESSION=""
+if ! IFS= read -r FUNNEL_SESSION <&3; then
+  echo "muse-implement: could not start the per-run funnel session" >&2
+  exec 3<&-
+  exit 1
+fi
+exec 3<&-
+export FUNNEL_SESSION
+
+cleanup() {
+  python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
+  if [[ -n "$WORKSPACE" && -d "$WORKSPACE" ]]; then
+    rm -rf -- "$WORKSPACE"
+  fi
+}
+trap cleanup EXIT
+
+# Own the opening poll. Empty polls never clone a repository or launch a model.
+BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent muse --tier escalated)"
+begin_status=$?
+if (( begin_status != 0 )); then
+  echo "muse-implement: funnel begin failed (exit $begin_status)" >&2
+  exit "$begin_status"
+fi
+
+begin_value() {
+  local key="$1"
+  printf '%s\n' "$BEGIN_JSON" | python3 -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin)[sys.argv[1]]
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if value is None:
+    raise SystemExit(1)
+print(value)
+' "$key"
+}
+
+begin_work_value() {
+  local key="$1"
+  printf '%s\n' "$BEGIN_JSON" | python3 -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin)["work"][sys.argv[1]]
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if value is None:
+    raise SystemExit(1)
+print(value)
+' "$key"
+}
+
+if ! BEGIN_DO="$(begin_value do)" \
+  || ! BEGIN_GATE="$(begin_value gate)" \
+  || ! BEGIN_RUN="$(begin_value run)"; then
+  echo "muse-implement: funnel begin returned invalid JSON" >&2
+  exit 1
+fi
+
+if [[ "$BEGIN_DO" == "stop" ]]; then
+  case "$BEGIN_GATE" in
+    over) STOP_OUTCOME="skipped-over-pace" ;;
+    unknown) STOP_OUTCOME="skipped-usage-unknown" ;;
+    *) STOP_OUTCOME="nothing-to-do" ;;
+  esac
+  if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+      --outcome "$STOP_OUTCOME"; then
+    echo "muse-implement: could not finish the stopped run" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+if [[ "$BEGIN_DO" != "ticket" ]] \
+  || ! BEGIN_REPO="$(begin_work_value repo)" \
+  || ! BEGIN_REF="$(begin_work_value ref)"; then
+  echo "muse-implement: funnel begin returned invalid implementation work" >&2
+  exit 1
+fi
+
+release_ticket() {
+  if ! python3 "$REPO/funnel.py" release "$BEGIN_REF"; then
+    echo "muse-implement: could not release $BEGIN_REF" >&2
+  fi
+}
+
+PROMPT="${PROMPT_TEMPLATE//BEGIN_JSON/$BEGIN_JSON}"
+if printf '%s' "$PROMPT" | grep -q BEGIN_JSON; then
+  echo "muse-implement: the begin-json placeholder was not substituted" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "could not substitute the implementation opening result" >&2
+  exit 1
+fi
+
+if ! mkdir -p "$WORKSPACE_ROOT" \
+  || ! WORKSPACE="$(mktemp -d "$WORKSPACE_ROOT/run.XXXXXX")"; then
+  echo "muse-implement: could not create a fresh workspace" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "could not create a fresh implementation workspace" >&2
+  exit 1
+fi
+if ! "$GH_BIN" repo clone "$BEGIN_REPO" "$WORKSPACE"; then
+  echo "muse-implement: could not clone $BEGIN_REPO into the fresh workspace" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "could not clone $BEGIN_REPO into the fresh implementation workspace" >&2
+  exit 1
+fi
+
+# Approval and the sandbox stay on. `never` means never ask, not never allow;
+# safety comes from the routine and the fresh clone being the writable root.
+# Network is explicit because Muse's proxy-only default makes gh time out.
+#
+# `perl setpgrp` gives Muse and every shell child its own process group, so the
+# wall-clock bound can kill the entire tree without killing this runner.
+perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "$MUSE_BIN" exec \
+  --model muse-spark-1.3 \
+  --reasoning-effort "$EFFORT" \
+  --sandbox-network enabled \
+  --approval-mode never \
+  --max-model-steps 60 \
+  --no-foreign-personal-context \
+  --workspace "$WORKSPACE" \
+  --json \
+  "$PROMPT" &
+muse_pid=$!
+killed_marker="$(mktemp "${TMPDIR:-/tmp}/muse-implement-killed.XXXXXX")"
+rm -f "$killed_marker"
+
+(
+  sleep "$BOUND_SECONDS" &
+  sleep_pid=$!
+  trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM
+  wait "$sleep_pid"
+  if kill -0 "$muse_pid" 2>/dev/null; then
+    echo "muse-implement: killing run after ${BOUND_SECONDS}s ($TIER schedule)" >&2
+    : > "$killed_marker"
+    release_ticket
+    python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+      --outcome errored \
+      --note "killed after $((BOUND_SECONDS / 60)) minutes: $TIER implementation run exceeded the wall-clock bound (#392)" >&2
+    kill -TERM -- "-$muse_pid" 2>/dev/null
+    sleep 5
+    kill -KILL -- "-$muse_pid" 2>/dev/null
+  fi
+) &
+bound_pid=$!
+
+wait "$muse_pid"
+status=$?
+if [[ -e "$killed_marker" ]]; then
+  wait "$bound_pid" 2>/dev/null
+  rm -f "$killed_marker"
+  exit 124
+fi
+kill "$bound_pid" 2>/dev/null
+wait "$bound_pid" 2>/dev/null
+exit "$status"

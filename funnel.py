@@ -16,6 +16,7 @@ import argparse
 import contextlib
 import contextvars
 from collections import namedtuple
+from difflib import SequenceMatcher
 import errno
 import glob
 import hashlib
@@ -72,6 +73,48 @@ def normalized_routine(path: os.PathLike) -> bytes:
 def routine_sha(path: os.PathLike) -> str:
     """Return the stable sha256 of a routine, ignoring its own literal."""
     return hashlib.sha256(normalized_routine(path)).hexdigest()
+
+
+ROUTINE_SHA_MISMATCH_DISTANCE = 2
+
+
+def _routine_sha_edit_span_distance(left: str, right: str) -> int:
+    """Count contiguous changed spans in a stable alignment.
+
+    A copied hash can contain a short inserted or deleted run that shifts the
+    rest of the value. Counting edit spans keeps that one transcription error
+    together, while separate wrong nibbles still count separately. Hashes are
+    not repetitive enough for ``SequenceMatcher``'s junk heuristic, but turn it
+    off explicitly so this stays deterministic for short transition prefixes.
+    """
+    opcodes = SequenceMatcher(
+        None, left, right, autojunk=False
+    ).get_opcodes()
+    return sum(1 for opcode in opcodes if opcode[0] != "equal")
+
+
+def routine_sha_status(literal: str, actual: str) -> str:
+    """Classify a pasted routine hash as ``ok``, ``mismatch`` or ``drift``.
+
+    Comparison ignores surrounding whitespace and case. During the transition
+    from the legacy full hash to the shorter prefix, a longer stored hash is
+    compared through the pasted literal's prefix. A non-empty value within two
+    changed spans is a transcription mismatch; larger changes remain drift.
+    """
+    expected = str(literal).strip().lower()
+    stored = str(actual).strip().lower()
+    if not expected or not stored:
+        return "drift"
+    if len(stored) > len(expected):
+        stored = stored[:len(expected)]
+    if expected == stored:
+        return "ok"
+    distance = _routine_sha_edit_span_distance(expected, stored)
+    return (
+        "mismatch"
+        if distance <= ROUTINE_SHA_MISMATCH_DISTANCE
+        else "drift"
+    )
 
 
 def routine_path(agent: str) -> pathlib.Path:
@@ -8347,7 +8390,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         path = routine_path(agent)
         try:
             actual = routine_sha(path)
-            status = "ok" if actual == routine_sha_literal else "drift"
+            status = routine_sha_status(routine_sha_literal, actual)
             check = {
                 "expected": routine_sha_literal,
                 "actual": actual,
@@ -8362,10 +8405,15 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             }
         out["routine_sha"] = check
         if check["status"] != "ok":
+            outcome = (
+                "prompt-mismatch"
+                if check["status"] == "mismatch"
+                else "prompt-drift"
+            )
             heartbeat.record_event(
                 agent,
                 out["run"],
-                "prompt-drift",
+                outcome,
                 note="{} routine {} does not match the pasted literal".format(
                     agent, check["status"]),
                 routine_sha=check,

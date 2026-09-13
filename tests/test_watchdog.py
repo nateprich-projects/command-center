@@ -162,6 +162,26 @@ def test_prompt_mismatch_is_logged_without_filing_a_resync_alarm():
     assert "does not require resync" in message
 
 
+def test_health_line_excludes_rebegins_from_finishes():
+    rows = [
+        start("old", 4),
+        {
+            "run": "old",
+            "phase": "finish",
+            "ts": NOW - 3 * HOUR,
+            "agent": "codex",
+            "outcome": "skipped-blocked",
+            "re_begun_by": "fresh",
+        },
+        start("fresh", 2),
+        finish("fresh", 1),
+    ]
+
+    assert watchdog.health_line("codex", rows, NOW) == (
+        "`codex` run health: 2 starts, 1 finishes, 1 re-begins."
+    )
+
+
 def test_mismatch_only_watchdog_run_stays_healthy_and_prints_the_note(
     monkeypatch, capsys,
 ):

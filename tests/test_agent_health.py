@@ -94,6 +94,31 @@ def test_healthy_heartbeat_rows_render_no_agent_health(monkeypatch):
     assert funnel.agent_health(NOW) == []
 
 
+def test_brief_run_summary_separates_rebegins_from_finishes(monkeypatch):
+    rows = [
+        _start("old", 4),
+        {
+            "run": "old",
+            "phase": "finish",
+            "ts": NOW.timestamp() - 3 * 60,
+            "agent": "codex",
+            "outcome": "skipped-blocked",
+            "re_begun_by": "fresh",
+        },
+        _start("fresh", 2),
+        _finish("fresh", 1),
+    ]
+    monkeypatch.setattr(heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(heartbeat, "read", lambda agent: rows)
+
+    assert funnel.agent_run_summary(NOW) == [{
+        "agent": "codex",
+        "starts": 2,
+        "finishes": 1,
+        "re_begins": 1,
+    }]
+
+
 def test_prompt_mismatch_is_a_transcription_note_not_a_health_condition():
     rows = [{
         "run": "near-miss",

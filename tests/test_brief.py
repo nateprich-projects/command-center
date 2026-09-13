@@ -1106,6 +1106,25 @@ def test_brief_surfaces_agent_health_without_counting_it_as_a_decision(
     assert brief["total_needing_nate"] == 1
 
 
+def test_brief_surfaces_run_summary_with_rebegins_outside_finishes(
+    monkeypatch, capsys
+):
+    summary = [{
+        "agent": "codex",
+        "starts": 2,
+        "finishes": 1,
+        "re_begins": 1,
+    }]
+    monkeypatch.setattr(funnel, "agent_run_summary", lambda now: summary)
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+    monkeypatch.setattr(funnel, "working_tree_touched", lambda now: [])
+
+    assert funnel.cmd_brief([], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["run_summary"] == summary
+
+
 def test_brief_keeps_readable_sections_when_one_section_cannot_be_read(
     monkeypatch, capsys
 ):

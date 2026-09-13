@@ -63,6 +63,11 @@ BACKOFF = [1, 3, 7]
 #: bounded so the file never needs pagination.
 KEEP = 1000
 
+#: The run accounting shown in the brief and watchdog log. Keep it short
+#: enough to describe current health without making old one-off runs dominate
+#: the line.
+RUN_SUMMARY_WINDOW_SECONDS = 7 * 86400
+
 OUTCOMES = [
     "done",                # worked a ticket and opened or merged something
     "nothing-to-do",       # the funnel was empty
@@ -986,6 +991,83 @@ def open_starts(records: List[Dict]) -> List[Dict]:
                 opens.pop(i)
                 break
     return opens
+
+
+def is_rebegin_finish(record: Dict) -> bool:
+    """Whether a finish is the synthetic close written by a second begin.
+
+    ``skipped-blocked`` is also a normal outcome when a prerequisite is open,
+    so the outcome alone cannot identify a same-session re-begin. The durable
+    ``re_begun_by`` marker is written only by :func:`close_rebegun_starts` and
+    is the part of the record that makes this classification unambiguous.
+    """
+    return (
+        isinstance(record, dict)
+        and record.get("phase") == "finish"
+        and record.get("outcome") == "skipped-blocked"
+        and isinstance(record.get("re_begun_by"), str)
+        and bool(record.get("re_begun_by").strip())
+    )
+
+
+def run_summary(
+    records: List[Dict],
+    now: Optional[float] = None,
+    window_seconds: Optional[int] = RUN_SUMMARY_WINDOW_SECONDS,
+) -> Dict[str, int]:
+    """Count starts, ordinary finishes, and same-session re-begins.
+
+    Counts are per run id rather than per JSONL row, so a retry that repeats an
+    already durable row cannot inflate the health line. A re-begin is a close
+    for liveness purposes, but it is deliberately excluded from ``finishes``;
+    otherwise a session that declined once and then worked would look like two
+    completed runs. When ``now`` is omitted, all timestamped history is counted
+    so fixture and offline callers can use the helper without a wall-clock
+    assumption.
+    """
+    starts = set()
+    finishes = set()
+    re_begins = set()
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        run = record.get("run")
+        if not run:
+            continue
+        timestamp = record.get("ts")
+        if (
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, (int, float))
+        ):
+            continue
+        if now is not None:
+            if timestamp > now:
+                continue
+            if (
+                window_seconds is not None
+                and timestamp < now - window_seconds
+            ):
+                continue
+
+        phase = record.get("phase")
+        if phase == "start":
+            starts.add(run)
+        elif phase == "finish":
+            if is_rebegin_finish(record):
+                re_begins.add(run)
+            else:
+                finishes.add(run)
+
+    # A malformed or duplicated history must not put the same run in both
+    # categories. The synthetic marker wins because it is the more specific
+    # observation of what happened to that start.
+    finishes.difference_update(re_begins)
+    return {
+        "starts": len(starts),
+        "finishes": len(finishes),
+        "re_begins": len(re_begins),
+    }
 
 
 def resolve_run(records: List[Dict], requested: Optional[str]):

@@ -8,6 +8,17 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Routine-SHA outcomes must keep transcription separate from drift
+
+**2026-09-13 · Command Center / #748 · measured**
+
+`funnel begin --routine-sha` has three distinct outcomes: an exact hash is `ok`; a
+near transcription miss is `prompt-mismatch`, an informational note that does not
+require resync; and a genuinely stale or otherwise different routine literal is
+`prompt-drift`, which requires resync before relying on the scheduled prompt.
+Automation memory must not describe a `prompt-mismatch` as known drift or advise
+ignoring `prompt-drift`.
+
 ### Repository transfers can 500 repeatedly and then succeed
 
 **2026-09-13 · GitHub API / Jeffy onboarding · measured**

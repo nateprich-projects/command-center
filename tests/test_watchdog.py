@@ -11,9 +11,11 @@ import json
 import pathlib
 import sys
 import time
+from datetime import datetime
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+SILENCE_FIXTURE = ROOT / "tests" / "fixtures" / "heartbeat_silence_window.json"
 
 import heartbeat  # noqa: E402
 
@@ -75,6 +77,23 @@ def history(gaps_hours, quiet_hours):
          "agent": "codex", "outcome": "done"}
         for i, timestamp in enumerate(timestamps)
     ]
+
+
+def silence_fixture():
+    payload = json.loads(SILENCE_FIXTURE.read_text())
+    now = datetime.fromisoformat(
+        payload["now"].replace("Z", "+00:00")
+    ).timestamp()
+    rows = {
+        agent: [
+            dict(row, ts=datetime.fromisoformat(
+                row["ts"].replace("Z", "+00:00")
+            ).timestamp())
+            for row in agent_rows
+        ]
+        for agent, agent_rows in payload["agents"].items()
+    }
+    return now, rows
 
 
 # -- what must NOT be reported ---------------------------------------------
@@ -187,6 +206,37 @@ def test_thin_history_declines_to_alarm_and_prints_a_note():
     message = watchdog.note("codex", rows, NOW)
     assert "only 1 gap(s)" in message
     assert "silence threshold not inferred" in message
+
+
+def test_sparse_silence_floor_reaches_the_watchdog_issue_body(monkeypatch):
+    now, rows = silence_fixture()
+    calls = []
+
+    monkeypatch.setattr(watchdog.time, "time", lambda: now)
+    monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {
+        "codex": "openai",
+        "muse": "meta",
+    })
+    monkeypatch.setattr(
+        watchdog, "records", lambda agent: rows.get(agent, [])
+    )
+    monkeypatch.setattr(
+        watchdog, "existing_issue", lambda: {"number": 160}
+    )
+    monkeypatch.setattr(
+        watchdog, "gh", lambda *args: calls.append(args) or ""
+    )
+
+    assert watchdog.main() == 0
+
+    body = next(
+        argument[len("body="):]
+        for call in calls
+        for argument in call
+        if argument.startswith("body=")
+    )
+    assert "- `codex`: absolute silence floor 6h exceeded." in body
+    assert "normal gap" not in body
 
 
 def test_three_unfinished_runs_are_reported_as_dying():

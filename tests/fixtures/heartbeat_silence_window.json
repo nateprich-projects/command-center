@@ -1,0 +1,41 @@
+{
+  "now": "2026-09-12T20:00:00Z",
+  "observed_window": {
+    "start": "2026-09-11T12:00:00Z",
+    "end": "2026-09-12T20:00:00Z"
+  },
+  "agents": {
+    "codex": [
+      {
+        "run": "codex-before-window",
+        "phase": "finish",
+        "ts": "2026-09-11T11:59:00Z",
+        "agent": "codex",
+        "outcome": "done"
+      }
+    ],
+    "muse": [
+      {
+        "run": "muse-window-start",
+        "phase": "finish",
+        "ts": "2026-09-11T12:15:00Z",
+        "agent": "muse",
+        "outcome": "nothing-to-do"
+      },
+      {
+        "run": "muse-window-middle",
+        "phase": "finish",
+        "ts": "2026-09-12T12:15:00Z",
+        "agent": "muse",
+        "outcome": "nothing-to-do"
+      },
+      {
+        "run": "muse-window-end",
+        "phase": "finish",
+        "ts": "2026-09-12T19:19:00Z",
+        "agent": "muse",
+        "outcome": "nothing-to-do"
+      }
+    ]
+  }
+}

@@ -4623,12 +4623,18 @@ query($cursor: String) {
 }
 """
 
+# GitHub permits up to 100 Project items per connection page. The brief reads
+# the same Project view on every run, so use the largest bounded page to avoid
+# paying the per-request latency for eleven 50-item pages on the current board
+# (#757). The cursor still makes this safe for a board larger than one page.
+PROJECT_ITEM_PAGE_SIZE = 100
+
 ITEM_QUERY = """
 query($login: String!, $number: Int!, $cursor: String) {
   rateLimit { cost remaining resetAt }
   user(login: $login) {
     projectV2(number: $number) {
-      items(first: 50, after: $cursor) {
+      items(first: %d, after: $cursor) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id
@@ -4679,7 +4685,7 @@ query($login: String!, $number: Int!, $cursor: String) {
     }
   }
 }
-"""
+""" % PROJECT_ITEM_PAGE_SIZE
 
 ITEM_LOCK_QUERY = """
 query($item: ID!) {

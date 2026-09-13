@@ -310,6 +310,72 @@ def test_same_prompt_still_catches_a_real_change():
     assert not sync.same_prompt(None, wanted)
 
 
+def test_the_installed_lanes_fire_in_distinct_minutes():
+    """Two lanes in the same minute are handed the same top ticket (#667)."""
+    files = sorted(sync.AUTOMATIONS.glob(sync.GLOB))
+    if not files:
+        pytest.skip("no Codex automations on this machine — nothing to compare")
+    problems = sync.same_minute_lanes(path.parent.name for path in files)
+    assert not problems, (
+        "Codex lanes are not staggered one minute apart: {}. Edit each rrule's "
+        "BYMINUTE by hand (#678).".format(problems)
+    )
+
+
+def _write_rrule(root, name, rrule, with_prompt=False):
+    """The rrule is written first: the lane's tier, and so its prompt, is read
+    back off it."""
+    path = root / name / "automation.toml"
+    path.parent.mkdir()
+    path.write_text('rrule = "RRULE:{}"\n'.format(rrule))
+    if with_prompt:
+        with path.open("a") as fh:
+            fh.write("prompt = {}\n".format(json.dumps(sync.prompt_text(name))))
+
+
+def test_check_fails_when_two_lanes_share_a_fire_minute(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sync, "AUTOMATIONS", tmp_path)
+    hourly = "command-center-a-hourly"
+    nights = "command-center-b-nights"
+    _write_rrule(tmp_path, hourly, "FREQ=HOURLY;INTERVAL=1;BYMINUTE=0,20,40", with_prompt=True)
+    _write_rrule(tmp_path, nights, "FREQ=WEEKLY;BYDAY=SA;BYHOUR=2;BYMINUTE=0;BYSECOND=0", with_prompt=True)
+
+    assert sync.main(["--check"]) == 1
+    output = capsys.readouterr().out
+    assert "SAME-MINUTE {} and {} both fire at minute 0".format(hourly, nights) in output
+    assert "DRIFTED" not in output
+
+
+def test_check_passes_on_the_one_minute_stagger(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(sync, "AUTOMATIONS", tmp_path)
+    lanes = [("command-center-0-hourly", "FREQ=HOURLY;INTERVAL=1;BYMINUTE=0,20,40")]
+    lanes += [
+        ("command-center-{}-window".format(n),
+         "FREQ=WEEKLY;BYDAY=MO;BYHOUR={};BYMINUTE={};BYSECOND=0".format(n, n))
+        for n in range(1, 5)
+    ]
+    for name, rrule in lanes:
+        _write_rrule(tmp_path, name, rrule, with_prompt=True)
+
+    assert sync.main(["--check"]) == 0
+    assert "SAME-MINUTE" not in capsys.readouterr().out
+    assert [sync.fire_minutes(name) for name, _ in lanes][1:] == [
+        frozenset({n}) for n in range(1, 5)
+    ]
+
+
+def test_an_unreadable_minute_is_not_a_verified_offset(tmp_path, monkeypatch):
+    monkeypatch.setattr(sync, "AUTOMATIONS", tmp_path)
+    _write_rrule(tmp_path, "no-minute", "FREQ=WEEKLY;BYDAY=SA;BYHOUR=2")
+    _write_rrule(tmp_path, "minute-seven", "FREQ=HOURLY;BYMINUTE=7")
+
+    assert sync.fire_minutes("no-minute") is None
+    assert sync.fire_minutes("does-not-exist") is None
+    assert sync.same_minute_lanes(["no-minute", "minute-seven"]) == [
+        ("no-minute", None, None)
+    ]
+
+
 def test_hourly_lane_documentation_matches_its_actual_cadence():
     source = (ROOT / "scripts" / "sync_codex_automations.py").read_text()
     assert "The `-hourly`" in source

@@ -131,3 +131,52 @@ def test_fixture_load_api_calls_do_not_scale_with_item_count(monkeypatch):
         "fixture-load API calls must be bounded by pages and fixed work, "
         "not by item count"
     )
+
+
+def test_project_item_query_uses_maximum_bounded_page():
+    """The Project read uses one bounded request for every 100 items."""
+    compact = " ".join(funnel.ITEM_QUERY.split())
+
+    assert "items(first: 100, after: $cursor)" in compact
+    assert funnel.PROJECT_ITEM_PAGE_SIZE == 100
+
+
+def test_load_items_follows_the_cursor_after_a_full_page(monkeypatch):
+    """The larger page does not drop items when the Project still continues."""
+    pages = [
+        [_node(number) for number in range(1, 101)],
+        [_node(101)],
+    ]
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append(variables)
+        page = pages.pop(0)
+        return {
+            "user": {
+                "projectV2": {
+                    "items": {
+                        "nodes": page,
+                        "pageInfo": {
+                            "hasNextPage": bool(pages),
+                            "endCursor": "cursor-1" if pages else None,
+                        },
+                    }
+                }
+            }
+        }
+
+    monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    items = funnel.load_items()
+
+    assert [item.number for item in items] == list(range(1, 102))
+    assert calls == [
+        {"login": funnel.PROJECT_OWNER, "number": funnel.PROJECT_NUMBER},
+        {
+            "login": funnel.PROJECT_OWNER,
+            "number": funnel.PROJECT_NUMBER,
+            "cursor": "cursor-1",
+        },
+    ]

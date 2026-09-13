@@ -13,6 +13,7 @@ is structural rather than a single oversight.
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
@@ -20,6 +21,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import funnel  # noqa: E402
 
 SKILL = pathlib.Path(__file__).resolve().parent.parent / "skills" / "funnel" / "SKILL.md"
+
+
+def documented_field_keys() -> set:
+    """Return the keys named in the skill's brief field table."""
+    fields = SKILL.read_text().split("## What the fields mean", 1)[1]
+    fields = fields.split("## How to render it", 1)[0]
+    return set(re.findall(r"^\| `([^`]+)` \|", fields, re.MULTILINE))
 
 
 def brief_keys() -> set:
@@ -63,10 +71,22 @@ def test_every_brief_key_is_documented_in_the_skill():
     )
 
 
+def test_human_step_brief_keys_are_documented_in_the_field_table():
+    """Both work-owner sections must be part of the brief contract."""
+    expected = {"human_steps", "machine_local_steps"}
+    documented = documented_field_keys()
+    assert expected <= brief_keys()
+    assert expected <= documented, (
+        "the /funnel field table omits brief work-owner keys: "
+        + ", ".join(sorted(expected - documented))
+    )
+
+
 def test_the_keys_were_actually_found():
     """A parser that silently found nothing would make the guard vacuous."""
     keys = brief_keys()
     assert "human_steps" in keys
+    assert "machine_local_steps" in keys
     assert "total_needing_nate" in keys
     assert len(keys) > 10
 
@@ -86,5 +106,21 @@ def test_working_tree_touched_rendering_keeps_observers_visible():
     missing = [phrase for phrase in required if phrase not in rendering]
     assert not missing, (
         "the /funnel rendering instructions hide working-tree observer details: "
+        + ", ".join(missing)
+    )
+
+
+def test_human_step_rendering_names_both_work_owners():
+    """The two work queues must not be rendered as Nate's decision queue."""
+    rendering = SKILL.read_text().split("## How to render it", 1)[1]
+    required = (
+        "`human_steps`",
+        "waiting on Nate to go and do",
+        "`machine_local_steps`",
+        "waiting on a Claude Code session to go and do",
+    )
+    missing = [phrase for phrase in required if phrase not in rendering]
+    assert not missing, (
+        "the /funnel rendering instructions blur human and machine-local work: "
         + ", ".join(missing)
     )

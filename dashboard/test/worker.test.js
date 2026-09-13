@@ -8,6 +8,15 @@ function encodeJson(value) {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
 }
 
+function tamperSignature(token) {
+  const parts = token.split(".");
+  const signature = parts[2];
+  const index = Math.floor(signature.length / 2);
+  const replacement = signature[index] === "a" ? "b" : "a";
+  parts[2] = `${signature.slice(0, index)}${replacement}${signature.slice(index + 1)}`;
+  return parts.join(".");
+}
+
 function accessFixture(overrides = {}) {
   const teamDomain = overrides.teamDomain || `https://${crypto.randomUUID()}.cloudflareaccess.com`;
   const audience = "dashboard-audience";
@@ -55,7 +64,12 @@ test("Access validation requires the configured issuer, audience, expiry, and si
   assert.equal(await verifyAccessJwt(fixture.sign({ iss: "https://other.cloudflareaccess.com" }), config, options), false);
   assert.equal(await verifyAccessJwt(fixture.sign({ exp: 1 }), config, options), false);
 
-  const tampered = fixture.sign().replace(/.$/, (character) => character === "a" ? "b" : "a");
+  const valid = fixture.sign();
+  const tampered = tamperSignature(valid);
+  assert.notDeepEqual(
+    Buffer.from(tampered.split(".")[2], "base64url"),
+    Buffer.from(valid.split(".")[2], "base64url"),
+  );
   assert.equal(await verifyAccessJwt(tampered, config, options), false);
 });
 

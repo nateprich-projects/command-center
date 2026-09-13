@@ -62,7 +62,7 @@ def test_record_binding_writes_its_own_phase(spool):
     assert record["phase"] == "bind"
     assert (record["run"], record["do"], record["work"]) == ("r1", "ticket", "o/r#9")
     assert heartbeat.bindings([record]) == {
-        "r1": {"do": "ticket", "work": "o/r#9", "ts": record["ts"]},
+        "r1": {"do": "ticket", "work": "o/r#9", "ts": record["ts"], "repo": None},
     }
 
 
@@ -206,7 +206,7 @@ def test_an_omitted_id_with_one_open_start_still_resolves(spool):
 def test_begin_binds_the_work_it_issues(monkeypatch):
     bound = []
     monkeypatch.setattr(heartbeat, "record_binding",
-                        lambda agent, run, do, work: bound.append((agent, run, do, work)) or "spooled")
+                        lambda agent, run, do, work, repo=None: bound.append((agent, run, do, work)) or "spooled")
     out = {"run": "r1", "do": "ticket", "work": {"ref": "o/r#9", "title": "t"}}
     funnel._bind_run("codex", out)
     assert bound == [("codex", "r1", "ticket", "o/r#9")]

@@ -1108,7 +1108,7 @@ def test_begin_binds_the_ticket_it_issues_to_the_run(monkeypatch, capsys):
     bound = []
     monkeypatch.setattr(
         heartbeat, "record_binding",
-        lambda agent, run, do, work: bound.append((agent, run, do, work)) or "pushed",
+        lambda agent, run, do, work, repo=None: bound.append((agent, run, do, work)) or "pushed",
     )
     project, ticket = _ticket(7, 6)
     result, writes = _implementing_begin(monkeypatch, capsys, [project, ticket])

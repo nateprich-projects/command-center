@@ -60,7 +60,7 @@ asked of it.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha c5479276ab0af9dff7df7e019030bae73b4fa691a3abaa11a20f98442f777cd3
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha 28ba97815eefa9f6724d10e3be43f67ff1186a4d8d382419b38dc1e6ccb3f813
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and says
@@ -326,7 +326,7 @@ capture using `skills/shape`'s "Class it when you file it" rule, and say why.
 Agents class their own captures, never his existing issues.
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --note "<observed evidence; chosen class and why>"
+python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --repo nateprich-projects/command-center --note "<observed evidence; chosen class and why>"
 ```
 
 This is the sanctioned exception to the review rule to act only on the PR you were

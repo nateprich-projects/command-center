@@ -27,7 +27,7 @@ preempt.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha 644340ec64692c4183b856c0c9d4496776f3d94fb3972e99b629cbf34be18fba
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha 0093038c9182e89c038d8d77a09e4f6b36f15a0480667c306d80b4e8e45f3c62
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and names
@@ -316,7 +316,7 @@ capture using `skills/shape`'s "Class it when you file it" rule, and say why.
 Agents class their own captures, never his existing issues.
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --origin agent --class <Broken|Maintenance|Improve|New|Replace> --note "<observed evidence; say why you chose this class, and say plainly when you are unsure>"
+python3 /Users/nateprich/.claude/command-center-run/funnel.py capture "<short defect title>" --repo nateprich-projects/command-center --origin agent --class <Broken|Maintenance|Improve|New|Replace> --note "<observed evidence; say why you chose this class, and say plainly when you are unsure>"
 ```
 
 This is the sanctioned exception to the review rule to act only on the PR you were

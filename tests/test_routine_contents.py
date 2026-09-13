@@ -135,3 +135,14 @@ def test_unattended_shaping_can_recover_an_unclassed_agent_idea(routine):
     assert "capture origin is `agent`" in normalized
     assert "--class <broken|maintenance|improve|new|replace>" in normalized
     assert "proposed class:" in normalized
+
+
+@pytest.mark.parametrize("routine", ("codex-work", "muse", "claude", "zcode"))
+def test_every_capture_line_names_its_repo(routine):
+    """With two member repos, a capture without --repo refuses and the
+    observation is lost (#668). The resolver defaults from the run's binding;
+    the routine passes the flag anyway."""
+    body = (ROOT / "routines" / (routine + ".md")).read_text(encoding="utf-8")
+    lines = [l for l in body.splitlines() if "funnel.py capture" in l]
+    assert lines
+    assert all("--repo" in l for l in lines)

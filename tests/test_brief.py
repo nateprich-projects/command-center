@@ -295,17 +295,37 @@ def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
         "gate authority, policy authority"
     )
     comments = {
-        80: [{"body": funnel.SELF_APPROVED_PREFIX + basis}],
-        81: [{"body": "Approved at the Shaped gate — Ready."}],
-        82: [{"body": funnel.SELF_APPROVED_PREFIX + "old basis"}],
+        80: [{
+            "body": funnel.SELF_APPROVED_PREFIX + basis,
+            "createdAt": "2026-09-05T11:00:00Z",
+        }],
+        81: [{
+            "body": "Approved at the Shaped gate — Ready.",
+            "createdAt": "2026-09-05T10:00:00Z",
+        }],
+        82: [{
+            "body": funnel.SELF_APPROVED_PREFIX + "old basis",
+            "createdAt": "2026-08-29T12:00:00Z",
+        }],
     }
     calls = []
 
-    def gh_json(*args):
-        calls.append(args)
-        return {"comments": comments[int(args[3])]}
+    def gh_graphql(query, **variables):
+        calls.append(query)
+        _, aliases = funnel._closed_itself_comment_query(
+            [nate_approved, self_approved]
+        )
+        response = {
+            "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"}
+        }
+        for ref, (repo_alias, issue_alias) in aliases.items():
+            number = int(ref.rsplit("#", 1)[1])
+            response.setdefault(repo_alias, {})[issue_alias] = {
+                "comments": {"nodes": comments[number]}
+            }
+        return response
 
-    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(funnel, "gh_graphql", gh_graphql)
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
 
     assert funnel.cmd_brief(
@@ -322,7 +342,84 @@ def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
     }]
     assert "authority signals: gate authority, policy authority" in \
         brief["unattended_approvals"][0]["basis"]
-    assert [call[3] for call in calls] == ["81", "80"]
+    assert len(calls) == 1
+    assert "rateLimit { cost remaining resetAt }" in calls[0]
+    assert "comments(last: {})".format(
+        funnel.CLOSED_ITSELF_COMMENT_PAGE_SIZE
+    ) in calls[0]
+    assert "nodes { body createdAt }" in calls[0]
+
+
+def test_unattended_approvals_batch_is_cached_for_one_run(monkeypatch):
+    items = [
+        _approval_item(83, NOW - timedelta(hours=1), previous="Ideas"),
+        _approval_item(84, NOW - timedelta(hours=2)),
+    ]
+    comments = {
+        item.number: [{"body": funnel.SELF_APPROVED_PREFIX + "basis"}]
+        for item in items
+    }
+    calls = []
+
+    def gh_graphql(query, **variables):
+        calls.append(query)
+        _, aliases = funnel._closed_itself_comment_query(items)
+        response = {
+            "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"}
+        }
+        for ref, (repo_alias, issue_alias) in aliases.items():
+            number = int(ref.rsplit("#", 1)[1])
+            response.setdefault(repo_alias, {})[issue_alias] = {
+                "comments": {"nodes": comments[number]}
+            }
+        return response
+
+    monkeypatch.setattr(funnel, "gh_graphql", gh_graphql)
+    cache = funnel.BriefCache()
+
+    first = funnel.unattended_approvals(items, NOW, brief_cache=cache)
+    second = funnel.unattended_approvals(items, NOW, brief_cache=cache)
+
+    assert [row["ref"] for row in first] == [items[0].ref, items[1].ref]
+    assert second == first
+    assert len(calls) == 1
+
+
+def test_brief_comment_tail_cache_is_shared_between_sections(monkeypatch):
+    item = funnel.Item(
+        repo="nateprich/beta", number=85, title="Both markers",
+        url="https://example.invalid/85", state="CLOSED", status="Done",
+        klass="Improve", children_total=1, children_done=1,
+        closed_at=NOW - timedelta(hours=1),
+        status_events=[{
+            "previous_status": "Ideas", "status": "Ready",
+            "at": NOW - timedelta(hours=2),
+        }],
+    )
+    comments = [{
+        "body": funnel.closed_itself_comment([], []),
+    }, {
+        "body": funnel.SELF_APPROVED_PREFIX + "basis",
+    }]
+    calls = []
+
+    def gh_graphql(query, **variables):
+        calls.append(query)
+        _, aliases = funnel._closed_itself_comment_query([item])
+        repo_alias, issue_alias = aliases[item.ref]
+        return {
+            "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},
+            repo_alias: {
+                issue_alias: {"comments": {"nodes": comments}}
+            },
+        }
+
+    monkeypatch.setattr(funnel, "gh_graphql", gh_graphql)
+    cache = funnel.BriefCache()
+
+    assert funnel.closed_itself_json([item], NOW, brief_cache=cache)
+    assert funnel.unattended_approvals([item], NOW, brief_cache=cache)
+    assert len(calls) == 1
 
 
 def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(

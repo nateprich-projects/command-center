@@ -2593,9 +2593,12 @@ def _self_approval_transition_times(item: Item, now: datetime) -> List[datetime]
     return sorted(found)
 
 
-def _self_approval_markers(item: Item) -> List[Dict[str, object]]:
+def _self_approval_markers(
+    item: Item, comments: Optional[Sequence[dict]] = None
+) -> List[Dict[str, object]]:
     """Read marker comments for one already-identified candidate item."""
-    comments = _issue_comments(item)
+    if comments is None:
+        comments = _issue_comments(item)
 
     found: List[Dict[str, object]] = []
     for comment in comments:
@@ -2612,22 +2615,37 @@ def _self_approval_markers(item: Item) -> List[Dict[str, object]]:
 
 
 def unattended_approvals(
-    items: Iterable[Item], now: datetime
+    items: Iterable[Item], now: datetime, brief_cache=None
 ) -> List[Dict[str, object]]:
     """Recent agent Ready transitions carrying their own approval marker.
 
     Status history is already part of the Project load. Only items with a
-    recent Ideas/Shaped-to-Ready candidate pay for an issue-comment lookup,
-    and a record is emitted only when the marker is present. That makes a
-    Nate-authored ``approve`` transition invisible here without reading every
-    issue's comments.
+    recent Ideas/Shaped-to-Ready candidate pay for a bounded, batched
+    issue-comment lookup, and a record is emitted only when the marker is
+    present. That makes a Nate-authored ``approve`` transition invisible here
+    without reading every issue's comments.
     """
-    found: List[Dict[str, object]] = []
+    candidates = []
     for item in items:
         transition_times = _self_approval_transition_times(item, now)
         if not transition_times:
             continue
-        markers = _self_approval_markers(item)
+
+        candidates.append((item, transition_times))
+
+    if not candidates:
+        return []
+
+    cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
+    comments_by_ref = cache.comment_tails(
+        [item for item, _transition_times in candidates]
+    )
+
+    found: List[Dict[str, object]] = []
+    for item, transition_times in candidates:
+        markers = _self_approval_markers(
+            item, comments_by_ref.get(item.ref, [])
+        )
         if not markers:
             continue
 
@@ -6183,36 +6201,42 @@ class BriefCache:
     def __init__(self):
         self._pr_facts = _BRIEF_UNAVAILABLE
         self._heartbeat_rows: Dict[str, List[Dict]] = {}
-        self._closed_itself_comments: Dict[str, List[Dict]] = {}
+        self._comment_tails: Dict[str, List[Dict]] = {}
 
     def clear(self) -> None:
         """Forget auxiliary reads after a command may have mutated GitHub."""
         self._pr_facts = _BRIEF_UNAVAILABLE
         self._heartbeat_rows.clear()
-        self._closed_itself_comments.clear()
+        self._comment_tails.clear()
 
     def get_pr_facts(self, items: Sequence[Item]):
         if self._pr_facts is _BRIEF_UNAVAILABLE:
             self._pr_facts = ticket_pr_facts(items)
         return self._pr_facts
 
-    def closed_itself_comments(
+    def comment_tails(
         self, items: Sequence[Item]
     ) -> Dict[str, List[Dict]]:
         """Read and retain bounded marker tails for one run only."""
         missing = [
             item for item in items
-            if item.ref not in self._closed_itself_comments
+            if item.ref not in self._comment_tails
         ]
         if missing:
-            self._closed_itself_comments.update(
+            self._comment_tails.update(
                 _batched_issue_comments(missing)
             )
         return {
-            item.ref: self._closed_itself_comments[item.ref]
+            item.ref: self._comment_tails[item.ref]
             for item in items
-            if item.ref in self._closed_itself_comments
+            if item.ref in self._comment_tails
         }
+
+    def closed_itself_comments(
+        self, items: Sequence[Item]
+    ) -> Dict[str, List[Dict]]:
+        """Read the bounded comment tails used by the closed-itself section."""
+        return self.comment_tails(items)
 
     def heartbeat_rows(self, agent: str) -> List[Dict]:
         if agent in self._heartbeat_rows:
@@ -6462,8 +6486,12 @@ def cmd_brief(
         )
         approvals = section(
             "unattended_approvals",
-            lambda: unattended_approvals(items, now),
+            lambda: unattended_approvals(items, now, brief_cache=cache),
             [],
+            candidate_count=sum(
+                1 for item in items
+                if _self_approval_transition_times(item, now)
+            ),
         )
         health = section("agent_health", lambda: agent_health(now), [])
         touched = section(
@@ -7238,7 +7266,7 @@ def _issue_comments(item: Item) -> List[dict]:
     return comments
 
 
-def _closed_itself_comment_query(
+def _brief_comment_query(
     items: Sequence[Item],
 ) -> Tuple[str, Dict[str, Tuple[str, str]]]:
     """Build one bounded GraphQL read for a batch of candidate issues."""
@@ -7266,7 +7294,7 @@ def _closed_itself_comment_query(
             issue_alias = "issue{}".format(issue_index)
             lines.append(
                 "    {}: issue(number: {}) {{ comments(last: {}) {{ "
-                "nodes {{ body }} }} }}".format(
+                "nodes {{ body createdAt }} }} }}".format(
                     issue_alias, item.number, CLOSED_ITSELF_COMMENT_PAGE_SIZE
                 )
             )
@@ -7276,6 +7304,13 @@ def _closed_itself_comment_query(
     return "\n".join(lines), aliases
 
 
+def _closed_itself_comment_query(
+    items: Sequence[Item],
+) -> Tuple[str, Dict[str, Tuple[str, str]]]:
+    """Compatibility wrapper for the brief's shared comment query builder."""
+    return _brief_comment_query(items)
+
+
 def _batched_issue_comments(
     items: Sequence[Item],
 ) -> Dict[str, List[Dict]]:
@@ -7283,7 +7318,7 @@ def _batched_issue_comments(
     found: Dict[str, List[Dict]] = {}
     for start in range(0, len(items), CLOSED_ITSELF_COMMENT_BATCH_SIZE):
         batch = items[start:start + CLOSED_ITSELF_COMMENT_BATCH_SIZE]
-        query, aliases = _closed_itself_comment_query(batch)
+        query, aliases = _brief_comment_query(batch)
         data = gh_graphql(query)
         for item in batch:
             repo_alias, issue_alias = aliases[item.ref]

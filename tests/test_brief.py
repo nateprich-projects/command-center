@@ -896,10 +896,18 @@ def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
         url="https://example.invalid/41", state="OPEN",
         parent="nateprich/beta#39",
     )
+    machine_local_step = funnel.Item(
+        repo="nateprich/beta", number=42, title="Run the local setup",
+        url="https://example.invalid/42", state="OPEN",
+        parent="nateprich/beta#39",
+        body="Human step: {}\n".format(funnel.MACHINE_LOCAL_REASON),
+    )
 
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
 
-    assert funnel.cmd_brief([ordinary_ticket, human_step], NOW) == 0
+    assert funnel.cmd_brief(
+        [ordinary_ticket, human_step, machine_local_step], NOW
+    ) == 0
     brief = json.loads(capsys.readouterr().out)
 
     assert brief["human_steps"] == [{
@@ -908,7 +916,14 @@ def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
         "url": "https://example.invalid/40",
         "reason": "an account or billing setting",
     }]
+    assert brief["machine_local_steps"] == [{
+        "ref": "nateprich/beta#42",
+        "title": "Run the local setup",
+        "url": "https://example.invalid/42",
+        "reason": funnel.MACHINE_LOCAL_REASON,
+    }]
     assert brief["items"] == []
+    assert brief["total_needing_nate"] == 0
     assert funnel.awaiting_decision([human_step]) == []
 
 

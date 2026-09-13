@@ -399,6 +399,7 @@ BRIEF_SECTION_BUDGETS = {
     "prose_dependencies": 0.25,
     "suspected_human_steps": 0.25,
     "human_steps": 0.25,
+    "machine_local_steps": 0.25,
     "closed_with_access_vocabulary": 0.25,
     "unclassed_captures": 0.25,
     "needs_class": 0.25,
@@ -5589,6 +5590,14 @@ def _item_human_step_reason(item: Item) -> Optional[str]:
     return parse_human_step(item.body or "")
 
 
+def _reason_matches(reason: Optional[str], candidates: Iterable[str]) -> bool:
+    """Match a parsed marker against an allowlist without trusting casing."""
+    if not isinstance(reason, str):
+        return False
+    normalized = reason.casefold()
+    return any(normalized == candidate.casefold() for candidate in candidates)
+
+
 def human_step_items(items: Iterable[Item]) -> List[Item]:
     """Open child issues that Nate must complete himself.
 
@@ -5602,7 +5611,9 @@ def human_step_items(items: Iterable[Item]) -> List[Item]:
             item for item in items
             if item.state == "OPEN"
             and item.parent is not None
-            and _item_human_step_reason(item) is not None
+            and _reason_matches(
+                _item_human_step_reason(item), HUMAN_STEP_REASONS
+            )
         ),
         key=lambda item: (item.repo, item.number),
     )
@@ -5620,6 +5631,31 @@ def _human_step_item_json(item: Item) -> Dict[str, object]:
 def human_step_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     """Render the open human-step work owed by Nate."""
     return [_human_step_item_json(item) for item in human_step_items(items)]
+
+
+def machine_local_step_items(items: Iterable[Item]) -> List[Item]:
+    """Open child issues whose work needs Claude Code's local environment."""
+    return sorted(
+        (
+            item for item in items
+            if item.state == "OPEN"
+            and item.parent is not None
+            and _reason_matches(
+                _item_human_step_reason(item), MACHINE_LOCAL_REASONS
+            )
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+
+
+def machine_local_step_json(
+    items: Iterable[Item],
+) -> List[Dict[str, object]]:
+    """Render open work waiting on a Claude Code session."""
+    return [
+        _human_step_item_json(item)
+        for item in machine_local_step_items(items)
+    ]
 
 
 def completed_projects_missing_human_steps(items: Iterable[Item]) -> List[Item]:
@@ -6552,6 +6588,11 @@ def cmd_brief(
             [],
         )
         human = section("human_steps", lambda: human_step_json(items), [])
+        machine_local = section(
+            "machine_local_steps",
+            lambda: machine_local_step_json(items),
+            [],
+        )
         closed_access = section(
             "closed_with_access_vocabulary",
             lambda: closed_with_access_vocabulary_json(items),
@@ -6636,6 +6677,7 @@ def cmd_brief(
             "prose_dependencies": prose,
             "suspected_human_steps": suspected,
             "human_steps": human,
+            "machine_local_steps": machine_local,
             "closed_with_access_vocabulary": closed_access,
             "unclassed_captures": unclassed,
             "needs_class": needs,

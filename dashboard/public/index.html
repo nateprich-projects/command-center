@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Command Center</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">Command Center</p>
+        <h1>Funnel</h1>
+      </div>
+      <button id="refresh" type="button">Request refresh</button>
+    </header>
+    <p id="snapshot-status" class="snapshot-status" role="status">Loading snapshot…</p>
+    <main>
+      <section aria-labelledby="brief-heading">
+        <h2 id="brief-heading">Waiting on Nate</h2>
+        <div id="brief"></div>
+      </section>
+      <section aria-labelledby="board-heading">
+        <h2 id="board-heading">Projects</h2>
+        <div id="board" class="board"></div>
+      </section>
+    </main>
+    <template id="empty-state">
+      <p class="empty">Nothing is waiting on you.</p>
+    </template>
+  </body>
+</html>

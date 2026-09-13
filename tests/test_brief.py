@@ -927,6 +927,88 @@ def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
     assert funnel.awaiting_decision([human_step]) == []
 
 
+def test_brief_separates_blocked_human_and_machine_local_steps(
+    monkeypatch, capsys
+):
+    parent = funnel.Item(
+        repo="nateprich/beta", number=43, title="Project",
+        url="https://example.invalid/43", state="OPEN", status="Building",
+        klass="New",
+    )
+    blocked_parent = funnel.Item(
+        repo="nateprich/beta", number=44, title="Blocked project",
+        url="https://example.invalid/44", state="OPEN", status="Building",
+        klass="New", labels=["blocked"], parent=parent.ref,
+        block_references=["#88"], block_reason="Wait for the prerequisite.",
+    )
+    blocker = funnel.Item(
+        repo="nateprich/beta", number=45, title="Prerequisite",
+        url="https://example.invalid/45", state="OPEN",
+    )
+    blocked_human = funnel.Item(
+        repo="nateprich/beta", number=46, title="Create the account",
+        url="https://example.invalid/46", state="OPEN",
+        parent=parent.ref,
+        body="Human step: an account or billing setting\n",
+        open_blockers=[blocker.ref],
+    )
+    blocked_machine_local = funnel.Item(
+        repo="nateprich/beta", number=47, title="Run local setup",
+        url="https://example.invalid/47", state="OPEN",
+        parent=blocked_parent.ref,
+        body="Human step: {}\n".format(funnel.MACHINE_LOCAL_REASON),
+    )
+    actionable_human = funnel.Item(
+        repo="nateprich/beta", number=48, title="Set the account option",
+        url="https://example.invalid/48", state="OPEN",
+        parent=parent.ref,
+        body="Human step: an account or billing setting\n",
+    )
+    actionable_machine_local = funnel.Item(
+        repo="nateprich/beta", number=49, title="Run the local check",
+        url="https://example.invalid/49", state="OPEN",
+        parent=parent.ref,
+        body="Human step: {}\n".format(funnel.MACHINE_LOCAL_REASON),
+    )
+
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([
+        blocked_machine_local,
+        actionable_machine_local,
+        blocked_human,
+        actionable_human,
+        blocker,
+        blocked_parent,
+        parent,
+    ], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert [row["ref"] for row in brief["human_steps"]] == [
+        actionable_human.ref
+    ]
+    assert [row["ref"] for row in brief["machine_local_steps"]] == [
+        actionable_machine_local.ref
+    ]
+    assert brief["blocked_human_steps"] == [{
+        "ref": blocked_human.ref,
+        "title": "Create the account",
+        "url": "https://example.invalid/46",
+        "reason": "an account or billing setting",
+        "blocked_reason": "open native blockers",
+        "blockers": [blocker.ref],
+    }]
+    assert brief["blocked_machine_local_steps"] == [{
+        "ref": blocked_machine_local.ref,
+        "title": "Run local setup",
+        "url": "https://example.invalid/47",
+        "reason": funnel.MACHINE_LOCAL_REASON,
+        "blocked_reason": "parent carries blocked marker",
+        "blockers": [blocked_parent.ref],
+    }]
+    assert brief["total_needing_nate"] == 0
+
+
 def test_brief_flags_completed_access_plan_without_any_human_ticket(
     monkeypatch, capsys
 ):

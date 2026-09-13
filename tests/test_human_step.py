@@ -55,6 +55,82 @@ def test_human_and_machine_local_items_use_separate_allowlists():
     ]
 
 
+@pytest.mark.parametrize(
+    ("reason", "actionable", "blocked"),
+    [
+        (
+            funnel.HUMAN_STEP_REASONS[0],
+            funnel.human_step_items,
+            funnel.blocked_human_step_items,
+        ),
+        (
+            funnel.MACHINE_LOCAL_REASON,
+            funnel.machine_local_step_items,
+            funnel.blocked_machine_local_step_items,
+        ),
+    ],
+)
+def test_marked_steps_split_by_native_and_parent_blockers(
+    reason, actionable, blocked
+):
+    parent = funnel.Item(
+        repo="nateprich/beta", number=30, title="Project",
+        url="https://example.invalid/30", state="OPEN", status="Building",
+        klass="New",
+    )
+    blocked_parent = funnel.Item(
+        repo="nateprich/beta", number=31, title="Blocked project",
+        url="https://example.invalid/31", state="OPEN", status="Building",
+        klass="New", labels=["blocked"],
+    )
+    native_blocker = funnel.Item(
+        repo="nateprich/beta", number=32, title="Prerequisite",
+        url="https://example.invalid/32", state="OPEN",
+    )
+    open_edge = funnel.Item(
+        repo="nateprich/beta", number=33, title="Open native edge",
+        url="https://example.invalid/33", state="OPEN",
+        parent=parent.ref,
+        body=funnel.HUMAN_STEP_PREFIX + reason,
+        open_blockers=[native_blocker.ref],
+    )
+    own_marker = funnel.Item(
+        repo="nateprich/beta", number=34, title="Own blocked marker",
+        url="https://example.invalid/34", state="OPEN",
+        parent=parent.ref,
+        body=funnel.HUMAN_STEP_PREFIX + reason,
+        labels=["blocked"], block_references=["#88"],
+    )
+    parent_marker = funnel.Item(
+        repo="nateprich/beta", number=35, title="Blocked parent",
+        url="https://example.invalid/35", state="OPEN",
+        parent=blocked_parent.ref,
+        body=funnel.HUMAN_STEP_PREFIX + reason,
+    )
+    control = funnel.Item(
+        repo="nateprich/beta", number=36, title="Actionable control",
+        url="https://example.invalid/36", state="OPEN",
+        parent=parent.ref,
+        body=funnel.HUMAN_STEP_PREFIX + reason,
+    )
+    items = [
+        control, parent_marker, own_marker, open_edge,
+        native_blocker, blocked_parent, parent,
+    ]
+
+    by_ref = {item.ref: item for item in items}
+    assert funnel.blocked_step_reason(open_edge, by_ref) == \
+        "open native blockers"
+    assert funnel.blocked_step_reason(own_marker, by_ref) == \
+        "ticket carries blocked marker"
+    assert funnel.blocked_step_reason(parent_marker, by_ref) == \
+        "parent carries blocked marker"
+    assert funnel.blocked_step_reason(control, by_ref) is None
+
+    assert [item.number for item in actionable(items)] == [36]
+    assert [item.number for item in blocked(items)] == [33, 34, 35]
+
+
 def test_difficulty_is_not_a_human_step_reason():
     assert funnel.parse_human_step(
         funnel.HUMAN_STEP_PREFIX + "this is hard"

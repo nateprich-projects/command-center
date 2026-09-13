@@ -118,6 +118,97 @@ def _implementing_begin(monkeypatch, capsys, items, *, agent="codex",
     return json.loads(capsys.readouterr().out), writes
 
 
+def test_begin_prints_a_transient_json_envelope_when_project_load_is_truncated(
+    monkeypatch, capsys
+):
+    funnel.reset_route_state()
+    funnel.reset_api_usage()
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[:3] == ["gh", "api", "graphql"]:
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr=(
+                    "unexpected end of JSON input; GraphQL request ID "
+                    "DD41:627C:A3F5CB:EEDB4E:6AA66A60"
+                ),
+            )
+        if any("heartbeat.py" in str(part) for part in argv):
+            return SimpleNamespace(
+                returncode=0, stdout="begin-run\n", stderr=""
+            )
+        raise AssertionError("unexpected subprocess: {}".format(argv))
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel.time, "sleep", lambda seconds: None)
+
+    def load_truncated_project():
+        funnel.gh_graphql("{viewer{login}}")
+        return []
+
+    assert funnel.main(
+        ["begin", "--agent", "codex", "--tier", "standard"],
+        _items_loader=load_truncated_project,
+    ) == 2
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["agent"] == "codex"
+    assert result["run"] == "begin-run"
+    assert result["gate"] == "unknown"
+    assert result["do"] == "stop"
+    assert result["transient"] is True
+    assert "transient" in result["why"]
+    assert "DD41:627C:A3F5CB:EEDB4E:6AA66A60" in result["why"]
+    assert funnel._API_USAGE["graphql_calls"] == 3
+    assert funnel.graphql_spend()["calls"] == 3
+    assert len([call for call in calls if call[:3] == ["gh", "api", "graphql"]]) == 3
+
+
+def test_begin_error_after_heartbeat_start_does_not_start_a_second_run(
+    monkeypatch, capsys
+):
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if any("heartbeat.py" in str(part) for part in argv):
+            return SimpleNamespace(
+                returncode=0, stdout="already-started\n", stderr=""
+            )
+        raise AssertionError("unexpected subprocess: {}".format(argv))
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(
+        usage, "read_agent", lambda agent, timestamp: {"windows": {}}
+    )
+    monkeypatch.setattr(
+        usage, "pace", lambda reading, timestamp, provider: {"over_pace": False}
+    )
+    monkeypatch.setattr(funnel, "repo_readiness_for_items", lambda items: {})
+    monkeypatch.setattr(
+        funnel,
+        "reconcile_approved_merges",
+        lambda *args: (_ for _ in ()).throw(funnel.GitHubError("offline")),
+    )
+
+    assert funnel.main(
+        ["begin", "--agent", "codex", "--tier", "standard"],
+        _items=[],
+    ) == 2
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["run"] == "already-started"
+    assert result["do"] == "stop"
+    assert result["transient"] is False
+    assert len([
+        call for call in calls
+        if any("heartbeat.py" in str(part) for part in call)
+    ]) == 1
+
+
 def _reconcile_begin(monkeypatch, capsys, items, rows, verdicts, merge_result=0):
     _allow_begin(monkeypatch)
     monkeypatch.setattr(funnel, "_gh_json", lambda *args: rows)

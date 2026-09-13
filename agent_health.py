@@ -15,6 +15,10 @@ from typing import Dict, List, Optional, Tuple
 NORMAL_PERCENTILE = 90
 NORMAL_MULTIPLE = 5
 SILENCE_FLOOR_SECONDS = 3600
+#: A live agent with too little history for cadence inference is still silent
+#: when its last recorded run is this old. This is deliberately independent of
+#: the one-hour floor used by the inferred cadence path.
+ABSOLUTE_SILENCE_SECONDS = 6 * 3600
 MINIMUM_HISTORY = 8
 
 #: The normal rhythm is learned from the trailing fortnight. This is deliberately
@@ -158,6 +162,7 @@ def assess(
     normal_percentile: Optional[float] = None,
     normal_multiple: Optional[int] = None,
     silence_floor_seconds: Optional[int] = None,
+    absolute_silence_seconds: Optional[int] = None,
     minimum_history: Optional[int] = None,
     history_window_seconds: Optional[int] = None,
     unfinished_seconds: Optional[int] = None,
@@ -178,6 +183,10 @@ def assess(
     silence_floor_seconds = (
         SILENCE_FLOOR_SECONDS
         if silence_floor_seconds is None else silence_floor_seconds
+    )
+    absolute_silence_seconds = (
+        ABSOLUTE_SILENCE_SECONDS
+        if absolute_silence_seconds is None else absolute_silence_seconds
     )
     minimum_history = MINIMUM_HISTORY if minimum_history is None else minimum_history
     history_window_seconds = (
@@ -200,6 +209,9 @@ def assess(
     if not rows:
         return []
 
+    import heartbeat
+
+    retired = getattr(heartbeat, "RETIRED_AGENTS", frozenset())
     inferred = _normal_gap(
         rows,
         now,
@@ -229,12 +241,35 @@ def assess(
                     int(latest),
                 )
             )
+    elif inferred is None and agent not in retired:
+        timestamps = [
+            float(row["ts"])
+            for row in rows
+            if not isinstance(row.get("ts"), bool)
+            and isinstance(row.get("ts"), (int, float))
+            and float(row["ts"]) <= now
+        ]
+        if timestamps:
+            latest = max(timestamps)
+            quiet_for = now - latest
+            if quiet_for > absolute_silence_seconds:
+                problems.append(
+                    "`{}`: absolute silence floor {} exceeded. "
+                    "Nothing recorded for {} — last at <t:{}:f>; "
+                    "cadence unavailable with fewer than {} gaps in the "
+                    "trailing {} history.".format(
+                        agent,
+                        _duration(absolute_silence_seconds),
+                        _duration(quiet_for),
+                        int(latest),
+                        minimum_history,
+                        _window_label(history_window_seconds),
+                    )
+                )
 
     # An unresolved finish counts as a finish for one of its candidates. A run
     # that completed but could not name itself must not be reported as dying —
     # that false alarm is the failure this signal exists to avoid.
-    import heartbeat
-
     open_starts = heartbeat.open_starts(rows)
     completed_durations = _completed_run_durations(
         rows, now, history_window_seconds=history_window_seconds

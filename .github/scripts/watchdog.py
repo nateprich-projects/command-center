@@ -51,6 +51,7 @@ MARKER = "<!-- command-center-watchdog -->"
 NORMAL_PERCENTILE = _agent_health.NORMAL_PERCENTILE
 NORMAL_MULTIPLE = _agent_health.NORMAL_MULTIPLE
 SILENCE_FLOOR_SECONDS = _agent_health.SILENCE_FLOOR_SECONDS
+ABSOLUTE_SILENCE_SECONDS = _agent_health.ABSOLUTE_SILENCE_SECONDS
 MINIMUM_HISTORY = _agent_health.MINIMUM_HISTORY
 HISTORY_WINDOW_SECONDS = _agent_health.HISTORY_WINDOW_SECONDS
 UNFINISHED_SECONDS = _agent_health.UNFINISHED_SECONDS
@@ -256,6 +257,7 @@ def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
         normal_percentile=NORMAL_PERCENTILE,
         normal_multiple=NORMAL_MULTIPLE,
         silence_floor_seconds=SILENCE_FLOOR_SECONDS,
+        absolute_silence_seconds=ABSOLUTE_SILENCE_SECONDS,
         minimum_history=MINIMUM_HISTORY,
         history_window_seconds=HISTORY_WINDOW_SECONDS,
         unfinished_seconds=UNFINISHED_SECONDS,

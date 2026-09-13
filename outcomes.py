@@ -574,6 +574,326 @@ def derive_outcome(
     }
 
 
+def _nonnegative_number(value: object) -> Optional[float]:
+    """Return a finite non-negative number without treating zero as absent."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        return None
+    return number
+
+
+def _nonnegative_integer(value: object) -> Optional[int]:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
+def _text(value: object) -> Optional[str]:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _lane(row: Mapping[str, object]) -> str:
+    """Name a lane from observed run metadata, without a roster allowlist."""
+    parts = []
+    agent = _text(row.get("agent"))
+    model = _text(row.get("model"))
+    effort = _text(row.get("reasoning_effort"))
+    provider = _text(row.get("provider"))
+    if agent:
+        parts.append(agent)
+    elif provider:
+        parts.append(provider)
+    if model:
+        parts.append(model)
+    if effort:
+        parts.append(effort)
+    return "/".join(parts) or "unknown"
+
+
+def _record_lane(row: Mapping[str, object]) -> str:
+    """Use the last observed run metadata when the record is a rework roll-up."""
+    runs = row.get("runs")
+    if isinstance(runs, list):
+        for run in reversed(runs):
+            if isinstance(run, Mapping) and _lane(run) != "unknown":
+                return _lane(run)
+    return _lane(row)
+
+
+def _merged_pr_count(row: Mapping[str, object]) -> Optional[int]:
+    """Return merged PRs in one record, or None when merge state is unknown."""
+    merged_prs = row.get("merged_prs")
+    if isinstance(merged_prs, list):
+        if not merged_prs:
+            return 1 if row.get("merged") is True else 0
+        if all(_number(value) is not None for value in merged_prs):
+            return len(merged_prs)
+        return None
+    if row.get("merged") is True:
+        return 1
+    if row.get("merged") is False:
+        return 0
+    return None
+
+
+def _cost_observation(row: Mapping[str, object]) -> Optional[Tuple[float, str]]:
+    """Read a cost already priced by another producer; never price tokens here."""
+    for name, unit in (("cost_usd", "USD"), ("credits", "credits")):
+        value = _nonnegative_number(row.get(name))
+        if value is not None:
+            return value, unit
+
+    raw = row.get("cost")
+    if isinstance(raw, Mapping):
+        unit = _text(raw.get("unit"))
+        value = _nonnegative_number(raw.get("value", raw.get("amount")))
+    else:
+        unit = _text(row.get("cost_unit"))
+        value = _nonnegative_number(raw)
+    if unit and value is not None:
+        return value, unit
+    return None
+
+
+def _cost_parts(
+    row: Mapping[str, object],
+) -> Optional[List[Tuple[float, str, str]]]:
+    """Return priced record/run costs, or None for an incomplete run roll-up."""
+    record_cost = _cost_observation(row)
+    if record_cost is not None:
+        value, unit = record_cost
+        return [(value, unit, _record_lane(row))]
+
+    runs = row.get("runs")
+    if not isinstance(runs, list) or not runs:
+        return []
+    parts: List[Tuple[float, str, str]] = []
+    for run in runs:
+        if not isinstance(run, Mapping):
+            return None
+        cost = _cost_observation(run)
+        if cost is None:
+            return None
+        value, unit = cost
+        parts.append((value, unit, _lane(run)))
+    return parts
+
+
+def _signal_status(sample_size: int, missing_size: int) -> str:
+    if sample_size and missing_size:
+        return "partial"
+    if sample_size:
+        return "available"
+    return "insufficient_data"
+
+
+def _cost_signal(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
+    groups: Dict[Tuple[str, str], Dict[str, object]] = {}
+    merged_records = 0
+    priced_records = 0
+    missing = []
+
+    for index, row in enumerate(rows):
+        merged_count = _merged_pr_count(row)
+        if merged_count is None:
+            if row.get("merged") is not False:
+                missing.append(row.get("ticket") or "record {}".format(index))
+            continue
+        if merged_count == 0:
+            continue
+        merged_records += 1
+        parts = _cost_parts(row)
+        if not parts:
+            missing.append(row.get("ticket") or "record {}".format(index))
+            continue
+        priced_records += 1
+        for value, unit, lane in parts:
+            key = (unit, lane)
+            group = groups.setdefault(key, {
+                "total_cost": 0.0,
+                "merged_prs": 0,
+            })
+            group["total_cost"] = float(group["total_cost"]) + value
+            # A run with a different lane still contributes to the merged
+            # ticket's cost in that lane.  The denominator is intentionally
+            # explicit so a later reader does not mistake a lane contribution
+            # for a global composite score.
+            group["merged_prs"] = int(group["merged_prs"]) + merged_count
+
+    by_lane = []
+    for (unit, lane), group in sorted(groups.items()):
+        merged_prs = int(group["merged_prs"])
+        total = float(group["total_cost"])
+        by_lane.append({
+            "lane": lane,
+            "unit": unit,
+            "merged_prs": merged_prs,
+            "total_cost": round(total, 6),
+            "cost_per_merged_pr": round(total / merged_prs, 6),
+        })
+
+    status = _signal_status(priced_records, len(missing))
+    return {
+        "definition": (
+            "complete priced cost divided by merged PRs, grouped by observed "
+            "agent/model/effort lane"
+        ),
+        "status": status,
+        "available": bool(by_lane),
+        # There is deliberately no global scalar here: the named signal is
+        # the per-lane table, not a north-star number across models.
+        "value": None,
+        "sample_size": priced_records,
+        "merged_records": merged_records,
+        "missing_records": len(missing),
+        "missing_examples": [str(value) for value in missing[:5]],
+        "by_lane": by_lane,
+        "reason": None if by_lane else (
+            "no merged ticket has a complete priced cost"
+        ),
+    }
+
+
+def _rework_signal(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
+    attempts = 0
+    rework_attempts = 0
+    merged_prs = 0
+    sample_size = 0
+    missing = []
+    groups: Dict[str, Dict[str, int]] = {}
+
+    for index, row in enumerate(rows):
+        merged_count = _merged_pr_count(row)
+        if merged_count is None:
+            if row.get("attempts") is not None:
+                missing.append(row.get("ticket") or "record {}".format(index))
+            continue
+        if merged_count == 0:
+            continue
+        value = _nonnegative_integer(row.get("attempts"))
+        if value is None:
+            missing.append(row.get("ticket") or "record {}".format(index))
+            continue
+        extra = max(0, value - 1)
+        attempts += value
+        rework_attempts += extra
+        merged_prs += merged_count
+        sample_size += 1
+        lane = _record_lane(row)
+        group = groups.setdefault(lane, {
+            "attempts": 0,
+            "rework_attempts": 0,
+            "merged_prs": 0,
+        })
+        group["attempts"] += value
+        group["rework_attempts"] += extra
+        group["merged_prs"] += merged_count
+
+    rate = rework_attempts / merged_prs if merged_prs else None
+    by_lane = []
+    for lane, group in sorted(groups.items()):
+        lane_prs = group["merged_prs"]
+        by_lane.append({
+            "lane": lane,
+            "attempts": group["attempts"],
+            "rework_attempts": group["rework_attempts"],
+            "merged_prs": lane_prs,
+            "rate": round(group["rework_attempts"] / lane_prs, 6),
+        })
+
+    status = _signal_status(sample_size, len(missing))
+    return {
+        "definition": "attempts beyond the first per merged PR",
+        "status": status,
+        "available": rate is not None,
+        "value": round(rate, 6) if rate is not None else None,
+        "rate": round(rate, 6) if rate is not None else None,
+        "attempts": attempts if sample_size else None,
+        "rework_attempts": rework_attempts if sample_size else None,
+        "merged_prs": merged_prs if sample_size else None,
+        "sample_size": sample_size,
+        "missing_records": len(missing),
+        "missing_examples": [str(value) for value in missing[:5]],
+        "by_lane": by_lane,
+        "reason": None if rate is not None else "no merged ticket has attempts",
+    }
+
+
+def _intervention_signal(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
+    interventions = 0
+    sample_size = 0
+    missing = []
+    groups: Dict[str, Dict[str, int]] = {}
+    for index, row in enumerate(rows):
+        value = row.get("human_intervention_required")
+        if not isinstance(value, bool):
+            missing.append(row.get("ticket") or "record {}".format(index))
+            continue
+        sample_size += 1
+        if value:
+            interventions += 1
+        lane = _record_lane(row)
+        group = groups.setdefault(lane, {"interventions": 0, "records": 0})
+        group["records"] += 1
+        group["interventions"] += int(value)
+
+    rate = interventions / sample_size if sample_size else None
+    by_lane = []
+    for lane, group in sorted(groups.items()):
+        by_lane.append({
+            "lane": lane,
+            "interventions": group["interventions"],
+            "records": group["records"],
+            "rate": round(group["interventions"] / group["records"], 6),
+        })
+
+    status = _signal_status(sample_size, len(missing))
+    return {
+        "definition": (
+            "records with human_intervention_required=true divided by all "
+            "outcome records carrying that boolean"
+        ),
+        "status": status,
+        "available": rate is not None,
+        "value": round(rate, 6) if rate is not None else None,
+        "rate": round(rate, 6) if rate is not None else None,
+        "interventions": interventions if sample_size else None,
+        "sample_size": sample_size,
+        "missing_records": len(missing),
+        "missing_examples": [str(value) for value in missing[:5]],
+        "by_lane": by_lane,
+        "reason": None if rate is not None else (
+            "no outcome record has a human_intervention_required value"
+        ),
+    }
+
+
+def signal_summary(
+    records: Iterable[Mapping[str, object]],
+    now: Optional[datetime] = None,
+) -> Dict[str, object]:
+    """Compute the three named signals without inventing missing evidence."""
+    rows = [dict(row) for row in records if isinstance(row, Mapping)]
+    recorded_at = now or datetime.now(timezone.utc)
+    if recorded_at.tzinfo is None:
+        recorded_at = recorded_at.replace(tzinfo=timezone.utc)
+    return {
+        "schema_version": 1,
+        "source": "outcomes",
+        "derived_at": recorded_at.astimezone(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        "outcome_records": len(rows),
+        "signals": {
+            "cost_per_merged_pr": _cost_signal(rows),
+            "rework_rate": _rework_signal(rows),
+            "intervention_rate": _intervention_signal(rows),
+        },
+    }
+
+
 def _run_gh(args: Sequence[str]):
     """Run a GitHub CLI read through funnel's route guard.
 
@@ -976,10 +1296,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     show.add_argument("--repo", default=REPO)
     show.add_argument("--branch", default=HEARTBEAT_BRANCH)
 
+    signals = sub.add_parser(
+        "signals", help="compute named signals from durable outcome records"
+    )
+    signals.add_argument("--repo", default=REPO)
+    signals.add_argument("--branch", default=HEARTBEAT_BRANCH)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "read":
             print(json.dumps(read_records(args.repo, args.branch), indent=2, sort_keys=True))
+            return 0
+        if args.command == "signals":
+            print(json.dumps(
+                signal_summary(read_records(args.repo, args.branch)),
+                indent=2,
+                sort_keys=True,
+            ))
             return 0
 
         repos = args.repo or [REPO]

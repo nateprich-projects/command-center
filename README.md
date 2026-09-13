@@ -28,6 +28,7 @@ ranks anything itself.
 | `funnel comment <ref> --blocked-on N [--blocked-on M] --because "<reason>" --voice <voice>` | Post a canonical block comment |
 | `python3 outcomes.py derive [--dry-run]` | Derive closed-ticket outcomes from GitHub; durable records append to `heartbeat:outcomes.jsonl` |
 | `python3 outcomes.py read` | Read the durable derived outcome records |
+| `python3 outcomes.py signals` | Compute the named outcome signals from the durable records |
 
 `outcomes.py derive --dry-run --ticket N` is the read-only form for checking a
 small live sample. The job scans pull requests once per repository, counts every
@@ -51,6 +52,13 @@ data stays null; new outcome derivation does not depend on local transcripts
 surviving. The heartbeat quota meter is not used as a cost proxy. The
 effective-dated rate table and notional dollar calculation are a separate
 consumer of these observations.
+
+`outcomes.py signals` computes cost per merged PR by observed lane, rework as
+attempts beyond the first per merged PR, and the intervention rate. It keeps the
+three signals separate, and reports `insufficient_data` or `partial` instead of
+turning missing observations into zero. Cost is read only from an already-priced
+`cost_usd`/`credits` observation; raw token counts are never treated as dollars.
+The same summary is included in the `outcome_signals` field of `funnel brief`.
 
 ## Documentation
 

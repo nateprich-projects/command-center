@@ -20,8 +20,9 @@ FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "project_items.json"
 
 @pytest.fixture(autouse=True)
 def no_resend_network(monkeypatch):
-    """Brief fixture tests should not read the live heartbeat branch."""
+    """Brief fixture tests should not read live heartbeat or outcome branches."""
     monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
+    monkeypatch.setattr(funnel, "_read_outcome_signals", lambda now: None)
 
 
 def fixture_items():
@@ -278,6 +279,26 @@ def test_brief_surfaces_unclassed_captures_with_origin_without_counting_them(
     }
     assert "Ideas" not in brief["counts_by_gate"]
     assert brief["total_needing_nate"] == 0
+
+
+def test_brief_carries_named_outcome_signals_without_recomputing_them(
+    monkeypatch, capsys
+):
+    signals = {
+        "schema_version": 1,
+        "source": "outcomes",
+        "signals": {
+            "cost_per_merged_pr": {"status": "insufficient_data"},
+            "rework_rate": {"status": "available", "value": 0.5},
+            "intervention_rate": {"status": "available", "value": 0.25},
+        },
+    }
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([], NOW, outcome_signals=signals) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["outcome_signals"] == signals
 
 
 def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
@@ -1210,6 +1231,23 @@ def test_main_brief_carries_project_load_timing(monkeypatch):
 
     assert funnel.main(["brief"]) == 0
     assert observed["timings"]["project_load"] >= 0
+
+
+def test_main_brief_reads_named_outcome_signals(monkeypatch, capsys):
+    signals = {
+        "schema_version": 1,
+        "source": "outcomes",
+        "signals": {"rework_rate": {"status": "available", "value": 1.0}},
+    }
+    monkeypatch.setattr(funnel, "load_items", lambda: [])
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda items: {})
+    monkeypatch.setattr(funnel, "_read_outcome_signals", lambda now: signals)
+
+    assert funnel.main(["brief"]) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["outcome_signals"] == signals
+    assert "outcome_signals" in brief["timings"]
 
 
 def test_brief_emits_elapsed_seconds_for_each_section(monkeypatch, capsys):

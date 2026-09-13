@@ -294,6 +294,141 @@ def test_ticket_run_with_unreadable_session_is_unknown_not_free(monkeypatch):
     assert record["token_usage"] is None
 
 
+def signal_record(number, *, merged=True, attempts=1, intervention=False,
+                  cost=None, agent="codex", model="gpt-5.6-luna",
+                  effort="high"):
+    row = {
+        "ticket": "owner/repo#{}".format(number),
+        "merged": merged,
+        "merged_prs": [number] if merged else [],
+        "attempts": attempts,
+        "human_intervention_required": intervention,
+        "runs": [{
+            "agent": agent,
+            "model": model,
+            "reasoning_effort": effort,
+        }],
+    }
+    if cost is not None:
+        row["cost_usd"] = cost
+    return row
+
+
+def test_signal_summary_computes_named_signals_independently_by_lane():
+    summary = outcomes.signal_summary([
+        signal_record(1, cost=2.0),
+        signal_record(
+            2, attempts=3, intervention=True, cost=6.0,
+            model="gpt-5.6-sol", effort="max",
+        ),
+        signal_record(3, merged=False, cost=None, intervention=False),
+    ], now=NOW)
+
+    signals = summary["signals"]
+    assert summary["outcome_records"] == 3
+
+    cost = signals["cost_per_merged_pr"]
+    assert cost["status"] == "available"
+    assert cost["value"] is None  # no cross-lane north-star total
+    assert cost["by_lane"] == [
+        {
+            "lane": "codex/gpt-5.6-luna/high",
+            "unit": "USD",
+            "merged_prs": 1,
+            "total_cost": 2.0,
+            "cost_per_merged_pr": 2.0,
+        },
+        {
+            "lane": "codex/gpt-5.6-sol/max",
+            "unit": "USD",
+            "merged_prs": 1,
+            "total_cost": 6.0,
+            "cost_per_merged_pr": 6.0,
+        },
+    ]
+
+    rework = signals["rework_rate"]
+    assert rework["status"] == "available"
+    assert rework["value"] == 1.0
+    assert rework["attempts"] == 4
+    assert rework["rework_attempts"] == 2
+    assert rework["merged_prs"] == 2
+
+    intervention = signals["intervention_rate"]
+    assert intervention["status"] == "available"
+    assert intervention["value"] == pytest.approx(1 / 3)
+    assert intervention["interventions"] == 1
+    assert intervention["sample_size"] == 3
+
+
+def test_signal_summary_keeps_missing_cost_and_partial_fields_honest():
+    summary = outcomes.signal_summary([
+        signal_record(1, cost=None),
+        signal_record(2, attempts=None, intervention=None, cost=4.0),
+    ], now=NOW)
+    signals = summary["signals"]
+
+    cost = signals["cost_per_merged_pr"]
+    assert cost["status"] == "partial"
+    assert cost["available"] is True
+    assert cost["missing_records"] == 1
+    assert cost["by_lane"][0]["cost_per_merged_pr"] == 4.0
+
+    rework = signals["rework_rate"]
+    assert rework["status"] == "partial"
+    assert rework["value"] == 0.0
+    assert rework["missing_records"] == 1
+
+    intervention = signals["intervention_rate"]
+    assert intervention["status"] == "partial"
+    assert intervention["value"] == 0.0
+    assert intervention["missing_records"] == 1
+
+
+def test_signal_summary_does_not_treat_raw_tokens_as_priced_cost():
+    row = signal_record(1, cost=None)
+    row["token_usage"] = {
+        "fresh_input_tokens": 10,
+        "cache_read_input_tokens": 20,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 5,
+    }
+
+    cost = outcomes.signal_summary([row], now=NOW)["signals"][
+        "cost_per_merged_pr"
+    ]
+    assert cost["status"] == "insufficient_data"
+    assert cost["available"] is False
+    assert cost["value"] is None
+    assert cost["by_lane"] == []
+
+
+def test_signal_summary_reports_null_values_when_a_signal_has_no_data():
+    signals = outcomes.signal_summary([], now=NOW)["signals"]
+    assert signals["cost_per_merged_pr"]["value"] is None
+    assert signals["rework_rate"]["value"] is None
+    assert signals["intervention_rate"]["value"] is None
+    assert all(
+        signal["status"] == "insufficient_data"
+        and signal["available"] is False
+        for signal in signals.values()
+    )
+
+
+def test_signals_command_prints_the_durable_summary(monkeypatch, capsys):
+    rows = [signal_record(1, cost=3.0)]
+    monkeypatch.setattr(
+        outcomes, "read_records", lambda repo, branch: rows
+    )
+
+    assert outcomes.main(["signals", "--repo", REPO, "--branch", "heartbeat"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"] == "outcomes"
+    assert payload["signals"]["cost_per_merged_pr"]["by_lane"][0][
+        "cost_per_merged_pr"
+    ] == 3.0
+
+
 def test_append_encoder_preserves_one_record_per_ticket():
     first = outcomes.derive_outcome(ticket(1), now=NOW)
     duplicate = dict(first)

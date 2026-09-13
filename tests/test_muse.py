@@ -31,7 +31,7 @@ import usage  # noqa: E402
 NOW = 1_788_800_000.0
 
 
-def _stubbed_runner(tmp_path, begin):
+def _stubbed_runner(tmp_path, begin, *, muse_stderr="", muse_status=0):
     """Run the shell harness against a tiny funnel/heartbeat/Muse clone."""
     repo = tmp_path / "repo"
     (repo / "routines").mkdir(parents=True)
@@ -64,6 +64,8 @@ def _stubbed_runner(tmp_path, begin):
         "#!/bin/bash\n"
         "printf '%s' \"$*\" > \"$MUSE_LOG\"\n"
         "printf '%s' \"${!#}\" > \"$MUSE_PROMPT\"\n"
+        "if [[ -n \"${MUSE_STDERR:-}\" ]]; then printf '%s' \"$MUSE_STDERR\" >&2; fi\n"
+        "exit \"${MUSE_STATUS:-0}\"\n"
     )
     muse.chmod(muse.stat().st_mode | stat.S_IEXEC)
     env = dict(
@@ -75,6 +77,8 @@ def _stubbed_runner(tmp_path, begin):
         MUSE_REVIEW_BOUND_SECONDS="20",
         MUSE_LOG=str(repo / "muse.log"),
         MUSE_PROMPT=str(repo / "muse.prompt"),
+        MUSE_STDERR=muse_stderr,
+        MUSE_STATUS=str(muse_status),
     )
     proc = subprocess.run(
         ["/bin/bash", str(ROOT / "scripts" / "muse-review"), "standard", "high"],
@@ -237,6 +241,51 @@ def test_the_runner_injects_begin_json_before_launching_muse(tmp_path):
     assert "begin --agent muse --tier standard --breakdown" in (
         repo / "funnel.calls"
     ).read_text()
+
+
+def test_a_fork_error_in_muse_stderr_finishes_the_run_as_errored(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        {
+            "agent": "muse",
+            "run": "fork-run",
+            "gate": "ok",
+            "do": "review",
+            "work": {"pr": 123},
+        },
+        muse_stderr="fork: Resource temporarily unavailable\nfull diagnostic\n",
+        muse_status=1,
+    )
+
+    assert proc.returncode == 1
+    heartbeat = (repo / "heartbeat.log").read_text()
+    assert heartbeat == (
+        "finish --agent muse --run fork-run --outcome errored "
+        "--note fork: Resource temporarily unavailable\n"
+    )
+    assert "fork: Resource temporarily unavailable" in proc.stderr
+    assert "full diagnostic" in proc.stderr
+
+
+@pytest.mark.parametrize("muse_status", (11, 35))
+def test_a_fork_exit_status_finishes_the_run_as_errored(tmp_path, muse_status):
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        {
+            "agent": "muse",
+            "run": "fork-exit-run",
+            "gate": "ok",
+            "do": "review",
+            "work": {"pr": 123},
+        },
+        muse_status=muse_status,
+    )
+
+    assert proc.returncode == 1
+    assert (repo / "heartbeat.log").read_text() == (
+        "finish --agent muse --run fork-exit-run --outcome errored "
+        "--note fork: Resource temporarily unavailable\n"
+    )
 
 
 def test_breakdown_rides_with_standard_and_not_with_escalated():

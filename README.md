@@ -37,6 +37,13 @@ reported as a successful or zero-value outcome. The intervention predicate is
 documented beside its implementation and treats an unmarked Nate comment, or a
 merge without a recorded Command Center approval, as human involvement.
 
+The full-history walk also reads closed-ticket comments and repository issue
+events in paginated batches, carries PR comments and closing references through
+the shared PR index, and refuses an exhausted GraphQL route rather than issuing
+one failing lookup per historical ticket. Its JSON summary reports both the
+number appended and the top-level fields left null; a repeat walk derives the
+same records but appends zero.
+
 When a ticket has a durable heartbeat binding, the record also carries each
 implementation run's detected model, effort, harness, provider, session time
 and four token kinds read from that run's own transcript. Missing transcript

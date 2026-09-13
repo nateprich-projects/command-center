@@ -120,6 +120,23 @@ def test_a_remote_branch_without_a_pr_is_still_recorded(monkeypatch):
     }
 
 
+def test_outcome_scan_can_opt_into_pr_comments_and_closing_refs(monkeypatch):
+    calls = []
+
+    def gh_json(*args):
+        calls.append(args)
+        return [pr_row(42, "ticket/42", comments=[], closingIssuesReferences=[])]
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+
+    funnel.ticket_pr_index("nateprich/beta", limit=77, include_comments=True)
+
+    assert len(calls) == 1
+    fields = calls[0][calls[0].index("--json") + 1]
+    assert "comments" in fields
+    assert "closingIssuesReferences" in fields
+
+
 def test_a_closed_ticket_with_an_open_pr_is_included(monkeypatch):
     closed = ticket(338, state="CLOSED")
     monkeypatch.setattr(

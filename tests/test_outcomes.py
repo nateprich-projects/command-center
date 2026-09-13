@@ -316,6 +316,70 @@ def test_repository_walk_rejects_a_truncated_pr_scan(monkeypatch):
         outcomes.derive_repository(REPO, limit=77, now=NOW)
 
 
+def test_repository_walk_uses_batched_issue_events_and_deleted_ref_links(
+    monkeypatch,
+):
+    ticket_row = ticket(42, comments=[])
+    deleted_ref_pr = pr(10, branch=None)
+    deleted_ref_pr["headRefName"] = None
+    deleted_ref_pr["comments"] = []
+    deleted_ref_pr["closingIssuesReferences"] = [
+        {"number": 42, "repository": {"nameWithOwner": REPO}}
+    ]
+
+    class Index(dict):
+        all_rows = (deleted_ref_pr,)
+
+    monkeypatch.setattr(outcomes, "list_closed_tickets", lambda repo, limit: [ticket_row])
+    monkeypatch.setattr(
+        funnel, "ticket_pr_index", lambda repo, limit, include_comments=False: (Index(), False)
+    )
+    monkeypatch.setattr(
+        outcomes,
+        "gh_json",
+        lambda *args: [[{
+            "issue": {"number": 42},
+            "event": "reopened",
+            "created_at": "2026-09-10T11:00:00Z",
+        }]],
+    )
+    monkeypatch.setattr(outcomes, "read_heartbeat_records", lambda: {})
+
+    records = outcomes.derive_repository(REPO, limit=77, now=NOW)
+
+    assert records[0]["attempts"] == 1
+    assert records[0]["reopened_after_merge"] is False
+
+
+def test_outcome_summary_reports_null_fields_by_name():
+    first = outcomes.derive_outcome(ticket(1), now=NOW)
+    second = outcomes.derive_outcome(
+        ticket(2), [pr(20, checks=[{"conclusion": "SUCCESS"}])],
+        {20: {"comments": []}}, now=NOW,
+    )
+
+    summary = outcomes.outcome_summary([first, second], appended=2)
+
+    assert summary["derived"] == 2
+    assert summary["appended"] == 2
+    assert summary["null_fields"] == sum(summary["null_fields_by_name"].values())
+    assert summary["null_fields_by_name"]["turns"] == 2
+    assert summary["storage"] == "heartbeat:outcomes.jsonl"
+
+
+def test_closed_ticket_list_requests_comments_for_the_full_walk(monkeypatch):
+    calls = []
+
+    def gh_json(*args):
+        calls.append(args)
+        return []
+
+    monkeypatch.setattr(outcomes, "gh_json", gh_json)
+
+    assert outcomes.list_closed_tickets(REPO, limit=77) == []
+    assert "comments" in calls[0][-1]
+
+
 def test_remote_append_uses_sha_and_retries_a_contents_conflict(monkeypatch):
     existing = outcomes.derive_outcome(ticket(1), now=NOW)
     addition = outcomes.derive_outcome(ticket(2), now=NOW)

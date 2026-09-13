@@ -1,0 +1,13 @@
+{
+  "name": "command-center-dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check worker.js && node --check public/app.js && node --check dev-server.js",
+    "test": "npm run check && node --test test/*.test.js",
+    "serve:fixture": "node dev-server.js"
+  },
+  "devDependencies": {
+    "wrangler": "4.131.1"
+  }
+}

@@ -669,6 +669,10 @@ def test_shaped_fills_an_unclassed_agent_class_before_status(
 
     def graphql(query, **variables):
         calls.append(("graphql", query, variables))
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
         return {"ok": True}
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
@@ -750,6 +754,10 @@ def test_shaped_leaves_nate_origin_class_unset_when_plan_proposes_one(
 
     def graphql(query, **variables):
         calls.append(("graphql", query, variables))
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
         return {"ok": True}
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
@@ -789,6 +797,10 @@ def _shaped_status_fixture(
 
     def graphql(query, **variables):
         calls.append(("graphql", query, variables))
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
         return {"ok": True}
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
@@ -804,12 +816,13 @@ def _shaped_status_fixture(
     [
         ("Improve", "agent", "", True),
         ("New", "agent", "", False),
+        ("New", "nate-relayed", "", False),
         ("Broken", "nate-relayed", "", False),
         ("Broken", "agent", "Risk: escalated — destructive\n", False),
     ],
 )
 def test_shaped_command_and_gate_question_share_the_same_predicate(
-    tmp_path, monkeypatch, klass, origin, extra, expected_ready
+    tmp_path, monkeypatch, capsys, klass, origin, extra, expected_ready
 ):
     plan_file = tmp_path / "plan.md"
     plan = (
@@ -850,6 +863,12 @@ def test_shaped_command_and_gate_question_share_the_same_predicate(
     item.status = "Shaped"
     asks_gate = funnel.gate_question(item) == "Is the plan good?"
     assert asks_gate is (not expected_ready)
+    output = capsys.readouterr().out
+    if expected_ready:
+        assert "advanced to Ready" in output
+    else:
+        assert "advanced to Ready" not in output
+        assert "→ Shaped" in output
 
 
 @pytest.mark.parametrize(
@@ -982,7 +1001,126 @@ def test_shaped_advances_a_plan_that_declares_nothing_open(
         "plan declares nothing open; no escalated risk"
     )
     output = capsys.readouterr().out
+    assert item.status == "Ready"
+    assert item.status_since == NOW
+    assert item.status_events[-1] == {
+        "previous_status": "Ideas",
+        "status": "Ready",
+        "at": NOW,
+    }
     assert "advanced to Ready: plan declares nothing open" in output
+
+
+def test_shaped_fails_closed_when_github_does_not_confirm_status(
+    tmp_path, monkeypatch, capsys
+):
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text(
+        "# Plan\n\nProposed class: Broken\n\n"
+        "## Needs you\nNothing.\n"
+    )
+    item = Item(
+        repo="owner/repo", number=49, title="An unconfirmed idea",
+        url="https://github.com/owner/repo/issues/49", state="OPEN",
+        status="Ideas", labels=["needs-shaping"],
+        body=funnel.origin_block(
+            "agent", at=NOW, run="capture-run", agent="claude"
+        ), item_id="project-item-49", klass="Broken",
+    )
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, variables))
+        if query == funnel.SET_FIELD:
+            return {}
+        return {"ok": True}
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel, "_option_id", lambda field_id, name: "{}-option".format(name)
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file), run="shape-run", agent="claude"
+    ) == 1
+
+    output = capsys.readouterr()
+    assert "owner/repo#49 → Ideas" in output.out
+    assert "advanced to Ready" not in output.out
+    assert "could not confirm requested Status Ready" in output.err
+    assert item.status == "Ideas"
+    assert item.labels == ["needs-shaping"]
+    assert not [
+        call for call in calls
+        if call[0] == "run" and call[1][:3] == ("gh", "issue", "comment")
+    ]
+    assert not [
+        call for call in calls
+        if call[0] == "run" and "--remove-label" in call[1]
+    ]
+
+
+def test_shaped_ready_is_visible_to_a_followup_show_in_the_same_session(
+    tmp_path, monkeypatch
+):
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text(
+        "# Plan\n\nProposed class: Broken\n\n"
+        "## Needs you\nNothing.\n"
+    )
+    item = Item(
+        repo="owner/repo", number=50, title="A session idea",
+        url="https://github.com/owner/repo/issues/50", state="OPEN",
+        status="Ideas", klass="Broken", item_id="project-item-50",
+        body=funnel.origin_block(
+            "agent", at=NOW, run="capture-run", agent="claude"
+        ),
+    )
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, variables))
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
+        return {"ok": True}
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(
+        funnel, "_option_id", lambda field_id, name: "{}-option".format(name)
+    )
+    monkeypatch.setattr(funnel, "report_api_cost", lambda: None)
+    monkeypatch.setattr(funnel, "report_graphql_spend", lambda: None)
+    session = funnel.FunnelSession(loader=lambda: [item])
+
+    shaped_code, shaped_out, shaped_err = session.dispatch([
+        "shaped", item.ref, "--plan", str(plan_file),
+        "--run", "shape-run", "--agent", "claude",
+    ])
+    assert shaped_code == 0
+    assert "owner/repo#50 → Ready" in shaped_out
+    assert "advanced to Ready" in shaped_out
+    assert shaped_err == ""
+
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: {"comments": []})
+    show_code, show_out, show_err = session.dispatch(["show", item.ref])
+
+    assert show_code == 0
+    assert "owner/repo#50  A session idea" in show_out
+    assert "Ready  |  Class Broken" in show_out
+    assert "GATE: not waiting on you" in show_out
+    assert show_err == ""
 
 
 @pytest.mark.parametrize(

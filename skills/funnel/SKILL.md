@@ -49,6 +49,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `disposal` | In the same 30-day window, parentless projects accepted to `Done` (`done`), parked (`parked`), their `finished_vs_abandoned` ratio, and created-minus-closed `net_open_growth`; `finished_vs_abandoned` is `null` when no project was parked |
 | `resend_ratio` | Recent total-input over fresh-input ratio for metered agents (`codex` and `zcode`); agents without usable telemetry are omitted |
 | `human_steps` | Open tickets only Nate can do, with the `reason` each declares. **Work he owes, not a decision he owes** — deliberately outside `total_needing_nate`, the same distinction that keeps `blocked` out. No agent can pick these up: `startable()` excludes them, so this list is the only place they surface |
+| `machine_local_steps` | Open tickets whose work needs a Claude Code session, with the `reason` each declares. **Work owed by that session, not a decision Nate owes** — deliberately outside `total_needing_nate` |
 | `suspected_human_steps` | Blocked child tickets whose block has no machine-readable condition but whose reason matches the known human-step vocabulary. Diagnostic only: leave the ticket blocked and let Nate decide whether to restate or split it |
 | `parked` | Stopped items with the written reason each carries. The reason is the artifact that makes re-encountering an idea a 30-second decision |
 | `closed_itself` | Projects the funnel closed in the recent named window, newest first, with the drift recorded at close |

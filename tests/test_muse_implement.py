@@ -146,7 +146,9 @@ def test_the_runner_clones_the_ticket_repo_and_launches_the_exact_writer_shape(t
     assert '"run": "writer-run"' in prompt
     assert '"repo": "example/widgets"' in prompt
     assert "BEGIN_JSON" not in prompt
-    assert "begin --agent muse --tier escalated" in (repo / "funnel.calls").read_text()
+    assert "begin --agent muse --tier escalated --role implement" in (
+        repo / "funnel.calls"
+    ).read_text()
 
 
 @pytest.mark.parametrize(

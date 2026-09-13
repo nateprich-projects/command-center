@@ -59,6 +59,10 @@ FLAGS="--tier $TIER"
 if [[ "$TIER" == "standard" ]]; then
   FLAGS="$FLAGS --breakdown"
 fi
+# Muse can implement escalated tickets as well as review them. Declare this
+# caller's role explicitly so begin cannot route the review schedule into the
+# implementation path.
+FLAGS="$FLAGS --role review"
 
 PROMPT_TEMPLATE="$(awk 'f{print} /^---$/{f=1}' "$ROUTINE")"
 PROMPT_TEMPLATE="${PROMPT_TEMPLATE//OPENING_FLAGS/$FLAGS}"
@@ -237,6 +241,7 @@ case "$BEGIN_DO" in
   review|breakdown|shape) ;;
   *)
     echo "muse-review: funnel begin returned unknown job '$BEGIN_DO'" >&2
+    failure "funnel begin returned unknown job '$BEGIN_DO'" || true
     exit 1
     ;;
 esac

@@ -85,7 +85,8 @@ def _ticket(number, parent, *, body="Risk: standard", klass="Improve",
 
 
 def _implementing_begin(monkeypatch, capsys, items, *, agent="codex",
-                        tier="standard", repo_readiness=None, pr_facts=None):
+                        tier="standard", repo_readiness=None, pr_facts=None,
+                        caller_role=None):
     _allow_begin(monkeypatch)
     monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
@@ -103,6 +104,7 @@ def _implementing_begin(monkeypatch, capsys, items, *, agent="codex",
     assert funnel.cmd_begin(
         items, NOW, agent, tier, False,
         repo_readiness=repo_readiness,
+        caller_role=caller_role,
     ) == 0
     return json.loads(capsys.readouterr().out), writes
 
@@ -614,6 +616,27 @@ def test_muse_escalated_begin_claims_a_ticket_as_an_implementer(
     assert [ref for ref, value in writes if value] == [ticket.ref]
 
 
+def test_muse_escalated_begin_uses_the_explicit_implementer_role(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(
+        14, 15, body="Risk: escalated — concurrency"
+    )
+
+    result, writes = _implementing_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        agent="muse",
+        tier="escalated",
+        caller_role="implement",
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert [ref for ref, value in writes if value] == [ticket.ref]
+
+
 def test_codex_begin_respects_the_wip_limit(monkeypatch, capsys):
     items = []
     for index in range(funnel.WIP_LIMIT):
@@ -726,7 +749,7 @@ def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
         funnel,
         "cmd_begin",
         lambda items, now, agent, tier, idle, breakdown=False,
-        routine_sha_literal=None, repo_readiness=None: (
+        routine_sha_literal=None, repo_readiness=None, caller_role=None: (
             received.append(repo_readiness) or 0
         ),
     )
@@ -932,6 +955,32 @@ def test_improve_idea_does_not_preempt_an_improve_review(monkeypatch, capsys):
 
     assert result["do"] == "review"
     assert result["work"] == _review_job(ticket)
+
+
+def test_muse_escalated_begin_uses_the_explicit_reviewer_role(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(
+        113, 112, body="Risk: escalated — concurrency"
+    )
+    review = _review_job(ticket, pr=114)
+
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+    monkeypatch.setattr(funnel, "review_queue", lambda rows, tier: [review])
+
+    assert funnel.cmd_begin(
+        [project, ticket],
+        NOW,
+        "muse",
+        "escalated",
+        False,
+        caller_role="review",
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "review"
+    assert result["work"] == review
 
 
 def test_broken_review_is_before_a_broken_idea(monkeypatch, capsys):

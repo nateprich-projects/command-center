@@ -67,7 +67,7 @@ The runner has already run this exact opening command before handing you the
 prompt:
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent muse --tier escalated
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent muse --tier escalated --role implement
 ```
 
 Its JSON result is inserted below:

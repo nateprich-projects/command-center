@@ -829,6 +829,41 @@ AGENTS_BY_ROLE = {
 }
 
 
+# ``muse`` is both a reviewer and an implementer, so the harness must identify
+# which caller is opening the run.  Keep the shorter role names canonical and
+# accept the descriptive forms at the CLI boundary as well.
+BEGIN_CALLER_ROLE_ALIASES = {
+    "review": "review",
+    "reviewer": "review",
+    "implement": "implement",
+    "implementer": "implement",
+}
+BEGIN_CALLER_ROLES = tuple(BEGIN_CALLER_ROLE_ALIASES)
+
+
+def begin_uses_ticket_path(
+    agent: str, tier: Optional[str], caller_role: Optional[str] = None
+) -> bool:
+    """Whether ``begin`` should open the implementation path.
+
+    An omitted role retains the pre-existing agent capability lookup.  When a
+    caller names its role, that declaration resolves the reviewer/implementer
+    collision for agents such as Muse; the caller role is intentionally the
+    source of routing in that case rather than the agent name.
+    """
+    if caller_role is None:
+        return agent_has_role(agent, "implement", tier)
+    try:
+        role = BEGIN_CALLER_ROLE_ALIASES[caller_role.casefold()]
+    except (AttributeError, KeyError):
+        raise ValueError(
+            "unknown begin caller role {!r}; expected one of {}".format(
+                caller_role, ", ".join(sorted(BEGIN_CALLER_ROLES))
+            )
+        )
+    return role == "implement"
+
+
 def agent_has_role(agent: str, role: str, tier: Optional[str]) -> bool:
     """Whether ``agent`` owns ``role`` in the requested execution tier."""
     tiers = AGENTS_BY_ROLE.get(role, {}).get(agent, frozenset())
@@ -8074,7 +8109,8 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               routine_sha_literal: Optional[str] = None,
               repo_readiness: Optional[
                   Mapping[str, MemberRepoReadiness]
-              ] = None) -> int:
+              ] = None,
+              caller_role: Optional[str] = None) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
     A polling routine spends most of its runs discovering there is nothing to
@@ -8167,7 +8203,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if orphaned:
         out["reconciled_starts"] = orphaned
 
-    if agent_has_role(agent, "implement", tier):
+    if begin_uses_ticket_path(agent, tier, caller_role):
         cleared = clear_satisfied_blocks(
             items, now, run=out.get("run"), agent=agent
         )
@@ -9305,6 +9341,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
                        help="also offer an approved plan to break down when "
                             "there is nothing to review")
     begin.add_argument(
+        "--role", dest="caller_role", choices=BEGIN_CALLER_ROLES, default=None,
+        help="caller role: review or implement; omitted preserves agent-based "
+             "routing",
+    )
+    begin.add_argument(
         "--routine-sha", dest="routine_sha", default=None,
         help="compare the checked-in routine's normalized sha256 to this literal",
     )
@@ -9377,7 +9418,9 @@ def main(argv: Optional[Sequence[str]] = None, *,
             args.command in ("next", "queue")
             or (
                 args.command == "begin"
-                and agent_has_role(args.agent, "implement", args.tier)
+                and begin_uses_ticket_path(
+                    args.agent, args.tier, args.caller_role
+                )
             )
         ):
             repo_readiness = repo_readiness_for_items(items)
@@ -9432,7 +9475,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "begin":
             return cmd_begin(items, now, args.agent, args.tier, args.idle,
                              args.breakdown, args.routine_sha,
-                             repo_readiness=repo_readiness)
+                             repo_readiness=repo_readiness,
+                             caller_role=args.caller_role)
         if args.command == "next-review":
             return cmd_next_review(items, args.tier)
         if args.command == "review":

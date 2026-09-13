@@ -238,9 +238,30 @@ def test_the_runner_injects_begin_json_before_launching_muse(tmp_path):
     assert "BEGIN_JSON" not in prompt
     assert "OPENING_FLAGS" not in prompt
     assert "--tier standard --breakdown" in prompt
-    assert "begin --agent muse --tier standard --breakdown" in (
-        repo / "funnel.calls"
-    ).read_text()
+    calls = (repo / "funnel.calls").read_text()
+    assert "begin --agent muse --tier standard --breakdown --role review" in calls
+    assert "--role review" in prompt
+
+
+def test_an_unexpected_begin_job_finishes_the_started_run(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        {
+            "agent": "muse",
+            "run": "unexpected-run",
+            "gate": "ok",
+            "do": "ticket",
+            "work": {"ref": "example/widgets#42"},
+        },
+    )
+
+    assert proc.returncode == 1
+    assert not (repo / "muse.log").exists()
+    assert (repo / "heartbeat.log").read_text() == (
+        "finish --agent muse --run unexpected-run --outcome errored "
+        "--note funnel begin returned unknown job 'ticket'\n"
+    )
+    assert "unknown job 'ticket'" in proc.stderr
 
 
 def test_a_fork_error_in_muse_stderr_finishes_the_run_as_errored(tmp_path):

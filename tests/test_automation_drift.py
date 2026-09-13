@@ -47,7 +47,7 @@ def test_every_codex_automation_matches_the_routine():
         # Per automation: the idle flag differs by schedule.
         wanted = sync.prompt_text(path.parent.name)
         _, existing = sync.current(path.read_text())
-        if not sync.same_prompt(existing, wanted):
+        if not sync.same_prompt_during_sha_transition(existing, wanted):
             drifted.append(path.parent.name)
 
     assert not drifted, (
@@ -167,24 +167,56 @@ def test_derived_lane_prompts_pin_the_current_routine_sha(tmp_path, monkeypatch)
             for line in sync.prompt_text(name).splitlines()
             if line.strip().startswith("python3") and sync.GATE_LINE in line
         )
-        assert command.count("--routine-sha " + expected) == 1
+        assert command.count(
+            "--routine-sha " + expected[:sync.ROUTINE_SHA_PREFIX_LENGTH]
+        ) == 1
 
 
-def test_check_accepts_a_lane_prompt_with_the_current_routine_sha(
-    tmp_path, monkeypatch, capsys
+@pytest.mark.parametrize("legacy", (False, True))
+def test_check_accepts_a_lane_prompt_with_either_current_routine_sha_length(
+    tmp_path, monkeypatch, capsys, legacy
 ):
     monkeypatch.setattr(sync, "AUTOMATIONS", tmp_path)
     directory = tmp_path / "command-center-lane"
     directory.mkdir()
+    prompt = sync.prompt_text("command-center-lane")
+    if legacy:
+        expected = sync.funnel.routine_sha(sync.ROUTINE)
+        prompt = prompt.replace(
+            "--routine-sha " + expected[:sync.ROUTINE_SHA_PREFIX_LENGTH],
+            "--routine-sha " + expected,
+            1,
+        )
     (directory / "automation.toml").write_text(
         'rrule = "RRULE:FREQ=HOURLY;BYMINUTE=0"\n'
-        "prompt = {}\n".format(json.dumps(sync.prompt_text("command-center-lane")))
+        "prompt = {}\n".format(json.dumps(prompt))
     )
 
     assert sync.main(["--check"]) == 0
     output = capsys.readouterr().out
     assert "ok       command-center-lane" in output
     assert "DRIFTED" not in output
+
+
+def test_check_rejects_a_prompt_with_the_wrong_routine_sha_prefix(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(sync, "AUTOMATIONS", tmp_path)
+    prompt = sync.prompt_text("command-center-lane")
+    expected = sync.funnel.routine_sha(sync.ROUTINE)
+    wrong = "0" * sync.ROUTINE_SHA_PREFIX_LENGTH
+    assert wrong != expected[:sync.ROUTINE_SHA_PREFIX_LENGTH]
+    prompt = prompt.replace(
+        "--routine-sha " + expected[:sync.ROUTINE_SHA_PREFIX_LENGTH],
+        "--routine-sha " + wrong,
+        1,
+    )
+    path = _write_fixture_automation(tmp_path, "command-center-lane", prompt)
+
+    assert sync.main(["--check"]) == 1
+    output = capsys.readouterr().out
+    assert "DRIFTED  command-center-lane" in output
+    assert sync.current(path.read_text())[1] == prompt
 
 
 def _write_fixture_automation(root, name, prompt):
@@ -196,6 +228,25 @@ def _write_fixture_automation(root, name, prompt):
         "updated_at = 1\n".format(json.dumps(prompt))
     )
     return directory / "automation.toml"
+
+
+def test_write_upgrades_a_legacy_hash_to_the_short_form(tmp_path, monkeypatch):
+    monkeypatch.setattr(sync, "AUTOMATIONS", tmp_path)
+    expected = sync.funnel.routine_sha(sync.ROUTINE)
+    prefix = expected[:sync.ROUTINE_SHA_PREFIX_LENGTH]
+    prompt = sync.prompt_text("command-center-lane").replace(
+        "--routine-sha " + prefix,
+        "--routine-sha " + expected,
+        1,
+    )
+    path = _write_fixture_automation(tmp_path, "command-center-lane", prompt)
+
+    assert sync.main([]) == 0
+
+    written = sync.current(path.read_text())[1]
+    command = next(line for line in written.splitlines() if "--routine-sha" in line)
+    assert "--routine-sha " + prefix in command
+    assert "--routine-sha " + expected not in command
 
 
 def test_write_attempts_remaining_schedules_after_an_unwritable_one(

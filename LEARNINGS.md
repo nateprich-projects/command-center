@@ -8,6 +8,33 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Repository transfers can 500 repeatedly and then succeed
+
+**2026-09-13 · GitHub API / Jeffy onboarding · measured**
+
+`POST /repos/nateprich/jeffy-finance-agent/transfer` to `nateprich-projects` returned a
+bare `HTTP 500` with an empty body four times over twenty minutes; the web UI's
+transfer button showed "Something went wrong!"; `githubstatus.com` reported all systems
+operational; every other endpoint for the repository answered normally; the identical
+call had moved `workbench` earlier the same day. The fifth API call returned `202` and
+the transfer completed within a minute. Nothing about the repository was changed between
+attempts (toggling `has_projects` off and on made no difference). Treat a transfer 500 as
+retryable rather than as a broken repository, and do not fall back to mirroring into a
+fresh repo, which would lose issues and PRs.
+
+### A pinned repository name makes GitHub's transfer redirect insufficient
+
+**2026-09-13 · Jeffy runtime / PR nateprich-projects/jeffy-finance-agent#55 · measured for the pin, documented for the redirect**
+
+Jeffy's runtime pins its own repository name and SSH remote string in six places and
+refuses configuration naming anything else, so after the transfer the deployed code
+crash-looped (`runtime config has invalid fixed values for: JEFFY_GITHUB_REPOSITORY`,
+112 watcher restarts) until the remote and config on the Mac mini were changed as
+`jeffy`. Git and `GET` API calls to the old name follow GitHub's redirect; `requests`
+turns a redirected `POST` into a `GET` (documented), so issue creation would not have
+survived the redirect either. With a deploy-on-merge runtime, the code change and the
+host-side identity change have to land in the same five-minute window.
+
 ### Batched dependency reads fail closed at Project load
 
 **2026-09-10 · GitHub dependencies / ticket #330 · measured**

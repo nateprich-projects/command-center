@@ -129,8 +129,29 @@ Keep invoking the Command Center scripts by their absolute
 read access is unaffected.
 
 Branch **`ticket/<issue-number>`**, from `main`. If that branch already exists on
-the remote, decide from the evidence above whether to continue it or reset it,
-and say which in your PR body.
+the remote, use the prior-run evidence and actual diff to decide whether to
+continue or reset. When it has an open PR, inspect the branch and PR with `gh`
+first; before deciding, read the newest `<!-- command-center-review -->` verdict
+comment on that PR and its `blocking` list (newest verdict wins), and compare
+the verdict's `head_sha` with the offered branch/PR head. State in the PR body
+whether you continued or reset the branch, and name every current-head blocking
+item you are addressing there. Never discard remote work without establishing
+what it contains.
+
+A `rejected` verdict at the offered head is unfinished engineering work. Never
+finish `done` without pushing a new head after that rejection. Do not rerun
+verification and finish `done` on the unchanged head. Either address every
+item in the blocking list, commit and push a new head, then verify and update
+the PR, or release the ticket and use the existing decline-with-reason path,
+naming why the blocking items could not be fixed. A rejection for an older head
+is not a current-head blocker after a newer head has been established.
+
+If the offered branch or PR is conflicting with `main`, rebase the ticket branch
+onto `main` before fixing the review blockers; resolve conflicts, verify the
+result, then address the blocking items, commit, and push the new head. Reset
+remains allowed only under the existing never-discard-without-establishing-
+contents rule, with the decision and established contents stated in the PR
+body.
 
 **Commit and push after each meaningful step.** Not once at the end. Your working
 directory is ephemeral and no later run will ever see it; the remote is the only

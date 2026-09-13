@@ -332,7 +332,8 @@ def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
         return funnel.Item(
             repo="nateprich/beta", number=number, title=title,
             url="https://example.invalid/{}".format(number), state="CLOSED",
-            state_reason="COMPLETED", status="Done", closed_at=at,
+            state_reason="COMPLETED", status="Done", klass="Improve",
+            children_total=1, children_done=1, closed_at=at,
         )
 
     newest = closed(70, "Newest upkeep", NOW - timedelta(hours=1))
@@ -351,11 +352,24 @@ def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
     }
     calls = []
 
-    def gh_json(*args):
-        calls.append(args)
-        return {"comments": [{"body": comments[int(args[3])]}]}
+    def gh_graphql(query, **variables):
+        calls.append(query)
+        return {
+            "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},
+            "repo0": {
+                "issue0": {"comments": {"nodes": [
+                    {"body": comments[70]}
+                ]}},
+                "issue1": {"comments": {"nodes": [
+                    {"body": comments[71]}
+                ]}},
+                "issue2": {"comments": {"nodes": [
+                    {"body": comments[72]}
+                ]}},
+            },
+        }
 
-    monkeypatch.setattr(funnel, "_gh_json", gh_json)
+    monkeypatch.setattr(funnel, "gh_graphql", gh_graphql)
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
 
     assert funnel.cmd_brief(
@@ -380,7 +394,87 @@ def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
         },
     ]
     assert brief["total_needing_nate"] == 0
-    assert [call[3] for call in calls] == ["70", "71", "72"]
+    assert len(calls) == 1
+    assert "rateLimit { cost remaining resetAt }" in calls[0]
+    assert "comments(last: {})".format(
+        funnel.CLOSED_ITSELF_COMMENT_PAGE_SIZE
+    ) in calls[0]
+
+
+def test_closed_itself_batch_is_bounded_and_cached_for_one_run(monkeypatch):
+    def closed(number, at, repo="nateprich/beta"):
+        return funnel.Item(
+            repo=repo, number=number, title="Upkeep {}".format(number),
+            url="https://example.invalid/{}".format(number), state="CLOSED",
+            state_reason="COMPLETED", status="Done", klass="Improve",
+            children_total=1, children_done=1, closed_at=at,
+        )
+
+    newest = closed(101, NOW - timedelta(hours=1))
+    older = closed(102, NOW - timedelta(hours=2), repo="other/repo")
+    items = [newest, older]
+    calls = []
+
+    def gh_graphql(query, **variables):
+        calls.append(query)
+        _, aliases = funnel._closed_itself_comment_query(items)
+        response = {
+            "rateLimit": {"cost": 2, "remaining": 98, "resetAt": "later"}
+        }
+        for ref, (repo_alias, issue_alias) in aliases.items():
+            body = funnel.closed_itself_comment([], [])
+            response.setdefault(repo_alias, {})[issue_alias] = {
+                "comments": {"nodes": [{"body": body}]}
+            }
+        return response
+
+    monkeypatch.setattr(funnel, "gh_graphql", gh_graphql)
+    cache = funnel.BriefCache()
+
+    first = funnel.closed_itself_json(items, NOW, brief_cache=cache)
+    second = funnel.closed_itself_json(items, NOW, brief_cache=cache)
+
+    assert [row["ref"] for row in first] == [newest.ref, older.ref]
+    assert second == first
+    assert len(calls) == 1
+    assert all(
+        "comments(last: {})".format(funnel.CLOSED_ITSELF_COMMENT_PAGE_SIZE)
+        in query
+        for query in calls
+    )
+    assert all("rateLimit { cost remaining resetAt }" in query for query in calls)
+
+    cache.clear()
+    funnel.closed_itself_json(items, NOW, brief_cache=cache)
+    assert len(calls) == 2
+
+
+def test_closed_itself_candidates_follow_auto_close_eligibility_signal():
+    def closed(number, **kwargs):
+        return funnel.Item(
+            repo="nateprich/beta", number=number, title="Project {}".format(number),
+            url="https://example.invalid/{}".format(number), state="CLOSED",
+            state_reason="COMPLETED", status="Done",
+            closed_at=NOW - timedelta(hours=1), **kwargs
+        )
+
+    plausible = closed(
+        110, klass="Improve", children_total=1, children_done=1
+    )
+    no_children = closed(
+        111, klass="Improve", children_total=0, children_done=0
+    )
+    wrong_class = closed(
+        112, klass="New", children_total=1, children_done=1
+    )
+    carried_human_step = closed(
+        113, klass="Improve", children_total=1, children_done=1,
+        carried_human_step=True,
+    )
+
+    assert funnel.closed_itself_items(
+        [no_children, wrong_class, carried_human_step, plausible], NOW
+    ) == [plausible]
 
 
 def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
@@ -415,16 +509,8 @@ def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
         "parked_at": "2026-09-03T00:00:00+00:00",
         "reason": "The rewrite no longer earns its maintenance cost.",
     }]
-    assert calls == [
-        (
-            "gh", "issue", "view", "15", "--repo", "nateprich/beta",
-            "--json", "comments",
-        ),
-        (
-            "gh", "issue", "view", "14", "--repo", "nateprich/beta",
-            "--json", "comments",
-        ),
-    ]
+    assert len(calls) == 1
+    assert calls[0][3] == "15"
 
 
 def test_brief_does_not_treat_ready_as_a_human_decision(monkeypatch, capsys):
@@ -1021,7 +1107,7 @@ def test_closed_itself_gate_timeout_names_candidate_count(
     item = funnel.Item(
         repo="nateprich/beta", number=96, title="Closed project",
         url="https://example.invalid/96", state="CLOSED", status="Done",
-        closed_at=NOW,
+        klass="Improve", children_total=1, children_done=1, closed_at=NOW,
     )
     monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS, "closed_itself", 0.0)
 

@@ -363,6 +363,12 @@ REJECTED_MERGE_WINDOW = timedelta(days=7)
 #: Nate could reasonably see it.
 CLOSED_ITSELF_WINDOW = timedelta(days=7)
 
+# The auto-close writer appends its marker when it closes a project. Reading a
+# bounded tail is enough to retain that write while preventing one unusually
+# noisy issue from expanding a gate read without limit.
+CLOSED_ITSELF_COMMENT_PAGE_SIZE = 20
+CLOSED_ITSELF_COMMENT_BATCH_SIZE = 100
+
 #: Keep mechanical block clears visible across several unattended brief runs,
 #: for the same reason funnel-closed projects remain visible for a week.
 CLEARED_BLOCK_WINDOW = timedelta(days=7)
@@ -5062,7 +5068,7 @@ def parked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
 
 
 def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
-    """Closed projects recent enough to carry a funnel-close record."""
+    """Closed projects recent enough to plausibly carry a funnel-close record."""
     cutoff = now - CLOSED_ITSELF_WINDOW
     return sorted(
         (
@@ -5072,6 +5078,7 @@ def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
             and item.status == "Done"
             and item.closed_at is not None
             and item.closed_at >= cutoff
+            and _could_carry_closed_itself_marker(item)
         ),
         key=lambda item: (
             -item.closed_at.timestamp(), item.repo, item.number
@@ -5079,9 +5086,23 @@ def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
     )
 
 
-def _closed_itself_item_json(item: Item) -> Optional[Dict[str, object]]:
+def _could_carry_closed_itself_marker(
+    item: Item, *, children_done: Optional[int] = None
+) -> bool:
+    """Mirror the auto-close writer's durable eligibility signal."""
+    completed = item.children_done if children_done is None else children_done
+    return (
+        item.klass in SELF_APPROVABLE_CLASSES
+        and item.children_total > 0
+        and completed == item.children_total
+        and not item.carried_human_step
+    )
+
+
+def _closed_itself_item_json(
+    item: Item, comments: Sequence[dict]
+) -> Optional[Dict[str, object]]:
     """Render one funnel-close marker, or omit an ordinary accepted close."""
-    comments = _issue_comments(item)
     for comment in reversed(comments):
         if not isinstance(comment, dict):
             continue
@@ -5105,12 +5126,19 @@ def _closed_itself_item_json(item: Item) -> Optional[Dict[str, object]]:
 
 
 def closed_itself_json(
-    items: Iterable[Item], now: datetime
+    items: Iterable[Item], now: datetime, brief_cache=None
 ) -> List[Dict[str, object]]:
     """The brief's recent funnel-close records, newest first."""
+    candidates = closed_itself_items(items, now)
+    if not candidates:
+        return []
+    cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
+    comments_by_ref = cache.closed_itself_comments(candidates)
     rows = []
-    for item in closed_itself_items(items, now):
-        row = _closed_itself_item_json(item)
+    for item in candidates:
+        row = _closed_itself_item_json(
+            item, comments_by_ref.get(item.ref, [])
+        )
         if row is not None:
             rows.append(row)
     return rows
@@ -6155,16 +6183,36 @@ class BriefCache:
     def __init__(self):
         self._pr_facts = _BRIEF_UNAVAILABLE
         self._heartbeat_rows: Dict[str, List[Dict]] = {}
+        self._closed_itself_comments: Dict[str, List[Dict]] = {}
 
     def clear(self) -> None:
         """Forget auxiliary reads after a command may have mutated GitHub."""
         self._pr_facts = _BRIEF_UNAVAILABLE
         self._heartbeat_rows.clear()
+        self._closed_itself_comments.clear()
 
     def get_pr_facts(self, items: Sequence[Item]):
         if self._pr_facts is _BRIEF_UNAVAILABLE:
             self._pr_facts = ticket_pr_facts(items)
         return self._pr_facts
+
+    def closed_itself_comments(
+        self, items: Sequence[Item]
+    ) -> Dict[str, List[Dict]]:
+        """Read and retain bounded marker tails for one run only."""
+        missing = [
+            item for item in items
+            if item.ref not in self._closed_itself_comments
+        ]
+        if missing:
+            self._closed_itself_comments.update(
+                _batched_issue_comments(missing)
+            )
+        return {
+            item.ref: self._closed_itself_comments[item.ref]
+            for item in items
+            if item.ref in self._closed_itself_comments
+        }
 
     def heartbeat_rows(self, agent: str) -> List[Dict]:
         if agent in self._heartbeat_rows:
@@ -6352,7 +6400,9 @@ def cmd_brief(
         )
         parked = section("parked", lambda: parked_json(items), [])
         closed_itself = section(
-            "closed_itself", lambda: closed_itself_json(items, now), [],
+            "closed_itself",
+            lambda: closed_itself_json(items, now, brief_cache=cache),
+            [],
             candidate_count=len(closed_itself_items(items, now)),
         )
         cleared_blocks = section(
@@ -7186,6 +7236,73 @@ def _issue_comments(item: Item) -> List[dict]:
     if not isinstance(comments, list):
         raise GitHubError("could not read comments for {}".format(item.ref))
     return comments
+
+
+def _closed_itself_comment_query(
+    items: Sequence[Item],
+) -> Tuple[str, Dict[str, Tuple[str, str]]]:
+    """Build one bounded GraphQL read for a batch of candidate issues."""
+    grouped: Dict[str, List[Item]] = {}
+    for item in items:
+        grouped.setdefault(item.repo, []).append(item)
+
+    lines = [
+        "query {",
+        "  rateLimit { cost remaining resetAt }",
+    ]
+    aliases: Dict[str, Tuple[str, str]] = {}
+    for repo_index, (repo, repo_items) in enumerate(grouped.items()):
+        try:
+            owner, name = repo.split("/", 1)
+        except ValueError:
+            raise GitHubError("invalid repository ref {}".format(repo))
+        repo_alias = "repo{}".format(repo_index)
+        lines.append(
+            "  {}: repository(owner: {}, name: {}) {{".format(
+                repo_alias, json.dumps(owner), json.dumps(name)
+            )
+        )
+        for issue_index, item in enumerate(repo_items):
+            issue_alias = "issue{}".format(issue_index)
+            lines.append(
+                "    {}: issue(number: {}) {{ comments(last: {}) {{ "
+                "nodes {{ body }} }} }}".format(
+                    issue_alias, item.number, CLOSED_ITSELF_COMMENT_PAGE_SIZE
+                )
+            )
+            aliases[item.ref] = (repo_alias, issue_alias)
+        lines.append("  }")
+    lines.append("}")
+    return "\n".join(lines), aliases
+
+
+def _batched_issue_comments(
+    items: Sequence[Item],
+) -> Dict[str, List[Dict]]:
+    """Read bounded comment tails in GraphQL batches, with measured cost."""
+    found: Dict[str, List[Dict]] = {}
+    for start in range(0, len(items), CLOSED_ITSELF_COMMENT_BATCH_SIZE):
+        batch = items[start:start + CLOSED_ITSELF_COMMENT_BATCH_SIZE]
+        query, aliases = _closed_itself_comment_query(batch)
+        data = gh_graphql(query)
+        for item in batch:
+            repo_alias, issue_alias = aliases[item.ref]
+            repository = data.get(repo_alias) if isinstance(data, dict) else None
+            issue = (
+                repository.get(issue_alias)
+                if isinstance(repository, dict)
+                else None
+            )
+            comments = issue.get("comments") if isinstance(issue, dict) else None
+            nodes = comments.get("nodes") if isinstance(comments, dict) else None
+            if not isinstance(nodes, list):
+                raise GitHubError(
+                    "could not read comments for {}".format(item.ref)
+                )
+            found[item.ref] = [
+                comment for comment in nodes if isinstance(comment, dict)
+            ]
+    return found
 
 
 def _project_status_times(item: Item) -> Dict[str, Optional[datetime]]:
@@ -8324,10 +8441,9 @@ def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
         item.parent is None
         and item.state == "OPEN"
         and item.status == "Building"
-        and item.klass in SELF_APPROVABLE_CLASSES
-        and item.children_total > 0
-        and completed == item.children_total
-        and not item.carried_human_step
+        and _could_carry_closed_itself_marker(
+            item, children_done=completed
+        )
     )
 
 

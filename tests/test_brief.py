@@ -1115,6 +1115,21 @@ def test_main_brief_reports_an_unreadable_project_load(
     }]
 
 
+def test_main_brief_carries_project_load_timing(monkeypatch):
+    observed = {}
+
+    monkeypatch.setattr(funnel, "load_items", lambda: [])
+
+    def fake_cmd_brief(items, now, **kwargs):
+        observed["timings"] = kwargs["timings"]
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
+
+    assert funnel.main(["brief"]) == 0
+    assert observed["timings"]["project_load"] >= 0
+
+
 def test_brief_emits_elapsed_seconds_for_each_section(monkeypatch, capsys):
     item = funnel.Item(
         repo="nateprich/beta", number=93, title="Timed project",
@@ -1136,6 +1151,7 @@ def test_brief_emits_elapsed_seconds_for_each_section(monkeypatch, capsys):
     assert brief["timings"]["items"] == pytest.approx(0.1)
     assert brief["timings"]["rejected_merges"] == pytest.approx(0.1)
     assert brief["timings"]["unattended_merges"] == pytest.approx(0.1)
+    assert brief["timings"]["brief_assembly"] == pytest.approx(0.1)
     assert all(value >= 0 for value in brief["timings"].values())
 
 

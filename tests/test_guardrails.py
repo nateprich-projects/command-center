@@ -33,12 +33,14 @@ RESOLVED = "/Volumes/"
 CAPTURE_ROUTINES = (
     "claude.md",
     "muse.md",
+    "muse-implement.md",
     "zcode.md",
     "codex-work.md",
 )
 AGENT_CAPTURE_ROUTINES = (
     "claude.md",
     "muse.md",
+    "muse-implement.md",
     "codex-work.md",
 )
 CAPTURE_RULE = (

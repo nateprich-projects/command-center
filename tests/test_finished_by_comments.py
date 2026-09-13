@@ -127,8 +127,9 @@ def test_a_retired_agent_is_never_read_and_the_reader_is_pure_on_failure(monkeyp
     assert funnel.finished_by_comments([project, ticket]) == set()
 
 
-def test_the_engineer_routine_records_the_no_pr_finish():
-    text = " ".join((ROOT / "routines" / "codex-work.md").read_text(encoding="utf-8").split()).lower()
+@pytest.mark.parametrize("routine", ["codex-work.md", "muse-implement.md"])
+def test_the_engineer_routine_records_the_no_pr_finish(routine):
+    text = " ".join((ROOT / "routines" / routine).read_text(encoding="utf-8").split()).lower()
     assert "finished by comments:" in text
     assert "--outcome skipped-human-step --note \"finished by comments:" in text
     assert "waiting on nate to close #<current-number>" in text

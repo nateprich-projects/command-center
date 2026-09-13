@@ -164,6 +164,11 @@ a stalled item from permanently plugging the queue.
 
 The ladder ranks what to **start**. Once a project is Building, its remaining tickets
 finish first. Passing a gate is a commitment and nothing may silently un-commit it.
+**A pinned project's tickets go first, ahead of the class groups** — a pin is Nate's
+explicit ordering call and outranks the ladder's default; it orders and nothing more,
+so the WIP-cap preemption stays with the finite classes. _(Nate, 2026-09-12: "that
+was always the intent of the prioritization"; until then a pin reached only his
+decision queue.)_
 
 Within one decision gate, the same ladder breaks class ties; gate depth still wins.
 

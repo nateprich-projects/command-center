@@ -162,11 +162,18 @@ def _recent_outcomes(
     week: int,
 ) -> List[Dict]:
     """Return records with ``outcome`` inside the current diagnostic week."""
-    return [
-        row for row in rows
-        if row.get("outcome") == outcome
-        and now - (row.get("ts") or 0) < week
-    ]
+    found = []
+    for row in rows:
+        timestamp = row.get("ts")
+        if (
+            row.get("outcome") != outcome
+            or isinstance(timestamp, bool)
+            or not isinstance(timestamp, (int, float))
+            or now - float(timestamp) >= week
+        ):
+            continue
+        found.append(row)
+    return found
 
 
 def notes(

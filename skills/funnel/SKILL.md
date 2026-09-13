@@ -113,7 +113,7 @@ when he chooses, not a notification and not a request for review.
 Then the gate counts on one line. Then anything unusual, and only if present:
 `prose_dependencies`, `suspected_human_steps`, `unclassed_captures`, `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`,
 `working_tree_touched`,
-`awaiting_breakdown`, `unattended_merges`, `unattended_approvals`, `agent_health`, `resend_ratio`, `rejected_merges`, `degraded`, and
+`awaiting_breakdown`, `unattended_merges`, `unattended_approvals`, `agent_health`, `agent_health_notes`, `resend_ratio`, `rejected_merges`, `degraded`, and
 `closed_with_access_vocabulary`. A suspected human step is report-only: do not clear its
 `blocked` label, restate it, or split it while rendering the brief.
 

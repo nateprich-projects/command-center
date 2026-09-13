@@ -668,10 +668,21 @@ def gate_question(item: Item) -> Optional[str]:
             return None
         return GATES["Building"]
     if item.status == "Shaped":
-        # A plan with no Needs section has not earned an all-clear. The shared
-        # parser fails closed so a missing section still reaches Nate rather
-        # than silently bypassing the plan gate.
-        return GATES["Shaped"] if plan_needs_nate(item.body or "") else None
+        # The shaping writer and this reader must agree about every reason a
+        # plan was held at Shaped, not only an open Needs question.
+        body = item.body or ""
+        origin = parse_origin(body)
+        override = parse_origin_override(body)
+        override_target = override["target"] if override is not None else None
+        risk = plan_is_escalated(body)
+        return (
+            GATES["Shaped"]
+            if not shaped_self_approvable(
+                body, origin, item.klass, risk,
+                override_target=override_target,
+            )
+            else None
+        )
     return None
 
 
@@ -1441,6 +1452,70 @@ def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],
         and effective_shape_owner(origin_voice, override_target) == "agents"
         and not needs_nate
         and not escalated
+    )
+
+
+def shaped_self_approvable(
+    body: object,
+    origin: object,
+    klass: Optional[str],
+    risk: object,
+    *,
+    override_target: Optional[str] = None,
+) -> bool:
+    """Whether a shaped plan may advance to ``Ready`` unattended.
+
+    This is the single decision shared by the shaping write and the Shaped
+    gate reader. Every input is checked here so a missing or malformed plan,
+    origin, Class, or risk result stays at Shaped for Nate rather than becoming
+    an accidental self-approval.
+    """
+    if not isinstance(body, str) or not body.strip():
+        return False
+
+    if isinstance(origin, dict):
+        origin_voice = origin.get("voice")
+    elif isinstance(origin, str):
+        # The voice string is useful to pure callers, while cmd_shaped and the
+        # queue reader pass the parsed origin marker. Both forms are validated
+        # against the same closed vocabulary.
+        origin_voice = origin
+    else:
+        origin_voice = None
+    if origin_voice not in ORIGIN_VOICES:
+        return False
+
+    if klass not in SELF_APPROVABLE_CLASSES:
+        return False
+
+    if isinstance(risk, bool):
+        escalated = risk
+    elif isinstance(risk, (list, tuple, set, frozenset)):
+        if not all(isinstance(reason, str) for reason in risk):
+            return False
+        escalated = bool(risk)
+    else:
+        return False
+
+    if override_target not in (None, "nate", "agents"):
+        return False
+
+    # Issue bodies retain the captured origin and agent provenance after the
+    # plan is written. Those machine blocks are not part of the plan's Needs
+    # section; remove only parseable owned blocks before asking the plan
+    # parser for its all-clear result.
+    plan_body = body
+    for marker in (PROVENANCE_MARKER, ORIGIN_MARKER,
+                   ORIGIN_OVERRIDE_MARKER):
+        for _payload, block in _marked_json_blocks(plan_body, marker):
+            plan_body = plan_body.replace(block, "")
+
+    return self_approval_eligible(
+        klass,
+        origin_voice,
+        override_target,
+        needs_nate=plan_needs_nate(plan_body),
+        escalated=escalated,
     )
 
 
@@ -7113,12 +7188,12 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     override_target = override["target"] if override is not None else None
     escalation_reasons = plan_is_escalated(plan)
     needs_nate = plan_status != "Ready"
-    eligible = self_approval_eligible(
+    eligible = shaped_self_approvable(
+        plan,
+        origin,
         effective_klass,
-        origin_voice,
-        override_target,
-        needs_nate=needs_nate,
-        escalated=bool(escalation_reasons),
+        escalation_reasons,
+        override_target=override_target,
     )
     status = "Ready" if eligible else "Shaped"
     failed_conditions = []

@@ -1221,6 +1221,63 @@ def test_ordinary_issues_are_not_counted_as_rejections():
 # -- Shaped to Ready: the breakdown ----------------------------------------
 
 
+def shaped_body(origin=None, klass="Improve", extra=""):
+    body = (
+        "# Plan\n\nProposed class: {}\n\n{}"
+        "## Needs you\n"
+        "Exposure: nothing outstanding. no new surface.\n"
+        "Gates: nothing outstanding. no gate change.\n"
+        "Scope and priority: nothing outstanding. bounded.\n"
+        "Preference: nothing outstanding. no user-facing choice.\n"
+    ).format(klass, extra)
+    if origin is not None:
+        body += "\n" + funnel.origin_block(
+            origin, at=NOW, run="shape-run", agent="claude"
+        )
+    return body
+
+
+def test_nate_origin_all_clear_plan_waits_on_the_shaped_gate():
+    shaped = item(
+        1, "Shaped", "Improve", body=shaped_body("nate-relayed")
+    )
+
+    assert gate_question(shaped) == "Is the plan good?"
+
+
+def test_agent_origin_new_all_clear_plan_waits_on_the_shaped_gate():
+    shaped = item(1, "Shaped", "New", body=shaped_body("agent", "New"))
+
+    assert gate_question(shaped) == "Is the plan good?"
+
+
+def test_escalated_all_clear_plan_waits_on_the_shaped_gate():
+    shaped = item(
+        1,
+        "Shaped",
+        "Broken",
+        body=shaped_body(
+            "agent", "Broken", "Risk: escalated — destructive\n"
+        ),
+    )
+
+    assert gate_question(shaped) == "Is the plan good?"
+
+
+@_pytest.mark.parametrize(
+    ("number", "klass", "origin"),
+    [(518, "Improve", "nate-relayed"),
+     (519, "New", "nate-relayed"),
+     (643, "New", "nate-relayed")],
+)
+def test_known_shaped_plan_witnesses_reach_the_shaped_gate(
+    number, klass, origin
+):
+    shaped = item(number, "Shaped", klass, body=shaped_body(origin, klass))
+
+    assert gate_question(shaped) == "Is the plan good?"
+
+
 def test_ready_with_no_tickets_waits_on_the_funnel_not_on_nate():
     """Ready is not a human gate, whether or not it has tickets."""
     assert gate_question(item(1, "Ready", "New", children_total=0)) is None
@@ -1261,8 +1318,16 @@ def test_shaped_plan_with_an_open_needs_you_question_waits_on_nate():
     assert gate_question(shaped) == "Is the plan good?"
 
 
-def test_shaped_plan_declaring_nothing_open_does_not_wait_on_nate():
-    shaped = item(1, "Shaped", "New", body="## Needs you\n\nNothing.\n")
+def test_agent_owned_improve_plan_declaring_nothing_open_does_not_wait_on_nate():
+    shaped = item(
+        1,
+        "Shaped",
+        "Improve",
+        body=(
+            "## Needs you\n\nNothing.\n\n"
+            + funnel.origin_block("agent", at=NOW, run="shape-run", agent="claude")
+        ),
+    )
 
     assert gate_question(shaped) is None
 

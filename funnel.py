@@ -452,6 +452,8 @@ BRIEF_SECTION_BUDGETS = {
     "suspected_human_steps": 0.25,
     "human_steps": 0.25,
     "machine_local_steps": 0.25,
+    "blocked_human_steps": 0.25,
+    "blocked_machine_local_steps": 0.25,
     "closed_with_access_vocabulary": 0.25,
     "unclassed_captures": 0.25,
     "needs_class": 0.25,
@@ -5882,6 +5884,57 @@ def _reason_matches(reason: Optional[str], candidates: Iterable[str]) -> bool:
     return any(normalized == candidate.casefold() for candidate in candidates)
 
 
+def blocked_step_reason(
+    item: Item, by_ref: Mapping[str, Item]
+) -> Optional[str]:
+    """Return why a marked child ticket is not currently actionable.
+
+    This is deliberately a smaller readiness check than ``startable``. A
+    marked step is withheld from its work-owner section when it carries the
+    ``blocked`` label, has an open native dependency, or belongs to a blocked
+    parent. The parent lookup uses the Project rows already loaded for the
+    brief; it never fetches issue state of its own.
+    """
+    reasons = []
+    if item.is_blocked:
+        reasons.append("ticket carries blocked marker")
+    if item.open_blockers:
+        reasons.append("open native blockers")
+    parent = by_ref.get(item.parent or "")
+    if parent is not None and parent.is_blocked:
+        reasons.append("parent carries blocked marker")
+    return "; ".join(reasons) if reasons else None
+
+
+def _blocked_step_refs(item: Item, by_ref: Mapping[str, Item]) -> List[str]:
+    """Return stable blocker references for one withheld marked step."""
+    refs: List[str] = []
+    if item.is_blocked:
+        refs.extend(item.block_references)
+    refs.extend(item.open_blockers)
+    parent = by_ref.get(item.parent or "")
+    if parent is not None and parent.is_blocked:
+        refs.append(parent.ref)
+
+    # Keep the source order while removing duplicate facts from overlapping
+    # native/comment observations.
+    unique: List[str] = []
+    for ref in refs:
+        if ref not in unique:
+            unique.append(ref)
+    return unique
+
+
+def _blocked_step_item_json(
+    item: Item, by_ref: Mapping[str, Item]
+) -> Dict[str, object]:
+    """Render one withheld human or machine-local step for the brief."""
+    rendered = _human_step_item_json(item)
+    rendered["blocked_reason"] = blocked_step_reason(item, by_ref)
+    rendered["blockers"] = _blocked_step_refs(item, by_ref)
+    return rendered
+
+
 def human_step_items(items: Iterable[Item]) -> List[Item]:
     """Open child issues that Nate must complete himself.
 
@@ -5890,14 +5943,17 @@ def human_step_items(items: Iterable[Item]) -> List[Item]:
     Closed tickets remain in ``items`` so the completed-project backstop can
     tell a project that carried a human step from one that never had one.
     """
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
     return sorted(
         (
-            item for item in items
+            item for item in rows
             if item.state == "OPEN"
             and item.parent is not None
             and _reason_matches(
                 _item_human_step_reason(item), HUMAN_STEP_REASONS
             )
+            and blocked_step_reason(item, by_ref) is None
         ),
         key=lambda item: (item.repo, item.number),
     )
@@ -5917,16 +5973,49 @@ def human_step_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     return [_human_step_item_json(item) for item in human_step_items(items)]
 
 
-def machine_local_step_items(items: Iterable[Item]) -> List[Item]:
-    """Open child issues whose work needs Claude Code's local environment."""
+def blocked_human_step_items(items: Iterable[Item]) -> List[Item]:
+    """Open human-step tickets withheld by a native or label block."""
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
     return sorted(
         (
-            item for item in items
+            item for item in rows
+            if item.state == "OPEN"
+            and item.parent is not None
+            and _reason_matches(
+                _item_human_step_reason(item), HUMAN_STEP_REASONS
+            )
+            and blocked_step_reason(item, by_ref) is not None
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+
+
+def blocked_human_step_json(
+    items: Iterable[Item],
+) -> List[Dict[str, object]]:
+    """Render human-step work that remains visible but cannot start."""
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    return [
+        _blocked_step_item_json(item, by_ref)
+        for item in blocked_human_step_items(rows)
+    ]
+
+
+def machine_local_step_items(items: Iterable[Item]) -> List[Item]:
+    """Open child issues whose work needs Claude Code's local environment."""
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    return sorted(
+        (
+            item for item in rows
             if item.state == "OPEN"
             and item.parent is not None
             and _reason_matches(
                 _item_human_step_reason(item), MACHINE_LOCAL_REASONS
             )
+            and blocked_step_reason(item, by_ref) is None
         ),
         key=lambda item: (item.repo, item.number),
     )
@@ -5939,6 +6028,36 @@ def machine_local_step_json(
     return [
         _human_step_item_json(item)
         for item in machine_local_step_items(items)
+    ]
+
+
+def blocked_machine_local_step_items(items: Iterable[Item]) -> List[Item]:
+    """Open Claude-local tickets withheld by a native or label block."""
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    return sorted(
+        (
+            item for item in rows
+            if item.state == "OPEN"
+            and item.parent is not None
+            and _reason_matches(
+                _item_human_step_reason(item), MACHINE_LOCAL_REASONS
+            )
+            and blocked_step_reason(item, by_ref) is not None
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+
+
+def blocked_machine_local_step_json(
+    items: Iterable[Item],
+) -> List[Dict[str, object]]:
+    """Render Claude-local work that remains visible but cannot start."""
+    rows = list(items)
+    by_ref = {item.ref: item for item in rows}
+    return [
+        _blocked_step_item_json(item, by_ref)
+        for item in blocked_machine_local_step_items(rows)
     ]
 
 
@@ -6877,6 +6996,16 @@ def cmd_brief(
             lambda: machine_local_step_json(items),
             [],
         )
+        blocked_human = section(
+            "blocked_human_steps",
+            lambda: blocked_human_step_json(items),
+            [],
+        )
+        blocked_machine_local = section(
+            "blocked_machine_local_steps",
+            lambda: blocked_machine_local_step_json(items),
+            [],
+        )
         closed_access = section(
             "closed_with_access_vocabulary",
             lambda: closed_with_access_vocabulary_json(items),
@@ -6966,6 +7095,8 @@ def cmd_brief(
             "suspected_human_steps": suspected,
             "human_steps": human,
             "machine_local_steps": machine_local,
+            "blocked_human_steps": blocked_human,
+            "blocked_machine_local_steps": blocked_machine_local,
             "closed_with_access_vocabulary": closed_access,
             "unclassed_captures": unclassed,
             "needs_class": needs,

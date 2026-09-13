@@ -50,6 +50,8 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `resend_ratio` | Recent total-input over fresh-input ratio for metered agents (`codex` and `zcode`); agents without usable telemetry are omitted |
 | `human_steps` | Open tickets waiting on Nate to go and do the declared `reason`. **Work he owes, not a decision he owes** — deliberately outside `total_needing_nate`, the same distinction that keeps `blocked` out. No agent can pick these up: `startable()` excludes them, so this list is the only place they surface |
 | `machine_local_steps` | Open tickets waiting on a Claude Code session to go and do the declared `reason`. **Work that session owes, not a decision Nate owes** — deliberately outside `total_needing_nate` |
+| `blocked_human_steps` | Open human-step tickets that cannot start because the ticket, its native dependencies, or its parent is blocked. Advisory only; each row keeps the declared `reason`, `blocked_reason`, and `blockers` refs |
+| `blocked_machine_local_steps` | Open machine-local tickets that cannot start because the ticket, its native dependencies, or its parent is blocked. Advisory only; each row keeps the declared `reason`, `blocked_reason`, and `blockers` refs |
 | `suspected_human_steps` | Blocked child tickets whose block has no machine-readable condition but whose reason matches the known human-step vocabulary. Diagnostic only: leave the ticket blocked and let Nate decide whether to restate or split it |
 | `parked` | Stopped items with the written reason each carries. The reason is the artifact that makes re-encountering an idea a 30-second decision |
 | `closed_itself` | Projects the funnel closed in the recent named window, newest first, with the drift recorded at close |
@@ -95,6 +97,11 @@ item's reason. Never fold it into the decision list or `human_steps`, and never 
 the total: it answers what is waiting on a Claude Code session to go and do, not what Nate
 has to decide. Keep it separate because a Claude Code session can take these tickets, while
 the human-step list is work only Nate can do.
+
+**Then `blocked_human_steps` and `blocked_machine_local_steps`, whenever either is
+non-empty**, as advisory lists. Show each item's declared reason, `blocked_reason`, and
+the `blockers` refs. These are waiting work, not actionable work: never fold them into
+`human_steps`, `machine_local_steps`, the decision list, or `total_needing_nate`.
 
 Then `closed_itself`, whenever it is non-empty, as its own short list, newest first. For
 each project show the title and closed-at time. Say **"closed itself with drift"** and

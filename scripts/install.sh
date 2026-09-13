@@ -80,6 +80,12 @@ done
 # launchd rejects symlinked plists, so keep copies of the schedules in the user
 # LaunchAgents directory. Re-running the installer refreshes the keeper and all
 # Muse schedule copies together.
+#
+# Copying is safe from an automation shell, but `launchctl bootstrap` is a
+# console action: on the schedule Mac the managed automation shell can inspect
+# the Aqua domain and boot out a job, yet launchd rejects its bootstrap request
+# with error 5. The installer therefore prints the reload handoff instead of
+# claiming that the copied files are loaded.
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 LAUNCHD_PLISTS=(
   com.nateprich.command-center-muse-review.plist
@@ -98,6 +104,19 @@ for name in "${LAUNCHD_PLISTS[@]}"; do
     say "copied: $dst"
   fi
 done
+
+echo
+if $DRY; then
+  echo "LaunchAgent files were not changed or reloaded (dry run)."
+else
+  echo "LaunchAgent copies were refreshed; launchd was not reloaded by this script."
+fi
+echo "Finish the reload from a Terminal in the logged-in console (Aqua) session."
+echo "An automation shell may show Bootstrap failed: 5 even when launchctl print succeeds."
+echo "For the keeper, run:"
+echo "  launchctl bootout gui/\$(id -u)/com.nateprich.command-center-run-keeper"
+echo "  launchctl bootstrap gui/\$(id -u) ~/Library/LaunchAgents/com.nateprich.command-center-run-keeper.plist"
+echo "  launchctl print gui/\$(id -u)/com.nateprich.command-center-run-keeper"
 
 # ---------------------------------------------------------------------------
 # settings.json — a user-global file that may hold unrelated settings, so it is

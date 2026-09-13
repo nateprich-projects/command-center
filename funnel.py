@@ -1607,9 +1607,28 @@ def startable(
         parent = by_ref.get(item.parent or "")
         return (parent.status if parent else item.status) == "Building"
 
+    def pinned_ancestor(item: Item) -> bool:
+        """Whether the project this ticket belongs to is pinned.
+
+        A pin is Nate's explicit ordering call, and until 2026-09-12 it reached
+        only his decision queue: a pinned project's ticket sat 18th behind older
+        Broken work while he asked why (#673). It now outranks the ladder's
+        default order. It orders and nothing more -- the WIP-cap preemption
+        stays with the finite classes, and a pin never unblocks or unlocks.
+        """
+        seen: Set[str] = set()
+        current: Optional[Item] = item
+        while current is not None and current.ref not in seen:
+            if current.pinned:
+                return True
+            seen.add(current.ref)
+            current = by_ref.get(current.parent or "")
+        return False
+
     def key(item: Item):
         since = question_since(item) or datetime.max.replace(tzinfo=timezone.utc)
         return (
+            0 if pinned_ancestor(item) else 1,
             # Finite classes preempt in-flight work of unbounded ones — the half
             # of plan.md's rule this key never implemented until #435. Measured
             # 2026-09-09: six Broken projects at Ready sat behind ten in-flight
@@ -8940,7 +8959,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
     release = sub.add_parser("release", help="give up the lock on a ticket")
     release.add_argument("ref", help="issue number, owner/repo#number, or URL")
     for verb, help_text in (
-        ("pin", "pin a project within its current gate"),
+        ("pin", "pin a project: it leads Nate's queue at its gate and its tickets lead the engineers' queue"),
         ("unpin", "clear a project's pin"),
     ):
         pin = sub.add_parser(verb, help=help_text)

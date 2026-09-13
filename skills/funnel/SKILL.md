@@ -38,7 +38,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `waiting_on` | The question being asked. `Accept it?` · `Is the plan good?` · `Unblock or park?` |
 | `waited` | Time at the current gate |
 | `class` | The item's Project `Class`; tickets inherit their parent's Class |
-| `pinned` | Present as `true` when Nate pinned the Project within its current gate; absent otherwise |
+| `pinned` | Present as `true` when Nate pinned the Project: it leads his queue at its gate **and its tickets lead the engineers' queue** (`startable()`, since 2026-09-12); absent otherwise |
 | `needs_class` | Items with no `Class` set. Invalid and not startable — a one-word fix in the Project |
 | `unclassed_captures` | Open Ideas with no `Class`, each with its recorded capture origin: `agent`, `nate-relayed`, or `unknown`. Diagnostic only — Ideas stays out of `counts_by_gate` and `total_needing_nate`; an agent-origin entry is the agent's to fix, while a Nate-origin (or unknown) entry is his |
 | `in_motion` | Tickets currently claimed, as a list. `wip_limit` is how many may run at once — the cap is policy, the per-ticket claim is correctness |

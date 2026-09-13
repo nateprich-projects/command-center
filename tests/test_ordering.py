@@ -416,17 +416,40 @@ def test_an_investigate_ticket_is_startable_without_preempting_broken_work():
     ])] == [4, 2]
 
 
-def test_pins_do_not_change_codex_startable_output():
-    unpinned = [
+def test_a_pinned_projects_tickets_lead_the_engineers_queue():
+    """Reversed 2026-09-12 on Nate's ruling: a pin was always meant to move the
+    work, not only the decision (#673). An older Broken ticket yields to it."""
+    rows = [
+        project(1, "Ready", "Improve", days=1, pinned=True), ticket(2, 1),
+        project(3, "Building", "Broken", days=30), ticket(4, 3),
+    ]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
+def test_two_pinned_projects_keep_the_ladders_order_between_them():
+    rows = [
+        project(1, "Ready", "Improve", days=1, pinned=True), ticket(2, 1),
+        project(3, "Building", "Broken", days=30, pinned=True), ticket(4, 3),
+    ]
+    assert [i.number for i in startable(rows)] == [4, 2]
+
+
+def test_an_unpinned_queue_is_unchanged_by_the_pin_rule():
+    rows = [
         project(1, "Building", "New"), ticket(2, 1),
         project(3, "Building", "Broken"), ticket(4, 3),
     ]
-    pinned = [
-        project(1, "Building", "New", pinned=True), ticket(2, 1),
-        project(3, "Building", "Broken", pinned=True), ticket(4, 3),
-    ]
+    assert [i.number for i in startable(rows)] == [4, 2]
 
-    assert startable(unpinned) == startable(pinned)
+
+def test_a_pin_does_not_preempt_the_wip_cap_for_an_unbounded_class():
+    """Ordering only: a pinned Improve waits for a slot like any other."""
+    rows = [project(1, "Ready", "Improve", days=1, pinned=True), ticket(2, 1)]
+    in_flight = [project(n, "Building", "Improve") for n in (10, 20, 30, 40)]
+    in_flight_tickets = [
+        ticket(n + 1, n, in_motion_since=at(0.01)) for n in (10, 20, 30, 40)
+    ]
+    assert next_ticket(rows + in_flight + in_flight_tickets, at(0)) is None
 
 
 def test_in_flight_work_finishes_before_anything_new_starts():

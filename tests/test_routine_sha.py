@@ -32,6 +32,7 @@ def _bindings_never_touch_the_real_spool(monkeypatch):
 
 
 NOW = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)
+ACTUAL_SHA = "0b3c1a4822c616944742e306fbfe4130f8e1206527a278f392c2d2042f0cfc40"
 
 
 @pytest.fixture(params=("claude", "zcode"))
@@ -111,6 +112,47 @@ python3 funnel.py begin --agent zcode --tier standard
     assert funnel.routine_sha(plain) == funnel.routine_sha(with_literal)
 
 
+def _replace_sha_characters(value, replacements):
+    chars = list(value)
+    for index, replacement in replacements.items():
+        chars[index] = replacement
+    return "".join(chars)
+
+
+@pytest.mark.parametrize(
+    ("literal", "expected"),
+    (
+        (ACTUAL_SHA, "ok"),
+        ("  {}  ".format(ACTUAL_SHA.upper()), "ok"),
+        (_replace_sha_characters(ACTUAL_SHA, {25: "e"}), "mismatch"),
+        (_replace_sha_characters(ACTUAL_SHA, {25: "e", 26: "3"}), "mismatch"),
+        (
+            _replace_sha_characters(ACTUAL_SHA, {0: "f", 10: "a", 20: "d"}),
+            "drift",
+        ),
+        (ACTUAL_SHA[:16], "ok"),
+        (_replace_sha_characters(ACTUAL_SHA[:16], {5: "f"}), "mismatch"),
+        ("f5c52a8712e10c85319a8fec6715a020ed23d4a4ce33ce2b7508269f75570a88", "drift"),
+    ),
+)
+def test_routine_sha_classifier_has_exact_near_miss_and_drift_states(
+    literal, expected
+):
+    assert funnel.routine_sha_status(literal, ACTUAL_SHA) == expected
+
+
+@pytest.mark.parametrize(
+    "literal",
+    (
+        "0b3c1a4822c616944742e306feebf4130f8e1206527a278f392c2d2042f0cfc40",
+        "0b3c1a4822c616944742e306fe4130f8e1206527a278f392c2d2042f0cfc40",
+        "0b3c1a4822c616944742e306fe3fbfe4130f8e1206527a278f392c2d2042f0cfc40",
+    ),
+)
+def test_observed_prompt_literal_replays_are_near_misses(literal):
+    assert funnel.routine_sha_status(literal, ACTUAL_SHA) == "mismatch"
+
+
 @pytest.mark.parametrize(
     ("agent", "filename"),
     (("zcode", "zcode.md"), ("codex", "codex-work.md")),
@@ -164,8 +206,9 @@ def test_matching_routine_sha_reports_ok_and_does_not_record_drift(
     ("agent", "filename"),
     (("zcode", "zcode.md"), ("codex", "codex-work.md")),
 )
-def test_mismatching_routine_sha_records_prompt_drift_and_keeps_working(
-    tmp_path, monkeypatch, capsys, agent, filename
+@pytest.mark.parametrize("near_miss", (False, True))
+def test_mismatching_routine_sha_records_the_matching_event_and_keeps_working(
+    tmp_path, monkeypatch, capsys, agent, filename, near_miss
 ):
     path = _routine(
         tmp_path,
@@ -193,13 +236,23 @@ def test_mismatching_routine_sha_records_prompt_drift_and_keeps_working(
         lambda *args, **kwargs: events.append((args, kwargs)),
     )
 
+    literal = "0" * 64
+    expected_status = "drift"
+    expected_event = "prompt-drift"
+    if near_miss:
+        actual = funnel.routine_sha(path)
+        replacement = "0" if actual[25] != "0" else "1"
+        literal = actual[:25] + replacement + actual[26:]
+        expected_status = "mismatch"
+        expected_event = "prompt-mismatch"
+
     assert funnel.cmd_begin(
         items, NOW, agent, "standard", False,
-        routine_sha_literal="0" * 64,
+        routine_sha_literal=literal,
     ) == 0
     result = json.loads(capsys.readouterr().out)
 
-    assert result["routine_sha"]["status"] == "drift"
+    assert result["routine_sha"]["status"] == expected_status
     assert result["routine_sha"]["actual"] == funnel.routine_sha(path)
     assert result["do"] == expected_do
     if agent == "codex":
@@ -207,7 +260,7 @@ def test_mismatching_routine_sha_records_prompt_drift_and_keeps_working(
     else:
         assert result["work"] == work
     assert len(events) == 1
-    assert events[0][0] == (agent, "run-id", "prompt-drift")
+    assert events[0][0] == (agent, "run-id", expected_event)
     assert events[0][1]["routine_sha"] == result["routine_sha"]
 
 
@@ -225,3 +278,18 @@ def test_prompt_drift_event_is_non_terminal(monkeypatch):
     assert records[0][1]["run"] == "run-id"
     assert records[0][1]["phase"] == "event"
     assert records[0][1]["outcome"] == "prompt-drift"
+
+
+def test_prompt_mismatch_is_a_valid_non_terminal_event(monkeypatch):
+    records = []
+    monkeypatch.setattr(
+        heartbeat,
+        "append",
+        lambda agent, record: records.append((agent, record)) or "pushed",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    assert "prompt-mismatch" in heartbeat.OUTCOMES
+    assert heartbeat.record_event("codex", "run-id", "prompt-mismatch") == "pushed"
+    assert records[0][1]["phase"] == "event"
+    assert records[0][1]["outcome"] == "prompt-mismatch"

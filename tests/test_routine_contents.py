@@ -44,7 +44,10 @@ def test_muse_implement_carries_the_writer_contract():
     assert "the runner has already run this exact opening command" in normalized
     assert "do not run `begin` again" in normalized
     assert "prior_run.py <issue-number>" in normalized
-    assert "gh repo clone <repo-from-the-ticket> ." in normalized
+    assert "the runner starts you in a fresh, otherwise disposable per-run workspace that has already cloned the ticket repo" in normalized
+    assert "`git remote -v` shows the ticket repo as `origin`" in normalized
+    assert "`git status --short --branch` shows a clean tree before creating `ticket/<issue-number>` from `main`" in normalized
+    assert "gh repo clone <repo-from-the-ticket> ." not in normalized
     assert "branch **`ticket/<issue-number>` from `main`**" in normalized
     assert "commit and push after each meaningful step" in normalized
     assert "shell commands run in the background" in normalized

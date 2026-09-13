@@ -130,14 +130,22 @@ timing. If it reports stranded work in another directory, that work exists only
 there; rescue it or deliberately redo it rather than assuming it is inherited
 or gone.
 
-## 3. Clone and do the ticket
+## 3. Verify the runner-provided checkout and do the ticket
 
-The runner starts you in a fresh, otherwise disposable per-run directory. Clone
-the repository named in the opening JSON **into that directory**, not beside it:
+The runner starts you in a fresh, otherwise disposable per-run workspace that
+has already cloned the ticket repo. Do not clone the repository again. Before
+doing any work, verify that the runner handed you the expected checkout and a
+clean tree:
 
 ```bash
-gh repo clone <repo-from-the-ticket> .
+git remote -v
+git status --short --branch
 ```
+
+Confirm `git remote -v` shows the ticket repo as `origin`, and `git status
+--short --branch` shows a clean tree before creating `ticket/<issue-number>`
+from `main`. If either check is wrong, stop rather than cloning or working in
+another directory.
 
 Never work in `~/.claude/command-center` or
 `~/.claude/command-center-run`. The first is Nate's working tree and the second

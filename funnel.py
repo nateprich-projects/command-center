@@ -6117,14 +6117,20 @@ class BriefGateTimeout(RuntimeError):
     """A gate-feeding brief section cannot safely return a partial brief."""
 
     def __init__(self, section: str, elapsed: float, budget: float,
-                 reason: str):
+                 reason: str, candidate_count: Optional[int] = None):
         self.section = section
         self.elapsed = elapsed
         self.budget = budget
         self.reason = reason
+        self.candidate_count = candidate_count
         super().__init__(
-            "section {!r} exceeded its {:.3f}s budget after {:.3f}s: {}"
-            .format(section, budget, elapsed, reason)
+            "brief gate timeout: section={!r} elapsed={:.3f}s "
+            "budget={:.3f}s candidate count={} reason={}"
+            .format(
+                section, elapsed, budget,
+                "unknown" if candidate_count is None else candidate_count,
+                reason,
+            )
         )
 
 
@@ -6218,6 +6224,7 @@ def _brief_timed(
     deadline: Optional[float] = None,
     budget: Optional[float] = None,
     gate: Optional[bool] = None,
+    candidate_count: Optional[int] = None,
 ) -> object:
     """Run one brief section, enforce its budget, and record its timing."""
     degraded = degraded if degraded is not None else []
@@ -6235,7 +6242,10 @@ def _brief_timed(
     def stop(reason: str, elapsed: float) -> object:
         timings[section] = round(max(0.0, elapsed), 6)
         if gate:
-            raise BriefGateTimeout(section, elapsed, budget, reason)
+            raise BriefGateTimeout(
+                section, elapsed, budget, reason,
+                candidate_count=candidate_count,
+            )
         degraded.append(_brief_degraded_record(
             section, elapsed, budget, reason
         ))
@@ -6263,7 +6273,10 @@ def _brief_timed(
         if deadline is not None and started + elapsed > deadline:
             reason = "brief transport budget was exceeded"
         if gate:
-            raise BriefGateTimeout(section, elapsed, budget, reason)
+            raise BriefGateTimeout(
+                section, elapsed, budget, reason,
+                candidate_count=candidate_count,
+            )
         degraded.append(_brief_degraded_record(
             section, elapsed, budget, reason
         ))
@@ -6288,13 +6301,20 @@ def cmd_brief(
     cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
     cache_token = _ACTIVE_BRIEF_CACHE.set(cache)
 
-    def section(name: str, reader: Callable[[], object], default):
+    def section(
+        name: str,
+        reader: Callable[[], object],
+        default,
+        *,
+        candidate_count: Optional[int] = None,
+    ):
         value = _brief_timed(
             name,
             lambda: _brief_read(name, reader, missing),
             timings,
             degraded,
             deadline=deadline,
+            candidate_count=candidate_count,
         )
         return default if value is _BRIEF_UNAVAILABLE else value
 
@@ -6332,7 +6352,8 @@ def cmd_brief(
         )
         parked = section("parked", lambda: parked_json(items), [])
         closed_itself = section(
-            "closed_itself", lambda: closed_itself_json(items, now), []
+            "closed_itself", lambda: closed_itself_json(items, now), [],
+            candidate_count=len(closed_itself_items(items, now)),
         )
         cleared_blocks = section(
             "cleared_blocks", lambda: cleared_blocks_json(items, now), []

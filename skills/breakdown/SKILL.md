@@ -101,7 +101,8 @@ Apply this marker narrowly to LaunchAgent work. A ticket whose step runs
 criterion requires that a plist loads, must carry the exact marker line above. This
 covers both sides of a reinstall pair: booting out the old job and loading the
 replacement. Reading both plist files and running
-`python3 -m pytest tests/test_launchd_drift.py` remain workable by any agent. If a
+`PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests/test_launchd_drift.py` remain
+workable by any agent. If a
 plan item mixes those drift checks with a load action, split only the load action
 into its own human-step ticket, one human action per ticket; do not mark the whole
 LaunchAgent ticket or rely on a hand mark.

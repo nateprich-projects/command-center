@@ -1155,6 +1155,35 @@ def test_brief_emits_elapsed_seconds_for_each_section(monkeypatch, capsys):
     assert all(value >= 0 for value in brief["timings"].values())
 
 
+def test_brief_timings_identify_a_slow_stage_without_changing_payload(
+    monkeypatch, capsys
+):
+    """A later slowdown must name its stage instead of only blocking the brief."""
+    item = funnel.Item(
+        repo="nateprich/beta", number=97, title="Regression project",
+        url="https://example.invalid/97", state="OPEN", status="Ready",
+        status_since=NOW,
+    )
+    clock = [0.0]
+
+    monkeypatch.setattr(funnel.time, "perf_counter", lambda: clock[0])
+
+    def slow_closed_itself(*args, **kwargs):
+        clock[0] += 3.5
+        return []
+
+    monkeypatch.setattr(funnel, "closed_itself_json", slow_closed_itself)
+
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["items"] == []
+    assert brief["total_needing_nate"] == 0
+    assert brief["closed_itself"] == []
+    assert brief["timings"]["closed_itself"] == pytest.approx(3.5)
+    assert max(brief["timings"], key=brief["timings"].get) == "closed_itself"
+
+
 def test_brief_marks_an_over_budget_informational_section_degraded(
     monkeypatch, capsys
 ):

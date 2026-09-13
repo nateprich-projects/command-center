@@ -35,8 +35,10 @@ MUSE_SCHEDULE_NAMES = REVIEWER_NAMES + [IMPLEMENTER_NAME]
 KEEPER_NAME = "com.nateprich.command-center-run-keeper.plist"
 #: The Remote Control listener. Not a schedule; see the carve-out in `AGENTS.md`.
 REMOTE_CONTROL_NAME = "com.nateprich.command-center-remote-control.plist"
-NAMES = MUSE_SCHEDULE_NAMES + [KEEPER_NAME, REMOTE_CONTROL_NAME]
-INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [KEEPER_NAME]
+#: The funnel snapshot publisher (#652). A poll loop, not a routine schedule.
+PUBLISHER_NAME = "com.nateprich.command-center-funnel-publisher.plist"
+NAMES = MUSE_SCHEDULE_NAMES + [KEEPER_NAME, REMOTE_CONTROL_NAME, PUBLISHER_NAME]
+INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [KEEPER_NAME, PUBLISHER_NAME]
 LAUNCH_AGENTS = pathlib.Path.home() / "Library" / "LaunchAgents"
 CLAUDE_CODE_MARKER = "Human step: a Claude Code environment"
 LAUNCHD_CLAUDE_CODE_TRIGGER = re.compile(
@@ -263,3 +265,46 @@ def test_the_keeper_fires_at_least_as_often_as_the_fastest_routine():
 
     fastest_routine_gap = min(maximum_gap(name) for name in REVIEWER_NAMES)
     assert maximum_gap(KEEPER_NAME) <= fastest_routine_gap
+
+
+def test_the_publisher_runs_the_run_clone_copy():
+    """The unattended job must run the maintained checkout's publisher under
+    the pinned interpreter, never Nate's working tree."""
+    import plistlib
+
+    with (ROOT / "launchd" / PUBLISHER_NAME).open("rb") as handle:
+        args = plistlib.load(handle)["ProgramArguments"]
+
+    assert args == [
+        "/usr/bin/python3",
+        "/Users/nateprich/.claude/command-center-run/publisher.py",
+    ]
+    assert not any(a.startswith("/Volumes/") for a in args), args
+
+
+def test_the_publisher_polls_every_minute():
+    """The plan polls Cloudflare every minute; a poll loop uses StartInterval
+    rather than the keeper's 60-entry calendar schedule."""
+    import plistlib
+
+    with (ROOT / "launchd" / PUBLISHER_NAME).open("rb") as handle:
+        plist = plistlib.load(handle)
+
+    assert plist["StartInterval"] == 60
+    assert "StartCalendarInterval" not in plist
+
+
+def test_the_publisher_logs_to_its_own_files():
+    """Publisher failures must land in the publisher's logs, never in an
+    agent run's output."""
+    import plistlib
+
+    with (ROOT / "launchd" / PUBLISHER_NAME).open("rb") as handle:
+        plist = plistlib.load(handle)
+
+    assert plist["StandardOutPath"] == (
+        "/Users/nateprich/Library/Logs/command-center-funnel-publisher.log"
+    )
+    assert plist["StandardErrorPath"] == (
+        "/Users/nateprich/Library/Logs/command-center-funnel-publisher.err.log"
+    )

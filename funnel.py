@@ -468,6 +468,7 @@ BRIEF_SECTION_BUDGETS = {
     "agent_health": 1.0,
     "agent_health_notes": 1.0,
     "working_tree_touched": 1.0,
+    "outcome_signals": 3.0,
     "rejected_merges": 0.25,
 }
 
@@ -2177,9 +2178,17 @@ def _heartbeat_context(run: Optional[str], agent: Optional[str]):
         providers = sorted(heartbeat.PROVIDERS)
         if agent and agent in heartbeat.PROVIDERS:
             providers = [agent]
+        cache = (
+            _ACTIVE_BRIEF_CACHE.get()
+            if "_ACTIVE_BRIEF_CACHE" in globals() else None
+        )
         candidates = []
         for provider in providers:
-            for row in heartbeat.open_starts(heartbeat.read(provider)):
+            rows = (
+                cache.heartbeat_rows(provider)
+                if cache is not None else heartbeat.read(provider)
+            )
+            for row in heartbeat.open_starts(rows):
                 if run and row.get("run") != run:
                     continue
                 candidates.append(row)
@@ -6826,6 +6835,30 @@ def _brief_heartbeat_rows(agent: str) -> List[Dict]:
     return heartbeat.read(agent)
 
 
+def _read_outcome_signals(now: datetime) -> Dict[str, object]:
+    """Read named outcome signals without turning an unavailable read into zeros."""
+    try:
+        import outcomes
+
+        return outcomes.signal_summary(outcomes.read_records(), now=now)
+    except Exception as exc:
+        # Outcome history is diagnostic input. Keep the brief usable when its
+        # separate heartbeat-branch read is unavailable, while making the
+        # uncertainty explicit instead of presenting an empty result as truth.
+        return {
+            "schema_version": 1,
+            "source": "outcomes",
+            "derived_at": now.astimezone(timezone.utc).isoformat().replace(
+                "+00:00", "Z"
+            ),
+            "status": "unavailable",
+            "reason": "could not read durable outcome records: {}".format(
+                _brief_error(exc)
+            ),
+            "signals": {},
+        }
+
+
 def _brief_degraded_record(section: str, elapsed: float, budget: float,
                            reason: str) -> Dict[str, object]:
     return {
@@ -6913,6 +6946,7 @@ def cmd_brief(
     degraded: Optional[List[Dict[str, object]]] = None,
     deadline: Optional[float] = None,
     brief_cache: Optional[BriefCache] = None,
+    outcome_signals: Optional[Dict[str, object]] = None,
 ) -> int:
     missing = list(missing or [])
     timings = {} if timings is None else timings
@@ -7115,6 +7149,7 @@ def cmd_brief(
             "agent_health": health,
             "agent_health_notes": health_notes,
             "working_tree_touched": touched,
+            "outcome_signals": outcome_signals,
             "rejected_merges": rejected,
             "degraded": degraded,
             "timings": timings,
@@ -10261,6 +10296,15 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         error = "could not read ticket branch facts: brief section read timed out"
                         for section in BRIEF_PR_FACT_SECTIONS:
                             missing.append({"section": section, "error": error})
+                outcome_signals = _brief_timed(
+                    "outcome_signals",
+                    lambda: _read_outcome_signals(now),
+                    timings,
+                    degraded,
+                    deadline=deadline,
+                )
+                if outcome_signals is _BRIEF_UNAVAILABLE:
+                    outcome_signals = None
                 return cmd_brief(
                     items,
                     now,
@@ -10270,6 +10314,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     degraded=degraded,
                     deadline=deadline,
                     brief_cache=cache,
+                    outcome_signals=outcome_signals,
                 )
             finally:
                 _ACTIVE_BRIEF_TIMINGS.reset(brief_timing_token)

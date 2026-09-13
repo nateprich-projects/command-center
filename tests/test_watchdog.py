@@ -150,6 +150,36 @@ def test_prompt_drift_is_reported_as_a_fault():
     assert "checked-in file" in problems[0]
 
 
+def test_prompt_mismatch_is_logged_without_filing_a_resync_alarm():
+    rows = [event("a", 1, "prompt-mismatch")]
+
+    assert watchdog.assess("codex", rows, NOW) == []
+
+    message = watchdog.note("codex", rows, NOW)
+
+    assert "prompt-mismatch 1 time(s)" in message
+    assert "transcription note" in message
+    assert "does not require resync" in message
+
+
+def test_mismatch_only_watchdog_run_stays_healthy_and_prints_the_note(
+    monkeypatch, capsys,
+):
+    monkeypatch.setattr(watchdog.time, "time", lambda: NOW)
+    monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(watchdog, "records", lambda agent: [
+        event("a", 1, "prompt-mismatch")
+    ])
+    monkeypatch.setattr(watchdog, "existing_issue", lambda: {})
+
+    assert watchdog.main() == 0
+    output = capsys.readouterr().out
+
+    assert "healthy" in output
+    assert "prompt-mismatch 1 time(s)" in output
+    assert "opened #" not in output
+
+
 def test_one_dying_run_is_noise_not_an_alarm():
     """One is noise; three in a week means runs are dying.
 

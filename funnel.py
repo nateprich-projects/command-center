@@ -40,6 +40,7 @@ from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Set, Tuple)
 
 from agent_health import assess as assess_agent_health
+from agent_health import notes as agent_health_assessment_notes
 
 # --------------------------------------------------------------------------
 # Configuration. These are the only knobs; everything else is derived.
@@ -463,6 +464,7 @@ BRIEF_SECTION_BUDGETS = {
     "unattended_merges": 3.0,
     "unattended_approvals": 49.0,
     "agent_health": 1.0,
+    "agent_health_notes": 1.0,
     "working_tree_touched": 1.0,
     "rejected_merges": 0.25,
 }
@@ -2862,6 +2864,35 @@ def agent_health(now: datetime) -> List[Dict[str, str]]:
         found.extend(
             {"agent": agent, "condition": condition}
             for condition in conditions
+        )
+    return found
+
+
+def agent_health_notes(now: datetime) -> List[Dict[str, str]]:
+    """Informational heartbeat notes that never enter the health alarm list."""
+    try:
+        import heartbeat
+
+        providers = sorted(heartbeat.PROVIDERS)
+    except Exception:
+        return []
+
+    found: List[Dict[str, str]] = []
+    retired = getattr(heartbeat, "RETIRED_AGENTS", frozenset())
+    for agent in providers:
+        if agent in retired:
+            continue  # a stopped schedule is not a dying one (#431)
+        try:
+            notes = agent_health_assessment_notes(
+                agent, _brief_heartbeat_rows(agent), now.timestamp()
+            )
+        except Exception:
+            # Notes are diagnostic too. A heartbeat read failure must not hide
+            # the rest of the funnel or make a brief fail open.
+            continue
+        found.extend(
+            {"agent": agent, "note": note}
+            for note in notes
         )
     return found
 
@@ -6709,6 +6740,9 @@ def cmd_brief(
             ),
         )
         health = section("agent_health", lambda: agent_health(now), [])
+        health_notes = section(
+            "agent_health_notes", lambda: agent_health_notes(now), []
+        )
         touched = section(
             "working_tree_touched", lambda: working_tree_touched(now), []
         )
@@ -6758,6 +6792,7 @@ def cmd_brief(
             "unattended_merges": merges,
             "unattended_approvals": approvals,
             "agent_health": health,
+            "agent_health_notes": health_notes,
             "working_tree_touched": touched,
             "rejected_merges": rejected,
             "degraded": degraded,

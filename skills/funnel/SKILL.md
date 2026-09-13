@@ -58,7 +58,8 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `prose_dependencies` | Open tickets whose recognised dependency sentence has no matching native `blocked_by` edge. Numbered sentences carry the open named issue refs in `names`; unnumbered `Depends on` or `Blocked on` sentences carry `names: []`; every row carries the ticket `ref` and original `sentence`; diagnostic only |
 | `unattended_merges` | Merges an agent made without him, read from every live reviewer's heartbeat records (retired agents excluded); each record carries `pr`, `at`, `note` and the `agent` that merged, plus `self_reviewed: true` when the authoring and reviewing runs used the same agent. `plan.md` makes these appearing in the brief a condition of unattended merging being allowed at all |
 | `unattended_approvals` | Recent plans moved to `Ready` by the unattended shaping path, with each row's issue `ref`, title, URL, transition time `at`, and stated `basis`; a marker-backed record, not a notification or review request |
-| `agent_health` | Raised watchdog conditions, each with the heartbeat agent and the watchdog's condition wording. Empty when all agents are healthy |
+| `agent_health` | Raised watchdog conditions, each with the heartbeat agent and the watchdog's condition wording. Empty when all agents are healthy; prompt-mismatch transcription notes are kept separate |
+| `agent_health_notes` | Informational heartbeat notes, currently near-miss `prompt-mismatch` routine literals. Diagnostic only: they never page for a resync |
 | `rejected_merges` | Merges he checked and found broken, over `window_days`. `stop_auto_merging` true means three in a week — auto-merging stops until he fixes the review bar |
 | `closed_with_access_vocabulary` | Projects that closed with access-shaped words in the plan and no human-step ticket. The detective backstop for when every preventive layer missed one |
 | `missing` | Sections that could not be read, each with the section name and error. A non-empty list means the brief is partial; do not treat a null or empty value in a named section as an all-clear |
@@ -115,6 +116,10 @@ Then the gate counts on one line. Then anything unusual, and only if present:
 `awaiting_breakdown`, `unattended_merges`, `unattended_approvals`, `agent_health`, `resend_ratio`, `rejected_merges`, `degraded`, and
 `closed_with_access_vocabulary`. A suspected human step is report-only: do not clear its
 `blocked` label, restate it, or split it while rendering the brief.
+
+`agent_health_notes` is also report-only. Show each note as a transcription note, not as
+an alarm or a request to resync; a near-miss routine literal does not establish prompt
+drift.
 
 For `unattended_merges`, call out a row with `self_reviewed: true` as
 **self-reviewed**. The marker is derived from the authoring and reviewing run

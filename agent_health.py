@@ -40,6 +40,7 @@ OPEN_START_MULTIPLE = 10
 ERROR_THRESHOLD = 3
 WEEK = 7 * 86400
 PROMPT_DRIFT_OUTCOME = "prompt-drift"
+PROMPT_MISMATCH_OUTCOME = "prompt-mismatch"
 
 
 def _history(
@@ -152,6 +153,61 @@ def _completed_run_durations(
             continue
         durations.append(finished_at - started_at)
     return durations
+
+
+def _recent_outcomes(
+    rows: List[Dict],
+    now: float,
+    outcome: str,
+    week: int,
+) -> List[Dict]:
+    """Return records with ``outcome`` inside the current diagnostic week."""
+    return [
+        row for row in rows
+        if row.get("outcome") == outcome
+        and now - (row.get("ts") or 0) < week
+    ]
+
+
+def notes(
+    agent: str,
+    rows: List[Dict],
+    now: float,
+    *,
+    week: Optional[int] = None,
+    prompt_mismatch_outcome: Optional[str] = None,
+) -> List[str]:
+    """Return informational notes that must not raise a health alarm.
+
+    A near-miss routine literal is useful evidence about the run that produced
+    it, but it does not establish that the checked-in prompt is stale. Keep the
+    transcription note separate from :func:`assess`, whose return value is the
+    set of conditions that may page or enter the funnel's health section.
+    """
+    week = WEEK if week is None else week
+    prompt_mismatch_outcome = (
+        PROMPT_MISMATCH_OUTCOME
+        if prompt_mismatch_outcome is None else prompt_mismatch_outcome
+    )
+    mismatches = _recent_outcomes(
+        rows, now, prompt_mismatch_outcome, week
+    )
+    if not mismatches:
+        return []
+
+    latest = max(
+        mismatches,
+        key=lambda row: row.get("ts") or 0,
+    )
+    return [
+        "`{}` recorded prompt-mismatch {} time(s) this week. This is a "
+        "routine-literal transcription note for a near miss, not prompt drift; "
+        "it does not require resync. Most recent at <t:{}:f>.".format(
+            agent,
+            len(mismatches),
+            int(latest.get("ts") or 0),
+        )
+    ]
 
 
 def assess(
@@ -315,11 +371,9 @@ def assess(
             )
         )
 
-    prompt_drift = [
-        r for r in rows
-        if r.get("outcome") == prompt_drift_outcome
-        and now - (r.get("ts") or 0) < week
-    ]
+    prompt_drift = _recent_outcomes(
+        rows, now, prompt_drift_outcome, week
+    )
     if prompt_drift:
         problems.append(
             "`{}` reported prompt drift {} time(s) this week. The routine "
@@ -331,10 +385,7 @@ def assess(
             )
         )
 
-    errored = [
-        r for r in rows
-        if r.get("outcome") == "errored" and now - (r.get("ts") or 0) < week
-    ]
+    errored = _recent_outcomes(rows, now, "errored", week)
     if len(errored) >= error_threshold:
         notes = [r.get("note") for r in errored[-3:] if r.get("note")]
         problems.append(

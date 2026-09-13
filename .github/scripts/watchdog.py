@@ -15,6 +15,8 @@ different fixes:
   itself.
 - **Drifted.** A run reported that the prompt it received differs from the
   checked-in routine.
+- **Transcription note.** A run reported a near-miss routine literal. This is
+  printed as evidence, but it does not page or request a resync.
 - **Stale runtime.** Three consecutive scheduled runs used a checkout that
   GitHub reports behind `main` after the normal keeper lag.
 
@@ -59,6 +61,7 @@ DYING_THRESHOLD = _agent_health.DYING_THRESHOLD
 ERROR_THRESHOLD = _agent_health.ERROR_THRESHOLD
 WEEK = _agent_health.WEEK
 PROMPT_DRIFT_OUTCOME = _agent_health.PROMPT_DRIFT_OUTCOME
+PROMPT_MISMATCH_OUTCOME = _agent_health.PROMPT_MISMATCH_OUTCOME
 
 RUNTIME_WATCHED_AGENTS = frozenset({"codex", "muse", "zcode"})
 RUNTIME_RUN_COUNT = 3
@@ -278,13 +281,21 @@ def note(agent: str, rows: List[Dict], now: Optional[float] = None) -> str:
         return "`{}` has never recorded a run (not scheduled yet?)".format(agent)
     if now is None:
         now = time.time()
+    notes = []
     timestamps, gaps = _history(rows, now)
     if len(gaps) < MINIMUM_HISTORY:
-        return (
+        notes.append((
             "`{}` has only {} gap(s) in the trailing {} history; "
             "silence threshold not inferred yet"
-        ).format(agent, len(gaps), _window_label())
-    return ""
+        ).format(agent, len(gaps), _window_label()))
+    notes.extend(_agent_health.notes(
+        agent,
+        rows,
+        now,
+        week=WEEK,
+        prompt_mismatch_outcome=PROMPT_MISMATCH_OUTCOME,
+    ))
+    return " ".join(notes)
 
 
 def existing_issue() -> Dict:

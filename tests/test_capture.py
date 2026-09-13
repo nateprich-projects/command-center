@@ -28,7 +28,7 @@ SHAPED_691_PLAN = (
 ).read_text()
 
 
-def test_capture_stamps_the_created_body_as_agent(monkeypatch):
+def test_capture_item_add_failure_surfaces_the_error(monkeypatch, capsys):
     calls = []
 
     def run(args, capture_output, text=True):
@@ -43,26 +43,111 @@ def test_capture_stamps_the_created_body_as_agent(monkeypatch):
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
 
+    assert funnel.main([
+        "capture", "An idea", "--repo", "owner/repo", "--origin", "nate-relayed",
+    ], _items=[]) == 2
+
+    assert len(calls) == 2
+    assert calls[0][-2:] == ("--label", "needs-shaping")
+    assert "not in project" in capsys.readouterr().err
+
+
+def test_capture_retries_transient_item_add_then_succeeds(monkeypatch):
+    calls = []
+    sleeps = []
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        if args[1:3] == ["issue", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/owner/repo/issues/123\n",
+                stderr="",
+            )
+        if args[1:3] == ["project", "item-add"] and len(
+                [call for call in calls if call[1:3] == ("project", "item-add")]
+        ) == 1:
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="Something went wrong while executing your query",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"id": "project-item-123"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel.time, "sleep", sleeps.append)
+    monkeypatch.setattr(funnel, "_option_id", lambda field_id, name: "ideas-option")
+    monkeypatch.setattr(funnel, "gh_graphql", lambda *args, **kwargs: {})
+
     assert funnel.cmd_capture(
-        [], NOW, "An idea", "Raw note", "owner/repo",
-        run="capture-run", agent="claude", origin="agent", klass="Broken",
+        [], NOW, "An idea", "A note", "owner/repo",
+        run="capture-run", agent="codex", origin="nate-relayed",
     ) == 0
 
-    body = calls[0][calls[0].index("--body") + 1]
-    assert body.startswith("Raw note")
-    assert funnel.parse_provenance(body) == {
-        "agent": "claude",
-        "at": NOW.isoformat(),
-        "run": "capture-run",
-        "voice": "agent",
-    }
-    assert funnel.parse_origin(body) == {
-        "agent": "claude",
-        "at": NOW.isoformat(),
-        "run": "capture-run",
-        "voice": "agent",
-    }
-    assert calls[0][-2:] == ("--label", "needs-shaping")
+    assert len([call for call in calls if call[1:3] == ("project", "item-add")]) == 2
+    assert sleeps == [funnel.CAPTURE_ITEM_ADD_RETRY_DELAY_SECONDS]
+
+
+def test_capture_retry_exhaustion_surfaces_the_last_transient_error(monkeypatch):
+    calls = []
+    errors = [
+        "Something went wrong while executing your query (first)",
+        "Post https://api.github.com/graphql: context deadline exceeded (second)",
+        "Something went wrong while executing your query (last)",
+    ]
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        if args[1:3] == ["issue", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/owner/repo/issues/123\n",
+                stderr="",
+            )
+        return SimpleNamespace(returncode=1, stdout="", stderr=errors.pop(0))
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel.time, "sleep", lambda seconds: None)
+
+    with pytest.raises(funnel.GitHubError, match="last"):
+        funnel.cmd_capture(
+            [], NOW, "An idea", "A note", "owner/repo",
+            run="capture-run", agent="codex", origin="nate-relayed",
+        )
+
+    assert len([call for call in calls if call[1:3] == ("project", "item-add")]) == 3
+
+
+def test_capture_non_transient_item_add_failure_does_not_retry(monkeypatch):
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        if args[1:3] == ["issue", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/owner/repo/issues/123\n",
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="Could not resolve to a Project item",
+        )
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    with pytest.raises(funnel.GitHubError, match="Could not resolve"):
+        funnel.cmd_capture(
+            [], NOW, "An idea", "A note", "owner/repo",
+            run="capture-run", agent="codex", origin="nate-relayed",
+        )
+
+    assert len([call for call in calls if call[1:3] == ("project", "item-add")]) == 1
 
 
 @pytest.mark.parametrize(
@@ -80,9 +165,15 @@ def test_capture_records_each_explicit_origin(monkeypatch, origin, klass):
                 stdout="https://github.com/owner/repo/issues/42\n",
                 stderr="",
             )
-        return SimpleNamespace(returncode=1, stdout="", stderr="not in project")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"id": "project-item-42"}),
+            stderr="",
+        )
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "_option_id", lambda field_id, name: "ideas-option")
+    monkeypatch.setattr(funnel, "gh_graphql", lambda *args, **kwargs: {})
 
     assert funnel.cmd_capture(
         [], NOW, "An idea", "Raw note", "owner/repo",

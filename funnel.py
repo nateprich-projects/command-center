@@ -6836,6 +6836,61 @@ mutation($project: ID!, $item: ID!, $field: ID!) {
 """
 
 
+def _status_write_confirmed(response: object, item_id: str) -> bool:
+    """Return whether GitHub acknowledged the Project item status write."""
+    if not isinstance(response, dict):
+        return False
+    mutation = response.get("updateProjectV2ItemFieldValue")
+    if not isinstance(mutation, dict):
+        return False
+    project_item = mutation.get("projectV2Item")
+    return (
+        isinstance(project_item, dict)
+        and project_item.get("id") == item_id
+    )
+
+
+def _write_status(item: Item, status: str, now: datetime) -> Optional[str]:
+    """Write and locally record a Project status, or return a failure reason.
+
+    A FunnelSession deliberately reuses its Project objects across commands.
+    Updating GitHub without updating this object makes a same-session ``show``
+    report the stage that was true before the mutation. Treat the mutation
+    payload as the confirmation boundary: only the expected Project item
+    response permits the local state and its gate timestamp to advance.
+    """
+    if not item.item_id:
+        return "{} is not in the Project".format(item.ref)
+
+    try:
+        response = gh_graphql(
+            SET_FIELD,
+            project=PROJECT_ID,
+            item=item.item_id,
+            field=STATUS_FIELD_ID,
+            option=_option_id(STATUS_FIELD_ID, status),
+        )
+    except GitHubError as exc:
+        return "{}".format(exc)
+
+    if not _status_write_confirmed(response, item.item_id):
+        return (
+            "GitHub did not confirm the Status update for {} to {}"
+            .format(item.ref, status)
+        )
+
+    previous = item.status
+    item.status = status
+    item.status_since = now
+    if previous != status:
+        item.status_events.append({
+            "previous_status": previous,
+            "status": status,
+            "at": now,
+        })
+    return None
+
+
 def _option_id(field_id: str, name: str) -> str:
     data = gh_graphql(
         '{ rateLimit { cost remaining resetAt } '
@@ -7211,6 +7266,9 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     )
     if out.returncode != 0:
         raise GitHubError(out.stderr.strip())
+    # The session keeps this object after the issue-body write. Keep its body
+    # aligned with GitHub before a same-session `show` evaluates the plan.
+    item.body = body
 
     if not item.item_id:
         raise GitHubError("{} is not in the Project".format(item.ref))
@@ -7252,10 +7310,31 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
         # makes an unclassed idea look like it advanced cleanly.
         gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
                    field=CLASS_FIELD_ID, option=_option_id(CLASS_FIELD_ID, klass))
-    gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
-               field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, status))
-    _run_gh(["gh", "issue", "edit", str(item.number), "--repo", item.repo,
-                    "--remove-label", "needs-shaping"], capture_output=True)
+    status_error = _write_status(item, status, now)
+    if status_error is not None:
+        # The body is durable, but the stage is not confirmed. Do not clear
+        # the shaping label or post a self-approval marker, both of which
+        # would make the item look further along than its known Project state.
+        persisted_status = item.status or "unknown"
+        print("{} → {}\n{}".format(item.ref, persisted_status, item.url))
+        print(
+            "could not confirm requested Status {} for {}; retaining the "
+            "previously observed stage {}: {}".format(
+                status, item.ref, persisted_status, status_error
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+    label = _run_gh(
+        ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
+         "--remove-label", "needs-shaping"],
+        capture_output=True, text=True,
+    )
+    if label.returncode == 0:
+        item.labels = [
+            value for value in item.labels if value != "needs-shaping"
+        ]
     if status == "Ready":
         basis = "{}; no escalated risk".format(reason)
         if authority_signals:

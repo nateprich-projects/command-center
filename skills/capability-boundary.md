@@ -8,8 +8,12 @@ be verified. The world has three outcomes:
   of the checkout.
 - **Workable only where the Claude Code environment is present.** The step needs a
   machine-local Claude Code surface that Codex cannot reach or verify, such as
-  `~/.claude`, installed skills, routine prompts, or the statusline. This is the
-  middle case: it is agent work, but only Claude Code can take it.
+  `~/.claude`, installed skills, routine prompts, the statusline, or loading,
+  reloading, or booting out a LaunchAgent with `launchctl bootstrap`,
+  `launchctl bootout`, or `launchctl load`. An acceptance criterion that a plist
+  loads belongs here too, including both sides of a reinstall pair: booting out
+  the old job and loading the replacement. This is the middle case: it is agent
+  work, but only Claude Code can take it.
 - **Workable by no agent.** The step needs a capability outside both agent
   environments, such as a browser session or application UI, a credential store,
   account or billing settings, physical access, or an identity of its own.

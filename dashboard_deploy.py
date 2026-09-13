@@ -7,16 +7,18 @@ Cloudflare credential:
 1. Fetch ``origin main``. The fetch never moves the checkout's own branch:
    the keeper owns the checkout's branch, and this job deploys from a
    detached worktree at the fetched tip instead.
-2. Ensure the KV namespace. When ``dashboard/wrangler.toml`` at the tip still
-   carries the local-only placeholder id, look the namespace up by title,
-   create it when absent, and commit the real id to main. The commit changes
-   dashboard/, so the first deploy follows it in the same tick.
-3. Deploy only when dashboard/ changed since the last recorded deploy. A new
+2. Deploy only when dashboard/ changed since the last recorded deploy. A new
    tip with no dashboard/ change advances the recorded SHA without running
-   wrangler. A worktree at the tip runs ``npm ci`` and ``npx wrangler
-   deploy`` with the scoped token; the declared ``funnel.nateprich.com``
-   route attaches as part of the deploy, and DNS needs no work (its record
-   is already proxied, per #651).
+   wrangler and without touching Cloudflare.
+3. On a deploy, resolve the KV namespace id and patch the worktree's
+   ``dashboard/wrangler.toml`` copy with it before running ``npm ci`` and
+   ``npx wrangler deploy`` with the scoped token. When the tip still carries
+   the local-only placeholder id, the id comes from the state-recorded
+   value or a find-or-create title lookup; an already-real id on main
+   deploys as-is. The placeholder on main stays untouched: like the other
+   launchd jobs, this one never writes to main. The declared
+   ``funnel.nateprich.com`` route attaches as part of the deploy, and DNS
+   needs no work (its record is already proxied, per #651).
 
 Configuration, in precedence order (flag, environment, default):
 
@@ -90,9 +92,6 @@ KV_TIMEOUT_SECONDS = 30.0
 GIT_TIMEOUT_SECONDS = 120.0
 NPM_TIMEOUT_SECONDS = 600.0
 WRANGLER_TIMEOUT_SECONDS = 600.0
-COMMIT_USER_NAME = "Command Center dashboard deploy"
-COMMIT_USER_EMAIL = "command-center-dashboard-deploy@users.noreply.github.com"
-COMMIT_MESSAGE = "dashboard: record production KV namespace id (#653)"
 
 
 class DeployError(Exception):
@@ -331,7 +330,7 @@ def _ensure_namespace_id(api_base: str, account: str, token: str,
     """Return the production namespace id, creating it only when absent.
 
     An id recorded by an earlier tick wins outright, so a tick that created
-    the namespace but failed to push its commit never creates a second one.
+    the namespace but failed before deploying never creates a second one.
     Otherwise the title lookup decides: reuse the match, create when empty.
     """
     if state.get("namespace_id"):
@@ -354,13 +353,11 @@ def _ensure_namespace_id(api_base: str, account: str, token: str,
     return created
 
 
-def _commit_namespace_id(worktree: Path, remote: str,
-                         branch: str, namespace_id: str) -> str:
-    """Commit the real id over the placeholder and push it to main.
+def _patch_worktree_namespace_id(worktree: Path, namespace_id: str) -> None:
+    """Patch the worktree's wrangler.toml copy with the production id.
 
-    Returns the pushed commit. The push is plain, never forced: when main
-    moved underneath us the push fails and the next tick retries from the
-    new tip, reusing the recorded id instead of creating another namespace.
+    The placeholder on main stays untouched: the job deploys merged
+    dashboard/ changes but never commits or pushes itself.
     """
     toml_path = worktree / WRANGLER_TOML_REL
     try:
@@ -373,30 +370,6 @@ def _commit_namespace_id(worktree: Path, remote: str,
             encoding="utf-8")
     except OSError as exc:
         raise DeployError("cannot write {}: {}".format(toml_path, exc))
-    added = _git(worktree, ["add", "--", WRANGLER_TOML_REL])
-    if added.returncode != 0:
-        raise DeployError("git add {} failed: {}".format(
-            WRANGLER_TOML_REL, _tail(added.stderr, [])))
-    staged = _git_text(worktree, ["diff", "--cached", "--name-only"]).split()
-    if staged != [WRANGLER_TOML_REL]:
-        raise DeployError(
-            "refusing to commit: staged files are {!r}, want only {}".format(
-                staged, WRANGLER_TOML_REL))
-    commit = _git(worktree, ["-c", "user.name=" + COMMIT_USER_NAME,
-                             "-c", "user.email=" + COMMIT_USER_EMAIL,
-                             "commit", "-m", COMMIT_MESSAGE])
-    if commit.returncode != 0:
-        raise DeployError("namespace id commit failed: {}".format(
-            _tail(commit.stderr, [])))
-    push = _git(worktree, ["push", remote, "HEAD:" + branch])
-    if push.returncode != 0:
-        raise DeployError(
-            "git push {} HEAD:{} failed (will retry next tick): {}".format(
-                remote, branch, _tail(push.stderr, [])))
-    new_tip = _git_text(worktree, ["rev-parse", "HEAD"]).strip()
-    log("recorded namespace {} in {} on {}".format(
-        namespace_id, WRANGLER_TOML_REL, new_tip[:12]))
-    return new_tip
 
 
 def _deploy(dashboard_dir: Path, npm_bin: str, npx_bin: str,
@@ -435,6 +408,25 @@ def tick(repo: Path, remote: str, branch: str, env_file: Path,
     npm_bin = _require_executable("npm")
     npx_bin = _require_executable("npx")
 
+    old = state.get("deployed_sha")
+    if old:
+        exists = _git(repo, ["cat-file", "-e", old])
+        if exists.returncode == 0:
+            diff = _git(repo, ["diff", "--quiet", old, tip,
+                               "--", DASHBOARD_SUBDIR])
+            if diff.returncode == 0:
+                state["deployed_sha"] = tip
+                save_state(state_file, state)
+                log("main moved to {} with no {} changes; "
+                    "nothing to deploy".format(tip[:12], DASHBOARD_SUBDIR))
+                return 0
+            if diff.returncode != 1:
+                raise DeployError(
+                    "git diff {} {} failed: {}".format(
+                        old[:12], tip[:12], _tail(diff.stderr, [])))
+        else:
+            log("warning: last deployed {} is not in this clone; "
+                "deploying {}".format(old[:12], tip[:12]))
     parent = Path(tempfile.mkdtemp(prefix="dashboard-deploy-"))
     worktree = parent / "wt"
     try:
@@ -444,37 +436,21 @@ def tick(repo: Path, remote: str, branch: str, env_file: Path,
             raise DeployError("git worktree add failed: {}".format(
                 _tail(added.stderr, [])))
         try:
-            namespace_id = namespace_id_from_wrangler(
+            toml_id = namespace_id_from_wrangler(
                 worktree / WRANGLER_TOML_REL)
         except PublisherError as exc:
             raise DeployError(str(exc))
-        if namespace_id == PLACEHOLDER_NAMESPACE_ID:
+        if toml_id == PLACEHOLDER_NAMESPACE_ID:
             namespace_id = _ensure_namespace_id(
                 api_base, account, token, state)
             state["namespace_id"] = namespace_id
             save_state(state_file, state)
-            tip = _commit_namespace_id(
-                worktree, remote, branch, namespace_id)
-        old = state.get("deployed_sha")
-        if old:
-            exists = _git(repo, ["cat-file", "-e", old])
-            if exists.returncode == 0:
-                diff = _git(repo, ["diff", "--quiet", old, tip,
-                                   "--", DASHBOARD_SUBDIR])
-                if diff.returncode == 0:
-                    state["deployed_sha"] = tip
-                    state["namespace_id"] = namespace_id
-                    save_state(state_file, state)
-                    log("main moved to {} with no {} changes; "
-                        "nothing to deploy".format(tip[:12], DASHBOARD_SUBDIR))
-                    return 0
-                if diff.returncode != 1:
-                    raise DeployError(
-                        "git diff {} {} failed: {}".format(
-                            old[:12], tip[:12], _tail(diff.stderr, [])))
-            else:
-                log("warning: last deployed {} is not in this clone; "
-                    "deploying {}".format(old[:12], tip[:12]))
+            _patch_worktree_namespace_id(worktree, namespace_id)
+            log("patched the deploy worktree copy of {} with namespace "
+                "{}; main is untouched".format(
+                    WRANGLER_TOML_REL, namespace_id))
+        else:
+            namespace_id = toml_id
         _deploy(worktree / DASHBOARD_SUBDIR, npm_bin, npx_bin,
                 token, account, secrets)
         state["deployed_sha"] = tip

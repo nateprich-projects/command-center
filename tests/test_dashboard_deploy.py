@@ -3,8 +3,9 @@
 Ticket #653: every five minutes the launchd job fetches origin main and, only
 when dashboard/ changed since the last recorded deploy, runs npm ci plus npx
 wrangler deploy from a detached worktree with the scoped token. On its first
-tick it creates the KV namespace and commits the real id over the local-only
-placeholder, so the first deploy follows in the same tick.
+tick it creates the KV namespace and patches the real id into the worktree
+copy of wrangler.toml, leaving the placeholder on main untouched, so the
+first deploy follows in the same tick. The job never commits or pushes.
 
 Every test runs against a fake namespaces API, fixture git repos on local
 paths, and stub npm/npx scripts. No test reads the real .env, touches the
@@ -283,6 +284,8 @@ def make_stub_bin(tmp_path, npm=True, npx=True):
             '#!/bin/sh\n'
             '{\n'
             'echo "npx cwd=$(pwd) args=$*";\n'
+            'wid=$(grep \'^id = \' wrangler.toml 2>/dev/null | head -n 1); '
+            'echo "npx wrangler-id=$wid";\n'
             'if [ "$CLOUDFLARE_API_TOKEN" = "$EXPECT_TOKEN" ]; then'
             ' echo "npx token-ok"; else echo "npx token-mismatch"; fi;\n'
             'if [ "$CLOUDFLARE_ACCOUNT_ID" = "$EXPECT_ACCOUNT" ]; then'
@@ -330,9 +333,10 @@ def tick_env(tmp_path, monkeypatch, namespaces):
     }
 
 
-def test_first_tick_creates_namespace_commits_id_and_deploys(
+def test_first_tick_creates_namespace_patches_worktree_and_deploys(
         tmp_path, monkeypatch, namespaces, tick_env, capsys):
     origin, clone = make_origin(tmp_path)
+    before = tip_of(clone)
 
     rc = run_tick(clone, api_base=namespaces.api_base, **tick_env)
 
@@ -344,26 +348,18 @@ def test_first_tick_creates_namespace_commits_id_and_deploys(
         "Bearer " + FAKE_TOKEN] * len(namespaces.calls)
     created = namespaces.entries[0]["id"]
 
+    # The job never writes to main: no new commit, placeholder intact.
+    assert tip_of(clone) == before
     shown = _git_origin(
         ["show", "main:dashboard/wrangler.toml"], origin, tmp_path).stdout
-    assert 'id = "{}"'.format(created) in shown
-    assert "local-funnel-snapshot" not in shown
-    names = _git_origin(
-        ["show", "--name-only", "--format=", "main"],
-        origin, tmp_path).stdout.split()
-    assert names == ["dashboard/wrangler.toml"]
-    author = _git_origin(
-        ["log", "-1", "--format=%an%x00%ae%x00%s", "main"],
-        origin, tmp_path).stdout.rstrip("\n").split("\x00")
-    assert author == [dashboard_deploy.COMMIT_USER_NAME,
-                      dashboard_deploy.COMMIT_USER_EMAIL,
-                      dashboard_deploy.COMMIT_MESSAGE]
+    assert 'id = "local-funnel-snapshot"' in shown
 
     lines = stub_lines(tmp_path)
     assert [line for line in lines if line.startswith("npm ")] != []
     npx_calls = [line for line in lines if line.startswith("npx cwd=")]
     assert len(npx_calls) == 1
     assert "args=wrangler deploy" in npx_calls[0]
+    assert 'npx wrangler-id=id = "{}"'.format(created) in lines
     assert "npx token-ok" in lines
     assert "npx account-ok" in lines
     assert "npx ci-ok" in lines
@@ -374,12 +370,14 @@ def test_first_tick_creates_namespace_commits_id_and_deploys(
     assert str(clone) not in cwd
 
     state = json.loads(tick_env["state_file"].read_text())
-    assert state == {"deployed_sha": tip_of(clone), "namespace_id": created}
+    assert state == {"deployed_sha": before, "namespace_id": created}
 
     worktrees = _git(["worktree", "list"], cwd=clone).stdout.splitlines()
     assert len(worktrees) == 1
 
-    assert FAKE_TOKEN not in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "main is untouched" in err
+    assert FAKE_TOKEN not in err
 
 
 def test_up_to_date_tick_does_nothing(
@@ -435,27 +433,54 @@ def test_dashboard_change_triggers_deploy(
     lines = stub_lines(tmp_path)
     assert len([l for l in lines if l.startswith("npx cwd=")]) == 1
     assert "npx token-ok" in lines
+    assert 'npx wrangler-id=id = "ns-real-653"' in lines
     assert namespaces.calls == []
     state = json.loads(tick_env["state_file"].read_text())
     assert state == {"deployed_sha": tip_of(clone), "namespace_id": REAL_ID}
     assert FAKE_TOKEN not in capsys.readouterr().err
+
+
+def test_placeholder_with_no_dashboard_change_skips_cloudflare(
+        tmp_path, namespaces, tick_env, capsys):
+    origin, clone = make_origin(tmp_path)
+    first = tip_of(clone)
+    tick_env["state_file"].parent.mkdir(parents=True, exist_ok=True)
+    tick_env["state_file"].write_text(json.dumps(
+        {"deployed_sha": first}))
+    commit_on(clone, "README.md", "changed\n", "docs touch")
+
+    rc = run_tick(clone, api_base=namespaces.api_base, **tick_env)
+
+    assert rc == 0
+    assert stub_lines(tmp_path) == []
+    assert namespaces.calls == []
+    state = json.loads(tick_env["state_file"].read_text())
+    assert state["deployed_sha"] == tip_of(clone)
+    assert state["deployed_sha"] != first
+    assert "namespace_id" not in state
+    assert "nothing to deploy" in capsys.readouterr().err
+
+
 def test_existing_namespace_title_is_reused(
         tmp_path, namespaces, tick_env):
     namespaces.entries.append(
         {"id": "ns-found-9", "title": dashboard_deploy.KV_NAMESPACE_TITLE})
     origin, clone = make_origin(tmp_path)
+    before = tip_of(clone)
 
     rc = run_tick(clone, api_base=namespaces.api_base, **tick_env)
 
     assert rc == 0
     assert namespaces.posts() == []
+    assert tip_of(clone) == before
     shown = _git_origin(
         ["show", "main:dashboard/wrangler.toml"], origin, tmp_path).stdout
-    assert 'id = "ns-found-9"' in shown
+    assert 'id = "local-funnel-snapshot"' in shown
     state = json.loads(tick_env["state_file"].read_text())
     assert state["namespace_id"] == "ns-found-9"
-    assert len([l for l in stub_lines(tmp_path)
-                if l.startswith("npx cwd=")]) == 1
+    lines = stub_lines(tmp_path)
+    assert len([l for l in lines if l.startswith("npx cwd=")]) == 1
+    assert 'npx wrangler-id=id = "ns-found-9"' in lines
 
 
 def test_second_page_match_is_found(tmp_path, namespaces, tick_env):
@@ -465,19 +490,23 @@ def test_second_page_match_is_found(tmp_path, namespaces, tick_env):
     namespaces.entries.append(
         {"id": "ns-page-two", "title": dashboard_deploy.KV_NAMESPACE_TITLE})
     origin, clone = make_origin(tmp_path)
+    before = tip_of(clone)
 
     rc = run_tick(clone, api_base=namespaces.api_base, **tick_env)
 
     assert rc == 0
     assert namespaces.posts() == []
     assert namespaces.get_pages() == [1, 2, 3]
+    assert tip_of(clone) == before
     state = json.loads(tick_env["state_file"].read_text())
     assert state["namespace_id"] == "ns-page-two"
+    assert 'npx wrangler-id=id = "ns-page-two"' in stub_lines(tmp_path)
 
 
 def test_recorded_namespace_is_reused_without_api_calls(
         tmp_path, namespaces, tick_env, capsys):
     origin, clone = make_origin(tmp_path)
+    before = tip_of(clone)
     tick_env["state_file"].parent.mkdir(parents=True, exist_ok=True)
     tick_env["state_file"].write_text(json.dumps(
         {"namespace_id": "ns-stuck-7"}))
@@ -486,9 +515,13 @@ def test_recorded_namespace_is_reused_without_api_calls(
 
     assert rc == 0
     assert namespaces.calls == []
+    assert tip_of(clone) == before
     shown = _git_origin(
         ["show", "main:dashboard/wrangler.toml"], origin, tmp_path).stdout
-    assert 'id = "ns-stuck-7"' in shown
+    assert 'id = "local-funnel-snapshot"' in shown
+    assert 'npx wrangler-id=id = "ns-stuck-7"' in stub_lines(tmp_path)
+    state = json.loads(tick_env["state_file"].read_text())
+    assert state == {"deployed_sha": before, "namespace_id": "ns-stuck-7"}
     assert "reusing namespace ns-stuck-7" in capsys.readouterr().err
 
 
@@ -664,7 +697,7 @@ def test_corrupt_state_fails_closed(tmp_path, namespaces, tick_env, capsys):
     assert stub_lines(tmp_path) == []
 
 
-def test_namespace_api_failure_fails_before_commit(
+def test_namespace_api_failure_fails_before_deploy(
         tmp_path, namespaces, tick_env, capsys):
     namespaces.fail_next = (500, '{"success":false,"errors":[{"code":1}]}')
     origin, clone = make_origin(tmp_path)

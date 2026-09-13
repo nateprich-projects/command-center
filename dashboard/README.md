@@ -8,8 +8,9 @@ and clears.
 
 `wrangler.toml` deliberately disables `workers.dev` and names only
 `funnel.nateprich.com`. The #653 launchd job creates the production KV namespace
-on its first tick, commits the real id over the local-only placeholder in
-`wrangler.toml`, and deploys; after that it redeploys only when `main` changes under
+on its first tick and patches the real id into its own deploy worktree copy of
+`wrangler.toml`; the local-only placeholder on `main` stays untouched and the
+job never commits. After that it redeploys only when `main` changes under
 `dashboard/`. The declared route attaches as part of each deploy, and DNS needs
 no work.
 

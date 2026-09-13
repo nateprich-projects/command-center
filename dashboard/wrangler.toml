@@ -14,8 +14,9 @@ run_worker_first = true
 
 [[kv_namespaces]]
 binding = "FUNNEL_SNAPSHOT"
-# Ticket #653 creates the namespace and replaces this local-only identifier before
-# the first deploy. Keeping the binding here makes local development deterministic.
+# Ticket #653 creates the namespace and patches the real id into its deploy
+# worktree copy before the first deploy. This placeholder stays on main;
+# keeping the binding here makes local development deterministic.
 id = "local-funnel-snapshot"
 
 [vars]

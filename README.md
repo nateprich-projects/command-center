@@ -46,8 +46,9 @@ same records but appends zero.
 
 When a ticket has a durable heartbeat binding, the record also carries each
 implementation run's detected model, effort, harness, provider, session time
-and four token kinds read from that run's own transcript. Missing transcript
-data stays null; the heartbeat quota meter is not used as a cost proxy. The
+and four token kinds captured on that run's heartbeat finish. Missing transcript
+data stays null; new outcome derivation does not depend on local transcripts
+surviving. The heartbeat quota meter is not used as a cost proxy. The
 effective-dated rate table and notional dollar calculation are a separate
 consumer of these observations.
 

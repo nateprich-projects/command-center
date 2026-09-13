@@ -238,6 +238,42 @@ def test_ticket_runs_join_bindings_to_session_usage_and_metadata(monkeypatch):
     assert record["reasoning_effort"] == "high"
 
 
+def test_ticket_runs_prefer_the_durable_finish_token_snapshot(monkeypatch):
+    rows = {
+        "codex": [
+            {"run": "run-1", "agent": "codex", "phase": "start", "ts": 100,
+             "session_id": "session-1"},
+            {"run": "run-1", "agent": "codex", "phase": "bind", "ts": 101,
+             "do": "ticket", "work": "owner/repo#42"},
+            {"run": "run-1", "agent": "codex", "phase": "finish", "ts": 110,
+             "outcome": "done", "token_usage": {
+                 "fresh_input_tokens": 40,
+                 "cache_read_input_tokens": 60,
+                 "cache_write_input_tokens": 2,
+                 "output_tokens": 8,
+             }},
+        ],
+    }
+
+    def should_not_read_local_transcript(*args, **kwargs):
+        raise AssertionError("new outcome derivation must use heartbeat data")
+
+    monkeypatch.setattr(
+        outcomes.session_usage,
+        "usage_for_session",
+        should_not_read_local_transcript,
+    )
+
+    runs = outcomes._ticket_runs("owner/repo#42", rows)
+
+    assert runs[0]["token_usage"] == {
+        "fresh_input_tokens": 40,
+        "cache_read_input_tokens": 60,
+        "cache_write_input_tokens": 2,
+        "output_tokens": 8,
+    }
+
+
 def test_ticket_run_with_unreadable_session_is_unknown_not_free(monkeypatch):
     rows = {
         "codex": [

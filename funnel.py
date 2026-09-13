@@ -465,6 +465,7 @@ BRIEF_SECTION_BUDGETS = {
     "resend_ratio": 3.0,
     "unattended_merges": 3.0,
     "unattended_approvals": 49.0,
+    "run_summary": 1.0,
     "agent_health": 1.0,
     "agent_health_notes": 1.0,
     "working_tree_touched": 1.0,
@@ -2876,6 +2877,33 @@ def agent_health(now: datetime) -> List[Dict[str, str]]:
             {"agent": agent, "condition": condition}
             for condition in conditions
         )
+    return found
+
+
+def agent_run_summary(now: datetime) -> List[Dict[str, object]]:
+    """Recent per-agent run accounting for the brief's health line."""
+    try:
+        import heartbeat
+
+        providers = sorted(heartbeat.PROVIDERS)
+    except Exception:
+        return []
+
+    found: List[Dict[str, object]] = []
+    retired = getattr(heartbeat, "RETIRED_AGENTS", frozenset())
+    for agent in providers:
+        if agent in retired:
+            continue  # a stopped schedule is not a dying one (#431)
+        try:
+            summary = heartbeat.run_summary(
+                _brief_heartbeat_rows(agent), now=now.timestamp()
+            )
+        except Exception:
+            # This is diagnostic input. A heartbeat read failure must not make
+            # the brief fail or turn an unavailable count into zero.
+            continue
+        if any(summary.values()):
+            found.append({"agent": agent, **summary})
     return found
 
 
@@ -7091,6 +7119,9 @@ def cmd_brief(
                 if _self_approval_transition_times(item, now)
             ),
         )
+        run_summary = section(
+            "run_summary", lambda: agent_run_summary(now), []
+        )
         health = section("agent_health", lambda: agent_health(now), [])
         health_notes = section(
             "agent_health_notes", lambda: agent_health_notes(now), []
@@ -7146,6 +7177,7 @@ def cmd_brief(
             "resend_ratio": resend,
             "unattended_merges": merges,
             "unattended_approvals": approvals,
+            "run_summary": run_summary,
             "agent_health": health,
             "agent_health_notes": health_notes,
             "working_tree_touched": touched,

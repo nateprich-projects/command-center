@@ -125,6 +125,8 @@ def _completed_run_durations(
     history_window_seconds: int = HISTORY_WINDOW_SECONDS,
 ) -> List[float]:
     """Return named start-to-finish durations completed in the history window."""
+    import heartbeat
+
     cutoff = now - history_window_seconds
     starts = {
         row.get("run"): float(row["ts"])
@@ -140,6 +142,7 @@ def _completed_run_durations(
             row.get("phase") != "finish"
             or not row.get("run")
             or not isinstance(row.get("ts"), (int, float))
+            or heartbeat.is_rebegin_finish(row)
         ):
             continue
         finished_at = float(row["ts"])

@@ -251,6 +251,21 @@ def _window_label() -> str:
     return _agent_health._window_label(HISTORY_WINDOW_SECONDS)
 
 
+def health_line(agent: str, rows: List[Dict], now: float) -> str:
+    """Render the run accounting that accompanies the watchdog notes."""
+    summary = heartbeat.run_summary(rows, now=now)
+    if not any(summary.values()):
+        return ""
+    return (
+        "`{}` run health: {} starts, {} finishes, {} re-begins."
+    ).format(
+        agent,
+        summary["starts"],
+        summary["finishes"],
+        summary["re_begins"],
+    )
+
+
 def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
     """Compatibility wrapper around the shared heartbeat assessment."""
     problems = _agent_health.assess(
@@ -282,6 +297,9 @@ def note(agent: str, rows: List[Dict], now: Optional[float] = None) -> str:
     if now is None:
         now = time.time()
     notes = []
+    line = health_line(agent, rows, now)
+    if line:
+        notes.append(line)
     timestamps, gaps = _history(rows, now)
     if len(gaps) < MINIMUM_HISTORY:
         notes.append((

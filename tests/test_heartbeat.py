@@ -499,6 +499,38 @@ def test_unfinished_still_applies_its_ttl():
     assert len(heartbeat.unfinished(records, NOW + 3 * 3600, 2 * 3600)) == 1
 
 
+def test_run_summary_separates_same_session_rebegins_from_finishes():
+    records = [
+        start("old", NOW),
+        {
+            "run": "old",
+            "agent": "claude",
+            "phase": "finish",
+            "ts": NOW + MIN,
+            "outcome": "skipped-blocked",
+            "re_begun_by": "fresh",
+        },
+        start("fresh", NOW + 2 * MIN),
+        finish("fresh", NOW + 3 * MIN),
+    ]
+
+    assert heartbeat.run_summary(records, now=NOW + 4 * MIN) == {
+        "starts": 2,
+        "finishes": 1,
+        "re_begins": 1,
+    }
+
+
+def test_normal_skipped_blocked_finish_is_not_a_rebegin():
+    records = [finish("blocked", NOW, "skipped-blocked")]
+
+    assert heartbeat.run_summary(records, now=NOW + MIN) == {
+        "starts": 0,
+        "finishes": 1,
+        "re_begins": 0,
+    }
+
+
 # -- the watchdog reads it the same way ---------------------------------------
 
 def test_watchdog_does_not_report_an_unattributable_finish_as_dying():

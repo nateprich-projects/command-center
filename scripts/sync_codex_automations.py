@@ -129,6 +129,51 @@ def needs_presence_check(automation: str) -> bool:
     return fires_all_day(automation)
 
 
+#: Lanes firing in the same minute are handed the same top ticket, so each
+#: session declines once and re-begins before it works (#667). The fix is a
+#: one-minute stagger written into each `rrule` by hand (#678): the hourly lane
+#: keeps minute 0 and the four hour-restricted lanes take minutes 1-4. No
+#: random jitter, which is harder to verify in logs, and no wider spread, which
+#: idles lanes.
+#:
+#: The schedule itself stays the app's to write — this script never edits an
+#: `rrule`. `--check` only reads it, so an app-side reset shows up as drift.
+BYMINUTE = re.compile(r"(?:^|;)BYMINUTE=([0-9,]+)(?:;|$)")
+
+
+def fire_minutes(automation: str) -> Optional[frozenset]:
+    """The minutes past the hour a schedule fires at, read from its `rrule`.
+
+    None when the file, the rule or its `BYMINUTE` cannot be read: a rule with no
+    `BYMINUTE` fires at the app's own start minute, which nothing here can see.
+    """
+    path = AUTOMATIONS / automation / "automation.toml"
+    try:
+        rule = re.search(r'^rrule = "(.*)"$', path.read_text(), re.MULTILINE)
+    except OSError:
+        return None
+    if not rule:
+        return None
+    minutes = BYMINUTE.search(rule.group(1).split(":", 1)[-1])
+    if not minutes:
+        return None
+    return frozenset(int(m) for m in minutes.group(1).split(",") if m)
+
+
+def same_minute_lanes(names):
+    """Every pair of lanes sharing a fire minute, plus lanes whose minutes are
+    unreadable — an unverifiable offset is not a verified one."""
+    readings = [(name, fire_minutes(name)) for name in sorted(names)]
+    problems = [(name, None, None) for name, minutes in readings if minutes is None]
+    known = [(name, minutes) for name, minutes in readings if minutes is not None]
+    for i, (first, first_minutes) in enumerate(known):
+        for second, second_minutes in known[i + 1:]:
+            shared = first_minutes & second_minutes
+            if shared:
+                problems.append((first, second, sorted(shared)))
+    return problems
+
+
 def prompt_text(automation: str = "") -> str:
     """The runtime prompt for one automation.
 
@@ -285,9 +330,22 @@ def main(argv=None) -> int:
                 print("  {}".format(name))
             return 1
 
+    collisions = same_minute_lanes(path.parent.name for path in files) if args.check else []
+    for first, second, shared in collisions:
+        if second is None:
+            print("  NO-MINUTE {}: rrule carries no readable BYMINUTE, so its "
+                  "offset cannot be verified".format(first))
+        else:
+            print("  SAME-MINUTE {} and {} both fire at minute {}".format(
+                first, second, ",".join(str(m) for m in shared)))
+
     if args.check and drifted:
         print("\n{} of {} automations have drifted from {}".format(
             len(drifted), len(files), ROUTINE.relative_to(ROOT)))
+        return 1
+    if collisions:
+        print("\nLanes are not staggered one minute apart (#678). Edit the "
+              "BYMINUTE in each rrule by hand; this script never writes a schedule.")
         return 1
     return 0
 

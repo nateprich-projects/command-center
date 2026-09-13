@@ -20,7 +20,8 @@ the whole entry is pushed byte-for-byte, so extra keys ride along untouched.
 Configuration, in precedence order (flag, environment, file, default):
 
 - token: ``CLOUDFLARE_API_TOKEN`` in the environment or the gitignored ``.env``
-  beside this script (the same variable ``wrangler`` reads, so #653 shares it).
+  in Nate's working tree (the same variable ``wrangler`` reads, so #653 shares
+  it). The installed run clone is deliberately not a credential store.
 - account: ``--account-id``, ``CLOUDFLARE_ACCOUNT_ID``, then ``.env``.
 - namespace: ``--namespace-id``, ``FUNNEL_KV_NAMESPACE_ID``, then the ``id``
   of the ``FUNNEL_SNAPSHOT`` binding in ``dashboard/wrangler.toml`` (#653 owns
@@ -361,6 +362,17 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent
 
 
+def _working_tree_env_file() -> Path:
+    """Return the credential file owned by the canonical working tree.
+
+    ``publisher.py`` runs from the maintained read-only clone, while the
+    credential is intentionally kept in Nate's gitignored working tree. Keep
+    this default independent of ``__file__`` so a fresh run clone does not
+    need a second ``.env``.
+    """
+    return Path.home() / ".claude" / "command-center" / ".env"
+
+
 def _option(cli_value: Optional[str], env_name: str,
             default: Optional[str] = None) -> Optional[str]:
     if cli_value is not None:
@@ -505,7 +517,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     )).expanduser()
     env_file = Path(_option(
         args.env_file, "COMMAND_CENTER_DASHBOARD_ENV_FILE",
-        str(_repo_root() / ".env"),
+        str(_working_tree_env_file()),
     )).expanduser()
     wrangler_toml = Path(_option(
         args.wrangler_toml, "COMMAND_CENTER_DASHBOARD_WRANGLER_TOML",

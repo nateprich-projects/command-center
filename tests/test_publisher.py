@@ -478,6 +478,32 @@ def test_missing_account_exits_one_without_logging_the_token(
     assert FAKE_TOKEN not in err
 
 
+def test_default_env_file_uses_working_tree_not_run_clone(
+    tmp_path, kv, monkeypatch, capsys
+):
+    """An installed run-clone publisher reads the existing working-tree env."""
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    write_spool_entry(spool, "entry.json", seconds_ago=60)
+    argv, _ = base_argv(tmp_path, kv, spool)
+    env_index = argv.index("--env-file")
+    del argv[env_index:env_index + 2]
+
+    run_clone = tmp_path / "run-clone"
+    run_clone.mkdir()
+    monkeypatch.setattr(publisher, "_repo_root", lambda: run_clone)
+    working_tree = Path(os.environ["HOME"]) / ".claude" / "command-center"
+    working_tree.mkdir(parents=True)
+    write_env_file(working_tree / ".env")
+
+    code, _, err = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 0, err
+    assert len(kv.puts_to("snapshot")) == 1
+    assert (working_tree / ".env").exists()
+    assert not (run_clone / ".env").exists()
+
+
 def test_token_reaches_cloudflare_but_never_the_log(
     tmp_path, kv, monkeypatch, capsys
 ):

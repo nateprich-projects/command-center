@@ -19,6 +19,15 @@ from funnel import Item  # noqa: E402
 NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
 
 
+SHAPED_645_PLAN = (
+    "# Plan\n\nProposed class: Broken\n\n"
+    "## Needs you\nNothing.\n"
+)
+SHAPED_691_PLAN = (
+    pathlib.Path(__file__).parent / "fixtures" / "shaped_691_body.md"
+).read_text()
+
+
 def test_capture_stamps_the_created_body_as_agent(monkeypatch):
     calls = []
 
@@ -1011,14 +1020,16 @@ def test_shaped_advances_a_plan_that_declares_nothing_open(
     assert "advanced to Ready: plan declares nothing open" in output
 
 
+@pytest.mark.parametrize(
+    "plan",
+    [SHAPED_645_PLAN, SHAPED_691_PLAN],
+    ids=["645-style", "691-style"],
+)
 def test_shaped_fails_closed_when_github_does_not_confirm_status(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, plan
 ):
     plan_file = tmp_path / "plan.md"
-    plan_file.write_text(
-        "# Plan\n\nProposed class: Broken\n\n"
-        "## Needs you\nNothing.\n"
-    )
+    plan_file.write_text(plan)
     item = Item(
         repo="owner/repo", number=49, title="An unconfirmed idea",
         url="https://github.com/owner/repo/issues/49", state="OPEN",
@@ -1065,18 +1076,24 @@ def test_shaped_fails_closed_when_github_does_not_confirm_status(
     ]
 
 
+@pytest.mark.parametrize(
+    ("number", "title", "plan"),
+    [
+        (645, "A 645-style idea", SHAPED_645_PLAN),
+        (691, "A 691-style idea", SHAPED_691_PLAN),
+    ],
+    ids=["645-style", "691-style"],
+)
 def test_shaped_ready_is_visible_to_a_followup_show_in_the_same_session(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, number, title, plan
 ):
     plan_file = tmp_path / "plan.md"
-    plan_file.write_text(
-        "# Plan\n\nProposed class: Broken\n\n"
-        "## Needs you\nNothing.\n"
-    )
+    plan_file.write_text(plan)
     item = Item(
-        repo="owner/repo", number=50, title="A session idea",
-        url="https://github.com/owner/repo/issues/50", state="OPEN",
-        status="Ideas", klass="Broken", item_id="project-item-50",
+        repo="owner/repo", number=number, title=title,
+        url="https://github.com/owner/repo/issues/{}".format(number),
+        state="OPEN", status="Ideas", klass="Broken",
+        item_id="project-item-{}".format(number),
         body=funnel.origin_block(
             "agent", at=NOW, run="capture-run", agent="claude"
         ),
@@ -1109,7 +1126,7 @@ def test_shaped_ready_is_visible_to_a_followup_show_in_the_same_session(
         "--run", "shape-run", "--agent", "claude",
     ])
     assert shaped_code == 0
-    assert "owner/repo#50 → Ready" in shaped_out
+    assert "owner/repo#{} → Ready".format(number) in shaped_out
     assert "advanced to Ready" in shaped_out
     assert shaped_err == ""
 
@@ -1117,7 +1134,7 @@ def test_shaped_ready_is_visible_to_a_followup_show_in_the_same_session(
     show_code, show_out, show_err = session.dispatch(["show", item.ref])
 
     assert show_code == 0
-    assert "owner/repo#50  A session idea" in show_out
+    assert "owner/repo#{}  {}".format(number, title) in show_out
     assert "Ready  |  Class Broken" in show_out
     assert "GATE: not waiting on you" in show_out
     assert show_err == ""

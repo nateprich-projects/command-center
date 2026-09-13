@@ -72,3 +72,34 @@ def test_gh_graphql_returns_rate_limit_alongside_existing_data(monkeypatch):
     assert data["rateLimit"] == response["data"]["rateLimit"]
     query_arg = next(arg for arg in calls[0] if arg.startswith("query="))
     assert RATE_LIMIT in compact(query_arg.removeprefix("query="))
+
+
+def test_brief_profile_records_graphql_operation_time_and_count(monkeypatch):
+    response = {
+        "data": {
+            "user": {"projectV2": {"items": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}},
+            "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},
+        }
+    }
+
+    def run(args, capture_output, text):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(response),
+            stderr="",
+        )
+
+    timings = {}
+    token = funnel._ACTIVE_BRIEF_TIMINGS.set(timings)
+    monkeypatch.setattr(funnel, "_run_gh", run)
+    try:
+        funnel.gh_graphql(funnel.ITEM_QUERY, login="nateprich", number=2)
+        funnel.gh_graphql(funnel.ITEM_QUERY, login="nateprich", number=2)
+    finally:
+        funnel._ACTIVE_BRIEF_TIMINGS.reset(token)
+
+    assert timings["graphql.project_items"] >= 0
+    assert timings["graphql.project_items.calls"] == 2

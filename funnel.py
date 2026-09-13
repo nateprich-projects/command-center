@@ -4723,6 +4723,53 @@ _GRAPHQL_COST_READS = 0
 #: visible as a separate count rather than being assigned a guessed cost.
 _API_USAGE: Dict[str, int] = {"graphql_calls": 0, "cli_calls": 0}
 
+# A brief's existing ``timings`` field is also the safe place for temporary
+# diagnosis of its expensive inputs.  The profile is active only while a
+# brief command loads and renders; all writes are best effort so timing can
+# never make the command it observes fail.
+_ACTIVE_BRIEF_TIMINGS: contextvars.ContextVar = contextvars.ContextVar(
+    "active_brief_timings", default=None
+)
+
+
+def _graphql_operation(query: str) -> str:
+    """Name the read shape represented by one GraphQL query."""
+    compact = " ".join(query.split())
+    if "repositories(first:" in compact:
+        return "member_repos"
+    if "projectV2(number:" in compact and "items(first:" in compact:
+        return "project_items"
+    if "comments(last:" in compact:
+        return "brief_comments"
+    if "fields(first:" in compact:
+        return "project_fields"
+    if "userContentEdits" in compact:
+        return "issue_edits"
+    if "timelineItems" in compact:
+        return "issue_timeline"
+    if "subIssues(first:" in compact:
+        return "sub_issues"
+    if compact.startswith("mutation"):
+        return "mutation"
+    return "other"
+
+
+def _record_brief_graphql_timing(query: str, elapsed: float) -> None:
+    """Aggregate one GraphQL operation into the active brief profile."""
+    timings = _ACTIVE_BRIEF_TIMINGS.get()
+    if timings is None:
+        return
+    try:
+        key = "graphql.{}".format(_graphql_operation(query))
+        timings[key] = round(
+            float(timings.get(key, 0.0)) + max(0.0, elapsed), 6
+        )
+        calls_key = key + ".calls"
+        timings[calls_key] = int(timings.get(calls_key, 0)) + 1
+    except Exception:
+        # Instrumentation must not gate or otherwise alter the brief.
+        return
+
 #: The parsed command's optional provenance values, used only by the process
 #: exit hook below.  Commands without `--run` still resolve an unambiguous open
 #: heartbeat start through `_heartbeat_context`.
@@ -4928,23 +4975,31 @@ def gh_graphql(query: str, **variables) -> dict:
     Each response's rate-limit block is also accumulated into
     ``graphql_spend()`` so a run can report what it spent.
     """
-    cmd = ["gh", "api", "graphql", "-f", "query=" + query]
-    for key, value in variables.items():
-        flag = "-F" if isinstance(value, (int, bool)) else "-f"
-        cmd += [flag, "{}={}".format(key, value)]
-    proc = _run_gh(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise GitHubError(proc.stderr.strip() or "gh exited {}".format(proc.returncode))
-    payload = json.loads(proc.stdout)
-    if payload.get("errors"):
-        raise GitHubError(json.dumps(payload["errors"]))
-    data = payload["data"]
-    if isinstance(data, dict):
-        block = data.get("rateLimit")
-        _record_rate_limit(block)
-        if isinstance(block, dict) and block.get("remaining") == 0:
-            _mark_exhausted("rateLimit.remaining is 0", block.get("resetAt"))
-    return data
+    started = time.perf_counter()
+    try:
+        cmd = ["gh", "api", "graphql", "-f", "query=" + query]
+        for key, value in variables.items():
+            flag = "-F" if isinstance(value, (int, bool)) else "-f"
+            cmd += [flag, "{}={}".format(key, value)]
+        proc = _run_gh(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise GitHubError(
+                proc.stderr.strip() or "gh exited {}".format(proc.returncode)
+            )
+        payload = json.loads(proc.stdout)
+        if payload.get("errors"):
+            raise GitHubError(json.dumps(payload["errors"]))
+        data = payload["data"]
+        if isinstance(data, dict):
+            block = data.get("rateLimit")
+            _record_rate_limit(block)
+            if isinstance(block, dict) and block.get("remaining") == 0:
+                _mark_exhausted("rateLimit.remaining is 0", block.get("resetAt"))
+        return data
+    finally:
+        _record_brief_graphql_timing(
+            query, time.perf_counter() - started
+        )
 
 
 def parse_time(value: Optional[str]) -> Optional[datetime]:
@@ -6607,7 +6662,7 @@ def cmd_brief(
     brief_cache: Optional[BriefCache] = None,
 ) -> int:
     missing = list(missing or [])
-    timings = dict(timings or {})
+    timings = {} if timings is None else timings
     degraded = list(degraded or [])
     if deadline is None:
         deadline = time.perf_counter() + BRIEF_TOTAL_BUDGET_SECONDS
@@ -6763,6 +6818,7 @@ def cmd_brief(
                 "error": "; ".join(blocked_comment_errors),
             })
 
+        assembly_started = time.perf_counter()
         brief = {
             "generated_at": now.isoformat(),
             "total_needing_nate": len(decisions),
@@ -6799,6 +6855,9 @@ def cmd_brief(
             "timings": timings,
             "missing": missing,
         }
+        timings["brief_assembly"] = round(
+            max(0.0, time.perf_counter() - assembly_started), 6
+        )
         print(json.dumps(brief, indent=2))
         return 0
     except BriefGateTimeout as exc:
@@ -9715,25 +9774,42 @@ def main(argv: Optional[Sequence[str]] = None, *,
     if args.command == "doctor":
         return cmd_doctor()
 
+    brief_timings: Optional[Dict[str, float]] = (
+        {} if args.command == "brief" else None
+    )
+    brief_load_token = (
+        _ACTIVE_BRIEF_TIMINGS.set(brief_timings)
+        if brief_timings is not None else None
+    )
+    brief_load_started = (
+        time.perf_counter() if brief_timings is not None else None
+    )
     try:
-        if _items is not None:
-            items = _items
-        elif _items_loader is not None:
-            items = _items_loader()
-        else:
-            items = load_items()
-    except GitHubError as exc:
-        if args.command == "brief":
-            print(json.dumps({
-                "generated_at": now.isoformat(),
-                "missing": [{
-                    "section": "items",
-                    "error": _brief_error(exc),
-                }],
-            }, indent=2))
-            return 0
-        print("funnel: {}".format(exc), file=sys.stderr)
-        return 2
+        try:
+            if _items is not None:
+                items = _items
+            elif _items_loader is not None:
+                items = _items_loader()
+            else:
+                items = load_items()
+        except GitHubError as exc:
+            if args.command == "brief":
+                print(json.dumps({
+                    "generated_at": now.isoformat(),
+                    "missing": [{
+                        "section": "items",
+                        "error": _brief_error(exc),
+                    }],
+                }, indent=2))
+                return 0
+            print("funnel: {}".format(exc), file=sys.stderr)
+            return 2
+    finally:
+        if brief_timings is not None:
+            brief_timings["project_load"] = round(
+                max(0.0, time.perf_counter() - brief_load_started), 6
+            )
+            _ACTIVE_BRIEF_TIMINGS.reset(brief_load_token)
 
     try:
         repo_readiness = None
@@ -9819,53 +9895,57 @@ def main(argv: Optional[Sequence[str]] = None, *,
             )
         if args.command == "brief":
             missing = []
-            timings: Dict[str, float] = {}
+            timings = brief_timings if brief_timings is not None else {}
             degraded: List[Dict[str, object]] = []
             deadline = time.perf_counter() + BRIEF_TOTAL_BUDGET_SECONDS
             cache = _ACTIVE_BRIEF_CACHE.get() or BriefCache()
+            brief_timing_token = _ACTIVE_BRIEF_TIMINGS.set(timings)
 
-            pr_facts_error: List[str] = []
+            try:
+                pr_facts_error: List[str] = []
 
-            def read_pr_facts():
-                try:
-                    return cache.get_pr_facts(items)
-                except GitHubError as exc:
-                    pr_facts_error.append(
-                        "could not read ticket branch facts: {}".format(exc)
-                    )
-                    for section in BRIEF_PR_FACT_SECTIONS:
-                        missing.append({
-                            "section": section,
-                            "error": pr_facts_error[-1],
-                        })
-                    return {}
+                def read_pr_facts():
+                    try:
+                        return cache.get_pr_facts(items)
+                    except GitHubError as exc:
+                        pr_facts_error.append(
+                            "could not read ticket branch facts: {}".format(exc)
+                        )
+                        for section in BRIEF_PR_FACT_SECTIONS:
+                            missing.append({
+                                "section": section,
+                                "error": pr_facts_error[-1],
+                            })
+                        return {}
 
-            pr_facts = _brief_timed(
-                "ticket_pr_facts",
-                read_pr_facts,
-                timings,
-                degraded,
-                deadline=deadline,
-            )
-            if pr_facts is _BRIEF_UNAVAILABLE:
-                # A missing PR/branch scan must not turn a stale claim into a
-                # false diagnostic. An empty mapping says those facts are
-                # unavailable, so the pure consumers preserve the safe side.
-                pr_facts = {}
-                if not pr_facts_error:
-                    error = "could not read ticket branch facts: brief section read timed out"
-                    for section in BRIEF_PR_FACT_SECTIONS:
-                        missing.append({"section": section, "error": error})
-            return cmd_brief(
-                items,
-                now,
-                pr_facts=pr_facts,
-                missing=missing,
-                timings=timings,
-                degraded=degraded,
-                deadline=deadline,
-                brief_cache=cache,
-            )
+                pr_facts = _brief_timed(
+                    "ticket_pr_facts",
+                    read_pr_facts,
+                    timings,
+                    degraded,
+                    deadline=deadline,
+                )
+                if pr_facts is _BRIEF_UNAVAILABLE:
+                    # A missing PR/branch scan must not turn a stale claim into a
+                    # false diagnostic. An empty mapping says those facts are
+                    # unavailable, so the pure consumers preserve the safe side.
+                    pr_facts = {}
+                    if not pr_facts_error:
+                        error = "could not read ticket branch facts: brief section read timed out"
+                        for section in BRIEF_PR_FACT_SECTIONS:
+                            missing.append({"section": section, "error": error})
+                return cmd_brief(
+                    items,
+                    now,
+                    pr_facts=pr_facts,
+                    missing=missing,
+                    timings=timings,
+                    degraded=degraded,
+                    deadline=deadline,
+                    brief_cache=cache,
+                )
+            finally:
+                _ACTIVE_BRIEF_TIMINGS.reset(brief_timing_token)
         if args.command == "queue":
             return cmd_queue(items, now, repo_readiness=repo_readiness)
         return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))

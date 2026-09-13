@@ -63,7 +63,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `rejected_merges` | Merges he checked and found broken, over `window_days`. `stop_auto_merging` true means three in a week — auto-merging stops until he fixes the review bar |
 | `closed_with_access_vocabulary` | Projects that closed with access-shaped words in the plan and no human-step ticket. The detective backstop for when every preventive layer missed one |
 | `missing` | Sections that could not be read, each with the section name and error. A non-empty list means the brief is partial; do not treat a null or empty value in a named section as an all-clear |
-| `timings` | Diagnostic elapsed seconds for each brief section, including the shared `ticket_pr_facts` read. Use it to identify the slow section when a brief is close to the session reply budget |
+| `timings` | Diagnostic elapsed seconds for each brief section, including the shared `ticket_pr_facts` read, plus `project_load`, `brief_assembly`, and aggregated `graphql.<operation>` timings with matching `.calls` counts. Use it to identify the slow stage when a brief is close to the session reply budget |
 | `degraded` | Informational sections that exceeded their time budget, with the section name, elapsed time, budget, and reason. A gate-feeding section never appears here: it fails the brief closed instead |
 
 ## How to render it
@@ -125,8 +125,9 @@ For `unattended_merges`, call out a row with `self_reviewed: true` as
 **self-reviewed**. The marker is derived from the authoring and reviewing run
 agents; do not infer it from the GitHub account or from the PR author.
 
-Use `timings` diagnostically when a brief is slow: name the largest section in the
-report, but do not treat timing as a queue or gate signal. A session reply timeout
+Use `timings` diagnostically when a brief is slow: name the largest stage in the
+report, including Project load and each `graphql.<operation>` aggregate, but do not
+treat timing as a queue or gate signal. A session reply timeout
 means the session was busy; the client reports the slow section as unknown when no
 brief response made it back.
 

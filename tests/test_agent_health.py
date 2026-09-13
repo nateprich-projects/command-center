@@ -95,7 +95,7 @@ def test_healthy_heartbeat_rows_render_no_agent_health(monkeypatch):
 
 
 def test_sparse_history_uses_the_absolute_silence_floor_and_reaches_the_brief(
-    monkeypatch,
+    monkeypatch, capsys,
 ):
     now, rows = _silence_fixture()
 
@@ -113,8 +113,18 @@ def test_sparse_history_uses_the_absolute_silence_floor_and_reaches_the_brief(
     monkeypatch.setattr(
         funnel, "_brief_heartbeat_rows", lambda agent: rows.get(agent, [])
     )
+    monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+    monkeypatch.setattr(funnel, "working_tree_touched", lambda now: [])
 
-    assert funnel.agent_health(now) == [{
+    item = funnel.Item(
+        repo="nateprich/beta", number=60, title="A quiet project",
+        url="https://example.invalid/60", state="OPEN", status="Building",
+        klass="Improve",
+    )
+    assert funnel.cmd_brief([item], now) == 0
+    brief = json.loads(capsys.readouterr().out)
+    assert brief["agent_health"] == [{
         "agent": "codex",
         "condition": conditions[0],
     }]

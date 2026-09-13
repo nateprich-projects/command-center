@@ -37,8 +37,12 @@ KEEPER_NAME = "com.nateprich.command-center-run-keeper.plist"
 REMOTE_CONTROL_NAME = "com.nateprich.command-center-remote-control.plist"
 #: The funnel snapshot publisher (#652). A poll loop, not a routine schedule.
 PUBLISHER_NAME = "com.nateprich.command-center-funnel-publisher.plist"
-NAMES = MUSE_SCHEDULE_NAMES + [KEEPER_NAME, REMOTE_CONTROL_NAME, PUBLISHER_NAME]
-INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [KEEPER_NAME, PUBLISHER_NAME]
+#: The dashboard auto-deploy (#653). A five-minute poll in the keeper mould.
+DEPLOY_NAME = "com.nateprich.command-center-funnel-deploy.plist"
+NAMES = MUSE_SCHEDULE_NAMES + [
+    KEEPER_NAME, REMOTE_CONTROL_NAME, PUBLISHER_NAME, DEPLOY_NAME]
+INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [
+    KEEPER_NAME, PUBLISHER_NAME, DEPLOY_NAME]
 LAUNCH_AGENTS = pathlib.Path.home() / "Library" / "LaunchAgents"
 CLAUDE_CODE_MARKER = "Human step: a Claude Code environment"
 LAUNCHD_CLAUDE_CODE_TRIGGER = re.compile(
@@ -307,4 +311,54 @@ def test_the_publisher_logs_to_its_own_files():
     )
     assert plist["StandardErrorPath"] == (
         "/Users/nateprich/Library/Logs/command-center-funnel-publisher.err.log"
+    )
+
+
+def test_the_deploy_runs_the_run_clone_copy():
+    """The unattended job must run the maintained checkout's deployer under
+    the pinned interpreter, never Nate's working tree."""
+    import plistlib
+
+    with (ROOT / "launchd" / DEPLOY_NAME).open("rb") as handle:
+        args = plistlib.load(handle)["ProgramArguments"]
+
+    assert args == [
+        "/usr/bin/python3",
+        "/Users/nateprich/.claude/command-center-run/dashboard_deploy.py",
+    ]
+    assert not any(a.startswith("/Volumes/") for a in args), args
+
+
+def test_the_deploy_fires_every_five_minutes():
+    """The plan deploys merged dashboard/ changes without a keyboard; the
+    keeper's five-minute calendar grid bounds that wait."""
+    import plistlib
+
+    with (ROOT / "launchd" / DEPLOY_NAME).open("rb") as handle:
+        plist = plistlib.load(handle)
+
+    schedule = plist["StartCalendarInterval"]
+    if isinstance(schedule, dict):
+        schedule = [schedule]
+    minutes = sorted(entry["Minute"] for entry in schedule)
+    gaps = [right - left for left, right in zip(minutes, minutes[1:])]
+    gaps.append(minutes[0] + 60 - minutes[-1])
+
+    assert max(gaps) == 5
+    assert "StartInterval" not in plist
+
+
+def test_the_deploy_logs_to_its_own_files():
+    """Deploy failures must land in the deployer's logs, never in an
+    agent run's output."""
+    import plistlib
+
+    with (ROOT / "launchd" / DEPLOY_NAME).open("rb") as handle:
+        plist = plistlib.load(handle)
+
+    assert plist["StandardOutPath"] == (
+        "/Users/nateprich/Library/Logs/command-center-funnel-deploy.log"
+    )
+    assert plist["StandardErrorPath"] == (
+        "/Users/nateprich/Library/Logs/command-center-funnel-deploy.err.log"
     )

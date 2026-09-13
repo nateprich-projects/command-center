@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Funnel dashboard auto-deploy (#653, step 4 of #643). Every five minutes it
+  fetches origin main and, when dashboard/ changed since the last deploy,
+  runs npm ci plus npx wrangler deploy from a detached worktree at the new
+  tip, using the scoped token from the gitignored .env. The declared
+  funnel.nateprich.com route attaches as part of the deploy. On its first
+  tick it also creates the KV namespace and commits the real id to main,
+  replacing the local-only placeholder; that commit changes dashboard/, so
+  the first deploy follows it in the same tick.
+
+  The canonical copy lives here in the repo. launchd refuses a symlinked plist
+  (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the
+  installed file is a copy and `tests/test_launchd_drift.py` compares them.
+
+  The five-minute calendar grid is the run-keeper mould: a deploy lands no
+  later than five minutes after its merge, and a calendar schedule avoids
+  interval drift. Overlap between a slow tick and the next is handled inside
+  dashboard_deploy.py with a lockfile, not by the schedule.
+
+  The interpreter is pinned to /usr/bin/python3 (3.9, verified to run
+  funnel.py and this script) rather than PATH's python3 so a future homebrew
+  python cannot silently change what the job runs under.
+
+  Note for editors: XML forbids a double hyphen inside a comment. Use an em dash
+  or a semicolon; plutil accepts the double hyphen and plistlib rejects it, so a
+  file can lint clean and still be unparseable.
+
+  After editing, re-install from a Terminal in the logged-in console session:
+    cp launchd/com.nateprich.command-center-funnel-deploy.plist ~/Library/LaunchAgents/
+    launchctl bootout gui/$(id -u)/com.nateprich.command-center-funnel-deploy
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nateprich.command-center-funnel-deploy.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nateprich.command-center-funnel-deploy</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/nateprich/.claude/command-center-run/dashboard_deploy.py</string>
+    </array>
+
+    <!--
+      Every five minutes, in the run-keeper mould. A calendar schedule avoids
+      interval drift and gives every merged dashboard/ change a deploy no
+      later than its next fire.
+    -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Minute</key><integer>0</integer></dict>
+        <dict><key>Minute</key><integer>5</integer></dict>
+        <dict><key>Minute</key><integer>10</integer></dict>
+        <dict><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Minute</key><integer>20</integer></dict>
+        <dict><key>Minute</key><integer>25</integer></dict>
+        <dict><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Minute</key><integer>35</integer></dict>
+        <dict><key>Minute</key><integer>40</integer></dict>
+        <dict><key>Minute</key><integer>45</integer></dict>
+        <dict><key>Minute</key><integer>50</integer></dict>
+        <dict><key>Minute</key><integer>55</integer></dict>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-funnel-deploy.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-funnel-deploy.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/nateprich/.local/bin</string>
+        <key>HOME</key>
+        <string>/Users/nateprich</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

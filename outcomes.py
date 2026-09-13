@@ -15,7 +15,6 @@ import argparse
 import base64
 import json
 import math
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -542,13 +541,28 @@ def derive_outcome(
 
 
 def _run_gh(args: Sequence[str]):
-    return subprocess.run(["gh"] + list(args), capture_output=True, text=True)
+    """Run a GitHub CLI read through funnel's route guard.
+
+    Outcome derivation is a consumer of the same GraphQL-backed ``gh`` route
+    as the funnel. Reusing its launcher means an exhausted route is refused
+    after the first observed failure instead of producing one failing call per
+    historical ticket (#513). REST calls, including the repository-wide issue
+    event scan, keep their own route as funnel does.
+    """
+    return funnel._run_gh(
+        ["gh"] + list(args), capture_output=True, text=True
+    )
 
 
 def gh_json(*args: str):
     """Run one read-only gh command and decode its JSON response."""
     result = _run_gh(args)
     if result.returncode != 0:
+        if funnel.route_exhausted() is not None:
+            raise funnel.GitHubError(
+                result.stderr.strip()
+                or "GitHub GraphQL route exhausted during outcome derivation"
+            )
         raise OutcomeError(result.stderr.strip() or "gh exited {}".format(result.returncode))
     try:
         return json.loads(result.stdout)
@@ -561,7 +575,7 @@ def list_closed_tickets(repo: str, limit: int = PR_SCAN_LIMIT) -> List[Dict[str,
     rows = gh_json(
         "issue", "list", "--repo", repo, "--state", "closed",
         "--limit", str(limit + 1),
-        "--json", "number,title,url,closedAt,stateReason",
+        "--json", "number,title,url,closedAt,stateReason,comments",
     )
     if not isinstance(rows, list):
         raise OutcomeError("invalid closed-ticket response for {}".format(repo))
@@ -603,6 +617,101 @@ def _issue_observations(repo: str, number: int) -> Tuple[List[Dict], List[Dict]]
     return comments, _flatten_pages(events)
 
 
+def _repository_issue_events(repo: str) -> Dict[int, List[Dict[str, object]]]:
+    """Read repository issue events once and group them by issue number.
+
+    The per-issue endpoint is correct for a small sample but turns a full
+    history walk into one REST request per closed ticket. GitHub's repository
+    event endpoint is paginated, so it gives the same evidence in one bounded
+    route walk and remains safe when an issue or its head ref has disappeared.
+    """
+    payload = gh_json(
+        "api", "--paginate", "--slurp",
+        "repos/{}/issues/events?per_page=100".format(repo),
+    )
+    grouped: Dict[int, List[Dict[str, object]]] = {}
+    for row in _flatten_pages(payload):
+        issue = row.get("issue")
+        number = issue.get("number") if isinstance(issue, Mapping) else None
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            number = row.get("issue_number")
+        if isinstance(number, bool) or not isinstance(number, int) or number <= 0:
+            continue
+        grouped.setdefault(number, []).append(row)
+    return grouped
+
+
+def _index_with_outcome_details(
+    repo: str, limit: int,
+) -> Tuple[Mapping[str, Mapping[str, object]], bool, Sequence[Mapping[str, object]]]:
+    """Use the shared PR index and request detail fields only for backfill."""
+    try:
+        index, truncated = funnel.ticket_pr_index(
+            repo, limit=limit, include_comments=True
+        )
+    except TypeError as exc:
+        # Keep fixture-era callers and downstream consumers that provide the
+        # pre-#101 two-argument test double compatible. The real funnel helper
+        # always accepts the opt-in detail flag.
+        if "include_comments" not in str(exc):
+            raise
+        index, truncated = funnel.ticket_pr_index(repo, limit=limit)
+    rows = getattr(index, "all_rows", tuple(index.values()))
+    return index, truncated, tuple(
+        row for row in rows if isinstance(row, Mapping)
+    )
+
+
+def _closing_ticket_numbers(
+    row: Mapping[str, object], repo: str,
+) -> Iterable[int]:
+    """Yield ticket numbers explicitly linked by a PR when its head ref is gone."""
+    references = row.get("closingIssuesReferences")
+    if not isinstance(references, list):
+        return ()
+    found: List[int] = []
+    for reference in references:
+        if not isinstance(reference, Mapping):
+            continue
+        repository = reference.get("repository")
+        ref_repo = (
+            repository.get("nameWithOwner")
+            if isinstance(repository, Mapping) else None
+        )
+        if ref_repo is not None and ref_repo != repo:
+            continue
+        number = reference.get("number")
+        if isinstance(number, int) and not isinstance(number, bool) and number > 0:
+            found.append(number)
+    return found
+
+
+def _null_field_counts(
+    records: Iterable[Mapping[str, object]],
+) -> Dict[str, int]:
+    """Count null top-level fields so a backfill reports unknown history plainly."""
+    counts: Dict[str, int] = {}
+    for record in records:
+        for name, value in record.items():
+            if value is None:
+                counts[name] = counts.get(name, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def outcome_summary(
+    records: Sequence[Mapping[str, object]], appended: int,
+) -> Dict[str, object]:
+    """Return the mechanical counts printed by ``derive`` and used in its PR."""
+    null_fields = _null_field_counts(records)
+    return {
+        "derived": len(records),
+        "appended": appended,
+        "null_fields": sum(null_fields.values()),
+        "null_fields_by_name": null_fields,
+        "storage": "{}:{}".format(HEARTBEAT_BRANCH, OUTCOMES_PATH),
+    }
+
+
 def _pr_observation(repo: str, number: int) -> Dict[str, object]:
     detail = gh_json(
         "pr", "view", str(number), "--repo", repo,
@@ -639,21 +748,25 @@ def derive_repository(
         if heartbeat_records is not None
         else read_heartbeat_records()
     )
-    index, truncated = funnel.ticket_pr_index(repo, limit=limit)
+    index, truncated, indexed_rows = _index_with_outcome_details(repo, limit)
     if truncated:
         raise OutcomeError(
             "PR scan for {} exceeded {}; refusing partial outcome records".format(
                 repo, limit
             )
         )
-    rows = getattr(index, "all_rows", tuple(index.values()))
+    issue_events = _repository_issue_events(repo)
     by_branch: Dict[str, List[Dict[str, object]]] = {}
-    for row in rows:
-        if not isinstance(row, Mapping):
-            continue
+    by_ticket_number: Dict[int, List[Dict[str, object]]] = {}
+    for row in indexed_rows:
         branch = row.get("headRefName")
         if isinstance(branch, str) and branch.startswith("ticket/"):
             by_branch.setdefault(branch, []).append(dict(row))
+        # A deleted head ref can leave the PR without a usable branch name.
+        # Preserve the attempt when GitHub still exposes the PR's explicit
+        # closing-issue relationship.
+        for closing_number in _closing_ticket_numbers(row, repo):
+            by_ticket_number.setdefault(closing_number, []).append(dict(row))
 
     records: List[Dict[str, object]] = []
     for ticket in tickets:
@@ -661,12 +774,22 @@ def derive_repository(
         if number is None:
             continue
         prs = by_branch.get("ticket/{}".format(number), [])
+        if not prs:
+            prs = by_ticket_number.get(number, [])
         details: Dict[int, Dict[str, object]] = {}
         for row in prs:
             pr_number = _pr_number(row)
-            if pr_number is not None:
+            # The outcome-aware index carries comments, reviews and checks in
+            # one repository-wide read. Fixture-era rows without comments use
+            # the old detail reader, keeping the pure test seam and the
+            # unreachable-ref fallback intact.
+            if pr_number is not None and "comments" not in row:
                 details[pr_number] = _pr_observation(repo, pr_number)
-        comments, events = _issue_observations(repo, number)
+        comments = ticket.get("comments")
+        if not isinstance(comments, list):
+            comments, events = _issue_observations(repo, number)
+        else:
+            events = issue_events.get(number, [])
         records.append(derive_outcome(
             ticket,
             prs,
@@ -835,11 +958,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(json.dumps(records, indent=2, sort_keys=True))
             return 0
         appended = append_records(records)
-        print(json.dumps({
-            "derived": len(records),
-            "appended": appended,
-            "storage": "{}:{}".format(HEARTBEAT_BRANCH, OUTCOMES_PATH),
-        }, sort_keys=True))
+        print(json.dumps(outcome_summary(records, appended), sort_keys=True))
         return 0
     except (OutcomeError, funnel.GitHubError) as exc:
         print("outcomes: {}".format(exc), file=sys.stderr)

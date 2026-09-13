@@ -8296,7 +8296,8 @@ def _ticket_body(repo: str, number: int) -> str:
 
 
 def ticket_pr_index(
-    repo: str, limit: int = MERGED_PR_SCAN_LIMIT
+    repo: str, limit: int = MERGED_PR_SCAN_LIMIT, *,
+    include_comments: bool = False,
 ) -> Tuple[Dict[str, Dict], bool]:
     """Every `ticket/<n>` PR in one repo, indexed by ticket ref.
 
@@ -8309,7 +8310,10 @@ def ticket_pr_index(
     passes a larger bound for its full-history read, but still uses this helper
     so it cannot regress to one PR lookup per ticket. The returned mapping also
     exposes the rows in the scan as ``all_rows`` for consumers that need to
-    count more than one PR on a branch.
+    count more than one PR on a branch. ``include_comments`` is an opt-in for
+    the outcome backfill: the normal funnel path does not pay to fetch PR
+    comment history, while the backfill can derive verdicts from this same
+    repository-wide scan instead of doing one ``gh pr view`` per PR.
     """
     try:
         limit = int(limit)
@@ -8317,11 +8321,15 @@ def ticket_pr_index(
         raise ValueError("ticket PR scan limit must be an integer")
     if limit <= 0:
         raise ValueError("ticket PR scan limit must be positive")
+    fields = (
+        "number,state,url,headRefName,headRefOid,mergeable,mergedAt,reviews,"
+        "createdAt,closedAt,statusCheckRollup,author,mergedBy"
+    )
+    if include_comments:
+        fields += ",comments,closingIssuesReferences"
     rows = _gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "all",
-        "--json",
-        "number,state,url,headRefName,headRefOid,mergeable,mergedAt,reviews,"
-        "createdAt,closedAt,statusCheckRollup,author,mergedBy",
+        "--json", fields,
         "--limit", str(limit + 1),
     )
     if rows is None:

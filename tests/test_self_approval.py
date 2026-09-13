@@ -19,6 +19,7 @@ from funnel import (  # noqa: E402
     effective_shape_owner,
     needs_nate_signals,
     self_approval_eligible,
+    shaped_self_approvable,
 )
 
 
@@ -29,6 +30,26 @@ def eligible(klass, origin, override=None, needs_nate=False, escalated=False):
         override,
         needs_nate=needs_nate,
         escalated=escalated,
+    )
+
+
+def all_clear_plan():
+    return (
+        "# Plan\n\n"
+        "## Needs you\n"
+        "Exposure: nothing outstanding. no new surface.\n"
+        "Gates: nothing outstanding. no gate change.\n"
+        "Scope and priority: nothing outstanding. bounded.\n"
+        "Preference: nothing outstanding. no user-facing choice.\n"
+    )
+
+
+def shaped_eligible(body, origin, klass, risk=None):
+    return shaped_self_approvable(
+        body,
+        {"voice": origin} if isinstance(origin, str) else origin,
+        klass,
+        [] if risk is None else risk,
     )
 
 
@@ -84,3 +105,29 @@ def test_origin_is_one_term_in_the_combined_self_approval_condition():
     assert eligible("Improve", "agent", escalated=True) is False
     assert eligible("Improve", "nate-relayed") is False
     assert eligible("Improve", "agent") is True
+
+
+def test_shaped_predicate_matches_the_shared_ready_decision():
+    assert shaped_eligible(all_clear_plan(), "agent", "Improve") is True
+    assert shaped_eligible(all_clear_plan(), "nate-relayed", "Improve") is False
+    assert shaped_eligible(all_clear_plan(), "agent", "New") is False
+    assert shaped_eligible(
+        all_clear_plan(), "agent", "Broken", ["declared: destructive"]
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("body", "origin", "klass", "risk"),
+    [
+        (None, "agent", "Improve", []),
+        (all_clear_plan(), None, "Improve", []),
+        (all_clear_plan(), {"voice": "unknown"}, "Improve", []),
+        (all_clear_plan(), "agent", None, []),
+        (all_clear_plan(), "agent", "Improve", None),
+        (all_clear_plan(), "agent", "Improve", ["bad", 1]),
+    ],
+)
+def test_shaped_predicate_fails_closed_on_missing_or_malformed_input(
+    body, origin, klass, risk
+):
+    assert shaped_self_approvable(body, origin, klass, risk) is False

@@ -800,6 +800,59 @@ def _shaped_status_fixture(
 
 
 @pytest.mark.parametrize(
+    ("klass", "origin", "extra", "expected_ready"),
+    [
+        ("Improve", "agent", "", True),
+        ("New", "agent", "", False),
+        ("Broken", "nate-relayed", "", False),
+        ("Broken", "agent", "Risk: escalated — destructive\n", False),
+    ],
+)
+def test_shaped_command_and_gate_question_share_the_same_predicate(
+    tmp_path, monkeypatch, klass, origin, extra, expected_ready
+):
+    plan_file = tmp_path / "plan.md"
+    plan = (
+        "# Plan\n\nProposed class: {}\n\n{}"
+        "## Needs you\n"
+        "Exposure: nothing outstanding. no new surface.\n"
+        "Gates: nothing outstanding. no gate change.\n"
+        "Scope and priority: nothing outstanding. bounded.\n"
+        "Preference: nothing outstanding. no user-facing choice.\n"
+    ).format(klass, extra)
+    item, calls = _shaped_status_fixture(
+        monkeypatch,
+        plan_file,
+        plan,
+        {"Ready": "ready-option", "Shaped": "shaped-option"},
+        klass=klass,
+        body=funnel.origin_block(
+            origin, at=NOW, run="capture-run", agent="claude"
+        ),
+    )
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file), run="shape-run", agent="claude"
+    ) == 0
+
+    status_write = next(
+        record[2] for record in calls
+        if len(record) == 3 and record[0] == "graphql"
+        and record[1] == funnel.SET_FIELD
+    )
+    assert (status_write["option"] == "ready-option") is expected_ready
+
+    edit = next(
+        args for kind, args in calls
+        if kind == "run" and args[:3] == ("gh", "issue", "edit")
+    )
+    item.body = edit[-1]
+    item.status = "Shaped"
+    asks_gate = funnel.gate_question(item) == "Is the plan good?"
+    assert asks_gate is (not expected_ready)
+
+
+@pytest.mark.parametrize(
     ("klass", "origin", "extra", "expected"),
     (
         (

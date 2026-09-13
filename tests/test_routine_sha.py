@@ -70,6 +70,7 @@ def _allow_begin(monkeypatch):
         lambda reading, timestamp, provider: {"over_pace": False},
     )
     monkeypatch.setattr(funnel, "ticket_pr_facts", lambda rows: {})
+    monkeypatch.setattr(funnel, "read_lock", lambda item: None)
 
 
 def _routine(tmp_path, body, filename="zcode.md"):

@@ -39,6 +39,17 @@ INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [KEEPER_NAME]
 LAUNCH_AGENTS = pathlib.Path.home() / "Library" / "LaunchAgents"
 
 
+def console_reload_hint(name):
+    label = name[: -len(".plist")]
+    return (
+        "Run the reload from a Terminal in the logged-in console (Aqua) session, "
+        "not an automation shell: cp launchd/{} ~/Library/LaunchAgents/ && "
+        "launchctl bootout gui/$(id -u)/{} && "
+        "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{} && "
+        "launchctl print gui/$(id -u)/{}"
+    ).format(name, label, name, label)
+
+
 @pytest.mark.parametrize("name", NAMES)
 def test_the_repo_carries_the_canonical_plist(name):
     """Whatever the OS makes us install, the reviewable copy lives here."""
@@ -68,11 +79,16 @@ def test_the_installed_plist_matches_the_repo(name):
     canonical = repo_copy.read_text()
     assert installed == canonical, (
         "the installed launchd plist has drifted from launchd/{}. "
-        "Re-copy it: cp launchd/{} ~/Library/LaunchAgents/ && "
-        "launchctl bootout gui/$(id -u)/{} && "
-        "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{}".format(
-            name, name, name[: -len(".plist")], name)
+        "{}".format(name, console_reload_hint(name))
     )
+
+
+def test_drift_hint_requires_the_console_session():
+    hint = console_reload_hint(KEEPER_NAME)
+
+    assert "logged-in console (Aqua) session" in hint
+    assert "not an automation shell" in hint
+    assert "launchctl print gui/$(id -u)/com.nateprich.command-center-run-keeper" in hint
 
 
 @pytest.mark.parametrize("name", MUSE_SCHEDULE_NAMES)
@@ -167,6 +183,9 @@ def test_the_installer_copies_all_launchd_plists(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
+    assert "logged-in console (Aqua) session" in result.stdout
+    assert "launchd was not reloaded" in result.stdout
+    assert "Bootstrap failed: 5" in result.stdout
     for name in INSTALL_NAMES:
         installed = tmp_path / "Library" / "LaunchAgents" / name
         assert installed.read_text() == (ROOT / "launchd" / name).read_text()

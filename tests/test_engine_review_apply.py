@@ -421,3 +421,57 @@ def test_the_entry_point_is_executable():
     assert entry.exists()
     assert entry.stat().st_mode & stat.S_IXUSR
 
+
+# -- validate-only: parse and decide without recording -------------------------
+
+def test_validate_only_prints_the_decision_and_records_nothing(
+        monkeypatch, capsys):
+    wiring = Wiring(monkeypatch)
+    code = run_cli(monkeypatch, capsys,
+                   ["7", "--repo", REPO, "--answer", "-", "--validate-only"],
+                   stdin=answer())
+    assert code == 0
+    assert wiring.reviews == []
+    assert wiring.merges == []
+    decided = json.loads(capsys.readouterr().out)
+    assert decided == {"verdict": "approved", "blocking": [], "note": None}
+
+
+def test_validate_only_decides_unsure_as_rejected(monkeypatch, capsys):
+    wiring = Wiring(monkeypatch)
+    code = run_cli(monkeypatch, capsys,
+                   ["7", "--repo", REPO, "--answer", "-", "--validate-only"],
+                   stdin=answer(unsure=["not sure"]))
+    assert code == 0
+    assert wiring.reviews == []
+    assert wiring.merges == []
+    decided = json.loads(capsys.readouterr().out)
+    assert decided["verdict"] == "rejected"
+    assert decided["blocking"] == ["unsure: not sure"]
+    assert decided["note"] is not None
+
+
+def test_validate_only_keeps_the_retryable_exit_split(monkeypatch, capsys):
+    wiring = Wiring(monkeypatch)
+    code = run_cli(monkeypatch, capsys,
+                   ["7", "--repo", REPO, "--answer", "-", "--validate-only"],
+                   stdin="{not json")
+    assert code == review_apply.RETRY_EXIT == 3
+    assert wiring.reviews == []
+    assert "invalid JSON" in capsys.readouterr().err
+
+
+def test_validate_only_final_malformed_exits_1_without_recording(
+        monkeypatch, capsys):
+    wiring = Wiring(monkeypatch)
+    code = run_cli(monkeypatch, capsys,
+                   ["7", "--repo", REPO, "--answer", "-", "--validate-only",
+                    "--attempt", "2"],
+                   stdin="{not json")
+    assert code == 1
+    assert wiring.reviews == []
+    assert wiring.merges == []
+    out = capsys.readouterr()
+    assert "invalid JSON" in out.err
+    assert review_apply.ERRORED_OUTCOME not in out.out
+

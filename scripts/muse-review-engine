@@ -1,0 +1,541 @@
+#!/bin/bash
+# A Muse review engine: one PR judged against its packet, then stop.
+#
+# Usage: muse-review-engine [tier] [reasoning-effort] [--shadow]
+#   tier   -- escalated (default) or standard; substituted into begin
+#   effort -- max (default) or high
+#   --shadow -- record the answer on the PR and the finish note instead of
+#              applying it: the shadow period before the #794 cutover
+#
+# Phase 1 of #794: the runner executes the protocol and the model answers one
+# question. begin claims the PR, review-packet assembles the evidence, and a
+# failing precheck is applied as rejected with no model call at all.
+# Otherwise the runner shows the model routines/muse-review.md with the packet
+# inline — judgement text only — parses the one JSON answer, retries once on a
+# parse error, and hands it to review-apply, which performs every side effect.
+#
+# The model runs with --disable-shell --disable-write --disable-web-tools: it
+# has no tool at all, so it cannot run funnel.py or gh itself. No
+# --sandbox-network flag: there are no tools left that need the network, and
+# the CLI's own provider calls work under the default. No --approval-mode
+# either: the default stays on-request, so a future tool outside the three
+# disables could never be silently auto-allowed on this path.
+#
+# A separate runner from muse-review on purpose, like muse-implement: the old
+# routine runs the job until the cutover, and a flag error must never turn one
+# into the other.
+
+set -uo pipefail
+
+TIER="escalated"
+EFFORT="max"
+SHADOW=0
+SEEN=0
+for arg in "$@"; do
+  case "$arg" in
+    --shadow) SHADOW=1 ;;
+    --*) echo "muse-review-engine: unknown flag '$arg'" >&2; exit 1 ;;
+    *)
+      SEEN=$((SEEN + 1))
+      if (( SEEN == 1 )); then
+        TIER="$arg"
+      elif (( SEEN == 2 )); then
+        EFFORT="$arg"
+      else
+        echo "muse-review-engine: usage: muse-review-engine [tier] [effort] [--shadow]" >&2
+        exit 1
+      fi
+      ;;
+  esac
+done
+case "$TIER" in
+  escalated|standard) ;;
+  *) echo "muse-review-engine: tier must be escalated or standard, got '$TIER'" >&2; exit 1 ;;
+esac
+case "$EFFORT" in
+  max|high) ;;
+  *) echo "muse-review-engine: reasoning effort must be max or high, got '$EFFORT'" >&2; exit 1 ;;
+esac
+
+# The maintained read-only clone, not Nate's working tree: the routine text
+# and the funnel it invokes must come from the same checkout.
+REPO="${MUSE_REVIEW_ENGINE_REPO:-/Users/nateprich/.claude/command-center-run}"
+# The muse and gh binaries and the wall-clock bound are overridable for the
+# tests; the defaults are what the schedule runs.
+MUSE_BIN="${MUSE_BIN:-$HOME/.local/bin/muse}"
+GH_BIN="${GH_BIN:-gh}"
+BOUND_SECONDS="${MUSE_REVIEW_ENGINE_BOUND_SECONDS:-1200}"
+ROUTINE="$REPO/routines/muse-review.md"
+# An empty directory on purpose, shared with the old reviewer. The model has
+# no tools so it cannot see this at all; it exists only because exec wants a
+# workspace root.
+WORKSPACE="$HOME/.claude/command-center-muse-workspace"
+# Marker so the shadow-agreement read finds the engine's shadow comments.
+SHADOW_MARKER="<!-- command-center-shadow-review -->"
+
+mkdir -p "$WORKSPACE" || exit 1
+
+if [[ ! -r "$ROUTINE" ]]; then
+  echo "muse-review-engine: cannot read $ROUTINE — refusing to run without a prompt" >&2
+  exit 1
+fi
+
+# Everything after the first `---` is the agent-facing prompt; the header
+# above it is written for a human reading the file. Same shape as the other
+# routines. The packet goes where PACKET_JSON stands, exactly once: a second
+# occurrence would mean the substitution below left a literal behind.
+PROMPT_TEMPLATE="$(awk 'f{print} /^---$/{f=1}' "$ROUTINE")"
+if [[ "$PROMPT_TEMPLATE" != *[![:space:]]* ]]; then
+  echo "muse-review-engine: $ROUTINE has no prompt after its --- separator" >&2
+  exit 1
+fi
+PLACEHOLDERS="$(printf '%s' "$PROMPT_TEMPLATE" | grep -o PACKET_JSON | wc -l | tr -d ' ')"
+if [[ "$PLACEHOLDERS" != "1" ]]; then
+  echo "muse-review-engine: $ROUTINE must hold PACKET_JSON exactly once" >&2
+  exit 1
+fi
+
+PACKET_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-packet.XXXXXX")"
+PROMPT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-prompt.XXXXXX")"
+ANSWER_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-answer.XXXXXX")"
+DECISION_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-decision.XXXXXX")"
+COMMENT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-comment.XXXXXX")"
+DIAG_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-diag.XXXXXX")"
+if [[ -z "$PACKET_FILE" || -z "$PROMPT_FILE" || -z "$ANSWER_FILE" \
+  || -z "$DECISION_FILE" || -z "$COMMENT_FILE" || -z "$DIAG_FILE" ]]; then
+  echo "muse-review-engine: could not create scratch files" >&2
+  exit 1
+fi
+
+BEGIN_RUN=""
+
+# Keep the funnel's Project view in one disposable process for this Muse run.
+# The server prints its loopback endpoint through an inherited pipe; it does
+# not read GitHub until the first client command arrives, so `begin` still
+# sees the live Project when it claims work. No endpoint or Project data is
+# written to disk, and the session ends with this runner.
+exec 3< <(
+  FUNNEL_SESSION= FUNNEL_SESSION_SERVER=1 \
+    python3 "$REPO/funnel.py" session-server --parent-pid "$$"
+)
+FUNNEL_SESSION=""
+if ! IFS= read -r FUNNEL_SESSION <&3; then
+  echo "muse-review-engine: could not start the per-run funnel session" >&2
+  exec 3<&-
+  exit 1
+fi
+exec 3<&-
+export FUNNEL_SESSION
+
+cleanup() {
+  python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
+  rm -f -- "$PACKET_FILE" "$PROMPT_FILE" "$ANSWER_FILE" \
+    "$DECISION_FILE" "$COMMENT_FILE" "$DIAG_FILE"
+}
+trap cleanup EXIT
+
+# Keep one error shape for runner failures: the heartbeat gets the concise
+# diagnostic, while the full stderr remains in the schedule's error log.
+failure() {
+  local note="$1"
+  if [[ -z "$BEGIN_RUN" ]]; then
+    echo "muse-review-engine: $note (no run id to finish)" >&2
+    return 1
+  fi
+  if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+      --outcome errored --note "$note"; then
+    echo "muse-review-engine: could not finish errored run" >&2
+    return 1
+  fi
+  return 0
+}
+
+finish_done() {
+  local note="$1"
+  if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+      --outcome done --note "$note"; then
+    echo "muse-review-engine: could not finish the run" >&2
+    exit 1
+  fi
+}
+
+# Own the opening poll. Empty polls must not launch a model: `begin` has
+# already recorded the heartbeat and made the gate decision, so a stop can
+# finish the run here without ever invoking `muse exec`.
+BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent muse --tier "$TIER" --role review)"
+begin_status=$?
+if (( begin_status != 0 )); then
+  echo "muse-review-engine: funnel begin failed (exit $begin_status)" >&2
+  exit "$begin_status"
+fi
+
+begin_value() {
+  local key="$1"
+  printf '%s\n' "$BEGIN_JSON" | python3 -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin)[sys.argv[1]]
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if value is None:
+    raise SystemExit(1)
+print(value)
+' "$key"
+}
+
+begin_work_value() {
+  local key="$1"
+  printf '%s\n' "$BEGIN_JSON" | python3 -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin)["work"][sys.argv[1]]
+except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+if value is None:
+    raise SystemExit(1)
+print(value)
+' "$key"
+}
+
+if ! BEGIN_DO="$(begin_value do)" \
+  || ! BEGIN_GATE="$(begin_value gate)" \
+  || ! BEGIN_RUN="$(begin_value run)"; then
+  echo "muse-review-engine: funnel begin returned invalid JSON" >&2
+  exit 1
+fi
+
+if [[ "$BEGIN_DO" == "stop" ]]; then
+  case "$BEGIN_GATE" in
+    over) STOP_OUTCOME="skipped-over-pace" ;;
+    unknown) STOP_OUTCOME="skipped-usage-unknown" ;;
+    *) STOP_OUTCOME="nothing-to-do" ;;
+  esac
+  if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+      --outcome "$STOP_OUTCOME"; then
+    echo "muse-review-engine: could not finish the stopped run" >&2
+    exit 1
+  fi
+  exit 0
+fi
+
+if [[ "$BEGIN_DO" != "review" ]] \
+  || ! BEGIN_PR="$(begin_work_value pr)" \
+  || ! BEGIN_REPO="$(begin_work_value repo)"; then
+  echo "muse-review-engine: funnel begin returned unknown job '$BEGIN_DO'" >&2
+  failure "funnel begin returned unknown job '$BEGIN_DO'" || true
+  exit 1
+fi
+
+# The packet is the only evidence the model ever sees. Reads only; nothing
+# here changes remote state.
+if ! python3 "$REPO/review-packet" "$BEGIN_PR" --repo "$BEGIN_REPO" \
+    >"$PACKET_FILE" 2>"$DIAG_FILE"; then
+  packet_err="$(cat "$DIAG_FILE")"
+  echo "muse-review-engine: review-packet failed: $packet_err" >&2
+  failure "review-packet failed for PR #$BEGIN_PR in $BEGIN_REPO: $packet_err" || true
+  exit 1
+fi
+
+packet_field() {
+  python3 -c '
+import json
+import sys
+
+packet = json.load(open(sys.argv[1]))
+field = sys.argv[2]
+if field == "precheck_pass":
+    print(packet.get("precheck", {}).get("pass", False))
+elif field == "ci":
+    print((packet.get("ci") or {}).get("state") or "unknown")
+elif field == "head":
+    print(packet.get("head_sha") or "")
+elif field == "reason_count":
+    print(len(packet.get("precheck", {}).get("reasons", [])))
+elif field == "rejected_answer":
+    print(json.dumps({
+        "verdict": "rejected",
+        "blocking": packet.get("precheck", {}).get("reasons", []),
+        "unsure": [],
+    }))
+' "$PACKET_FILE" "$1"
+}
+
+if ! PACKET_PASS="$(packet_field precheck_pass)" \
+  || ! PACKET_CI="$(packet_field ci)" \
+  || ! PACKET_HEAD="$(packet_field head)"; then
+  echo "muse-review-engine: the packet for PR #$BEGIN_PR is not valid JSON" >&2
+  failure "review-packet for PR #$BEGIN_PR in $BEGIN_REPO printed invalid JSON" || true
+  exit 1
+fi
+HEAD_SHORT="${PACKET_HEAD:0:12}"
+if [[ -z "$HEAD_SHORT" ]]; then
+  HEAD_SHORT="unknown-head"
+fi
+
+# Cap a blob pasted into a note or comment, with the cut marked. Mirrors
+# review-apply's MAX_RAW_NOTE: a GitHub comment is no place for unbounded
+# model output.
+cap_text() {
+  python3 -c '
+import sys
+
+text = open(sys.argv[1]).read()
+limit = int(sys.argv[2])
+if len(text) <= limit:
+    sys.stdout.write(text)
+else:
+    sys.stdout.write(text[:limit] + "\n…[truncated {} chars]".format(len(text) - limit))
+' "$1" "$2"
+}
+
+compact_json() {
+  python3 -c '
+import json
+import sys
+
+raw = open(sys.argv[1]).read()
+limit = int(sys.argv[2])
+try:
+    flat = json.dumps(json.loads(raw), sort_keys=True)
+except ValueError:
+    flat = " ".join(raw.split())
+if len(flat) > limit:
+    flat = flat[:limit] + "…[truncated {} chars]".format(len(flat) - limit)
+print(flat)
+' "$1" "$2"
+}
+
+# A shadow run records the answer and finishes done instead of applying. The
+# answer file holds what the model said (or the constructed precheck
+# rejection); the decision is the verdict word that would have been recorded.
+record_shadow() {
+  local verdict="$1"
+  local answer_note="$2"
+  local model_line="$3"
+  {
+    printf '%s\n' "$SHADOW_MARKER"
+    printf '**Shadow review (not applied)** — run `%s`, packet head `%s`\n' \
+      "$BEGIN_RUN" "$HEAD_SHORT"
+    printf '\n%s\n' "$model_line"
+    printf '\nDecision: **%s**.\n' "$verdict"
+    printf '\n```json\n'
+    cap_text "$ANSWER_FILE" 4000
+    printf '\n```\n'
+  } >"$COMMENT_FILE"
+  if ! "$GH_BIN" pr comment "$BEGIN_PR" --repo "$BEGIN_REPO" \
+      --body-file "$COMMENT_FILE" 2>"$DIAG_FILE"; then
+    gh_err="$(cat "$DIAG_FILE")"
+    echo "muse-review-engine: shadow comment failed: $gh_err" >&2
+    failure "shadow review of PR #$BEGIN_PR in $BEGIN_REPO recorded no verdict (gh pr comment failed: $gh_err); answer: $answer_note" || true
+    exit 1
+  fi
+  finish_done "shadow review of PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $verdict; answer: $answer_note"
+}
+
+if [[ "$PACKET_PASS" != "True" ]]; then
+  # A failing precheck is applied as rejected with no model call at all. The
+  # reasons become the blocking list through the same review-apply path a
+  # model rejection takes, so the verdict shape never depends on who judged.
+  if ! packet_field rejected_answer >"$ANSWER_FILE"; then
+    echo "muse-review-engine: could not build the precheck rejection" >&2
+    failure "could not build the precheck rejection for PR #$BEGIN_PR in $BEGIN_REPO" || true
+    exit 1
+  fi
+  REASON_COUNT="$(packet_field reason_count)"
+  ANSWER_NOTE="$(compact_json "$ANSWER_FILE" 4000)"
+  if (( SHADOW )); then
+    record_shadow "rejected" "$ANSWER_NOTE" \
+      "No model was called: the packet precheck failed with $REASON_COUNT reason(s)."
+    exit 0
+  fi
+  if python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
+      --answer "$ANSWER_FILE" --ci "$PACKET_CI" --head "$PACKET_HEAD" \
+      --attempt 1 >"$DIAG_FILE" 2>&1; then
+    finish_done "reviewed PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: rejected without a model call ($REASON_COUNT precheck reason(s))"
+    exit 0
+  fi
+  apply_err="$(cat "$DIAG_FILE")"
+  echo "muse-review-engine: review-apply refused the precheck rejection: $apply_err" >&2
+  failure "review-apply refused the precheck rejection on PR #$BEGIN_PR in $BEGIN_REPO: $apply_err" || true
+  exit 1
+fi
+
+# Substitute the whole packet where PACKET_JSON stands. The template check
+# above guarantees exactly one occurrence, so this cannot leave one behind —
+# and a packet that happens to contain the literal stays content, not a
+# placeholder. The prompt travels by --prompt-file, not argv, because a diff
+# can outgrow the argument limit.
+PACKET_JSON="$(cat "$PACKET_FILE")"
+PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$PACKET_JSON}"
+printf '%s' "$PROMPT" >"$PROMPT_FILE"
+
+# One model call: the prompt file in, the raw answer on stdout. Plain kill,
+# not a process-group kill: --disable-shell means the model can have no
+# children to orphan. Exit 124 when the bound kills the call.
+call_muse() {
+  local killed_marker
+  # Split from the declaration: `local x=$(...)` would mask mktemp's status.
+  if ! killed_marker="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-killed.XXXXXX")"; then
+    return 1
+  fi
+  rm -f "$killed_marker"
+  "$MUSE_BIN" exec \
+    --model muse-spark-1.3 \
+    --reasoning-effort "$EFFORT" \
+    --disable-shell \
+    --disable-write \
+    --disable-web-tools \
+    --max-model-steps 60 \
+    --no-foreign-personal-context \
+    --workspace "$WORKSPACE" \
+    --prompt-file "$PROMPT_FILE" >"$ANSWER_FILE" 2>"$DIAG_FILE" &
+  local muse_pid=$!
+  (
+    sleep "$BOUND_SECONDS" &
+    sleep_pid=$!
+    trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM
+    wait "$sleep_pid"
+    if kill -0 "$muse_pid" 2>/dev/null; then
+      echo "muse-review-engine: killing run after ${BOUND_SECONDS}s ($TIER schedule)" >&2
+      : > "$killed_marker"
+      kill -TERM "$muse_pid" 2>/dev/null
+      sleep 5
+      kill -KILL "$muse_pid" 2>/dev/null
+    fi
+  ) &
+  local bound_pid=$!
+  wait "$muse_pid"
+  local status=$?
+  if [[ -e "$killed_marker" ]]; then
+    wait "$bound_pid" 2>/dev/null
+    rm -f "$killed_marker"
+    return 124
+  fi
+  kill "$bound_pid" 2>/dev/null
+  wait "$bound_pid" 2>/dev/null
+  rm -f "$killed_marker"
+  return "$status"
+}
+
+muse_failed() {
+  local status="$1"
+  if (( status == 124 )); then
+    echo "muse-review-engine: the model call outlived the wall-clock bound" >&2
+    failure "killed after $((BOUND_SECONDS / 60)) minutes: $TIER review run exceeded the wall-clock bound (#392)" || true
+    exit 124
+  fi
+  muse_err="$(cat "$DIAG_FILE")"
+  echo "muse-review-engine: muse exec failed (exit $status): $muse_err" >&2
+  failure "muse exec failed (exit $status) on PR #$BEGIN_PR in $BEGIN_REPO: $muse_err" || true
+  exit 1
+}
+
+# The recorded verdict word, read back from review-apply's own report — never
+# re-derived here, because unsure non-empty flips an approval to a rejection.
+recorded_verdict() {
+  grep -o 'recorded \(approved\|rejected\)' "$DIAG_FILE" | tail -n 1 | awk '{print $2}'
+}
+
+if (( SHADOW )); then
+  ATTEMPT=1
+  while true; do
+    # Read the status into a variable: `$?` inside an `if !` branch is the
+    # negated condition's status (0), not the call's.
+    call_muse
+    muse_status=$?
+    if (( muse_status != 0 )); then
+      muse_failed "$muse_status"
+    fi
+    # Read the status directly into a variable: `$?` after an `if`
+    # whose condition failed is 0, not the command's status, so the `fi`
+    # below would never see a retryable 3. (A bare `name=$(...)`
+    # assignment keeps the substitution's status.)
+    decision="$(python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
+        --answer "$ANSWER_FILE" --validate-only --attempt "$ATTEMPT" \
+        2>"$DIAG_FILE")"
+    validate_status=$?
+    if (( validate_status == 0 )); then
+      printf '%s' "$decision" >"$DECISION_FILE"
+      VERDICT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["verdict"])' "$DECISION_FILE")"
+      if [[ -z "$VERDICT" ]]; then
+        VERDICT="unknown"
+      fi
+      ANSWER_NOTE="$(compact_json "$ANSWER_FILE" 4000)"
+      record_shadow "$VERDICT" "$ANSWER_NOTE" "The model answered the review question."
+      exit 0
+    fi
+    if (( validate_status == 3 && ATTEMPT == 1 )); then
+      parse_err="$(cat "$DIAG_FILE")"
+      printf '%s\n\nYour previous answer could not be parsed: %s\nReply again with exactly one JSON object and nothing else.' \
+        "$PROMPT" "$parse_err" >"$PROMPT_FILE"
+      ATTEMPT=2
+      continue
+    fi
+    # A malformed final answer: record what the model actually said, with
+    # the parse error, and finish errored — the shadow comparison for this
+    # head is lost, and the next run collects the packet again.
+    parse_err="$(cat "$DIAG_FILE")"
+    printf '%s' "$parse_err" >"$DECISION_FILE"
+    ANSWER_NOTE="unparseable ($(compact_json "$DECISION_FILE" 500)): $(compact_json "$ANSWER_FILE" 2000)"
+    {
+      printf '%s\n' "$SHADOW_MARKER"
+      printf '**Shadow review (not applied)** — run `%s`, packet head `%s`\n' \
+        "$BEGIN_RUN" "$HEAD_SHORT"
+      printf '\nThe model answered the review question, but the final answer could not be parsed: %s\n' "$parse_err"
+      printf '\nRaw output:\n\n```\n'
+      cap_text "$ANSWER_FILE" 4000
+      printf '\n```\n'
+    } >"$COMMENT_FILE"
+    if "$GH_BIN" pr comment "$BEGIN_PR" --repo "$BEGIN_REPO" \
+        --body-file "$COMMENT_FILE" 2>/dev/null; then
+      failure "shadow review of PR #$BEGIN_PR in $BEGIN_REPO recorded no verdict (final answer unparseable); answer: $ANSWER_NOTE" || true
+    else
+      failure "shadow review of PR #$BEGIN_PR in $BEGIN_REPO recorded no verdict (final answer unparseable, and gh pr comment failed); answer: $ANSWER_NOTE" || true
+    fi
+    exit 1
+  done
+fi
+
+ATTEMPT=1
+while true; do
+  call_muse
+  muse_status=$?
+  if (( muse_status != 0 )); then
+    muse_failed "$muse_status"
+  fi
+  # Read the status directly: `$?` after an `if` whose condition failed
+  # is 0, never the apply exit, so the retryable 3 must be caught here.
+  # (No `set -e`, so the bare failing call below does not abort the run.)
+  python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
+      --answer "$ANSWER_FILE" --ci "$PACKET_CI" --head "$PACKET_HEAD" \
+      --attempt "$ATTEMPT" >"$DIAG_FILE" 2>&1
+  apply_status=$?
+  if (( apply_status == 0 )); then
+    VERDICT="$(recorded_verdict)"
+    if [[ -z "$VERDICT" ]]; then
+      VERDICT="recorded"
+    fi
+    finish_done "reviewed PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $VERDICT"
+    exit 0
+  fi
+  if (( apply_status == 3 && ATTEMPT == 1 )); then
+    parse_err="$(cat "$DIAG_FILE")"
+    printf '%s\n\nYour previous answer could not be parsed: %s\nReply again with exactly one JSON object and nothing else.' \
+      "$PROMPT" "$parse_err" >"$PROMPT_FILE"
+    ATTEMPT=2
+    continue
+  fi
+  apply_err="$(cat "$DIAG_FILE")"
+  if printf '%s' "$apply_err" | grep -q 'run outcome: errored'; then
+    echo "muse-review-engine: the final answer was malformed; rejected was recorded" >&2
+    failure "recorded rejected on PR #$BEGIN_PR in $BEGIN_REPO after a malformed final answer" || true
+    exit 1
+  fi
+  echo "muse-review-engine: review-apply failed: $apply_err" >&2
+  failure "review-apply failed on PR #$BEGIN_PR in $BEGIN_REPO: $apply_err" || true
+  exit 1
+done

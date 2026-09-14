@@ -26,6 +26,12 @@ issue, and no dependency cycles. The create path makes sub-issues with
 native blocked-by edges, writes the Needs field and a code-owned ``Risk:``
 line, and posts the coverage comment; the question path posts the
 needs-decision comment and labels the project blocked.
+
+The runner protocol (#811) rides on ``--attempt``: a malformed answer
+exits 3 below attempt 2 so the runner retries once with the error fed
+back, and 1 at 2 or later with nothing recorded. Without ``--attempt``
+the single-shot exit 2 stands. ``--validate-only`` validates without
+creating anything and prints the validated answer, for the shadow path.
 """
 
 from __future__ import annotations
@@ -83,6 +89,15 @@ ISSUE_URL_RE = re.compile(
 #: Exit code for a schema failure. No effect has happened: validation is
 #: total before the first mutation, so 2 always means nothing was created.
 EXIT_VALIDATION = 2
+
+#: Malformed answer on a runner-protocol attempt below the final one: the
+#: runner feeds the parse error back to the model and calls again.
+RETRY_EXIT = 3
+
+#: Attempts past the first are final: a malformed answer then exits 1
+#: with nothing recorded, and the runner finishes the run errored. The
+#: project stays awaiting breakdown, so the next run asks again.
+FINAL_ATTEMPT = 2
 
 
 def parse_project_ref(value: str, default_repo: Optional[str] = None,
@@ -761,6 +776,19 @@ def read_answer(source: str) -> object:
             "the answer is not valid JSON: {}".format(exc))
 
 
+def validation_exit(attempt: Optional[int]) -> int:
+    """The exit for a malformed answer, recording nothing either way.
+
+    Without ``--attempt`` the single-shot legacy exit 2 stands. With an
+    explicit attempt the runner protocol applies: retryable 3 below the
+    final attempt, 1 at it — the project stays awaiting breakdown, so
+    the next run asks again.
+    """
+    if attempt is None:
+        return EXIT_VALIDATION
+    return RETRY_EXIT if attempt < FINAL_ATTEMPT else 1
+
+
 def apply_main(argv: Optional[Sequence[str]] = None) -> int:
     """Validate one breakdown answer and perform its effects."""
     parser = argparse.ArgumentParser(
@@ -776,7 +804,17 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
                         help="heartbeat run id stamped on runner comments")
     parser.add_argument("--agent", default=None,
                         help="agent stamped on runner comments")
+    parser.add_argument("--attempt", type=int, default=None,
+                        help="attempt number in the runner protocol: a "
+                             "malformed answer exits 3 below attempt 2 "
+                             "(the runner retries once) and 1 at 2 or "
+                             "later. Without --attempt, exit 2.")
+    parser.add_argument("--validate-only", action="store_true",
+                        help="validate without creating anything; print the "
+                             "validated answer as JSON")
     args = parser.parse_args(argv)
+    if args.attempt is not None and args.attempt < 1:
+        parser.error("--attempt must be at least 1")
     try:
         text = (args.project or "").strip()
         default = funnel.resolve_repo(args.repo) if text.isdigit() \
@@ -793,7 +831,7 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     except BreakdownError as exc:
         print("breakdown-apply: {}".format(exc), file=sys.stderr)
-        return EXIT_VALIDATION
+        return validation_exit(args.attempt)
     try:
         errors, normalized = validate_answer(answer, fetch_issue_state)
     except funnel.GitHubError as exc:
@@ -802,8 +840,11 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
     if errors:
         for error in errors:
             print("breakdown-apply: {}".format(error), file=sys.stderr)
-        return EXIT_VALIDATION
+        return validation_exit(args.attempt)
     assert normalized is not None
+    if args.validate_only:
+        print(json.dumps(normalized, indent=2, sort_keys=True))
+        return 0
     try:
         result = apply(repo, number, normalized,
                        run=args.run, agent=args.agent)

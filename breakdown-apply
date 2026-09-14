@@ -7,6 +7,11 @@ Part of #794: validates the model's JSON answer against the ticket schema
 and performs every side effect. Exit 2 means the answer failed validation
 and nothing was created; exit 1 means a GitHub or local failure, possibly
 after creating some tickets (named on stderr).
+
+--attempt N is the runner protocol (#811): a malformed answer exits 3
+below attempt 2 so the runner retries once, and 1 at 2 or later with
+nothing recorded. --validate-only prints the validated answer without
+creating anything, for the runner's shadow path.
 """
 
 import os

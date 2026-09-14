@@ -30,8 +30,9 @@ REVIEWER_NAMES = [
     "com.nateprich.command-center-muse-review.plist",           # escalated, hourly
     "com.nateprich.command-center-muse-review-standard.plist",  # standard, /5
 ]
+SHADOW_REVIEWER_NAME = "com.nateprich.command-center-muse-review-shadow.plist"
 IMPLEMENTER_NAME = "com.nateprich.command-center-muse-implement.plist"
-MUSE_SCHEDULE_NAMES = REVIEWER_NAMES + [IMPLEMENTER_NAME]
+MUSE_SCHEDULE_NAMES = REVIEWER_NAMES + [SHADOW_REVIEWER_NAME, IMPLEMENTER_NAME]
 KEEPER_NAME = "com.nateprich.command-center-run-keeper.plist"
 #: The Remote Control listener. Not a schedule; see the carve-out in `AGENTS.md`.
 REMOTE_CONTROL_NAME = "com.nateprich.command-center-remote-control.plist"
@@ -154,7 +155,12 @@ def test_the_plist_points_at_the_stable_path(name):
         plist = plistlib.load(handle)
     args = plist["ProgramArguments"]
     assert args[0] == "/bin/bash"
-    script = "muse-implement" if name == IMPLEMENTER_NAME else "muse-review"
+    if name == IMPLEMENTER_NAME:
+        script = "muse-implement"
+    elif name == SHADOW_REVIEWER_NAME:
+        script = "muse-review-engine"
+    else:
+        script = "muse-review"
     assert any(a.endswith("/scripts/{}".format(script)) for a in args), args
     # Checked against the arguments, not the file text: the header explains the
     # TCC blocker and has to name `/Volumes/External SSD` to do so. Asserting on
@@ -208,7 +214,28 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
 
     assert args(NAMES[0]) == ["escalated", "max"]
     assert args(NAMES[1]) == ["standard", "high"]
+    assert args(SHADOW_REVIEWER_NAME) == ["--shadow", "standard"]
     assert args(IMPLEMENTER_NAME) == ["escalated", "max"]
+
+
+def test_the_shadow_reviewer_runs_beside_standard_on_the_same_cadence():
+    """The shadow engine observes every standard slot without replacing it."""
+    import plistlib
+
+    with (ROOT / "launchd" / SHADOW_REVIEWER_NAME).open("rb") as handle:
+        shadow = plistlib.load(handle)
+    with (ROOT / "launchd" / REVIEWER_NAMES[1]).open("rb") as handle:
+        standard = plistlib.load(handle)
+
+    assert shadow["StartCalendarInterval"] == standard["StartCalendarInterval"]
+    assert "StartInterval" not in shadow
+
+
+def test_the_shadow_reviewer_header_documents_non_applying_side_by_side_run():
+    header = (ROOT / "launchd" / SHADOW_REVIEWER_NAME).read_text()
+
+    assert "runs beside the old routine" in header
+    assert "applies nothing" in header
 
 
 def test_the_implementer_polls_every_fifteen_minutes_while_794_clears():

@@ -184,6 +184,41 @@ def test_finish_ticket_pushes_opens_pr_releases_and_finishes(tmp_path, monkeypat
     assert pushed == "done\n"
 
 
+def test_finish_ticket_releases_and_errors_when_tests_fail(tmp_path, monkeypatch):
+    remote, clone = make_clone(tmp_path)
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+
+    effects = {"released": [], "finished": []}
+
+    def no_pr(repo, context, found_ticket, body):
+        raise AssertionError("a failing checkout must not open a PR")
+
+    with pytest.raises(implement.ImplementError, match="SystemExit"):
+        implement.finish_done(
+            answer(),
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "raise SystemExit(3)"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=no_pr,
+        )
+
+    assert effects["released"] == [REPO + "#42"]
+    (finished,), = [effects["finished"]]
+    assert finished[:3] == ("codex", "run-42", "errored")
+    assert finished[3].startswith("tests failed: ")
+    assert "SystemExit(3)" in finished[3]
+    assert finished[4] == REPO + "#42"
+
+    refs = run_git("--git-dir", str(remote), "show-ref").stdout
+    assert "ticket/42" not in refs
+    dirty = run_git("status", "--porcelain", cwd=clone).stdout.strip()
+    assert "implemented.txt" in dirty
+
+
 def test_finish_ticket_requires_the_deterministic_branch(tmp_path):
     _, clone = make_clone(tmp_path)
     run_git("switch", "--quiet", "main", cwd=clone)
@@ -203,7 +238,7 @@ def test_test_discovery_runs_both_suites_in_a_mixed_repo(tmp_path):
     (tmp_path / "tests" / "test_runner.py").write_text("def test_ok(): pass\n")
     (tmp_path / "package.json").write_text('{"scripts":{"test":"node --test"}}')
     assert implement.default_test_commands(tmp_path) == [
-        [sys.executable, "-m", "pytest", "-q"],
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
         ["npm", "test"],
     ]
 

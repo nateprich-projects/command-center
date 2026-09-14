@@ -246,7 +246,11 @@ def default_test_commands(root: pathlib.Path) -> List[List[str]]:
         root / "tox.ini",
     )
     if has_python_tests or any(path.is_file() for path in python_markers):
-        commands.append([sys.executable, "-m", "pytest", "-q"])
+        # No cache provider: the finish step commits everything dirty, so the
+        # test run must not leave .pytest_cache/ behind for it to stage.
+        commands.append(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+        )
     if (root / "package.json").is_file():
         commands.append(["npm", "test"])
     if not commands:
@@ -403,6 +407,14 @@ def finish_heartbeat(agent: str, run: str, outcome: str,
         raise ImplementError("heartbeat finish refused run {}".format(run))
 
 
+def _failure_note(exc: ImplementError) -> str:
+    """Summarise a test failure in one heartbeat-note-sized line."""
+    first = str(exc).splitlines()[0] if str(exc) else "unknown test failure"
+    if len(first) > 200:
+        first = first[:197].rstrip() + "..."
+    return "tests failed: {}".format(first)
+
+
 def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
                 test_commands: Optional[Sequence[Sequence[str]]] = None,
@@ -417,7 +429,15 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     resolved = resolve_checkout_repo(context["root"], repo)
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
-    tests = run_tests(context["root"], test_commands)
+    try:
+        tests = run_tests(context["root"], test_commands)
+    except ImplementError as exc:
+        # A failing checkout must not strand the run: no commit, push or PR
+        # happens below, so release the claim and finish errored with the
+        # failing command's summary, then re-raise for the nonzero exit.
+        release(ref)
+        heartbeat_finish(agent, run, "errored", _failure_note(exc), ref)
+        raise
     continued = _remote_branch_exists(context["root"], context["branch"])
     _commit_if_needed(context["root"], context["number"], answer["summary"])
     _run(

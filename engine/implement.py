@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Assemble implementation evidence and finish one ticket (#815).
+"""Assemble implementation evidence and finish one ticket (#815, #816).
 
 The model changes files and returns one small structured answer.  This module
 owns the protocol around that judgement: read the ticket packet, verify the
-checkout, run its tests, commit and push, open the pull request, release the
-claim, and finish the heartbeat bound to the ticket.
+checkout, then either run its tests, commit and push, open the pull request,
+or file the human step, or record the decline — and release the claim and
+finish the heartbeat bound to the ticket.
 
 The package imports ``funnel`` and never the reverse.  ``funnel finish-ticket``
 is a process-level CLI forwarder to the standalone entry point, so importing
@@ -163,7 +164,11 @@ def packet_main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 def read_answer(path: str) -> dict:
-    """Read and validate the happy-path model answer."""
+    """Read and validate one structured implementation answer.
+
+    Exactly one shape: the done answer, the blocked_on_human answer, or
+    the declined answer. Anything mixed or unknown fails closed.
+    """
     try:
         raw = sys.stdin.read() if path == "-" else pathlib.Path(path).read_text()
     except OSError as exc:
@@ -174,6 +179,22 @@ def read_answer(path: str) -> dict:
         raise ImplementError("answer is not valid JSON: {}".format(exc))
     if not isinstance(answer, dict):
         raise ImplementError("answer must be a JSON object")
+    if "done" in answer:
+        return _read_done_answer(answer)
+    if set(answer) == {"blocked_on_human"}:
+        return {"blocked_on_human": _read_blocked_answer(
+            answer["blocked_on_human"])}
+    if set(answer) == {"declined"}:
+        reason = answer["declined"]
+        if not isinstance(reason, str) or not reason.strip():
+            raise ImplementError("declined reason must be a non-empty string")
+        return {"declined": reason.strip()}
+    raise ImplementError(
+        "answer must be a done, blocked_on_human, or declined answer")
+
+
+def _read_done_answer(answer: dict) -> dict:
+    """Validate the happy-path model answer."""
     if answer.get("done") is not True:
         raise ImplementError("happy-path answer must set done to true")
     summary = answer.get("summary")
@@ -192,6 +213,26 @@ def read_answer(path: str) -> dict:
         "summary": summary.strip(),
         "departures": [value.strip() for value in departures],
     }
+
+
+def _read_blocked_answer(value: object) -> dict:
+    """Validate the blocked_on_human answer against the allowlisted reasons."""
+    if not isinstance(value, dict):
+        raise ImplementError("blocked_on_human must be an object")
+    reason = value.get("reason")
+    if reason not in funnel.HUMAN_STEP_REASONS:
+        raise ImplementError(
+            "blocked_on_human reason must be one of: {}".format(
+                ", ".join(funnel.HUMAN_STEP_REASONS)))
+    action = value.get("action")
+    if not isinstance(action, str) or not action.strip():
+        raise ImplementError("blocked_on_human action must be a non-empty string")
+    extra = sorted(set(value) - {"reason", "action"})
+    if extra:
+        raise ImplementError(
+            "blocked_on_human has unknown field(s): {}".format(
+                ", ".join(extra)))
+    return {"reason": reason, "action": action.strip()}
 
 
 def _run(command: Sequence[str], *, cwd: pathlib.Path,
@@ -386,6 +427,107 @@ def create_or_update_pr(repo: str, context: dict, ticket: dict,
     return {"number": int(match.group(1)), "url": url}
 
 
+def render_human_step_title(action: str) -> str:
+    """Render the human-step sub-issue title from the model's action."""
+    return "Human step: {}".format(action)
+
+
+def render_human_step_body(*, parent_number: int, ticket_number: int,
+                           reason: str, action: str) -> str:
+    """Render the human-step sub-issue body with its exact marker line.
+
+    The ``Human step: <reason>`` line must match ``HUMAN_STEP_LINE``
+    exactly, because the body scanner reads that marker until the Needs
+    field covers every open ticket.
+    """
+    doing = action.rstrip()
+    if not doing.endswith("."):
+        doing += "."
+    return "\n".join([
+        "Part of #{}; discovered while implementing #{}.".format(
+            parent_number, ticket_number),
+        "",
+        "{}{}".format(funnel.HUMAN_STEP_PREFIX, reason),
+        "",
+        "Action Nate must perform: {}".format(doing),
+        "",
+        "Risk: standard",
+        "",
+    ])
+
+
+def parse_created_number(output: str) -> int:
+    """Read the created issue number from `gh issue create` output.
+
+    `gh` prints the issue URL; the number is its last path segment. Only
+    the last non-empty line is read, so progress chatter above it is
+    harmless.
+    """
+    lines = [line.strip() for line in (output or "").splitlines()
+             if line.strip()]
+    if not lines:
+        raise funnel.GitHubError(
+            "gh issue create printed nothing; the ticket may not exist")
+    match = re.search(r"/issues/([1-9][0-9]*)\s*$", lines[-1])
+    if not match:
+        raise funnel.GitHubError(
+            "could not read the created issue number from: {}".format(
+                lines[-1][:120]))
+    return int(match.group(1))
+
+
+def create_human_step_issue(repo: str, parent_number: int, title: str,
+                            body: str, *,
+                            cwd: pathlib.Path) -> dict:
+    """File the human-step sub-issue under the ticket's parent. One mutation."""
+    proc = funnel._run_gh(
+        ["gh", "issue", "create", "--repo", repo,
+         "--parent", str(parent_number),
+         "--title", title, "--body", body],
+        cwd=str(cwd), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise funnel.GitHubError(
+            "could not file the human-step issue under {}#{}: {}".format(
+                repo, parent_number, (proc.stderr or "").strip()))
+    number = parse_created_number(proc.stdout or "")
+    url = [line.strip() for line in (proc.stdout or "").splitlines()
+           if line.strip()][-1]
+    return {"number": number, "ref": "{}#{}".format(repo, number), "url": url}
+
+
+def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = None,
+                        cwd: pathlib.Path) -> None:
+    """Label one ticket blocked, with the native edge when one exists."""
+    command = ["gh", "issue", "edit", str(number), "--repo", repo]
+    if blocked_by is not None:
+        command += ["--add-blocked-by", str(blocked_by)]
+    command += ["--add-label", "blocked"]
+    proc = funnel._run_gh(
+        command, cwd=str(cwd), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise funnel.GitHubError(
+            "could not mark {}#{} blocked: {}".format(
+                repo, number, (proc.stderr or "").strip()))
+
+
+def post_agent_comment(repo: str, number: int, body: str, *,
+                       run: str, agent: str, cwd: pathlib.Path) -> None:
+    """Post one runner-owned comment with the agent voice stamped on it."""
+    proc = funnel._run_gh(
+        ["gh", "issue", "comment", str(number), "--repo", repo,
+         "--body", funnel.append_provenance(
+             body, "agent", at=datetime.now(timezone.utc),
+             run=run, agent=agent)],
+        cwd=str(cwd), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise funnel.GitHubError(
+            "could not comment on {}#{}: {}".format(
+                repo, number, (proc.stderr or "").strip()))
+
+
 def release_claim(ref: str) -> None:
     """Release through funnel's one lock implementation."""
     items = funnel.load_items()
@@ -454,10 +596,96 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     return pr
 
 
+def finish_blocked_on_human(
+        blocked: dict, *, run: str, agent: str = "codex",
+        repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
+        release: Callable[[str], None] = release_claim,
+        heartbeat_finish: Callable[[str, str, str, str, str], None]
+        = finish_heartbeat,
+        create_effect: Callable[..., dict] = create_human_step_issue,
+        block_effect: Callable[..., None] = mark_ticket_blocked,
+        comment_effect: Callable[..., None] = post_agent_comment,
+        extra_note: Optional[str] = None) -> dict:
+    """File the human step, block the ticket, release, and finish. No PR.
+
+    No test run, commit, or push happens here: the checkout holds an
+    unfinished implementation and must stay exactly as the model left it.
+    A failure after the sub-issue exists names it, so the retry starts
+    from GitHub's truth rather than filing a second one.
+    """
+    context = checkout_context(cwd)
+    resolved = resolve_checkout_repo(context["root"], repo)
+    ticket = fetch_ticket(resolved, context["number"])
+    ref = ticket["ref"]
+    parent = ticket.get("parent") or {}
+    parent_number = parent.get("number")
+    if not isinstance(parent_number, int):
+        raise ImplementError(
+            "blocked_on_human needs the ticket's parent to file the "
+            "human step under")
+    title = render_human_step_title(blocked["action"])
+    body = render_human_step_body(
+        parent_number=parent_number, ticket_number=context["number"],
+        reason=blocked["reason"], action=blocked["action"])
+    created = create_effect(
+        resolved, parent_number, title, body, cwd=context["root"])
+    try:
+        block_effect(resolved, context["number"],
+                     blocked_by=created["number"], cwd=context["root"])
+        comment_effect(
+            resolved, context["number"],
+            "**Blocked on #{}:** Complete the human step before resuming "
+            "this ticket.".format(created["number"]),
+            run=run, agent=agent, cwd=context["root"])
+    except funnel.GitHubError as exc:
+        raise funnel.GitHubError(
+            "{} (already created: {})".format(exc, created["ref"]))
+    release(ref)
+    note = "stopped: human step filed as #{}; ticket blocked; no PR opened".format(
+        created["number"])
+    if extra_note:
+        note += "; " + extra_note.strip()
+    heartbeat_finish(agent, run, "skipped-human-step", note, ref)
+    return {"ticket": ref,
+            "human_step": {"number": created["number"],
+                           "ref": created["ref"],
+                           "url": created["url"]}}
+
+
+def finish_declined(
+        reason: str, *, run: str, agent: str = "codex",
+        repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
+        release: Callable[[str], None] = release_claim,
+        heartbeat_finish: Callable[[str, str, str, str, str], None]
+        = finish_heartbeat,
+        block_effect: Callable[..., None] = mark_ticket_blocked,
+        comment_effect: Callable[..., None] = post_agent_comment,
+        extra_note: Optional[str] = None) -> dict:
+    """Label the declined ticket blocked, record why, release, finish. No PR."""
+    context = checkout_context(cwd)
+    resolved = resolve_checkout_repo(context["root"], repo)
+    ticket = fetch_ticket(resolved, context["number"])
+    ref = ticket["ref"]
+    block_effect(resolved, context["number"], cwd=context["root"])
+    comment_effect(resolved, context["number"],
+                   "**Declined:** {}".format(reason),
+                   run=run, agent=agent, cwd=context["root"])
+    release(ref)
+    first = reason.splitlines()[0] if reason else "no reason given"
+    if len(first) > 200:
+        first = first[:197].rstrip() + "..."
+    note = "declined: {}".format(first)
+    if extra_note:
+        note += "; " + extra_note.strip()
+    heartbeat_finish(agent, run, "skipped-blocked", note, ref)
+    return {"ticket": ref, "declined": reason}
+
+
 def finish_main(argv: Optional[Sequence[str]] = None) -> int:
-    """CLI for the happy-path finish-ticket effect sequence."""
+    """CLI for one structured answer's finish-ticket effect sequence."""
     parser = argparse.ArgumentParser(
-        description="verify, publish, release, and finish one implemented ticket"
+        description="publish, block, or decline one ticket, then release "
+                    "and finish its run"
     )
     parser.add_argument("--answer", required=True,
                         help="structured answer file, or - for stdin")
@@ -471,13 +699,24 @@ def finish_main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     try:
         answer = read_answer(args.answer)
-        pr = finish_done(
-            answer, run=args.run, agent=args.agent, repo=args.repo,
-            extra_note=args.note,
-        )
+        if "done" in answer:
+            result = finish_done(
+                answer, run=args.run, agent=args.agent, repo=args.repo,
+                extra_note=args.note,
+            )
+        elif "blocked_on_human" in answer:
+            result = finish_blocked_on_human(
+                answer["blocked_on_human"], run=args.run, agent=args.agent,
+                repo=args.repo, extra_note=args.note,
+            )
+        else:
+            result = finish_declined(
+                answer["declined"], run=args.run, agent=args.agent,
+                repo=args.repo, extra_note=args.note,
+            )
     except (funnel.GitHubError, ImplementError, OSError,
             subprocess.SubprocessError) as exc:
         print("finish-ticket: {}".format(exc), file=sys.stderr)
         return 1
-    print(json.dumps(pr, sort_keys=True))
+    print(json.dumps(result, sort_keys=True))
     return 0

@@ -478,7 +478,7 @@ def test_collect_rejects_an_unknown_idea():
         shape.collect(REPO, 42, items_loader=lambda: [idea(43)])
 
 
-# -- applying an answer ---------------------------------------------------------
+# -- applying an answer ------------------------------------------------------
 
 def test_apply_advances_an_all_clear_agent_plan_to_ready(
         monkeypatch, capsys):
@@ -664,7 +664,7 @@ def test_apply_holds_an_escalated_plan_at_shaped(monkeypatch, capsys):
     assert "escalated risk (credentials)" in capsys.readouterr().out
 
 
-# -- structural guarantees -----------------------------------------------------
+# -- structural guarantees --------------------------------------------------
 
 def test_engine_imports_from_funnel_and_never_the_reverse():
     engine_source = (ROOT / "engine" / "shape.py").read_text()
@@ -710,7 +710,7 @@ def test_the_entry_points_are_executable():
     assert "apply_main" in (ROOT / "shape-apply").read_text()
 
 
-# -- the CLIs ------------------------------------------------------------------
+# -- the CLIs ---------------------------------------------------------------
 
 def test_packet_cli_prints_valid_json_with_every_field(
         monkeypatch, capsys):

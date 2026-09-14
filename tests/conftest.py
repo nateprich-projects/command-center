@@ -36,6 +36,10 @@ def heartbeat_isolation(monkeypatch, tmp_path):
     """Keep heartbeat records local to this test and GitHub calls offline."""
     live_before = _spool_sizes(LIVE_SPOOL_DIR)
     test_spool = tmp_path / "heartbeat-spool"
+    monkeypatch.setenv(
+        "COMMAND_CENTER_DASHBOARD_SPOOL",
+        str(tmp_path / "dashboard-spool"),
+    )
 
     monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(test_spool))
 

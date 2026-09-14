@@ -35,7 +35,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Set, Tuple)
 
@@ -394,7 +394,8 @@ SELF_APPROVED_LINE = re.compile(
 BLOCK_COMMENT_PREFIX = "**Blocked"
 BLOCK_COMMENT_RE = re.compile(
     r"\A" + re.escape(BLOCK_COMMENT_PREFIX)
-    + r"(?: on (?P<references>#[0-9]+(?: and #[0-9]+)*))?:\*\*"
+    + r"(?: until (?P<blocked_until>[0-9]{4}-[0-9]{2}-[0-9]{2}))?"
+      r"(?: on (?P<references>#[0-9]+(?: and #[0-9]+)*))?:\*\*"
 )
 
 #: A breakdown can leave a project waiting on Nate's answer. The header is
@@ -553,6 +554,7 @@ class Item:
     labels: List[str] = field(default_factory=list)
     block_references: List[str] = field(default_factory=list)
     block_reason: Optional[str] = None
+    blocked_until: Optional[date] = None
     needs_decision: Optional[str] = None
     unparseable_block_comments: List[str] = field(default_factory=list)
     block_comments_error: Optional[str] = None
@@ -730,6 +732,32 @@ def needs_class(item: Item) -> bool:
     return item.klass not in LADDER
 
 
+def _item_blocked_until(item: Item) -> Optional[date]:
+    """Return the trusted date condition stored on an Item, if any."""
+    value = item.blocked_until
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _block_condition_date(now: Optional[datetime] = None) -> date:
+    """Return the UTC calendar date used by date-conditioned blocks."""
+    return (now or datetime.now(timezone.utc)).date()
+
+
+def _block_date_condition(item: Item) -> Optional[str]:
+    """Render a parsed date condition for reports and clear records."""
+    blocked_until = _item_blocked_until(item)
+    if blocked_until is None:
+        return None
+    return "until {}".format(blocked_until.isoformat())
+
+
 def gate_question(item: Item) -> Optional[str]:
     """The decision this item is waiting on, or None if it waits on no one."""
     if item.state != "OPEN":
@@ -738,7 +766,10 @@ def gate_question(item: Item) -> Optional[str]:
         # A named condition is knowable work for the system, not a question for
         # Nate. A silent block still needs his attention, but only a project
         # can be parked; a ticket can only be unblocked.
-        if item.block_references:
+        # A valid date condition is also machine-readable. Both future and
+        # passed dates stay out of the question queue; the begin path clears a
+        # passed condition before selecting work.
+        if item.block_references or _item_blocked_until(item) is not None:
             return None
         if item.parent is None and item.needs_decision:
             return "Answer the breakdown's question?"
@@ -2079,8 +2110,29 @@ def parse_origin_override(body: str) -> Optional[Dict]:
     return found
 
 
-def parse_block_comment(bodies: Iterable[str]) -> Optional[Tuple[List[str], str]]:
-    """Return the newest parseable block comment's references and reason.
+def _parse_block_comment_header(
+    body: str,
+) -> Optional[Tuple[re.Match, Optional[date]]]:
+    """Return a block-header match and its validated date, if present."""
+    match = BLOCK_COMMENT_RE.match(body)
+    if match is None:
+        return None
+    raw_date = match.group("blocked_until")
+    if raw_date is None:
+        return match, None
+    try:
+        blocked_until = date.fromisoformat(raw_date)
+    except ValueError:
+        # The regex establishes the shape; the date parser establishes that
+        # the calendar date actually exists (for example, no February 30).
+        return None
+    return match, blocked_until
+
+
+def parse_block_comment(
+    bodies: Iterable[str],
+) -> Optional[Tuple[List[str], Optional[date], str]]:
+    """Return the newest parseable block comment's refs, date and reason.
 
     The header is deliberately strict and anchored at the start of the body so
     an old or embedded mention cannot accidentally become a condition.
@@ -2088,12 +2140,14 @@ def parse_block_comment(bodies: Iterable[str]) -> Optional[Tuple[List[str], str]
     for body in reversed(list(bodies)):
         if not isinstance(body, str):
             continue
-        match = BLOCK_COMMENT_RE.match(body)
-        if not match:
+        parsed_header = _parse_block_comment_header(body)
+        if parsed_header is None:
             continue
+        match, blocked_until = parsed_header
         references = match.group("references")
         return (
             references.split(" and ") if references else [],
+            blocked_until,
             body[match.end():].strip(),
         )
     return None
@@ -2143,7 +2197,7 @@ def unparseable_block_comment_lines(bodies: Iterable[str]) -> List[str]:
             continue
         if not body.lstrip().startswith(BLOCK_COMMENT_PREFIX):
             continue
-        if BLOCK_COMMENT_RE.match(body):
+        if _parse_block_comment_header(body) is not None:
             continue
         lines = body.splitlines()
         findings.append(lines[0] if lines else body)
@@ -4474,7 +4528,9 @@ def check_suspected_human_steps(items: Iterable[Item]) -> Check:
     )
 
 
-def check_block_conditions(items: Iterable[Item]) -> Check:
+def check_block_conditions(
+    items: Iterable[Item], now: Optional[datetime] = None
+) -> Check:
     """Report blocked items whose conditions are satisfied or unresolvable.
 
     The loaded Project rows contain both the parsed block comments and the
@@ -4495,6 +4551,7 @@ def check_block_conditions(items: Iterable[Item]) -> Check:
                 item.is_blocked
                 or item.block_reason is not None
                 or item.block_references
+                or item.blocked_until is not None
                 or item.open_blockers
                 or item.dead_blockers
             )
@@ -4503,7 +4560,7 @@ def check_block_conditions(items: Iterable[Item]) -> Check:
     )
 
     for item in candidates:
-        satisfied = satisfied_block_refs(item, by_ref)
+        satisfied = satisfied_block_refs(item, by_ref, now=now)
         if satisfied:
             findings.append(
                 "{}: satisfied block conditions: {}".format(
@@ -4525,14 +4582,20 @@ def check_block_conditions(items: Iterable[Item]) -> Check:
 
         if item.block_reason is None:
             detail = "block comment is not parseable"
-        elif not item.block_references:
-            detail = "no machine-readable conditions"
         else:
-            resolved = [
-                _dependency_ref(item, value) or str(value).strip()
-                for value in item.block_references
-            ]
-            detail = "on {}".format(", ".join(resolved))
+            details = []
+            if item.block_references:
+                resolved = [
+                    _dependency_ref(item, value) or str(value).strip()
+                    for value in item.block_references
+                ]
+                details.append("on {}".format(", ".join(resolved)))
+            blocked_until = _item_blocked_until(item)
+            if blocked_until is not None and (
+                blocked_until > _block_condition_date(now)
+            ):
+                details.append("until {}".format(blocked_until.isoformat()))
+            detail = ", ".join(details) or "no machine-readable conditions"
         findings.append("{}: still-waiting ({})".format(item.ref, detail))
 
     return Check("block conditions", not broken, "\n".join(findings), "")
@@ -5837,6 +5900,9 @@ def _blocked_item_json(item: Item) -> Dict[str, object]:
         "conditions": item.block_references,
         "blocked_at": item.status_since.isoformat() if item.status_since else None,
     }
+    blocked_until = _item_blocked_until(item)
+    if blocked_until is not None:
+        rendered["blocked_until"] = blocked_until.isoformat()
     if item.needs_decision is not None:
         rendered["needs_decision"] = item.needs_decision
     return rendered
@@ -6342,20 +6408,20 @@ def _dead_dependency_refs(item: Item, by_ref: Dict[str, Item]) -> List[str]:
 
 
 def satisfied_block_refs(
-    item: Item, by_ref: Dict[str, Item]
+    item: Item, by_ref: Dict[str, Item], now: Optional[datetime] = None,
 ) -> Optional[List[str]]:
-    """Return the parsed block conditions that are all satisfied.
+    """Return all parsed block conditions that are satisfied.
 
     A missing parsed comment, an empty reference list, an unresolvable
-    reference, a missing blocker, an open blocker, or a blocker that is
-    explicitly unable to close all fail closed with ``None``. The checks are
-    deliberately separate so a caller can report which part of the
-    four-part satisfaction test failed without treating an empty list as
-    vacuously satisfied.
+    reference, a missing blocker, an open blocker, a future date, or a blocker
+    that is explicitly unable to close all fail closed with ``None``. The
+    checks are deliberately separate so a caller can report which part of the
+    conjunction failed without treating an empty list as vacuously satisfied.
 
     This mirrors ``_dead_dependency_refs`` over the already-loaded native and
     comment dependency facts. It never fetches a blocker: a reference must be
-    present in ``by_ref`` before it can satisfy a block.
+    present in ``by_ref`` before it can satisfy a block. A date condition is
+    represented as ``until YYYY-MM-DD`` in the returned condition list.
     """
     # ``block_reason`` is populated only when ``parse_block_comment`` found a
     # matching header. An empty reason is still a parsed comment; ``None`` is
@@ -6363,9 +6429,21 @@ def satisfied_block_refs(
     if item.block_reason is None:
         return None
 
+    blocked_until = _item_blocked_until(item)
+    if item.blocked_until is not None and blocked_until is None:
+        return None
+
+    conditions: List[str] = []
+    if blocked_until is not None:
+        if blocked_until > _block_condition_date(now):
+            return None
+        date_condition = _block_date_condition(item)
+        if date_condition is not None:
+            conditions.append(date_condition)
+
     values = list(item.block_references)
     if not values:
-        return None
+        return conditions or None
 
     resolved: List[str] = []
     for value in values:
@@ -6392,7 +6470,8 @@ def satisfied_block_refs(
             return None
         satisfied.add(ref)
 
-    return sorted(satisfied)
+    conditions.extend(sorted(satisfied))
+    return conditions or None
 
 
 def satisfied_block_comment(
@@ -6408,7 +6487,7 @@ def satisfied_block_comment(
     }
     body = (
         SATISFIED_BLOCK_PREFIX
-        + "all machine-readable conditions were found closed: {}.\n\n"
+        + "all machine-readable conditions were satisfied: {}.\n\n"
           "Found closed at `{}`.\n\n```json\n{}\n```".format(
               ", ".join(refs), found_closed_at,
               json.dumps(payload, indent=2, sort_keys=True),
@@ -6453,7 +6532,7 @@ def clear_satisfied_blocks(
         key=lambda item: (item.repo, item.number),
     )
     for item in candidates:
-        conditions = satisfied_block_refs(item, by_ref)
+        conditions = satisfied_block_refs(item, by_ref, now=now)
         if not conditions:
             continue
 
@@ -8517,7 +8596,11 @@ def _load_block_comment(item: Item) -> None:
     item.unparseable_block_comments = unparseable_block_comment_lines(bodies)
     parsed = parse_block_comment(bodies)
     if parsed is not None:
-        item.block_references, item.block_reason = parsed
+        (
+            item.block_references,
+            item.blocked_until,
+            item.block_reason,
+        ) = parsed
     item.needs_decision = parse_needs_decision_comment(bodies)
     for body in reversed(bodies):
         record = parse_satisfied_block_comment(body)

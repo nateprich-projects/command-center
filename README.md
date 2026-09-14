@@ -29,6 +29,7 @@ ranks anything itself.
 | `python3 outcomes.py derive [--dry-run]` | Derive closed-ticket outcomes from GitHub; durable records append to `heartbeat:outcomes.jsonl` |
 | `python3 outcomes.py read` | Read the durable derived outcome records |
 | `python3 outcomes.py signals` | Compute the named outcome signals from the durable records |
+| `python3 outcomes.py signals \| python3 questions.py` | Evaluate the registered questions against the named signals |
 
 `outcomes.py derive --dry-run --ticket N` is the read-only form for checking a
 small live sample. The job scans pull requests once per repository, counts every
@@ -59,6 +60,13 @@ three signals separate, and reports `insufficient_data` or `partial` instead of
 turning missing observations into zero. Cost is read only from an already-priced
 `cost_usd`/`credits` observation; raw token counts are never treated as dollars.
 The same summary is included in the `outcome_signals` field of `funnel brief`.
+
+`questions.py` is the sufficiency contract for the later proposal routine. Its
+registry is the allowlist of questions: each entry records its hypothesis, named
+signal dependencies and minimum sample. It emits a `finding` only when every
+dependency has complete evidence at that threshold; otherwise its status is the
+literal `not enough evidence yet` and the result names each signal's observed,
+required and shortfall amounts. An unknown question name is rejected.
 
 ## Documentation
 

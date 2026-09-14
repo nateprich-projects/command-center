@@ -2,7 +2,7 @@
 """review-apply — validate a review answer and perform its effects.
 
 Usage: review-apply <pr> --repo owner/name --answer - [--ci STATE]
-                     [--head SHA] [--attempt N]
+                     [--head SHA] [--attempt N] [--validate-only]
 
 Part of #794: the model answered the review question with one JSON
 object, and this step validates it and performs every side effect —

@@ -19,10 +19,16 @@ Effects, through the existing paths, never re-derived here:
   the note and exit 1 with ``run outcome: errored`` on stdout, which
   the runner maps to its errored finish.
 
+``--validate-only`` parses and decides without recording anything, for
+the review runner's shadow path: valid input prints the decided
+``{"verdict", "blocking", "note"}`` and exits 0; malformed input exits
+3 on a retryable attempt and 1 on a final one, recording nothing
+either way.
+
 No approval can result from malformed input: every validation failure
-either retries or records rejected. Exit codes: 0 applied, 1 failed
-after recording or refused without recording, 3 malformed and
-retryable.
+either retries or records rejected. Exit codes: 0 applied (or valid,
+with ``--validate-only``), 1 failed after recording or refused without
+recording, 3 malformed and retryable.
 """
 
 from __future__ import annotations
@@ -213,6 +219,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--attempt", type=int, default=1,
                         help="1 (default) retries a malformed answer with "
                              "exit 3; 2 records it as rejected")
+    parser.add_argument("--validate-only", action="store_true",
+                        help="parse and decide without recording anything; "
+                             "print the decision as JSON")
     args = parser.parse_args(argv)
     if args.attempt < 1:
         parser.error("--attempt must be at least 1")
@@ -225,10 +234,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         answer = parse_answer(raw)
     except AnswerError as exc:
+        print("review-apply: malformed answer "
+              "(attempt {}): {}".format(args.attempt, exc),
+              file=sys.stderr)
+        if args.validate_only:
+            # Shadow validation: the attempt split without the effects.
+            return RETRY_EXIT if args.attempt < FINAL_ATTEMPT else 1
         if args.attempt < FINAL_ATTEMPT:
-            print("review-apply: malformed answer "
-                  "(attempt {}): {}".format(args.attempt, exc),
-                  file=sys.stderr)
             return RETRY_EXIT
         try:
             return apply_malformed_final(
@@ -237,6 +249,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("review-apply: {}".format(exc), file=sys.stderr)
             return 1
     verdict, blocking, note = decide(answer)
+    if args.validate_only:
+        print(json.dumps({"verdict": verdict, "blocking": blocking,
+                          "note": note}, sort_keys=True))
+        return 0
     try:
         repo = funnel.resolve_repo(args.repo)
         if args.head is not None:

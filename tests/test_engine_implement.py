@@ -191,6 +191,23 @@ def test_finish_ticket_requires_the_deterministic_branch(tmp_path):
         implement.checkout_context(clone)
 
 
+def test_test_discovery_does_not_mistake_javascript_tests_for_pytest(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "runner.test.js").write_text("// test\n")
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"node --test"}}')
+    assert implement.default_test_commands(tmp_path) == [["npm", "test"]]
+
+
+def test_test_discovery_runs_both_suites_in_a_mixed_repo(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_runner.py").write_text("def test_ok(): pass\n")
+    (tmp_path / "package.json").write_text('{"scripts":{"test":"node --test"}}')
+    assert implement.default_test_commands(tmp_path) == [
+        [sys.executable, "-m", "pytest", "-q"],
+        ["npm", "test"],
+    ]
+
+
 def test_pr_template_lists_departures_and_verification():
     found = implement.render_pr_body(
         ticket(),

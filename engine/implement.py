@@ -237,13 +237,17 @@ def default_test_commands(root: pathlib.Path) -> List[List[str]]:
             'from pathlib import Path; compile(Path("funnel.py").read_text(), '
             '"funnel.py", "exec")',
         ])
-    python_markers = (
-        root / "tests", root / "pytest.ini", root / "pyproject.toml",
-        root / "setup.cfg", root / "tox.ini",
+    test_dir = root / "tests"
+    has_python_tests = test_dir.is_dir() and any(
+        path.is_file() for path in test_dir.rglob("test_*.py")
     )
-    if any(path.exists() for path in python_markers):
+    python_markers = (
+        root / "pytest.ini", root / "pyproject.toml", root / "setup.cfg",
+        root / "tox.ini",
+    )
+    if has_python_tests or any(path.is_file() for path in python_markers):
         commands.append([sys.executable, "-m", "pytest", "-q"])
-    elif (root / "package.json").is_file():
+    if (root / "package.json").is_file():
         commands.append(["npm", "test"])
     if not commands:
         raise ImplementError(
@@ -457,4 +461,3 @@ def finish_main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     print(json.dumps(pr, sort_keys=True))
     return 0
-

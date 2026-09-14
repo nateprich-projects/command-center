@@ -34,21 +34,13 @@
     </array>
 
     <!--
-      Every three hours at :37. The minute is outside the standard review
-      schedule's :00/:05 slots and the escalated review schedule's :07 slot, so
-      two Muse jobs are not started by these launchd schedules together.
+      Every 15 minutes while #794's escalated tickets clear (Nate, 2026-09-13,
+      ticket #831). launchd starts no second instance while one runs, and an
+      empty fire is one begin call. Revert to the three-hourly :37 calendar
+      schedule when #794 closes; the revert is recorded on #529.
     -->
-    <key>StartCalendarInterval</key>
-    <array>
-        <dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>37</integer></dict>
-        <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>37</integer></dict>
-        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>37</integer></dict>
-        <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>37</integer></dict>
-        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>37</integer></dict>
-        <dict><key>Hour</key><integer>15</integer><key>Minute</key><integer>37</integer></dict>
-        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>37</integer></dict>
-        <dict><key>Hour</key><integer>21</integer><key>Minute</key><integer>37</integer></dict>
-    </array>
+    <key>StartInterval</key>
+    <integer>900</integer>
 
     <key>RunAtLoad</key>
     <false/>

@@ -11,6 +11,7 @@ import json
 import pathlib
 import stat
 import sys
+from types import SimpleNamespace
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -602,8 +603,12 @@ def test_unreadable_create_output_is_a_github_error():
 # -- apply ---------------------------------------------------------------------
 
 def stub_apply(monkeypatch, **kw):
-    """Replace every GitHub effect with a recorder. Returns the calls dict."""
-    calls: dict = {"created": [], "needs": [], "comments": [],
+    """Replace every GitHub effect with a recorder. Returns the calls dict.
+
+    The Project add itself stays real: `gh` is stubbed one layer down so
+    every apply test proves the Needs id comes from item-add's answer.
+    """
+    calls: dict = {"created": [], "added": [], "needs": [], "comments": [],
                    "labels": [], "plans": []}
     next_number = {"n": 100}
 
@@ -621,10 +626,19 @@ def stub_apply(monkeypatch, **kw):
             "body": breakdown.with_risk_line(ticket["body"], ticket["risk"]),
             "number": next_number["n"],
         })
-        return next_number["n"], "{}#{}".format(repo, next_number["n"])
+        number = next_number["n"]
+        return (number, "{}#{}".format(repo, number),
+                "https://github.com/{}/issues/{}".format(repo, number))
 
-    def fake_item_id(repo, number):
-        return "item-{}".format(number)
+    def fake_run_gh(command, **kwargs):
+        assert command[1:3] == ["project", "item-add"], command
+        calls["added"].append(list(command))
+        url = command[command.index("--url") + 1]
+        number = url.rsplit("/", 1)[-1]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"id": "item-{}".format(number)}),
+            stderr="")
 
     def fake_needs(item_id, needs, ref):
         calls["needs"].append((item_id, needs, ref))
@@ -637,7 +651,7 @@ def stub_apply(monkeypatch, **kw):
 
     monkeypatch.setattr(breakdown, "fetch_plan", fake_plan)
     monkeypatch.setattr(breakdown, "create_ticket", fake_create)
-    monkeypatch.setattr(breakdown, "fetch_project_item_id", fake_item_id)
+    monkeypatch.setattr(funnel, "_run_gh", fake_run_gh)
     monkeypatch.setattr(breakdown, "write_needs", fake_needs)
     monkeypatch.setattr(breakdown, "post_comment", fake_comment)
     monkeypatch.setattr(breakdown, "apply_blocked_label", fake_label)
@@ -775,3 +789,101 @@ def test_apply_main_creates_and_prints_the_result(
     assert found["project"] == "owner/repo#1"
     assert [row["ref"] for row in found["created"]] == ["owner/repo#101"]
     assert len(calls["created"]) == 1
+
+
+def test_the_needs_id_comes_from_item_add(monkeypatch):
+    # Regression for the #851 rejection: Issue.projectItems is empty for
+    # org-repo issues in this user-owned Project, so the id must come from
+    # `gh project item-add` answering for the created issue's URL.
+    calls = stub_apply(monkeypatch)
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="first"),
+        raw_ticket(title="second"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+    breakdown.apply(REPO, 1, normalized)
+    assert calls["added"] == [
+        ["gh", "project", "item-add", str(funnel.PROJECT_NUMBER),
+         "--owner", funnel.PROJECT_OWNER,
+         "--url", "https://github.com/owner/repo/issues/101",
+         "--format", "json"],
+        ["gh", "project", "item-add", str(funnel.PROJECT_NUMBER),
+         "--owner", funnel.PROJECT_OWNER,
+         "--url", "https://github.com/owner/repo/issues/102",
+         "--format", "json"],
+    ]
+    assert calls["needs"] == [("item-101", "none", "owner/repo#101"),
+                              ("item-102", "none", "owner/repo#102")]
+
+
+def test_a_failed_project_add_names_the_created_issue(monkeypatch):
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="not permitted"))
+    try:
+        breakdown.add_to_project("https://github.com/owner/repo/issues/7")
+    except funnel.GitHubError as exc:
+        assert "https://github.com/owner/repo/issues/7" in str(exc)
+        assert "not permitted" in str(exc)
+    else:
+        raise AssertionError("a failed add must surface")
+
+
+def test_an_item_add_without_an_id_is_a_github_error(monkeypatch):
+    for bad in ("", "{}", '{"id": null}', "[]", "not json"):
+        monkeypatch.setattr(
+            funnel, "_run_gh",
+            lambda *args, **kwargs: SimpleNamespace(
+                returncode=0, stdout=bad, stderr=""))
+        try:
+            breakdown.add_to_project(
+                "https://github.com/owner/repo/issues/7")
+        except funnel.GitHubError as exc:
+            assert "no item id" in str(exc)
+        else:
+            raise AssertionError("{!r} must not yield an id".format(bad))
+
+
+def test_issue_state_reads_missing_as_none_and_transients_as_errors(
+        monkeypatch):
+    def run_for(stdout, stderr, returncode):
+        return lambda *args, **kwargs: SimpleNamespace(
+            returncode=returncode, stdout=stdout, stderr=stderr)
+
+    monkeypatch.setattr(funnel, "_run_gh", run_for(
+        "", "GraphQL: Could not resolve to an issue or pull request with "
+        "the number of 999999. (repository.issue)", 1))
+    assert breakdown.fetch_issue_state("owner/repo#999999") is None
+
+    monkeypatch.setattr(
+        funnel, "_run_gh", run_for("", "HTTP 502 Bad Gateway", 1))
+    try:
+        breakdown.fetch_issue_state("owner/repo#7")
+    except funnel.GitHubError as exc:
+        assert "could not read the state" in str(exc)
+    else:
+        raise AssertionError("a transient failure must surface, not read "
+                             "as a missing issue")
+
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        run_for('{"number": 7, "state": "OPEN"}', "", 0))
+    assert breakdown.fetch_issue_state("owner/repo#7") == "OPEN"
+    assert breakdown.fetch_issue_state("bogus") is None
+
+
+def test_apply_main_reports_an_ambiguous_repo_without_a_traceback(
+        monkeypatch, tmp_path, capsys):
+    def boom(repo):
+        raise funnel.GitHubError(
+            "multiple member repos: a, b; --repo is required")
+
+    monkeypatch.setattr(funnel, "resolve_repo", boom)
+    answer = tmp_path / "answer.json"
+    answer.write_text(json.dumps({"tickets": [raw_ticket()]}))
+    assert breakdown.apply_main(["7", "--answer", str(answer)]) == 1
+    err = capsys.readouterr().err
+    assert "multiple member repos" in err
+    assert "Traceback" not in err

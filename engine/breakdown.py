@@ -80,20 +80,6 @@ ISSUE_URL_RE = re.compile(
     r"(?P<repo>[A-Za-z0-9_.-]+)/issues/(?P<number>[1-9][0-9]*)/*\Z"
 )
 
-#: One created issue's Project item, to find where to write its Needs field.
-PROJECT_ITEM_QUERY = """
-query($owner: String!, $name: String!, $number: Int!) {
-  rateLimit { cost remaining resetAt }
-  repository(owner: $owner, name: $name) {
-    issue(number: $number) {
-      projectItems(first: 20) {
-        nodes { id project { id } }
-      }
-    }
-  }
-}
-"""
-
 #: Exit code for a schema failure. No effect has happened: validation is
 #: total before the first mutation, so 2 always means nothing was created.
 EXIT_VALIDATION = 2
@@ -539,27 +525,53 @@ def parse_created_number(output: str) -> int:
     return int(match.group(1))
 
 
+#: The `gh issue view` failure that means the issue is genuinely absent,
+#: rather than a transient GitHub failure one retry might cure.
+ISSUE_MISSING_SIGNALS = ("could not resolve", "http 404", "not found")
+
+
 def fetch_issue_state(ref: str) -> Optional[str]:
     """Return an issue's state, or None when no such issue exists.
 
-    The dependency check behind validation: `gh issue view` fails closed
-    on unknown refs and reports OPEN/CLOSED for known ones.
+    The dependency check behind validation. A missing issue reads as None;
+    any other `gh` failure raises, so a transient outage can never masquerade
+    as a bad dependency and mislabel the answer.
     """
     match = REF_RE.match(ref.strip())
     if not match:
         return None
-    data = funnel._gh_json(
-        "gh", "issue", "view", match.group("number"), "--repo",
-        "{}/{}".format(match.group("owner"), match.group("repo")),
-        "--json", "number,state")
+    proc = funnel._run_gh(
+        ["gh", "issue", "view", match.group("number"), "--repo",
+         "{}/{}".format(match.group("owner"), match.group("repo")),
+         "--json", "number,state"],
+        capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        if any(signal in detail.lower()
+               for signal in ISSUE_MISSING_SIGNALS):
+            return None
+        raise funnel.GitHubError(
+            "could not read the state of {}: {}".format(ref, detail))
+    try:
+        data = json.loads(proc.stdout or "")
+    except ValueError:
+        raise funnel.GitHubError(
+            "could not read the state of {}: gh answered no JSON".format(
+                ref))
     if not isinstance(data, dict):
-        return None
+        raise funnel.GitHubError(
+            "could not read the state of {}: gh answered no JSON".format(
+                ref))
     return data.get("state")
 
 
 def create_ticket(repo: str, parent_number: int, ticket: dict,
-                  blocked_by: Sequence[str]) -> Tuple[int, str]:
-    """Create one sub-issue with its native blocked-by edges. One mutation."""
+                  blocked_by: Sequence[str]) -> Tuple[int, str, str]:
+    """Create one sub-issue with its native blocked-by edges. One mutation.
+
+    Returns the number, the ``owner/repo#n`` ref, and the issue URL the
+    Project add takes.
+    """
     body = with_risk_line(ticket.get("body") or "", ticket["risk"])
     command = ["gh", "issue", "create", "--repo", repo,
                "--parent", str(parent_number)]
@@ -573,30 +585,37 @@ def create_ticket(repo: str, parent_number: int, ticket: dict,
                 ticket["title"], repo, parent_number,
                 (proc.stderr or "").strip()))
     number = parse_created_number(proc.stdout or "")
-    return number, "{}#{}".format(repo, number)
+    url = [line.strip() for line in (proc.stdout or "").splitlines()
+           if line.strip()][-1]
+    return number, "{}#{}".format(repo, number), url
 
 
-def fetch_project_item_id(repo: str, number: int) -> str:
+def add_to_project(url: str) -> str:
     """Return a new ticket's Project item id, where its Needs field lives.
 
-    GitHub adds a sub-issue to its parent's Project automatically; this is
-    the handle for that row. Absent means the row has not appeared yet, and
-    the Needs write must not pretend otherwise.
+    The id comes from `gh project item-add`, as `cmd_capture` does: the add
+    answers the Project row's id, for a fresh ticket or one already on the
+    board. Never query `Issue.projectItems` for it — LEARNINGS.md (2026-09-05,
+    measured) records that connection as empty for org-repo issues in this
+    user-owned Project, which is exactly what a breakdown creates.
     """
-    owner, _, name = repo.partition("/")
-    data = funnel.gh_graphql(
-        PROJECT_ITEM_QUERY, owner=owner, name=name, number=number)
-    issue = (data.get("repository") or {}).get("issue") or {}
-    nodes = (issue.get("projectItems") or {}).get("nodes") or []
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        project = node.get("project") or {}
-        if project.get("id") == funnel.PROJECT_ID and node.get("id"):
-            return node["id"]
-    raise funnel.GitHubError(
-        "created {}#{} but it has no Project row yet; set its Needs field "
-        "by hand".format(repo, number))
+    proc = funnel._run_gh(
+        ["gh", "project", "item-add", str(funnel.PROJECT_NUMBER),
+         "--owner", funnel.PROJECT_OWNER, "--url", url, "--format", "json"],
+        capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise funnel.GitHubError(
+            "created {} but could not add it to the Project: {}".format(
+                url, (proc.stderr or "").strip()))
+    try:
+        item_id = json.loads(proc.stdout or "").get("id")
+    except (ValueError, AttributeError):
+        item_id = None
+    if not item_id:
+        raise funnel.GitHubError(
+            "created {} but gh project item-add answered no item id".format(
+                url))
+    return item_id
 
 
 def write_needs(item_id: str, needs: str, ref: str) -> None:
@@ -663,13 +682,12 @@ def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
     try:
         for index in order:
             ticket = tickets[index]
-            number, ref = create_ticket(
+            number, ref, url = create_ticket(
                 repo, parent_number, ticket,
                 blocked_by_values(ticket, created_numbers))
             created_numbers[index] = number
             created_refs[index] = ref
-            write_needs(fetch_project_item_id(repo, number),
-                        ticket["needs"], ref)
+            write_needs(add_to_project(url), ticket["needs"], ref)
         created = [{
             "ref": created_refs[index],
             "number": created_numbers[index],
@@ -764,7 +782,7 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
         default = funnel.resolve_repo(args.repo) if text.isdigit() \
             else args.repo
         repo, number = parse_project_ref(args.project, default)
-    except BreakdownError as exc:
+    except (funnel.GitHubError, BreakdownError) as exc:
         print("breakdown-apply: {}".format(exc), file=sys.stderr)
         return 1
     try:
@@ -776,7 +794,11 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
     except BreakdownError as exc:
         print("breakdown-apply: {}".format(exc), file=sys.stderr)
         return EXIT_VALIDATION
-    errors, normalized = validate_answer(answer, fetch_issue_state)
+    try:
+        errors, normalized = validate_answer(answer, fetch_issue_state)
+    except funnel.GitHubError as exc:
+        print("breakdown-apply: {}".format(exc), file=sys.stderr)
+        return 1
     if errors:
         for error in errors:
             print("breakdown-apply: {}".format(error), file=sys.stderr)

@@ -7,8 +7,12 @@ writes an ISO timestamp to `refresh-requested`, which the publisher in #652 poll
 and clears.
 
 `wrangler.toml` deliberately disables `workers.dev` and names only
-`funnel.nateprich.com`. Ticket #653 creates the production KV namespace, replaces
-the local-only namespace id in the config, and performs the first deploy.
+`funnel.nateprich.com`. The #653 launchd job creates the production KV namespace
+on its first tick and patches the real id into its own deploy worktree copy of
+`wrangler.toml`; the local-only placeholder on `main` stays untouched and the
+job never commits. After that it redeploys only when `main` changes under
+`dashboard/`. The declared route attaches as part of each deploy, and DNS needs
+no work.
 
 Run the JS checks with:
 

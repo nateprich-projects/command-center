@@ -93,6 +93,7 @@ LAUNCHD_PLISTS=(
   com.nateprich.command-center-muse-implement.plist
   com.nateprich.command-center-run-keeper.plist
   com.nateprich.command-center-funnel-publisher.plist
+  com.nateprich.command-center-funnel-deploy.plist
 )
 for name in "${LAUNCHD_PLISTS[@]}"; do
   src="$REPO/launchd/$name"

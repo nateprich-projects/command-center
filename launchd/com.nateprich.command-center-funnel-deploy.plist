@@ -6,9 +6,10 @@
   runs npm ci plus npx wrangler deploy from a detached worktree at the new
   tip, using the scoped token from the gitignored .env. The declared
   funnel.nateprich.com route attaches as part of the deploy. On its first
-  tick it also creates the KV namespace and commits the real id to main,
-  replacing the local-only placeholder; that commit changes dashboard/, so
-  the first deploy follows it in the same tick.
+  tick it also creates the KV namespace when absent, then patches the
+  detached worktree copy of wrangler.toml from the state-recorded or
+  title-looked-up id and deploys in the same tick; the placeholder on
+  main stays untouched and the job never commits.
 
   The canonical copy lives here in the repo. launchd refuses a symlinked plist
   (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the

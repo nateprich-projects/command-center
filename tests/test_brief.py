@@ -32,6 +32,47 @@ def fixture_items():
     ]
 
 
+def maintenance_fixture_items():
+    def closed(number, klass, parent=None, status="Done"):
+        return funnel.Item(
+            repo="nateprich/beta",
+            number=number,
+            title="Closed {}".format(number),
+            url="https://example.invalid/{}".format(number),
+            state="CLOSED",
+            state_reason="COMPLETED",
+            status=status,
+            klass=klass,
+            parent=parent,
+            closed_at=NOW - timedelta(days=1),
+        )
+
+    projects = [
+        closed(number, klass)
+        for number, klass in enumerate(
+            ("Broken", "Maintenance", "Broken", "New", "New"), start=1
+        )
+    ]
+    tickets = [
+        closed(
+            100 + number,
+            None,
+            parent=projects[number % len(projects)].ref,
+            status=None,
+        )
+        for number in range(20)
+    ]
+    return projects + tickets
+
+
+def test_maintenance_load_counts_closed_projects_not_tickets():
+    load = funnel.maintenance_load(maintenance_fixture_items(), NOW)
+
+    assert load["window_days"] == 30
+    assert load["closed_in_window"] == 5
+    assert load["upkeep_share"] == round(3 / 5, 3)
+
+
 def test_brief_removes_a_branchless_takeover_from_in_motion(
     monkeypatch, capsys
 ):

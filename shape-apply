@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""shape-apply — validate one shape answer and record the plan it carries.
+
+Usage: shape-apply <idea> --repo owner/name --answer - < answer.json
+
+Part of #794: validates the model's structured answer against the plan
+schema, renders the issue body from the fields, applies the self-approval
+rule mechanically, and writes Shaped or Ready. Unlike shape-packet, this
+entry point performs the shaping writes.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from engine.shape import apply_main as main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

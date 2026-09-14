@@ -1,0 +1,603 @@
+#!/usr/bin/env python3
+"""Shape one idea from a structured answer (#810, Phase 2 of #794).
+
+The shape runner shows the model a packet and nothing else: the idea, its
+origin, plan.md, AGENTS.md, and the sibling plans in the same repo. The
+model returns one structured answer; this module validates that answer
+against the plan schema, renders the issue body from the fields, and
+applies the self-approval rule mechanically.
+
+The decision never parses a Needs section: ``needs_nate``'s four fields
+are the open-question record, and ``decide`` feeds them to the shared
+``self_approval_eligible`` predicate. The old Needs-section parser
+(``shaped_plan_status`` / ``plan_needs_nate``) is not called anywhere on
+this path; the rendered body keeps the stable four-category section only
+so existing readers stay consistent through the cutover.
+
+Two entry points share this module: ``shape-packet`` is read-only, while
+``shape-apply`` performs the shaping writes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import pathlib
+import re
+import sys
+from datetime import datetime, timezone
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import funnel  # noqa: E402
+
+
+class ShapeError(Exception):
+    """A shape answer failed validation, or shaping cannot proceed."""
+
+
+#: The answer keys shape-apply accepts — exactly these, no extras. From
+#: the Shape row of #794.
+ANSWER_KEYS = frozenset({
+    "decided_from_precedent",
+    "decided_by_agent",
+    "needs_nate",
+    "proposed_class",
+    "plan_markdown",
+})
+
+#: The needs_nate fields, each mapped to the Needs-section category it
+#: renders as. The category spellings are the stable headings the skill
+#: and the old parser agree on.
+NEEDS_FIELDS = (
+    ("exposure", "Exposure"),
+    ("gates", "Gates"),
+    ("scope", "Scope and priority"),
+    ("preference", "Preference"),
+)
+
+#: The all-clear rendering per category, verbatim from skills/shape: the
+#: bare answer is ``nothing outstanding`` and the elaboration follows
+#: after a period.
+ALL_CLEAR = {
+    "Exposure": "nothing outstanding. "
+                "No new credentials or reachable surface.",
+    "Gates": "nothing outstanding. No gate ownership changes.",
+    "Scope and priority": "nothing outstanding. "
+                          "The scoped change is documented.",
+    "Preference": "nothing outstanding. "
+                  "No user-facing choice remains.",
+}
+
+
+def _require_text(value: object, where: str) -> str:
+    """Return stripped text, or raise when it is missing or blank."""
+    if not isinstance(value, str) or not value.strip():
+        raise ShapeError("{} must be a non-empty string".format(where))
+    return value.strip()
+
+
+def _require_line(value: object, where: str) -> str:
+    """Return one line of text, or raise when it is missing or blank.
+
+    Decision fields render as Markdown list items, so inner newlines are
+    collapsed: a multi-line claim would otherwise break the list form.
+    """
+    return re.sub(r"\s+", " ", _require_text(value, where))
+
+
+def _check_keys(entry: object, keys: Sequence[str], where: str) -> None:
+    """Reject a mapping that is missing keys or carries unknown ones."""
+    if not isinstance(entry, dict):
+        raise ShapeError("{} must be an object".format(where))
+    missing = sorted(set(keys) - set(entry))
+    extra = sorted(set(entry) - set(keys))
+    if missing:
+        raise ShapeError("{} is missing {}".format(
+            where, ", ".join(missing)))
+    if extra:
+        raise ShapeError("{} has unknown fields: {}".format(
+            where, ", ".join(extra)))
+
+
+def _validate_precedent(entries: object) -> List[Dict[str, str]]:
+    """Validate the decided-from-precedent list. It may be empty: a
+    genuinely novel idea cites nothing, and an empty list says so
+    honestly rather than inventing a source."""
+    if not isinstance(entries, list):
+        raise ShapeError("decided_from_precedent must be a list")
+    validated = []
+    for index, entry in enumerate(entries):
+        where = "decided_from_precedent[{}]".format(index)
+        _check_keys(entry, ("claim", "source"), where)
+        validated.append({
+            "claim": _require_line(entry["claim"], where + ".claim"),
+            "source": _require_line(entry["source"], where + ".source"),
+        })
+    return validated
+
+
+def _validate_agent_decisions(entries: object) -> List[Dict[str, str]]:
+    """Validate the decided-by-agent list. Each entry keeps its
+    reasoning and its rejected alternative, in the same shape as the
+    plan's Rejected section."""
+    if not isinstance(entries, list):
+        raise ShapeError("decided_by_agent must be a list")
+    validated = []
+    for index, entry in enumerate(entries):
+        where = "decided_by_agent[{}]".format(index)
+        _check_keys(entry, ("decision", "alternative", "why"), where)
+        validated.append({
+            "decision": _require_line(
+                entry["decision"], where + ".decision"),
+            "alternative": _require_line(
+                entry["alternative"], where + ".alternative"),
+            "why": _require_line(entry["why"], where + ".why"),
+        })
+    return validated
+
+
+def _validate_needs_nate(needs: object) -> Dict[str, Optional[str]]:
+    """Validate the open-question record: the four fields, each null or
+    a question. An empty string is neither — it fails closed."""
+    fields = [field for field, _ in NEEDS_FIELDS]
+    _check_keys(needs, fields, "needs_nate")
+    assert isinstance(needs, dict)
+    validated: Dict[str, Optional[str]] = {}
+    for field, _ in NEEDS_FIELDS:
+        value = needs[field]
+        if value is None:
+            validated[field] = None
+        elif not isinstance(value, str) or not value.strip():
+            raise ShapeError(
+                "needs_nate.{} must be null or a non-empty "
+                "question".format(field))
+        else:
+            validated[field] = re.sub(r"\s+", " ", value.strip())
+    return validated
+
+
+def validate_answer(data: object) -> Dict:
+    """Validate a shape answer against the plan schema.
+
+    Returns a normalized copy: surrounding whitespace stripped, inner
+    newlines in one-line fields collapsed. Anything malformed raises
+    ``ShapeError`` before any write, so a confused model cannot leave a
+    half-shaped idea behind.
+    """
+    _check_keys(data, sorted(ANSWER_KEYS), "the answer")
+    assert isinstance(data, dict)
+    proposed = _require_line(data["proposed_class"], "proposed_class")
+    if proposed not in funnel.LADDER:
+        raise ShapeError(
+            "proposed_class {!r} is not a ladder class; choose one of "
+            "{}".format(proposed, ", ".join(funnel.LADDER)))
+    return {
+        "decided_from_precedent": _validate_precedent(
+            data["decided_from_precedent"]),
+        "decided_by_agent": _validate_agent_decisions(
+            data["decided_by_agent"]),
+        "needs_nate": _validate_needs_nate(data["needs_nate"]),
+        "proposed_class": proposed,
+        "plan_markdown": _require_text(
+            data["plan_markdown"], "plan_markdown"),
+    }
+
+
+def render_plan(answer: Dict) -> str:
+    """Render the issue body from validated answer fields.
+
+    The plan narrative and its proposed class come first, then the
+    runner-owned decision record: what precedent settled, what the
+    agent decided itself, and the four Needs Nate categories (a
+    question where one is open, the stable all-clear line where not).
+    Needs stays last so the section holds only its category lines for
+    the readers that still parse it. Takes a validated answer;
+    ``apply_shape`` validates before calling.
+    """
+    lines = [answer["plan_markdown"].rstrip(), "",
+             "Proposed class: {}".format(answer["proposed_class"]), "",
+             "## Decided from precedent", ""]
+    precedent = answer["decided_from_precedent"]
+    if precedent:
+        for entry in precedent:
+            lines.append("- {} (source: {})".format(
+                entry["claim"], entry["source"]))
+    else:
+        lines.append("None recorded.")
+    lines.extend(["", "## Decided by the agent", ""])
+    by_agent = answer["decided_by_agent"]
+    if by_agent:
+        for entry in by_agent:
+            lines.append("- {} (rejected: {}; {})".format(
+                entry["decision"], entry["alternative"], entry["why"]))
+    else:
+        lines.append("None recorded.")
+    lines.extend(["", "## Needs Nate", ""])
+    needs = answer["needs_nate"]
+    for field, category in NEEDS_FIELDS:
+        question = needs[field]
+        lines.append("- {}: {}".format(
+            category,
+            question if question is not None else ALL_CLEAR[category]))
+    lines.append("")
+    return "\n".join(lines)
+
+
+def open_need_categories(answer: Dict) -> List[str]:
+    """The Needs Nate categories holding a question, in field order."""
+    return [category for field, category in NEEDS_FIELDS
+            if answer["needs_nate"][field] is not None]
+
+
+def needs_nate_open(answer: Dict) -> bool:
+    """Whether the answer's open-question record asks Nate anything.
+
+    This boolean is what the old Needs-section parser used to supply.
+    One non-null field holds the plan at Shaped.
+    """
+    return bool(open_need_categories(answer))
+
+
+def decide(answer: Dict, *,
+           klass: Optional[str],
+           origin_voice: Optional[str],
+           override_target: Optional[str] = None,
+           escalation_reasons: Sequence[str] = ()) -> Tuple[str, str]:
+    """Apply the self-approval rule to validated fields. Pure: no IO.
+
+    Returns the status and its reason: ``Ready`` only when the four
+    needs_nate fields are all null, the class is self-approvable, the
+    effective shaper is agents, and the plan carries no escalated risk.
+    The rule itself is the shared ``self_approval_eligible`` predicate,
+    so the packet path cannot drift from the shaping path; only the
+    needs_nate input comes from the fields instead of the parser.
+    """
+    reasons = list(escalation_reasons or [])
+    open_categories = open_need_categories(answer)
+    if funnel.self_approval_eligible(
+            klass, origin_voice, override_target,
+            needs_nate=bool(open_categories),
+            escalated=bool(reasons)):
+        if origin_voice == "agent":
+            owner_basis = "origin agent"
+        else:
+            owner_basis = "origin override to agents"
+        return ("Ready",
+                "needs_nate all null; class {} self-approvable; "
+                "{}".format(klass, owner_basis))
+    failed = []
+    if klass not in funnel.SELF_APPROVABLE_CLASSES:
+        failed.append("class {} is not self-approvable".format(
+            klass or "unset"))
+    if funnel.effective_shape_owner(
+            origin_voice, override_target) != "agents":
+        failed.append("origin is Nate's")
+    failed.extend("open question under {}".format(category)
+                  for category in open_categories)
+    if reasons:
+        failed.append("escalated risk ({})".format(", ".join(reasons)))
+    return "Shaped", "; ".join(failed)
+
+
+def fetch_repo_text(repo: str, path: str) -> Tuple[str, bool]:
+    """One text file at the repo's default branch, or ("", True).
+
+    Missing is a fact about the repo, not a fetch failure: the packet
+    stays valid and says so, because the shape question is still
+    answerable without it.
+    """
+    proc = funnel._run_gh(
+        ["gh", "api", "repos/{}/contents/{}".format(repo, path),
+         "-H", "Accept: application/vnd.github.raw"],
+        capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        if "404" in (proc.stderr or ""):
+            return "", True
+        raise funnel.GitHubError(
+            "could not read {} in {}: {}".format(
+                path, repo, (proc.stderr or "").strip()))
+    return proc.stdout or "", False
+
+
+def sibling_plan_items(items: Sequence, idea) -> list:
+    """The other open project plans in the idea's repo, sorted by ref.
+
+    Same "open plans" definition the shaping overlap check uses —
+    parentless, open, Shaped/Ready/Building — narrowed to the idea's
+    own repo, which is what the shape packet promises.
+    """
+    return sorted(
+        (row for row in items
+         if row.ref != idea.ref
+         and row.repo == idea.repo
+         and row.parent is None
+         and row.state == "OPEN"
+         and row.status in funnel.SHAPING_PLAN_STATUSES),
+        key=lambda row: row.ref)
+
+
+def _idea_packet(item) -> Dict:
+    """The idea's identity, captured note, labels, and Project fields."""
+    return {
+        "ref": item.ref,
+        "number": item.number,
+        "title": item.title,
+        "url": item.url,
+        "body": item.body,
+        "labels": sorted(item.labels or []),
+        "status": item.status,
+        "klass": item.klass,
+    }
+
+
+def _sibling_packet(item) -> Dict:
+    """One sibling plan: identity, stage, class, and the plan itself."""
+    return {
+        "ref": item.ref,
+        "number": item.number,
+        "title": item.title,
+        "status": item.status,
+        "klass": item.klass,
+        "body": item.body,
+    }
+
+
+def build_packet(*, repo: str, idea: Dict,
+                 origin_voice: Optional[str],
+                 override_target: Optional[str],
+                 plan_md: str, plan_md_missing: bool,
+                 agents_md: str, agents_md_missing: bool,
+                 siblings: Sequence[Dict],
+                 collected_at: str) -> Dict:
+    """Assemble the packet from already-fetched pieces. Pure: no IO.
+
+    Everything the shape question needs in one JSON-serialisable dict:
+    the idea, its origin, the repo's plan.md and AGENTS.md, and the
+    sibling plans the model cites as precedent.
+    """
+    return {
+        "repo": repo,
+        "idea": dict(idea),
+        "origin": {
+            "voice": origin_voice,
+            "override_target": override_target,
+        },
+        "plan_md": plan_md,
+        "plan_md_missing": plan_md_missing,
+        "agents_md": agents_md,
+        "agents_md_missing": agents_md_missing,
+        "sibling_plans": [dict(row) for row in siblings],
+        "collected_at": collected_at,
+    }
+
+
+def collect(repo: Optional[str], idea_number: int, *,
+            items_loader: Optional[Callable[[], list]] = None,
+            now: Optional[datetime] = None) -> Dict:
+    """Fetch every piece and build the packet. Reads only, no writes."""
+    resolved = funnel.resolve_repo(repo)
+    items = (items_loader or funnel.load_items)()
+    idea_item = funnel.find(items, "{}#{}".format(resolved, idea_number))
+    origin = funnel.parse_origin(idea_item.body or "")
+    override = funnel.parse_origin_override(idea_item.body or "")
+    plan_md, plan_md_missing = fetch_repo_text(resolved, "plan.md")
+    agents_md, agents_md_missing = fetch_repo_text(resolved, "AGENTS.md")
+    return build_packet(
+        repo=resolved,
+        idea=_idea_packet(idea_item),
+        origin_voice=origin["voice"] if origin is not None else None,
+        override_target=(override["target"]
+                         if override is not None else None),
+        plan_md=plan_md,
+        plan_md_missing=plan_md_missing,
+        agents_md=agents_md,
+        agents_md_missing=agents_md_missing,
+        siblings=[_sibling_packet(row)
+                  for row in sibling_plan_items(items, idea_item)],
+        collected_at=(now or datetime.now(timezone.utc)).isoformat(),
+    )
+
+
+def packet_main(argv: Optional[Sequence[str]] = None) -> int:
+    """Print the shape packet for one idea as JSON."""
+    parser = argparse.ArgumentParser(
+        description="assemble one read-only shape packet for an idea")
+    parser.add_argument("idea", type=int, help="idea issue number")
+    parser.add_argument("--repo", default=None,
+                        help="owner/name; required when ambiguous")
+    args = parser.parse_args(argv)
+    try:
+        packet = collect(args.repo, args.idea)
+    except funnel.GitHubError as exc:
+        print("shape-packet: {}".format(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(packet, indent=2, sort_keys=True))
+    return 0
+
+
+def apply_shape(items: list, now: datetime, ref: str,
+                answer_data: object,
+                run: Optional[str] = None,
+                agent: Optional[str] = None) -> int:
+    """Validate one shape answer and record the plan it carries.
+
+    Renders the issue body from the answer fields, applies the
+    self-approval rule mechanically, writes Shaped or Ready, and posts
+    the self-approval record as a code-owned comment on a Ready
+    transition. Validation runs before the first write, so a malformed
+    answer leaves the idea untouched.
+
+    Two deliberate departures from ``funnel shaped``: the open-question
+    record comes from the needs_nate fields rather than a Needs-section
+    parse, and a manually placed origin-override block is carried over
+    verbatim with the origin block — otherwise the override term of the
+    rule could never fire on this path, and the packet would report an
+    override the apply step ignores.
+    """
+    item = funnel.find(items, ref)
+    answer = validate_answer(answer_data)
+
+    original_body = item.body or ""
+    origin = funnel.parse_origin(original_body)
+    origin_voice = origin["voice"] if origin is not None else None
+    carried_blocks = []
+    for marker in (funnel.ORIGIN_MARKER,
+                   funnel.ORIGIN_OVERRIDE_MARKER):
+        block = funnel._marked_json_block(original_body, marker)
+        if block is not None:
+            carried_blocks.append(block)
+    override = funnel.parse_origin_override(original_body)
+    override_target = override["target"] if override is not None else None
+
+    by_ref = {candidate.ref: candidate for candidate in items}
+    class_missing = item.klass not in funnel.LADDER
+    effective_klass = funnel.effective_class(item, by_ref)
+    if class_missing and origin_voice == "agent":
+        effective_klass = answer["proposed_class"]
+
+    rendered = render_plan(answer)
+    authority_signals = funnel.needs_nate_signals(rendered)
+    body = funnel.append_provenance(
+        rendered, "agent", at=now, run=run, agent=agent)
+    for block in carried_blocks:
+        body = "{}\n\n{}".format(body, block)
+    overlaps = funnel.shaping_plan_overlap_candidates(items, item, rendered)
+
+    out = funnel._run_gh(
+        ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
+         "--body", body],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        raise funnel.GitHubError(out.stderr.strip())
+    # The session keeps this object after the issue-body write. Keep its
+    # body aligned with GitHub before a same-session reader evaluates it.
+    item.body = body
+
+    if not item.item_id:
+        raise funnel.GitHubError("{} is not in the Project".format(item.ref))
+    escalation_reasons = funnel.plan_is_escalated(rendered)
+    status, reason = decide(
+        answer,
+        klass=effective_klass,
+        origin_voice=origin_voice,
+        override_target=override_target,
+        escalation_reasons=escalation_reasons,
+    )
+    if class_missing and origin_voice == "agent":
+        # This recovery write is the only place shaping may assign a
+        # Class. Keep it immediately before the Status mutation so the
+        # latter never makes an unclassed idea look like it advanced
+        # cleanly.
+        funnel.gh_graphql(
+            funnel.SET_FIELD, project=funnel.PROJECT_ID,
+            item=item.item_id, field=funnel.CLASS_FIELD_ID,
+            option=funnel._option_id(funnel.CLASS_FIELD_ID,
+                                     answer["proposed_class"]))
+    status_error = funnel._write_status(item, status, now)
+    if status_error is not None:
+        # The body is durable, but the stage is not confirmed. Do not
+        # clear the shaping label or post a self-approval marker, both
+        # of which would make the item look further along than its known
+        # Project state.
+        persisted_status = item.status or "unknown"
+        print("{} → {}\n{}".format(item.ref, persisted_status, item.url))
+        print(
+            "could not confirm requested Status {} for {}; retaining the "
+            "previously observed stage {}: {}".format(
+                status, item.ref, persisted_status, status_error
+            ),
+            file=sys.stderr,
+        )
+        return 1
+
+    label = funnel._run_gh(
+        ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
+         "--remove-label", "needs-shaping"],
+        capture_output=True, text=True,
+    )
+    if label.returncode == 0:
+        item.labels = [
+            value for value in item.labels if value != "needs-shaping"
+        ]
+    if status == "Ready":
+        basis = "{}; no escalated risk".format(reason)
+        if authority_signals:
+            basis += "; authority signals: {}".format(
+                ", ".join(authority_signals)
+            )
+        comment = funnel._run_gh(
+            ["gh", "issue", "comment", str(item.number),
+             "--repo", item.repo,
+             "--body", funnel.self_approval_comment(
+                 basis, at=now, run=run, agent=agent
+             )],
+            capture_output=True, text=True,
+        )
+        if comment.returncode != 0:
+            raise funnel.GitHubError(comment.stderr.strip())
+    print("{} → {}\n{}".format(item.ref, status, item.url))
+    if status == "Ready":
+        print("advanced to Ready: {}".format(reason))
+    else:
+        print("held at Shaped: {}".format(reason))
+    print("\n--- plan overlap candidates (advisory) ---")
+    if overlaps:
+        print("Read each candidate and record the conclusion in the plan:")
+        for overlap in overlaps:
+            print("  {}".format(overlap))
+    else:
+        print("  none found")
+    if authority_signals:
+        print("\n--- self-approval advisory ---")
+        print("Authority signals are recorded in the Self-approved basis:")
+        for signal in authority_signals:
+            print("  {}: {}".format(
+                signal, funnel.NEEDS_NATE_SIGNAL_REASONS[signal]
+            ))
+    if status != "Ready":
+        print("\nIt now waits on you: is the plan good? "
+              "Answer by moving it to Ready.")
+    return 0
+
+
+def apply_main(argv: Optional[Sequence[str]] = None) -> int:
+    """Validate a shape answer from a file or stdin and record it."""
+    parser = argparse.ArgumentParser(
+        description="validate one shape answer and record the plan")
+    parser.add_argument("idea", type=int, help="idea issue number")
+    parser.add_argument("--repo", default=None,
+                        help="owner/name; required when ambiguous")
+    parser.add_argument("--answer", required=True,
+                        help="answer JSON file, or - for stdin")
+    parser.add_argument("--run", default=None,
+                        help="run id recorded in provenance blocks")
+    parser.add_argument("--agent", default=None,
+                        help="agent name recorded in provenance blocks")
+    args = parser.parse_args(argv)
+    try:
+        if args.answer == "-":
+            raw = sys.stdin.read()
+        else:
+            try:
+                raw = pathlib.Path(args.answer).read_text()
+            except OSError as exc:
+                raise ShapeError(
+                    "cannot read {}: {}".format(args.answer, exc))
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ShapeError(
+                "the answer is not valid JSON: {}".format(exc))
+        resolved = funnel.resolve_repo(args.repo)
+        items = funnel.load_items()
+        return apply_shape(
+            items, datetime.now(timezone.utc),
+            "{}#{}".format(resolved, args.idea), data,
+            run=args.run, agent=args.agent)
+    except (ShapeError, funnel.GitHubError) as exc:
+        print("shape-apply: {}".format(exc), file=sys.stderr)
+        return 1

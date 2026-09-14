@@ -887,3 +887,97 @@ def test_apply_main_reports_an_ambiguous_repo_without_a_traceback(
     err = capsys.readouterr().err
     assert "multiple member repos" in err
     assert "Traceback" not in err
+
+
+# -- the runner protocol: --attempt and --validate-only ----------------------
+
+def test_validation_exit_maps_attempts_to_retry_then_final():
+    """#811: without --attempt the single-shot exit 2 stands; with it, a
+    malformed answer is retryable below attempt 2 and final at it."""
+    assert breakdown.validation_exit(None) == 2
+    assert breakdown.validation_exit(1) == 3
+    assert breakdown.validation_exit(2) == 1
+    assert breakdown.validation_exit(3) == 1
+
+
+def test_apply_main_with_attempt_1_asks_for_a_retry(
+        monkeypatch, tmp_path, capsys):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("validation must precede every mutation")
+
+    monkeypatch.setattr(breakdown, "create_ticket", fail_if_called)
+    monkeypatch.setattr(breakdown, "fetch_issue_state", lambda ref: "OPEN")
+    answer = tmp_path / "answer.json"
+    answer.write_text(json.dumps({"tickets": [raw_ticket(risk="wild")]}))
+    assert breakdown.apply_main(
+        ["owner/repo#1", "--answer", str(answer),
+         "--attempt", "1"]) == 3
+    assert "risk 'wild'" in capsys.readouterr().err
+
+
+def test_apply_main_with_attempt_2_is_final(
+        monkeypatch, tmp_path, capsys):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("validation must precede every mutation")
+
+    monkeypatch.setattr(breakdown, "create_ticket", fail_if_called)
+    monkeypatch.setattr(breakdown, "fetch_issue_state", lambda ref: "OPEN")
+    answer = tmp_path / "answer.json"
+    answer.write_text(json.dumps({"tickets": [raw_ticket(risk="wild")]}))
+    assert breakdown.apply_main(
+        ["owner/repo#1", "--answer", str(answer),
+         "--attempt", "2"]) == 1
+    assert "risk 'wild'" in capsys.readouterr().err
+
+
+def test_apply_main_with_attempt_rejects_unparsable_json(
+        monkeypatch, tmp_path, capsys):
+    answer = tmp_path / "answer.json"
+    answer.write_text("{not json")
+    assert breakdown.apply_main(
+        ["owner/repo#1", "--answer", str(answer),
+         "--attempt", "1"]) == 3
+    assert "not valid JSON" in capsys.readouterr().err
+    assert breakdown.apply_main(
+        ["owner/repo#1", "--answer", str(answer),
+         "--attempt", "2"]) == 1
+
+
+def test_apply_main_validate_only_prints_without_creating(
+        monkeypatch, tmp_path, capsys):
+    """The runner's shadow path: validate and report, with no ticket, no
+    edge, no comment, and no label."""
+    calls = stub_apply(monkeypatch)
+    monkeypatch.setattr(breakdown, "fetch_issue_state", lambda ref: "OPEN")
+    answer = tmp_path / "answer.json"
+    answer.write_text(json.dumps({"tickets": [raw_ticket(title="only")]}))
+    assert breakdown.apply_main(
+        ["owner/repo#1", "--answer", str(answer),
+         "--validate-only"]) == 0
+    found = json.loads(capsys.readouterr().out)
+    assert [row["title"] for row in found["tickets"]] == ["only"]
+    assert found["needs_decision"] is None
+    assert all(value == [] for value in calls.values())
+
+
+def test_apply_main_validate_only_rejects_a_malformed_answer(
+        monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(breakdown, "fetch_issue_state", lambda ref: "OPEN")
+    answer = tmp_path / "answer.json"
+    answer.write_text(json.dumps({"tickets": [raw_ticket(risk="wild")]}))
+    assert breakdown.apply_main(
+        ["owner/repo#1", "--answer", str(answer), "--validate-only",
+         "--attempt", "1"]) == 3
+    assert "risk 'wild'" in capsys.readouterr().err
+
+
+def test_apply_main_rejects_an_attempt_below_1(tmp_path):
+    answer = tmp_path / "answer.json"
+    answer.write_text(json.dumps({"tickets": [raw_ticket()]}))
+    try:
+        breakdown.apply_main(
+            ["owner/repo#1", "--answer", str(answer), "--attempt", "0"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("--attempt 0 must not parse")

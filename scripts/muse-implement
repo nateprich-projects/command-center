@@ -42,7 +42,12 @@ fi
 REPO="${MUSE_IMPLEMENT_REPO:-/Users/nateprich/.claude/command-center-run}"
 MUSE_BIN="${MUSE_BIN:-$HOME/.local/bin/muse}"
 GH_BIN="${GH_BIN:-gh}"
-BOUND_SECONDS="${MUSE_IMPLEMENT_BOUND_SECONDS:-1200}"
+# 45 minutes and 200 model steps while #794's escalated tickets clear (Nate,
+# 2026-09-14): at 60 steps in 20 minutes, #811 and #817 each died twice with
+# WIP pushed and a claim left behind. launchd starts no second instance while
+# one runs, so a long run skips fires rather than overlapping. Revert with
+# #831 and #859 when #794 closes.
+BOUND_SECONDS="${MUSE_IMPLEMENT_BOUND_SECONDS:-2700}"
 ROUTINE="$REPO/routines/muse-implement.md"
 WORKSPACE_ROOT="${MUSE_IMPLEMENT_WORKSPACE_ROOT:-$HOME/.claude/command-center-muse-implement-workspaces}"
 WORKSPACE=""
@@ -287,7 +292,7 @@ perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "$MUSE_BIN" exec \
   --sandbox-network enabled \
   --disable-sandbox \
   --approval-mode never \
-  --max-model-steps 60 \
+  --max-model-steps 200 \
   --no-foreign-personal-context \
   --workspace "$WORKSPACE" \
   --prompt-file "$PROMPT_FILE" \

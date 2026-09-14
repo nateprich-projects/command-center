@@ -1,18 +1,22 @@
 #!/bin/bash
-# A Muse review engine: one PR judged against its packet, then stop.
+# A Muse judgement engine: one review, breakdown, or shape job against its
+# packet, then stop.
 #
 # Usage: muse-review-engine [tier] [reasoning-effort] [--shadow]
 #   tier   -- escalated (default) or standard; substituted into begin
 #   effort -- max (default) or high
-#   --shadow -- record the answer on the PR and the finish note instead of
-#              applying it: the shadow period before the #794 cutover
+#   --shadow -- record the answer on the PR or issue and the finish note
+#              instead of applying it: the shadow period before the #794
+#              cutover
 #
 # Phase 1 of #794: the runner executes the protocol and the model answers one
-# question. begin claims the PR, review-packet assembles the evidence, and a
-# failing precheck is applied as rejected with no model call at all.
-# Otherwise the runner shows the model routines/muse-review.md with the packet
+# question. begin offers the work, the packet command assembles the evidence,
+# and a failing review precheck is applied as rejected with no model call at
+# all. Otherwise the runner shows the model the job's routine with the packet
 # inline — judgement text only — parses the one JSON answer, retries once on a
-# parse error, and hands it to review-apply, which performs every side effect.
+# parse error, and hands it to the apply command, which performs every side
+# effect. Breakdown rides the standard tier only; shape follows wherever
+# begin offers it.
 #
 # The model runs with --disable-shell --disable-write --disable-web-tools: it
 # has no tool at all, so it cannot run funnel.py or gh itself. No
@@ -65,33 +69,56 @@ REPO="${MUSE_REVIEW_ENGINE_REPO:-/Users/nateprich/.claude/command-center-run}"
 MUSE_BIN="${MUSE_BIN:-$HOME/.local/bin/muse}"
 GH_BIN="${GH_BIN:-gh}"
 BOUND_SECONDS="${MUSE_REVIEW_ENGINE_BOUND_SECONDS:-1200}"
-ROUTINE="$REPO/routines/muse-review.md"
+ROUTINE_REVIEW="$REPO/routines/muse-review.md"
+ROUTINE_BREAKDOWN="$REPO/routines/muse-breakdown.md"
+ROUTINE_SHAPE="$REPO/routines/muse-shape.md"
 # An empty directory on purpose, shared with the old reviewer. The model has
 # no tools so it cannot see this at all; it exists only because exec wants a
 # workspace root.
 WORKSPACE="$HOME/.claude/command-center-muse-workspace"
-# Marker so the shadow-agreement read finds the engine's shadow comments.
+# Markers so the shadow-agreement read finds the engine's shadow comments.
 SHADOW_MARKER="<!-- command-center-shadow-review -->"
+SHADOW_MARKER_BREAKDOWN="<!-- command-center-shadow-breakdown -->"
+SHADOW_MARKER_SHAPE="<!-- command-center-shadow-shape -->"
 
 mkdir -p "$WORKSPACE" || exit 1
 
-if [[ ! -r "$ROUTINE" ]]; then
-  echo "muse-review-engine: cannot read $ROUTINE — refusing to run without a prompt" >&2
-  exit 1
-fi
+# One prompt per job, all checked before begin: a run must never take work
+# it cannot ask about. Everything after the first `---` is the agent-facing
+# prompt; the header above it is written for a human reading the file. Same
+# shape as the other routines. The packet goes where PACKET_JSON stands,
+# exactly once: a second occurrence would mean the substitution below left a
+# literal behind.
+check_routine() {
+  local file="$1"
+  local template
+  local placeholders
+  if [[ ! -r "$file" ]]; then
+    echo "muse-review-engine: cannot read $file — refusing to run without a prompt" >&2
+    return 1
+  fi
+  template="$(awk 'f{print} /^---$/{f=1}' "$file")"
+  if [[ "$template" != *[![:space:]]* ]]; then
+    echo "muse-review-engine: $file has no prompt after its --- separator" >&2
+    return 1
+  fi
+  placeholders="$(printf '%s' "$template" | grep -o PACKET_JSON | wc -l | tr -d ' ')"
+  if [[ "$placeholders" != "1" ]]; then
+    echo "muse-review-engine: $file must hold PACKET_JSON exactly once" >&2
+    return 1
+  fi
+  printf '%s' "$template"
+}
 
-# Everything after the first `---` is the agent-facing prompt; the header
-# above it is written for a human reading the file. Same shape as the other
-# routines. The packet goes where PACKET_JSON stands, exactly once: a second
-# occurrence would mean the substitution below left a literal behind.
-PROMPT_TEMPLATE="$(awk 'f{print} /^---$/{f=1}' "$ROUTINE")"
-if [[ "$PROMPT_TEMPLATE" != *[![:space:]]* ]]; then
-  echo "muse-review-engine: $ROUTINE has no prompt after its --- separator" >&2
+# Bare assignments, not `local x=$(...)`: the assignment keeps the
+# substitution's status, so `if !` sees a bad routine.
+if ! PROMPT_REVIEW="$(check_routine "$ROUTINE_REVIEW")"; then
   exit 1
 fi
-PLACEHOLDERS="$(printf '%s' "$PROMPT_TEMPLATE" | grep -o PACKET_JSON | wc -l | tr -d ' ')"
-if [[ "$PLACEHOLDERS" != "1" ]]; then
-  echo "muse-review-engine: $ROUTINE must hold PACKET_JSON exactly once" >&2
+if ! PROMPT_BREAKDOWN="$(check_routine "$ROUTINE_BREAKDOWN")"; then
+  exit 1
+fi
+if ! PROMPT_SHAPE="$(check_routine "$ROUTINE_SHAPE")"; then
   exit 1
 fi
 
@@ -101,8 +128,10 @@ ANSWER_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-answer.XXXXXX")"
 DECISION_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-decision.XXXXXX")"
 COMMENT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-comment.XXXXXX")"
 DIAG_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-diag.XXXXXX")"
+RESULT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-result.XXXXXX")"
 if [[ -z "$PACKET_FILE" || -z "$PROMPT_FILE" || -z "$ANSWER_FILE" \
-  || -z "$DECISION_FILE" || -z "$COMMENT_FILE" || -z "$DIAG_FILE" ]]; then
+  || -z "$DECISION_FILE" || -z "$COMMENT_FILE" || -z "$DIAG_FILE" \
+  || -z "$RESULT_FILE" ]]; then
   echo "muse-review-engine: could not create scratch files" >&2
   exit 1
 fi
@@ -130,7 +159,7 @@ export FUNNEL_SESSION
 cleanup() {
   python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
   rm -f -- "$PACKET_FILE" "$PROMPT_FILE" "$ANSWER_FILE" \
-    "$DECISION_FILE" "$COMMENT_FILE" "$DIAG_FILE"
+    "$DECISION_FILE" "$COMMENT_FILE" "$DIAG_FILE" "$RESULT_FILE"
 }
 trap cleanup EXIT
 
@@ -159,10 +188,348 @@ finish_done() {
   fi
 }
 
+# Cap a blob pasted into a note or comment, with the cut marked. Mirrors
+# review-apply's MAX_RAW_NOTE: a GitHub comment is no place for unbounded
+# model output.
+cap_text() {
+  python3 -c '
+import sys
+
+text = open(sys.argv[1]).read()
+limit = int(sys.argv[2])
+if len(text) <= limit:
+    sys.stdout.write(text)
+else:
+    sys.stdout.write(text[:limit] + "\n…[truncated {} chars]".format(len(text) - limit))
+' "$1" "$2"
+}
+
+compact_json() {
+  python3 -c '
+import json
+import sys
+
+raw = open(sys.argv[1]).read()
+limit = int(sys.argv[2])
+try:
+    flat = json.dumps(json.loads(raw), sort_keys=True)
+except ValueError:
+    flat = " ".join(raw.split())
+if len(flat) > limit:
+    flat = flat[:limit] + "…[truncated {} chars]".format(len(flat) - limit)
+print(flat)
+' "$1" "$2"
+}
+
+# One model call: the prompt file in, the raw answer on stdout. Plain kill,
+# not a process-group kill: --disable-shell means the model can have no
+# children to orphan. Exit 124 when the bound kills the call.
+call_muse() {
+  local killed_marker
+  # Split from the declaration: `local x=$(...)` would mask mktemp's status.
+  if ! killed_marker="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-killed.XXXXXX")"; then
+    return 1
+  fi
+  rm -f "$killed_marker"
+  "$MUSE_BIN" exec \
+    --model muse-spark-1.3 \
+    --reasoning-effort "$EFFORT" \
+    --disable-shell \
+    --disable-write \
+    --disable-web-tools \
+    --max-model-steps 60 \
+    --no-foreign-personal-context \
+    --workspace "$WORKSPACE" \
+    --prompt-file "$PROMPT_FILE" >"$ANSWER_FILE" 2>"$DIAG_FILE" &
+  local muse_pid=$!
+  (
+    sleep "$BOUND_SECONDS" &
+    sleep_pid=$!
+    trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM
+    wait "$sleep_pid"
+    if kill -0 "$muse_pid" 2>/dev/null; then
+      echo "muse-review-engine: killing run after ${BOUND_SECONDS}s ($TIER schedule)" >&2
+      : > "$killed_marker"
+      kill -TERM "$muse_pid" 2>/dev/null
+      sleep 5
+      kill -KILL "$muse_pid" 2>/dev/null
+    fi
+  ) &
+  local bound_pid=$!
+  wait "$muse_pid"
+  local status=$?
+  if [[ -e "$killed_marker" ]]; then
+    wait "$bound_pid" 2>/dev/null
+    rm -f "$killed_marker"
+    return 124
+  fi
+  kill "$bound_pid" 2>/dev/null
+  wait "$bound_pid" 2>/dev/null
+  rm -f "$killed_marker"
+  return "$status"
+}
+
+muse_failed() {
+  local status="$1"
+  if (( status == 124 )); then
+    echo "muse-review-engine: the model call outlived the wall-clock bound" >&2
+    failure "killed after $((BOUND_SECONDS / 60)) minutes: $TIER $JOB run exceeded the wall-clock bound (#392)" || true
+    exit 124
+  fi
+  muse_err="$(cat "$DIAG_FILE")"
+  echo "muse-review-engine: muse exec failed (exit $status): $muse_err" >&2
+  failure "muse exec failed (exit $status) $FAIL_SUBJECT: $muse_err" || true
+  exit 1
+}
+
+# --- breakdown and shape: the standard-tier issue jobs -----------------------
+# One shared path for both: no precheck, no head to pin. The packet is the
+# plan or the idea, the model answers one JSON object with the same tool
+# restrictions as review, a malformed answer retries once with the parse
+# error fed back, and the apply performs every side effect. A malformed
+# final answer records nothing — the project stays awaiting breakdown, the
+# idea keeps its needs-shaping label — so the next run asks again.
+
+collect_issue_packet() {
+  if [[ "$JOB" == "breakdown" ]]; then
+    python3 "$REPO/breakdown-packet" "$BEGIN_REF" \
+      >"$PACKET_FILE" 2>"$DIAG_FILE"
+  else
+    python3 "$REPO/shape-packet" "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
+      >"$PACKET_FILE" 2>"$DIAG_FILE"
+  fi
+}
+
+# One issue-job apply invocation. Extra arguments ($@) slot the shadow
+# path's --validate-only in; --run/--agent ride both paths for one shape,
+# and the read-only one ignores them — nothing stamped without writes.
+run_issue_apply() {
+  local attempt="$1"
+  shift
+  if [[ "$JOB" == "breakdown" ]]; then
+    python3 "$REPO/breakdown-apply" "$BEGIN_REF" --answer "$ANSWER_FILE" \
+      --attempt "$attempt" "$@" --run "$BEGIN_RUN" --agent muse
+  else
+    python3 "$REPO/shape-apply" "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
+      --answer "$ANSWER_FILE" --attempt "$attempt" "$@" \
+      --run "$BEGIN_RUN" --agent muse
+  fi
+}
+
+# The decision word for a shadow comment, read back from --validate-only's
+# own report: the ticket count or the needs-decision question for a
+# breakdown, the Shaped-versus-Ready status for a shape.
+issue_shadow_decision() {
+  python3 -c '
+import json
+import sys
+
+job, path = sys.argv[1], sys.argv[2]
+decision = json.load(open(path))
+if job == "breakdown":
+    if decision.get("needs_decision"):
+        print("needs-decision question")
+    else:
+        count = len(decision.get("tickets", []))
+        print("{} ticket{}".format(count, "" if count == 1 else "s"))
+else:
+    print(decision.get("status") or "unknown")
+' "$JOB" "$DECISION_FILE"
+}
+
+# The finish note for a live apply, read back from the apply's own report —
+# never re-derived here, because the apply is what knows what it wrote.
+issue_live_note() {
+  python3 -c '
+import json
+import sys
+
+job, ref, path = sys.argv[1], sys.argv[2], sys.argv[3]
+if job == "breakdown":
+    result = json.load(open(path))
+    if result.get("needs_decision"):
+        print("broke down {}: asked a needs-decision question".format(ref))
+    else:
+        count = len(result.get("created", []))
+        print("broke down {}: created {} ticket{}".format(
+            ref, count, "" if count == 1 else "s"))
+else:
+    lines = open(path).read().splitlines()
+    status = ""
+    reason = ""
+    for line in lines:
+        if line.startswith("advanced to Ready: "):
+            status, reason = "Ready", line[len("advanced to Ready: "):]
+        elif line.startswith("held at Shaped: "):
+            status, reason = "Shaped", line[len("held at Shaped: "):]
+    if not status and lines and lines[0].startswith(ref + " "):
+        status = lines[0].split(None, 2)[-1]
+    note = "shaped {}: {}".format(ref, status or "applied")
+    if reason:
+        note += " ({})".format(reason[:300])
+    print(note)
+' "$JOB" "$BEGIN_REF" "$RESULT_FILE"
+}
+
+retry_issue_prompt() {
+  parse_err="$(cat "$DIAG_FILE")"
+  printf '%s\n\nYour previous answer could not be parsed: %s\nReply again with exactly one JSON object and nothing else.' \
+    "$PROMPT" "$parse_err" >"$PROMPT_FILE"
+}
+
+# A shadow run records the answer as a comment on the project or idea and
+# finishes done instead of applying: no tickets, no plan, no status change.
+record_issue_shadow() {
+  local decision="$1"
+  local answer_note="$2"
+  local model_line="$3"
+  {
+    printf '%s\n' "$SHADOW_MARKER_JOB"
+    printf '**Shadow %s (not applied)** — run `%s`, %s `%s`\n' \
+      "$JOB" "$BEGIN_RUN" "$SUBJECT_WORD" "$BEGIN_REF"
+    printf '\n%s\n' "$model_line"
+    printf '\nDecision: **%s**.\n' "$decision"
+    printf '\n```json\n'
+    cap_text "$ANSWER_FILE" 4000
+    printf '\n```\n'
+  } >"$COMMENT_FILE"
+  if ! "$GH_BIN" issue comment "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
+      --body-file "$COMMENT_FILE" 2>"$DIAG_FILE"; then
+    gh_err="$(cat "$DIAG_FILE")"
+    echo "muse-review-engine: shadow comment failed: $gh_err" >&2
+    failure "shadow $JOB of $BEGIN_REF recorded no decision (gh issue comment failed: $gh_err); answer: $answer_note" || true
+    exit 1
+  fi
+  finish_done "shadow $JOB of $BEGIN_REF: $decision; answer: $answer_note"
+}
+
+# A malformed final answer: record what the model actually said, with the
+# parse error, and finish errored — the shadow comparison for this subject
+# is lost, and the next run collects the packet again.
+issue_shadow_malformed() {
+  parse_err="$(cat "$DIAG_FILE")"
+  printf '%s' "$parse_err" >"$DECISION_FILE"
+  ANSWER_NOTE="unparseable ($(compact_json "$DECISION_FILE" 500)): $(compact_json "$ANSWER_FILE" 2000)"
+  {
+    printf '%s\n' "$SHADOW_MARKER_JOB"
+    printf '**Shadow %s (not applied)** — run `%s`, %s `%s`\n' \
+      "$JOB" "$BEGIN_RUN" "$SUBJECT_WORD" "$BEGIN_REF"
+    printf '\nThe model answered the %s question, but the final answer could not be parsed: %s\n' \
+      "$JOB" "$parse_err"
+    printf '\nRaw output:\n\n```\n'
+    cap_text "$ANSWER_FILE" 4000
+    printf '\n```\n'
+  } >"$COMMENT_FILE"
+  if "$GH_BIN" issue comment "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
+      --body-file "$COMMENT_FILE" 2>/dev/null; then
+    failure "shadow $JOB of $BEGIN_REF recorded no decision (final answer unparseable); answer: $ANSWER_NOTE" || true
+  else
+    failure "shadow $JOB of $BEGIN_REF recorded no decision (final answer unparseable, and gh issue comment failed); answer: $ANSWER_NOTE" || true
+  fi
+}
+
+run_issue_job() {
+  # The packet is the only evidence the model ever sees. Reads only;
+  # nothing here changes remote state.
+  if ! collect_issue_packet; then
+    packet_err="$(cat "$DIAG_FILE")"
+    echo "muse-review-engine: $JOB-packet failed: $packet_err" >&2
+    failure "$JOB-packet failed for $BEGIN_REF: $packet_err" || true
+    exit 1
+  fi
+  if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' \
+      "$PACKET_FILE" 2>/dev/null; then
+    echo "muse-review-engine: the $JOB packet for $BEGIN_REF is not valid JSON" >&2
+    failure "$JOB-packet for $BEGIN_REF printed invalid JSON" || true
+    exit 1
+  fi
+
+  # Substitute the whole packet where PACKET_JSON stands. The template check
+  # above guarantees exactly one occurrence, so this cannot leave one behind —
+  # and a packet that happens to contain the literal stays content, not a
+  # placeholder. The prompt travels by --prompt-file, not argv, because a plan
+  # can outgrow the argument limit.
+  PACKET_JSON="$(cat "$PACKET_FILE")"
+  PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$PACKET_JSON}"
+  printf '%s' "$PROMPT" >"$PROMPT_FILE"
+
+  ATTEMPT=1
+  while true; do
+    # Read the status into a variable: `$?` inside an `if !` branch is the
+    # negated condition's status (0), not the call's.
+    call_muse
+    muse_status=$?
+    if (( muse_status != 0 )); then
+      muse_failed "$muse_status"
+    fi
+    if (( SHADOW )); then
+      # Read the status directly into a variable: `$?` after an `if`
+      # whose condition failed is 0, not the command's status, so the `fi`
+      # below would never see a retryable 3. (A bare `name=$(...)`
+      # assignment keeps the substitution's status.)
+      decision="$(run_issue_apply "$ATTEMPT" --validate-only \
+        2>"$DIAG_FILE")"
+      validate_status=$?
+      if (( validate_status == 0 )); then
+        printf '%s' "$decision" >"$DECISION_FILE"
+        if ! DECISION_WORD="$(issue_shadow_decision)"; then
+          DECISION_WORD="undecided"
+        fi
+        if [[ -z "$DECISION_WORD" ]]; then
+          DECISION_WORD="undecided"
+        fi
+        ANSWER_NOTE="$(compact_json "$ANSWER_FILE" 4000)"
+        record_issue_shadow "$DECISION_WORD" "$ANSWER_NOTE" \
+          "The model answered the $JOB question."
+        exit 0
+      fi
+      if (( validate_status == 3 && ATTEMPT == 1 )); then
+        retry_issue_prompt
+        ATTEMPT=2
+        continue
+      fi
+      issue_shadow_malformed
+      exit 1
+    fi
+    # Read the status directly: `$?` after an `if` whose condition failed
+    # is 0, never the apply exit, so the retryable 3 must be caught here.
+    # (No `set -e`, so the bare failing call below does not abort the run.)
+    run_issue_apply "$ATTEMPT" >"$RESULT_FILE" 2>"$DIAG_FILE"
+    apply_status=$?
+    if (( apply_status == 0 )); then
+      if ! NOTE="$(issue_live_note)"; then
+        NOTE="$JOB_PAST $BEGIN_REF: applied"
+      fi
+      finish_done "$NOTE"
+      exit 0
+    fi
+    if (( apply_status == 3 && ATTEMPT == 1 )); then
+      retry_issue_prompt
+      ATTEMPT=2
+      continue
+    fi
+    apply_err="$(cat "$DIAG_FILE")"
+    echo "muse-review-engine: $JOB-apply failed: $apply_err" >&2
+    failure "$JOB-apply failed on $BEGIN_REF: $apply_err" || true
+    exit 1
+  done
+}
+
 # Own the opening poll. Empty polls must not launch a model: `begin` has
 # already recorded the heartbeat and made the gate decision, so a stop can
 # finish the run here without ever invoking `muse exec`.
-BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent muse --tier "$TIER" --role review)"
+#
+# Breakdown rides with the standard tier, not with escalated — the same rule
+# scripts/muse-review states: it is mechanical work for the frequent
+# cheaper-effort schedule, and the escalated schedule exists so rare risky
+# reviews never wait behind it. Shape needs no flag: begin offers a waiting
+# idea on any tier once review and breakdown are empty.
+BEGIN_FLAGS="--tier $TIER"
+if [[ "$TIER" == "standard" ]]; then
+  BEGIN_FLAGS="$BEGIN_FLAGS --breakdown"
+fi
+BEGIN_FLAGS="$BEGIN_FLAGS --role review"
+BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent muse $BEGIN_FLAGS)"
 begin_status=$?
 if (( begin_status != 0 )); then
   echo "muse-review-engine: funnel begin failed (exit $begin_status)" >&2
@@ -222,12 +589,53 @@ if [[ "$BEGIN_DO" == "stop" ]]; then
   exit 0
 fi
 
-if [[ "$BEGIN_DO" != "review" ]] \
-  || ! BEGIN_PR="$(begin_work_value pr)" \
-  || ! BEGIN_REPO="$(begin_work_value repo)"; then
+JOB="review"
+FAIL_SUBJECT=""
+if [[ "$BEGIN_DO" == "review" ]]; then
+  if ! BEGIN_PR="$(begin_work_value pr)" \
+    || ! BEGIN_REPO="$(begin_work_value repo)"; then
+    echo "muse-review-engine: funnel begin returned unknown job '$BEGIN_DO'" >&2
+    failure "funnel begin returned unknown job '$BEGIN_DO'" || true
+    exit 1
+  fi
+  FAIL_SUBJECT="on PR #$BEGIN_PR in $BEGIN_REPO"
+  PROMPT_TEMPLATE="$PROMPT_REVIEW"
+elif [[ "$BEGIN_DO" == "breakdown" || "$BEGIN_DO" == "shape" ]]; then
+  JOB="$BEGIN_DO"
+  if ! BEGIN_REF="$(begin_work_value ref)"; then
+    echo "muse-review-engine: funnel begin returned unknown job '$BEGIN_DO'" >&2
+    failure "funnel begin returned unknown job '$BEGIN_DO'" || true
+    exit 1
+  fi
+  SUBJECT_REPO="${BEGIN_REF%#*}"
+  SUBJECT_NUM="${BEGIN_REF##*#}"
+  if [[ "$SUBJECT_REPO" != */* || -z "$SUBJECT_NUM" ]] \
+    || [[ "$SUBJECT_NUM" =~ [^0-9] ]]; then
+    echo "muse-review-engine: funnel begin returned an unparseable ref '$BEGIN_REF'" >&2
+    failure "funnel begin returned an unparseable ref '$BEGIN_REF'" || true
+    exit 1
+  fi
+  FAIL_SUBJECT="on $JOB of $BEGIN_REF"
+  if [[ "$JOB" == "breakdown" ]]; then
+    PROMPT_TEMPLATE="$PROMPT_BREAKDOWN"
+    SHADOW_MARKER_JOB="$SHADOW_MARKER_BREAKDOWN"
+    SUBJECT_WORD="project"
+    JOB_PAST="broke down"
+  else
+    PROMPT_TEMPLATE="$PROMPT_SHAPE"
+    SHADOW_MARKER_JOB="$SHADOW_MARKER_SHAPE"
+    SUBJECT_WORD="idea"
+    JOB_PAST="shaped"
+  fi
+else
   echo "muse-review-engine: funnel begin returned unknown job '$BEGIN_DO'" >&2
   failure "funnel begin returned unknown job '$BEGIN_DO'" || true
   exit 1
+fi
+
+if [[ "$JOB" != "review" ]]; then
+  run_issue_job
+  exit "$?"
 fi
 
 # The packet is the only evidence the model ever sees. Reads only; nothing
@@ -275,39 +683,6 @@ HEAD_SHORT="${PACKET_HEAD:0:12}"
 if [[ -z "$HEAD_SHORT" ]]; then
   HEAD_SHORT="unknown-head"
 fi
-
-# Cap a blob pasted into a note or comment, with the cut marked. Mirrors
-# review-apply's MAX_RAW_NOTE: a GitHub comment is no place for unbounded
-# model output.
-cap_text() {
-  python3 -c '
-import sys
-
-text = open(sys.argv[1]).read()
-limit = int(sys.argv[2])
-if len(text) <= limit:
-    sys.stdout.write(text)
-else:
-    sys.stdout.write(text[:limit] + "\n…[truncated {} chars]".format(len(text) - limit))
-' "$1" "$2"
-}
-
-compact_json() {
-  python3 -c '
-import json
-import sys
-
-raw = open(sys.argv[1]).read()
-limit = int(sys.argv[2])
-try:
-    flat = json.dumps(json.loads(raw), sort_keys=True)
-except ValueError:
-    flat = " ".join(raw.split())
-if len(flat) > limit:
-    flat = flat[:limit] + "…[truncated {} chars]".format(len(flat) - limit)
-print(flat)
-' "$1" "$2"
-}
 
 # A shadow run records the answer and finishes done instead of applying. The
 # answer file holds what the model said (or the constructed precheck
@@ -372,67 +747,6 @@ fi
 PACKET_JSON="$(cat "$PACKET_FILE")"
 PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$PACKET_JSON}"
 printf '%s' "$PROMPT" >"$PROMPT_FILE"
-
-# One model call: the prompt file in, the raw answer on stdout. Plain kill,
-# not a process-group kill: --disable-shell means the model can have no
-# children to orphan. Exit 124 when the bound kills the call.
-call_muse() {
-  local killed_marker
-  # Split from the declaration: `local x=$(...)` would mask mktemp's status.
-  if ! killed_marker="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-killed.XXXXXX")"; then
-    return 1
-  fi
-  rm -f "$killed_marker"
-  "$MUSE_BIN" exec \
-    --model muse-spark-1.3 \
-    --reasoning-effort "$EFFORT" \
-    --disable-shell \
-    --disable-write \
-    --disable-web-tools \
-    --max-model-steps 60 \
-    --no-foreign-personal-context \
-    --workspace "$WORKSPACE" \
-    --prompt-file "$PROMPT_FILE" >"$ANSWER_FILE" 2>"$DIAG_FILE" &
-  local muse_pid=$!
-  (
-    sleep "$BOUND_SECONDS" &
-    sleep_pid=$!
-    trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM
-    wait "$sleep_pid"
-    if kill -0 "$muse_pid" 2>/dev/null; then
-      echo "muse-review-engine: killing run after ${BOUND_SECONDS}s ($TIER schedule)" >&2
-      : > "$killed_marker"
-      kill -TERM "$muse_pid" 2>/dev/null
-      sleep 5
-      kill -KILL "$muse_pid" 2>/dev/null
-    fi
-  ) &
-  local bound_pid=$!
-  wait "$muse_pid"
-  local status=$?
-  if [[ -e "$killed_marker" ]]; then
-    wait "$bound_pid" 2>/dev/null
-    rm -f "$killed_marker"
-    return 124
-  fi
-  kill "$bound_pid" 2>/dev/null
-  wait "$bound_pid" 2>/dev/null
-  rm -f "$killed_marker"
-  return "$status"
-}
-
-muse_failed() {
-  local status="$1"
-  if (( status == 124 )); then
-    echo "muse-review-engine: the model call outlived the wall-clock bound" >&2
-    failure "killed after $((BOUND_SECONDS / 60)) minutes: $TIER review run exceeded the wall-clock bound (#392)" || true
-    exit 124
-  fi
-  muse_err="$(cat "$DIAG_FILE")"
-  echo "muse-review-engine: muse exec failed (exit $status): $muse_err" >&2
-  failure "muse exec failed (exit $status) on PR #$BEGIN_PR in $BEGIN_REPO: $muse_err" || true
-  exit 1
-}
 
 # The recorded verdict word, read back from review-apply's own report — never
 # re-derived here, because unsure non-empty flips an approval to a rejection.

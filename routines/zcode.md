@@ -204,8 +204,9 @@ python3 /Users/nateprich/.claude/command-center-run/funnel.py merge <pr> --yes
 
 `review` stamps your verdict with the commit you actually read. `merge` then
 checks every condition itself — branch matches a ticket whose project is
-`Building`, CI green, a verdict exists and approves, and **the approved commit is
-still the head**. If anything fails it refuses and lists why.
+`Building`, CI green, a verdict exists and approves, **the approved commit is
+still the head**, and auto-merging is not stopped. If anything fails it
+refuses and lists why.
 
 Your judgement is the part only you can do. Typing `gh pr merge` is not, and
 doing it by hand is what makes an unattended merge impossible to audit later.
@@ -224,11 +225,10 @@ than stranding it.
 are unsure about, and leave it. An unattended merge you were not confident in is
 exactly the failure that retires this whole arrangement.
 
-**Before merging anything**, run `funnel brief` and require it to succeed, then
-check `rejected_merges.stop_auto_merging`. If the command fails or that
-gate-feeding section is missing/degraded, do not merge: the check is
-fail-closed. Three rejected merges in a week means auto-merging stops until
-Nate fixes the review bar.
+Do not run `funnel brief` in the merge path: the gate reads the
+rejected-merge counter itself and refuses while auto-merging is stopped.
+Three rejected merges in a week means every merge refuses until Nate fixes
+the review bar.
 
 Do not change `Status` or `Class` on anything. Those are Nate's gates.
 

@@ -9716,6 +9716,18 @@ def merge_blockers(repo: str, pr: int, items: List[Item],
     if not data:
         return ["PR #{} could not be read".format(pr)]
 
+    # The stop is read here, from the same loaded items as the binding check,
+    # so merging never waits on a reporting run. Until #801 the review
+    # routines ran the full 35-section reporting read before every merge just
+    # to read this counter, and a slow read blocked the merge by timing out
+    # (#830). The gate is fail-closed: a tripped counter refuses.
+    counter = rejected_merges(items, now)
+    if counter["stop_auto_merging"]:
+        why.append("auto-merging is stopped: {} rejected merges in the last "
+                   "{} days ({})".format(
+                       counter["count"], counter["window_days"],
+                       ", ".join(str(r) for r in counter["refs"])))
+
     if data.get("state") != "OPEN":
         why.append("PR is {}, not open".format(data.get("state")))
 

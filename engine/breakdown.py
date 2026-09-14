@@ -1,0 +1,783 @@
+#!/usr/bin/env python3
+"""Break a plan into tickets through one structured answer (#809, #794 Phase 2).
+
+The breakdown runner shows the model a packet — the plan body, the existing
+sibling tickets, and the sizing standard — and nothing else. The model
+returns one JSON answer with either a ticket list or a needs-decision
+question. This module validates that answer against the ticket schema and
+performs every side effect; the model runs no command.
+
+Packet (read-only)::
+
+    breakdown-packet <project>
+
+prints the plan body, sibling tickets, and sizing standard as JSON.
+
+Apply (writes)::
+
+    breakdown-apply <project> --answer -
+
+reads ``{"tickets": [...], "needs_decision": null | "question"}`` where each
+ticket carries ``title``, ``body``, ``risk``, ``depends_on`` (sibling
+indices or ``owner/repo#n``), and ``needs``. Validation is total before the
+first mutation: at least one ticket or a question but never both, both enums
+exact, every dependency resolving to a sibling index or an existing open
+issue, and no dependency cycles. The create path makes sub-issues with
+native blocked-by edges, writes the Needs field and a code-owned ``Risk:``
+line, and posts the coverage comment; the question path posts the
+needs-decision comment and labels the project blocked.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import funnel  # noqa: E402
+
+
+class BreakdownError(Exception):
+    """A local breakdown failure: bad ref, bad file, unparsable answer."""
+
+
+#: The risk enum, owned here: the answer schema's vocabulary, not GitHub's.
+RISK_OPTIONS = ("standard", "escalated")
+
+#: The needs enum lives on the Project (Nate 2026-09-13, #794); the schema
+#: reuses funnel's record of it rather than keeping a second copy.
+NEEDS_OPTIONS = funnel.NEEDS_OPTIONS
+
+#: Project option ids recorded in #808, by needs name. Using them directly
+#: saves one field-options lookup per ticket created.
+NEEDS_OPTION_IDS = {
+    "none": funnel.NEEDS_OPTION_NONE,
+    "human": funnel.NEEDS_OPTION_HUMAN,
+    "claude-code-environment": funnel.NEEDS_OPTION_CLAUDE_CODE_ENVIRONMENT,
+}
+
+#: The sizing standard is the judgement slice of the breakdown skill: the
+#: unit and sizing sections, without the protocol the runner now owns.
+SIZING_SKILL_PATH = os.path.join("skills", "breakdown", "SKILL.md")
+SIZING_START = "## The unit"
+SIZING_END = "## Ordering and independence"
+
+#: An external dependency: owner/repo#n, the only string shape accepted.
+REF_RE = re.compile(
+    r"\A(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)"
+    r"#(?P<number>[1-9][0-9]*)\Z"
+)
+
+#: Issue URLs accepted wherever a project ref is accepted.
+ISSUE_URL_RE = re.compile(
+    r"\Ahttps?://[^/]+/(?P<owner>[A-Za-z0-9_.-]+)/"
+    r"(?P<repo>[A-Za-z0-9_.-]+)/issues/(?P<number>[1-9][0-9]*)/*\Z"
+)
+
+#: One created issue's Project item, to find where to write its Needs field.
+PROJECT_ITEM_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      projectItems(first: 20) {
+        nodes { id project { id } }
+      }
+    }
+  }
+}
+"""
+
+#: Exit code for a schema failure. No effect has happened: validation is
+#: total before the first mutation, so 2 always means nothing was created.
+EXIT_VALIDATION = 2
+
+
+def parse_project_ref(value: str, default_repo: Optional[str] = None,
+                      ) -> Tuple[str, int]:
+    """Split a project ref into its repo and issue number.
+
+    Accepts a bare number (resolved against ``default_repo``), an
+    ``owner/repo#n`` ref, or an issue URL. Anything else is a local error,
+    raised before any GitHub call.
+    """
+    text = (value or "").strip()
+    if text.isdigit() and int(text) >= 1:
+        if not default_repo:
+            raise BreakdownError(
+                "a bare issue number needs --repo to name its owner/repo")
+        return default_repo, int(text)
+    match = REF_RE.match(text)
+    if match:
+        return ("{}/{}".format(match.group("owner"), match.group("repo")),
+                int(match.group("number")))
+    match = ISSUE_URL_RE.match(text)
+    if match:
+        return ("{}/{}".format(match.group("owner"), match.group("repo")),
+                int(match.group("number")))
+    raise BreakdownError(
+        "not a project ref: {!r} — want <n>, owner/repo#n, or an issue URL"
+        .format(value))
+
+
+def sizing_standard(skill_text: Optional[str] = None) -> str:
+    """Return the sizing slice of the breakdown skill, verbatim.
+
+    Reads ``skills/breakdown/SKILL.md`` from the checkout unless ``skill_text``
+    is given (the tests' seam). Fails loudly when the section markers move
+    rather than silently handing the model the wrong judgement text.
+    """
+    if skill_text is None:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, SIZING_SKILL_PATH),
+                  encoding="utf-8") as handle:
+            skill_text = handle.read()
+    lines = skill_text.splitlines()
+    try:
+        start = next(index for index, line in enumerate(lines)
+                     if line.strip() == SIZING_START)
+        end = next(index for index, line in enumerate(lines)
+                   if line.strip() == SIZING_END)
+    except StopIteration:
+        raise BreakdownError(
+            "cannot find the sizing standard in {}: want {!r} through {!r}"
+            .format(SIZING_SKILL_PATH, SIZING_START, SIZING_END))
+    if end <= start:
+        raise BreakdownError(
+            "the sizing standard in {} is empty: {!r} comes after {!r}"
+            .format(SIZING_SKILL_PATH, SIZING_END, SIZING_START))
+    return "\n".join(lines[start:end]).strip() + "\n"
+
+
+def fetch_plan(repo: str, number: int) -> dict:
+    """The project issue behind the breakdown: identity plus its plan body."""
+    data = funnel._gh_json(
+        "gh", "issue", "view", str(number), "--repo", repo, "--json",
+        "number,title,url,body,state")
+    if not data:
+        raise funnel.GitHubError(
+            "could not read project {}#{}".format(repo, number))
+    data["ref"] = "{}#{}".format(repo, number)
+    return data
+
+
+def fetch_siblings(repo: str, number: int) -> List[dict]:
+    """The project's existing sub-issues, so the model does not re-plan them.
+
+    Number, title, and state are the anti-duplication facts; bodies would
+    bloat the packet fifty times over for no decision the question needs.
+    """
+    owner, _, name = repo.partition("/")
+    data = funnel.gh_graphql(
+        funnel.SUB_ISSUES, owner=owner, name=name, number=number)
+    issue = (data.get("repository") or {}).get("issue") or {}
+    nodes = (issue.get("subIssues") or {}).get("nodes") or []
+    siblings = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        child_repo = (node.get("repository") or {}).get("nameWithOwner")
+        child_number = node.get("number")
+        if not child_repo or not child_number:
+            continue
+        siblings.append({
+            "ref": "{}#{}".format(child_repo, child_number),
+            "repo": child_repo,
+            "number": child_number,
+            "title": node.get("title"),
+            "state": node.get("state"),
+        })
+    siblings.sort(key=lambda entry: entry["number"])
+    return siblings
+
+
+def build_packet(*, repo: str, number: int, plan: dict,
+                 siblings: Sequence[dict], sizing: str,
+                 collected_at: str) -> Dict:
+    """Assemble the packet from already-fetched pieces. Pure: no IO."""
+    plan = plan or {}
+    return {
+        "project": {
+            "ref": "{}#{}".format(repo, number),
+            "repo": repo,
+            "number": number,
+            "title": plan.get("title"),
+            "url": plan.get("url"),
+            "body": plan.get("body"),
+            "state": plan.get("state"),
+        },
+        "siblings": list(siblings or []),
+        "sizing_standard": sizing,
+        "sizing_standard_source": SIZING_SKILL_PATH,
+        "collected_at": collected_at,
+    }
+
+
+def collect(project: str, repo: Optional[str] = None, *,
+            now: Optional[datetime] = None) -> Dict:
+    """Fetch every packet piece. Reads only, no writes."""
+    resolved_repo, number = parse_project_ref(
+        project, funnel.resolve_repo(repo))
+    return build_packet(
+        repo=resolved_repo,
+        number=number,
+        plan=fetch_plan(resolved_repo, number),
+        siblings=fetch_siblings(resolved_repo, number),
+        sizing=sizing_standard(),
+        collected_at=(now or datetime.now(timezone.utc)).isoformat(),
+    )
+
+
+def packet_main(argv: Optional[Sequence[str]] = None) -> int:
+    """Print the breakdown packet for one project as JSON."""
+    parser = argparse.ArgumentParser(
+        description="assemble one read-only breakdown packet for a project")
+    parser.add_argument("project",
+                        help="issue number, owner/repo#n, or issue URL")
+    parser.add_argument("--repo", default=None,
+                        help="owner/name; required with a bare number when "
+                             "ambiguous")
+    args = parser.parse_args(argv)
+    try:
+        packet = collect(args.project, args.repo)
+    except (funnel.GitHubError, BreakdownError) as exc:
+        print("breakdown-packet: {}".format(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(packet, indent=2, sort_keys=True))
+    return 0
+
+
+def _is_blank(value: object) -> bool:
+    """Whether a required text field came back missing or whitespace-only."""
+    return not isinstance(value, str) or not value.strip()
+
+
+def _find_cycle(edges: Dict[int, List[int]]) -> Optional[List[int]]:
+    """Return one dependency cycle as an index path, or None when acyclic.
+
+    ``edges[i]`` lists the sibling indices ticket ``i`` is blocked by. A
+    self-edge is reported by validation, not here, so it is skipped.
+    """
+    visiting: Dict[int, int] = {}
+    done = set()
+    for root in sorted(edges):
+        if root in done:
+            continue
+        stack = [(root, iter(sorted(edges.get(root, []))))]
+        visiting[root] = len(stack) - 1
+        while stack:
+            node, children = stack[-1]
+            advanced = False
+            for child in children:
+                if child == node or child not in edges:
+                    continue
+                if child in visiting:
+                    path = [entry[0] for entry in stack[visiting[child]:]]
+                    return path + [child]
+                if child not in done:
+                    visiting[child] = len(stack)
+                    stack.append((child, iter(sorted(edges.get(child, [])))))
+                    advanced = True
+                    break
+            if not advanced:
+                done.add(node)
+                del visiting[node]
+                stack.pop()
+    return None
+
+
+def validate_answer(answer: object, issue_state: Callable[[str], Optional[str]]
+                    ) -> Tuple[List[str], Optional[dict]]:
+    """Validate one breakdown answer against the ticket schema.
+
+    Returns ``(errors, normalized)``. ``errors`` is empty exactly when the
+    answer is applicable; ``normalized`` then holds the tickets with their
+    dependencies resolved to ``("sibling", index)`` / ``("external", ref)``
+    pairs in answer order, plus the stripped needs-decision question or
+    None. ``issue_state`` maps an ``owner/repo#n`` ref to its issue state
+    (``"OPEN"``/``"CLOSED"``) or None when no such issue exists; each unique
+    ref is looked up at most once.
+    """
+    if not isinstance(answer, dict):
+        return ["the answer must be a JSON object with tickets and "
+                "needs_decision"], None
+    raw_tickets = answer.get("tickets", [])
+    if not isinstance(raw_tickets, list):
+        return ["tickets must be a list of ticket objects"], None
+    for index, raw in enumerate(raw_tickets):
+        if not isinstance(raw, dict):
+            return ["ticket {} must be an object with title, body, risk, "
+                    "depends_on, and needs".format(index)], None
+
+    raw_question = answer.get("needs_decision")
+    if raw_question is None:
+        question = None
+    elif isinstance(raw_question, str):
+        question = raw_question.strip() or None
+    else:
+        return ["needs_decision must be null or a question string"], None
+
+    errors: List[str] = []
+    if question is not None and raw_tickets:
+        errors.append("the answer must either list tickets or ask a "
+                      "needs-decision question, not both")
+    if question is None and not raw_tickets:
+        errors.append("the answer must list at least one ticket or ask a "
+                      "needs-decision question")
+
+    tickets: List[dict] = []
+    dep_errors = 0
+    known: Dict[str, Optional[str]] = {}
+    for index, raw in enumerate(raw_tickets):
+        label = "ticket {}".format(index)
+        title = raw.get("title")
+        if _is_blank(title):
+            errors.append("{} needs a non-empty title".format(label))
+        body = raw.get("body")
+        if _is_blank(body):
+            errors.append("{} needs a non-empty body".format(label))
+        risk = raw.get("risk")
+        if risk not in RISK_OPTIONS:
+            errors.append("{} has risk {!r}; want one of {}".format(
+                label, risk, ", ".join(RISK_OPTIONS)))
+        needs = raw.get("needs")
+        if needs not in NEEDS_OPTIONS:
+            errors.append("{} has needs {!r}; want one of {}".format(
+                label, needs, ", ".join(NEEDS_OPTIONS)))
+        depends_on = raw.get("depends_on", [])
+        if not isinstance(depends_on, list):
+            errors.append("{} has depends_on {!r}; want a list of sibling "
+                           "indices and owner/repo#n refs".format(
+                               label, depends_on))
+            depends_on = []
+        resolved = []
+        for entry in depends_on:
+            if isinstance(entry, bool):
+                errors.append("{} depends on {!r}; want a sibling index or "
+                              "owner/repo#n".format(label, entry))
+                dep_errors += 1
+            elif isinstance(entry, int):
+                if entry == index:
+                    errors.append("{} depends on itself".format(label))
+                    dep_errors += 1
+                elif entry < 0 or entry >= len(raw_tickets):
+                    errors.append(
+                        "{} depends on sibling {}; only 0..{} exist".format(
+                            label, entry, len(raw_tickets) - 1))
+                    dep_errors += 1
+                else:
+                    resolved.append(("sibling", entry))
+            elif isinstance(entry, str) and REF_RE.match(entry.strip()):
+                ref = entry.strip()
+                if ref not in known:
+                    known[ref] = issue_state(ref)
+                state = known[ref]
+                if state is None:
+                    errors.append("{} depends on {}, which is not an "
+                                  "existing issue".format(label, ref))
+                    dep_errors += 1
+                elif str(state).upper() != "OPEN":
+                    errors.append("{} depends on {}, which is not open"
+                                  .format(label, ref))
+                    dep_errors += 1
+                else:
+                    resolved.append(("external", ref))
+            else:
+                errors.append("{} depends on {!r}; want a sibling index or "
+                              "owner/repo#n".format(label, entry))
+                dep_errors += 1
+        tickets.append({
+            "title": title.strip() if isinstance(title, str) else title,
+            "body": body.strip() if isinstance(body, str) else body,
+            "risk": risk,
+            "needs": needs,
+            "depends_on": resolved,
+        })
+
+    if not dep_errors:
+        edges = {
+            index: [target for kind, target in ticket["depends_on"]
+                    if kind == "sibling"]
+            for index, ticket in enumerate(tickets)
+        }
+        cycle = _find_cycle(edges)
+        if cycle is not None:
+            errors.append("tickets depend in a cycle: {}".format(
+                " -> ".join("ticket {}".format(i) for i in cycle)))
+
+    if errors:
+        return errors, None
+    return [], {"tickets": tickets, "needs_decision": question}
+
+
+def creation_order(tickets: Sequence[dict]) -> List[int]:
+    """List ticket indices so every blocker is created before its dependent.
+
+    Kahn's algorithm, stable in answer order: among the tickets whose
+    blockers all exist, the earliest answer wins. External refs point
+    outside the answer, so only sibling edges order anything.
+    """
+    remaining = {
+        index: {target for kind, target in ticket.get("depends_on", [])
+                if kind == "sibling"}
+        for index, ticket in enumerate(tickets)
+    }
+    order = []
+    while remaining:
+        ready = sorted(index for index, blockers in remaining.items()
+                       if blockers <= set(order))
+        if not ready:
+            raise BreakdownError(
+                "tickets cannot be ordered; validation missed a cycle")
+        order.append(ready[0])
+        del remaining[ready[0]]
+    return order
+
+
+def with_risk_line(body: str, risk: str) -> str:
+    """Return the ticket body with exactly one code-owned ``Risk:`` line.
+
+    The runner owns the line, not the model: any ``Risk:`` line the answer
+    carried is removed first, so a conflicting model value can never win.
+    """
+    scrubbed = funnel.RISK_LINE.sub("", body or "")
+    scrubbed = re.sub(r"\n{3,}", "\n\n", scrubbed).strip()
+    if scrubbed:
+        return "{}\n\nRisk: {}".format(scrubbed, risk)
+    return "Risk: {}".format(risk)
+
+
+def issue_url(ref: str) -> str:
+    """Render an owner/repo#n ref as the issue URL `gh --blocked-by` takes."""
+    match = REF_RE.match(ref.strip())
+    if not match:
+        raise BreakdownError(
+            "not an owner/repo#n ref: {!r}".format(ref))
+    return "https://github.com/{}/{}/issues/{}".format(
+        match.group("owner"), match.group("repo"), match.group("number"))
+
+
+def blocked_by_values(ticket: dict, created_numbers: Dict[int, int]) -> List[str]:
+    """Render one ticket's dependencies as `gh --blocked-by` values.
+
+    Sibling indices become the created issue numbers in the ticket repo;
+    external refs become issue URLs, since a bare number would point at the
+    wrong repository. Answer order is preserved.
+    """
+    values = []
+    for kind, target in ticket.get("depends_on", []):
+        if kind == "sibling":
+            values.append(str(created_numbers[target]))
+        else:
+            values.append(issue_url(target))
+    return values
+
+
+def display_blockers(ticket: dict, created_refs: Dict[int, str],
+                     repo: str) -> List[str]:
+    """Render one ticket's blockers for the human-readable coverage comment.
+
+    Same-repo blockers read as ``#n``; cross-repo ones keep their full ref.
+    """
+    rendered = []
+    for kind, target in ticket.get("depends_on", []):
+        if kind == "sibling":
+            ref = created_refs[target]
+        else:
+            ref = target
+        if ref.startswith(repo + "#"):
+            rendered.append("#" + ref.split("#", 1)[1])
+        else:
+            rendered.append(ref)
+    return rendered
+
+
+def coverage_comment_body(project_ref: str, created: Sequence[dict]) -> str:
+    """Render the deterministic coverage comment posted on the project.
+
+    Each entry names what the runner wrote — the ref, the code-owned risk,
+    the Needs field, and the native edges — so a later reader sees the
+    breakdown without opening every ticket.
+    """
+    lines = ["Breakdown of {} created {} ticket{}:".format(
+        project_ref, len(created), "" if len(created) == 1 else "s")]
+    for ticket in created:
+        entry = "- {}: {} (Risk: {}, Needs: {}".format(
+            ticket["ref"], ticket["title"], ticket["risk"], ticket["needs"])
+        if ticket.get("blocked_by"):
+            entry += "; blocked by {}".format(
+                ", ".join(ticket["blocked_by"]))
+        lines.append(entry + ")")
+    return "\n".join(lines)
+
+
+def parse_created_number(output: str) -> int:
+    """Read the created issue number from `gh issue create` output.
+
+    `gh` prints the issue URL; the number is its last path segment. Only the
+    last non-empty line is read, so progress chatter above it is harmless.
+    """
+    lines = [line.strip() for line in (output or "").splitlines()
+             if line.strip()]
+    if not lines:
+        raise funnel.GitHubError(
+            "gh issue create printed nothing; the ticket may not exist")
+    match = re.search(r"/issues/([1-9][0-9]*)\s*$", lines[-1])
+    if not match:
+        raise funnel.GitHubError(
+            "could not read the created issue number from: {}".format(
+                lines[-1][:120]))
+    return int(match.group(1))
+
+
+def fetch_issue_state(ref: str) -> Optional[str]:
+    """Return an issue's state, or None when no such issue exists.
+
+    The dependency check behind validation: `gh issue view` fails closed
+    on unknown refs and reports OPEN/CLOSED for known ones.
+    """
+    match = REF_RE.match(ref.strip())
+    if not match:
+        return None
+    data = funnel._gh_json(
+        "gh", "issue", "view", match.group("number"), "--repo",
+        "{}/{}".format(match.group("owner"), match.group("repo")),
+        "--json", "number,state")
+    if not isinstance(data, dict):
+        return None
+    return data.get("state")
+
+
+def create_ticket(repo: str, parent_number: int, ticket: dict,
+                  blocked_by: Sequence[str]) -> Tuple[int, str]:
+    """Create one sub-issue with its native blocked-by edges. One mutation."""
+    body = with_risk_line(ticket.get("body") or "", ticket["risk"])
+    command = ["gh", "issue", "create", "--repo", repo,
+               "--parent", str(parent_number)]
+    if list(blocked_by):
+        command += ["--blocked-by", ",".join(blocked_by)]
+    command += ["--title", ticket["title"], "--body", body]
+    proc = funnel._run_gh(command, capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise funnel.GitHubError(
+            "could not create {!r} under {}#{}: {}".format(
+                ticket["title"], repo, parent_number,
+                (proc.stderr or "").strip()))
+    number = parse_created_number(proc.stdout or "")
+    return number, "{}#{}".format(repo, number)
+
+
+def fetch_project_item_id(repo: str, number: int) -> str:
+    """Return a new ticket's Project item id, where its Needs field lives.
+
+    GitHub adds a sub-issue to its parent's Project automatically; this is
+    the handle for that row. Absent means the row has not appeared yet, and
+    the Needs write must not pretend otherwise.
+    """
+    owner, _, name = repo.partition("/")
+    data = funnel.gh_graphql(
+        PROJECT_ITEM_QUERY, owner=owner, name=name, number=number)
+    issue = (data.get("repository") or {}).get("issue") or {}
+    nodes = (issue.get("projectItems") or {}).get("nodes") or []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        project = node.get("project") or {}
+        if project.get("id") == funnel.PROJECT_ID and node.get("id"):
+            return node["id"]
+    raise funnel.GitHubError(
+        "created {}#{} but it has no Project row yet; set its Needs field "
+        "by hand".format(repo, number))
+
+
+def write_needs(item_id: str, needs: str, ref: str) -> None:
+    """Write one ticket's Needs single-select. One mutation."""
+    response = funnel.gh_graphql(
+        funnel.SET_FIELD,
+        project=funnel.PROJECT_ID,
+        item=item_id,
+        field=funnel.NEEDS_FIELD_ID,
+        option=NEEDS_OPTION_IDS[needs],
+    )
+    confirmed = (isinstance(response, dict)
+                 and (response.get("updateProjectV2ItemFieldValue") or {})
+                 .get("projectV2Item", {}).get("id") == item_id)
+    if not confirmed:
+        raise funnel.GitHubError(
+            "GitHub did not confirm the Needs update for {} to {}".format(
+                ref, needs))
+
+
+def post_comment(repo: str, number: int, body: str, *,
+                 run: Optional[str] = None,
+                 agent: Optional[str] = None) -> None:
+    """Post one runner-owned comment with the agent voice stamped on it."""
+    proc = funnel._run_gh(
+        ["gh", "issue", "comment", str(number), "--repo", repo,
+         "--body", funnel.append_provenance(
+             body, "agent", at=datetime.now(timezone.utc),
+             run=run, agent=agent)],
+        capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise funnel.GitHubError(
+            "could not comment on {}#{}: {}".format(
+                repo, number, (proc.stderr or "").strip()))
+
+
+def apply_blocked_label(repo: str, number: int) -> None:
+    """Label one issue blocked, so it leaves the breakdown queue."""
+    proc = funnel._run_gh(
+        ["gh", "issue", "edit", str(number), "--repo", repo,
+         "--add-label", "blocked"],
+        capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise funnel.GitHubError(
+            "recorded the needs-decision comment on {}#{}, but could not "
+            "add its blocked label: {}".format(
+                repo, number, (proc.stderr or "").strip()))
+
+
+def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
+                 run: Optional[str] = None,
+                 agent: Optional[str] = None) -> List[dict]:
+    """Create every ticket with its edges and fields, then cover the parent.
+
+    Blockers go first, so every native edge points at an issue that already
+    exists. A failure names the tickets already created, so the next attempt
+    starts from GitHub's truth rather than this run's memory.
+    """
+    created_numbers: Dict[int, int] = {}
+    created_refs: Dict[int, str] = {}
+    try:
+        for index in creation_order(tickets):
+            ticket = tickets[index]
+            number, ref = create_ticket(
+                repo, parent_number, ticket,
+                blocked_by_values(ticket, created_numbers))
+            created_numbers[index] = number
+            created_refs[index] = ref
+            write_needs(fetch_project_item_id(repo, number),
+                        ticket["needs"], ref)
+        created = [{
+            "ref": created_refs[index],
+            "number": created_numbers[index],
+            "title": tickets[index]["title"],
+            "risk": tickets[index]["risk"],
+            "needs": tickets[index]["needs"],
+            "blocked_by": display_blockers(
+                tickets[index], created_refs, repo),
+        } for index in sorted(created_refs)]
+        post_comment(
+            repo, parent_number,
+            coverage_comment_body(
+                "{}#{}".format(repo, parent_number), created),
+            run=run, agent=agent)
+        return created
+    except funnel.GitHubError as exc:
+        if created_refs:
+            progress = "already created: {}".format(", ".join(
+                created_refs[index] for index in sorted(created_refs)))
+        else:
+            progress = "no tickets were created"
+        raise funnel.GitHubError("{} ({})".format(exc, progress))
+
+
+def apply_question(repo: str, parent_number: int, question: str, *,
+                   run: Optional[str] = None,
+                   agent: Optional[str] = None) -> None:
+    """Post the breakdown's question and park the project on Nate's answer.
+
+    Creates no tickets: a ticket built on an invented decision is worse
+    than no ticket, because someone will implement it.
+    """
+    post_comment(
+        repo, parent_number,
+        "{} {}".format(funnel.NEEDS_DECISION_PREFIX, question),
+        run=run, agent=agent)
+    apply_blocked_label(repo, parent_number)
+
+
+def apply(repo: str, number: int, normalized: dict, *,
+          run: Optional[str] = None,
+          agent: Optional[str] = None) -> dict:
+    """Perform one validated answer's effects. Reads, then writes, in order."""
+    project_ref = "{}#{}".format(repo, number)
+    plan = fetch_plan(repo, number)
+    if str(plan.get("state") or "").upper() != "OPEN":
+        raise funnel.GitHubError(
+            "project {} is {}; a closed project takes no breakdown".format(
+                project_ref, plan.get("state")))
+    question = normalized.get("needs_decision")
+    if question is not None:
+        apply_question(repo, number, question, run=run, agent=agent)
+        return {"project": project_ref, "needs_decision": question}
+    created = apply_create(repo, number, normalized.get("tickets", []),
+                           run=run, agent=agent)
+    return {"project": project_ref, "created": created}
+
+
+def read_answer(source: str) -> object:
+    """Read one JSON answer from a path, or from stdin when given `-`."""
+    if source == "-":
+        text = sys.stdin.read()
+    else:
+        with open(source, encoding="utf-8") as handle:
+            text = handle.read()
+    try:
+        return json.loads(text)
+    except ValueError as exc:
+        raise BreakdownError(
+            "the answer is not valid JSON: {}".format(exc))
+
+
+def apply_main(argv: Optional[Sequence[str]] = None) -> int:
+    """Validate one breakdown answer and perform its effects."""
+    parser = argparse.ArgumentParser(
+        description="validate one breakdown answer and create its tickets")
+    parser.add_argument("project",
+                        help="issue number, owner/repo#n, or issue URL")
+    parser.add_argument("--answer", required=True,
+                        help="path to the JSON answer, or - for stdin")
+    parser.add_argument("--repo", default=None,
+                        help="owner/name; required with a bare number when "
+                             "ambiguous")
+    parser.add_argument("--run", default=None,
+                        help="heartbeat run id stamped on runner comments")
+    parser.add_argument("--agent", default=None,
+                        help="agent stamped on runner comments")
+    args = parser.parse_args(argv)
+    try:
+        repo, number = parse_project_ref(
+            args.project, funnel.resolve_repo(args.repo))
+    except BreakdownError as exc:
+        print("breakdown-apply: {}".format(exc), file=sys.stderr)
+        return 1
+    try:
+        answer = read_answer(args.answer)
+    except OSError as exc:
+        print("breakdown-apply: cannot read the answer: {}".format(exc),
+              file=sys.stderr)
+        return 1
+    except BreakdownError as exc:
+        print("breakdown-apply: {}".format(exc), file=sys.stderr)
+        return EXIT_VALIDATION
+    errors, normalized = validate_answer(answer, fetch_issue_state)
+    if errors:
+        for error in errors:
+            print("breakdown-apply: {}".format(error), file=sys.stderr)
+        return EXIT_VALIDATION
+    assert normalized is not None
+    try:
+        result = apply(repo, number, normalized,
+                       run=args.run, agent=args.agent)
+    except (funnel.GitHubError, BreakdownError) as exc:
+        print("breakdown-apply: {}".format(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0

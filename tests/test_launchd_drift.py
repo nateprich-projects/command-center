@@ -205,18 +205,19 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
     assert args(IMPLEMENTER_NAME) == ["escalated", "max"]
 
 
-def test_the_implementer_fires_every_three_hours_off_review_slots():
-    """The implementation lane is periodic, but its calendar slot does not
-    collide with either review schedule's minute."""
+def test_the_implementer_polls_every_fifteen_minutes_while_794_clears():
+    """The implementation lane polls on a fixed interval while #794's escalated
+    tickets clear (Nate, 2026-09-13, #831). launchd starts no second instance
+    while one runs, so the interval cannot overlap itself. When #794 closes this
+    reverts to the three-hourly :37 calendar schedule, whose test this replaced:
+    hours 0..21 step 3, minute 37, off the :07 and :00/:05 review slots."""
     import plistlib
 
     with (ROOT / "launchd" / IMPLEMENTER_NAME).open("rb") as handle:
-        schedule = plistlib.load(handle)["StartCalendarInterval"]
+        plist = plistlib.load(handle)
 
-    assert [entry["Hour"] for entry in schedule] == list(range(0, 24, 3))
-    assert {entry["Minute"] for entry in schedule} == {37}
-    assert not {entry["Minute"] for entry in schedule} & {7}
-    assert not {entry["Minute"] for entry in schedule} & set(range(0, 60, 5))
+    assert plist["StartInterval"] == 900
+    assert "StartCalendarInterval" not in plist
 
 
 def test_the_installer_copies_all_launchd_plists(tmp_path):

@@ -60,7 +60,7 @@ asked of it.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha 28ba97815eefa9f6724d10e3be43f67ff1186a4d8d382419b38dc1e6ccb3f813
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha 540480f7c7de20a8d2bbc96d3dcf7a58fee8848cde970a59b7fb8b756b94fd39
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and says

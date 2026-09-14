@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import pathlib
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -97,9 +99,13 @@ def _ticket(number, parent, *, body="Risk: standard", klass="Improve",
 
 def _implementing_begin(monkeypatch, capsys, items, *, agent="codex",
                         tier="standard", repo_readiness=None, pr_facts=None,
-                        caller_role=None, current_claims=None):
+                        caller_role=None, current_claims=None, reconcile=None):
     _allow_begin(monkeypatch)
-    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+    monkeypatch.setattr(
+        funnel,
+        "reconcile_approved_merges",
+        reconcile if reconcile is not None else (lambda *args: []),
+    )
     monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
     monkeypatch.setattr(
         funnel, "ticket_pr_facts", lambda rows: pr_facts or {}
@@ -181,6 +187,9 @@ def test_begin_prints_a_transient_json_envelope_when_project_load_is_truncated(
 def test_begin_error_after_heartbeat_start_does_not_start_a_second_run(
     monkeypatch, capsys
 ):
+    """Reconcile no longer aborts begin (#823): the listing error is
+    recorded, selection runs against the empty board and stops cleanly, and
+    still only one run is started."""
     calls = []
 
     def run(argv, **kwargs):
@@ -208,12 +217,17 @@ def test_begin_error_after_heartbeat_start_does_not_start_a_second_run(
     assert funnel.main(
         ["begin", "--agent", "codex", "--tier", "standard"],
         _items=[],
-    ) == 2
+    ) == 0
 
     result = json.loads(capsys.readouterr().out)
     assert result["run"] == "already-started"
+    assert result["gate"] == "ok"
     assert result["do"] == "stop"
-    assert result["transient"] is False
+    assert result["reconcile_errors"] == [{
+        "step": "approved_merges",
+        "error": "offline",
+        "transient": False,
+    }]
     assert len([
         call for call in calls
         if any("heartbeat.py" in str(part) for part in call)
@@ -1441,3 +1455,195 @@ def test_a_stop_run_binds_nothing(monkeypatch, capsys):
 
     assert result["do"] == "stop"
     assert "bound" not in result and bound == []
+
+
+def _selecting_reconcile_begin(monkeypatch, capsys, items, rows, verdicts,
+                               merge):
+    """Begin with a live merge reconcile and live ticket selection."""
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: rows)
+    monkeypatch.setattr(
+        funnel, "latest_verdict", lambda repo, pr: verdicts.get(pr)
+    )
+    monkeypatch.setattr(funnel, "cmd_merge", merge)
+    monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+    bodies = {item.number: item.body for item in items}
+    monkeypatch.setattr(
+        funnel, "_ticket_body", lambda repo, number: bodies.get(number) or ""
+    )
+    monkeypatch.setattr(
+        funnel, "read_lock", lambda item: item.in_motion_since
+    )
+    writes = []
+    monkeypatch.setattr(
+        funnel, "write_lock", lambda item, value: writes.append((item.ref, value))
+    )
+    assert funnel.cmd_begin(items, NOW, "codex", "standard", False) == 0
+    return json.loads(capsys.readouterr().out), writes
+
+
+def test_begin_records_a_reconcile_listing_error_and_still_selects(
+    monkeypatch, capsys
+):
+    """A reconcile step that cannot reach GitHub is recorded, not fatal.
+
+    The listing failure below is #732's transient GraphQL shape: selection
+    proceeds, the gate stays ok instead of claiming unknown state, and the
+    raw stdout stays one valid JSON document.
+    """
+    project, ticket = _ticket(12, 11)
+    error = funnel.GitHubError(
+        "Something went wrong",
+        transient=True,
+        request_id="D707:172A39:4F2E95A:53DD225:6AA6668B",
+    )
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, [project, ticket],
+        reconcile=lambda *args: (_ for _ in ()).throw(error),
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert result["gate"] == "ok"
+    assert result["reconcile_errors"] == [{
+        "step": "approved_merges",
+        "error": "transient GraphQL response: Something went wrong "
+                 "(GraphQL request ID D707:172A39:4F2E95A:53DD225:6AA6668B)",
+        "transient": True,
+    }]
+    assert [ref for ref, value in writes if value] == [ticket.ref]
+
+
+@pytest.mark.parametrize("func,step", [
+    ("reconcile_auto_closeable_projects", "auto_closeable_projects"),
+    ("reconcile_closed_items", "closed_items"),
+    ("reconcile_orphaned_starts", "orphaned_starts"),
+])
+def test_begin_records_other_reconcile_step_errors_and_still_selects(
+    monkeypatch, capsys, func, step
+):
+    """Every reconcile step is non-fatal, not just the merge retry."""
+    project, ticket = _ticket(30, 29)
+    monkeypatch.setattr(
+        funnel,
+        func,
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            funnel.GitHubError("offline")
+        ),
+    )
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, [project, ticket]
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert result["reconcile_errors"] == [{
+        "step": step,
+        "error": "offline",
+        "transient": False,
+    }]
+    assert [ref for ref, value in writes if value] == [ticket.ref]
+
+
+def test_begin_withholds_a_ticket_whose_merge_reconcile_errored(
+    monkeypatch, capsys
+):
+    """#732: the merge may have succeeded remotely, so the open-looking
+    ticket is unknown state and must not be claimed; selection serves the
+    healthy ticket instead."""
+    bad_project, bad = _ticket(20, 19)
+    good_project, good = _ticket(22, 21)
+
+    def merge(items, now, repo, pr, confirmed):
+        raise funnel.GitHubError("Something went wrong")
+
+    result, writes = _selecting_reconcile_begin(
+        monkeypatch,
+        capsys,
+        [bad_project, bad, good_project, good],
+        [{"number": 200, "headRefName": "ticket/20", "headRefOid": "head"}],
+        {200: {"verdict": "approved", "head_sha": "head"}},
+        merge,
+    )
+
+    assert result["reconciled_merges"] == [{
+        "repo": bad.repo,
+        "pr": 200,
+        "ref": bad.ref,
+        "result": "error",
+        "error": "Something went wrong",
+    }]
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == good.ref
+    assert [ref for ref, value in writes if value] == [good.ref]
+
+
+def test_begin_stops_without_claiming_when_only_the_errored_ticket_remains(
+    monkeypatch, capsys
+):
+    """Withholding the unknown-state ticket can leave nothing startable;
+    that is a clean stop, not an abort and not a claim."""
+    project, ticket = _ticket(24, 23)
+
+    def merge(items, now, repo, pr, confirmed):
+        raise funnel.GitHubError("Something went wrong")
+
+    result, writes = _selecting_reconcile_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        [{"number": 240, "headRefName": "ticket/24", "headRefOid": "head"}],
+        {240: {"verdict": "approved", "head_sha": "head"}},
+        merge,
+    )
+
+    assert result["reconciled_merges"][0]["result"] == "error"
+    assert result["do"] == "stop"
+    assert writes == []
+
+
+def test_begin_sources_never_name_brief():
+    """#823: selection after reconcile never loads a reporting section."""
+    for func in (funnel.cmd_begin, funnel.reconcile_approved_merges):
+        assert re.search(r"\bbrief\b",
+                         inspect.getsource(func), re.IGNORECASE) is None
+
+
+def test_begin_completes_without_loading_any_reporting_section(
+    monkeypatch, capsys
+):
+    """#823: reconcile, merge record and selection run while every
+    reporting-section loader explodes. The PR snapshot stays available:
+    selection reads it as gate state, not as a reporting section."""
+    def explode(*args, **kwargs):
+        raise AssertionError("begin loaded a reporting section")
+
+    monkeypatch.setattr(funnel, "cmd_brief", explode)
+    monkeypatch.setattr(funnel, "_brief_timed", explode)
+    monkeypatch.setattr(funnel.BriefCache, "get_pr_facts", explode)
+    monkeypatch.setattr(funnel, "unattended_approvals", explode)
+    monkeypatch.setattr(funnel, "closed_itself_json", explode)
+    monkeypatch.setattr(funnel, "maintenance_load", explode)
+
+    merged_project, merged_ticket = _ticket(40, 39)
+    project, ticket = _ticket(42, 41)
+    result, writes = _selecting_reconcile_begin(
+        monkeypatch,
+        capsys,
+        [merged_project, merged_ticket, project, ticket],
+        [{"number": 400, "headRefName": "ticket/40", "headRefOid": "head"}],
+        {400: {"verdict": "approved", "head_sha": "head"}},
+        lambda items, now, repo, pr, confirmed: 0,
+    )
+
+    assert result["reconciled_merges"] == [{
+        "repo": merged_ticket.repo,
+        "pr": 400,
+        "ref": merged_ticket.ref,
+        "result": "merged",
+    }]
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert [ref for ref, value in writes if value] == [ticket.ref]

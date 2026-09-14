@@ -189,13 +189,16 @@ def validate_answer(data: object) -> Dict:
 def render_plan(answer: Dict) -> str:
     """Render the issue body from validated answer fields.
 
-    The plan narrative comes first, then the runner-owned decision
-    record: what precedent settled, what the agent decided itself, the
-    four Needs Nate categories (a question where one is open, the
-    stable all-clear line where not), and the proposed class. Takes a
-    validated answer; ``apply_shape`` validates before calling.
+    The plan narrative and its proposed class come first, then the
+    runner-owned decision record: what precedent settled, what the
+    agent decided itself, and the four Needs Nate categories (a
+    question where one is open, the stable all-clear line where not).
+    Needs stays last so the section holds only its category lines for
+    the readers that still parse it. Takes a validated answer;
+    ``apply_shape`` validates before calling.
     """
     lines = [answer["plan_markdown"].rstrip(), "",
+             "Proposed class: {}".format(answer["proposed_class"]), "",
              "## Decided from precedent", ""]
     precedent = answer["decided_from_precedent"]
     if precedent:
@@ -219,9 +222,7 @@ def render_plan(answer: Dict) -> str:
         lines.append("- {}: {}".format(
             category,
             question if question is not None else ALL_CLEAR[category]))
-    lines.extend(["",
-                  "Proposed class: {}".format(answer["proposed_class"]),
-                  ""])
+    lines.append("")
     return "\n".join(lines)
 
 

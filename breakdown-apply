@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+"""breakdown-apply — validate one breakdown answer and create its tickets.
+
+Usage: breakdown-apply <project> --answer - [--repo owner/name]
+
+Part of #794: validates the model's JSON answer against the ticket schema
+and performs every side effect. Exit 2 means the answer failed validation
+and nothing was created; exit 1 means a GitHub or local failure, possibly
+after creating some tickets (named on stderr).
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from engine.breakdown import apply_main as main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

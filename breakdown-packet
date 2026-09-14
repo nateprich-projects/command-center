@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""breakdown-packet — print one read-only breakdown packet for a project.
+
+Usage: breakdown-packet <project> [--repo owner/name]
+
+Part of #794: the breakdown runner shows the model this packet and nothing
+else. No writes; every GitHub call is a read.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from engine.breakdown import packet_main as main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

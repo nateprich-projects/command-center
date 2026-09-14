@@ -35,9 +35,6 @@ ROUTINE = ROOT / "routines" / "codex-work.md"
 AUTOMATIONS = pathlib.Path.home() / ".codex" / "automations"
 GLOB = "command-center-*/automation.toml"
 
-sys.path.insert(0, str(ROOT))
-import funnel  # noqa: E402
-
 #: Everything above this line is setup documentation for Nate — how to paste it,
 #: how to scope the sandbox. The agent at runtime needs what is below it.
 SEPARATOR = "\n---\n"
@@ -65,22 +62,6 @@ IDLE_RRULE_MARKER = "BYHOUR="
 
 
 BEGIN_LINE = "funnel.py begin --agent codex --tier standard"
-NEXT_LINE = "funnel.py next --tier standard"
-ROUTINE_SHA_PREFIX_LENGTH = 16
-# The source routine is intentionally hash-free: the copied prompt is the thing
-# that identifies itself, and each lane has its own derived flags. Strip a
-# future source literal from the opening command before inserting the current
-# one, so a stale literal is replaced rather than duplicated.
-ROUTINE_SHA_ARGUMENT = re.compile(r"(?:[ \t]+)--routine-sha[ \t]+\S+")
-# During rollout, installed prompts may still carry the old full hash. Only
-# current hashes in one of the two supported lengths are normalised for
-# `--check`; an incorrect prefix, or a full hash with an incorrect suffix, stays
-# different and is reported as drift.
-PROMPT_SHA_ARGUMENT = re.compile(
-    r"(?P<option>--routine-sha[ \t]+)"
-    r"(?P<literal>[0-9a-fA-F]{64}|[0-9a-fA-F]{16})"
-    r"(?=$|[ \t\r\n])"
-)
 # Kept as a compatibility prefix for callers that use the old name for the
 # schedule-specific opening command.
 GATE_LINE = "funnel.py begin --agent codex"
@@ -188,8 +169,7 @@ def prompt_text(automation: str = "") -> str:
     """The runtime prompt for one automation.
 
     Everything above the `---` is setup documentation for Nate; below it is what
-    the agent runs. Per-automation differences are the tier and idle flag; the
-    routine hash is shared by every derived lane.
+    the agent runs. Per-automation differences are the tier and idle flag.
     """
     body = ROUTINE.read_text()
     title = body.splitlines()[0].strip()
@@ -197,19 +177,11 @@ def prompt_text(automation: str = "") -> str:
         raise SystemExit("{}: no '---' separator; cannot tell setup notes from the "
                          "runtime prompt".format(ROUTINE))
     runtime = body.split(SEPARATOR, 1)[1].strip()
-    runtime = "\n".join(
-        ROUTINE_SHA_ARGUMENT.sub("", line) if BEGIN_LINE in line else line
-        for line in runtime.splitlines()
-    )
     tier = tier_for(automation)
     begin = BEGIN_LINE.replace("standard", tier)
-    begin += " --routine-sha {}".format(
-        funnel.routine_sha(ROUTINE)[:ROUTINE_SHA_PREFIX_LENGTH]
-    )
     if needs_presence_check(automation):
         begin += " --idle"
     runtime = runtime.replace(BEGIN_LINE, begin, 1)
-    runtime = runtime.replace(NEXT_LINE, NEXT_LINE.replace("standard", tier))
     return "{}\n\n{}\n".format(title, runtime)
 
 
@@ -229,34 +201,6 @@ def same_prompt(existing: Optional[str], wanted: str) -> bool:
     if existing is None:
         return False
     return existing.rstrip("\n") == wanted.rstrip("\n")
-
-
-def same_prompt_during_sha_transition(
-    existing: Optional[str], wanted: str
-) -> bool:
-    """Whether a prompt matches while old full hashes are being rolled out.
-
-    Write mode uses ``same_prompt`` so a sync run upgrades a legacy prompt to
-    the new short literal. ``--check`` uses this comparison instead: it accepts
-    the exact current hash in either its 16-character prefix or 64-character
-    legacy form, while preserving all other prompt differences.
-    """
-    if existing is None:
-        return False
-
-    expected = funnel.routine_sha(ROUTINE)
-    prefix = expected[:ROUTINE_SHA_PREFIX_LENGTH]
-
-    def canonicalize(text: str) -> str:
-        def replace(match: re.Match) -> str:
-            literal = match.group("literal").lower()
-            if literal in (prefix, expected):
-                return match.group("option") + prefix
-            return match.group(0)
-
-        return PROMPT_SHA_ARGUMENT.sub(replace, text)
-
-    return same_prompt(canonicalize(existing), canonicalize(wanted))
 
 
 def current(text: str):
@@ -308,8 +252,7 @@ def main(argv=None) -> int:
                 ledger.append((name, "unwritable"))
                 stale.append(name)
             continue
-        matches = (same_prompt_during_sha_transition(existing, wanted)
-                   if args.check else same_prompt(existing, wanted))
+        matches = same_prompt(existing, wanted)
         if matches:
             print("  ok       {}".format(name))
             if not args.check:

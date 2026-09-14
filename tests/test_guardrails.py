@@ -35,13 +35,11 @@ CAPTURE_ROUTINES = (
     "muse.md",
     "muse-implement.md",
     "zcode.md",
-    "codex-work.md",
 )
 AGENT_CAPTURE_ROUTINES = (
     "claude.md",
     "muse.md",
     "muse-implement.md",
-    "codex-work.md",
 )
 CAPTURE_RULE = (
     "When this run observes a defect (broken behaviour, a failing command, or a "
@@ -212,14 +210,12 @@ def test_agent_run_documents_use_no_bytecode_verification_commands():
     )
 
 
-def test_codex_routine_documents_the_canonical_verification_commands():
+def test_codex_routine_delegates_verification_to_finish_ticket():
     body = (ROOT / "routines" / "codex-work.md").read_text(encoding="utf-8")
-    assert (
-        "PYTHONDONTWRITEBYTECODE=1 python3 -c 'from pathlib import Path; "
-        "compile(Path(\"funnel.py\").read_text(), \"funnel.py\", \"exec\")'"
-    ) in body
-    assert "PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile funnel.py" not in body
-    assert "PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q" in body
+    assert "finish-ticket --run <run> --answer -" in body
+    assert "tests the checkout" in body
+    assert "PYTHONDONTWRITEBYTECODE" not in body
+    assert "python3 -m pytest" not in body
 
 
 def test_the_permission_rule_itself_is_intact():

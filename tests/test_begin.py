@@ -30,6 +30,17 @@ def _bindings_never_touch_the_real_spool(monkeypatch):
     monkeypatch.setattr(heartbeat, "record_binding", lambda *args, **kwargs: "pushed")
     monkeypatch.setattr(funnel, "finished_by_comments", lambda items: set())
     monkeypatch.setattr(funnel, "reconcile_orphaned_starts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        funnel,
+        "implementation_packet",
+        lambda repo, number, agent: {
+            "repo": repo,
+            "ticket": {"number": number},
+            "plan": None,
+            "verdict": {"blocking": []},
+            "prior_run": None,
+        },
+    )
 
 
 def _allow_begin(monkeypatch):
@@ -687,6 +698,69 @@ def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
     assert events == [
         "heartbeat", "reconcile", "clear", "next", "read-lock", "claim"
     ]
+
+
+def test_codex_ticket_begin_carries_the_implementation_packet_and_vendor_block(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(81, 80)
+    packet = {
+        "repo": ticket.repo,
+        "ticket": {"number": ticket.number, "body": "Do the work."},
+        "plan": {"number": project.number, "body": "# Plan"},
+        "verdict": {"blocking": ["cover the empty case"]},
+        "prior_run": {"session": "prior.jsonl"},
+    }
+    calls = []
+    monkeypatch.setattr(
+        funnel,
+        "implementation_packet",
+        lambda repo, number, agent: (
+            calls.append((repo, number, agent)) or packet
+        ),
+    )
+
+    result, _ = _implementing_begin(monkeypatch, capsys, [project, ticket])
+
+    assert result["do"] == "ticket"
+    assert result["packet"] == packet
+    assert result["vendor"] == funnel.CODEX_IMPLEMENT_VENDOR
+    assert calls == [(ticket.repo, ticket.number, "codex")]
+
+
+def test_codex_stop_and_non_codex_ticket_do_not_carry_the_vendor_packet(
+    monkeypatch, capsys
+):
+    stopped, _ = _implementing_begin(monkeypatch, capsys, [])
+    assert stopped["do"] == "stop"
+    assert "packet" not in stopped and "vendor" not in stopped
+
+    project, ticket = _ticket(83, 82, body="Risk: escalated")
+    muse, _ = _implementing_begin(
+        monkeypatch, capsys, [project, ticket], agent="muse", tier="escalated"
+    )
+    assert muse["do"] == "ticket"
+    assert "packet" not in muse and "vendor" not in muse
+
+
+def test_codex_packet_failure_releases_the_claim_and_stops(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(85, 84)
+    monkeypatch.setattr(
+        funnel,
+        "implementation_packet",
+        lambda *args: (_ for _ in ()).throw(
+            funnel.GitHubError("packet source unavailable")
+        ),
+    )
+
+    result, writes = _implementing_begin(monkeypatch, capsys, [project, ticket])
+
+    assert result["do"] == "stop"
+    assert "work" not in result
+    assert "packet source unavailable" in result["why"]
+    assert writes[-1] == (ticket.ref, None)
 
 
 def test_two_same_minute_begins_claim_different_tickets(monkeypatch, capsys):

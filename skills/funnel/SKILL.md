@@ -153,7 +153,7 @@ brief response made it back.
 When `degraded` is non-empty, say which informational sections exceeded their
 budgets and that the brief is partial. If `brief` exits non-zero, show the error
 and do not use a partial or missing `rejected_merges` value to justify a merge;
-that section is a fail-closed pre-merge gate.
+the merge gate reads the counter itself and refuses on a partial read.
 
 For `unclassed_captures`, show each Idea's origin and make the repair owner clear:
 agent-origin entries are for the shaping agent to class, while Nate-origin and unknown

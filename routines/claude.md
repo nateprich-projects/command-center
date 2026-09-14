@@ -27,7 +27,7 @@ preempt.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha 0093038c9182e89c038d8d77a09e4f6b36f15a0480667c306d80b4e8e45f3c62
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha 2e5150f66f4dab1be170b3dc1ce76773d11e8134498870a7d3ddfbd2454e25cc
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and names
@@ -166,8 +166,9 @@ python3 /Users/nateprich/.claude/command-center-run/funnel.py merge <pr> --yes
 
 `review` stamps your verdict with the commit you actually read. `merge` then
 checks every condition itself — the branch matches a ticket whose project is
-`Building`, CI is green, a verdict exists, it says approved, and **the approved
-commit is still the head**. If anything fails it refuses and lists why.
+`Building`, CI is green, a verdict exists, it says approved, **the approved
+commit is still the head**, and auto-merging is not stopped. If anything
+fails it refuses and lists why.
 
 Your judgement is the part only you can do. Typing `gh pr merge` is not, and
 doing it by hand is what makes an unattended merge impossible to audit later.
@@ -342,7 +343,6 @@ the brief as a record — the note is that record.
 auto-merge bar having failed, which is a different and more serious thing. He
 runs `funnel reject <pr>`, which reopens the ticket, files the regression,
 returns the parent to `Building` with `Class: Broken`, and reports the count.
-**Three in a week and auto-merging stops** until this prompt is fixed. Before
-merging anything, run `funnel brief` and require it to succeed, then check
-`rejected_merges.stop_auto_merging`. If the command fails or that gate-feeding
-section is missing/degraded, do not merge: the check is fail-closed.
+**Three in a week and auto-merging stops** until this prompt is fixed. Do not
+run `funnel brief` in the merge path: the gate reads the rejected-merge
+counter itself and refuses while auto-merging is stopped.

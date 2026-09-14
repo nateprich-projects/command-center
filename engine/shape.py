@@ -38,6 +38,28 @@ class ShapeError(Exception):
     """A shape answer failed validation, or shaping cannot proceed."""
 
 
+#: Malformed answer on a runner-protocol attempt below the final one: the
+#: runner feeds the parse error back to the model and calls again.
+RETRY_EXIT = 3
+
+#: Attempts past the first are final: a malformed answer then exits 1
+#: with nothing recorded, and the runner finishes the run errored. The
+#: idea keeps its needs-shaping label, so the next run asks again.
+FINAL_ATTEMPT = 2
+
+
+def validation_exit(attempt: Optional[int]) -> int:
+    """The exit for a malformed answer, recording nothing either way.
+
+    Without ``--attempt`` the single-shot legacy exit 1 stands. With an
+    explicit attempt the runner protocol applies: retryable 3 below the
+    final attempt, 1 at it.
+    """
+    if attempt is None:
+        return 1
+    return RETRY_EXIT if attempt < FINAL_ATTEMPT else 1
+
+
 #: The answer keys shape-apply accepts — exactly these, no extras. From
 #: the Shape row of #794.
 ANSWER_KEYS = frozenset({
@@ -282,6 +304,33 @@ def decide(answer: Dict, *,
     return "Shaped", "; ".join(failed)
 
 
+def preview_decision(items: list, item, answer: Dict) -> Tuple[str, str]:
+    """The status one validated answer would record, without writing.
+
+    The same inputs the live path decides from — the effective class
+    with the class-missing recovery, the origin voice and override, and
+    the escalated-risk scan of the rendered plan — so ``--validate-only``
+    reports the status the live path would write. Pure apart from its
+    arguments; takes a validated answer.
+    """
+    original_body = item.body or ""
+    origin = funnel.parse_origin(original_body)
+    origin_voice = origin["voice"] if origin is not None else None
+    override = funnel.parse_origin_override(original_body)
+    override_target = override["target"] if override is not None else None
+    by_ref = {candidate.ref: candidate for candidate in items}
+    effective_klass = funnel.effective_class(item, by_ref)
+    if item.klass not in funnel.LADDER and origin_voice == "agent":
+        effective_klass = answer["proposed_class"]
+    return decide(
+        answer,
+        klass=effective_klass,
+        origin_voice=origin_voice,
+        override_target=override_target,
+        escalation_reasons=funnel.plan_is_escalated(render_plan(answer)),
+    )
+
+
 def fetch_repo_text(repo: str, path: str) -> Tuple[str, bool]:
     """One text file at the repo's default branch, or ("", True).
 
@@ -449,16 +498,13 @@ def apply_shape(items: list, now: datetime, ref: str,
         block = funnel._marked_json_block(original_body, marker)
         if block is not None:
             carried_blocks.append(block)
-    override = funnel.parse_origin_override(original_body)
-    override_target = override["target"] if override is not None else None
-
-    by_ref = {candidate.ref: candidate for candidate in items}
     class_missing = item.klass not in funnel.LADDER
-    effective_klass = funnel.effective_class(item, by_ref)
-    if class_missing and origin_voice == "agent":
-        effective_klass = answer["proposed_class"]
 
     rendered = render_plan(answer)
+    # Decided before the first write from the same inputs as the shadow
+    # path: the decision is pure, and previewing it early changes nothing
+    # the writes below can observe.
+    status, reason = preview_decision(items, item, answer)
     authority_signals = funnel.needs_nate_signals(rendered)
     body = funnel.append_provenance(
         rendered, "agent", at=now, run=run, agent=agent)
@@ -479,14 +525,6 @@ def apply_shape(items: list, now: datetime, ref: str,
 
     if not item.item_id:
         raise funnel.GitHubError("{} is not in the Project".format(item.ref))
-    escalation_reasons = funnel.plan_is_escalated(rendered)
-    status, reason = decide(
-        answer,
-        klass=effective_klass,
-        origin_voice=origin_voice,
-        override_target=override_target,
-        escalation_reasons=escalation_reasons,
-    )
     if class_missing and origin_voice == "agent":
         # This recovery write is the only place shaping may assign a
         # Class. Keep it immediately before the Status mutation so the
@@ -577,7 +615,17 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
                         help="run id recorded in provenance blocks")
     parser.add_argument("--agent", default=None,
                         help="agent name recorded in provenance blocks")
+    parser.add_argument("--attempt", type=int, default=None,
+                        help="attempt number in the runner protocol: a "
+                             "malformed answer exits 3 below attempt 2 "
+                             "(the runner retries once) and 1 at 2 or "
+                             "later. Without --attempt, exit 1.")
+    parser.add_argument("--validate-only", action="store_true",
+                        help="validate and decide without writing anything; "
+                             "print the status, reason, and answer as JSON")
     args = parser.parse_args(argv)
+    if args.attempt is not None and args.attempt < 1:
+        parser.error("--attempt must be at least 1")
     try:
         if args.answer == "-":
             raw = sys.stdin.read()
@@ -587,16 +635,35 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
             except OSError as exc:
                 raise ShapeError(
                     "cannot read {}: {}".format(args.answer, exc))
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ShapeError(
-                "the answer is not valid JSON: {}".format(exc))
+    except (ShapeError, funnel.GitHubError) as exc:
+        # An unreadable answer is a local failure, not a malformed one:
+        # retrying the same read could not help.
+        print("shape-apply: {}".format(exc), file=sys.stderr)
+        return 1
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print("shape-apply: the answer is not valid JSON: {}".format(exc),
+              file=sys.stderr)
+        return validation_exit(args.attempt)
+    try:
+        answer = validate_answer(data)
+    except ShapeError as exc:
+        print("shape-apply: {}".format(exc), file=sys.stderr)
+        return validation_exit(args.attempt)
+    try:
         resolved = funnel.resolve_repo(args.repo)
         items = funnel.load_items()
+        ref = "{}#{}".format(resolved, args.idea)
+        if args.validate_only:
+            item = funnel.find(items, ref)
+            status, reason = preview_decision(items, item, answer)
+            print(json.dumps({"status": status, "reason": reason,
+                              "answer": answer},
+                             indent=2, sort_keys=True))
+            return 0
         return apply_shape(
-            items, datetime.now(timezone.utc),
-            "{}#{}".format(resolved, args.idea), data,
+            items, datetime.now(timezone.utc), ref, data,
             run=args.run, agent=args.agent)
     except (ShapeError, funnel.GitHubError) as exc:
         print("shape-apply: {}".format(exc), file=sys.stderr)

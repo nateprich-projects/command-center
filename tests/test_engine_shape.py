@@ -784,3 +784,138 @@ def test_apply_cli_rejects_a_malformed_answer_without_writing(
         ["42", "--repo", REPO, "--answer", "-"]) == 1
     assert "plan_markdown" in capsys.readouterr().err
     assert item.status == "Ideas"
+
+
+# -- the runner protocol: --attempt and --validate-only ----------------------
+
+def test_validation_exit_maps_attempts_to_retry_then_final():
+    """#811: without --attempt the single-shot exit 1 stands; with it, a
+    malformed answer is retryable below attempt 2 and final at it."""
+    assert shape.validation_exit(None) == 1
+    assert shape.validation_exit(1) == 3
+    assert shape.validation_exit(2) == 1
+    assert shape.validation_exit(3) == 1
+
+
+def test_apply_cli_with_attempt_1_asks_for_a_retry(monkeypatch, capsys):
+    item = idea(42)
+    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+
+    def fail(*args, **kwargs):
+        raise AssertionError("no write may precede validation")
+
+    monkeypatch.setattr(funnel, "gh_graphql", fail)
+    monkeypatch.setattr(funnel.subprocess, "run", fail)
+    bad = answer()
+    del bad["plan_markdown"]
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(bad)))
+    assert shape.apply_main(
+        ["42", "--repo", REPO, "--answer", "-",
+         "--attempt", "1"]) == 3
+    assert "plan_markdown" in capsys.readouterr().err
+    assert item.status == "Ideas"
+
+
+def test_apply_cli_with_attempt_2_is_final(monkeypatch, capsys):
+    item = idea(42)
+    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+
+    def fail(*args, **kwargs):
+        raise AssertionError("no write may precede validation")
+
+    monkeypatch.setattr(funnel, "gh_graphql", fail)
+    monkeypatch.setattr(funnel.subprocess, "run", fail)
+    bad = answer()
+    del bad["plan_markdown"]
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(bad)))
+    assert shape.apply_main(
+        ["42", "--repo", REPO, "--answer", "-",
+         "--attempt", "2"]) == 1
+    assert "plan_markdown" in capsys.readouterr().err
+    assert item.status == "Ideas"
+
+
+def test_apply_cli_with_attempt_rejects_invalid_json(monkeypatch, capsys):
+    def fail(*args, **kwargs):
+        raise AssertionError("no GitHub read may precede parsing")
+
+    monkeypatch.setattr(funnel, "load_items", fail)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("not json"))
+    assert shape.apply_main(
+        ["42", "--repo", REPO, "--answer", "-",
+         "--attempt", "1"]) == 3
+    assert "not valid JSON" in capsys.readouterr().err
+    monkeypatch.setattr(sys, "stdin", io.StringIO("not json"))
+    assert shape.apply_main(
+        ["42", "--repo", REPO, "--answer", "-",
+         "--attempt", "2"]) == 1
+
+
+def test_apply_cli_validate_only_reports_the_decision_without_writing(
+        monkeypatch, capsys):
+    """The runner's shadow path: decide from the same inputs as the live
+    path and report, without touching the idea."""
+    item = idea(42)
+    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+
+    def fail(*args, **kwargs):
+        raise AssertionError("validate-only must not reach GitHub")
+
+    monkeypatch.setattr(funnel, "gh_graphql", fail)
+    monkeypatch.setattr(funnel.subprocess, "run", fail)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(answer())))
+    assert shape.apply_main(
+        ["42", "--repo", REPO, "--answer", "-",
+         "--validate-only"]) == 0
+    found = json.loads(capsys.readouterr().out)
+    # The same answer advances the live path to Ready
+    # (test_apply_cli_reads_the_answer_from_stdin): the preview must agree.
+    assert found["status"] == "Ready"
+    assert "needs_nate all null" in found["reason"]
+    assert found["answer"]["proposed_class"] == "Improve"
+    assert item.status == "Ideas"
+
+
+def test_apply_cli_validate_only_previews_a_shaped_decision(
+        monkeypatch, capsys):
+    item = idea(42)
+    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+
+    def fail(*args, **kwargs):
+        raise AssertionError("validate-only must not reach GitHub")
+
+    monkeypatch.setattr(funnel, "gh_graphql", fail)
+    monkeypatch.setattr(funnel.subprocess, "run", fail)
+    held = answer(needs_nate={"exposure": "May this ship in September?",
+                              "gates": None, "scope": None,
+                              "preference": None})
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(held)))
+    assert shape.apply_main(
+        ["42", "--repo", REPO, "--answer", "-",
+         "--validate-only"]) == 0
+    found = json.loads(capsys.readouterr().out)
+    assert found["status"] == "Shaped"
+    assert "open question under Exposure" in found["reason"]
+    assert item.status == "Ideas"
+
+
+def test_apply_cli_validate_only_rejects_a_malformed_answer(
+        monkeypatch, capsys):
+    item = idea(42)
+    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+    bad = answer()
+    del bad["plan_markdown"]
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(bad)))
+    assert shape.apply_main(
+        ["42", "--repo", REPO, "--answer", "-", "--validate-only",
+         "--attempt", "1"]) == 3
+    assert "plan_markdown" in capsys.readouterr().err
+
+
+def test_apply_main_rejects_an_attempt_below_1(monkeypatch):
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps(answer())))
+    with pytest.raises(SystemExit) as caught:
+        shape.apply_main(["42", "--repo", REPO, "--answer", "-",
+                          "--attempt", "0"])
+    assert caught.value.code == 2

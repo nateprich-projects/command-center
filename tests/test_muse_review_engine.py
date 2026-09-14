@@ -1,16 +1,17 @@
-"""scripts/muse-review-engine judges one PR against its packet, then stops.
+"""scripts/muse-review-engine judges one job against its packet, then stops.
 
-Phase 1 of #794: the runner executes the protocol and the model answers one
-question. begin claims the PR, review-packet assembles the evidence, and a
-failing precheck is applied as rejected with no model call at all. Otherwise
-the model sees the judgement prompt with the packet inline and no tools, its
-one JSON answer is validated, retried once on a parse error, and handed to
-review-apply. --shadow records the answer on the PR and the finish note
-instead of applying: the shadow period before the cutover.
+Phases 1 and 2 of #794: the runner executes the protocol and the model
+answers one question. begin offers the work, the packet command assembles
+the evidence, and a failing review precheck is applied as rejected with no
+model call at all. Otherwise the model sees the job's judgement prompt with
+the packet inline and no tools, its one JSON answer is validated, retried
+once on a parse error, and handed to the apply command. --shadow records
+the answer on the PR or issue and the finish note instead of applying: the
+shadow period before the cutover.
 
 The harness below stubs the funnel, heartbeat, packet, apply, gh, and muse
-binaries; the routine text is the real file, so the prompt-substitution and
-word-count tests pin the artifact that ships.
+binaries; the routine text is the real files, so the prompt-substitution
+and word-count tests pin the artifacts that ship.
 """
 
 from __future__ import annotations
@@ -26,10 +27,15 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "muse-review-engine"
 ROUTINE = ROOT / "routines" / "muse-review.md"
+ROUTINE_BREAKDOWN = ROOT / "routines" / "muse-breakdown.md"
+ROUTINE_SHAPE = ROOT / "routines" / "muse-shape.md"
 
 REPO = "owner/repo"
 PR = 7
 HEAD = "abc123def456"
+BREAKDOWN_REF = "owner/repo#1"
+SHAPE_NUM = 5
+SHAPE_REF = "owner/repo#5"
 
 
 def _begin(**overrides):
@@ -75,6 +81,76 @@ def _answer(**overrides):
     data = {"verdict": "approved", "blocking": [], "unsure": []}
     data.update(overrides)
     return json.dumps(data)
+
+
+def _issue_begin(job):
+    ref = BREAKDOWN_REF if job == "breakdown" else SHAPE_REF
+    return {"agent": "muse", "run": "engine-run", "gate": "ok",
+            "do": job, "work": {"ref": ref, "title": "The {}".format(job)}}
+
+
+def _issue_packet(job):
+    if job == "breakdown":
+        return {
+            "project": {"ref": BREAKDOWN_REF, "number": 1,
+                        "title": "The plan",
+                        "body": "# Plan\n\nDeliver the thing end to end."},
+            "siblings": [{"ref": "owner/repo#2", "title": "First slice"}],
+            "sizing_standard": "One ticket is one run ending in one "
+                               "pull request, holding one concern.",
+            "collected_at": "2026-09-14T00:00:00+00:00",
+        }
+    return {
+        "idea": {"ref": SHAPE_REF, "number": SHAPE_NUM, "title": "The idea",
+                 "body": "Captured note: rotate the api-key monthly."},
+        "origin": {"voice": "agent", "override_target": None},
+        "plan_md": "# Plan\n\nThe repo's written rules.",
+        "plan_md_missing": False,
+        "agents_md": "# AGENTS\n\nThe rule book.",
+        "agents_md_missing": False,
+        "sibling_plans": [{"ref": "owner/repo#9", "title": "A sibling plan"}],
+        "collected_at": "2026-09-14T00:00:00+00:00",
+    }
+
+
+def _issue_ticket(title, **overrides):
+    ticket = {"title": title, "body": "What: {}.\n\nAccept: it is done.".format(title),
+              "risk": "standard", "depends_on": [], "needs": "none"}
+    ticket.update(overrides)
+    return ticket
+
+
+def _breakdown_answer(**overrides):
+    data = {"tickets": [_issue_ticket("First slice"),
+                        _issue_ticket("Second slice")],
+            "needs_decision": None}
+    data.update(overrides)
+    return json.dumps(data)
+
+
+def _shape_answer(**overrides):
+    data = {
+        "decided_from_precedent": [
+            {"claim": "keys rotate monthly", "source": "plan.md policy"},
+        ],
+        "decided_by_agent": [
+            {"decision": "rotate on the first",
+             "alternative": "rotate on demand",
+             "why": "a fixed date is auditable"},
+        ],
+        "needs_nate": {"exposure": None, "gates": None, "scope": None,
+                       "preference": None},
+        "proposed_class": "Improve",
+        "plan_markdown": "# Plan\n\nRotate the api-key monthly.\n",
+    }
+    data.update(overrides)
+    return json.dumps(data)
+
+
+def _issue_answer(job, **overrides):
+    if job == "breakdown":
+        return _breakdown_answer(**overrides)
+    return _shape_answer(**overrides)
 
 
 FUNNEL_STUB = (
@@ -164,6 +240,145 @@ APPLY_STUB = (
     "print('recorded {} on PR #{} against {} in {}'.format(verdict, args[0], flag('--head'), flag('--repo')))\n"
 )
 
+
+def _issue_packet_stub(noun):
+    """The packet stub for an issue job: the same read-only shape as the
+    review one, with a failure message naming the job's packet."""
+    return (
+        "import os, pathlib, sys\n"
+        "root = pathlib.Path(__file__).parent\n"
+        "with (root / 'packet.calls').open('a') as fh:\n"
+        "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "if os.environ.get('PACKET_STATUS', '0') != '0':\n"
+        "    sys.stderr.write('could not read the " + noun + " packet for {}\\n'.format(sys.argv[1]))\n"
+        "    raise SystemExit(1)\n"
+        "sys.stdout.write((root / 'packet.json').read_text())\n"
+    )
+
+
+# Emulates the breakdown-apply contract the runner depends on: the
+# --attempt retry protocol (exit 3 below attempt 2, exit 1 at it),
+# --validate-only printing the normalized answer, and the live report with
+# the created refs or the needs-decision question. A real apply drops an
+# APPLIED marker file, so the shadow tests can prove nothing was applied by
+# its absence.
+BREAKDOWN_APPLY_STUB = (
+    "import json, os, pathlib, sys\n"
+    "root = pathlib.Path(__file__).parent\n"
+    "with (root / 'apply.calls').open('a') as fh:\n"
+    "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
+    "args = sys.argv[1:]\n"
+    "def flag(name):\n"
+    "    if name in args and args.index(name) + 1 < len(args):\n"
+    "        return args[args.index(name) + 1]\n"
+    "    return None\n"
+    "attempt = int(flag('--attempt') or '1')\n"
+    "validate_only = '--validate-only' in args\n"
+    "raw = pathlib.Path(flag('--answer')).read_text()\n"
+    "(root / 'apply.answer').write_text(raw)\n"
+    "def malformed(reason):\n"
+    "    sys.stderr.write('breakdown-apply: malformed answer (attempt {}): {}\\n'.format(attempt, reason))\n"
+    "    raise SystemExit(3 if attempt < 2 else 1)\n"
+    "try:\n"
+    "    data = json.loads(raw)\n"
+    "except ValueError as exc:\n"
+    "    malformed('invalid JSON: {}'.format(exc))\n"
+    "if not isinstance(data, dict):\n"
+    "    malformed('the answer must be one JSON object')\n"
+    "tickets = data.get('tickets')\n"
+    "question = data.get('needs_decision')\n"
+    "if tickets is None and question is None:\n"
+    "    malformed('the answer needs tickets or a needs-decision question, not neither')\n"
+    "if tickets is not None and question is not None:\n"
+    "    malformed('the answer needs tickets or a needs-decision question, not both')\n"
+    "checked = []\n"
+    "if tickets is not None:\n"
+    "    if not isinstance(tickets, list) or not tickets:\n"
+    "        malformed('tickets must be a non-empty list')\n"
+    "    for position, ticket in enumerate(tickets):\n"
+    "        if not isinstance(ticket, dict):\n"
+    "            malformed('ticket {} is not an object'.format(position))\n"
+    "        for key in ('title', 'body'):\n"
+    "            if not ticket.get(key) or not isinstance(ticket.get(key), str):\n"
+    "                malformed('ticket {} needs a non-empty {}'.format(position, key))\n"
+    "        if ticket.get('risk') not in ('standard', 'escalated'):\n"
+    "            malformed('ticket {} risk must be standard or escalated'.format(position))\n"
+    "        if ticket.get('needs') not in ('none', 'human', 'claude-code-environment'):\n"
+    "            malformed('ticket {} needs an allowed needs value'.format(position))\n"
+    "        if not isinstance(ticket.get('depends_on'), list):\n"
+    "            malformed('ticket {} depends_on must be a list'.format(position))\n"
+    "        checked.append({key: ticket[key] for key in ('title', 'body', 'risk', 'needs', 'depends_on')})\n"
+    "if validate_only:\n"
+    "    print(json.dumps({'tickets': checked, 'needs_decision': question}, sort_keys=True))\n"
+    "    raise SystemExit(0)\n"
+    "if os.environ.get('APPLY_REFUSE', ''):\n"
+    "    sys.stderr.write('breakdown-apply: project {} is closed; nothing to break down\\n'.format(args[0]))\n"
+    "    raise SystemExit(1)\n"
+    "(root / 'applied.marker').write_text('applied')\n"
+    "if tickets is None:\n"
+    "    print(json.dumps({'project': args[0], 'needs_decision': question}, sort_keys=True))\n"
+    "else:\n"
+    "    created = [{'ref': 'owner/repo#{}'.format(101 + position)} for position in range(len(checked))]\n"
+    "    print(json.dumps({'project': args[0], 'created': created}, sort_keys=True))\n"
+)
+
+# Emulates the shape-apply contract: the same --attempt protocol, a
+# --validate-only report of the status the live path would record, and the
+# live report with the ref-to-status line and the advanced/held line. Open
+# Nate questions hold the idea at Shaped; a clean answer advances to Ready.
+SHAPE_APPLY_STUB = (
+    "import json, os, pathlib, sys\n"
+    "root = pathlib.Path(__file__).parent\n"
+    "with (root / 'apply.calls').open('a') as fh:\n"
+    "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
+    "args = sys.argv[1:]\n"
+    "def flag(name):\n"
+    "    if name in args and args.index(name) + 1 < len(args):\n"
+    "        return args[args.index(name) + 1]\n"
+    "    return None\n"
+    "attempt = int(flag('--attempt') or '1')\n"
+    "validate_only = '--validate-only' in args\n"
+    "raw = pathlib.Path(flag('--answer')).read_text()\n"
+    "(root / 'apply.answer').write_text(raw)\n"
+    "def malformed(reason):\n"
+    "    sys.stderr.write('shape-apply: malformed answer (attempt {}): {}\\n'.format(attempt, reason))\n"
+    "    raise SystemExit(3 if attempt < 2 else 1)\n"
+    "try:\n"
+    "    data = json.loads(raw)\n"
+    "except ValueError as exc:\n"
+    "    malformed('invalid JSON: {}'.format(exc))\n"
+    "if not isinstance(data, dict):\n"
+    "    malformed('the answer must be one JSON object')\n"
+    "for key in ('decided_from_precedent', 'decided_by_agent', 'needs_nate', 'proposed_class', 'plan_markdown'):\n"
+    "    if key not in data:\n"
+    "        malformed('the answer needs {}'.format(key))\n"
+    "needs = data.get('needs_nate')\n"
+    "if not isinstance(needs, dict) or set(needs) != {'exposure', 'gates', 'scope', 'preference'}:\n"
+    "    malformed('needs_nate must hold the four Nate questions')\n"
+    "if data.get('proposed_class') not in ('Investigate', 'Broken', 'Maintenance', 'Improve', 'New', 'Replace'):\n"
+    "    malformed('proposed_class must name one ladder class')\n"
+    "if not data.get('plan_markdown') or not isinstance(data.get('plan_markdown'), str):\n"
+    "    malformed('plan_markdown must be non-empty')\n"
+    "asked = [name for name in ('exposure', 'gates', 'scope', 'preference') if needs[name]]\n"
+    "if asked:\n"
+    "    status, reason = 'Shaped', 'open questions for Nate: {}'.format(', '.join(asked))\n"
+    "else:\n"
+    "    status, reason = 'Ready', 'self-approved: agent idea, finite class, no open questions'\n"
+    "if validate_only:\n"
+    "    print(json.dumps({'status': status, 'reason': reason, 'answer': data}, sort_keys=True))\n"
+    "    raise SystemExit(0)\n"
+    "if os.environ.get('APPLY_REFUSE', ''):\n"
+    "    sys.stderr.write('shape-apply: idea {} is not in the Project\\n'.format(args[0]))\n"
+    "    raise SystemExit(1)\n"
+    "(root / 'applied.marker').write_text('applied')\n"
+    "ref = '{}#{}'.format(flag('--repo'), args[0])\n"
+    "print('{0} \\u2192 {1}\\nhttps://github.com/{2}/issues/{3}'.format(ref, status, flag('--repo'), args[0]))\n"
+    "if status == 'Ready':\n"
+    "    print('advanced to Ready: {}'.format(reason))\n"
+    "else:\n"
+    "    print('held at Shaped: {}'.format(reason))\n"
+)
+
 MUSE_STUB = (
     "#!/bin/bash\n"
     "count_file=\"$MUSE_COUNT\"\n"
@@ -217,6 +432,15 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
     (repo / "routines" / "muse-review.md").write_text(
         routine_body if routine_body is not None else ROUTINE.read_text()
     )
+    # The engine checks every prompt before begin, so the stub repo carries
+    # all three real routines: a run must never take work it cannot ask
+    # about, whatever the job turns out to be.
+    (repo / "routines" / "muse-breakdown.md").write_text(
+        ROUTINE_BREAKDOWN.read_text()
+    )
+    (repo / "routines" / "muse-shape.md").write_text(
+        ROUTINE_SHAPE.read_text()
+    )
     (repo / "begin.json").write_text(json.dumps(begin))
     if isinstance(packet, str):
         (repo / "packet.json").write_text(packet)
@@ -226,6 +450,10 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
     (repo / "heartbeat.py").write_text(HEARTBEAT_STUB)
     (repo / "review-packet").write_text(PACKET_STUB)
     (repo / "review-apply").write_text(APPLY_STUB)
+    (repo / "breakdown-packet").write_text(_issue_packet_stub("breakdown"))
+    (repo / "breakdown-apply").write_text(BREAKDOWN_APPLY_STUB)
+    (repo / "shape-packet").write_text(_issue_packet_stub("shape"))
+    (repo / "shape-apply").write_text(SHAPE_APPLY_STUB)
     muse = tmp_path / "muse"
     _executable(muse, MUSE_STUB)
     gh = tmp_path / "gh"
@@ -551,7 +779,10 @@ def test_the_model_call_carries_the_exact_no_tool_shape(tmp_path):
     assert "--json" not in invoked
     assert "--approval-mode" not in invoked
     calls = (repo / "funnel.calls").read_text()
-    assert "begin --agent muse --tier standard --role review" in calls
+    # Standard asks begin for breakdown work too (#811); escalated reviews
+    # never wait behind it.
+    assert "begin --agent muse --tier standard --breakdown --role review" \
+        in calls
 
 
 def test_a_malformed_first_answer_retries_once_with_the_parse_error(tmp_path):
@@ -749,3 +980,428 @@ def test_a_shadow_comment_failure_finishes_errored(tmp_path):
     assert "--outcome errored" in heartbeat
     assert "gh pr comment failed" in heartbeat
     assert '"verdict": "approved"' in heartbeat
+
+
+# -- the issue prompts ---------------------------------------------------------
+
+def test_the_breakdown_prompt_is_judgement_text_under_500_words():
+    """#794's Phase 2 bar for the breakdown routine: the sizing and coverage
+    rules, the schema, the packet placeholder — and no protocol, because the
+    model has no tool to execute one with."""
+    body = ROUTINE_BREAKDOWN.read_text()
+    assert len(body.split()) < 500
+    assert "\n---\n" in body, "the runner splits the prompt on the --- separator"
+    prompt = body.split("\n---\n", 1)[1]
+    assert prompt.count("PACKET_JSON") == 1
+    normalized = " ".join(prompt.split()).lower()
+    assert "what tickets does this plan break into" in normalized
+    assert "one run ending in one pull request" in normalized
+    assert '"tickets"' in prompt
+    assert '"needs_decision"' in prompt
+    assert '"risk": "standard" | "escalated"' in prompt
+    assert '"needs": "none" | "human" | "claude-code-environment"' in prompt
+    assert "exactly one json object and nothing else" in normalized
+    for protocol in ("funnel.py", "heartbeat.py", "breakdown-apply",
+                     "breakdown-packet", "gh issue create", "```bash"):
+        assert protocol not in prompt, (
+            "judgement text only: {!r} is unreachable without tools".format(
+                protocol))
+
+
+def test_the_shape_prompt_is_judgement_text_under_500_words():
+    """#794's Phase 2 bar for the shape routine: the decision-record rules,
+    the schema, the packet placeholder — and no protocol."""
+    body = ROUTINE_SHAPE.read_text()
+    assert len(body.split()) < 500
+    assert "\n---\n" in body, "the runner splits the prompt on the --- separator"
+    prompt = body.split("\n---\n", 1)[1]
+    assert prompt.count("PACKET_JSON") == 1
+    normalized = " ".join(prompt.split()).lower()
+    assert "what is the plan, what is settled" in normalized
+    assert "decided_from_precedent" in prompt
+    assert "decided_by_agent" in prompt
+    assert '"needs_nate": {"exposure"' in prompt
+    for category in ("exposure", "gates", "scope", "preference"):
+        assert category in normalized
+    assert '"proposed_class"' in prompt
+    assert '"plan_markdown"' in prompt
+    assert "exactly one json object and nothing else" in normalized
+    for protocol in ("funnel.py", "heartbeat.py", "shape-apply",
+                     "shape-packet", "gh issue", "```bash"):
+        assert protocol not in prompt, (
+            "judgement text only: {!r} is unreachable without tools".format(
+                protocol))
+
+
+def test_the_runner_reads_the_issue_routines_at_run_time():
+    """The issue prompts are the routine files, not copies: the drift
+    surface #52 exists for must not come back in the engine."""
+    runner = SCRIPT.read_text()
+    assert "routines/muse-breakdown.md" in runner
+    assert "routines/muse-shape.md" in runner
+
+
+# -- live issue jobs: one question, one answer ---------------------------------
+
+def _issue_ref(job):
+    return BREAKDOWN_REF if job == "breakdown" else SHAPE_REF
+
+
+def test_standard_tier_asks_begin_for_breakdown(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path / "std", _issue_begin("breakdown"),
+        _issue_packet("breakdown"), args=("standard",),
+        answers=(_issue_answer("breakdown"),))
+
+    assert proc.returncode == 0, proc.stderr
+    calls = (repo / "funnel.calls").read_text()
+    assert "begin --agent muse --tier standard --breakdown --role review" \
+        in calls
+    assert _heartbeat(repo).endswith(
+        "broke down {}: created 2 tickets\n".format(BREAKDOWN_REF))
+
+
+def test_escalated_tier_reviews_without_breakdown(tmp_path):
+    """Breakdown rides the standard tier only, so rare risky reviews never
+    wait behind it."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), answers=(_answer(),))
+
+    assert proc.returncode == 0, proc.stderr
+    assert "--breakdown" not in (repo / "funnel.calls").read_text()
+
+
+def test_a_breakdown_is_applied_and_finished_done(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
+        answers=(_issue_answer("breakdown"),))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 1
+    prompt = (repo / "muse.prompt.1").read_text()
+    assert "What tickets does this plan break into" in prompt
+    assert "PACKET_JSON" not in prompt
+    assert "one run ending in one pull request" in prompt
+    assert BREAKDOWN_REF in prompt
+    packet_calls = (repo / "packet.calls").read_text().splitlines()
+    assert packet_calls == [BREAKDOWN_REF]
+    calls = _apply_calls(repo)
+    assert len(calls) == 1
+    assert calls[0].split()[0] == BREAKDOWN_REF
+    assert "--attempt 1" in calls[0]
+    assert "--run engine-run" in calls[0]
+    assert "--agent muse" in calls[0]
+    assert "--validate-only" not in calls[0]
+    assert (repo / "applied.marker").exists()
+    applied = json.loads((repo / "apply.answer").read_text())
+    assert [ticket["title"] for ticket in applied["tickets"]] == \
+        ["First slice", "Second slice"]
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run engine-run --outcome done "
+        "--note broke down {}: created 2 tickets\n".format(BREAKDOWN_REF)
+    )
+
+
+def test_a_shape_is_applied_and_finished_done(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_issue_answer("shape"),))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 1
+    prompt = (repo / "muse.prompt.1").read_text()
+    assert "What is the plan, what is settled" in prompt
+    assert "PACKET_JSON" not in prompt
+    assert "rotate the api-key monthly" in prompt
+    packet_calls = (repo / "packet.calls").read_text().splitlines()
+    assert packet_calls == ["{} --repo {}".format(SHAPE_NUM, REPO)]
+    calls = _apply_calls(repo)
+    assert len(calls) == 1
+    assert calls[0].split()[:3] == \
+        [str(SHAPE_NUM), "--repo", REPO]
+    assert "--attempt 1" in calls[0]
+    assert "--run engine-run" in calls[0]
+    assert "--agent muse" in calls[0]
+    assert (repo / "applied.marker").exists()
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run engine-run --outcome done "
+        "--note shaped {}: Ready (self-approved: agent idea, finite "
+        "class, no open questions)\n".format(SHAPE_REF)
+    )
+
+
+def test_a_breakdown_question_is_asked_not_created(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
+        answers=(_breakdown_answer(
+            tickets=None,
+            needs_decision="Which repo owns the schedule?"),))
+
+    assert proc.returncode == 0, proc.stderr
+    assert (repo / "applied.marker").exists()
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run engine-run --outcome done "
+        "--note broke down {}: asked a needs-decision "
+        "question\n".format(BREAKDOWN_REF)
+    )
+
+
+def test_a_shape_with_open_questions_holds_at_shaped(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_shape_answer(needs_nate={
+            "exposure": "May this touch credentials?",
+            "gates": None, "scope": None, "preference": None}),))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run engine-run --outcome done "
+        "--note shaped {}: Shaped (open questions for Nate: "
+        "exposure)\n".format(SHAPE_REF)
+    )
+
+
+def test_the_issue_model_call_carries_the_no_tool_shape(tmp_path):
+    """The issue jobs call the model with the same tool restrictions as
+    review: no shell, no writes, no web tools."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
+        answers=(_issue_answer("breakdown"),))
+
+    assert proc.returncode == 0, proc.stderr
+    invoked = (repo / "muse.args.1").read_text().splitlines()
+    assert invoked[0] == "exec"
+    assert invoked[invoked.index("--model") + 1] == "muse-spark-1.3"
+    assert "--disable-shell" in invoked
+    assert "--disable-write" in invoked
+    assert "--disable-web-tools" in invoked
+    assert invoked[invoked.index("--max-model-steps") + 1] == "60"
+    assert "--no-foreign-personal-context" in invoked
+    assert "--workspace" in invoked
+    assert "--prompt-file" in invoked
+    assert "--sandbox-network" not in invoked
+    assert "--json" not in invoked
+    assert "--approval-mode" not in invoked
+
+
+@pytest.mark.parametrize("job", ("breakdown", "shape"))
+def test_a_malformed_issue_answer_retries_once_with_the_parse_error(
+        tmp_path, job):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin(job), _issue_packet(job),
+        answers=("{not json", _issue_answer(job)))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 2
+    retry_prompt = (repo / "muse.prompt.2").read_text()
+    assert "Your previous answer could not be parsed" in retry_prompt
+    assert "invalid JSON" in retry_prompt
+    assert "Reply again with exactly one JSON object" in retry_prompt
+    calls = _apply_calls(repo)
+    assert len(calls) == 2
+    assert "--attempt 1" in calls[0]
+    assert "--attempt 2" in calls[1]
+    assert (repo / "applied.marker").exists()
+    assert "--outcome done" in _heartbeat(repo)
+
+
+@pytest.mark.parametrize("job", ("breakdown", "shape"))
+def test_a_malformed_final_issue_answer_records_nothing_and_errors(
+        tmp_path, job):
+    """A malformed final answer records nothing — the project stays
+    awaiting breakdown, the idea keeps its label — so the next run asks
+    again."""
+    ref = _issue_ref(job)
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin(job), _issue_packet(job),
+        answers=("{not json", "still not"))
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 2
+    assert len(_apply_calls(repo)) == 2
+    assert not (repo / "applied.marker").exists()
+    assert not (repo / "gh.log").exists(), \
+        "a malformed final answer records nothing"
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "{}-apply failed on {}".format(job, ref) in heartbeat
+    assert "attempt 2" in heartbeat
+
+
+@pytest.mark.parametrize("job", ("breakdown", "shape"))
+def test_an_issue_packet_failure_finishes_errored_without_a_model_call(
+        tmp_path, job):
+    ref = _issue_ref(job)
+    packet_arg = ref if job == "breakdown" else str(SHAPE_NUM)
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin(job), _issue_packet(job),
+        extra_env={"PACKET_STATUS": "1"})
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run engine-run --outcome errored "
+        "--note {}-packet failed for {}: could not read the {} packet "
+        "for {}\n".format(job, ref, job, packet_arg)
+    )
+
+
+@pytest.mark.parametrize("job", ("breakdown", "shape"))
+def test_an_invalid_issue_packet_finishes_errored_without_a_model_call(
+        tmp_path, job):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin(job), "not json{")
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 0
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "printed invalid JSON" in heartbeat
+
+
+def test_an_unparseable_issue_ref_finishes_errored(tmp_path):
+    begin = {"agent": "muse", "run": "engine-run", "gate": "ok",
+             "do": "breakdown", "work": {"ref": "not-a-ref"}}
+    proc, repo = _stubbed_runner(
+        tmp_path, begin, _issue_packet("breakdown"))
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 0
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run engine-run --outcome errored "
+        "--note funnel begin returned an unparseable ref 'not-a-ref'\n"
+    )
+
+
+def test_a_refused_breakdown_apply_finishes_errored(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
+        answers=(_issue_answer("breakdown"),),
+        extra_env={"APPLY_REFUSE": "1"})
+
+    assert proc.returncode == 1
+    assert len(_apply_calls(repo)) == 1, \
+        "a refused apply is not a parse error: no retry"
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "breakdown-apply failed on {}".format(BREAKDOWN_REF) in heartbeat
+    assert "is closed" in heartbeat
+
+
+# -- issue shadow: record the answer, create nothing ----------------------------
+
+def test_a_shadow_breakdown_records_its_answer_and_creates_nothing(tmp_path):
+    """The #811 accept line: --shadow validates the answer, posts it as a
+    comment on the project, and carries it on the finish note — creating
+    no issues."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
+        args=("--shadow",), answers=(_issue_answer("breakdown"),))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 1
+    calls = _apply_calls(repo)
+    assert len(calls) == 1
+    assert "--validate-only" in calls[0]
+    assert not (repo / "applied.marker").exists(), \
+        "a shadow run must not apply"
+    gh_log = (repo / "gh.log").read_text()
+    assert "create" not in gh_log, "a shadow run creates no issues"
+    assert "issue comment 1 --repo owner/repo --body-file" in gh_log
+    assert len(gh_log.strip().splitlines()) == 1
+    body = (repo / "gh.body").read_text()
+    assert "<!-- command-center-shadow-breakdown -->" in body
+    assert "not applied" in body
+    assert "engine-run" in body
+    assert BREAKDOWN_REF in body
+    assert "Decision: **2 tickets**" in body
+    assert '"needs_decision": null' in body
+    heartbeat = _heartbeat(repo)
+    assert heartbeat.startswith(
+        "finish --agent muse --run engine-run --outcome done "
+        "--note shadow breakdown of {}: 2 tickets; "
+        "answer: ".format(BREAKDOWN_REF)
+    )
+    assert '"needs_decision": null' in heartbeat
+
+
+def test_a_shadow_shape_records_its_answer_and_applies_nothing(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        args=("--shadow",), answers=(_issue_answer("shape"),))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 1
+    calls = _apply_calls(repo)
+    assert len(calls) == 1
+    assert "--validate-only" in calls[0]
+    assert not (repo / "applied.marker").exists(), \
+        "a shadow run must not apply"
+    gh_log = (repo / "gh.log").read_text()
+    assert "issue comment 5 --repo owner/repo --body-file" in gh_log
+    body = (repo / "gh.body").read_text()
+    assert "<!-- command-center-shadow-shape -->" in body
+    assert "not applied" in body
+    assert "engine-run" in body
+    assert SHAPE_REF in body
+    assert "Decision: **Ready**" in body
+    assert '"proposed_class": "Improve"' in body
+    heartbeat = _heartbeat(repo)
+    assert heartbeat.startswith(
+        "finish --agent muse --run engine-run --outcome done "
+        "--note shadow shape of {}: Ready; answer: ".format(SHAPE_REF)
+    )
+    assert '"proposed_class": "Improve"' in heartbeat
+
+
+def test_a_shadow_breakdown_retry_records_the_second_answer(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
+        args=("--shadow",),
+        answers=("{not json", _issue_answer("breakdown")))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 2
+    calls = _apply_calls(repo)
+    assert len(calls) == 2
+    assert all("--validate-only" in call for call in calls)
+    assert not (repo / "applied.marker").exists()
+    assert _heartbeat(repo).startswith(
+        "finish --agent muse --run engine-run --outcome done "
+        "--note shadow breakdown of {}: 2 tickets; "
+        "answer: ".format(BREAKDOWN_REF)
+    )
+
+
+def test_a_shadow_breakdown_malformed_final_answer_records_raw_and_errors(
+        tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
+        args=("--shadow",), answers=("{not json", "still not"))
+
+    assert proc.returncode == 1
+    assert not (repo / "applied.marker").exists()
+    body = (repo / "gh.body").read_text()
+    assert "could not be parsed" in body
+    assert "still not" in body
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "final answer unparseable" in heartbeat
+    assert "still not" in heartbeat
+
+
+@pytest.mark.parametrize("job", ("breakdown", "shape"))
+def test_a_shadow_issue_comment_failure_finishes_errored(tmp_path, job):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin(job), _issue_packet(job),
+        args=("--shadow",), answers=(_issue_answer(job),),
+        extra_env={"GH_STATUS": "1"})
+
+    assert proc.returncode == 1
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "gh issue comment failed" in heartbeat
+    assert "recorded no decision" in heartbeat

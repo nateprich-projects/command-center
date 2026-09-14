@@ -10097,6 +10097,17 @@ def main(argv: Optional[Sequence[str]] = None, *,
          _items: Optional[List[Item]] = None,
          _items_loader: Optional[Callable[[], List[Item]]] = None,
          _reset_api_usage: bool = True) -> int:
+    # The implementation engine imports this module for the established
+    # GitHub and lock operations.  Keep that dependency one-way by forwarding
+    # this public spelling to its standalone process instead of importing it.
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    if raw_argv and raw_argv[0] == "finish-ticket":
+        proc = subprocess.run(
+            [sys.executable, str(CHECKOUT_ROOT / "finish-ticket")]
+            + raw_argv[1:]
+        )
+        return proc.returncode
+
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("queue", help="everything, ordered")

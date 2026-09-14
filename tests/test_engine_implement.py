@@ -1,4 +1,4 @@
-"""Implementation packet and runner effects (#815, Phase 3 of #794)."""
+"""Implementation packet and runner effects (#815, #816, Phase 3 of #794)."""
 
 from __future__ import annotations
 
@@ -42,6 +42,10 @@ def answer():
         "summary": "Added the bounded implementation runner.",
         "departures": [],
     }
+
+
+def blocked(reason="entering a credential", action="Approve the OAuth app"):
+    return {"blocked_on_human": {"reason": reason, "action": action}}
 
 
 def run_git(*args, cwd=None):
@@ -135,6 +139,25 @@ def test_collect_fetches_the_parent_plan_and_open_pr_verdict(monkeypatch):
         {"done": True, "summary": "", "departures": []},
         {"done": True, "summary": "x", "departures": "none"},
         {"done": True, "summary": "x", "departures": [], "extra": True},
+        {"blocked_on_human": {"reason": "it is hard", "action": "x"}},
+        {"blocked_on_human": {"reason": "Entering a Credential",
+                              "action": "x"}},
+        {"blocked_on_human": {"reason": "entering a credential",
+                              "action": "  "}},
+        {"blocked_on_human": {"reason": "entering a credential"}},
+        {"blocked_on_human": {"reason": "entering a credential",
+                              "action": "x", "extra": True}},
+        {"blocked_on_human": "entering a credential"},
+        {"declined": ""},
+        {"declined": "  "},
+        {"declined": 42},
+        {"declined": "stale", "extra": True},
+        {"done": True, "summary": "x", "departures": [],
+         "declined": "stale"},
+        {"blocked_on_human": {"reason": "entering a credential",
+                              "action": "x"},
+         "declined": "stale"},
+        {"unknown": True},
     ),
 )
 def test_answer_validation_fails_closed(tmp_path, value):
@@ -281,3 +304,222 @@ def test_engine_imports_funnel_and_funnel_does_not_import_engine():
     source = (ROOT / "funnel.py").read_text()
     assert "import engine" not in source
     assert "from engine" not in source
+
+
+@pytest.mark.parametrize("reason", funnel.HUMAN_STEP_REASONS)
+def test_blocked_answer_accepts_each_allowlisted_reason(tmp_path, reason):
+    path = tmp_path / "answer.json"
+    path.write_text(json.dumps(blocked(reason=reason, action="  Do it  ")))
+    assert implement.read_answer(str(path)) == {
+        "blocked_on_human": {"reason": reason, "action": "Do it"}
+    }
+
+
+def test_declined_answer_returns_the_trimmed_reason(tmp_path):
+    path = tmp_path / "answer.json"
+    path.write_text(json.dumps({"declined": "  prerequisite has not landed  "}))
+    assert implement.read_answer(str(path)) == {
+        "declined": "prerequisite has not landed"
+    }
+
+
+@pytest.mark.parametrize("reason", funnel.HUMAN_STEP_REASONS)
+def test_human_step_body_carries_the_exact_marker_line(reason):
+    body = implement.render_human_step_body(
+        parent_number=7, ticket_number=42, reason=reason,
+        action="Approve the OAuth app",
+    )
+    assert funnel.HUMAN_STEP_LINE.search(body) is not None
+    assert funnel.parse_human_step(body) == reason
+    assert "Human step: {}".format(reason) in body.splitlines()
+    assert body.startswith("Part of #7; discovered while implementing #42.")
+    assert body.rstrip().endswith("Risk: standard")
+    assert implement.render_human_step_title("Approve the OAuth app") == (
+        "Human step: Approve the OAuth app"
+    )
+
+
+def test_parse_created_number_reads_the_issue_url():
+    assert implement.parse_created_number(
+        "https://github.com/owner/repo/issues/99\n") == 99
+    with pytest.raises(funnel.GitHubError):
+        implement.parse_created_number("nothing useful\n")
+
+
+def test_finish_blocked_on_human_files_blocks_comments_and_finishes(
+        tmp_path, monkeypatch):
+    remote, clone = make_clone(tmp_path)
+    (clone / "halfway.txt").write_text("not finished\n")
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+
+    effects = {"created": [], "blocked": [], "comments": [], "released": [],
+               "finished": []}
+
+    def create(repo, parent, title, body, **kwargs):
+        effects["created"].append((repo, parent, title, body))
+        return {"number": 43,
+                "ref": "{}#43".format(repo),
+                "url": "https://github.com/{}/issues/43".format(repo)}
+
+    result = implement.finish_blocked_on_human(
+        blocked()["blocked_on_human"],
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        create_effect=create,
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+    )
+
+    assert result == {"ticket": REPO + "#42",
+                      "human_step": {"number": 43,
+                                     "ref": REPO + "#43",
+                                     "url": "https://github.com/{}/issues/43".format(REPO)}}
+    (repo, parent, title, body), = effects["created"]
+    assert repo == REPO and parent == 7
+    assert title == "Human step: Approve the OAuth app"
+    assert funnel.parse_human_step(body) == "entering a credential"
+    ((_, number), kwargs), = effects["blocked"]
+    assert number == 42 and kwargs["blocked_by"] == 43
+    (comment_args, comment_kwargs), = effects["comments"]
+    assert comment_args[1] == 42
+    assert comment_kwargs["run"] == "run-42"
+    assert comment_args[2] == (
+        "**Blocked on #43:** Complete the human step before resuming "
+        "this ticket."
+    )
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"] == [
+        ("codex", "run-42", "skipped-human-step",
+         "stopped: human step filed as #43; ticket blocked; no PR opened",
+         REPO + "#42")
+    ]
+
+    refs = run_git("--git-dir", str(remote), "show-ref").stdout
+    assert "ticket/42" not in refs
+    dirty = run_git("status", "--porcelain", cwd=clone).stdout.strip()
+    assert "halfway.txt" in dirty
+
+
+def test_finish_blocked_on_human_requires_a_parent(tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    orphan = ticket(42)
+    del orphan["parent"]
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: orphan)
+
+    effects = {"released": [], "finished": []}
+    with pytest.raises(implement.ImplementError, match="parent"):
+        implement.finish_blocked_on_human(
+            blocked()["blocked_on_human"],
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+        )
+    assert effects == {"released": [], "finished": []}
+
+
+def test_finish_blocked_on_human_names_what_exists_when_comment_fails(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+
+    def fail_comment(*args, **kwargs):
+        raise funnel.GitHubError("comment failed")
+
+    with pytest.raises(funnel.GitHubError, match="already created"):
+        implement.finish_blocked_on_human(
+            blocked()["blocked_on_human"],
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            release=lambda ref: (_ for _ in ()).throw(
+                AssertionError("a partial failure must hold the claim")),
+            heartbeat_finish=lambda *args: (_ for _ in ()).throw(
+                AssertionError("a partial failure must not finish")),
+            create_effect=lambda *args, **kwargs: {
+                "number": 43, "ref": REPO + "#43",
+                "url": "https://github.com/{}/issues/43".format(REPO)},
+            block_effect=lambda *args, **kwargs: None,
+            comment_effect=fail_comment,
+        )
+
+
+def test_finish_declined_labels_comments_releases_and_finishes(
+        tmp_path, monkeypatch):
+    remote, clone = make_clone(tmp_path)
+    (clone / "halfway.txt").write_text("not finished\n")
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+
+    effects = {"blocked": [], "comments": [], "released": [], "finished": []}
+
+    result = implement.finish_declined(
+        "prerequisite has not landed",
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+    )
+
+    assert result == {"ticket": REPO + "#42",
+                      "declined": "prerequisite has not landed"}
+    ((_, number), kwargs), = effects["blocked"]
+    assert number == 42 and kwargs.get("blocked_by") is None
+    (comment_args, _), = effects["comments"]
+    assert comment_args[2] == "**Declined:** prerequisite has not landed"
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"] == [
+        ("codex", "run-42", "skipped-blocked",
+         "declined: prerequisite has not landed", REPO + "#42")
+    ]
+
+    refs = run_git("--git-dir", str(remote), "show-ref").stdout
+    assert "ticket/42" not in refs
+    dirty = run_git("status", "--porcelain", cwd=clone).stdout.strip()
+    assert "halfway.txt" in dirty
+
+
+def test_finish_main_routes_blocked_and_declined_answers(
+        tmp_path, monkeypatch, capsys):
+    routed = {}
+
+    def fake_blocked(blocked_answer, **kwargs):
+        routed["blocked"] = (blocked_answer, kwargs)
+        return {"ticket": REPO + "#42", "human_step": {"number": 43}}
+
+    def fake_declined(reason, **kwargs):
+        routed["declined"] = (reason, kwargs)
+        return {"ticket": REPO + "#42", "declined": reason}
+
+    monkeypatch.setattr(implement, "finish_blocked_on_human", fake_blocked)
+    monkeypatch.setattr(implement, "finish_declined", fake_declined)
+
+    path = tmp_path / "answer.json"
+    path.write_text(json.dumps(blocked()))
+    assert implement.finish_main(
+        ["--answer", str(path), "--run", "run-42",
+         "--agent", "muse", "--repo", REPO]) == 0
+    assert routed["blocked"][0] == blocked()["blocked_on_human"]
+    assert routed["blocked"][1]["run"] == "run-42"
+    assert routed["blocked"][1]["agent"] == "muse"
+    assert json.loads(capsys.readouterr().out)["human_step"]["number"] == 43
+
+    path.write_text(json.dumps({"declined": "stale"}))
+    assert implement.finish_main(
+        ["--answer", str(path), "--run", "run-42"]) == 0
+    assert routed["declined"][0] == "stale"
+    assert json.loads(capsys.readouterr().out)["declined"] == "stale"
+
+    path.write_text(json.dumps({"unknown": True}))
+    assert implement.finish_main(
+        ["--answer", str(path), "--run", "run-42"]) == 1

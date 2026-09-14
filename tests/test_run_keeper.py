@@ -1,14 +1,41 @@
-"""The launchd keeper records a bounded, parseable machine-health line."""
+"""The launchd keeper installs on change and records health plus readiness.
+
+Besides the bounded, parseable machine-health line, the keeper writes a
+changed routine into the installed Codex automations, copies and reloads
+changed launchd plists, and records a readiness line (installed equals main,
+and which files do not) beside the health line.  Every install path runs
+against a fake home, never the Mac's real automations or LaunchAgents.
+"""
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
 from pathlib import Path
+import plistlib
 import subprocess
 
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "run-keeper"
+
+spec = importlib.util.spec_from_file_location(
+    "sync_codex_automations", ROOT / "scripts" / "sync_codex_automations.py"
+)
+sync = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sync)
+
+DAY_NAME = "command-center-test-day"
+DAY_RRULE = "FREQ=HOURLY;INTERVAL=1;BYMINUTE=0"
+NIGHT_NAME = "command-center-test-night"
+NIGHT_RRULE = "FREQ=WEEKLY;BYDAY=SA;BYHOUR=2;BYMINUTE=1"
+PUBLISHER_PLIST = "com.nateprich.command-center-funnel-publisher.plist"
+PUBLISHER_LABEL = "com.nateprich.command-center-funnel-publisher"
+KEEPER_PLIST = "com.nateprich.command-center-run-keeper.plist"
+KEEPER_LABEL = "com.nateprich.command-center-run-keeper"
+DEPLOY_PLIST = "com.nateprich.command-center-funnel-deploy.plist"
+UNTOUCHED_PLIST = "com.nateprich.command-center-muse-review.plist"
 
 
 def run_git(*args, cwd=None):
@@ -54,11 +81,7 @@ def make_heartbeat_remote(tmp_path: Path) -> tuple[Path, Path]:
     return bare, checkout
 
 
-def test_keeper_appends_one_parseable_line_per_run(tmp_path):
-    bare, checkout = make_heartbeat_remote(tmp_path)
-    tools = tmp_path / "tools"
-    tools.mkdir()
-
+def write_tool_stubs(tools: Path) -> None:
     write_executable(
         tools / "ps",
         """
@@ -78,6 +101,21 @@ esac
         tools / "pgrep",
         "case \"$*\" in *codex*) exit 0 ;; *muse*) exit 0 ;; *) exit 1 ;; esac\n",
     )
+
+
+def write_launchctl_stub(path: Path, log: Path, fail_bootstrap: bool = False) -> None:
+    body = 'echo "$@" >> "{}"\n'.format(log)
+    if fail_bootstrap:
+        body += 'if [ "$1" = "bootstrap" ]; then exit 5; fi\n'
+    body += "exit 0\n"
+    write_executable(path, body)
+
+
+def test_keeper_appends_one_parseable_line_per_run(tmp_path):
+    bare, checkout = make_heartbeat_remote(tmp_path)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    write_tool_stubs(tools)
 
     env = os.environ.copy()
     env.update(
@@ -114,3 +152,356 @@ esac
         }
         for record in fields
     )
+
+
+def make_install_remote(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """A heartbeat remote whose main also carries what the keeper installs."""
+    bare, checkout = make_heartbeat_remote(tmp_path)
+    seed = tmp_path / "seed"
+    # Every top-level module: the keeper shells out to the sync script, which
+    # imports funnel, which imports its siblings. Copying one file passes
+    # today and breaks on the next import.
+    for src in sorted(ROOT.glob("*.py")):
+        (seed / src.name).write_bytes(src.read_bytes())
+    for name in (
+        "routines/codex-work.md",
+        "scripts/sync_codex_automations.py",
+    ):
+        dst = seed / name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes((ROOT / name).read_bytes())
+    for plist in sorted((ROOT / "launchd").glob("*.plist")):
+        dst = seed / "launchd" / plist.name
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(plist.read_bytes())
+    run_git("-C", str(seed), "add", "-A")
+    run_git("-C", str(seed), "commit", "-m", "keeper install files")
+    run_git("-C", str(seed), "push", "origin", "main")
+    run_git("-C", str(checkout), "pull", "--ff-only")
+    return bare, checkout, seed
+
+
+def commit_and_push(seed: Path, message: str) -> None:
+    run_git("-C", str(seed), "add", "-A")
+    run_git("-C", str(seed), "commit", "-m", message)
+    run_git("-C", str(seed), "push", "origin", "main")
+
+
+def change_routine(seed: Path) -> None:
+    path = seed / "routines" / "codex-work.md"
+    text = path.read_text()
+    assert "\n---\n" in text
+    path.write_text(text + "\n<!-- keeper install test -->\n")
+
+
+def change_plist(seed: Path, name: str) -> None:
+    path = seed / "launchd" / name
+    text = path.read_text()
+    marker = (
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
+        ' "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+    )
+    assert marker in text
+    path.write_text(
+        text.replace(marker, marker + "<!-- keeper install test -->\n", 1)
+    )
+    with path.open("rb") as handle:
+        plistlib.load(handle)
+
+
+def install_launchd_copies(seed: Path, home: Path, skip=()) -> Path:
+    agents = home / "Library" / "LaunchAgents"
+    agents.mkdir(parents=True, exist_ok=True)
+    for plist in sorted((seed / "launchd").glob("*.plist")):
+        if plist.name in skip:
+            continue
+        (agents / plist.name).write_bytes(plist.read_bytes())
+    return agents
+
+
+def write_current_automation(monkeypatch, home, routine, name, rrule):
+    """An installed automation matching the given routine copy.
+
+    The rrule is written first because the lane's tier, and so its prompt, is
+    read back off it.
+    """
+    automations = home / ".codex" / "automations"
+    monkeypatch.setattr(sync, "AUTOMATIONS", automations)
+    monkeypatch.setattr(sync, "ROUTINE", routine)
+    path = automations / name / "automation.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('rrule = "RRULE:{}"\n'.format(rrule))
+    with path.open("a") as fh:
+        fh.write(
+            "prompt = {}\nupdated_at = 1\n".format(
+                json.dumps(sync.prompt_text(name))
+            )
+        )
+    return path
+
+
+def write_stale_automation(home, name, rrule, prompt="a stale prompt"):
+    path = home / ".codex" / "automations" / name / "automation.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        'rrule = "RRULE:{}"\nprompt = {}\nupdated_at = 1\n'.format(
+            rrule, json.dumps(prompt)
+        )
+    )
+    return path
+
+
+def installed_prompt(path: Path):
+    return sync.current(path.read_text())[1]
+
+
+def keeper_env(checkout: Path, home: Path, tools: Path, launchctl: Path) -> dict:
+    env = os.environ.copy()
+    env.update(
+        {
+            "COMMAND_CENTER_RUN_REPO": str(checkout),
+            "COMMAND_CENTER_SENTINEL_PS": str(tools / "ps"),
+            "COMMAND_CENTER_SENTINEL_PGREP": str(tools / "pgrep"),
+            "COMMAND_CENTER_SENTINEL_SYSCTL": str(tools / "sysctl"),
+            "COMMAND_CENTER_SENTINEL_UPTIME": str(tools / "uptime"),
+            "COMMAND_CENTER_SENTINEL_FILE": "sentinel.log",
+            "COMMAND_CENTER_KEEPER_LAUNCHCTL": str(launchctl),
+            "HOME": str(home),
+        }
+    )
+    return env
+
+
+def run_keeper(checkout: Path, home: Path, tools: Path, launchctl: Path):
+    return subprocess.run(
+        [str(SCRIPT)],
+        env=keeper_env(checkout, home, tools, launchctl),
+        capture_output=True,
+        text=True,
+    )
+
+
+def show_heartbeat_file(bare: Path, name: str) -> str:
+    return run_git("--git-dir", str(bare), "show", "heartbeat:" + name).stdout
+
+
+def parse_record(line: str) -> dict:
+    return dict(part.split("=", 1) for part in line.split())
+
+
+def one_readiness_record(bare: Path) -> dict:
+    lines = show_heartbeat_file(bare, "keeper-readiness.log").splitlines()
+    assert len(lines) == 1
+    return parse_record(lines[0])
+
+
+def make_tools(tmp_path: Path, fail_bootstrap: bool = False):
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    write_tool_stubs(tools)
+    launchctl_log = tmp_path / "launchctl.log"
+    write_launchctl_stub(tools / "launchctl", launchctl_log, fail_bootstrap)
+    return tools, launchctl_log
+
+
+def test_keeper_installs_prompts_when_the_routine_changed(tmp_path, monkeypatch):
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    routine = checkout / "routines" / "codex-work.md"
+    day = write_current_automation(monkeypatch, home, routine, DAY_NAME, DAY_RRULE)
+    night = write_current_automation(
+        monkeypatch, home, routine, NIGHT_NAME, NIGHT_RRULE
+    )
+    before = {DAY_NAME: installed_prompt(day), NIGHT_NAME: installed_prompt(night)}
+    install_launchd_copies(seed, home)
+
+    change_routine(seed)
+    commit_and_push(seed, "routine change")
+
+    tools, launchctl_log = make_tools(tmp_path)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    monkeypatch.setattr(sync, "AUTOMATIONS", home / ".codex" / "automations")
+    monkeypatch.setattr(sync, "ROUTINE", checkout / "routines" / "codex-work.md")
+    for name, path in ((DAY_NAME, day), (NIGHT_NAME, night)):
+        assert installed_prompt(path) == sync.prompt_text(name)
+        assert installed_prompt(path) != before[name]
+        assert path.with_suffix(".toml.bak").is_file()
+    assert not launchctl_log.exists()
+    assert one_readiness_record(bare) == {
+        "timestamp": "Sat_Sep_12_21:00:00_2026",
+        "prompts": "yes",
+        "plists": "yes",
+        "files": "-",
+        "reload_pending": "-",
+    }
+    assert len(show_heartbeat_file(bare, "sentinel.log").splitlines()) == 1
+
+
+def test_keeper_reports_prompt_drift_it_did_not_cause(tmp_path, monkeypatch):
+    """Stale prompts without a routine change are reported, not installed.
+
+    The pull moved nothing, so the keeper has no install trigger; the
+    readiness record still names the drifted automations within one cycle.
+    """
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    day = write_stale_automation(home, DAY_NAME, DAY_RRULE)
+    night = write_stale_automation(home, NIGHT_NAME, NIGHT_RRULE)
+    install_launchd_copies(seed, home)
+
+    tools, _ = make_tools(tmp_path)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    assert installed_prompt(day) == "a stale prompt"
+    assert installed_prompt(night) == "a stale prompt"
+    assert not day.with_suffix(".toml.bak").exists()
+    assert not night.with_suffix(".toml.bak").exists()
+    assert one_readiness_record(bare) == {
+        "timestamp": "Sat_Sep_12_21:00:00_2026",
+        "prompts": "no",
+        "plists": "yes",
+        "files": "codex/{},codex/{}".format(DAY_NAME, NIGHT_NAME),
+        "reload_pending": "-",
+    }
+
+
+def test_keeper_copies_and_reloads_only_the_changed_plist(
+    tmp_path, monkeypatch
+):
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    routine = checkout / "routines" / "codex-work.md"
+    day = write_current_automation(monkeypatch, home, routine, DAY_NAME, DAY_RRULE)
+    agents = install_launchd_copies(seed, home)
+    untouched = agents / UNTOUCHED_PLIST
+    old_mtime = int(untouched.stat().st_mtime) - 100
+    os.utime(untouched, (old_mtime, old_mtime))
+
+    change_plist(seed, PUBLISHER_PLIST)
+    commit_and_push(seed, "plist change")
+
+    tools, launchctl_log = make_tools(tmp_path)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    assert (agents / PUBLISHER_PLIST).read_bytes() == (
+        checkout / "launchd" / PUBLISHER_PLIST
+    ).read_bytes()
+    assert int(untouched.stat().st_mtime) == old_mtime
+    calls = launchctl_log.read_text()
+    assert "bootout gui/" in calls and PUBLISHER_LABEL in calls
+    assert "bootstrap gui/" in calls and PUBLISHER_PLIST in calls
+    assert calls.count("bootout") == 1
+    assert calls.count("bootstrap") == 1
+    assert not day.with_suffix(".toml.bak").exists()
+    assert one_readiness_record(bare) == {
+        "timestamp": "Sat_Sep_12_21:00:00_2026",
+        "prompts": "yes",
+        "plists": "yes",
+        "files": "-",
+        "reload_pending": "-",
+    }
+
+
+def test_keeper_records_a_failed_reload_and_keeps_both_records(
+    tmp_path, monkeypatch
+):
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    agents = install_launchd_copies(seed, home)
+
+    change_plist(seed, PUBLISHER_PLIST)
+    commit_and_push(seed, "plist change")
+
+    tools, _ = make_tools(tmp_path, fail_bootstrap=True)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    assert (agents / PUBLISHER_PLIST).read_bytes() == (
+        checkout / "launchd" / PUBLISHER_PLIST
+    ).read_bytes()
+    assert one_readiness_record(bare) == {
+        "timestamp": "Sat_Sep_12_21:00:00_2026",
+        "prompts": "yes",
+        "plists": "yes",
+        "files": "-",
+        "reload_pending": PUBLISHER_LABEL,
+    }
+    assert len(show_heartbeat_file(bare, "sentinel.log").splitlines()) == 1
+
+
+def test_keeper_copies_but_never_reloads_itself(tmp_path, monkeypatch):
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    agents = install_launchd_copies(seed, home)
+
+    change_plist(seed, KEEPER_PLIST)
+    commit_and_push(seed, "keeper plist change")
+
+    tools, launchctl_log = make_tools(tmp_path)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    assert (agents / KEEPER_PLIST).read_bytes() == (
+        checkout / "launchd" / KEEPER_PLIST
+    ).read_bytes()
+    assert not launchctl_log.exists()
+    assert one_readiness_record(bare) == {
+        "timestamp": "Sat_Sep_12_21:00:00_2026",
+        "prompts": "yes",
+        "plists": "yes",
+        "files": "-",
+        "reload_pending": KEEPER_LABEL,
+    }
+
+
+def test_keeper_leaves_a_never_installed_plist_alone(tmp_path, monkeypatch):
+    """First install belongs to the installer plus a console reload."""
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    agents = install_launchd_copies(seed, home, skip=(DEPLOY_PLIST,))
+
+    change_plist(seed, DEPLOY_PLIST)
+    commit_and_push(seed, "deploy plist change")
+
+    tools, launchctl_log = make_tools(tmp_path)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    assert not (agents / DEPLOY_PLIST).exists()
+    assert not launchctl_log.exists()
+    assert one_readiness_record(bare) == {
+        "timestamp": "Sat_Sep_12_21:00:00_2026",
+        "prompts": "yes",
+        "plists": "yes",
+        "files": "-",
+        "reload_pending": "-",
+    }
+
+
+def test_keeper_reports_plist_drift_without_recoping_it(tmp_path, monkeypatch):
+    """A locally edited plist without a pull change is reported, not fixed."""
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    agents = install_launchd_copies(seed, home)
+    drifted_path = agents / PUBLISHER_PLIST
+    drifted_path.write_text(
+        drifted_path.read_text() + "<!-- local drift -->\n"
+    )
+
+    tools, launchctl_log = make_tools(tmp_path)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    assert drifted_path.read_text().endswith("<!-- local drift -->\n")
+    assert not launchctl_log.exists()
+    assert one_readiness_record(bare) == {
+        "timestamp": "Sat_Sep_12_21:00:00_2026",
+        "prompts": "yes",
+        "plists": "no",
+        "files": "launchd/" + PUBLISHER_PLIST,
+        "reload_pending": "-",
+    }

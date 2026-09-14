@@ -1,10 +1,12 @@
 #!/bin/bash
-# Refresh the maintained checkout and append one machine-health line.
+# Refresh the maintained checkout, install changed prompts and plists, and
+# append one machine-health line plus one keeper-readiness line.
 #
-# This is deliberately a shell-only observer.  It never starts an agent, reads
-# a prompt, or writes the checkout used by the routines.  The health record is
-# committed to the existing orphan `heartbeat` branch through a temporary
-# worktree, so the maintained checkout stays on `main` for the next run.
+# It never starts an agent and never writes the checkout used by the routines:
+# installs go to the Codex automations and the user's LaunchAgents, and both
+# records are committed to the existing orphan `heartbeat` branch through a
+# temporary worktree, so the maintained checkout stays on `main` for the next
+# run.
 
 set -u
 
@@ -16,16 +18,41 @@ PS="${COMMAND_CENTER_SENTINEL_PS:-/bin/ps}"
 PGREP="${COMMAND_CENTER_SENTINEL_PGREP:-/usr/bin/pgrep}"
 SYSCTL="${COMMAND_CENTER_SENTINEL_SYSCTL:-/usr/sbin/sysctl}"
 UPTIME="${COMMAND_CENTER_SENTINEL_UPTIME:-/usr/bin/uptime}"
+READINESS_FILE="${COMMAND_CENTER_KEEPER_READINESS_FILE:-keeper-readiness.log}"
+LAUNCHCTL="${COMMAND_CENTER_KEEPER_LAUNCHCTL:-/bin/launchctl}"
+
+KEEPER_LABEL="com.nateprich.command-center-run-keeper"
+ROUTINE_PATH="routines/codex-work.md"
+SYNC_SCRIPT="$REPO/scripts/sync_codex_automations.py"
+LAUNCH_AGENTS_DIR="${HOME:-}/Library/LaunchAgents"
 
 # Keep the existing keeper responsibility.  A failed refresh must not suppress
-# the health line: the sentinel is meant to remain useful during degradation.
+# the health or readiness lines: the keeper is meant to remain useful during
+# degradation.  The pre-pull HEAD is the install trigger: prompts and plists
+# install only when the pull moved their source, while readiness is compared
+# every run, so drift without a pull change is reported rather than silently
+# kept.
+before_sha="$("$GIT" -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
 "$GIT" -C "$REPO" pull --ff-only || true
+after_sha="$("$GIT" -C "$REPO" rev-parse HEAD 2>/dev/null || true)"
+pulled_changes=""
+if [ -n "$before_sha" ] && [ -n "$after_sha" ] && [ "$before_sha" != "$after_sha" ]; then
+  pulled_changes=$("$GIT" -C "$REPO" diff --name-only "$before_sha" "$after_sha" 2>/dev/null || true)
+fi
 
 trim_spaces() {
   local value="$1"
   value="${value#"${value%%[![:space:]]*}"}"
   value="${value%"${value##*[![:space:]]}"}"
   printf '%s' "$value"
+}
+
+csv_add() {
+  if [ -z "$1" ]; then
+    printf '%s' "$2"
+  else
+    printf '%s,%s' "$1" "$2"
+  fi
 }
 
 timestamp="$("$PS" -p "$$" -o lstart= 2>/dev/null || true)"
@@ -75,6 +102,97 @@ has_process_family() {
 
 health_line="timestamp=$timestamp user_processes=$user_processes maxprocperuid=$maxprocperuid load_1=$load_1 load_5=$load_5 load_15=$load_15 codex=$(has_process_family codex) claude=$(has_process_family claude) muse=$(has_process_family muse)"
 
+# Phase 4 (#794): install on change.  There is deliberately no quiet-moment
+# condition: prompts and plists are read at run start, so a replacement
+# affects only the next run (amendment accepted 2026-09-13).  An install
+# failure warns on stderr and shows up in the readiness record below; it never
+# suppresses either record.
+install_plist() {
+  local name="$1" label src dst
+  name="${name##*/}"
+  src="$REPO/launchd/$name"
+  dst="$LAUNCH_AGENTS_DIR/$name"
+  # Refresh only: the installer plus a console reload own first install, so a
+  # plist that was never installed is left alone, as is one removed from the
+  # repo (uninstalling a schedule is a console action, not keeper work).
+  [ -n "${HOME:-}" ] || return 0
+  [ -f "$src" ] || return 0
+  [ -f "$dst" ] || return 0
+  mkdir -p "$LAUNCH_AGENTS_DIR" 2>/dev/null || return 0
+  if ! cp "$src" "$dst" 2>/dev/null; then
+    echo "run-keeper: could not copy $name" >&2
+    return 0
+  fi
+  label="${name%.plist}"
+  if [ "$label" = "$KEEPER_LABEL" ]; then
+    # Never bootout self mid-run.  The copy is current; a console reload (the
+    # #822 human-step class) loads it.  Pending until then.
+    reload_pending=$(csv_add "$reload_pending" "$label")
+    return 0
+  fi
+  "$LAUNCHCTL" bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
+  if "$LAUNCHCTL" bootstrap "gui/$(id -u)" "$dst" >/dev/null 2>&1; then
+    :
+  else
+    echo "run-keeper: reload of $label failed" >&2
+    reload_pending=$(csv_add "$reload_pending" "$label")
+  fi
+}
+
+reload_pending=""
+routine_changed=""
+while IFS= read -r changed_path; do
+  [ "$changed_path" = "$ROUTINE_PATH" ] && routine_changed="yes"
+  case "$changed_path" in
+    launchd/*.plist) install_plist "$changed_path" ;;
+  esac
+done <<< "$pulled_changes"
+if [ -n "$routine_changed" ] && [ -f "$SYNC_SCRIPT" ]; then
+  PYTHONDONTWRITEBYTECODE=1 python3 "$SYNC_SCRIPT" || \
+    echo "run-keeper: prompt install failed; see the readiness record" >&2
+fi
+
+# Readiness: installed equals main, and which files do not.  Compared every
+# run whether or not this run installed anything, so the record answers
+# #821's question within one keeper cycle of a deliberate edit.
+prompts="yes"
+plists="yes"
+drifted=""
+if [ -n "${HOME:-}" ]; then
+  for src in "$REPO"/launchd/*.plist; do
+    [ -f "$src" ] || continue
+    name="${src##*/}"
+    dst="$LAUNCH_AGENTS_DIR/$name"
+    # Skip-if-absent, the same honesty rule as the drift tests: a plist that
+    # was never installed is not evidence of drift.
+    [ -f "$dst" ] || continue
+    if ! cmp -s "$src" "$dst" 2>/dev/null; then
+      plists="no"
+      drifted=$(csv_add "$drifted" "launchd/$name")
+    fi
+  done
+fi
+if [ -f "$SYNC_SCRIPT" ]; then
+  # The DRIFTED lines are the comparison; the exit code also fires on
+  # same-minute lanes, which is a schedule problem, not install drift.
+  check_out=$(PYTHONDONTWRITEBYTECODE=1 python3 "$SYNC_SCRIPT" --check 2>/dev/null || true)
+  while IFS= read -r line; do
+    case "$line" in
+      "  DRIFTED  "*)
+        automation="${line#*DRIFTED  }"
+        automation="$(trim_spaces "$automation")"
+        if [ -n "$automation" ]; then
+          prompts="no"
+          drifted=$(csv_add "$drifted" "codex/$automation")
+        fi
+        ;;
+    esac
+  done <<< "$check_out"
+fi
+[ -n "$drifted" ] || drifted="-"
+[ -n "$reload_pending" ] || reload_pending="-"
+readiness_line="timestamp=$timestamp prompts=$prompts plists=$plists files=$drifted reload_pending=$reload_pending"
+
 WORKTREE="${TMPDIR:-/tmp}/command-center-sentinel.$$"
 
 remove_worktree() {
@@ -95,11 +213,12 @@ push_health_line() {
     fi
 
     printf '%s\n' "$health_line" >> "$WORKTREE/$SENTINEL_FILE"
-    "$GIT" -C "$WORKTREE" add -- "$SENTINEL_FILE" || continue
+    printf '%s\n' "$readiness_line" >> "$WORKTREE/$READINESS_FILE"
+    "$GIT" -C "$WORKTREE" add -- "$SENTINEL_FILE" "$READINESS_FILE" || continue
     "$GIT" -C "$WORKTREE" \
       -c user.name="Command Center sentinel" \
       -c user.email="command-center-sentinel@users.noreply.github.com" \
-      commit -m "heartbeat: sentinel health record" >/dev/null 2>&1 || continue
+      commit -m "heartbeat: sentinel health and keeper readiness records" >/dev/null 2>&1 || continue
 
     if "$GIT" -C "$WORKTREE" push "$REMOTE" HEAD:refs/heads/heartbeat >/dev/null 2>&1; then
       return 0
@@ -109,6 +228,6 @@ push_health_line() {
 }
 
 if ! push_health_line; then
-  echo "run-keeper: could not push the sentinel record to heartbeat" >&2
+  echo "run-keeper: could not push the health and readiness records to heartbeat" >&2
   exit 1
 fi

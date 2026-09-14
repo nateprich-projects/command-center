@@ -9,10 +9,20 @@
 # write access disabled; putting both flag sets behind a mode switch would let
 # a flag error turn a reviewer into a writer.
 #
+# Phase 3 of #794: the runner executes the protocol and the model answers one
+# question. begin claims the ticket, the runner clones it onto ticket/<n> and
+# assembles the packet with implement-packet, and the model sees the
+# judgement-only prompt with the packet inline. It changes files and writes
+# one structured answer to answer.json; the runner hands that answer to
+# finish-ticket, which performs every side effect: tests, commit, push, the
+# PR (or the blocked/declined path), release, and finish. The model is never
+# told to run funnel.py or gh.
+#
 # The prompt is routines/muse-implement.md, read from the maintained clone at
 # run time. The writable workspace is a fresh clone of the claimed ticket's
-# repository. It is removed when the run exits, so no later run can inherit it;
-# meaningful work survives because the routine pushes each step.
+# repository. It is removed when the run exits, so no later run can inherit
+# it; finished work survives because finish-ticket pushes before the runner
+# returns.
 
 set -uo pipefail
 
@@ -36,6 +46,9 @@ BOUND_SECONDS="${MUSE_IMPLEMENT_BOUND_SECONDS:-1200}"
 ROUTINE="$REPO/routines/muse-implement.md"
 WORKSPACE_ROOT="${MUSE_IMPLEMENT_WORKSPACE_ROOT:-$HOME/.claude/command-center-muse-implement-workspaces}"
 WORKSPACE=""
+# The one file the model hands back: exactly one JSON object, written in the
+# workspace root, read by finish-ticket after the model exits.
+ANSWER_NAME="answer.json"
 
 if [[ ! -r "$ROUTINE" ]]; then
   echo "muse-implement: cannot read $ROUTINE — refusing to run without a prompt" >&2
@@ -45,6 +58,21 @@ fi
 PROMPT_TEMPLATE="$(awk 'f{print} /^---$/{f=1}' "$ROUTINE")"
 if [[ "$PROMPT_TEMPLATE" != *[![:space:]]* ]]; then
   echo "muse-implement: $ROUTINE has no prompt after its --- separator" >&2
+  exit 1
+fi
+# The packet goes where PACKET_JSON stands, exactly once: a second occurrence
+# would mean the substitution below left a literal behind.
+PLACEHOLDERS="$(printf '%s' "$PROMPT_TEMPLATE" | grep -o PACKET_JSON | wc -l | tr -d ' ')"
+if [[ "$PLACEHOLDERS" != "1" ]]; then
+  echo "muse-implement: $ROUTINE must hold PACKET_JSON exactly once" >&2
+  exit 1
+fi
+
+PACKET_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-implement-packet.XXXXXX")"
+PROMPT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-implement-prompt.XXXXXX")"
+DIAG_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-implement-diag.XXXXXX")"
+if [[ -z "$PACKET_FILE" || -z "$PROMPT_FILE" || -z "$DIAG_FILE" ]]; then
+  echo "muse-implement: could not create scratch files" >&2
   exit 1
 fi
 
@@ -65,6 +93,7 @@ export FUNNEL_SESSION
 
 cleanup() {
   python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
+  rm -f -- "$PACKET_FILE" "$PROMPT_FILE" "$DIAG_FILE"
   if [[ -n "$WORKSPACE" && -d "$WORKSPACE" ]]; then
     rm -rf -- "$WORKSPACE"
   fi
@@ -136,23 +165,31 @@ if [[ "$BEGIN_DO" != "ticket" ]] \
   || ! BEGIN_REPO="$(begin_work_value repo)" \
   || ! BEGIN_REF="$(begin_work_value ref)"; then
   echo "muse-implement: funnel begin returned invalid implementation work" >&2
+  if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+      --outcome errored --note "funnel begin returned invalid implementation work"; then
+    echo "muse-implement: could not finish the invalid run" >&2
+  fi
   exit 1
 fi
+
+# The ticket number drives the branch name and the packet call. It comes from
+# the claimed ref's issue number, never from a second queue read.
+TICKET_NUMBER="${BEGIN_REF##*#}"
+if [[ "$BEGIN_REF" != *"#"* || ! "$TICKET_NUMBER" =~ ^[1-9][0-9]*$ ]]; then
+  echo "muse-implement: funnel begin returned an invalid ticket ref '$BEGIN_REF'" >&2
+  if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+      --outcome errored --note "funnel begin returned an invalid ticket ref"; then
+    echo "muse-implement: could not finish the invalid run" >&2
+  fi
+  exit 1
+fi
+TICKET_BRANCH="ticket/$TICKET_NUMBER"
 
 release_ticket() {
   if ! python3 "$REPO/funnel.py" release "$BEGIN_REF"; then
     echo "muse-implement: could not release $BEGIN_REF" >&2
   fi
 }
-
-PROMPT="${PROMPT_TEMPLATE//BEGIN_JSON/$BEGIN_JSON}"
-if printf '%s' "$PROMPT" | grep -q BEGIN_JSON; then
-  echo "muse-implement: the begin-json placeholder was not substituted" >&2
-  release_ticket
-  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
-    --outcome errored --note "could not substitute the implementation opening result" >&2
-  exit 1
-fi
 
 if ! mkdir -p "$WORKSPACE_ROOT" \
   || ! WORKSPACE="$(mktemp -d "$WORKSPACE_ROOT/run.XXXXXX")"; then
@@ -169,6 +206,71 @@ if ! "$GH_BIN" repo clone "$BEGIN_REPO" "$WORKSPACE"; then
     --outcome errored --note "could not clone $BEGIN_REPO into the fresh implementation workspace" >&2
   exit 1
 fi
+
+# Put the clone on the ticket branch before the model sees it. A remote
+# branch continues in place — never reset, so no earlier push is lost — and
+# otherwise the branch starts fresh from origin/main.
+if ! git -C "$WORKSPACE" fetch --quiet origin 2>"$DIAG_FILE"; then
+  fetch_err="$(cat "$DIAG_FILE")"
+  echo "muse-implement: could not fetch origin in the fresh workspace: $fetch_err" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "could not fetch origin for $BEGIN_REF: $fetch_err" >&2
+  exit 1
+fi
+git -C "$WORKSPACE" ls-remote --exit-code --heads origin \
+  "refs/heads/$TICKET_BRANCH" >/dev/null 2>"$DIAG_FILE"
+ls_status=$?
+if (( ls_status != 0 && ls_status != 2 )); then
+  ls_err="$(cat "$DIAG_FILE")"
+  echo "muse-implement: could not inspect remote $TICKET_BRANCH: $ls_err" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "could not inspect remote $TICKET_BRANCH for $BEGIN_REF: $ls_err" >&2
+  exit 1
+fi
+if (( ls_status == 0 )); then
+  SWITCH_ARGS=(-c "$TICKET_BRANCH" --track "origin/$TICKET_BRANCH")
+else
+  SWITCH_ARGS=(-c "$TICKET_BRANCH" origin/main)
+fi
+if ! git -C "$WORKSPACE" switch --quiet "${SWITCH_ARGS[@]}" 2>"$DIAG_FILE"; then
+  switch_err="$(cat "$DIAG_FILE")"
+  echo "muse-implement: could not check out $TICKET_BRANCH: $switch_err" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "could not check out $TICKET_BRANCH for $BEGIN_REF: $switch_err" >&2
+  exit 1
+fi
+
+# The packet is the only evidence the model judges from. Reads only; nothing
+# here changes remote state.
+if ! python3 "$REPO/implement-packet" "$TICKET_NUMBER" --repo "$BEGIN_REPO" \
+    >"$PACKET_FILE" 2>"$DIAG_FILE"; then
+  packet_err="$(cat "$DIAG_FILE")"
+  echo "muse-implement: implement-packet failed: $packet_err" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "implement-packet failed for $BEGIN_REF: $packet_err" >&2
+  exit 1
+fi
+if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' \
+    "$PACKET_FILE" 2>/dev/null; then
+  echo "muse-implement: implement-packet printed invalid JSON for $BEGIN_REF" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "implement-packet for $BEGIN_REF printed invalid JSON" >&2
+  exit 1
+fi
+
+# Substitute the whole packet where PACKET_JSON stands. The template check
+# above guarantees exactly one occurrence, so this cannot leave one behind —
+# and a packet that happens to contain the literal stays content, not a
+# placeholder. The prompt travels by --prompt-file, not argv, because a plan
+# can outgrow the argument limit.
+PACKET_JSON="$(cat "$PACKET_FILE")"
+PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$PACKET_JSON}"
+printf '%s' "$PROMPT" >"$PROMPT_FILE"
 
 # `never` means never ask, not never allow. The managed macOS shell sandbox
 # hides the active Directory Services user record from child git/ssh processes
@@ -188,8 +290,8 @@ perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "$MUSE_BIN" exec \
   --max-model-steps 60 \
   --no-foreign-personal-context \
   --workspace "$WORKSPACE" \
-  --json \
-  "$PROMPT" &
+  --prompt-file "$PROMPT_FILE" \
+  --json &
 muse_pid=$!
 killed_marker="$(mktemp "${TMPDIR:-/tmp}/muse-implement-killed.XXXXXX")"
 rm -f "$killed_marker"
@@ -222,4 +324,36 @@ if [[ -e "$killed_marker" ]]; then
 fi
 kill "$bound_pid" 2>/dev/null
 wait "$bound_pid" 2>/dev/null
-exit "$status"
+
+if (( status != 0 )); then
+  echo "muse-implement: muse exec failed (exit $status) on $BEGIN_REF" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "muse exec failed (exit $status) on $BEGIN_REF" >&2
+  exit 1
+fi
+
+ANSWER_FILE="$WORKSPACE/$ANSWER_NAME"
+if [[ ! -f "$ANSWER_FILE" ]]; then
+  echo "muse-implement: the model left no $ANSWER_NAME for $BEGIN_REF" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "the model left no $ANSWER_NAME for $BEGIN_REF" >&2
+  exit 1
+fi
+
+# finish-ticket owns every side effect from here: it validates the answer,
+# tests the checkout, commits and pushes, opens the PR (or records the
+# blocked or declined path), releases the claim, and finishes the run. A
+# failure there may already have released and finished — the test-failure
+# path does — so the fallback below must tolerate both being done.
+if ! (cd "$WORKSPACE" && python3 "$REPO/finish-ticket" --answer "$ANSWER_FILE" \
+    --run "$BEGIN_RUN" --agent muse --repo "$BEGIN_REPO" 2>"$DIAG_FILE"); then
+  finish_err="$(cat "$DIAG_FILE")"
+  echo "muse-implement: finish-ticket failed: $finish_err" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "finish-ticket failed for $BEGIN_REF: $finish_err" >&2 || true
+  exit 1
+fi
+exit 0

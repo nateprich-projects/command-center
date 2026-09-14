@@ -1,4 +1,16 @@
-"""The Muse implementer gets one disposable clone and a bounded writer run."""
+"""The Muse implement runner owns the protocol; the model judges one ticket.
+
+Phase 3 of #794: begin claims the ticket, the runner clones it onto
+ticket/<n> and assembles the packet with implement-packet, and the model
+sees the judgement-only prompt with the packet inline. It changes files
+and writes one structured answer to answer.json; the runner hands that
+answer to finish-ticket, which performs every side effect.
+
+The harness below stubs the funnel, heartbeat, packet, finish, gh, and
+muse binaries with a real fixture git remote underneath; the routine text
+is the real file, so the prompt-substitution tests pin the artifact that
+ships.
+"""
 
 from __future__ import annotations
 
@@ -13,98 +25,219 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "muse-implement"
+ROUTINE = ROOT / "routines" / "muse-implement.md"
+
+TICKET = 42
+BEGIN_REF = "example/widgets#42"
+BEGIN_REPO = "example/widgets"
 
 
-def _executable(path: pathlib.Path, body: str) -> None:
+def _begin(**overrides):
+    begin = {
+        "agent": "muse",
+        "run": "writer-run",
+        "gate": "ok",
+        "do": "ticket",
+        "work": {"ref": BEGIN_REF, "repo": BEGIN_REPO},
+    }
+    begin.update(overrides)
+    return begin
+
+
+def _packet(**overrides):
+    packet = {
+        "repo": BEGIN_REPO,
+        "ticket": {"ref": BEGIN_REF, "number": TICKET,
+                   "title": "Do the thing", "body": "Risk: escalated"},
+        "plan": {"ref": "example/widgets#7", "number": 7,
+                 "body": "# Plan\n"},
+        "verdict": {"pr": None, "head_sha": None, "verdict": None,
+                    "blocking": []},
+        "prior_run": None,
+        "marker": "packet-marker-817",
+    }
+    packet.update(overrides)
+    return packet
+
+
+ANSWER = json.dumps({"done": True, "summary": "Did the thing.",
+                     "departures": ["Did not do the other thing."]})
+
+FUNNEL_STUB = (
+    "import pathlib, sys\n"
+    "root = pathlib.Path(__file__).parent\n"
+    "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
+    "with (root / 'funnel.calls').open('a') as fh:\n"
+    "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
+    "if command == 'session-server':\n"
+    "    print('127.0.0.1:1:stub', flush=True)\n"
+    "elif command == 'begin':\n"
+    "    print((root / 'begin.json').read_text(), end='')\n"
+    "elif command == 'session-stop':\n"
+    "    pass\n"
+    "elif command == 'release':\n"
+    "    pass\n"
+    "else:\n"
+    "    raise SystemExit('unexpected funnel command: ' + command)\n"
+)
+
+HEARTBEAT_STUB = (
+    "import pathlib, sys\n"
+    "with (pathlib.Path(__file__).parent / 'heartbeat.log').open('a') as fh:\n"
+    "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
+)
+
+PACKET_STUB = (
+    "import os, pathlib, sys\n"
+    "root = pathlib.Path(__file__).parent\n"
+    "with (root / 'packet.calls').open('a') as fh:\n"
+    "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
+    "if os.environ.get('PACKET_STATUS', '0') != '0':\n"
+    "    sys.stderr.write(os.environ.get('PACKET_ERROR', 'packet failed'))\n"
+    "    raise SystemExit(1)\n"
+    "sys.stdout.write((root / 'packet.json').read_text())\n"
+)
+
+FINISH_STUB = (
+    "import os, pathlib, sys\n"
+    "root = pathlib.Path(__file__).parent\n"
+    "with (root / 'finish.calls').open('a') as fh:\n"
+    "    fh.write(os.getcwd() + ' :: ' + ' '.join(sys.argv[1:]) + '\\n')\n"
+    "args = sys.argv[1:]\n"
+    "answer = args[args.index('--answer') + 1]\n"
+    "(root / 'finish.answer').write_text(pathlib.Path(answer).read_text())\n"
+    "if os.environ.get('FINISH_STATUS', '0') != '0':\n"
+    "    sys.stderr.write(os.environ.get('FINISH_ERROR', 'finish failed'))\n"
+    "    raise SystemExit(1)\n"
+    "print('{\"number\": 99, \"url\": "
+    "\"https://github.com/example/widgets/pull/99\"}')\n"
+)
+
+GH_STUB = (
+    "#!/bin/bash\n"
+    "printf '%s\\n' \"$*\" >> \"$GH_LOG\"\n"
+    "if [[ \"${GH_STATUS:-0}\" -ne 0 ]]; then exit \"$GH_STATUS\"; fi\n"
+    "git clone --quiet \"$CLONE_SOURCE\" \"$4\"\n"
+)
+
+MUSE_STUB = (
+    "#!/bin/bash\n"
+    "count_file=\"$MUSE_COUNT\"\n"
+    "n=1\n"
+    "if [[ -f \"$count_file\" ]]; then n=$(($(cat \"$count_file\") + 1)); fi\n"
+    "printf '%s' \"$n\" > \"$count_file\"\n"
+    "printf '%s\\n' \"$@\" > \"$MUSE_ARGS.$n\"\n"
+    "workspace=''\n"
+    "prompt_file=''\n"
+    "previous=''\n"
+    "for argument in \"$@\"; do\n"
+    "  if [[ \"$previous\" == '--workspace' ]]; then workspace=\"$argument\"; fi\n"
+    "  if [[ \"$previous\" == '--prompt-file' ]]; then prompt_file=\"$argument\"; fi\n"
+    "  previous=\"$argument\"\n"
+    "done\n"
+    "test -n \"$workspace\" && test -s \"$prompt_file\"\n"
+    "cp \"$prompt_file\" \"$MUSE_PROMPT.$n\"\n"
+    "if [[ -n \"${MUSE_SLEEP:-}\" ]]; then exec sleep \"$MUSE_SLEEP\"; fi\n"
+    "git -C \"$workspace\" branch --show-current > \"$MUSE_BRANCH.$n\"\n"
+    "git -C \"$workspace\" rev-parse --abbrev-ref '@{u}' > \"$MUSE_UPSTREAM.$n\" "
+    "2>/dev/null || printf 'none' > \"$MUSE_UPSTREAM.$n\"\n"
+    "if [[ -n \"${MUSE_REQUIRE_FILE:-}\" ]]; then "
+    "test -f \"$workspace/$MUSE_REQUIRE_FILE\"; fi\n"
+    "if [[ -z \"${MUSE_MISSING_ANSWER:-}\" ]]; then "
+    "printf '%s' \"$MUSE_ANSWER\" > \"$workspace/answer.json\"; fi\n"
+    "if [[ -n \"${MUSE_TOUCH:-}\" ]]; then "
+    "printf 'changed' > \"$workspace/$MUSE_TOUCH\"; fi\n"
+    "exit \"${MUSE_STATUS:-0}\"\n"
+)
+
+
+def _executable(path, body):
     path.write_text(body)
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-def _stubbed_runner(
-    tmp_path: pathlib.Path,
-    begin: dict,
-    *,
-    bound_seconds: int = 20,
-    gh_status: int = 0,
-    muse_body: str | None = None,
-    gh_body: str | None = None,
-    extra_env: dict[str, str] | None = None,
-) -> tuple[subprocess.CompletedProcess[str], pathlib.Path]:
+def _run_git(*args, cwd=None):
+    return subprocess.run(["git"] + list(args), cwd=cwd, check=True,
+                          capture_output=True, text=True)
+
+
+def _seed_remote(base, *, ticket_branch=False):
+    """A fixture origin with a seed commit on main, cloned by the fake gh."""
+    remote = base / "remote.git"
+    seed = base / "seed"
+    _run_git("init", "--bare", "--quiet", str(remote))
+    _run_git("init", "--quiet", "-b", "main", str(seed))
+    _run_git("config", "user.name", "Fixture", cwd=seed)
+    _run_git("config", "user.email", "fixture@example.test", cwd=seed)
+    (seed / "README.md").write_text("seed\n")
+    _run_git("add", "README.md", cwd=seed)
+    _run_git("commit", "--quiet", "-m", "seed", cwd=seed)
+    _run_git("remote", "add", "origin", str(remote), cwd=seed)
+    _run_git("push", "--quiet", "-u", "origin", "main", cwd=seed)
+    _run_git("--git-dir", str(remote), "symbolic-ref", "HEAD",
+             "refs/heads/main")
+    if ticket_branch:
+        _run_git("switch", "--quiet", "-c", "ticket/{}".format(TICKET),
+                 cwd=seed)
+        (seed / "continued-marker").write_text("earlier push\n")
+        _run_git("add", "continued-marker", cwd=seed)
+        _run_git("commit", "--quiet", "-m", "earlier work", cwd=seed)
+        _run_git("push", "--quiet", "-u", "origin",
+                 "ticket/{}".format(TICKET), cwd=seed)
+    return remote
+
+
+def _stubbed_runner(tmp_path, begin, *, packet=None, bound_seconds=20,
+                    gh_status=0, muse_body=None, gh_body=None,
+                    routine_body=None, ticket_branch=False, extra_env=None):
+    """Run the implementer against stub funnel/heartbeat/packet/finish/gh/muse.
+
+    The fixture remote is real git, so the runner's fetch, branch inspection,
+    and checkout run for real; only the model and the GitHub effects are
+    faked. The routine text defaults to the real file.
+    """
     repo = tmp_path / "runner-repo"
     (repo / "routines").mkdir(parents=True)
     (repo / "routines" / "muse-implement.md").write_text(
-        "# Muse implementer\n\n---\n\nOpening result:\n\n```json\nBEGIN_JSON\n```\n"
+        routine_body if routine_body is not None else ROUTINE.read_text()
     )
     (repo / "begin.json").write_text(json.dumps(begin))
-    (repo / "funnel.py").write_text(
-        "import pathlib, sys\n"
-        "root = pathlib.Path(__file__).parent\n"
-        "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
-        "with (root / 'funnel.calls').open('a') as fh:\n"
-        "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
-        "if command == 'session-server':\n"
-        "    print('127.0.0.1:1:stub', flush=True)\n"
-        "elif command == 'begin':\n"
-        "    print((root / 'begin.json').read_text(), end='')\n"
-        "elif command == 'session-stop':\n"
-        "    pass\n"
-        "elif command == 'release':\n"
-        "    pass\n"
-        "else:\n"
-        "    raise SystemExit('unexpected funnel command: ' + command)\n"
-    )
-    (repo / "heartbeat.py").write_text(
-        "import pathlib, sys\n"
-        "with (pathlib.Path(__file__).parent / 'heartbeat.log').open('a') as fh:\n"
-        "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
-    )
+    if isinstance(packet, str):
+        (repo / "packet.json").write_text(packet)
+    else:
+        (repo / "packet.json").write_text(
+            json.dumps(packet if packet is not None else _packet()))
+    (repo / "funnel.py").write_text(FUNNEL_STUB)
+    (repo / "heartbeat.py").write_text(HEARTBEAT_STUB)
+    (repo / "implement-packet").write_text(PACKET_STUB)
+    (repo / "finish-ticket").write_text(FINISH_STUB)
+
+    remote = _seed_remote(tmp_path, ticket_branch=ticket_branch)
 
     gh = tmp_path / "gh"
-    _executable(
-        gh,
-        gh_body
-        or (
-            "#!/bin/bash\n"
-            "printf '%s\\n' \"$*\" >> \"$GH_LOG\"\n"
-            f"if [[ {gh_status} -ne 0 ]]; then exit {gh_status}; fi\n"
-            "mkdir -p \"$4/.git\"\n"
-            "printf '%s' cloned > \"$4/clone-marker\"\n"
-        ),
-    )
-
+    _executable(gh, gh_body or GH_STUB)
     muse = tmp_path / "muse"
-    _executable(
-        muse,
-        muse_body
-        or (
-            "#!/bin/bash\n"
-            "printf '%s\\n' \"$@\" > \"$MUSE_ARGS\"\n"
-            "printf '%s' \"${!#}\" > \"$MUSE_PROMPT\"\n"
-            "previous=''\n"
-            "for argument in \"$@\"; do\n"
-            "  if [[ \"$previous\" == '--workspace' ]]; then\n"
-            "    test -d \"$argument/.git\"\n"
-            "    test -f \"$argument/clone-marker\"\n"
-            "    printf '%s' \"$argument\" > \"$MUSE_WORKSPACE\"\n"
-            "  fi\n"
-            "  previous=\"$argument\"\n"
-            "done\n"
-        ),
-    )
+    _executable(muse, muse_body or MUSE_STUB)
 
     workspace_root = tmp_path / "workspaces"
     env = dict(
         os.environ,
+        HOME=str(tmp_path),
+        TMPDIR=str(tmp_path),
         MUSE_IMPLEMENT_REPO=str(repo),
         MUSE_BIN=str(muse),
         GH_BIN=str(gh),
         MUSE_IMPLEMENT_BOUND_SECONDS=str(bound_seconds),
         MUSE_IMPLEMENT_WORKSPACE_ROOT=str(workspace_root),
+        CLONE_SOURCE=str(remote),
+        GH_STATUS=str(gh_status),
         GH_LOG=str(repo / "gh.log"),
+        MUSE_COUNT=str(repo / "muse.count"),
         MUSE_ARGS=str(repo / "muse.args"),
         MUSE_PROMPT=str(repo / "muse.prompt"),
-        MUSE_WORKSPACE=str(repo / "muse.workspace"),
-        TMPDIR=str(tmp_path),
+        MUSE_BRANCH=str(repo / "muse.branch"),
+        MUSE_UPSTREAM=str(repo / "muse.upstream"),
+        MUSE_ANSWER=ANSWER,
     )
     if extra_env:
         env.update(extra_env)
@@ -114,48 +247,294 @@ def _stubbed_runner(
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
-        timeout=bound_seconds + 15,
+        timeout=bound_seconds + 25,
     )
     return proc, repo
 
 
-def test_the_runner_clones_the_ticket_repo_and_launches_the_exact_writer_shape(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path,
-        {
-            "agent": "muse",
-            "run": "writer-run",
-            "gate": "ok",
-            "do": "ticket",
-            "work": {"ref": "example/widgets#42", "repo": "example/widgets"},
-        },
-    )
+def _heartbeat(repo):
+    log = repo / "heartbeat.log"
+    return log.read_text() if log.exists() else ""
+
+
+def _muse_calls(repo):
+    count = repo / "muse.count"
+    return int(count.read_text()) if count.exists() else 0
+
+
+def _calls(repo, name):
+    calls = repo / (name + ".calls")
+    return calls.read_text().splitlines() if calls.exists() else []
+
+
+def test_the_happy_path_runs_packet_model_and_finish_in_order(tmp_path):
+    proc, repo = _stubbed_runner(tmp_path, _begin())
 
     assert proc.returncode == 0, proc.stderr
-    args = (repo / "muse.args").read_text().splitlines()
+    assert _muse_calls(repo) == 1
+    assert _calls(repo, "packet") == ["42 --repo example/widgets"]
+
+    # The model ran in the fresh clone, on a new ticket branch from main.
+    workspace = pathlib.Path(
+        (repo / "muse.args.1").read_text().splitlines()[
+            (repo / "muse.args.1").read_text().splitlines().index(
+                "--workspace") + 1]
+    )
+    assert (repo / "muse.branch.1").read_text().strip() == "ticket/42"
+    assert (repo / "muse.upstream.1").read_text().strip() == "none"
+    assert (repo / "gh.log").read_text() == "repo clone example/widgets {}\n".format(
+        workspace
+    )
+
+    # The writer shape: a shell for tests, the prompt by file, no reviewer
+    # flags — and no positional prompt, so a plan cannot outgrow argv.
+    args = (repo / "muse.args.1").read_text().splitlines()
     assert args[0] == "exec"
     assert args[args.index("--model") + 1] == "muse-spark-1.3"
     assert args[args.index("--reasoning-effort") + 1] == "max"
     assert args[args.index("--sandbox-network") + 1] == "enabled"
     assert "--disable-sandbox" in args
     assert args[args.index("--approval-mode") + 1] == "never"
+    assert args[args.index("--max-model-steps") + 1] == "60"
+    assert "--no-foreign-personal-context" in args
+    assert "--prompt-file" in args
+    assert "--json" in args
     assert "--disable-write" not in args
+    assert "--disable-shell" not in args
     assert "--yolo" not in args
+    assert "Command Center implementer" not in " ".join(args)
 
-    workspace = pathlib.Path((repo / "muse.workspace").read_text())
-    assert (repo / "gh.log").read_text() == "repo clone example/widgets {}\n".format(
-        workspace
-    )
-    assert not workspace.exists(), "the disposable clone must be removed after the run"
-    assert not list((tmp_path / "workspaces").iterdir())
-
-    prompt = (repo / "muse.prompt").read_text()
-    assert '"run": "writer-run"' in prompt
-    assert '"repo": "example/widgets"' in prompt
-    assert "BEGIN_JSON" not in prompt
+    # The packet went into the prompt file, with no literal left behind.
+    prompt = (repo / "muse.prompt.1").read_text()
+    assert "packet-marker-817" in prompt
+    assert "PACKET_JSON" not in prompt
     assert "begin --agent muse --tier escalated --role implement" in (
         repo / "funnel.calls"
     ).read_text()
+
+    # finish-ticket received the model's answer from the checkout, ran there,
+    # and owns the release and finish: the runner recorded no heartbeat.
+    finish = _calls(repo, "finish")
+    assert len(finish) == 1
+    cwd, argv = finish[0].split(" :: ")
+    assert cwd == str(workspace)
+    assert argv.split() == [
+        "--answer", str(workspace / "answer.json"),
+        "--run", "writer-run", "--agent", "muse",
+        "--repo", "example/widgets",
+    ]
+    assert (repo / "finish.answer").read_text() == ANSWER
+    assert _heartbeat(repo) == ""
+
+    assert not workspace.exists(), "the disposable clone must be removed after the run"
+    assert not list((tmp_path / "workspaces").iterdir())
+
+
+def test_a_remote_ticket_branch_continues_in_place(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), ticket_branch=True,
+        extra_env={"MUSE_REQUIRE_FILE": "continued-marker"},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert (repo / "muse.branch.1").read_text().strip() == "ticket/42"
+    assert (repo / "muse.upstream.1").read_text().strip() == "origin/ticket/42"
+
+
+def test_the_runner_reads_the_routine_at_run_time():
+    """The prompt is the routine file, not a copy: the drift surface #52
+    exists for must not come back in the engine."""
+    runner = SCRIPT.read_text()
+    assert "routines/muse-implement.md" in runner
+    assert "PACKET_JSON" in runner
+    assert "PROMPT_TEMPLATE//BEGIN_JSON" not in runner
+
+
+@pytest.mark.parametrize(
+    ("gate", "outcome"),
+    (
+        ("over", "skipped-over-pace"),
+        ("unknown", "skipped-usage-unknown"),
+        ("ok", "nothing-to-do"),
+    ),
+)
+def test_a_stop_finishes_without_a_clone_or_model(tmp_path, gate, outcome):
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        {"agent": "muse", "run": "stop-run", "gate": gate, "do": "stop"},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert not (repo / "gh.log").exists()
+    assert _muse_calls(repo) == 0
+    assert _calls(repo, "packet") == []
+    assert _calls(repo, "finish") == []
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run stop-run --outcome {}\n".format(outcome)
+    )
+
+
+def test_the_runner_refuses_any_lane_other_than_escalated_max():
+    bad_tier = subprocess.run(
+        ["/bin/bash", str(SCRIPT), "standard", "max"],
+        capture_output=True,
+        text=True,
+    )
+    bad_effort = subprocess.run(
+        ["/bin/bash", str(SCRIPT), "escalated", "high"],
+        capture_output=True,
+        text=True,
+    )
+
+    assert bad_tier.returncode == 1
+    assert "tier must be escalated" in bad_tier.stderr
+    assert bad_effort.returncode == 1
+    assert "reasoning effort must be max" in bad_effort.stderr
+
+
+def test_a_missing_routine_refuses_before_begin(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = dict(os.environ, MUSE_IMPLEMENT_REPO=str(repo),
+               HOME=str(tmp_path), TMPDIR=str(tmp_path))
+    proc = subprocess.run(["/bin/bash", str(SCRIPT)], env=env,
+                          stdin=subprocess.DEVNULL, capture_output=True,
+                          text=True, timeout=30)
+    assert proc.returncode == 1
+    assert "refusing to run without a prompt" in proc.stderr
+    assert not (repo / "funnel.calls").exists()
+
+
+@pytest.mark.parametrize("placeholders", (0, 2))
+def test_a_routine_without_exactly_one_packet_placeholder_is_refused(
+        tmp_path, placeholders):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(),
+        routine_body="# Implement\n\n---\n\nJudge this.\n"
+        + "PACKET_JSON\n" * placeholders)
+    assert proc.returncode == 1
+    assert "PACKET_JSON exactly once" in proc.stderr
+    assert _muse_calls(repo) == 0
+
+
+@pytest.mark.parametrize("begin", (
+    _begin(do="review", work={"pr": 7, "repo": BEGIN_REPO}),
+    _begin(work={"ref": BEGIN_REF}),
+    _begin(work={"ref": "example/widgets", "repo": BEGIN_REPO}),
+    _begin(work={"ref": "example/widgets#0", "repo": BEGIN_REPO}),
+))
+def test_invalid_begin_work_finishes_errored_without_a_clone(tmp_path, begin):
+    proc, repo = _stubbed_runner(tmp_path, begin)
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 0
+    assert not (repo / "gh.log").exists()
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "invalid" in heartbeat
+
+
+def test_a_clone_failure_finishes_errored_and_never_launches_muse(tmp_path):
+    proc, repo = _stubbed_runner(tmp_path, _begin(), gh_status=23)
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 0
+    assert _calls(repo, "packet") == []
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run writer-run --outcome errored --note "
+        "could not clone example/widgets into the fresh implementation workspace\n"
+    )
+    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+    assert not list((tmp_path / "workspaces").iterdir())
+
+
+def test_a_packet_failure_finishes_errored_without_a_model_call(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(),
+        extra_env={"PACKET_STATUS": "1", "PACKET_ERROR": "could not read ticket"})
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 0
+    assert _calls(repo, "finish") == []
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run writer-run --outcome errored --note "
+        "implement-packet failed for example/widgets#42: could not read ticket\n"
+    )
+    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+
+
+def test_an_invalid_packet_finishes_errored_without_a_model_call(tmp_path):
+    proc, repo = _stubbed_runner(tmp_path, _begin(), packet="not json{")
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 0
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run writer-run --outcome errored --note "
+        "implement-packet for example/widgets#42 printed invalid JSON\n"
+    )
+
+
+def test_a_model_failure_releases_and_finishes_errored(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), extra_env={"MUSE_STATUS": "3"})
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 1
+    assert _calls(repo, "finish") == []
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run writer-run --outcome errored --note "
+        "muse exec failed (exit 3) on example/widgets#42\n"
+    )
+    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+
+
+def test_a_missing_answer_releases_and_finishes_errored(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), extra_env={"MUSE_MISSING_ANSWER": "1"})
+
+    assert proc.returncode == 1
+    assert _calls(repo, "finish") == []
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run writer-run --outcome errored --note "
+        "the model left no answer.json for example/widgets#42\n"
+    )
+    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+
+
+def test_a_finish_ticket_failure_releases_and_finishes_errored(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(),
+        extra_env={"FINISH_STATUS": "1",
+                   "FINISH_ERROR": "answer is not valid JSON: boom"})
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 1
+    assert len(_calls(repo, "finish")) == 1
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run writer-run --outcome errored --note "
+        "finish-ticket failed for example/widgets#42: "
+        "answer is not valid JSON: boom\n"
+    )
+    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+
+
+def test_the_wall_clock_bound_kills_the_process_group_and_finishes_errored(
+        tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), bound_seconds=1,
+        extra_env={"MUSE_SLEEP": "30"},
+    )
+
+    assert proc.returncode == 124
+    assert "killing run after 1s" in proc.stderr
+    assert _calls(repo, "finish") == []
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run writer-run --outcome errored --note "
+        "killed after 0 minutes: escalated implementation run exceeded the "
+        "wall-clock bound (#392)\n"
+    )
+    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+    assert not list((tmp_path / "workspaces").iterdir())
 
 
 def test_a_fresh_workspace_resolves_uid_and_pushes_over_ssh(tmp_path):
@@ -164,14 +543,9 @@ def test_a_fresh_workspace_resolves_uid_and_pushes_over_ssh(tmp_path):
     The fake Muse executable models the managed shell boundary: it refuses to
     enter the workspace probe unless the runner disables the nested sandbox.
     The probe then exercises the real uid lookup and Git SSH transport without
-    requiring a network credential or a checkout-local URL rewrite.
+    requiring a network credential or a checkout-local URL rewrite. The model
+    still answers, and finish-ticket still runs, so the full protocol holds.
     """
-    remote = tmp_path / "remote.git"
-    subprocess.run(
-        ["git", "init", "--bare", "--quiet", str(remote)],
-        check=True,
-    )
-
     probe = tmp_path / "workspace-probe.py"
     _executable(
         probe,
@@ -253,21 +627,22 @@ def test_a_fresh_workspace_resolves_uid_and_pushes_over_ssh(tmp_path):
         "esac\n",
     )
 
+    # A real clone, re-pointed at the SSH origin the probe asserts: the
+    # runner's own fetch and branch inspection travel the fake SSH transport.
     gh_body = (
         "#!/bin/bash\n"
         "set -eu\n"
         "printf '%s\\n' \"$*\" >> \"$GH_LOG\"\n"
         "workspace=\"${4:?workspace argument missing}\"\n"
-        "git init --quiet \"$workspace\"\n"
-        "printf '%s' seed > \"$workspace/README.md\"\n"
-        "git -C \"$workspace\" add README.md\n"
-        "git -C \"$workspace\" -c user.name=runner -c user.email=runner@example.test commit --quiet -m seed\n"
-        "git -C \"$workspace\" remote add origin ssh://git@forge/muse-regression.git\n"
+        "git clone --quiet \"$CLONE_SOURCE\" \"$workspace\"\n"
+        "git -C \"$workspace\" remote set-url origin "
+        "ssh://git@forge/muse-regression.git\n"
     )
     muse_body = (
         "#!/bin/bash\n"
         "set -eu\n"
-        "printf '%s\\n' \"$@\" > \"$MUSE_ARGS\"\n"
+        "printf '%s\\n' \"$@\" > \"$MUSE_ARGS.1\"\n"
+        "printf '%s' 1 > \"$MUSE_COUNT\"\n"
         "workspace=''\n"
         "has_disable_sandbox=0\n"
         "previous=''\n"
@@ -281,17 +656,13 @@ def test_a_fresh_workspace_resolves_uid_and_pushes_over_ssh(tmp_path):
         "  exit 42\n"
         "fi\n"
         "\"$MUSE_WORKSPACE_PROBE\" \"$workspace\"\n"
+        "printf '%s' \"$MUSE_ANSWER\" > \"$workspace/answer.json\"\n"
     )
 
+    remote = _seed_remote(tmp_path / "ssh-remote")
     proc, repo = _stubbed_runner(
         tmp_path,
-        {
-            "agent": "muse",
-            "run": "ssh-workspace-run",
-            "gate": "ok",
-            "do": "ticket",
-            "work": {"ref": "example/widgets#42", "repo": "example/widgets"},
-        },
+        _begin(run="ssh-workspace-run"),
         muse_body=muse_body,
         gh_body=gh_body,
         extra_env={
@@ -300,7 +671,9 @@ def test_a_fresh_workspace_resolves_uid_and_pushes_over_ssh(tmp_path):
                 tmp_path / "runner-repo" / "workspace-probe.json"
             ),
             "REMOTE_REPO": str(remote),
+            "CLONE_SOURCE": str(remote),
             "TEST_SSH": str(ssh),
+            "GIT_SSH_COMMAND": str(ssh),
             "SSH_LOG": str(tmp_path / "runner-repo" / "ssh.log"),
         },
     )
@@ -315,96 +688,6 @@ def test_a_fresh_workspace_resolves_uid_and_pushes_over_ssh(tmp_path):
     ssh_calls = (repo / "ssh.log").read_text().splitlines()
     assert "-T git@forge" in ssh_calls
     assert sum("git-receive-pack" in call for call in ssh_calls) == 2
-    assert "--disable-sandbox" in (repo / "muse.args").read_text().splitlines()
-
-
-@pytest.mark.parametrize(
-    ("gate", "outcome"),
-    (
-        ("over", "skipped-over-pace"),
-        ("unknown", "skipped-usage-unknown"),
-        ("ok", "nothing-to-do"),
-    ),
-)
-def test_a_stop_finishes_without_a_clone_or_model(tmp_path, gate, outcome):
-    proc, repo = _stubbed_runner(
-        tmp_path,
-        {"agent": "muse", "run": "stop-run", "gate": gate, "do": "stop"},
-    )
-
-    assert proc.returncode == 0, proc.stderr
-    assert not (repo / "gh.log").exists()
-    assert not (repo / "muse.args").exists()
-    assert (repo / "heartbeat.log").read_text() == (
-        "finish --agent muse --run stop-run --outcome {}\n".format(outcome)
-    )
-
-
-def test_the_runner_refuses_any_lane_other_than_escalated_max():
-    bad_tier = subprocess.run(
-        ["/bin/bash", str(SCRIPT), "standard", "max"],
-        capture_output=True,
-        text=True,
-    )
-    bad_effort = subprocess.run(
-        ["/bin/bash", str(SCRIPT), "escalated", "high"],
-        capture_output=True,
-        text=True,
-    )
-
-    assert bad_tier.returncode == 1
-    assert "tier must be escalated" in bad_tier.stderr
-    assert bad_effort.returncode == 1
-    assert "reasoning effort must be max" in bad_effort.stderr
-
-
-def test_a_clone_failure_finishes_errored_and_never_launches_muse(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path,
-        {
-            "agent": "muse",
-            "run": "clone-failure",
-            "gate": "ok",
-            "do": "ticket",
-            "work": {"ref": "example/widgets#42", "repo": "example/widgets"},
-        },
-        gh_status=23,
-    )
-
-    assert proc.returncode == 1
-    assert not (repo / "muse.args").exists()
-    assert (repo / "heartbeat.log").read_text() == (
-        "finish --agent muse --run clone-failure --outcome errored --note "
-        "could not clone example/widgets into the fresh implementation workspace\n"
-    )
-    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
-    assert not list((tmp_path / "workspaces").iterdir())
-
-
-def test_the_wall_clock_bound_kills_the_process_group_and_finishes_errored(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path,
-        {
-            "agent": "muse",
-            "run": "hung-run",
-            "gate": "ok",
-            "do": "ticket",
-            "work": {"ref": "example/widgets#42", "repo": "example/widgets"},
-        },
-        bound_seconds=1,
-        muse_body=(
-            "#!/bin/bash\n"
-            "trap '' TERM\n"
-            "while true; do sleep 1; done\n"
-        ),
-    )
-
-    assert proc.returncode == 124
-    assert "killing run after 1s" in proc.stderr
-    assert (repo / "heartbeat.log").read_text() == (
-        "finish --agent muse --run hung-run --outcome errored --note "
-        "killed after 0 minutes: escalated implementation run exceeded the "
-        "wall-clock bound (#392)\n"
-    )
-    assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
-    assert not list((tmp_path / "workspaces").iterdir())
+    assert any("git-upload-pack" in call for call in ssh_calls)
+    assert "--disable-sandbox" in (repo / "muse.args.1").read_text().splitlines()
+    assert len(_calls(repo, "finish")) == 1

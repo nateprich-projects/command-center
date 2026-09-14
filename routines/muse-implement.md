@@ -57,9 +57,13 @@ required pushes of `ticket/*`; do not use raw HTTP or edit GitHub state through
 another client.
 
 `--approval-mode never` means never ask, not never allow. The safety boundary is
-this routine plus the fresh workspace; stay inside both. The runner enables
-network access because `gh` does not work under Muse's default proxy-only
-sandbox.
+this routine plus the fresh workspace; stay inside both. The runner disables
+Muse's nested shell sandbox at the workspace-launch boundary because that
+macOS seatbelt hides the active Directory Services user record from child
+`git` and `ssh` processes (`No user exists for uid ...`). Network access
+remains explicit because `gh` does not work under Muse's default proxy-only
+sandbox. Do not add per-call SSH fallbacks, HTTPS rewrites, or checkout-local
+`insteadOf` rules.
 
 ## 1. Use the opening result; do not begin again
 

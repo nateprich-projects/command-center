@@ -170,9 +170,12 @@ if ! "$GH_BIN" repo clone "$BEGIN_REPO" "$WORKSPACE"; then
   exit 1
 fi
 
-# Approval and the sandbox stay on. `never` means never ask, not never allow;
-# safety comes from the routine and the fresh clone being the writable root.
-# Network is explicit because Muse's proxy-only default makes gh time out.
+# `never` means never ask, not never allow. The managed macOS shell sandbox
+# hides the active Directory Services user record from child git/ssh processes
+# (`No user exists for uid ...`). Disable that nested sandbox at this single
+# workspace-launch boundary; the routine and fresh clone remain the safety
+# boundary, and no per-call SSH fallback is permitted.
+# Network remains explicit because Muse's proxy-only default makes gh time out.
 #
 # `perl setpgrp` gives Muse and every shell child its own process group, so the
 # wall-clock bound can kill the entire tree without killing this runner.
@@ -180,6 +183,7 @@ perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "$MUSE_BIN" exec \
   --model muse-spark-1.3 \
   --reasoning-effort "$EFFORT" \
   --sandbox-network enabled \
+  --disable-sandbox \
   --approval-mode never \
   --max-model-steps 60 \
   --no-foreign-personal-context \

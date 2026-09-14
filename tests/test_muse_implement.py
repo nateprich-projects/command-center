@@ -130,9 +130,9 @@ def test_the_runner_clones_the_ticket_repo_and_launches_the_exact_writer_shape(t
     assert args[args.index("--model") + 1] == "muse-spark-1.3"
     assert args[args.index("--reasoning-effort") + 1] == "max"
     assert args[args.index("--sandbox-network") + 1] == "enabled"
+    assert "--disable-sandbox" in args
     assert args[args.index("--approval-mode") + 1] == "never"
     assert "--disable-write" not in args
-    assert "--disable-sandbox" not in args
     assert "--yolo" not in args
 
     workspace = pathlib.Path((repo / "muse.workspace").read_text())

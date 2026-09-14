@@ -100,7 +100,13 @@ def test_successful_brief_spools_without_changing_stdout(
 ):
     spool = tmp_path / "dashboard-spool"
     monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
-    project = _item(7, "Building", children_total=3, children_done=1)
+    # ``funnel.main`` reads the real clock for "waited", so anchor this item's
+    # gate time to it rather than to the fixed NOW, or the expected "7 days"
+    # goes stale at the next day rollover (it did, on 2026-09-14).
+    project = _item(
+        7, "Building", children_total=3, children_done=1,
+        status_since=datetime.now(timezone.utc) - timedelta(days=7),
+    )
     expected = _brief_output()
     monkeypatch.setattr(funnel, "load_items", lambda: [project])
 

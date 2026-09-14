@@ -238,7 +238,7 @@ def test_packet_without_a_ticket_branch_has_no_ticket_body():
     found = packet(pr_view=view, ticket=None)
     assert found["ticket"] == {
         "ref": None, "number": None, "title": None, "url": None,
-        "body": None}
+        "body": None, "parent": None}
 
 
 def test_packet_marks_a_missing_plan():
@@ -304,6 +304,7 @@ def test_cli_prints_valid_json_with_every_field(monkeypatch, capsys):
     monkeypatch.setattr(
         review, "fetch_plan_md", lambda repo: ("# design record", False))
     monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
     monkeypatch.setattr(
         review, "fetch_verdict", lambda repo, pr: verdict())
     monkeypatch.setattr(
@@ -330,6 +331,7 @@ def test_cli_leaves_a_non_ticket_branch_without_a_ticket(monkeypatch, capsys):
     monkeypatch.setattr(review, "fetch_diff", lambda repo, pr: "")
     monkeypatch.setattr(review, "fetch_plan_md", lambda repo: ("", True))
     monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
     monkeypatch.setattr(
         review, "fetch_stop_counter",

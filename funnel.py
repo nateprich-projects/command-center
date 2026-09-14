@@ -9096,20 +9096,43 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # passed a check.
         out["unmetered"] = True
 
-    reconciled_merges = reconcile_approved_merges(items, now)
+    # Reconcile first, and never fatally. A step that cannot reach GitHub
+    # records its failure and selection proceeds without it; only a failure
+    # in selection's own reads stops the run (#732, #823).
+    reconcile_errors: List[Dict[str, object]] = []
+
+    def attempt_reconcile(step, func, *args):
+        try:
+            return func(*args)
+        except GitHubError as exc:
+            text, transient = _github_error_text(exc)
+            reconcile_errors.append({
+                "step": step,
+                "error": text,
+                "transient": transient,
+            })
+            return []
+
+    reconciled_merges = attempt_reconcile(
+        "approved_merges", reconcile_approved_merges, items, now)
     if reconciled_merges:
         out["reconciled_merges"] = reconciled_merges
 
-    auto_closed = reconcile_auto_closeable_projects(items)
+    auto_closed = attempt_reconcile(
+        "auto_closeable_projects", reconcile_auto_closeable_projects, items)
     if auto_closed:
         out["auto_closed"] = auto_closed
 
-    reconciled_statuses = reconcile_closed_items(items)
+    reconciled_statuses = attempt_reconcile(
+        "closed_items", reconcile_closed_items, items)
     if reconciled_statuses:
         out["reconciled_statuses"] = reconciled_statuses
-    orphaned = reconcile_orphaned_starts(items, now)
+    orphaned = attempt_reconcile(
+        "orphaned_starts", reconcile_orphaned_starts, items, now)
     if orphaned:
         out["reconciled_starts"] = orphaned
+    if reconcile_errors:
+        out["reconcile_errors"] = reconcile_errors
 
     if begin_uses_ticket_path(agent, tier, caller_role):
         cleared = clear_satisfied_blocks(
@@ -9133,6 +9156,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # claim/WIP checks below.
         blocked.difference_update(approved_conflicting_refs(pr_facts))
         blocked.update(finished_by_comments(items))
+        # A merge attempt that errored may still have merged remotely, so the
+        # ticket stays open locally with an unknown remote state (#732). It is
+        # not startable until the next run re-reads GitHub; the recorded error
+        # above says why it was passed over.
+        blocked.update(
+            str(entry["ref"]) for entry in reconciled_merges
+            if entry.get("result") == "error" and entry.get("ref")
+        )
         ticket = next_ticket_for_tier(
             items, now, tier=tier, blocked=blocked,
             agent=agent,
@@ -9339,6 +9370,25 @@ def _bind_run(agent: str, out: Dict[str, object]) -> None:
         pass
 
 
+def _github_error_text(error: GitHubError) -> Tuple[str, bool]:
+    """Human-readable text plus the transient flag for a GitHub failure.
+
+    Shared by the fatal ``begin`` envelope and the non-fatal reconcile
+    records: both name a transient GraphQL response and both carry the
+    request id that identifies it, so one shape covers either outcome.
+    """
+    transient = bool(getattr(error, "transient", False))
+    request_id = getattr(error, "request_id", None)
+    if not request_id:
+        request_id = _graphql_request_id(str(error))
+    text = str(error).strip() or type(error).__name__
+    if transient:
+        text = "transient GraphQL response: {}".format(text)
+    if request_id and request_id not in text:
+        text += " (GraphQL request ID {})".format(request_id)
+    return text, transient
+
+
 def _begin_error_envelope(agent: str, error: GitHubError) -> None:
     """Print a parseable failed ``begin`` result and preserve its heartbeat."""
     global _ACTIVE_HEARTBEAT_RUN, _ACTIVE_HEARTBEAT_AGENT
@@ -9355,15 +9405,7 @@ def _begin_error_envelope(agent: str, error: GitHubError) -> None:
             start_error = str(exc).strip() or type(exc).__name__
             _ACTIVE_HEARTBEAT_AGENT = agent
 
-    transient = bool(getattr(error, "transient", False))
-    request_id = getattr(error, "request_id", None)
-    if not request_id:
-        request_id = _graphql_request_id(str(error))
-    why = str(error).strip() or type(error).__name__
-    if transient:
-        why = "transient GraphQL response: {}".format(why)
-    if request_id and request_id not in why:
-        why += " (GraphQL request ID {})".format(request_id)
+    why, transient = _github_error_text(error)
     if start_error:
         why += "; heartbeat start failed: {}".format(start_error)
 

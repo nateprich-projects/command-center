@@ -3016,7 +3016,8 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
     recent = [
         i
         for i in items
-        if i.closed_at
+        if i.klass is not None
+        and i.closed_at
         and i.closed_at >= cutoff
         and i.state_reason != "NOT_PLANNED"
     ]

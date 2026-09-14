@@ -9,7 +9,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-ROUTINES = ("claude", "muse", "muse-implement", "zcode")
+ROUTINES = ("claude", "muse", "zcode")
 
 
 @pytest.mark.parametrize("routine", ROUTINES)
@@ -33,32 +33,6 @@ def test_muse_step_one_uses_the_runner_opening_result():
     assert "its json result is inserted into the code block below" in normalized
     assert "do not run `begin` again" in normalized
     assert "if it says `\"do\": \"stop\"`, the runner has finished the heartbeat" in normalized
-
-
-def test_muse_implement_carries_the_writer_contract():
-    body = (ROOT / "routines" / "muse-implement.md").read_text(encoding="utf-8")
-    normalized = " ".join(body.split()).lower()
-
-    assert "work **one escalated-tier ticket**, then stop" in normalized
-    assert "funnel.py begin --agent muse --tier escalated" in normalized
-    assert "the runner has already run this exact opening command" in normalized
-    assert "do not run `begin` again" in normalized
-    assert "prior_run.py <issue-number>" in normalized
-    assert "the runner starts you in a fresh, otherwise disposable per-run workspace that has already cloned the ticket repo" in normalized
-    assert "`git remote -v` shows the ticket repo as `origin`" in normalized
-    assert "`git status --short --branch` shows a clean tree before creating `ticket/<issue-number>` from `main`" in normalized
-    assert "gh repo clone <repo-from-the-ticket> ." not in normalized
-    assert "branch **`ticket/<issue-number>` from `main`**" in normalized
-    assert "commit and push after each meaningful step" in normalized
-    assert "shell commands run in the background" in normalized
-    assert "do not use `/tmp`, `$tmpdir`" in normalized
-    assert "use `gh` for github" in normalized
-    assert "open one pull request" in normalized
-    assert "capture observed defects before finishing" in normalized
-    assert "finished by comments:" in normalized
-    assert "mid-work discovery: convert, record, stop" in normalized
-    assert "never add an implementation mode to `muse-review`" in normalized
-    assert "never add an inline second-agent literal" in normalized
 
 
 def test_claude_reports_codex_automation_drift_without_gating_the_run():

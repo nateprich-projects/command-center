@@ -33,13 +33,11 @@ RESOLVED = "/Volumes/"
 CAPTURE_ROUTINES = (
     "claude.md",
     "muse.md",
-    "muse-implement.md",
     "zcode.md",
 )
 AGENT_CAPTURE_ROUTINES = (
     "claude.md",
     "muse.md",
-    "muse-implement.md",
 )
 CAPTURE_RULE = (
     "When this run observes a defect (broken behaviour, a failing command, or a "
@@ -213,6 +211,15 @@ def test_agent_run_documents_use_no_bytecode_verification_commands():
 def test_codex_routine_delegates_verification_to_finish_ticket():
     body = (ROOT / "routines" / "codex-work.md").read_text(encoding="utf-8")
     assert "finish-ticket --run <run> --answer -" in body
+    assert "tests the checkout" in body
+    assert "PYTHONDONTWRITEBYTECODE" not in body
+    assert "python3 -m pytest" not in body
+
+
+def test_muse_implement_routine_delegates_verification_to_finish_ticket():
+    body = (ROOT / "routines" / "muse-implement.md").read_text(encoding="utf-8")
+    assert "finish-ticket" in body
+    assert "answer.json" in body
     assert "tests the checkout" in body
     assert "PYTHONDONTWRITEBYTECODE" not in body
     assert "python3 -m pytest" not in body

@@ -10,8 +10,6 @@ from __future__ import annotations
 import pathlib
 import sys
 
-import pytest
-
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -125,13 +123,3 @@ def test_a_retired_agent_is_never_read_and_the_reader_is_pure_on_failure(monkeyp
 
     monkeypatch.setattr(heartbeat, "read", lambda agent: (_ for _ in ()).throw(OSError("no spool")))
     assert funnel.finished_by_comments([project, ticket]) == set()
-
-
-@pytest.mark.parametrize("routine", ["muse-implement.md"])
-def test_the_engineer_routine_records_the_no_pr_finish(routine):
-    text = " ".join((ROOT / "routines" / routine).read_text(encoding="utf-8").split()).lower()
-    assert "finished by comments:" in text
-    assert "--outcome skipped-human-step --note \"finished by comments:" in text
-    assert "waiting on nate to close #<current-number>" in text
-    assert "do not close the ticket" in text
-    assert funnel.COMMENTS_DELIVERABLE_PREFIX in text

@@ -7,6 +7,7 @@ which is the part a diff cannot carry.
 
     prior_run.py 42                 # most recent prior run on ticket #42
     prior_run.py 42 --agent claude
+    prior_run.py 42 --agent muse
 
 Three rules govern how the output should be used, and the routines say so too:
 
@@ -30,10 +31,13 @@ import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/*/*/*/*.jsonl")
 CLAUDE_SESSIONS = os.path.expanduser("~/.claude/projects/*/*.jsonl")
+MUSE_SESSIONS = os.path.expanduser(
+    "~/.local/share/muse/sessions/*/*/*/*/session.jsonl")
 
 #: Sessions older than this are not offered as a resume point. A run that died
 #: days ago has been overtaken by events.
@@ -139,16 +143,85 @@ def _read_claude(record):
     )
 
 
+def _looks_like_muse(record) -> bool:
+    """Muse's event envelope: a payload type plus a stream pointer."""
+    return "payload_type" in record and isinstance(record.get("stream"), dict)
+
+
+def _read_muse(record):
+    """Muse session log: one event envelope per line, the transcript on runs.
+
+    The conversation rides on ``payload.kind == "run"`` events: ``started``
+    carries the submitted prompt, ``assistant_message_committed`` the model's
+    text, and ``assistant_tool_calls_committed`` the tool calls with JSON
+    arguments. The workspace root and model arrive on sibling payload types,
+    and every line shares the envelope, so anything else is skipped.
+    """
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None, None
+
+    payload_type = record.get("payload_type")
+    if payload_type == "runtime.session.metadata":
+        meta = payload.get("record") or {}
+        out = {}
+        if meta.get("workspace_root"):
+            out["cwd"] = meta["workspace_root"]
+        if meta.get("model_id"):
+            out["model"] = meta["model_id"]
+        return ("meta", out) if out else (None, None)
+    if payload_type == "run.model.configured":
+        model = (payload.get("record") or {}).get("model_id")
+        return ("meta", {"model": model}) if model else (None, None)
+
+    if payload.get("kind") != "run":
+        return None, None
+    event = payload.get("event")
+    if not isinstance(event, dict):
+        return None, None
+    kind = event.get("kind")
+    if kind == "started":
+        prompt = event.get("prompt")
+        if isinstance(prompt, str) and prompt.strip():
+            return "message", {"role": "user", "text": prompt.strip()}
+        return None, None
+    if kind == "assistant_message_committed":
+        text = event.get("text")
+        if isinstance(text, str) and text.strip():
+            return "message", {"role": "assistant", "text": text.strip()}
+        return None, None
+    if kind == "assistant_tool_calls_committed":
+        calls = []
+        tool_calls = event.get("tool_calls")
+        for call in tool_calls if isinstance(tool_calls, list) else []:
+            if not isinstance(call, dict):
+                continue
+            calls.append("{}: {}".format(
+                call.get("name"), _text(call.get("args"))[:160]).strip())
+        return ("tools", calls) if calls else (None, None)
+    return None, None
+
+
+def session_label(path: str, agent: Optional[str]) -> str:
+    """What names a session in a digest. Muse calls every log session.jsonl,
+    so the parent directory — the session id — is the name."""
+    name = os.path.basename(path)
+    if agent == "muse" and name == "session.jsonl":
+        return os.path.basename(os.path.dirname(path)) or name
+    return name
+
+
 def digest(path: str, shape: Optional[str] = None) -> Dict:
     """Reduce a session to intent: what was asked, what was said, what was run.
 
-    The two vendors' transcripts share no structure, so the shape is detected
+    The vendors' transcripts share no structure, so the shape is detected
     rather than assumed. Assuming produced a digest with zero messages that
     still rendered a confident-looking header.
     """
     meta: Dict = {}
     messages: List[Dict] = []
     tools: List[str] = []
+    muse_seen = shape == "muse"
 
     with open(path, errors="replace") as fh:
         for line in fh:
@@ -157,10 +230,16 @@ def digest(path: str, shape: Optional[str] = None) -> Dict:
             except ValueError:
                 continue
 
-            reader = _read_claude if (
-                shape == "claude"
-                or (shape is None and isinstance(record.get("message"), dict))
-            ) else _read_codex
+            is_muse = _looks_like_muse(record)
+            muse_seen = muse_seen or is_muse
+            if shape == "muse" or (shape is None and is_muse):
+                reader = _read_muse
+            elif shape == "claude" or (
+                shape is None and isinstance(record.get("message"), dict)
+            ):
+                reader = _read_claude
+            else:
+                reader = _read_codex
 
             # Model and effort are not set by a scheduled task — it inherits the
             # app's default at fire time — and nothing else records which was
@@ -171,6 +250,18 @@ def digest(path: str, shape: Optional[str] = None) -> Dict:
                 meta["effort"] = record["effort"]
             if isinstance(record.get("message"), dict) and record["message"].get("model"):
                 meta.setdefault("model", record["message"]["model"])
+
+            # Muse stamps microseconds on every record and the session id on
+            # the stream; the first record dates the run.
+            if "timestamp" not in meta and isinstance(
+                record.get("recorded_at"), int
+            ):
+                meta["timestamp"] = datetime.fromtimestamp(
+                    record["recorded_at"] / 1000000, tz=timezone.utc
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+            stream = record.get("stream")
+            if not meta.get("id") and isinstance(stream, dict) and stream.get("id"):
+                meta["id"] = stream["id"]
 
             # Claude carries cwd/gitBranch on every record instead of a header.
             if not meta.get("cwd") and record.get("cwd"):
@@ -183,7 +274,7 @@ def digest(path: str, shape: Optional[str] = None) -> Dict:
 
             kind, value = reader(record)
             if kind == "meta" and value:
-                meta = value
+                meta.update(value)
             elif kind == "message" and value and value["text"]:
                 messages.append(value)
             elif kind == "message+tools":
@@ -193,6 +284,8 @@ def digest(path: str, shape: Optional[str] = None) -> Dict:
                 tools.extend(calls)
             elif kind == "tool" and value:
                 tools.append(value)
+            elif kind == "tools" and value:
+                tools.extend(value)
 
     # Both vendors inject large context blocks as pseudo-user turns (plugin
     # catalogues, environment dumps). They are not intent, and they would eat
@@ -200,7 +293,7 @@ def digest(path: str, shape: Optional[str] = None) -> Dict:
     messages = [m for m in messages if not m["text"].startswith("<")]
 
     return {
-        "session": os.path.basename(path),
+        "session": session_label(path, "muse" if muse_seen else shape),
         "meta": meta,
         # The tail is what matters — a dying run's last acts say where it got to.
         "messages": messages[-MAX_MESSAGES:],
@@ -293,7 +386,7 @@ def render(d: Dict, ticket: str) -> str:
             for commit in left.get("unpushed_commits", []):
                 lines.append("  unpushed: {}".format(commit))
             lines.append("")
-            lines.append("  This directory is NOT the one a new run gets — each Codex")
+            lines.append("  This directory is NOT the one a new run gets — each")
             lines.append("  session works somewhere new. Anything above exists only here.")
     return "\n".join(lines)
 
@@ -301,7 +394,8 @@ def render(d: Dict, ticket: str) -> str:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("ticket", help="issue number, or a full issue URL")
-    parser.add_argument("--agent", choices=["codex", "claude"], default="codex")
+    parser.add_argument("--agent", choices=["codex", "muse", "claude"],
+                        default="codex")
     parser.add_argument("--max-age-days", type=int, default=MAX_AGE_DAYS)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
@@ -311,7 +405,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     # match far too much.
     needles = ["issues/{}".format(ticket), "#{}".format(ticket)]
 
-    pattern = CODEX_SESSIONS if args.agent == "codex" else CLAUDE_SESSIONS
+    patterns = {"codex": CODEX_SESSIONS, "muse": MUSE_SESSIONS,
+                "claude": CLAUDE_SESSIONS}
+    pattern = patterns[args.agent]
     matches = candidates(pattern, needles, args.max_age_days)
     if not matches:
         print(
@@ -331,7 +427,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
     if len(matches) > 1:
-        d["other_candidates"] = [os.path.basename(p) for p in matches[1:4]]
+        d["other_candidates"] = [session_label(p, args.agent)
+                                 for p in matches[1:4]]
 
     if args.json:
         print(json.dumps(d, indent=2))

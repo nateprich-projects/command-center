@@ -58,6 +58,28 @@ REPO = "nateprich-projects/command-center"
 CHECKOUT_ROOT = pathlib.Path(__file__).resolve().parent
 CLAUDE_DIR = pathlib.Path.home() / ".claude"
 
+#: The vendor-specific facts a Codex implementation run needs in addition to
+#: the ticket packet. Keep these structured and code-owned: the shortened
+#: routine tells Codex to follow ``begin`` rather than duplicating sandbox and
+#: path rules in a pasted prompt that can drift.
+CODEX_IMPLEMENT_VENDOR = {
+    "sandbox": {
+        "writable": [
+            "the current Codex per-session working directory",
+            "~/.claude/command-center-heartbeat",
+        ],
+        "read_execute_only": [
+            "/Users/nateprich/.claude/command-center-run",
+        ],
+    },
+    "path_spelling": (
+        "Invoke every Command Center helper through exactly "
+        "/Users/nateprich/.claude/command-center-run. Never rewrite that "
+        "spelling to the symlink target; only Codex sandbox configuration may "
+        "contain the resolved target."
+    ),
+}
+
 # The routine declares its own identity in the opening command. The argument
 # is deliberately removed rather than replaced with a placeholder: the file
 # with no literal and the same file after the literal is pasted must hash to
@@ -8955,6 +8977,40 @@ def _start_begin_heartbeat(agent: str) -> Optional[str]:
     return run_id
 
 
+def implementation_packet(repo: str, number: int, agent: str) -> Dict:
+    """Read one implementation packet through the standalone engine.
+
+    ``engine.implement`` imports this module for the established GitHub reads,
+    so importing it here would reverse the dependency. The process boundary
+    keeps the package one-way while giving ``begin`` the same packet exposed by
+    the public ``implement-packet`` entry point.
+    """
+    command = [
+        sys.executable,
+        str(CHECKOUT_ROOT / "implement-packet"),
+        str(number),
+        "--repo",
+        repo,
+        "--agent",
+        agent,
+    ]
+    proc = _run_bounded_subprocess(
+        command, capture_output=True, text=True, timeout=120
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "unknown error").strip()
+        raise GitHubError("could not assemble implement packet: {}".format(detail))
+    try:
+        packet = json.loads(proc.stdout)
+    except (TypeError, ValueError) as exc:
+        raise GitHubError(
+            "implement-packet returned invalid JSON: {}".format(exc)
+        )
+    if not isinstance(packet, dict):
+        raise GitHubError("implement-packet returned a non-object JSON value")
+    return packet
+
+
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
               routine_sha_literal: Optional[str] = None,
@@ -9144,6 +9200,28 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     do="ticket",
                     work=item_json(ticket, now, {i.ref: i for i in items}),
                 )
+                if agent == "codex":
+                    try:
+                        out["packet"] = implementation_packet(
+                            ticket.repo, ticket.number, agent
+                        )
+                    except (GitHubError, OSError, subprocess.SubprocessError) as exc:
+                        # A packet-less implementation run is not actionable.
+                        # Undo the claim before returning a stop envelope so the
+                        # next poll can recover without waiting for the TTL.
+                        try:
+                            write_lock(ticket, None)
+                        except GitHubError as release_exc:
+                            out["release_error"] = str(release_exc)
+                        out.pop("work", None)
+                        out.update(
+                            do="stop",
+                            why="could not assemble implementation packet: {}".format(
+                                exc
+                            ),
+                        )
+                    else:
+                        out["vendor"] = CODEX_IMPLEMENT_VENDOR
         _bind_run(agent, out)
         print(json.dumps(out, indent=2))
         return 0

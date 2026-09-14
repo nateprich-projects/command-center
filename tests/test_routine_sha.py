@@ -29,6 +29,11 @@ def _bindings_never_touch_the_real_spool(monkeypatch):
     monkeypatch.setattr(heartbeat, "record_binding", lambda *args, **kwargs: "pushed")
     monkeypatch.setattr(funnel, "finished_by_comments", lambda items: set())
     monkeypatch.setattr(funnel, "reconcile_orphaned_starts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        funnel,
+        "implementation_packet",
+        lambda repo, number, agent: {"repo": repo, "ticket": {"number": number}},
+    )
 
 
 NOW = datetime(2026, 9, 7, 12, 0, 0, tzinfo=timezone.utc)

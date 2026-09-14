@@ -9,7 +9,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-ROUTINES = ("codex-work", "claude", "muse", "muse-implement", "zcode")
+ROUTINES = ("claude", "muse", "muse-implement", "zcode")
 
 
 @pytest.mark.parametrize("routine", ROUTINES)
@@ -163,7 +163,7 @@ def test_unattended_shaping_can_recover_an_unclassed_agent_idea(routine):
     assert "proposed class:" in normalized
 
 
-@pytest.mark.parametrize("routine", ("codex-work", "muse", "claude", "zcode"))
+@pytest.mark.parametrize("routine", ("muse", "claude", "zcode"))
 def test_every_capture_line_names_its_repo(routine):
     """With two member repos, a capture without --repo refuses and the
     observation is lost (#668). The resolver defaults from the run's binding;

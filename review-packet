@@ -1,0 +1,18 @@
+#!/usr/bin/env python3
+"""review-packet — print one read-only review packet for a PR as JSON.
+
+Usage: review-packet <pr> --repo owner/name
+
+Part of #794: the review runner shows the model this packet and nothing
+else. No writes; every GitHub call is a read.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from engine.review import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

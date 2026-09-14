@@ -43,21 +43,14 @@
       standard schedule's slots. Both run as agent `muse`, and two open runs at
       once make heartbeat attribution guesswork.
     -->
-    <key>StartCalendarInterval</key>
-    <array>
-        <dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>7</integer></dict>
-        <dict><key>Hour</key><integer>2</integer><key>Minute</key><integer>7</integer></dict>
-        <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>7</integer></dict>
-        <dict><key>Hour</key><integer>6</integer><key>Minute</key><integer>7</integer></dict>
-        <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>7</integer></dict>
-        <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>7</integer></dict>
-        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>7</integer></dict>
-        <dict><key>Hour</key><integer>14</integer><key>Minute</key><integer>7</integer></dict>
-        <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>7</integer></dict>
-        <dict><key>Hour</key><integer>18</integer><key>Minute</key><integer>7</integer></dict>
-        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>7</integer></dict>
-        <dict><key>Hour</key><integer>22</integer><key>Minute</key><integer>7</integer></dict>
-    </array>
+    <!--
+      Every 15 minutes while #794's escalated tickets clear (Nate, 2026-09-14,
+      ticket #859), matching the implementer's interval from #831. launchd
+      starts no second instance of this label while one runs. Revert to the
+      two-hourly :07 calendar schedule when #794 closes; recorded on #529.
+    -->
+    <key>StartInterval</key>
+    <integer>900</integer>
 
 
     <key>RunAtLoad</key>

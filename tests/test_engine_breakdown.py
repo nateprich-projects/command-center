@@ -1,0 +1,777 @@
+"""breakdown-packet and breakdown-apply with the ticket schema (#809, #794 Ph2).
+
+The breakdown runner shows the model a packet and performs its answer's
+effects. Every validation failure gets a fixture test here, so a malformed
+answer can never reach a mutation untested.
+"""
+
+from __future__ import annotations
+
+import json
+import pathlib
+import stat
+import sys
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+import funnel  # noqa: E402
+from engine import breakdown  # noqa: E402
+
+REPO = "owner/repo"
+OTHER = "other/repo"
+
+
+def raw_ticket(**kw):
+    data = {
+        "title": "do one thing",
+        "body": "What: do it.\n\nAccept: it is done.",
+        "risk": "standard",
+        "depends_on": [],
+        "needs": "none",
+    }
+    data.update(kw)
+    return data
+
+
+def validate(answer, states=None):
+    """Validate with a stub issue lookup; unknown refs do not exist."""
+    states = states or {}
+    seen = []
+
+    def lookup(ref):
+        seen.append(ref)
+        return states.get(ref)
+
+    errors, normalized = breakdown.validate_answer(answer, lookup)
+    return errors, normalized, seen
+
+
+def sibling_ticket(index, **kw):
+    data = {"title": "t{}".format(index), "body": "b{}".format(index),
+            "risk": "standard", "needs": "none", "depends_on": []}
+    data.update(kw)
+    return data
+
+
+# -- the sizing standard -------------------------------------------------
+
+def test_sizing_standard_holds_the_unit_and_the_sizing_rules():
+    found = breakdown.sizing_standard()
+    assert "One ticket is one Codex run" in found
+    assert "one concern" in found
+    assert "a few hundred lines at most" in found
+    assert "one way to tell it worked" in found
+
+
+def test_sizing_standard_excludes_the_protocol_the_runner_owns():
+    found = breakdown.sizing_standard()
+    assert "gh issue create" not in found
+    assert "Native dependency edges" not in found
+    assert "Boundary checklist" not in found
+
+
+def test_sizing_standard_fails_loudly_when_the_markers_move():
+    try:
+        breakdown.sizing_standard(skill_text="# rewritten\n\nno markers\n")
+    except breakdown.BreakdownError as exc:
+        assert "sizing standard" in str(exc)
+    else:
+        raise AssertionError("rewritten skill must not parse silently")
+    try:
+        breakdown.sizing_standard(skill_text="## Ordering and independence\n"
+                                             "## The unit\n")
+    except breakdown.BreakdownError as exc:
+        assert "empty" in str(exc)
+    else:
+        raise AssertionError("an empty slice must not pass")
+
+
+# -- project refs ----------------------------------------------------------
+
+def test_bare_number_resolves_against_the_default_repo():
+    assert breakdown.parse_project_ref("809", REPO) == (REPO, 809)
+
+
+def test_full_ref_needs_no_default():
+    assert breakdown.parse_project_ref("owner/repo#809") == (REPO, 809)
+    assert breakdown.parse_project_ref("  owner/repo#809  ", "x/y") == (
+        REPO, 809)
+
+
+def test_issue_url_parses():
+    url = "https://github.com/owner/repo/issues/809"
+    assert breakdown.parse_project_ref(url) == (REPO, 809)
+
+
+def test_bare_number_without_a_repo_is_a_local_error():
+    try:
+        breakdown.parse_project_ref("809")
+    except breakdown.BreakdownError as exc:
+        assert "--repo" in str(exc)
+    else:
+        raise AssertionError("ambiguous number must not parse")
+
+
+def test_malformed_refs_are_local_errors():
+    for bad in ("", "owner/repo", "owner/repo#0", "owner/repo#abc",
+                "#809", "owner/#809", "https://example.com/x"):
+        try:
+            breakdown.parse_project_ref(bad, REPO)
+        except breakdown.BreakdownError:
+            continue
+        raise AssertionError("{!r} must not parse".format(bad))
+
+
+# -- the assembled packet --------------------------------------------------
+
+def plan(**kw):
+    data = {
+        "ref": REPO + "#1",
+        "number": 1,
+        "title": "the plan",
+        "url": "https://github.com/{}/issues/1".format(REPO),
+        "body": "# Plan\n\nDo the thing.",
+        "state": "OPEN",
+    }
+    data.update(kw)
+    return data
+
+
+def sibling(number, **kw):
+    data = {
+        "ref": "{}#{}".format(REPO, number),
+        "repo": REPO,
+        "number": number,
+        "title": "ticket {}".format(number),
+        "state": "OPEN",
+    }
+    data.update(kw)
+    return data
+
+
+def packet(**kw):
+    args = {
+        "repo": REPO,
+        "number": 1,
+        "plan": plan(),
+        "siblings": [sibling(2), sibling(3, state="CLOSED")],
+        "sizing": "## The unit\n\nsizing rules\n",
+        "collected_at": "2026-09-14T00:00:00+00:00",
+    }
+    args.update(kw)
+    return breakdown.build_packet(**args)
+
+
+def test_packet_carries_every_field():
+    found = packet()
+    assert found["project"]["ref"] == REPO + "#1"
+    assert found["project"]["title"] == "the plan"
+    assert found["project"]["body"] == "# Plan\n\nDo the thing."
+    assert found["project"]["state"] == "OPEN"
+    assert [entry["number"] for entry in found["siblings"]] == [2, 3]
+    assert found["siblings"][1]["state"] == "CLOSED"
+    assert found["sizing_standard"] == "## The unit\n\nsizing rules\n"
+    assert found["sizing_standard_source"] == breakdown.SIZING_SKILL_PATH
+    assert found["collected_at"] == "2026-09-14T00:00:00+00:00"
+    json.dumps(found)  # the packet is JSON by contract
+
+
+def test_packet_with_no_siblings_says_so_plainly():
+    found = packet(siblings=[])
+    assert found["siblings"] == []
+
+
+def test_packet_cli_prints_valid_json(monkeypatch, capsys):
+    monkeypatch.setattr(breakdown, "fetch_plan", lambda repo, n: plan())
+    monkeypatch.setattr(
+        breakdown, "fetch_siblings", lambda repo, n: [sibling(2)])
+    monkeypatch.setattr(
+        breakdown, "sizing_standard", lambda skill_text=None: "sizing\n")
+    assert breakdown.packet_main(["owner/repo#1"]) == 0
+    found = json.loads(capsys.readouterr().out)
+    assert found["project"]["ref"] == REPO + "#1"
+    assert found["project"]["body"].startswith("# Plan")
+    assert [entry["ref"] for entry in found["siblings"]] == [REPO + "#2"]
+    assert found["sizing_standard"] == "sizing\n"
+
+
+def test_packet_cli_reports_a_bad_ref_without_a_traceback(capsys):
+    assert breakdown.packet_main(["nonsense", "--repo", REPO]) == 1
+    assert "not a project ref" in capsys.readouterr().err
+
+
+# -- structural guarantees ---------------------------------------------------
+
+def test_engine_imports_from_funnel_and_never_the_reverse():
+    engine_source = (ROOT / "engine" / "breakdown.py").read_text()
+    assert "import funnel" in engine_source
+    funnel_source = (ROOT / "funnel.py").read_text()
+    assert "import engine" not in funnel_source
+    assert "from engine" not in funnel_source
+
+
+def test_the_packet_entry_point_makes_no_writes():
+    # breakdown-apply owns every mutation; the packet path stays read-only.
+    mutating = ("pr merge", "pr comment", "pr close", "pr review",
+                "pr edit", "pr create", "issue close", "issue create",
+                "issue comment", "issue edit", "item-add", "item-edit",
+                "item-delete", "--yes", "delete-branch", "--blocked-by",
+                "SET_FIELD", "CLEAR_FIELD")
+    source = (ROOT / "breakdown-packet").read_text()
+    offenders = [verb for verb in mutating if verb in source]
+    assert offenders == []
+
+
+def test_the_entry_points_are_executable():
+    for name in ("breakdown-packet", "breakdown-apply"):
+        entry = ROOT / name
+        assert entry.exists()
+        assert entry.stat().st_mode & stat.S_IXUSR
+
+
+def test_the_needs_enum_is_funnels_not_a_second_copy():
+    assert breakdown.NEEDS_OPTIONS == funnel.NEEDS_OPTIONS
+    assert breakdown.NEEDS_OPTION_IDS == {
+        "none": funnel.NEEDS_OPTION_NONE,
+        "human": funnel.NEEDS_OPTION_HUMAN,
+        "claude-code-environment":
+            funnel.NEEDS_OPTION_CLAUDE_CODE_ENVIRONMENT,
+    }
+
+
+# -- validation: shape -------------------------------------------------------
+
+def test_a_non_object_answer_is_rejected():
+    for bad in (None, [], "tickets", 42):
+        errors, normalized, _ = validate(bad)
+        assert normalized is None
+        assert any("JSON object" in error for error in errors)
+
+
+def test_non_list_tickets_are_rejected():
+    errors, normalized, _ = validate({"tickets": "one"})
+    assert normalized is None
+    assert any("must be a list" in error for error in errors)
+
+
+def test_a_non_object_ticket_is_rejected():
+    errors, normalized, _ = validate({"tickets": ["do it"]})
+    assert normalized is None
+    assert any("ticket 0 must be an object" in error for error in errors)
+
+
+def test_empty_tickets_without_a_question_are_rejected():
+    for answer in ({"tickets": []}, {"tickets": [], "needs_decision": None},
+                   {}, {"tickets": [], "needs_decision": "  "}):
+        errors, normalized, _ = validate(answer)
+        assert normalized is None
+        assert any("at least one ticket" in error for error in errors), answer
+
+
+def test_tickets_with_a_question_are_rejected():
+    errors, normalized, _ = validate(
+        {"tickets": [raw_ticket()], "needs_decision": "which shape?"})
+    assert normalized is None
+    assert any("not both" in error for error in errors)
+
+
+def test_a_non_string_question_is_rejected():
+    errors, normalized, _ = validate(
+        {"tickets": [], "needs_decision": 42})
+    assert normalized is None
+    assert any("null or a question string" in error for error in errors)
+
+
+def test_a_question_alone_is_accepted():
+    errors, normalized, seen = validate(
+        {"tickets": [], "needs_decision": "  which shape?  "})
+    assert errors == []
+    assert normalized == {"tickets": [], "needs_decision": "which shape?"}
+    assert seen == []  # no dependencies, no lookups
+
+
+# -- validation: ticket fields ------------------------------------------------
+
+def test_a_blank_title_is_rejected():
+    errors, normalized, _ = validate({"tickets": [raw_ticket(title="  ")]})
+    assert normalized is None
+    assert any("ticket 0 needs a non-empty title" in error
+               for error in errors)
+    ticket = raw_ticket()
+    del ticket["title"]
+    errors, _, _ = validate({"tickets": [ticket]})
+    assert any("ticket 0 needs a non-empty title" in error
+               for error in errors)
+
+
+def test_a_blank_body_is_rejected():
+    errors, normalized, _ = validate({"tickets": [raw_ticket(body="")]})
+    assert normalized is None
+    assert any("ticket 0 needs a non-empty body" in error
+               for error in errors)
+
+
+def test_an_unknown_risk_is_rejected():
+    errors, normalized, _ = validate(
+        {"tickets": [raw_ticket(risk="Standard")]})
+    assert normalized is None
+    assert any("risk 'Standard'" in error for error in errors)
+    assert any("standard, escalated" in error for error in errors)
+
+
+def test_a_missing_risk_is_rejected():
+    ticket = raw_ticket()
+    del ticket["risk"]
+    errors, _, _ = validate({"tickets": [ticket]})
+    assert any("ticket 0 has risk None" in error for error in errors)
+
+
+def test_an_unknown_needs_is_rejected():
+    errors, normalized, _ = validate(
+        {"tickets": [raw_ticket(needs="claude")]})
+    assert normalized is None
+    assert any("needs 'claude'" in error for error in errors)
+    assert any("none, human, claude-code-environment" in error
+               for error in errors)
+
+
+def test_a_non_list_depends_on_is_rejected():
+    errors, normalized, _ = validate(
+        {"tickets": [raw_ticket(depends_on="owner/repo#9")]})
+    assert normalized is None
+    assert any("depends_on" in error for error in errors)
+
+
+def test_a_missing_depends_on_means_no_dependencies():
+    ticket = raw_ticket()
+    del ticket["depends_on"]
+    errors, normalized, seen = validate({"tickets": [ticket]})
+    assert errors == []
+    assert normalized["tickets"][0]["depends_on"] == []
+    assert seen == []
+
+
+# -- validation: dependencies ---------------------------------------------------
+
+def test_a_sibling_index_resolves_without_a_lookup():
+    errors, normalized, seen = validate({"tickets": [
+        raw_ticket(), raw_ticket(depends_on=[0])]})
+    assert errors == []
+    assert normalized["tickets"][1]["depends_on"] == [("sibling", 0)]
+    assert seen == []
+
+
+def test_an_out_of_range_index_is_rejected():
+    errors, normalized, _ = validate(
+        {"tickets": [raw_ticket(depends_on=[1])]})
+    assert normalized is None
+    assert any("only 0..0 exist" in error for error in errors)
+    errors, _, _ = validate({"tickets": [raw_ticket(depends_on=[-1])]})
+    assert any("only 0..0 exist" in error for error in errors)
+
+
+def test_a_ticket_may_not_depend_on_itself():
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(), raw_ticket(depends_on=[1])]})
+    assert normalized is None
+    assert any("ticket 1 depends on itself" in error for error in errors)
+
+
+def test_a_boolean_is_not_a_sibling_index():
+    errors, normalized, _ = validate(
+        {"tickets": [raw_ticket(), raw_ticket(depends_on=[True])]})
+    assert normalized is None
+    assert any("want a sibling index" in error for error in errors)
+
+
+def test_malformed_dependency_strings_are_rejected():
+    for bad in ("#9", "9", "owner/repo", "owner/repo#0", "owner/repo#abc",
+                "owner/repo9", "", None, ["owner/repo#9"]):
+        errors, normalized, seen = validate(
+            {"tickets": [raw_ticket(depends_on=[bad])]})
+        assert normalized is None, bad
+        assert any("want a sibling index" in error for error in errors), bad
+        assert seen == [], bad  # malformed refs cost no lookup
+
+
+def test_an_unknown_issue_is_rejected():
+    errors, normalized, seen = validate(
+        {"tickets": [raw_ticket(depends_on=["owner/repo#9"])]}, states={})
+    assert normalized is None
+    assert any("owner/repo#9, which is not an existing issue" in error
+               for error in errors)
+    assert seen == ["owner/repo#9"]
+
+
+def test_a_closed_issue_is_rejected():
+    errors, normalized, _ = validate(
+        {"tickets": [raw_ticket(depends_on=["owner/repo#9"])]},
+        states={"owner/repo#9": "CLOSED"})
+    assert normalized is None
+    assert any("owner/repo#9, which is not open" in error
+               for error in errors)
+
+
+def test_an_open_issue_resolves():
+    errors, normalized, seen = validate(
+        {"tickets": [raw_ticket(depends_on=["other/repo#7"])]},
+        states={"other/repo#7": "OPEN"})
+    assert errors == []
+    assert normalized["tickets"][0]["depends_on"] == [
+        ("external", "other/repo#7")]
+    assert seen == ["other/repo#7"]
+
+
+def test_each_unique_external_ref_is_looked_up_once():
+    errors, normalized, seen = validate({"tickets": [
+        raw_ticket(depends_on=["other/repo#7"]),
+        raw_ticket(depends_on=["other/repo#7", 0]),
+    ]}, states={"other/repo#7": "OPEN"})
+    assert errors == []
+    assert seen == ["other/repo#7"]
+
+
+def test_a_two_ticket_cycle_is_rejected():
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(depends_on=[1]), raw_ticket(depends_on=[0])]})
+    assert normalized is None
+    assert any("ticket 0 -> ticket 1 -> ticket 0" in error
+               for error in errors)
+
+
+def test_a_three_ticket_cycle_is_rejected():
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(depends_on=[1]),
+        raw_ticket(depends_on=[2]),
+        raw_ticket(depends_on=[0]),
+    ]})
+    assert normalized is None
+    assert any("depend in a cycle" in error for error in errors)
+    assert any("ticket 0 -> ticket 1 -> ticket 2 -> ticket 0" in error
+               for error in errors)
+
+
+def test_a_diamond_is_not_a_cycle():
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(),
+        raw_ticket(depends_on=[0]),
+        raw_ticket(depends_on=[0]),
+        raw_ticket(depends_on=[1, 2]),
+    ]})
+    assert errors == []
+
+
+def test_every_enum_value_validates():
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(risk="standard", needs="none"),
+        raw_ticket(risk="escalated", needs="human"),
+        raw_ticket(risk="escalated", needs="claude-code-environment"),
+    ]})
+    assert errors == []
+    assert [ticket["risk"] for ticket in normalized["tickets"]] == [
+        "standard", "escalated", "escalated"]
+    assert [ticket["needs"] for ticket in normalized["tickets"]] == [
+        "none", "human", "claude-code-environment"]
+
+
+# -- creation order ----------------------------------------------------------------
+
+def test_independent_tickets_keep_answer_order():
+    tickets = [sibling_ticket(0), sibling_ticket(1), sibling_ticket(2)]
+    assert breakdown.creation_order(tickets) == [0, 1, 2]
+
+
+def test_blockers_are_created_before_their_dependents():
+    tickets = [
+        sibling_ticket(0, depends_on=[("sibling", 1)]),
+        sibling_ticket(1),
+        sibling_ticket(2, depends_on=[("sibling", 0)]),
+    ]
+    assert breakdown.creation_order(tickets) == [1, 0, 2]
+
+
+def test_a_diamond_orders_the_base_first_and_stays_stable():
+    tickets = [
+        sibling_ticket(0, depends_on=[("sibling", 1),
+                                      ("sibling", 2)]),
+        sibling_ticket(1, depends_on=[("sibling", 3)]),
+        sibling_ticket(2, depends_on=[("sibling", 3)]),
+        sibling_ticket(3),
+    ]
+    assert breakdown.creation_order(tickets) == [3, 1, 2, 0]
+
+
+def test_external_refs_order_nothing():
+    tickets = [sibling_ticket(
+        0, depends_on=[("external", "other/repo#7")])]
+    assert breakdown.creation_order(tickets) == [0]
+
+
+# -- the code-owned Risk line ----------------------------------------------------------
+
+def test_the_risk_line_is_appended_to_a_plain_body():
+    found = breakdown.with_risk_line("What: do it.", "standard")
+    assert found == "What: do it.\n\nRisk: standard"
+
+
+def test_a_conflicting_model_risk_line_never_wins():
+    found = breakdown.with_risk_line(
+        "What: do it.\n\nRisk: escalated — concurrency", "standard")
+    assert found == "What: do it.\n\nRisk: standard"
+    assert found.count("Risk:") == 1
+
+
+def test_every_model_risk_line_is_removed_before_the_owned_one():
+    found = breakdown.with_risk_line(
+        "Risk: standard\n\nWhat: do it.\n\nRisk: escalated", "escalated")
+    assert found == "What: do it.\n\nRisk: escalated"
+
+
+def test_the_owned_line_survives_funnels_own_parser():
+    found = breakdown.with_risk_line("What: do it.\n\nRisk: standard",
+                                     "escalated")
+    match = funnel.RISK_LINE.search(found)
+    assert match is not None
+    assert match.group(1) == "escalated"
+
+
+# -- dependency rendering ---------------------------------------------------------
+
+def test_issue_url_renders_the_blocked_by_shape():
+    assert breakdown.issue_url("other/repo#7") == \
+        "https://github.com/other/repo/issues/7"
+
+
+def test_blocked_by_values_keep_answer_order_across_kinds():
+    ticket = sibling_ticket(2, depends_on=[("external", "other/repo#7"),
+                                           ("sibling", 0)])
+    assert breakdown.blocked_by_values(ticket, {0: 101}) == [
+        "https://github.com/other/repo/issues/7", "101"]
+
+
+def test_display_blockers_shorten_only_same_repo_refs():
+    ticket = sibling_ticket(1, depends_on=[("sibling", 0),
+                                           ("external", "other/repo#7"),
+                                           ("external", "owner/repo#9")])
+    assert breakdown.display_blockers(
+        ticket, {0: "owner/repo#101"}, REPO) == [
+            "#101", "other/repo#7", "#9"]
+
+
+def test_coverage_comment_names_what_the_runner_wrote():
+    found = breakdown.coverage_comment_body("owner/repo#1", [
+        {"ref": "owner/repo#101", "title": "first",
+         "risk": "standard", "needs": "none", "blocked_by": []},
+        {"ref": "owner/repo#102", "title": "second",
+         "risk": "escalated", "needs": "human",
+         "blocked_by": ["#101", "other/repo#7"]},
+    ])
+    assert found == (
+        "Breakdown of owner/repo#1 created 2 tickets:\n"
+        "- owner/repo#101: first (Risk: standard, Needs: none)\n"
+        "- owner/repo#102: second (Risk: escalated, Needs: human; "
+        "blocked by #101, other/repo#7)")
+
+
+def test_coverage_comment_singularises_one_ticket():
+    found = breakdown.coverage_comment_body("owner/repo#1", [
+        {"ref": "owner/repo#101", "title": "only",
+         "risk": "standard", "needs": "none", "blocked_by": []},
+    ])
+    assert found.splitlines()[0] == \
+        "Breakdown of owner/repo#1 created 1 ticket:"
+
+
+def test_created_numbers_come_from_the_last_line():
+    assert breakdown.parse_created_number(
+        "https://github.com/owner/repo/issues/101\n") == 101
+    assert breakdown.parse_created_number(
+        "some chatter\nhttps://github.com/owner/repo/issues/102\n") == 102
+
+
+def test_unreadable_create_output_is_a_github_error():
+    for bad in ("", "   \n ", "created, trust me"):
+        try:
+            breakdown.parse_created_number(bad)
+        except funnel.GitHubError:
+            continue
+        raise AssertionError("{!r} must not parse".format(bad))
+
+
+# -- apply ---------------------------------------------------------------------
+
+def stub_apply(monkeypatch, **kw):
+    """Replace every GitHub effect with a recorder. Returns the calls dict."""
+    calls: dict = {"created": [], "needs": [], "comments": [],
+                   "labels": [], "plans": []}
+    next_number = {"n": 100}
+
+    def fake_plan(repo, number):
+        calls["plans"].append((repo, number))
+        return kw.get("plan", plan(state="OPEN"))
+
+    def fake_create(repo, parent, ticket, blocked_by):
+        if kw.get("fail_on") == ticket["title"]:
+            raise funnel.GitHubError("creation refused")
+        next_number["n"] += 1
+        calls["created"].append({
+            "repo": repo, "parent": parent, "ticket": ticket,
+            "blocked_by": list(blocked_by),
+            "body": breakdown.with_risk_line(ticket["body"], ticket["risk"]),
+            "number": next_number["n"],
+        })
+        return next_number["n"], "{}#{}".format(repo, next_number["n"])
+
+    def fake_item_id(repo, number):
+        return "item-{}".format(number)
+
+    def fake_needs(item_id, needs, ref):
+        calls["needs"].append((item_id, needs, ref))
+
+    def fake_comment(repo, number, body, **provenance):
+        calls["comments"].append((repo, number, body))
+
+    def fake_label(repo, number):
+        calls["labels"].append((repo, number))
+
+    monkeypatch.setattr(breakdown, "fetch_plan", fake_plan)
+    monkeypatch.setattr(breakdown, "create_ticket", fake_create)
+    monkeypatch.setattr(breakdown, "fetch_project_item_id", fake_item_id)
+    monkeypatch.setattr(breakdown, "write_needs", fake_needs)
+    monkeypatch.setattr(breakdown, "post_comment", fake_comment)
+    monkeypatch.setattr(breakdown, "apply_blocked_label", fake_label)
+    return calls
+
+
+def test_the_create_path_writes_every_ticket_in_order(monkeypatch):
+    calls = stub_apply(monkeypatch)
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="second", risk="escalated", needs="human",
+                   depends_on=[1]),
+        raw_ticket(title="first", body="What: base.\n\nRisk: escalated"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+    result = breakdown.apply(REPO, 1, normalized)
+    assert [row["ticket"]["title"] for row in calls["created"]] == [
+        "first", "second"]  # the blocker goes first, not the answer order
+    assert calls["created"][0]["blocked_by"] == []
+    assert calls["created"][1]["blocked_by"] == ["101"]
+    assert calls["created"][0]["parent"] == 1
+    assert calls["created"][0]["repo"] == REPO
+    # The code-owned Risk line, not the model's conflicting one.
+    assert calls["created"][0]["body"] == "What: base.\n\nRisk: standard"
+    assert calls["created"][1]["body"].endswith("\n\nRisk: escalated")
+    assert calls["needs"] == [("item-101", "none", "owner/repo#101"),
+                              ("item-102", "human", "owner/repo#102")]
+    assert len(calls["comments"]) == 1
+    repo, number, body = calls["comments"][0]
+    assert (repo, number) == (REPO, 1)
+    assert body == breakdown.coverage_comment_body(
+        "owner/repo#1", result["created"])
+    assert "owner/repo#101" in body and "blocked by #101" in body
+    assert calls["labels"] == []
+    assert result["project"] == "owner/repo#1"
+    assert [row["ref"] for row in result["created"]] == [
+        "owner/repo#101", "owner/repo#102"]
+    json.dumps(result)
+
+
+def test_a_cross_project_reference_creates_the_native_edge(monkeypatch):
+    calls = stub_apply(monkeypatch)
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(depends_on=["other/repo#7"]),
+    ]}, states={"other/repo#7": "OPEN"})
+    assert errors == []
+    assert normalized is not None
+    breakdown.apply(REPO, 1, normalized)
+    assert calls["created"][0]["blocked_by"] == [
+        "https://github.com/other/repo/issues/7"]
+    assert "other/repo#7" in calls["comments"][0][2]
+
+
+def test_the_question_path_posts_and_labels_without_tickets(monkeypatch):
+    calls = stub_apply(monkeypatch)
+    errors, normalized, _ = validate(
+        {"tickets": [], "needs_decision": "tabs or spaces?"})
+    assert errors == []
+    assert normalized is not None
+    result = breakdown.apply(REPO, 1, normalized)
+    assert calls["created"] == []
+    assert calls["needs"] == []
+    assert len(calls["comments"]) == 1
+    repo, number, body = calls["comments"][0]
+    assert (repo, number) == (REPO, 1)
+    assert body.startswith("**Needs a decision:** tabs or spaces?")
+    assert calls["labels"] == [(REPO, 1)]
+    assert result == {"project": "owner/repo#1",
+                      "needs_decision": "tabs or spaces?"}
+
+
+def test_a_closed_project_takes_no_breakdown(monkeypatch):
+    calls = stub_apply(monkeypatch, plan=plan(state="CLOSED"))
+    errors, normalized, _ = validate({"tickets": [raw_ticket()]})
+    assert errors == []
+    assert normalized is not None
+    try:
+        breakdown.apply(REPO, 1, normalized)
+    except funnel.GitHubError as exc:
+        assert "closed project takes no breakdown" in str(exc)
+    else:
+        raise AssertionError("a closed project must refuse")
+    assert calls["created"] == []
+    assert calls["comments"] == []
+
+
+def test_a_partial_failure_names_the_tickets_already_created(monkeypatch):
+    stub_apply(monkeypatch, fail_on="second")
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="first"),
+        raw_ticket(title="second"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+    try:
+        breakdown.apply(REPO, 1, normalized)
+    except funnel.GitHubError as exc:
+        assert "already created: owner/repo#101" in str(exc)
+    else:
+        raise AssertionError("the second failure must surface")
+
+
+def test_apply_main_rejects_an_invalid_answer_with_exit_2(
+        monkeypatch, tmp_path, capsys):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("validation must precede every mutation")
+
+    monkeypatch.setattr(breakdown, "create_ticket", fail_if_called)
+    monkeypatch.setattr(breakdown, "fetch_issue_state", lambda ref: "OPEN")
+    answer = tmp_path / "answer.json"
+    answer.write_text(json.dumps({"tickets": [raw_ticket(risk="wild")]}))
+    assert breakdown.apply_main(
+        ["owner/repo#1", "--answer", str(answer)]) == 2
+    assert "risk 'wild'" in capsys.readouterr().err
+
+
+def test_apply_main_rejects_unparsable_json_with_exit_2(
+        monkeypatch, tmp_path, capsys):
+    answer = tmp_path / "answer.json"
+    answer.write_text("{not json")
+    assert breakdown.apply_main(
+        ["owner/repo#1", "--answer", str(answer)]) == 2
+    assert "not valid JSON" in capsys.readouterr().err
+
+
+def test_apply_main_creates_and_prints_the_result(
+        monkeypatch, tmp_path, capsys):
+    calls = stub_apply(monkeypatch)
+    monkeypatch.setattr(breakdown, "fetch_issue_state", lambda ref: "OPEN")
+    answer = tmp_path / "answer.json"
+    answer.write_text(json.dumps({"tickets": [raw_ticket(title="only")]}))
+    assert breakdown.apply_main(
+        ["owner/repo#1", "--answer", str(answer)]) == 0
+    found = json.loads(capsys.readouterr().out)
+    assert found["project"] == "owner/repo#1"
+    assert [row["ref"] for row in found["created"]] == ["owner/repo#101"]
+    assert len(calls["created"]) == 1

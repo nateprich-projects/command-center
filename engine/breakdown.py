@@ -222,8 +222,11 @@ def build_packet(*, repo: str, number: int, plan: dict,
 def collect(project: str, repo: Optional[str] = None, *,
             now: Optional[datetime] = None) -> Dict:
     """Fetch every packet piece. Reads only, no writes."""
-    resolved_repo, number = parse_project_ref(
-        project, funnel.resolve_repo(repo))
+    # A bare number needs its repo resolved; a full ref or URL does not,
+    # so the checkout lookup runs only when the ref cannot stand alone.
+    text = (project or "").strip()
+    default = funnel.resolve_repo(repo) if text.isdigit() else repo
+    resolved_repo, number = parse_project_ref(project, default)
     return build_packet(
         repo=resolved_repo,
         number=number,
@@ -649,13 +652,16 @@ def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
     """Create every ticket with its edges and fields, then cover the parent.
 
     Blockers go first, so every native edge points at an issue that already
-    exists. A failure names the tickets already created, so the next attempt
-    starts from GitHub's truth rather than this run's memory.
+    exists. The returned rows follow creation order, so the coverage comment
+    lists each blocker before its dependents. A failure names the tickets
+    already created, so the next attempt starts from GitHub's truth rather
+    than this run's memory.
     """
     created_numbers: Dict[int, int] = {}
     created_refs: Dict[int, str] = {}
+    order = creation_order(tickets)
     try:
-        for index in creation_order(tickets):
+        for index in order:
             ticket = tickets[index]
             number, ref = create_ticket(
                 repo, parent_number, ticket,
@@ -672,7 +678,7 @@ def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
             "needs": tickets[index]["needs"],
             "blocked_by": display_blockers(
                 tickets[index], created_refs, repo),
-        } for index in sorted(created_refs)]
+        } for index in order]
         post_comment(
             repo, parent_number,
             coverage_comment_body(
@@ -682,7 +688,8 @@ def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
     except funnel.GitHubError as exc:
         if created_refs:
             progress = "already created: {}".format(", ".join(
-                created_refs[index] for index in sorted(created_refs)))
+                created_refs[index] for index in order
+                if index in created_refs))
         else:
             progress = "no tickets were created"
         raise funnel.GitHubError("{} ({})".format(exc, progress))
@@ -753,8 +760,10 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
                         help="agent stamped on runner comments")
     args = parser.parse_args(argv)
     try:
-        repo, number = parse_project_ref(
-            args.project, funnel.resolve_repo(args.repo))
+        text = (args.project or "").strip()
+        default = funnel.resolve_repo(args.repo) if text.isdigit() \
+            else args.repo
+        repo, number = parse_project_ref(args.project, default)
     except BreakdownError as exc:
         print("breakdown-apply: {}".format(exc), file=sys.stderr)
         return 1

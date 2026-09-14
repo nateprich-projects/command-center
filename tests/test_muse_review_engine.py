@@ -211,7 +211,9 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
                     timeout=40):
     """Run the engine against stub funnel/heartbeat/packet/apply/gh/muse."""
     repo = tmp_path / "repo"
-    (repo / "routines").mkdir(parents=True)
+    # exist_ok: the flag-rejection test drives the runner four times in one
+    # directory; every file below is overwritten per call.
+    (repo / "routines").mkdir(parents=True, exist_ok=True)
     (repo / "routines" / "muse-review.md").write_text(
         routine_body if routine_body is not None else ROUTINE.read_text()
     )

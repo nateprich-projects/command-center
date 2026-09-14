@@ -450,9 +450,15 @@ if (( SHADOW )); then
     if (( muse_status != 0 )); then
       muse_failed "$muse_status"
     fi
-    if decision="$(python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
+    # Read the status directly into a variable: `$?` after an `if`
+    # whose condition failed is 0, not the command's status, so the `fi`
+    # below would never see a retryable 3. (A bare `name=$(...)`
+    # assignment keeps the substitution's status.)
+    decision="$(python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
         --answer "$ANSWER_FILE" --validate-only --attempt "$ATTEMPT" \
-        2>"$DIAG_FILE")"; then
+        2>"$DIAG_FILE")"
+    validate_status=$?
+    if (( validate_status == 0 )); then
       printf '%s' "$decision" >"$DECISION_FILE"
       VERDICT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["verdict"])' "$DECISION_FILE")"
       if [[ -z "$VERDICT" ]]; then
@@ -462,7 +468,6 @@ if (( SHADOW )); then
       record_shadow "$VERDICT" "$ANSWER_NOTE" "The model answered the review question."
       exit 0
     fi
-    validate_status=$?
     if (( validate_status == 3 && ATTEMPT == 1 )); then
       parse_err="$(cat "$DIAG_FILE")"
       printf '%s\n\nYour previous answer could not be parsed: %s\nReply again with exactly one JSON object and nothing else.' \
@@ -502,9 +507,14 @@ while true; do
   if (( muse_status != 0 )); then
     muse_failed "$muse_status"
   fi
-  if python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
+  # Read the status directly: `$?` after an `if` whose condition failed
+  # is 0, never the apply exit, so the retryable 3 must be caught here.
+  # (No `set -e`, so the bare failing call below does not abort the run.)
+  python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
       --answer "$ANSWER_FILE" --ci "$PACKET_CI" --head "$PACKET_HEAD" \
-      --attempt "$ATTEMPT" >"$DIAG_FILE" 2>&1; then
+      --attempt "$ATTEMPT" >"$DIAG_FILE" 2>&1
+  apply_status=$?
+  if (( apply_status == 0 )); then
     VERDICT="$(recorded_verdict)"
     if [[ -z "$VERDICT" ]]; then
       VERDICT="recorded"
@@ -512,7 +522,6 @@ while true; do
     finish_done "reviewed PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $VERDICT"
     exit 0
   fi
-  apply_status=$?
   if (( apply_status == 3 && ATTEMPT == 1 )); then
     parse_err="$(cat "$DIAG_FILE")"
     printf '%s\n\nYour previous answer could not be parsed: %s\nReply again with exactly one JSON object and nothing else.' \

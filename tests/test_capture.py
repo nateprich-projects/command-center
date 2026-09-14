@@ -294,6 +294,67 @@ def test_shaped_carries_the_captured_origin_block_verbatim(tmp_path, monkeypatch
     assert funnel.parse_provenance(shaped_body)["run"] == "shape-run"
 
 
+def test_shaped_carries_origin_override_and_reuses_it_for_the_gate(
+    tmp_path, monkeypatch
+):
+    plan = "# Plan\n\nProposed class: Broken\n\n## Needs you\nNothing.\n"
+    plan_file = tmp_path / "plan.md"
+    plan_file.write_text(plan)
+    captured_origin = funnel.origin_block(
+        "agent", at=NOW, run="capture-run", agent="muse"
+    )
+    captured_override = (
+        funnel.ORIGIN_OVERRIDE_MARKER
+        + "\n\n```json\n"
+        + json.dumps({"target": "nate"}, indent=2, sort_keys=True)
+        + "\n```"
+    )
+    item = Item(
+        repo="owner/repo", number=42, title="An idea",
+        url="https://github.com/owner/repo/issues/42", state="OPEN",
+        status="Ideas", klass="Broken", item_id="project-item-42",
+        body=captured_origin + "\n\n" + captured_override,
+    )
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, variables))
+        if query == funnel.SET_FIELD:
+            return {"updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id},
+            }}
+        return {"node": {"options": [
+            {"id": "shaped-option", "name": "Shaped"},
+            {"id": "ready-option", "name": "Ready"},
+        ]}}
+
+    def run(args, capture_output, text=True):
+        calls.append(("run", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    assert funnel.cmd_shaped(
+        [item], NOW, item.ref, str(plan_file),
+        run="shape-run", agent="claude",
+    ) == 0
+
+    edit = next(call for call in calls if call[0] == "run"
+                and call[1][:3] == ("gh", "issue", "edit"))
+    shaped_body = edit[1][-1]
+    assert shaped_body.endswith(captured_override)
+    assert shaped_body.index(captured_origin) < shaped_body.index(captured_override)
+    assert funnel.parse_origin_override(shaped_body) == {"target": "nate"}
+
+    status_write = next(record[2] for record in calls
+                        if len(record) == 3 and record[0] == "graphql"
+                        and record[1] == funnel.SET_FIELD)
+    assert status_write["option"] == "shaped-option"
+    assert item.status == "Shaped"
+    assert funnel.gate_question(item) == funnel.GATES["Shaped"]
+
+
 def test_shaped_prints_advisory_overlap_candidates(tmp_path, monkeypatch, capsys):
     plan_file = tmp_path / "plan.md"
     plan_file.write_text(

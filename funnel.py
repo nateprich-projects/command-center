@@ -7972,6 +7972,11 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
         _marked_json_block(original_body, ORIGIN_MARKER)
         if origin is not None else None
     )
+    captured_override = _marked_json_block(
+        original_body, ORIGIN_OVERRIDE_MARKER
+    )
+    override = parse_origin_override(original_body)
+    override_target = override["target"] if override is not None else None
     class_missing = item.klass not in LADDER
     if class_missing and origin_voice == "agent" and klass is None:
         raise GitHubError(
@@ -7999,6 +8004,8 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     body = append_provenance(plan, "agent", at=now, run=run, agent=agent)
     if captured_origin is not None:
         body = "{}\n\n{}".format(body, captured_origin)
+    if captured_override is not None:
+        body = "{}\n\n{}".format(body, captured_override)
     overlaps = shaping_plan_overlap_candidates(items, item, plan)
 
     out = _run_gh(
@@ -8019,8 +8026,6 @@ def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
     effective_klass = effective_class(item, by_ref)
     if class_missing and origin_voice == "agent" and klass is not None:
         effective_klass = klass
-    override = parse_origin_override(item.body or "")
-    override_target = override["target"] if override is not None else None
     escalation_reasons = plan_is_escalated(plan)
     needs_nate = plan_status != "Ready"
     eligible = shaped_self_approvable(

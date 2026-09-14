@@ -1002,6 +1002,7 @@ def test_begin_offers_shape_when_needs_decision_blocks_breakdown(monkeypatch, ca
         state="OPEN",
         status="Ideas",
         klass="New",
+        labels=["needs-shaping"],
         body="Risk: standard",
     )
 
@@ -1041,7 +1042,9 @@ def test_breakdown_work_carries_plan_access_signals(monkeypatch, capsys):
     assert result["work"]["access_signals"] == ["token", "tunnel"]
 
 
-def _idea(number, title, body, klass=None):
+def _idea(number, title, body, klass=None, labels=None):
+    if labels is None:
+        labels = ["needs-shaping"]
     return SimpleNamespace(
         ref="nateprich-projects/command-center#{}".format(number),
         repo="nateprich-projects/command-center",
@@ -1050,6 +1053,7 @@ def _idea(number, title, body, klass=None):
         title=title,
         body=body,
         klass=klass,
+        labels=labels,
     )
 
 
@@ -1267,6 +1271,23 @@ def test_shape_offers_only_the_first_idea_matching_the_run_tier(
         "title": candidates[1].title,
     }
     assert len(calls) == 1
+
+
+def test_shapeable_idea_requires_the_needs_shaping_label(monkeypatch):
+    unflagged = _idea(
+        38, "Unflagged idea", "Risk: standard", labels=[]
+    )
+    flagged = _idea(
+        39, "Flagged idea", "Risk: standard", labels=["needs-shaping"]
+    )
+
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+    monkeypatch.setattr(funnel, "ideas", lambda items: [unflagged, flagged])
+
+    assert funnel.shapeable_idea([], "standard", {}) is flagged
+
+    monkeypatch.setattr(funnel, "ideas", lambda items: [unflagged])
+    assert funnel.shapeable_idea([], "standard", {}) is None
 
 
 def test_muse_standard_schedule_is_offered_a_standard_idea_on_an_unmetered_reading(

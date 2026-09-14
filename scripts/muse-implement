@@ -237,7 +237,7 @@ fi
 if (( ls_status == 0 )); then
   SWITCH_ARGS=(-c "$TICKET_BRANCH" --track "origin/$TICKET_BRANCH")
 else
-  SWITCH_ARGS=(-c "$TICKET_BRANCH" origin/main)
+  SWITCH_ARGS=(--no-track -c "$TICKET_BRANCH" origin/main)
 fi
 if ! git -C "$WORKSPACE" switch --quiet "${SWITCH_ARGS[@]}" 2>"$DIAG_FILE"; then
   switch_err="$(cat "$DIAG_FILE")"
@@ -251,6 +251,7 @@ fi
 # The packet is the only evidence the model judges from. Reads only; nothing
 # here changes remote state.
 if ! python3 "$REPO/implement-packet" "$TICKET_NUMBER" --repo "$BEGIN_REPO" \
+    --agent muse \
     >"$PACKET_FILE" 2>"$DIAG_FILE"; then
   packet_err="$(cat "$DIAG_FILE")"
   echo "muse-implement: implement-packet failed: $packet_err" >&2

@@ -198,3 +198,92 @@ def test_stranded_says_clean_when_nothing_was_left(tmp_path):
 def test_a_vanished_working_directory_is_not_an_error(tmp_path):
     assert prior_run.stranded(str(tmp_path / "gone")) is None
     assert prior_run.stranded(None) is None
+
+
+# -- Muse's event envelope ------------------------------------------------
+
+
+def muse_log(path, events, session="0191dead-beef", workspace="/tmp/work",
+             model="muse-spark-1.3", stamp=1789425963000000):
+    lines = [json.dumps({
+        "stream": {"kind": "session", "id": session},
+        "recorded_at": stamp,
+        "payload_type": "runtime.session.metadata",
+        "payload": {"kind": "metadata", "record": {
+            "workspace_root": workspace, "model_id": model}},
+    })]
+    for kind, event in events:
+        lines.append(json.dumps({
+            "stream": {"kind": "session", "id": session},
+            "recorded_at": stamp,
+            "payload_type": "runtime.session",
+            "payload": {"kind": "run", "event": dict(event, kind=kind)},
+        }))
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_a_muse_log_is_parsed(tmp_path):
+    """The transcript rides on run events; task and turn-boundary events are
+    skipped, and the metadata record carries the workspace and model."""
+    session_dir = tmp_path / "0191dead-beef"
+    session_dir.mkdir()
+    f = muse_log(session_dir / "session.jsonl", [
+        ("started", {"prompt": "Work issue #42, then stop."}),
+        ("assistant_tool_calls_committed", {"tool_calls": [
+            {"name": "bash", "args": json.dumps(
+                {"command": "git status --short"})}]}),
+        ("assistant_message_committed", {"text": "The tree is clean."}),
+        ("terminal", {"reason": "turn_end"}),
+    ])
+    d = prior_run.digest(str(f), shape="muse")
+    assert [m["text"] for m in d["messages"]] == [
+        "Work issue #42, then stop.", "The tree is clean."]
+    assert [m["role"] for m in d["messages"]] == ["user", "assistant"]
+    assert any("bash" in call and "git status" in call
+               for call in d["tool_calls"])
+    assert d["meta"]["cwd"] == "/tmp/work"
+    assert d["meta"]["model"] == "muse-spark-1.3"
+    assert d["meta"]["id"] == "0191dead-beef"
+    assert "muse-spark-1.3 (effort unknown)" in prior_run.render(d, "42")
+
+
+def test_a_muse_session_is_named_by_its_directory(tmp_path):
+    """Every Muse log is called session.jsonl, so the basename names nothing
+    and the parent directory — the session id — is the name."""
+    session_dir = tmp_path / "0191dead-beef"
+    session_dir.mkdir()
+    f = muse_log(session_dir / "session.jsonl", [
+        ("started", {"prompt": "Work issue #42."})])
+    assert prior_run.digest(str(f), shape="muse")["session"] == "0191dead-beef"
+    assert prior_run.session_label(str(f), "muse") == "0191dead-beef"
+    assert prior_run.session_label(str(f), "codex") == "session.jsonl"
+
+
+def test_the_muse_shape_is_detected_when_not_declared(tmp_path):
+    f = muse_log(tmp_path / "session.jsonl", [
+        ("started", {"prompt": "muse side"})])
+    d = prior_run.digest(str(f))
+    assert d["messages"][0]["text"] == "muse side"
+    assert d["session"] == tmp_path.name
+
+
+def test_a_muse_transcript_without_messages_warns_rather_than_invents(
+        tmp_path, monkeypatch, capsys):
+    (tmp_path / "0191dead-beef").mkdir()
+    muse_log(tmp_path / "0191dead-beef" / "session.jsonl", [
+        ("tool_result_batch_committed", {
+            "batch_id": "b1", "results": [{"output": "see #42"}]}),
+        ("terminal", {"reason": "turn_end"})])
+    monkeypatch.setattr(
+        prior_run, "MUSE_SESSIONS",
+        str(tmp_path / "*" / "session.jsonl"))
+    assert prior_run.main(["42", "--agent", "muse"]) == 0
+    assert "yielded no messages" in capsys.readouterr().err
+
+
+def test_missing_muse_prior_run_exits_1(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        prior_run, "MUSE_SESSIONS",
+        str(tmp_path / "*" / "session.jsonl"))
+    assert prior_run.main(["42", "--agent", "muse"]) == 1

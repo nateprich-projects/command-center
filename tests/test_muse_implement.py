@@ -272,7 +272,7 @@ def test_the_happy_path_runs_packet_model_and_finish_in_order(tmp_path):
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 1
-    assert _calls(repo, "packet") == ["42 --repo example/widgets"]
+    assert _calls(repo, "packet") == ["42 --repo example/widgets --agent muse"]
 
     # The model ran in the fresh clone, on a new ticket branch from main.
     workspace = pathlib.Path(
@@ -295,7 +295,7 @@ def test_the_happy_path_runs_packet_model_and_finish_in_order(tmp_path):
     assert args[args.index("--sandbox-network") + 1] == "enabled"
     assert "--disable-sandbox" in args
     assert args[args.index("--approval-mode") + 1] == "never"
-    assert args[args.index("--max-model-steps") + 1] == "60"
+    assert args[args.index("--max-model-steps") + 1] == "200"
     assert "--no-foreign-personal-context" in args
     assert "--prompt-file" in args
     assert "--json" in args

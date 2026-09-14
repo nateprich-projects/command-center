@@ -151,7 +151,8 @@ def packet_main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("ticket", type=int, help="ticket number")
     parser.add_argument("--repo", default=None)
-    parser.add_argument("--agent", default="codex", choices=("codex", "claude"))
+    parser.add_argument("--agent", default="codex",
+                        choices=("codex", "muse", "claude"))
     args = parser.parse_args(argv)
     try:
         packet = collect(args.repo, args.ticket, agent=args.agent)

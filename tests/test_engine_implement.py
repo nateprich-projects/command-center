@@ -131,6 +131,30 @@ def test_collect_fetches_the_parent_plan_and_open_pr_verdict(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("argv", "agent"),
+    (
+        (["42", "--repo", REPO], "codex"),
+        (["42", "--repo", REPO, "--agent", "muse"], "muse"),
+        (["42", "--repo", REPO, "--agent", "claude"], "claude"),
+    ),
+)
+def test_packet_main_passes_the_agent_to_the_prior_run_digest(
+        monkeypatch, capsys, argv, agent):
+    """The digest must read the runner's own sessions: a Muse packet carrying
+    a Codex session's intent is confident evidence about the wrong run."""
+    seen = {}
+
+    def fake_collect(repo, number, **kwargs):
+        seen.update(repo=repo, number=number, **kwargs)
+        return {"ticket": {"number": number}}
+
+    monkeypatch.setattr(implement, "collect", fake_collect)
+    assert implement.packet_main(argv) == 0
+    assert seen == {"repo": REPO, "number": 42, "agent": agent}
+    assert json.loads(capsys.readouterr().out)["ticket"]["number"] == 42
+
+
+@pytest.mark.parametrize(
     "value",
     (
         [],

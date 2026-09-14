@@ -1,0 +1,539 @@
+#!/usr/bin/env python3
+"""Summarise the review-engine shadow period from heartbeat records.
+
+The review engine and the older reviewer currently write to the same ``muse``
+heartbeat stream.  Shadow finishes carry ``shadow review`` in their note, while
+the live reviewer carries ``reviewed PR``.  The report also accepts two
+different heartbeat streams, which keeps the reader useful if the schedules
+are separated later.
+
+Only completed review jobs inside the requested window count.  A missing or
+ambiguous verdict is not silently treated as a rejection: it is excluded from
+the agreement denominator and is surfaced through the malformed-output count
+when the record says that parsing failed.  This makes the cutover threshold
+fail closed when the telemetry is incomplete.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import statistics
+import sys
+import time
+from datetime import datetime, timezone
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import heartbeat
+
+
+# The review cutover requires at least 48 hours or 50 jobs.  The caller can
+# choose the actual observation window; 48 hours is the useful default while
+# the shadow plist is running.
+DEFAULT_WINDOW_SECONDS = 48 * 60 * 60
+DEFAULT_AGENT = "muse"
+
+SHADOW_NOTE_RE = re.compile(
+    r"(?:command-center-shadow-review|shadow\s+review)", re.IGNORECASE
+)
+REVIEW_NOTE_RE = re.compile(
+    r"(?:reviewed\s+PR|review\s+of\s+PR|shadow\s+review|pull\s+request\s+#)",
+    re.IGNORECASE,
+)
+PR_RE = re.compile(
+    r"\b(?:PR|pull\s+request)\s*#?\s*(?P<number>[1-9][0-9]*)\b",
+    re.IGNORECASE,
+)
+DECISION_RE = re.compile(
+    r"(?:decision\s*:\s*\**|recorded\s+|reviewed\s+[^:]*:\s*|"
+    r"shadow\s+review[^:]*:\s*|verdict\s*[:=]\s*[\"']?)"
+    r"(?P<decision>approved|rejected)\b",
+    re.IGNORECASE,
+)
+LOOSE_DECISION_RE = re.compile(
+    r"\breviewed\s+(?:PR|pull\s+request)\s+#?\s*[1-9][0-9]*\b"
+    r"[^\n]{0,160}?\b(?P<decision>approved|rejected)\b",
+    re.IGNORECASE,
+)
+MALFORMED_RE = re.compile(
+    r"malformed|unparseable|could not be parsed|parse error|no verdict",
+    re.IGNORECASE,
+)
+
+
+def _timestamp(value: object) -> Optional[float]:
+    """Return an epoch timestamp from heartbeat's numeric or ISO shapes."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _truthy(value: object) -> bool:
+    """Recognise explicit boolean-like shadow markers without guessing."""
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "shadow"}
+    return False
+
+
+def _note(row: Dict) -> str:
+    value = row.get("note")
+    return value if isinstance(value, str) else ""
+
+
+def decision(row: Dict) -> Optional[str]:
+    """Return a review verdict from a structured field or finish note.
+
+    Older heartbeat finishes predate ``--review-result`` and carry the verdict
+    in prose.  The structured field always wins; the note parser is deliberately
+    narrow so words such as ``approved`` in an unrelated explanation do not
+    become a review result.
+    """
+    for key in ("review_result", "verdict", "decision"):
+        value = row.get(key)
+        if isinstance(value, str) and value.lower() in {"approved", "rejected"}:
+            return value.lower()
+    note = _note(row)
+    matches = list(DECISION_RE.finditer(note))
+    matches += list(LOOSE_DECISION_RE.finditer(note))
+    if matches:
+        return matches[-1].group("decision").lower()
+    return None
+
+
+def is_malformed(row: Dict) -> bool:
+    """Whether a finish explicitly records malformed model output."""
+    for key in ("malformed", "malformed_output", "parse_error"):
+        if _truthy(row.get(key)):
+            return True
+    note = _note(row)
+    return bool(note and MALFORMED_RE.search(note))
+
+
+def is_shadow(row: Dict) -> bool:
+    """Whether a heartbeat row carries an explicit shadow marker."""
+    if any(_truthy(row.get(key)) for key in ("shadow", "shadow_run")):
+        return True
+    for key in ("mode", "kind", "role"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip().lower() == "shadow":
+            return True
+    agent = row.get("agent")
+    if isinstance(agent, str) and "shadow" in agent.lower():
+        return True
+    return bool(SHADOW_NOTE_RE.search(_note(row)))
+
+
+def _run_kinds(records: Iterable[Dict]) -> Dict[str, str]:
+    """Collect explicit per-run shadow/live markers from any record phase."""
+    found: Dict[str, str] = {}
+    for row in records:
+        if not isinstance(row, dict) or not row.get("run"):
+            continue
+        if is_shadow(row):
+            found[str(row["run"])] = "shadow"
+        elif str(row.get("mode") or row.get("kind") or "").lower() == "live":
+            found.setdefault(str(row["run"]), "live")
+    return found
+
+
+def partition_records(records: Sequence[Dict]) -> Tuple[List[Dict], List[Dict]]:
+    """Split one heartbeat stream into shadow and live run records.
+
+    The split is by run id, not by individual JSONL row, so the start and bind
+    rows stay attached to the finish that identifies the mode.
+    """
+    rows = [row for row in records if isinstance(row, dict)]
+    kinds = _run_kinds(rows)
+    shadow_runs = {run for run, kind in kinds.items() if kind == "shadow"}
+    shadow = [row for row in rows if str(row.get("run")) in shadow_runs]
+    live = [row for row in rows if str(row.get("run")) not in shadow_runs]
+    return shadow, live
+
+
+def _latest_by_run(records: Iterable[Dict], phase: str) -> Dict[str, Dict]:
+    """Return the latest timestamped row for each run and phase."""
+    found: Dict[str, Dict] = {}
+    for row in records:
+        if not isinstance(row, dict) or row.get("phase") != phase:
+            continue
+        run = row.get("run")
+        timestamp = _timestamp(row.get("ts"))
+        if not run or timestamp is None:
+            continue
+        key = str(run)
+        current = found.get(key)
+        if current is None or timestamp >= _timestamp(current.get("ts")):
+            found[key] = row
+    return found
+
+
+def _earliest_by_run(records: Iterable[Dict], phase: str) -> Dict[str, Dict]:
+    """Return the earliest timestamped row for each run and phase."""
+    found: Dict[str, Dict] = {}
+    for row in records:
+        if not isinstance(row, dict) or row.get("phase") != phase:
+            continue
+        run = row.get("run")
+        timestamp = _timestamp(row.get("ts"))
+        if not run or timestamp is None:
+            continue
+        key = str(run)
+        current = found.get(key)
+        if current is None or timestamp < _timestamp(current.get("ts")):
+            found[key] = row
+    return found
+
+
+def _bindings(records: Iterable[Dict]) -> Dict[str, Dict]:
+    """Return the latest binding row for each run."""
+    return _latest_by_run(records, "bind")
+
+
+def _review_target(note: str) -> Optional[str]:
+    """Extract a stable PR key from a review note when one is present."""
+    match = PR_RE.search(note or "")
+    if not match:
+        return None
+    # Shadow notes include ``in owner/repo`` while older live notes often do
+    # not.  The PR number is the common durable key across those note shapes;
+    # duplicate numbers are paired in chronological order below.
+    return "pr#{}".format(match.group("number"))
+
+
+def _work_key(binding: Optional[Dict], finish: Dict) -> Optional[str]:
+    """Use the PR target first, then the runner's bound work value."""
+    target = _review_target(_note(finish))
+    if target:
+        return target
+    for row in (finish, binding or {}):
+        for key in ("work", "job", "pr", "ticket"):
+            value = row.get(key)
+            if value not in (None, ""):
+                return str(value)
+    return None
+
+
+def _is_review_job(finish: Dict, binding: Optional[Dict]) -> bool:
+    """Identify review jobs without counting no-op or breakdown heartbeats."""
+    if isinstance(binding, dict) and str(binding.get("do") or "").lower() == "review":
+        return True
+    for key in ("review_result", "verdict", "decision"):
+        value = finish.get(key)
+        if isinstance(value, str) and value.lower() in {"approved", "rejected"}:
+            return True
+    note = _note(finish)
+    return bool(REVIEW_NOTE_RE.search(note) or decision(finish) is not None)
+
+
+def jobs_from_records(
+    records: Sequence[Dict],
+    *,
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+) -> List[Dict]:
+    """Build completed review jobs from heartbeat rows.
+
+    A job is represented by a finish with a matching start.  The finish time
+    determines window membership, matching the watchdog's completed-duration
+    rule and allowing a job that started just before the window to be counted.
+    """
+    rows = [row for row in records if isinstance(row, dict)]
+    starts = _earliest_by_run(rows, "start")
+    finishes = _latest_by_run(rows, "finish")
+    bindings = _bindings(rows)
+    jobs: List[Dict] = []
+    for run, finish in finishes.items():
+        finished_at = _timestamp(finish.get("ts"))
+        if finished_at is None:
+            continue
+        if since is not None and finished_at < since:
+            continue
+        if until is not None and finished_at > until:
+            continue
+        binding = bindings.get(run)
+        if heartbeat.is_rebegin_finish(finish) or not _is_review_job(finish, binding):
+            continue
+        started = starts.get(run)
+        started_at = _timestamp(started.get("ts")) if started else None
+        duration = None
+        if started_at is not None and finished_at >= started_at:
+            duration = finished_at - started_at
+        jobs.append({
+            "run": run,
+            "key": _work_key(binding, finish) or "run#{}".format(run),
+            "finished_at": finished_at,
+            "decision": decision(finish),
+            "malformed": is_malformed(finish),
+            "duration_seconds": duration,
+            "finish": finish,
+        })
+    return sorted(jobs, key=lambda job: (job["finished_at"], job["run"]))
+
+
+def _percentile(values: Sequence[float], percentile: float) -> Optional[float]:
+    """Linearly interpolated percentile, with an explicit empty result."""
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * percentile / 100.0
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * (
+        position - lower
+    )
+
+
+def _time_stats(jobs: Sequence[Dict]) -> Dict[str, object]:
+    durations = [
+        float(job["duration_seconds"])
+        for job in jobs
+        if isinstance(job.get("duration_seconds"), (int, float))
+        and not isinstance(job.get("duration_seconds"), bool)
+    ]
+    return {
+        "jobs": len(jobs),
+        "measured": len(durations),
+        "median_seconds": statistics.median(durations) if durations else None,
+        "p90_seconds": _percentile(durations, 90),
+    }
+
+
+def _pair_jobs(shadow: Sequence[Dict], live: Sequence[Dict]) -> List[Tuple[Dict, Dict]]:
+    """Pair same-target jobs in chronological order, preserving duplicates."""
+    shadow_by_key: Dict[str, List[Dict]] = {}
+    live_by_key: Dict[str, List[Dict]] = {}
+    for job in shadow:
+        shadow_by_key.setdefault(str(job["key"]), []).append(job)
+    for job in live:
+        live_by_key.setdefault(str(job["key"]), []).append(job)
+    pairs: List[Tuple[Dict, Dict]] = []
+    for key in sorted(set(shadow_by_key) & set(live_by_key)):
+        left = sorted(shadow_by_key[key], key=lambda job: job["finished_at"])
+        right = sorted(live_by_key[key], key=lambda job: job["finished_at"])
+        pairs.extend(zip(left, right))
+    return pairs
+
+
+def _rate(count: int, total: int) -> Optional[float]:
+    return count / total if total else None
+
+
+def window_bounds(
+    *,
+    now: Optional[float] = None,
+    window_seconds: int = DEFAULT_WINDOW_SECONDS,
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+) -> Tuple[float, float]:
+    """Resolve an inclusive observation window and reject inverted bounds."""
+    end = float(time.time() if now is None else now) if until is None else float(until)
+    if since is None:
+        start = end - float(window_seconds)
+    else:
+        start = float(since)
+    if start > end:
+        raise ValueError("the report window starts after it ends")
+    return start, end
+
+
+def build_report(
+    shadow_records: Sequence[Dict],
+    live_records: Optional[Sequence[Dict]] = None,
+    *,
+    now: Optional[float] = None,
+    window_seconds: int = DEFAULT_WINDOW_SECONDS,
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+) -> Dict[str, object]:
+    """Build the JSON report from one or two heartbeat streams.
+
+    Passing one stream (or the same list object for both arguments) activates
+    the note-based shadow/live split used by the current Muse schedules.
+    Passing two streams treats the first as shadow and the second as live.
+    """
+    start, end = window_bounds(
+        now=now, window_seconds=window_seconds, since=since, until=until
+    )
+    if live_records is None or live_records is shadow_records:
+        shadow_rows, live_rows = partition_records(shadow_records)
+    else:
+        shadow_rows, live_rows = list(shadow_records), list(live_records)
+    shadow = jobs_from_records(shadow_rows, since=start, until=end)
+    live = jobs_from_records(live_rows, since=start, until=end)
+    pairs = _pair_jobs(shadow, live)
+    comparable = [
+        (left, right)
+        for left, right in pairs
+        if left.get("decision") in {"approved", "rejected"}
+        and right.get("decision") in {"approved", "rejected"}
+    ]
+    agree = sum(
+        left["decision"] == right["decision"]
+        for left, right in comparable
+    )
+    disagree = len(comparable) - agree
+    shadow_approved = sum(job.get("decision") == "approved" for job in shadow)
+    shadow_rejected = sum(job.get("decision") == "rejected" for job in shadow)
+    live_approved = sum(job.get("decision") == "approved" for job in live)
+    live_rejected = sum(job.get("decision") == "rejected" for job in live)
+    shadow_malformed = sum(bool(job.get("malformed")) for job in shadow)
+    live_malformed = sum(bool(job.get("malformed")) for job in live)
+
+    return {
+        "window": {
+            "since": start,
+            "until": end,
+            "seconds": end - start,
+        },
+        "jobs": {
+            "shadow": len(shadow),
+            "live": len(live),
+            "matched": len(pairs),
+            "compared": len(comparable),
+        },
+        "agreement": {
+            "agree": agree,
+            "disagree": disagree,
+            "rate": _rate(agree, len(comparable)),
+            "approved": {
+                "shadow": shadow_approved,
+                "live": live_approved,
+            },
+            "rejected": {
+                "shadow": shadow_rejected,
+                "live": live_rejected,
+            },
+        },
+        "malformed_output": {
+            "shadow": {
+                "count": shadow_malformed,
+                "rate": _rate(shadow_malformed, len(shadow)),
+            },
+            "live": {
+                "count": live_malformed,
+                "rate": _rate(live_malformed, len(live)),
+            },
+        },
+        "time_per_job": {
+            "shadow": _time_stats(shadow),
+            "live": _time_stats(live),
+        },
+    }
+
+
+# Short aliases make the pure reader convenient to use from a cutover session
+# without creating another stateful reporting layer.
+report = build_report
+summarize = build_report
+
+
+def _parse_cli_timestamp(value: Optional[str]) -> Optional[float]:
+    if value is None:
+        return None
+    parsed = _timestamp(value)
+    if parsed is None:
+        raise ValueError("invalid timestamp {!r}".format(value))
+    return parsed
+
+
+def load_report(
+    shadow_agent: str = DEFAULT_AGENT,
+    live_agent: str = DEFAULT_AGENT,
+    *,
+    now: Optional[float] = None,
+    window_seconds: int = DEFAULT_WINDOW_SECONDS,
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+) -> Dict[str, object]:
+    """Read the selected heartbeat stream(s) and build a report."""
+    if shadow_agent == live_agent:
+        records = heartbeat.read(shadow_agent)
+        return build_report(
+            records,
+            now=now,
+            window_seconds=window_seconds,
+            since=since,
+            until=until,
+        )
+    return build_report(
+        heartbeat.read(shadow_agent),
+        heartbeat.read(live_agent),
+        now=now,
+        window_seconds=window_seconds,
+        since=since,
+        until=until,
+    )
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="report review shadow agreement from heartbeat records"
+    )
+    parser.add_argument(
+        "agents", nargs="*", metavar="AGENT",
+        help="optional positional shadow and live agent names",
+    )
+    parser.add_argument("--shadow-agent", default=None)
+    parser.add_argument("--live-agent", default=None)
+    parser.add_argument(
+        "--hours", "--window-hours", dest="hours", type=float, default=48.0,
+        help="trailing window in hours (default: 48)",
+    )
+    parser.add_argument("--since", default=None, help="window start epoch or ISO timestamp")
+    parser.add_argument("--until", default=None, help="window end epoch or ISO timestamp")
+    parser.add_argument(
+        "--now", default=None,
+        help="testable clock value; defaults to the current epoch",
+    )
+    args = parser.parse_args(argv)
+    if len(args.agents) > 2:
+        parser.error("at most two positional agents are accepted")
+    shadow_agent = args.shadow_agent or (
+        args.agents[0] if args.agents else DEFAULT_AGENT
+    )
+    live_agent = args.live_agent or (
+        args.agents[1] if len(args.agents) > 1 else DEFAULT_AGENT
+    )
+    if args.hours <= 0:
+        parser.error("--hours must be positive")
+    try:
+        report_data = load_report(
+            shadow_agent,
+            live_agent,
+            now=_parse_cli_timestamp(args.now),
+            window_seconds=int(args.hours * 60 * 60),
+            since=_parse_cli_timestamp(args.since),
+            until=_parse_cli_timestamp(args.until),
+        )
+    except (ValueError, OSError, heartbeat.HeartbeatError) as exc:
+        print("shadow-report: {}".format(exc), file=sys.stderr)
+        return 1
+    print(json.dumps(report_data, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

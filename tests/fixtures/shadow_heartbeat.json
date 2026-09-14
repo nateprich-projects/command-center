@@ -1,0 +1,127 @@
+{
+  "records": [
+    {
+      "agent": "muse",
+      "phase": "start",
+      "run": "shadow-approved",
+      "ts": 900
+    },
+    {
+      "agent": "muse",
+      "do": "review",
+      "phase": "bind",
+      "run": "shadow-approved",
+      "ts": 901,
+      "work": "42"
+    },
+    {
+      "agent": "muse",
+      "phase": "finish",
+      "run": "shadow-approved",
+      "ts": 910,
+      "note": "shadow review of PR #42 in owner/repo at abc: approved",
+      "outcome": "done"
+    },
+    {
+      "agent": "muse",
+      "phase": "start",
+      "run": "live-approved",
+      "ts": 880
+    },
+    {
+      "agent": "muse",
+      "do": "review",
+      "phase": "bind",
+      "run": "live-approved",
+      "ts": 881,
+      "work": "42"
+    },
+    {
+      "agent": "muse",
+      "phase": "finish",
+      "run": "live-approved",
+      "ts": 900,
+      "note": "reviewed PR #42: approved",
+      "outcome": "done"
+    },
+    {
+      "agent": "muse",
+      "phase": "start",
+      "run": "shadow-rejected",
+      "ts": 800
+    },
+    {
+      "agent": "muse",
+      "do": "review",
+      "phase": "bind",
+      "run": "shadow-rejected",
+      "ts": 801,
+      "work": "43"
+    },
+    {
+      "agent": "muse",
+      "phase": "finish",
+      "run": "shadow-rejected",
+      "ts": 830,
+      "note": "shadow review of PR #43 in owner/repo at def: rejected",
+      "outcome": "done"
+    },
+    {
+      "agent": "muse",
+      "phase": "start",
+      "run": "live-rejected",
+      "ts": 790
+    },
+    {
+      "agent": "muse",
+      "do": "review",
+      "phase": "bind",
+      "run": "live-rejected",
+      "ts": 791,
+      "work": "43"
+    },
+    {
+      "agent": "muse",
+      "phase": "finish",
+      "run": "live-rejected",
+      "ts": 825,
+      "note": "reviewed PR #43: rejected",
+      "outcome": "done"
+    },
+    {
+      "agent": "muse",
+      "phase": "start",
+      "run": "shadow-malformed",
+      "ts": 850
+    },
+    {
+      "agent": "muse",
+      "do": "review",
+      "phase": "bind",
+      "run": "shadow-malformed",
+      "ts": 851,
+      "work": "44"
+    },
+    {
+      "agent": "muse",
+      "phase": "finish",
+      "run": "shadow-malformed",
+      "ts": 890,
+      "note": "shadow review of PR #44 recorded no verdict (final answer unparseable)",
+      "outcome": "errored"
+    },
+    {
+      "agent": "muse",
+      "phase": "start",
+      "run": "noop",
+      "ts": 850
+    },
+    {
+      "agent": "muse",
+      "phase": "finish",
+      "run": "noop",
+      "ts": 860,
+      "outcome": "nothing-to-do"
+    }
+  ]
+}

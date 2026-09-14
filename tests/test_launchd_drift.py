@@ -175,19 +175,25 @@ def test_the_keeper_points_at_the_stable_wrapper():
     ]
 
 
-def test_the_two_schedules_do_not_collide():
-    """Both run as agent `muse`, so two open runs at once make heartbeat
-    attribution guesswork. Escalated fires at :07, standard on the quarter."""
+def test_the_escalated_reviewer_polls_every_fifteen_minutes_while_794_clears():
+    """Both review schedules run as agent `muse`. The escalated one polls on a
+    fixed interval while #794's escalated tickets clear (Nate, 2026-09-14,
+    #859), matching the implementer (#831); the standard one keeps its
+    calendar slots. Overlapping fires of the two labels are accepted for the
+    duration: launchd starts no second instance of either label while one
+    runs, and heartbeat attribution carries the tier. When #794 closes this
+    reverts to the two-hourly :07 calendar schedule and the collision test it
+    replaced: escalated minutes disjoint from standard minutes."""
     import plistlib
 
-    def minutes(name):
-        with (ROOT / "launchd" / name).open("rb") as handle:
-            sched = plistlib.load(handle)["StartCalendarInterval"]
-        if isinstance(sched, dict):
-            sched = [sched]
-        return {entry["Minute"] for entry in sched}
+    with (ROOT / "launchd" / NAMES[0]).open("rb") as handle:
+        escalated = plistlib.load(handle)
+    with (ROOT / "launchd" / NAMES[1]).open("rb") as handle:
+        standard = plistlib.load(handle)
 
-    assert not minutes(NAMES[0]) & minutes(NAMES[1])
+    assert escalated["StartInterval"] == 900
+    assert "StartCalendarInterval" not in escalated
+    assert "StartCalendarInterval" in standard
 
 
 def test_each_schedule_asks_for_its_own_tier_and_effort():
@@ -260,7 +266,12 @@ def test_the_keeper_fires_at_least_as_often_as_the_fastest_routine():
 
     def maximum_gap(name):
         with (ROOT / "launchd" / name).open("rb") as handle:
-            schedule = plistlib.load(handle)["StartCalendarInterval"]
+            plist = plistlib.load(handle)
+        if "StartInterval" in plist:
+            # A fixed interval (#831, #859) fires every N seconds; its gap is
+            # that interval in minutes.
+            return plist["StartInterval"] / 60
+        schedule = plist["StartCalendarInterval"]
         if isinstance(schedule, dict):
             schedule = [schedule]
         minutes = sorted(entry["Minute"] for entry in schedule)

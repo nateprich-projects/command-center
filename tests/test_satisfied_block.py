@@ -27,7 +27,7 @@ def issue(
     dead_blockers=(),
 ):
     parsed = funnel.parse_block_comment([comment]) if comment is not None else None
-    references, reason = parsed or ([], None)
+    references, blocked_until, reason = parsed or ([], None, None)
     return funnel.Item(
         repo=REPO,
         number=number,
@@ -36,6 +36,7 @@ def issue(
         state=state,
         block_references=references,
         block_reason=reason,
+        blocked_until=blocked_until,
         open_blockers=list(open_blockers),
         dead_blockers=list(dead_blockers),
     )
@@ -46,17 +47,17 @@ def issue(
     [
         pytest.param(
             "**Blocked on #77:** waiting for the scan.",
-            (["#77"], "waiting for the scan."),
+            (["#77"], None, "waiting for the scan."),
             id="single-reference",
         ),
         pytest.param(
             "**Blocked on #138 and #141:** waiting for both decisions.",
-            (["#138", "#141"], "waiting for both decisions."),
+            (["#138", "#141"], None, "waiting for both decisions."),
             id="multiple-references",
         ),
         pytest.param(
             "**Blocked:** waiting for Nate to provision the token.",
-            ([], "waiting for Nate to provision the token."),
+            ([], None, "waiting for Nate to provision the token."),
             id="no-reference",
         ),
     ],

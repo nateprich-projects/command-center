@@ -166,7 +166,7 @@ def test_conflicting_pr_with_a_moved_head_is_not_called_stranded():
 
 
 def _comment_block(number, blocker):
-    references, reason = funnel.parse_block_comment([
+    references, _, reason = funnel.parse_block_comment([
         "**Blocked on #{}:** waiting for the other ticket.".format(blocker)
     ])
     return issue(

@@ -7510,6 +7510,12 @@ CLASS_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhY15k"
 STATUS_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhY1tc"
 PINNED_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhygHE"
 PINNED_OPTION = "Pinned"
+# Third Project single-select, decided by Nate 2026-09-13 (#794), created #808.
+NEEDS_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhiOk9Q"
+NEEDS_OPTION_NONE = "259da669"
+NEEDS_OPTION_HUMAN = "cda6f372"
+NEEDS_OPTION_CLAUDE_CODE_ENVIRONMENT = "cffda418"
+NEEDS_OPTIONS = ("none", "human", "claude-code-environment")
 
 CLEAR_FIELD = """
 mutation($project: ID!, $item: ID!, $field: ID!) {

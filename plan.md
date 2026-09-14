@@ -700,6 +700,12 @@ carry neither** — they inherit `Class` for ladder ranking, and `Status` does n
 them. This is what keeps the gate count at roughly four decisions per project rather than
 four per ticket.
 
+_Tickets do carry one field of their own: `Needs`, a single-select with `none`, `human`
+and `claude-code-environment`, naming what the ticket needs beyond the standard lane.
+Design amendment, Nate 2026-09-13 (#794): not a label, a field, so the breakdown runner
+can write it and readers need not scan bodies. Until the runner writes it, the
+body-scanning classifiers stay._
+
 GitHub adds a sub-issue to its parent's Project automatically, with its fields blank, so
 this shape needs no maintenance. A parentless item with no `Status` at all is therefore
 not a ticket — it is a project that was added and forgotten, and it is flagged as needing

@@ -8712,6 +8712,8 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
         return None
 
     for item in ideas(items):
+        if "needs-shaping" not in getattr(item, "labels", ()):
+            continue
         body = getattr(item, "body", None)
         if body is None:
             body = _ticket_body(item.repo, item.number)

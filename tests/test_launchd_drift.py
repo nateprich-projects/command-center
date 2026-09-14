@@ -266,7 +266,12 @@ def test_the_keeper_fires_at_least_as_often_as_the_fastest_routine():
 
     def maximum_gap(name):
         with (ROOT / "launchd" / name).open("rb") as handle:
-            schedule = plistlib.load(handle)["StartCalendarInterval"]
+            plist = plistlib.load(handle)
+        if "StartInterval" in plist:
+            # A fixed interval (#831, #859) fires every N seconds; its gap is
+            # that interval in minutes.
+            return plist["StartInterval"] / 60
+        schedule = plist["StartCalendarInterval"]
         if isinstance(schedule, dict):
             schedule = [schedule]
         minutes = sorted(entry["Minute"] for entry in schedule)

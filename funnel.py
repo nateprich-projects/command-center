@@ -1940,6 +1940,65 @@ UNMERGEABLE_REJECTION_BLOCKING = "branch could not merge at this head"
 VERDICTS = ("approved", "rejected")
 CI_STATES = ("green", "red", "unknown")
 
+#: Conclusions GitHub reports for a check that passed or was excused.
+CI_SUCCESS_CONCLUSIONS = ("SUCCESS", "NEUTRAL", "SKIPPED")
+
+#: States GitHub reports for a check that has not reached a conclusion yet.
+CI_PENDING_STATES = ("PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING",
+                     "REQUESTED", "STALE")
+
+
+def ci_rollup_state(checks: Sequence[dict]) -> str:
+    """Classify a ``statusCheckRollup`` as ``green``, ``red`` or ``unknown``.
+
+    The one place that reads a rollup, so the review packet, the merge gate and
+    the review queue cannot drift apart about what CI said. Any reported
+    conclusion outside the success set is ``red``. Anything unfinished, or no
+    checks at all, is ``unknown`` rather than green — an absent signal must
+    never read as a passing one. Tolerates both wire shapes: CheckRun
+    (``conclusion``/``status``) and Status (``state``/``context``).
+    """
+    if not checks:
+        return "unknown"
+    pending = False
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        result = check.get("conclusion") or check.get("state")
+        # A pending state is read before the red rule, or it would fall into
+        # it: "PENDING" is not in the success set either. The engine's reader
+        # had this the other way round, so a Status-shaped rollup that had not
+        # reported yet came back red while the CheckRun shape came back
+        # unknown. Both now say unknown, which is what both docstrings claimed.
+        if result not in (None, "") and str(result).upper() in CI_PENDING_STATES:
+            pending = True
+            continue
+        if result not in CI_SUCCESS_CONCLUSIONS + (None, ""):
+            return "red"
+        if result in (None, ""):
+            status = str(check.get("status") or "").upper()
+            if status and status != "COMPLETED":
+                pending = True
+            elif not status:
+                # A bare entry with neither conclusion nor status carries
+                # no signal yet.
+                pending = True
+    return "unknown" if pending else "green"
+
+
+def checks_still_running(checks: Sequence[dict]) -> bool:
+    """Whether a rollup holds a check that has not reported yet.
+
+    Deliberately narrower than ``ci_rollup_state(...) == "unknown"``: an empty
+    rollup is also unknown, and "no checks at all" is a different fact from
+    "the checks are still running". The first must stay visible as a refusal
+    with a reason; only the second is worth waiting for.
+    """
+    entries = [check for check in (checks or []) if isinstance(check, dict)]
+    if not entries:
+        return False
+    return ci_rollup_state(entries) == "unknown"
+
 
 def _marked_json_blocks(body: str, marker: str) -> List[Tuple[Dict, str]]:
     """Return parseable JSON blocks owned by ``marker``, newest first.
@@ -9215,11 +9274,19 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
     `tier` filters by the *ticket's* risk, not the PR's size. A reviewer is
     matched to the work the same way an engine is: the expensive judgement is
     spent where the ticket says the stakes are, and nowhere else.
+
+    A PR whose checks are still running is not offered at all. The review
+    pre-check rejects anything that is not green, and a recorded rejection
+    covers that head for good, so offering a PR seconds after a push produced
+    a permanent rejection of a commit whose CI went on to pass (#900). Red CI
+    and a rollup with no checks in it are still offered: those are answers,
+    not a signal that has yet to arrive.
     """
     found: List[Dict] = []
     for repo in sorted({i.repo for i in items}):
         rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "open",
-                        "--json", "number,headRefName,headRefOid,createdAt",
+                        "--json", "number,headRefName,headRefOid,createdAt,"
+                        "statusCheckRollup",
                         "--limit", "100") or []
         for row in rows:
             head = row.get("headRefName") or ""
@@ -9228,6 +9295,13 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
             ref = "{}#{}".format(repo, head.split("/", 1)[1])
             ticket = next((i for i in items if i.ref == ref), None)
             if ticket is None:
+                continue
+            if checks_still_running(row.get("statusCheckRollup")):
+                # The checks have not reported yet, so the only answer a
+                # reviewer could record is "CI not green (state unknown)" —
+                # and that rejection then covers this head, locking the PR
+                # out of re-review once CI turns green (#900). Wait instead:
+                # the next tick reconsiders, because nothing was recorded.
                 continue
             verdict = latest_verdict(repo, row.get("number"))
             if verdict_covers_head(verdict, row.get("headRefOid")):
@@ -10515,7 +10589,7 @@ def merge_blockers(repo: str, pr: int, items: List[Item],
     checks = data.get("statusCheckRollup") or []
     failed = [c.get("name") or c.get("context") for c in checks
               if (c.get("conclusion") or c.get("state")) not in
-              ("SUCCESS", "NEUTRAL", "SKIPPED", None)]
+              CI_SUCCESS_CONCLUSIONS + (None,)]
     if failed:
         why.append("CI not green: " + ", ".join(str(f) for f in failed))
     elif not checks:

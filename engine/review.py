@@ -42,12 +42,12 @@ PROTECTED_PATHS = (
 #: permission rule, which matches the canonical path literally.
 RESOLVED_PATH_MARKER = "/Volumes/"
 
-#: Conclusions GitHub reports for checks that passed or were excused.
-CI_SUCCESS = ("SUCCESS", "NEUTRAL", "SKIPPED")
-
-#: States that mean a check has not reported a conclusion yet.
-CI_PENDING = ("PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING",
-              "REQUESTED", "STALE")
+#: Conclusions GitHub reports for checks that passed or were excused, and the
+#: states that mean a check has not reported one yet. Both come from
+#: ``funnel``, which owns the single rollup reader the packet, the merge gate
+#: and the review queue all share (#900).
+CI_SUCCESS = funnel.CI_SUCCESS_CONCLUSIONS
+CI_PENDING = funnel.CI_PENDING_STATES
 
 #: Path prefixes the #794 freeze covers. A diff touching these fails the
 #: freeze row unless the ticket's parent is #794.
@@ -95,32 +95,13 @@ MERGED_PR_SCAN_LIMIT = 100
 def ci_state(checks: Sequence[dict]) -> str:
     """Derive green/red/unknown from a statusCheckRollup list.
 
-    The red rule is merge_blockers' rule: any reported conclusion outside
-    the success set. Anything unfinished, or no checks at all, is unknown
-    rather than green — an absent signal must never read as a passing one.
-    Tolerates both wire shapes: CheckRun (conclusion/status) and Status
-    (state/context).
+    The reading itself lives in ``funnel.ci_rollup_state``, so the packet, the
+    merge gate and the review queue cannot disagree about what CI said. The
+    rules are unchanged: any reported conclusion outside the success set is
+    red, and anything unfinished — or no checks at all — is unknown rather
+    than green, because an absent signal must never read as a passing one.
     """
-    if not checks:
-        return "unknown"
-    pending = False
-    for check in checks:
-        if not isinstance(check, dict):
-            continue
-        result = check.get("conclusion") or check.get("state")
-        if result not in CI_SUCCESS + (None, ""):
-            return "red"
-        if result in (None, ""):
-            status = str(check.get("status") or "").upper()
-            if status and status != "COMPLETED":
-                pending = True
-            elif not status:
-                # A bare entry with neither conclusion nor status carries
-                # no signal yet.
-                pending = True
-        elif str(result).upper() in CI_PENDING:
-            pending = True
-    return "unknown" if pending else "green"
+    return funnel.ci_rollup_state(checks)
 
 
 def summarize_checks(rollup: Sequence[dict]) -> List[Dict[str, Optional[str]]]:

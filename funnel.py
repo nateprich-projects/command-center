@@ -16,10 +16,8 @@ import argparse
 import contextlib
 import contextvars
 from collections import namedtuple
-from difflib import SequenceMatcher
 import errno
 import glob
-import hashlib
 import hmac
 import io
 import json
@@ -40,7 +38,6 @@ from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Set, Tuple)
 
 from agent_health import assess as assess_agent_health
-from agent_health import notes as agent_health_assessment_notes
 
 # --------------------------------------------------------------------------
 # Configuration. These are the only knobs; everything else is derived.
@@ -79,71 +76,6 @@ CODEX_IMPLEMENT_VENDOR = {
         "contain the resolved target."
     ),
 }
-
-# The routine declares its own identity in the opening command. The argument
-# is deliberately removed rather than replaced with a placeholder: the file
-# with no literal and the same file after the literal is pasted must hash to
-# the same bytes. Keeping this normalisation here gives the paste helper and
-# `begin` one implementation to share.
-ROUTINE_SHA_ARGUMENT = re.compile(rb"(?:[ \t]+)?--routine-sha[ \t]+\S+")
-
-
-def normalized_routine(path: os.PathLike) -> bytes:
-    """Read a routine with its self-referential sha argument removed."""
-    return ROUTINE_SHA_ARGUMENT.sub(b"", pathlib.Path(path).read_bytes())
-
-
-def routine_sha(path: os.PathLike) -> str:
-    """Return the stable sha256 of a routine, ignoring its own literal."""
-    return hashlib.sha256(normalized_routine(path)).hexdigest()
-
-
-ROUTINE_SHA_MISMATCH_DISTANCE = 2
-
-
-def _routine_sha_edit_span_distance(left: str, right: str) -> int:
-    """Count contiguous changed spans in a stable alignment.
-
-    A copied hash can contain a short inserted or deleted run that shifts the
-    rest of the value. Counting edit spans keeps that one transcription error
-    together, while separate wrong nibbles still count separately. Hashes are
-    not repetitive enough for ``SequenceMatcher``'s junk heuristic, but turn it
-    off explicitly so this stays deterministic for short transition prefixes.
-    """
-    opcodes = SequenceMatcher(
-        None, left, right, autojunk=False
-    ).get_opcodes()
-    return sum(1 for opcode in opcodes if opcode[0] != "equal")
-
-
-def routine_sha_status(literal: str, actual: str) -> str:
-    """Classify a pasted routine hash as ``ok``, ``mismatch`` or ``drift``.
-
-    Comparison ignores surrounding whitespace and case. During the transition
-    from the legacy full hash to the shorter prefix, a longer stored hash is
-    compared through the pasted literal's prefix. A non-empty value within two
-    changed spans is a transcription mismatch; larger changes remain drift.
-    """
-    expected = str(literal).strip().lower()
-    stored = str(actual).strip().lower()
-    if not expected or not stored:
-        return "drift"
-    if len(stored) > len(expected):
-        stored = stored[:len(expected)]
-    if expected == stored:
-        return "ok"
-    distance = _routine_sha_edit_span_distance(expected, stored)
-    return (
-        "mismatch"
-        if distance <= ROUTINE_SHA_MISMATCH_DISTANCE
-        else "drift"
-    )
-
-
-def routine_path(agent: str) -> pathlib.Path:
-    """The checked-in routine whose pasted copy identifies itself."""
-    filename = "codex-work.md" if agent == "codex" else agent + ".md"
-    return CHECKOUT_ROOT / "routines" / filename
 
 # One small, shared shape for every doctor check. Later doctor tickets add
 # checks to the fixed list without changing the report contract.
@@ -498,7 +430,6 @@ BRIEF_SECTION_BUDGETS = {
     "unattended_approvals": 49.0,
     "run_summary": 1.0,
     "agent_health": 1.0,
-    "agent_health_notes": 1.0,
     "working_tree_touched": 1.0,
     "outcome_signals": 3.0,
     "rejected_merges": 0.25,
@@ -2985,35 +2916,6 @@ def agent_run_summary(now: datetime) -> List[Dict[str, object]]:
             continue
         if any(summary.values()):
             found.append({"agent": agent, **summary})
-    return found
-
-
-def agent_health_notes(now: datetime) -> List[Dict[str, str]]:
-    """Informational heartbeat notes that never enter the health alarm list."""
-    try:
-        import heartbeat
-
-        providers = sorted(heartbeat.PROVIDERS)
-    except Exception:
-        return []
-
-    found: List[Dict[str, str]] = []
-    retired = getattr(heartbeat, "RETIRED_AGENTS", frozenset())
-    for agent in providers:
-        if agent in retired:
-            continue  # a stopped schedule is not a dying one (#431)
-        try:
-            notes = agent_health_assessment_notes(
-                agent, _brief_heartbeat_rows(agent), now.timestamp()
-            )
-        except Exception:
-            # Notes are diagnostic too. A heartbeat read failure must not hide
-            # the rest of the funnel or make a brief fail open.
-            continue
-        found.extend(
-            {"agent": agent, "note": note}
-            for note in notes
-        )
     return found
 
 
@@ -7423,9 +7325,6 @@ def cmd_brief(
             "run_summary", lambda: agent_run_summary(now), []
         )
         health = section("agent_health", lambda: agent_health(now), [])
-        health_notes = section(
-            "agent_health_notes", lambda: agent_health_notes(now), []
-        )
         touched = section(
             "working_tree_touched", lambda: working_tree_touched(now), []
         )
@@ -7479,7 +7378,6 @@ def cmd_brief(
             "unattended_approvals": approvals,
             "run_summary": run_summary,
             "agent_health": health,
-            "agent_health_notes": health_notes,
             "working_tree_touched": touched,
             "outcome_signals": outcome_signals,
             "rejected_merges": rejected,
@@ -9150,7 +9048,6 @@ def implementation_packet(repo: str, number: int, agent: str) -> Dict:
 
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
-              routine_sha_literal: Optional[str] = None,
               repo_readiness: Optional[
                   Mapping[str, MemberRepoReadiness]
               ] = None,
@@ -9174,39 +9071,6 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
 
     out: Dict[str, object] = {"agent": agent}
     out["run"] = _start_begin_heartbeat(agent)
-
-    if routine_sha_literal is not None:
-        path = routine_path(agent)
-        try:
-            actual = routine_sha(path)
-            status = routine_sha_status(routine_sha_literal, actual)
-            check = {
-                "expected": routine_sha_literal,
-                "actual": actual,
-                "status": status,
-            }
-        except (OSError, UnicodeError) as exc:
-            check = {
-                "expected": routine_sha_literal,
-                "actual": None,
-                "status": "unreadable",
-                "error": str(exc),
-            }
-        out["routine_sha"] = check
-        if check["status"] != "ok":
-            outcome = (
-                "prompt-mismatch"
-                if check["status"] == "mismatch"
-                else "prompt-drift"
-            )
-            heartbeat.record_event(
-                agent,
-                out["run"],
-                outcome,
-                note="{} routine {} does not match the pasted literal".format(
-                    agent, check["status"]),
-                routine_sha=check,
-            )
 
     reading = usage.read_agent(agent, now.timestamp())
     if reading is None:
@@ -10554,11 +10418,6 @@ def main(argv: Optional[Sequence[str]] = None, *,
         help="caller role: review or implement; omitted preserves agent-based "
              "routing",
     )
-    begin.add_argument(
-        "--routine-sha", dest="routine_sha", default=None,
-        help="compare the checked-in routine's normalized sha256 to this literal",
-    )
-
     session_server = sub.add_parser(
         "session-server",
         help="serve one in-memory Project view for a single Muse run",
@@ -10707,7 +10566,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                               args.run, args.agent, args.klass)
         if args.command == "begin":
             return cmd_begin(items, now, args.agent, args.tier, args.idle,
-                             args.breakdown, args.routine_sha,
+                             args.breakdown,
                              repo_readiness=repo_readiness,
                              caller_role=args.caller_role)
         if args.command == "next-review":

@@ -82,8 +82,6 @@ OUTCOMES = [
     "skipped-blocked",     # prerequisite has not landed; no change made
     "skipped-human-step",   # paused for a required human action
     "skipped-api-reserve",  # GraphQL budget below the reserve floor (#273)
-    "prompt-drift",        # routine literal did not match the checked-in file
-    "prompt-mismatch",     # routine literal is a near transcription miss
     "errored",             # tried and failed
 ]
 
@@ -298,10 +296,10 @@ def record_event(agent: str, run: Optional[str], outcome: str,
                  **fields) -> str:
     """Record a non-terminal outcome attached to an already-running session.
 
-    `funnel begin` can discover prompt drift after the start record is written,
-    but the routine must still do its normal work and write its ordinary finish
-    record later. An event makes the fault visible to the watchdog without
-    closing the run or making a second finish race with the routine.
+    A misfiled finish can be re-attached to its still-open run as an event,
+    and the API-reserve gate can record its refusal the same way. An event
+    makes the outcome visible to the watchdog without closing the run or
+    making a second finish race with the routine.
     """
     if outcome not in OUTCOMES:
         raise ValueError("unknown heartbeat outcome: {}".format(outcome))

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -23,11 +23,12 @@ def _project(number):
                 state="OPEN", status="Building", klass="Broken", children_total=1)
 
 
-def _ticket(number, parent):
+def _ticket(number, parent, *, in_motion_since=None):
     return Item(repo=REPO, number=number, title="Ticket %d" % number,
                 url="https://github.com/%s/issues/%d" % (REPO, number),
                 state="OPEN", body="Risk: standard", parent=parent.ref,
-                item_id="item-%d" % number)
+                item_id="item-%d" % number,
+                in_motion_since=in_motion_since)
 
 
 def _wire(monkeypatch, spools, facts):
@@ -141,3 +142,43 @@ def test_no_candidates_means_no_pr_read(monkeypatch):
 
     assert funnel.reconcile_orphaned_starts([project, ticket], NOW) == []
     assert reads == []
+
+
+def test_reconcile_releases_a_bound_claim_with_no_branch_after_30_minutes(
+    monkeypatch,
+):
+    project = _project(1)
+    claimed_at = NOW - funnel.CLAIM_BRANCH_GRACE - timedelta(seconds=1)
+    ticket = _ticket(9, project, in_motion_since=claimed_at)
+    appended = _wire(
+        monkeypatch,
+        {"codex": _open_work_start(
+            "abandoned", ticket.ref, ts=int(claimed_at.timestamp())
+        )},
+        {ticket.ref: None},
+    )
+    writes = []
+    monkeypatch.setattr(
+        funnel, "write_lock",
+        lambda item, value: writes.append((item.ref, value)),
+    )
+
+    result = funnel.reconcile_abandoned_claims(
+        [project, ticket], NOW, pr_facts={ticket.ref: None}
+    )
+
+    assert writes == [(ticket.ref, "")]
+    assert ticket.in_motion_since is None
+    assert result == [{
+        "run": "abandoned",
+        "agent": "codex",
+        "ref": ticket.ref,
+        "result": "released",
+        "kept": "pushed",
+    }]
+    (agent, finish), = appended
+    assert agent == "codex"
+    assert finish["run"] == "abandoned"
+    assert finish["phase"] == "finish"
+    assert finish["outcome"] == "errored"
+    assert finish["reconciled_claim"] == ticket.ref

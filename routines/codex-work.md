@@ -15,6 +15,10 @@ surface.
 ---
 
 Run `python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent codex --tier standard` exactly once and follow the JSON it prints.
+`begin` can take several minutes. If the exec tool yields a timeout or partial
+output while the process is still running, keep reading that same exec session
+until the process exits. Never treat that yield as a failure, and never invoke
+`begin` again.
 
 Work one ticket, then stop. When `do` is `stop`, finish the printed `run` with
 the reported gate’s established outcome (`over` is `skipped-over-pace`,

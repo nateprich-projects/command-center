@@ -318,10 +318,13 @@ def test_the_happy_path_runs_packet_model_and_finish_in_order(tmp_path):
     assert len(finish) == 1
     cwd, argv = finish[0].split(" :: ")
     assert cwd == str(workspace)
-    assert argv.split() == [
-        "--answer-file", str(workspace / "answer.json"),
-        "--run", "writer-run", "--agent", "muse",
-        "--repo", "example/widgets",
+    answer_args = argv.split()
+    answer_file = pathlib.Path(answer_args[answer_args.index(
+        "--answer-file") + 1])
+    assert answer_file != workspace / "answer.json"
+    assert not answer_file.exists(), "the handoff scratch file must be cleaned up"
+    assert answer_args[answer_args.index("--run") + 1:] == [
+        "writer-run", "--agent", "muse", "--repo", "example/widgets",
     ]
     assert (repo / "finish.answer").read_text() == ANSWER
     assert _heartbeat(repo) == ""

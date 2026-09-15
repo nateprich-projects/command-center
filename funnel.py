@@ -75,6 +75,11 @@ CODEX_IMPLEMENT_VENDOR = {
         "spelling to the symlink target; only Codex sandbox configuration may "
         "contain the resolved target."
     ),
+    "answer_handoff": (
+        "Write the one structured answer to a file in the Codex session "
+        "directory, outside the ticket checkout, then invoke finish-ticket "
+        "from the checkout with --answer-file PATH."
+    ),
 }
 
 # One small, shared shape for every doctor check. Later doctor tickets add

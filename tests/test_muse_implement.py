@@ -104,7 +104,7 @@ FINISH_STUB = (
     "with (root / 'finish.calls').open('a') as fh:\n"
     "    fh.write(os.getcwd() + ' :: ' + ' '.join(sys.argv[1:]) + '\\n')\n"
     "args = sys.argv[1:]\n"
-    "answer = args[args.index('--answer') + 1]\n"
+    "answer = args[args.index('--answer-file') + 1]\n"
     "(root / 'finish.answer').write_text(pathlib.Path(answer).read_text())\n"
     "if os.environ.get('FINISH_STATUS', '0') != '0':\n"
     "    sys.stderr.write(os.environ.get('FINISH_ERROR', 'finish failed'))\n"
@@ -319,7 +319,7 @@ def test_the_happy_path_runs_packet_model_and_finish_in_order(tmp_path):
     cwd, argv = finish[0].split(" :: ")
     assert cwd == str(workspace)
     assert argv.split() == [
-        "--answer", str(workspace / "answer.json"),
+        "--answer-file", str(workspace / "answer.json"),
         "--run", "writer-run", "--agent", "muse",
         "--repo", "example/widgets",
     ]

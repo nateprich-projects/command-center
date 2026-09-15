@@ -166,27 +166,30 @@ def current_head(repo: str, pr: int) -> str:
 
 
 def apply_approved(repo: str, pr: int, blocking: List[str], note: Optional[str],
-                   ci: str) -> int:
+                   ci: str, run: Optional[str], agent: Optional[str]) -> int:
     """Record the approval, then merge through the existing gate.
 
     ``funnel merge`` refuses unless every condition holds — CI green,
     the verdict at the head, the ticket's project Building — and closes
     the ticket when the merge lands. Its exit code is the answer.
     """
-    funnel.cmd_review(repo, pr, "approved", ci, blocking, note)
+    funnel.cmd_review(repo, pr, "approved", ci, blocking, note,
+                      run=run, agent=agent)
     return funnel.cmd_merge(
         funnel.load_items(), datetime.now(timezone.utc), repo, pr, True)
 
 
 def apply_rejected(repo: str, pr: int, blocking: List[str],
-                   note: Optional[str], ci: str) -> int:
+                   note: Optional[str], ci: str, run: Optional[str],
+                   agent: Optional[str]) -> int:
     """Record the rejection with its blocking list. No merge follows."""
-    funnel.cmd_review(repo, pr, "rejected", ci, blocking, note)
+    funnel.cmd_review(repo, pr, "rejected", ci, blocking, note,
+                      run=run, agent=agent)
     return 0
 
 
 def apply_malformed_final(repo: str, pr: int, raw: str, error: AnswerError,
-                          ci: str) -> int:
+                          ci: str, run: Optional[str], agent: Optional[str]) -> int:
     """Second malformed answer: record rejected, signal the errored run.
 
     The parse error becomes the blocking item and the raw output the
@@ -196,7 +199,7 @@ def apply_malformed_final(repo: str, pr: int, raw: str, error: AnswerError,
     funnel.cmd_review(
         repo, pr, "rejected", ci,
         ["the model's answer could not be parsed: {}".format(error)],
-        truncate_raw(raw))
+        truncate_raw(raw), run=run, agent=agent)
     print("review-apply: recorded rejected on PR #{} in {} after "
           "a malformed final answer; {}".format(pr, repo, ERRORED_OUTCOME))
     return 1
@@ -213,6 +216,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="model answer JSON file, or - for stdin")
     parser.add_argument("--ci", default="unknown", choices=funnel.CI_STATES,
                         help="CI state from the packet (default: unknown)")
+    parser.add_argument("--run", default=None,
+                        help="heartbeat run id recorded in provenance")
+    parser.add_argument("--agent", default=None,
+                        help="agent name recorded in provenance")
     parser.add_argument("--head", default=None,
                         help="packet head sha: refuse without recording "
                              "when the branch has moved since")
@@ -244,7 +251,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return RETRY_EXIT
         try:
             return apply_malformed_final(
-                funnel.resolve_repo(args.repo), args.pr, raw, exc, args.ci)
+                funnel.resolve_repo(args.repo), args.pr, raw, exc, args.ci,
+                args.run, args.agent)
         except funnel.GitHubError as exc:
             print("review-apply: {}".format(exc), file=sys.stderr)
             return 1
@@ -266,8 +274,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                           args.head, head), file=sys.stderr)
                 return 1
         if verdict == "approved":
-            return apply_approved(repo, args.pr, blocking, note, args.ci)
-        return apply_rejected(repo, args.pr, blocking, note, args.ci)
+            return apply_approved(repo, args.pr, blocking, note, args.ci,
+                                  args.run, args.agent)
+        return apply_rejected(repo, args.pr, blocking, note, args.ci,
+                              args.run, args.agent)
     except funnel.GitHubError as exc:
         print("review-apply: {}".format(exc), file=sys.stderr)
         return 1

@@ -1418,27 +1418,39 @@ def test_brief_record_sections_allow_the_observed_two_second_read(
         ("rejected_merges", "rejected_merges"),
     ],
 )
-def test_brief_fails_closed_without_partial_json_when_gate_section_is_slow(
+def test_brief_degrades_a_slow_section_without_losing_the_rest(
     monkeypatch, capsys, section, reader
 ):
+    """No section fails the whole brief: a slow read degrades explicitly
+    while every other section is still emitted (#824)."""
     item = funnel.Item(
-        repo="nateprich/beta", number=95, title="Gate project",
+        repo="nateprich/beta", number=95, title="Slow project",
         url="https://example.invalid/95", state="OPEN", status="Ready",
         status_since=NOW,
     )
     monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS, section, 0.0)
     monkeypatch.setattr(funnel, reader, lambda *args: {})
 
-    assert funnel.cmd_brief([item], NOW) == 2
-    captured = capsys.readouterr()
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
 
-    assert captured.out == ""
-    assert "brief failed closed" in captured.err
-    assert section in captured.err
-    assert "no partial JSON emitted" in captured.err
+    degraded = [
+        row for row in brief["degraded"] if row["section"] == section
+    ]
+    assert len(degraded) == 1
+    assert degraded[0]["budget_seconds"] == 0.0
+    assert degraded[0]["reason"]
+    assert brief["timings"][section] == 0.0
+    # The rest of the brief is intact, not missing.
+    assert brief["items"] == []
+    assert brief["total_needing_nate"] == 0
+    assert brief["counts_by_gate"]["Ready"] == 1
+    assert section not in [
+        entry["section"] for entry in brief["missing"]
+    ]
 
 
-def test_closed_itself_gate_timeout_names_candidate_count(
+def test_closed_itself_degrades_explicitly_when_over_budget(
     monkeypatch, capsys
 ):
     item = funnel.Item(
@@ -1448,11 +1460,14 @@ def test_closed_itself_gate_timeout_names_candidate_count(
     )
     monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS, "closed_itself", 0.0)
 
-    assert funnel.cmd_brief([item], NOW) == 2
-    captured = capsys.readouterr()
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
 
-    assert captured.out == ""
-    assert "section='closed_itself'" in captured.err
-    assert "elapsed=0.000s" in captured.err
-    assert "budget=0.000s" in captured.err
-    assert "candidate count=1" in captured.err
+    assert brief["closed_itself"] == []
+    assert {
+        "section": "closed_itself",
+        "elapsed_seconds": 0.0,
+        "budget_seconds": 0.0,
+        "reason": "brief budget exhausted before the section started",
+    } in brief["degraded"]
+    assert brief["counts_by_gate"]["Ready"] == 0

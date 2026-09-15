@@ -146,3 +146,35 @@ def test_every_capture_line_names_its_repo(routine):
     lines = [l for l in body.splitlines() if "funnel.py capture" in l]
     assert lines
     assert all("--repo" in l for l in lines)
+
+
+def test_no_runner_or_routine_invokes_a_live_brief():
+    """Only the publisher runs ``brief``; runners and routines read the
+    published snapshot instead (#824). Prose may still name the brief as
+    an artifact — ``Do not run `funnel brief``` and ```funnel brief` shows``
+    — but no script may invoke it."""
+    offenders = []
+    for directory in ("scripts", "routines"):
+        for path in sorted((ROOT / directory).iterdir()):
+            if not path.is_file():
+                continue
+            for number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                if "funnel.py brief" in line:
+                    offenders.append(
+                        "{}:{}: {}".format(path.name, number, line.strip())
+                    )
+    assert not offenders, (
+        "these runner/routine lines invoke a live brief; read the published "
+        "snapshot instead:\n  " + "\n  ".join(offenders)
+    )
+
+
+@pytest.mark.parametrize("routine", ("claude", "zcode"))
+def test_breakdown_reads_awaiting_breakdown_from_the_snapshot(routine):
+    """The routine breakdown path lists its work from the published
+    snapshot's brief section, never from a live brief (#824)."""
+    body = (ROOT / "routines" / (routine + ".md")).read_text(encoding="utf-8")
+    assert "funnel.py snapshot" in body
+    assert ".brief.awaiting_breakdown" in body

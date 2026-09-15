@@ -110,6 +110,15 @@ def test_working_tree_touched_rendering_keeps_observers_visible():
     )
 
 
+def test_the_skill_reads_the_published_snapshot_not_a_live_brief():
+    """Only the publisher runs ``brief``; /funnel reads the published
+    snapshot and renders its brief section (#824)."""
+    skill = SKILL.read_text()
+    assert "funnel.py snapshot" in skill
+    assert "funnel.py brief" not in skill
+    assert "funnel brief" not in skill
+
+
 def test_human_step_rendering_names_both_work_owners():
     """The two work queues must not be rendered as Nate's decision queue."""
     rendering = SKILL.read_text().split("## How to render it", 1)[1]

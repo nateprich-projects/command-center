@@ -39,8 +39,6 @@ OPEN_START_FLOOR_SECONDS = 15 * 60
 OPEN_START_MULTIPLE = 10
 ERROR_THRESHOLD = 3
 WEEK = 7 * 86400
-PROMPT_DRIFT_OUTCOME = "prompt-drift"
-PROMPT_MISMATCH_OUTCOME = "prompt-mismatch"
 
 
 def _history(
@@ -179,47 +177,6 @@ def _recent_outcomes(
     return found
 
 
-def notes(
-    agent: str,
-    rows: List[Dict],
-    now: float,
-    *,
-    week: Optional[int] = None,
-    prompt_mismatch_outcome: Optional[str] = None,
-) -> List[str]:
-    """Return informational notes that must not raise a health alarm.
-
-    A near-miss routine literal is useful evidence about the run that produced
-    it, but it does not establish that the checked-in prompt is stale. Keep the
-    transcription note separate from :func:`assess`, whose return value is the
-    set of conditions that may page or enter the funnel's health section.
-    """
-    week = WEEK if week is None else week
-    prompt_mismatch_outcome = (
-        PROMPT_MISMATCH_OUTCOME
-        if prompt_mismatch_outcome is None else prompt_mismatch_outcome
-    )
-    mismatches = _recent_outcomes(
-        rows, now, prompt_mismatch_outcome, week
-    )
-    if not mismatches:
-        return []
-
-    latest = max(
-        mismatches,
-        key=lambda row: row.get("ts") or 0,
-    )
-    return [
-        "`{}` recorded prompt-mismatch {} time(s) this week. This is a "
-        "routine-literal transcription note for a near miss, not prompt drift; "
-        "it does not require resync. Most recent at <t:{}:f>.".format(
-            agent,
-            len(mismatches),
-            int(latest.get("ts") or 0),
-        )
-    ]
-
-
 def assess(
     agent: str,
     rows: List[Dict],
@@ -234,7 +191,6 @@ def assess(
     unfinished_seconds: Optional[int] = None,
     dying_threshold: Optional[int] = None,
     week: Optional[int] = None,
-    prompt_drift_outcome: Optional[str] = None,
     error_threshold: Optional[int] = None,
 ) -> List[str]:
     """Return raised conditions in the watchdog's existing wording.
@@ -264,10 +220,6 @@ def assess(
     )
     dying_threshold = DYING_THRESHOLD if dying_threshold is None else dying_threshold
     week = WEEK if week is None else week
-    prompt_drift_outcome = (
-        PROMPT_DRIFT_OUTCOME
-        if prompt_drift_outcome is None else prompt_drift_outcome
-    )
     error_threshold = ERROR_THRESHOLD if error_threshold is None else error_threshold
 
     problems: List[str] = []
@@ -378,20 +330,6 @@ def assess(
                 agent,
                 len(dying),
                 ", ".join(str(r.get("ticket")) for r in dying[-5:]),
-            )
-        )
-
-    prompt_drift = _recent_outcomes(
-        rows, now, prompt_drift_outcome, week
-    )
-    if prompt_drift:
-        problems.append(
-            "`{}` reported prompt drift {} time(s) this week. The routine "
-            "prompt differs from the checked-in file; sync it before relying "
-            "on scheduled work. Most recent at <t:{}:f>.".format(
-                agent,
-                len(prompt_drift),
-                int(prompt_drift[-1].get("ts") or 0),
             )
         )
 

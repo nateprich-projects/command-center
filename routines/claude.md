@@ -27,7 +27,7 @@ preempt.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha a1d05749b628bd4e3bf57bcf0943d04cd7a45f413d079cc258b8a97a9d4a4059
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and names
@@ -49,24 +49,6 @@ as `--run <id>` — never an id from an earlier `begin` in the same session. If
 `heartbeat finish` refuses a run/work mismatch, it names the still-open run id
 to use; use that id in `--run` and retry. Never wrap the id in `RUN=$(...)` —
 command substitution cannot be permission-matched and caused a prompt storm.
-
-### Live automation diagnostic
-
-After `begin` returns, including when it returns `"do": "stop"`, run this
-read-only check:
-
-```bash
-if [ -d "$HOME/.codex/automations" ]; then
-  python3 /Users/nateprich/.claude/command-center-run/scripts/sync_codex_automations.py --check || true
-fi
-```
-
-This reuses the sync script's existing detector and is report-only. If it prints
-`DRIFTED` lines, report one short `Codex automation drift:` diagnostic naming
-each schedule, the same way the brief reports other unusual facts. Do not treat
-the check's nonzero drift exit as a failed run, and do not run write mode or edit
-the live automations. If `~/.codex/automations` is absent, or no `DRIFTED` lines
-appear, say nothing.
 
 **Why one command rather than three.** This routine runs on Nate's own Anthropic
 subscription — the pool he does his real work on — and every separate tool call

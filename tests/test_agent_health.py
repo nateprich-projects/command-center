@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
 import heartbeat  # noqa: E402
-from agent_health import assess, notes  # noqa: E402
+from agent_health import assess  # noqa: E402
 
 
 NOW = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
@@ -119,27 +119,10 @@ def test_brief_run_summary_separates_rebegins_from_finishes(monkeypatch):
     }]
 
 
-def test_prompt_mismatch_is_a_transcription_note_not_a_health_condition():
-    rows = [{
-        "run": "near-miss",
-        "phase": "event",
-        "ts": NOW.timestamp() - 3600,
-        "agent": "codex",
-        "outcome": "prompt-mismatch",
-    }]
-
-    assert assess("codex", rows, NOW.timestamp()) == []
-
-    found = notes("codex", rows, NOW.timestamp())
-
-    assert len(found) == 1
-    assert "prompt-mismatch 1 time(s)" in found[0]
-    assert "transcription note" in found[0]
-    assert "not prompt drift" in found[0]
-    assert "does not require resync" in found[0]
-
-
-def test_prompt_drift_still_raises_alongside_a_separate_mismatch_note():
+def test_retired_prompt_events_raise_no_condition():
+    """`prompt-drift` and `prompt-mismatch` left the outcome vocabulary with
+    `--routine-sha` (#821). Old rows may still sit in the heartbeat history;
+    they raise nothing."""
     rows = [
         {
             "run": "drift",
@@ -157,11 +140,7 @@ def test_prompt_drift_still_raises_alongside_a_separate_mismatch_note():
         },
     ]
 
-    conditions = assess("codex", rows, NOW.timestamp())
-
-    assert len(conditions) == 1
-    assert "reported prompt drift 1 time(s)" in conditions[0]
-    assert len(notes("codex", rows, NOW.timestamp())) == 1
+    assert assess("codex", rows, NOW.timestamp()) == []
 
 
 def test_sparse_history_uses_the_absolute_silence_floor_and_reaches_the_brief(
@@ -198,33 +177,6 @@ def test_sparse_history_uses_the_absolute_silence_floor_and_reaches_the_brief(
         "agent": "codex",
         "condition": conditions[0],
     }]
-
-
-def test_brief_lists_prompt_mismatch_notes_separately_from_health_alarms(
-    monkeypatch, capsys,
-):
-    now = NOW
-    item = funnel.Item(
-        repo="nateprich/beta", number=61, title="A plan with a note",
-        url="https://example.invalid/61", state="OPEN", status="Shaped",
-        klass="Improve", status_since=now,
-        body="## Needs you\n\nChoose a direction.\n",
-    )
-    note = {
-        "agent": "codex",
-        "note": "`codex` recorded prompt-mismatch 1 time(s) this week.",
-    }
-    monkeypatch.setattr(funnel, "agent_health", lambda now: [])
-    monkeypatch.setattr(funnel, "agent_health_notes", lambda now: [note])
-    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
-    monkeypatch.setattr(funnel, "working_tree_touched", lambda now: [])
-
-    assert funnel.cmd_brief([item], now) == 0
-    brief = json.loads(capsys.readouterr().out)
-
-    assert brief["agent_health"] == []
-    assert brief["agent_health_notes"] == [note]
-    assert brief["total_needing_nate"] == 1
 
 
 def test_one_open_start_older_than_ten_times_median_is_reported():

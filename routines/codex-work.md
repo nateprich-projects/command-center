@@ -40,8 +40,9 @@ change and return exactly one structured answer:
   `{"blocked_on_human":{"reason":"<allowlisted reason>","action":"..."}}`
 - an unlanded named prerequisite before any change: `{"declined":"..."}`
 
-From the ticket checkout, pass that answer on standard input to
-`python3 /Users/nateprich/.claude/command-center-run/funnel.py finish-ticket --run <run> --answer -`.
+Write that answer to a file in the Codex session directory, outside the ticket
+checkout. From the ticket checkout, run
+`python3 /Users/nateprich/.claude/command-center-run/funnel.py finish-ticket --run <run> --answer-file <path>`.
 The runner validates the answer, tests the checkout, commits and pushes, opens
 the PR or records the blocked/declined path, releases the claim, and finishes
 the heartbeat. Report any failure honestly and stop; do not simulate an effect

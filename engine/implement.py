@@ -23,7 +23,7 @@ import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -164,16 +164,12 @@ def packet_main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
-def read_answer(path: str) -> dict:
-    """Read and validate one structured implementation answer.
+def parse_answer(raw: str) -> dict:
+    """Validate one structured implementation answer.
 
     Exactly one shape: the done answer, the blocked_on_human answer, or
     the declined answer. Anything mixed or unknown fails closed.
     """
-    try:
-        raw = sys.stdin.read() if path == "-" else pathlib.Path(path).read_text()
-    except OSError as exc:
-        raise ImplementError("cannot read answer {}: {}".format(path, exc))
     try:
         answer = json.loads(raw)
     except ValueError as exc:
@@ -192,6 +188,15 @@ def read_answer(path: str) -> dict:
         return {"declined": reason.strip()}
     raise ImplementError(
         "answer must be a done, blocked_on_human, or declined answer")
+
+
+def read_answer(path: str) -> dict:
+    """Read a structured answer from ``path`` (or stdin) and validate it."""
+    try:
+        raw = sys.stdin.read() if path == "-" else pathlib.Path(path).read_text()
+    except OSError as exc:
+        raise ImplementError("cannot read answer {}: {}".format(path, exc))
+    return parse_answer(raw)
 
 
 def _read_done_answer(answer: dict) -> dict:
@@ -270,8 +275,293 @@ def checkout_context(cwd: Optional[os.PathLike] = None) -> dict:
     return {"root": root, "branch": branch, "number": int(match.group(1))}
 
 
-def default_test_commands(root: pathlib.Path) -> List[List[str]]:
-    """Choose the deterministic test command from repository evidence."""
+def _toml_single_line_string(value: str) -> Optional[str]:
+    """Parse one single-line TOML basic or literal string, or None.
+
+    Anything else shaped — a number, array, inline table, or a triple-quoted
+    multi-line string — is not an override. Backslashes stay literal except
+    the two needed to write the string itself, so Windows-style paths and
+    regex escapes in a command survive unharmed.
+    """
+    if len(value) >= 2 and value[0] in "\"'":
+        quote = value[0]
+        chars: List[str] = []
+        index = 1
+        while index < len(value):
+            char = value[index]
+            if quote == '"' and char == "\\" and index + 1 < len(value):
+                follower = value[index + 1]
+                if follower == "\\":
+                    chars.append("\\")
+                elif follower == '"':
+                    chars.append('"')
+                else:
+                    chars.append("\\" + follower)
+                index += 2
+                continue
+            if char == quote:
+                tail = value[index + 1:]
+                if tail.strip() and not tail.strip().startswith("#"):
+                    return None
+                text = "".join(chars)
+                return text if text.strip() else None
+            if char in "\n\r":
+                return None
+            chars.append(char)
+            index += 1
+    return None
+
+
+def pyproject_test_command(root: pathlib.Path) -> Optional[str]:
+    """Return the raw ``[tool.command-center] test`` string, or None.
+
+    The engine runs on interpreters without ``tomllib`` and installs no
+    dependencies, so this reads one single-line string key with a section
+    scan instead of parsing TOML. A missing file, a missing section, or a
+    value that is not a single-line quoted string is not an override.
+    """
+    try:
+        text = (root / "pyproject.toml").read_text()
+    except OSError:
+        return None
+    in_section = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("["):
+            in_section = re.fullmatch(
+                r"\[\s*tool\.command-center\s*\](\s*#.*)?", stripped
+            ) is not None
+            continue
+        if not in_section:
+            continue
+        match = re.match(r"test\b\s*=\s*(.+?)\s*$", stripped)
+        if match:
+            return _toml_single_line_string(match.group(1))
+    return None
+
+
+def _strip_yaml_comment(text: str) -> str:
+    """Cut a YAML ``#`` comment, honouring single and double quotes."""
+    quote: Optional[str] = None
+    for index, char in enumerate(text):
+        if quote is not None:
+            if char == quote:
+                quote = None
+            continue
+        if char in "\"'":
+            quote = char
+        elif char == "#" and (index == 0 or text[index - 1] in " \t"):
+            return text[:index].rstrip()
+    return text.rstrip()
+
+
+def _strip_yaml_quotes(text: str) -> str:
+    """Strip one pair of matching YAML quotes, without unescaping."""
+    if len(text) >= 2 and text[0] in "\"'" and text[-1] == text[0]:
+        return text[1:-1]
+    return text
+
+
+def _workflow_steps(text: str) -> List[Tuple[str, str]]:
+    """Split one workflow file into (name, run) step pairs.
+
+    A minimal indentation scan, not a YAML parser: every ``-`` item starts a
+    chunk, where a dash line deeper than the open chunk belongs to its block
+    scalar rather than starting a new step. The chunk's first ``name:`` and
+    first ``run:`` win; block scalars (``|``, ``>``) and plain continuations
+    are collected by indentation, and chunks without a ``run:`` are dropped.
+    """
+    chunks: List[Tuple[int, List[Tuple[int, str]]]] = []
+    current: Optional[Tuple[int, List[Tuple[int, str]]]] = None
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        lstripped = line.strip()
+        if lstripped == "-":
+            dash_content: Optional[str] = ""
+        elif lstripped.startswith("- ") or lstripped.startswith("-\t"):
+            dash_content = lstripped[2:]
+        else:
+            dash_content = None
+        if dash_content is not None:
+            if current is None or indent <= current[0]:
+                current = (indent, [])
+                chunks.append(current)
+                if dash_content:
+                    current[1].append((indent, dash_content))
+                continue
+        if current is None or indent <= current[0]:
+            current = None
+            continue
+        current[1].append((indent, lstripped))
+    steps = []
+    for _, chunk in chunks:
+        name = ""
+        run: Optional[str] = None
+        for position, (indent, content) in enumerate(chunk):
+            name_match = re.match(r"name\s*:\s*(.*)$", content)
+            if name_match and not name:
+                name = _strip_yaml_quotes(
+                    _strip_yaml_comment(name_match.group(1).strip()))
+            run_match = re.match(r"run\s*:\s*(.*)$", content)
+            if run_match and run is None:
+                run = _workflow_run_value(
+                    run_match.group(1).strip(), indent,
+                    [entry for entry in chunk[position + 1:]])
+        if run is not None:
+            steps.append((name, run))
+    return steps
+
+
+def _workflow_run_value(rest: str, indent: int,
+                        following: Sequence[Tuple[int, str]]) -> str:
+    """Read one ``run:`` value with its block-scalar continuation lines."""
+    if re.fullmatch(r"[|>][+\-0-9]*(\s*#.*)?", rest):
+        deeper = [content for (found, content) in following
+                  if found > indent]
+        if rest.startswith("|"):
+            return "\n".join(deeper).strip()
+        return " ".join(line.strip() for line in deeper if line.strip())
+    if not rest:
+        deeper = [content for (found, content) in following
+                  if found > indent]
+        return " ".join(line.strip() for line in deeper if line.strip())
+    return _strip_yaml_quotes(_strip_yaml_comment(rest))
+
+
+def _shell_command(text: str) -> List[str]:
+    """Split one CI ``run:`` value into argv, or run it under ``sh -c``.
+
+    CI ``run:`` values are shell by definition. Plain word-shaped lines split
+    into argv so the recorded command stays readable; multi-line scripts,
+    lines with shell metacharacters, and unbalanced quotes run under
+    ``sh -c`` exactly as the workflow would run them. GitHub ``${{ }}``
+    expressions are not expanded: such a step fails loudly instead of
+    running with a silently empty value.
+    """
+    stripped = text.strip()
+    if "\n" in stripped or re.search(r"[|&;<>()`$]", stripped):
+        return ["sh", "-c", stripped]
+    try:
+        argv = shlex.split(stripped)
+    except ValueError:
+        return ["sh", "-c", stripped]
+    if not argv:
+        return ["sh", "-c", stripped]
+    return argv
+
+
+def _segment_invokes_pytest(words: Sequence[str]) -> bool:
+    """True when one shell segment's argv runs pytest, not installs it."""
+    if not words:
+        return False
+    first = words[0].rsplit("/", 1)[-1]
+    if first == "pytest":
+        return True
+    if re.fullmatch(r"python[\d.]*|pypy[\d.]*", first):
+        return any(
+            word == "-m" and index + 1 < len(words)
+            and words[index + 1] == "pytest"
+            for index, word in enumerate(words)
+        )
+    if first == "uv" and "run" in words[1:]:
+        after = words[words.index("run", 1) + 1:]
+        return "pytest" in after
+    return False
+
+
+def _run_invokes_pytest(run: str) -> bool:
+    """True when any line of a ``run:`` value invokes pytest.
+
+    ``pip install pytest`` does not count: installing the runner is not
+    running the suite. Segments are split quote-blindly, which is fine for
+    a matcher — execution always runs the value verbatim.
+    """
+    for line in run.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        for segment in re.split(r"\s*(?:&&|\|\||;)\s*", stripped):
+            try:
+                words = shlex.split(segment)
+            except ValueError:
+                words = segment.split()
+            if _segment_invokes_pytest(words):
+                return True
+    return False
+
+
+def _is_test_step(name: str, run: str) -> bool:
+    """True when a workflow step is the suite, not its installation.
+
+    A step whose ``run:`` invokes pytest always counts. Otherwise the name
+    must say tests — a ``test``/``tests``/``testing`` word or ``pytest`` —
+    and must not say ``install``/``setup``, so ``Install pytest`` and
+    ``Set up the test database`` never select an installer as the suite.
+    """
+    if _run_invokes_pytest(run):
+        return True
+    lowered = name.strip().lower()
+    if "install" in lowered or "setup" in lowered or "set up" in lowered:
+        return False
+    if re.search(r"\btests?\b|\btesting\b", lowered):
+        return True
+    return "pytest" in lowered
+
+
+def override_test_command(root: pathlib.Path) -> Optional[Tuple[List[str], str]]:
+    """Resolve the repo's declared test command, or None.
+
+    First ``[tool.command-center] test`` in ``pyproject.toml``, split into
+    argv (write ``sh -c "..."`` there when the suite needs a shell); else the
+    ``run:`` of the first CI workflow test step, across
+    ``.github/workflows/*.yml`` and ``*.yaml`` in sorted order. The source
+    names the evidence, for the PR body and the heartbeat note.
+    """
+    raw = pyproject_test_command(root)
+    if raw:
+        try:
+            argv = shlex.split(raw)
+        except ValueError:
+            argv = []
+        if argv:
+            return argv, "pyproject.toml [tool.command-center] test"
+    workflows = root / ".github" / "workflows"
+    if workflows.is_dir():
+        candidates = sorted(
+            path for path in workflows.iterdir()
+            if path.is_file() and path.suffix in (".yml", ".yaml")
+        )
+        for path in candidates:
+            try:
+                text = path.read_text()
+            except OSError:
+                continue
+            for name, run in _workflow_steps(text):
+                if not run.strip():
+                    continue
+                if _is_test_step(name, run):
+                    display = (name.strip()
+                               or run.strip().splitlines()[0][:60])
+                    return (
+                        _shell_command(run),
+                        'CI {} step "{}"'.format(
+                            path.relative_to(root), display),
+                    )
+    return None
+
+
+def default_test_plan(
+        root: pathlib.Path) -> Tuple[List[List[str]], Optional[str]]:
+    """Choose the test commands and name the evidence behind the test slot.
+
+    A declared override always wins, ungated: its presence is the evidence.
+    Without one, the default pytest runs only where Python evidence (a
+    ``tests/`` tree or a config marker) says a suite exists. The ``npm``
+    suite is independent and never suppressed. Returns the commands and the
+    test-slot source, which is None when no test slot was resolved.
+    """
     commands: List[List[str]] = []
     if (root / "funnel.py").is_file():
         commands.append([
@@ -279,40 +569,74 @@ def default_test_commands(root: pathlib.Path) -> List[List[str]]:
             'from pathlib import Path; compile(Path("funnel.py").read_text(), '
             '"funnel.py", "exec")',
         ])
-    test_dir = root / "tests"
-    has_python_tests = test_dir.is_dir() and any(
-        path.is_file() for path in test_dir.rglob("test_*.py")
-    )
-    python_markers = (
-        root / "pytest.ini", root / "pyproject.toml", root / "setup.cfg",
-        root / "tox.ini",
-    )
-    if has_python_tests or any(path.is_file() for path in python_markers):
-        # No cache provider: the finish step commits everything dirty, so the
-        # test run must not leave .pytest_cache/ behind for it to stage.
-        commands.append(
-            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+    override = override_test_command(root)
+    if override is not None:
+        argv, source = override
+        commands.append(argv)
+        test_source: Optional[str] = source
+    else:
+        test_dir = root / "tests"
+        has_python_tests = test_dir.is_dir() and any(
+            path.is_file() for path in test_dir.rglob("test_*.py")
         )
+        python_markers = (
+            root / "pytest.ini", root / "pyproject.toml", root / "setup.cfg",
+            root / "tox.ini",
+        )
+        if has_python_tests or any(path.is_file() for path in python_markers):
+            # No cache provider: the finish step commits everything dirty, so
+            # the test run must not leave .pytest_cache/ behind for it to
+            # stage. Resolved commands run verbatim, so run_tests carries
+            # the same guard in PYTEST_ADDOPTS for those.
+            commands.append(
+                [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+            )
+            test_source = "default pytest"
+        else:
+            test_source = None
     if (root / "package.json").is_file():
         commands.append(["npm", "test"])
     if not commands:
         raise ImplementError(
             "could not derive a test command from this checkout"
         )
+    return commands, test_source
+
+
+def default_test_commands(root: pathlib.Path) -> List[List[str]]:
+    """Choose the deterministic test command from repository evidence."""
+    commands, _ = default_test_plan(root)
     return commands
 
 
 def run_tests(root: pathlib.Path,
-              commands: Optional[Sequence[Sequence[str]]] = None) -> List[str]:
-    """Run the checkout's tests without writing Python bytecode."""
-    selected = list(commands) if commands is not None else default_test_commands(root)
+              commands: Optional[Sequence[Sequence[str]]] = None
+              ) -> Tuple[List[str], Optional[str]]:
+    """Run the checkout's tests without writing Python bytecode.
+
+    Returns the rendered commands and the test-command source, which is
+    None when the caller injected explicit commands or no test slot was
+    resolved.
+    """
+    if commands is not None:
+        selected = list(commands)
+        source: Optional[str] = None
+    else:
+        selected, source = default_test_plan(root)
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    # Whatever ultimately invokes pytest inherits the no-cache guard, so a
+    # resolved `make test` cannot leave .pytest_cache/ for `git add -A`.
+    extra = env.get("PYTEST_ADDOPTS", "").strip()
+    env["PYTEST_ADDOPTS"] = (
+        "{} -p no:cacheprovider".format(extra) if extra
+        else "-p no:cacheprovider"
+    )
     rendered = []
     for command in selected:
         argv = list(command)
         _run(argv, cwd=root, env=env)
         rendered.append(shlex.join(argv))
-    return rendered
+    return rendered, source
 
 
 def resolve_checkout_repo(root: pathlib.Path, explicit: Optional[str]) -> str:
@@ -327,7 +651,8 @@ def resolve_checkout_repo(root: pathlib.Path, explicit: Optional[str]) -> str:
 
 
 def render_pr_body(ticket: dict, answer: dict, *, continued: bool,
-                   tests: Sequence[str]) -> str:
+                   tests: Sequence[str],
+                   test_source: Optional[str] = None) -> str:
     """Render the stable PR template from the model's structured answer."""
     parent = ticket.get("parent") or {}
     parent_number = parent.get("number")
@@ -357,6 +682,12 @@ def render_pr_body(ticket: dict, answer: dict, *, continued: bool,
         "Verified:",
     ])
     lines.extend("- `{}`".format(value) for value in tests)
+    if test_source is not None:
+        lines.extend([
+            "",
+            "Test command source:",
+            test_source,
+        ])
     return "\n".join(lines) + "\n"
 
 
@@ -577,7 +908,8 @@ def _failure_note(exc: ImplementError, kept: str = "") -> str:
     return note
 
 
-def _keep_work(root: pathlib.Path, number: int, branch: str) -> str:
+def _keep_work(root: pathlib.Path, number: int, branch: str, *,
+               reason: str = "tests failing") -> str:
     """Commit and push whatever the run produced, so a failure loses time only.
 
     Never opens a PR. Returns a short phrase for the heartbeat note.
@@ -586,7 +918,7 @@ def _keep_work(root: pathlib.Path, number: int, branch: str) -> str:
         if _run(["git", "status", "--porcelain"], cwd=root).stdout.strip():
             _run(["git", "add", "-A"], cwd=root)
             _run(["git", "commit", "-m",
-                  "WIP #{}: tests failing".format(number)], cwd=root)
+                  "WIP #{}: {}".format(number, reason)], cwd=root)
         ahead = _run(["git", "rev-list", "--count", "origin/main..HEAD"],
                      cwd=root).stdout.strip()
         if not ahead.isdigit() or int(ahead) < 1:
@@ -596,6 +928,36 @@ def _keep_work(root: pathlib.Path, number: int, branch: str) -> str:
     except ImplementError as exc:
         first = str(exc).splitlines()[0] if str(exc) else "unknown error"
         return "work NOT kept: {}".format(first[:120])
+
+
+def _recover_answer_error(
+        exc: ImplementError, *, run: str, agent: str = "codex",
+        repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
+        release: Callable[[str], None] = release_claim,
+        heartbeat_finish: Callable[[str, str, str, str, str], None]
+        = finish_heartbeat) -> bool:
+    """Keep a dirty checkout and close its run after an unreadable answer.
+
+    A clean checkout retains the old fail-closed behaviour: there is no model
+    work to preserve, so this helper performs no side effects and returns
+    false.  Dirty work follows the same WIP-push path as a test failure, but
+    the heartbeat names the answer error that prevented validation.
+    """
+    context = checkout_context(cwd)
+    if not _run(["git", "status", "--porcelain"],
+                cwd=context["root"]).stdout.strip():
+        return False
+    resolved = resolve_checkout_repo(context["root"], repo)
+    ref = "{}#{}".format(resolved, context["number"])
+    kept = _keep_work(
+        context["root"], context["number"], context["branch"],
+        reason="answer unreadable",
+    )
+    release(ref)
+    first = str(exc).splitlines()[0] if str(exc) else "unknown answer error"
+    note = "answer error: {} | {}".format(first[:200], kept)
+    heartbeat_finish(agent, run, "errored", note, ref)
+    return True
 
 
 def finish_done(answer: dict, *, run: str, agent: str = "codex",
@@ -613,7 +975,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
     try:
-        tests = run_tests(context["root"], test_commands)
+        tests, test_source = run_tests(context["root"], test_commands)
     except ImplementError as exc:
         # A failing checkout must not strand the run or lose its work (#877):
         # commit and push the ticket branch without opening a PR, release the
@@ -629,10 +991,13 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         ["git", "push", "--set-upstream", "origin", context["branch"]],
         cwd=context["root"],
     )
-    body = render_pr_body(ticket, answer, continued=continued, tests=tests)
+    body = render_pr_body(ticket, answer, continued=continued, tests=tests,
+                         test_source=test_source)
     pr = pr_effect(resolved, context, ticket, body)
     release(ref)
     note = "PR #{}".format(pr["number"])
+    if test_source is not None:
+        note += " (tests: {})".format(test_source)
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "done", note, ref)
@@ -724,24 +1089,80 @@ def finish_declined(
     return {"ticket": ref, "declined": reason}
 
 
+def dry_run_main() -> int:
+    """Print the resolved test plan for this checkout without running it."""
+    try:
+        context = checkout_context(None)
+        commands, source = default_test_plan(context["root"])
+    except (ImplementError, OSError, subprocess.SubprocessError) as exc:
+        print("finish-ticket: {}".format(exc), file=sys.stderr)
+        return 1
+    print(json.dumps({
+        "branch": context["branch"],
+        "number": context["number"],
+        "test_commands": [shlex.join(command) for command in commands],
+        "test_source": source,
+    }, indent=2, sort_keys=True))
+    return 0
+
+
 def finish_main(argv: Optional[Sequence[str]] = None) -> int:
     """CLI for one structured answer's finish-ticket effect sequence."""
     parser = argparse.ArgumentParser(
         description="publish, block, or decline one ticket, then release "
                     "and finish its run"
     )
-    parser.add_argument("--answer", required=True,
-                        help="structured answer file, or - for stdin")
-    parser.add_argument("--run", required=True, help="bound heartbeat run id")
+    answer_group = parser.add_mutually_exclusive_group()
+    answer_group.add_argument(
+        "--answer", required=False, default=None,
+        help="structured answer as inline JSON, or - for stdin",
+    )
+    answer_group.add_argument(
+        "--answer-file", required=False, default=None,
+        help="path to a file containing the structured answer",
+    )
+    parser.add_argument("--run", required=False, default=None,
+                        help="bound heartbeat run id")
     parser.add_argument("--agent", default="codex",
                         choices=("codex", "muse", "zcode", "claude"))
     parser.add_argument("--repo", default=None,
                         help="owner/name; normally derived from the checkout")
     parser.add_argument("--note", default=None,
                         help="extra run note, such as a stale-claim takeover")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the resolved test plan and exit; "
+                             "runs nothing and changes nothing")
     args = parser.parse_args(argv)
+    if args.dry_run:
+        return dry_run_main()
+    if (args.answer is None and args.answer_file is None) or not args.run:
+        parser.error(
+            "one of --answer/--answer-file and --run are required "
+            "without --dry-run")
     try:
-        answer = read_answer(args.answer)
+        if args.answer_file is not None:
+            answer = read_answer(args.answer_file)
+        elif args.answer == "-":
+            answer = read_answer("-")
+        else:
+            answer = parse_answer(args.answer)
+    except ImplementError as exc:
+        try:
+            _recover_answer_error(
+                exc, run=args.run, agent=args.agent, repo=args.repo,
+                release=release_claim, heartbeat_finish=finish_heartbeat,
+            )
+        except (funnel.GitHubError, ImplementError, OSError,
+                subprocess.SubprocessError) as recovery_exc:
+            print(
+                "finish-ticket: {}; answer-error recovery failed: {}".format(
+                    exc, recovery_exc),
+                file=sys.stderr,
+            )
+            return 1
+        print("finish-ticket: {}".format(exc), file=sys.stderr)
+        return 1
+    try:
         if "done" in answer:
             result = finish_done(
                 answer, run=args.run, agent=args.agent, repo=args.repo,

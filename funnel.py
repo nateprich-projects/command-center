@@ -16,10 +16,8 @@ import argparse
 import contextlib
 import contextvars
 from collections import namedtuple
-from difflib import SequenceMatcher
 import errno
 import glob
-import hashlib
 import hmac
 import io
 import json
@@ -40,7 +38,6 @@ from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Set, Tuple)
 
 from agent_health import assess as assess_agent_health
-from agent_health import notes as agent_health_assessment_notes
 
 # --------------------------------------------------------------------------
 # Configuration. These are the only knobs; everything else is derived.
@@ -78,72 +75,12 @@ CODEX_IMPLEMENT_VENDOR = {
         "spelling to the symlink target; only Codex sandbox configuration may "
         "contain the resolved target."
     ),
+    "answer_handoff": (
+        "Write the one structured answer to a file in the Codex session "
+        "directory, outside the ticket checkout, then invoke finish-ticket "
+        "from the checkout with --answer-file PATH."
+    ),
 }
-
-# The routine declares its own identity in the opening command. The argument
-# is deliberately removed rather than replaced with a placeholder: the file
-# with no literal and the same file after the literal is pasted must hash to
-# the same bytes. Keeping this normalisation here gives the paste helper and
-# `begin` one implementation to share.
-ROUTINE_SHA_ARGUMENT = re.compile(rb"(?:[ \t]+)?--routine-sha[ \t]+\S+")
-
-
-def normalized_routine(path: os.PathLike) -> bytes:
-    """Read a routine with its self-referential sha argument removed."""
-    return ROUTINE_SHA_ARGUMENT.sub(b"", pathlib.Path(path).read_bytes())
-
-
-def routine_sha(path: os.PathLike) -> str:
-    """Return the stable sha256 of a routine, ignoring its own literal."""
-    return hashlib.sha256(normalized_routine(path)).hexdigest()
-
-
-ROUTINE_SHA_MISMATCH_DISTANCE = 2
-
-
-def _routine_sha_edit_span_distance(left: str, right: str) -> int:
-    """Count contiguous changed spans in a stable alignment.
-
-    A copied hash can contain a short inserted or deleted run that shifts the
-    rest of the value. Counting edit spans keeps that one transcription error
-    together, while separate wrong nibbles still count separately. Hashes are
-    not repetitive enough for ``SequenceMatcher``'s junk heuristic, but turn it
-    off explicitly so this stays deterministic for short transition prefixes.
-    """
-    opcodes = SequenceMatcher(
-        None, left, right, autojunk=False
-    ).get_opcodes()
-    return sum(1 for opcode in opcodes if opcode[0] != "equal")
-
-
-def routine_sha_status(literal: str, actual: str) -> str:
-    """Classify a pasted routine hash as ``ok``, ``mismatch`` or ``drift``.
-
-    Comparison ignores surrounding whitespace and case. During the transition
-    from the legacy full hash to the shorter prefix, a longer stored hash is
-    compared through the pasted literal's prefix. A non-empty value within two
-    changed spans is a transcription mismatch; larger changes remain drift.
-    """
-    expected = str(literal).strip().lower()
-    stored = str(actual).strip().lower()
-    if not expected or not stored:
-        return "drift"
-    if len(stored) > len(expected):
-        stored = stored[:len(expected)]
-    if expected == stored:
-        return "ok"
-    distance = _routine_sha_edit_span_distance(expected, stored)
-    return (
-        "mismatch"
-        if distance <= ROUTINE_SHA_MISMATCH_DISTANCE
-        else "drift"
-    )
-
-
-def routine_path(agent: str) -> pathlib.Path:
-    """The checked-in routine whose pasted copy identifies itself."""
-    filename = "codex-work.md" if agent == "codex" else agent + ".md"
-    return CHECKOUT_ROOT / "routines" / filename
 
 # One small, shared shape for every doctor check. Later doctor tickets add
 # checks to the fixed list without changing the report contract.
@@ -504,7 +441,6 @@ BRIEF_SECTION_BUDGETS = {
     "unattended_approvals": 49.0,
     "run_summary": 1.0,
     "agent_health": 1.0,
-    "agent_health_notes": 1.0,
     "working_tree_touched": 1.0,
     "outcome_signals": 3.0,
     "portfolio_metrics": 3.0,
@@ -2678,6 +2614,38 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
         excluded.add(ticket.ref)
 
 
+def held_claims_before(
+    items: Sequence[Item],
+    now: datetime,
+    ticket: Optional[Item],
+    *,
+    blocked: Optional[Set[str]] = None,
+    agent: str = "codex",
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> List[str]:
+    """Claimed queue entries a selector passed before its chosen ticket.
+
+    ``next_ticket`` already removes live claims before choosing, but ``begin``
+    also needs to make that walk observable. The returned refs keep the same
+    shared ordering as ``startable``; when no ticket can be selected, every
+    otherwise-startable live claim is reported.
+    """
+    claimed = {item.ref for item in in_motion(items, now, pr_facts=pr_facts)}
+    passed: List[str] = []
+    for candidate in startable(
+        items,
+        awaiting_review=blocked,
+        agent=agent,
+        repo_readiness=repo_readiness,
+    ):
+        if ticket is not None and candidate.ref == ticket.ref:
+            break
+        if candidate.ref in claimed:
+            passed.append(candidate.ref)
+    return passed
+
+
 def rejected_merges(items: Iterable[Item], now: datetime) -> Dict[str, object]:
     """Merges Nate checked and found broken.
 
@@ -3046,35 +3014,6 @@ def agent_run_summary(now: datetime) -> List[Dict[str, object]]:
             continue
         if any(summary.values()):
             found.append({"agent": agent, **summary})
-    return found
-
-
-def agent_health_notes(now: datetime) -> List[Dict[str, str]]:
-    """Informational heartbeat notes that never enter the health alarm list."""
-    try:
-        import heartbeat
-
-        providers = sorted(heartbeat.PROVIDERS)
-    except Exception:
-        return []
-
-    found: List[Dict[str, str]] = []
-    retired = getattr(heartbeat, "RETIRED_AGENTS", frozenset())
-    for agent in providers:
-        if agent in retired:
-            continue  # a stopped schedule is not a dying one (#431)
-        try:
-            notes = agent_health_assessment_notes(
-                agent, _brief_heartbeat_rows(agent), now.timestamp()
-            )
-        except Exception:
-            # Notes are diagnostic too. A heartbeat read failure must not hide
-            # the rest of the funnel or make a brief fail open.
-            continue
-        found.extend(
-            {"agent": agent, "note": note}
-            for note in notes
-        )
     return found
 
 
@@ -7735,9 +7674,6 @@ def cmd_brief(
             "run_summary", lambda: agent_run_summary(now), []
         )
         health = section("agent_health", lambda: agent_health(now), [])
-        health_notes = section(
-            "agent_health_notes", lambda: agent_health_notes(now), []
-        )
         touched = section(
             "working_tree_touched", lambda: working_tree_touched(now), []
         )
@@ -7799,7 +7735,6 @@ def cmd_brief(
             "unattended_approvals": approvals,
             "run_summary": run_summary,
             "agent_health": health,
-            "agent_health_notes": health_notes,
             "working_tree_touched": touched,
             "outcome_signals": outcome_signals,
             "rejected_merges": rejected,
@@ -9481,7 +9416,6 @@ def implementation_packet(repo: str, number: int, agent: str) -> Dict:
 
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
-              routine_sha_literal: Optional[str] = None,
               repo_readiness: Optional[
                   Mapping[str, MemberRepoReadiness]
               ] = None,
@@ -9505,39 +9439,6 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
 
     out: Dict[str, object] = {"agent": agent}
     out["run"] = _start_begin_heartbeat(agent)
-
-    if routine_sha_literal is not None:
-        path = routine_path(agent)
-        try:
-            actual = routine_sha(path)
-            status = routine_sha_status(routine_sha_literal, actual)
-            check = {
-                "expected": routine_sha_literal,
-                "actual": actual,
-                "status": status,
-            }
-        except (OSError, UnicodeError) as exc:
-            check = {
-                "expected": routine_sha_literal,
-                "actual": None,
-                "status": "unreadable",
-                "error": str(exc),
-            }
-        out["routine_sha"] = check
-        if check["status"] != "ok":
-            outcome = (
-                "prompt-mismatch"
-                if check["status"] == "mismatch"
-                else "prompt-drift"
-            )
-            heartbeat.record_event(
-                agent,
-                out["run"],
-                outcome,
-                note="{} routine {} does not match the pasted literal".format(
-                    agent, check["status"]),
-                routine_sha=check,
-            )
 
     reading = usage.read_agent(agent, now.timestamp())
     if reading is None:
@@ -9595,6 +9496,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         "closed_items", reconcile_closed_items, items)
     if reconciled_statuses:
         out["reconciled_statuses"] = reconciled_statuses
+    released_claims = attempt_reconcile(
+        "closed_claims", reconcile_closed_claims, items)
+    if released_claims:
+        out["released_claims"] = released_claims
     orphaned = attempt_reconcile(
         "orphaned_starts", reconcile_orphaned_starts, items, now)
     if orphaned:
@@ -9668,6 +9573,17 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 repo_readiness=repo_readiness,
                 pr_facts=pr_facts,
             )
+        held = held_claims_before(
+            items,
+            now,
+            ticket,
+            blocked=blocked,
+            agent=agent,
+            repo_readiness=repo_readiness,
+            pr_facts=pr_facts,
+        )
+        if held:
+            out["held"] = held
         if ticket is None:
             holder = lock_holder(items, now, pr_facts=pr_facts)
             withheld = readiness_blockers(
@@ -10237,6 +10153,23 @@ def reconcile_closed_items(items: Sequence[Item]) -> List[str]:
     return repaired
 
 
+def reconcile_closed_claims(items: Sequence[Item]) -> List[str]:
+    """Release claims left on tickets which GitHub already says are closed."""
+    released: List[str] = []
+    candidates = sorted(
+        (
+            item for item in items
+            if item.state == "CLOSED" and item.in_motion_since is not None
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+    for item in candidates:
+        write_lock(item, "")
+        item.in_motion_since = None
+        released.append(item.ref)
+    return released
+
+
 def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
     """Close a finished upkeep project after its last ticket merge.
 
@@ -10447,6 +10380,10 @@ def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
 
     ticket = next((item for item in items if item.ref == ref), None)
     if ticket is not None:
+        if ticket.in_motion_since is not None:
+            write_lock(ticket, "")
+            ticket.in_motion_since = None
+            print("released {}".format(ref))
         _auto_close_parent(items, ticket)
     return 0
 
@@ -10890,11 +10827,6 @@ def main(argv: Optional[Sequence[str]] = None, *,
         help="caller role: review or implement; omitted preserves agent-based "
              "routing",
     )
-    begin.add_argument(
-        "--routine-sha", dest="routine_sha", default=None,
-        help="compare the checked-in routine's normalized sha256 to this literal",
-    )
-
     session_server = sub.add_parser(
         "session-server",
         help="serve one in-memory Project view for a single Muse run",
@@ -11044,7 +10976,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                               args.run, args.agent, args.klass)
         if args.command == "begin":
             return cmd_begin(items, now, args.agent, args.tier, args.idle,
-                             args.breakdown, args.routine_sha,
+                             args.breakdown,
                              repo_readiness=repo_readiness,
                              caller_role=args.caller_role)
         if args.command == "next-review":

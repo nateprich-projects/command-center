@@ -23,7 +23,7 @@ def test_runtime_has_one_begin_and_one_finish_ticket_command():
     ) == 1
     assert runtime.count(
         "python3 /Users/nateprich/.claude/command-center-run/funnel.py "
-        "finish-ticket --run <run> --answer -"
+        "finish-ticket --run <run> --answer-file <path>"
     ) == 1
     assert "--routine-sha" not in runtime
     assert "funnel.py next" not in runtime
@@ -43,6 +43,7 @@ def test_runtime_follows_the_packet_and_returns_one_structured_judgement():
     assert '"blocked_on_human"' in runtime
     assert '"declined"' in runtime
     assert "tests the checkout, commits and pushes, opens" in runtime
+    assert "outside the ticket checkout" in normalized
 
 
 def test_routine_is_under_the_500_word_acceptance_limit():

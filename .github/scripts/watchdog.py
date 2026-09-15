@@ -13,10 +13,6 @@ different fixes:
   outcome line could never have detected.
 - **Erroring.** Repeated `errored` outcomes. Something is broken in the run
   itself.
-- **Drifted.** A run reported that the prompt it received differs from the
-  checked-in routine.
-- **Transcription note.** A run reported a near-miss routine literal. This is
-  printed as evidence, but it does not page or request a resync.
 - **Stale runtime.** Three consecutive scheduled runs used a checkout that
   GitHub reports behind `main` after the normal keeper lag.
 
@@ -60,8 +56,6 @@ UNFINISHED_SECONDS = _agent_health.UNFINISHED_SECONDS
 DYING_THRESHOLD = _agent_health.DYING_THRESHOLD
 ERROR_THRESHOLD = _agent_health.ERROR_THRESHOLD
 WEEK = _agent_health.WEEK
-PROMPT_DRIFT_OUTCOME = _agent_health.PROMPT_DRIFT_OUTCOME
-PROMPT_MISMATCH_OUTCOME = _agent_health.PROMPT_MISMATCH_OUTCOME
 
 RUNTIME_WATCHED_AGENTS = frozenset({"codex", "muse", "zcode"})
 RUNTIME_RUN_COUNT = 3
@@ -281,7 +275,6 @@ def assess(agent: str, rows: List[Dict], now: float) -> List[str]:
         unfinished_seconds=UNFINISHED_SECONDS,
         dying_threshold=DYING_THRESHOLD,
         week=WEEK,
-        prompt_drift_outcome=PROMPT_DRIFT_OUTCOME,
         error_threshold=ERROR_THRESHOLD,
     )
     runtime_problem = _runtime_lag_problem(agent, rows, now)
@@ -306,13 +299,6 @@ def note(agent: str, rows: List[Dict], now: Optional[float] = None) -> str:
             "`{}` has only {} gap(s) in the trailing {} history; "
             "silence threshold not inferred yet"
         ).format(agent, len(gaps), _window_label()))
-    notes.extend(_agent_health.notes(
-        agent,
-        rows,
-        now,
-        week=WEEK,
-        prompt_mismatch_outcome=PROMPT_MISMATCH_OUTCOME,
-    ))
     return " ".join(notes)
 
 
@@ -356,7 +342,7 @@ def main() -> int:
         + ["- " + p for p in problems]
         + ["", "Healthy outcomes — any `skipped-*` result or `nothing-to-do` — "
            "are not reported here by design. This issue is only raised for "
-              "silence, dying runs, prompt drift, repeated errors, or a stale "
+              "silence, dying runs, repeated errors, or a stale "
               "runtime checkout.",
            "", "It closes itself once the heartbeats recover."]
     )

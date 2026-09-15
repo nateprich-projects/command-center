@@ -664,6 +664,47 @@ def test_begin_repairs_closed_terminal_statuses_and_stale_shaping_labels(
     ]
 
 
+def test_begin_releases_every_claim_left_on_a_closed_ticket(
+    monkeypatch, capsys
+):
+    first_project, first = _ticket(
+        240, 239, in_motion_since=NOW - timedelta(minutes=5)
+    )
+    second_project, second = _ticket(
+        242, 241, in_motion_since=NOW - timedelta(minutes=10)
+    )
+    first.state = "CLOSED"
+    first.state_reason = "COMPLETED"
+    second.state = "CLOSED"
+    second.state_reason = "COMPLETED"
+
+    result, _, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys,
+        [first_project, first, second_project, second],
+    )
+
+    assert result["released_claims"] == [first.ref, second.ref]
+    assert first.in_motion_since is None
+    assert second.in_motion_since is None
+    assert [
+        variables for query, variables in graphql_calls
+        if query == funnel.SET_LOCK
+    ] == [
+        {
+            "project": funnel.PROJECT_ID,
+            "item": first.item_id,
+            "field": funnel.LOCK_FIELD_ID,
+            "value": "",
+        },
+        {
+            "project": funnel.PROJECT_ID,
+            "item": second.item_id,
+            "field": funnel.LOCK_FIELD_ID,
+            "value": "",
+        },
+    ]
+
+
 def test_codex_begin_records_heartbeat_before_selecting_and_claiming(
     monkeypatch, capsys
 ):
@@ -739,6 +780,7 @@ def test_codex_ticket_begin_carries_the_implementation_packet_and_vendor_block(
     assert result["do"] == "ticket"
     assert result["packet"] == packet
     assert result["vendor"] == funnel.CODEX_IMPLEMENT_VENDOR
+    assert "--answer-file PATH" in result["vendor"]["answer_handoff"]
     assert calls == [(ticket.repo, ticket.number, "codex")]
 
 
@@ -801,6 +843,58 @@ def test_two_same_minute_begins_claim_different_tickets(monkeypatch, capsys):
     assert second_result["work"]["ref"] == second.ref
     assert [ref for ref, value in first_writes if value] == [first.ref]
     assert [ref for ref, value in second_writes if value] == [second.ref]
+
+
+def test_begin_passes_a_held_head_and_offers_the_next_startable_ticket(
+    monkeypatch, capsys
+):
+    first_project, first = _ticket(
+        8, 7, in_motion_since=NOW - timedelta(minutes=5)
+    )
+    second_project, second = _ticket(10, 9)
+
+    result, writes = _implementing_begin(
+        monkeypatch,
+        capsys,
+        [first_project, first, second_project, second],
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == second.ref
+    assert result["held"] == [first.ref]
+    assert [ref for ref, value in writes if value] == [second.ref]
+
+
+def test_merge_releases_the_claim_on_the_ticket_it_finishes(monkeypatch):
+    project, ticket = _ticket(12, 11, in_motion_since=NOW)
+    writes = []
+
+    monkeypatch.setattr(funnel, "resolve_repo", lambda repo: ticket.repo)
+    monkeypatch.setattr(funnel, "merge_blockers", lambda *args: [])
+    monkeypatch.setattr(
+        funnel,
+        "_gh_json",
+        lambda *args: (
+            {"headRefName": "ticket/{}".format(ticket.number)}
+            if "pr" in args
+            else {"state": "CLOSED"}
+        ),
+    )
+    monkeypatch.setattr(
+        funnel,
+        "_run_gh",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+    monkeypatch.setattr(
+        funnel, "write_lock", lambda item, value: writes.append((item.ref, value))
+    )
+    monkeypatch.setattr(funnel, "_auto_close_parent", lambda *args: False)
+
+    assert funnel.cmd_merge([project, ticket], NOW, ticket.repo, 70, True) == 0
+    assert writes == [(ticket.ref, "")]
+    assert ticket.in_motion_since is None
 
 
 def test_begin_offers_a_ticket_whose_refreshed_claim_is_over_60_seconds_old(
@@ -1004,7 +1098,7 @@ def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
         funnel,
         "cmd_begin",
         lambda items, now, agent, tier, idle, breakdown=False,
-        routine_sha_literal=None, repo_readiness=None, caller_role=None: (
+        repo_readiness=None, caller_role=None: (
             received.append(repo_readiness) or 0
         ),
     )

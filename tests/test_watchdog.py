@@ -143,23 +143,17 @@ def test_a_human_step_skip_is_healthy():
     assert watchdog.assess("codex", rows, NOW) == []
 
 
-def test_prompt_drift_is_reported_as_a_fault():
-    problems = watchdog.assess("codex", [event("a", 1, "prompt-drift")], NOW)
-    assert len(problems) == 1
-    assert "reported prompt drift 1 time(s)" in problems[0]
-    assert "checked-in file" in problems[0]
-
-
-def test_prompt_mismatch_is_logged_without_filing_a_resync_alarm():
-    rows = [event("a", 1, "prompt-mismatch")]
+def test_retired_prompt_events_are_ignored():
+    """`prompt-drift` and `prompt-mismatch` left the outcome vocabulary with
+    `--routine-sha` (#821). Old rows may still sit in the heartbeat history;
+    they raise nothing and print no note."""
+    rows = [
+        event("a", 1, "prompt-drift"),
+        event("b", 1, "prompt-mismatch"),
+    ]
 
     assert watchdog.assess("codex", rows, NOW) == []
-
-    message = watchdog.note("codex", rows, NOW)
-
-    assert "prompt-mismatch 1 time(s)" in message
-    assert "transcription note" in message
-    assert "does not require resync" in message
+    assert "prompt" not in watchdog.note("codex", rows, NOW)
 
 
 def test_health_line_excludes_rebegins_from_finishes():
@@ -180,24 +174,6 @@ def test_health_line_excludes_rebegins_from_finishes():
     assert watchdog.health_line("codex", rows, NOW) == (
         "`codex` run health: 2 starts, 1 finishes, 1 re-begins."
     )
-
-
-def test_mismatch_only_watchdog_run_stays_healthy_and_prints_the_note(
-    monkeypatch, capsys,
-):
-    monkeypatch.setattr(watchdog.time, "time", lambda: NOW)
-    monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {"codex": "openai"})
-    monkeypatch.setattr(watchdog, "records", lambda agent: [
-        event("a", 1, "prompt-mismatch")
-    ])
-    monkeypatch.setattr(watchdog, "existing_issue", lambda: {})
-
-    assert watchdog.main() == 0
-    output = capsys.readouterr().out
-
-    assert "healthy" in output
-    assert "prompt-mismatch 1 time(s)" in output
-    assert "opened #" not in output
 
 
 def test_one_dying_run_is_noise_not_an_alarm():

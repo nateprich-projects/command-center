@@ -945,3 +945,51 @@ def test_dry_run_refuses_a_non_ticket_branch(tmp_path, monkeypatch, capsys):
 def test_finish_main_requires_answer_and_run_without_dry_run():
     with pytest.raises(SystemExit):
         implement.finish_main([])
+
+
+def test_a_rebased_ticket_branch_pushes_as_a_fast_forward_keeping_the_run_tree(tmp_path):
+    """#890: a stale-PR rebase rewrote ticket/42; the push must still land."""
+    remote, clone = make_clone(tmp_path)
+    (clone / "old.txt").write_text("first attempt\n")
+    run_git("add", "old.txt", cwd=clone)
+    run_git("commit", "--quiet", "-m", "first attempt", cwd=clone)
+    run_git("push", "--quiet", "-u", "origin", "ticket/42", cwd=clone)
+
+    # main moves on, and the engineer rebases the ticket branch onto it.
+    other = tmp_path / "other"
+    run_git("clone", "--quiet", str(remote), str(other))
+    run_git("config", "user.name", "Fixture", cwd=other)
+    run_git("config", "user.email", "fixture@example.test", cwd=other)
+    (other / "main.txt").write_text("main moved\n")
+    run_git("add", "main.txt", cwd=other)
+    run_git("commit", "--quiet", "-m", "main moved", cwd=other)
+    run_git("push", "--quiet", "origin", "main", cwd=other)
+    run_git("fetch", "--quiet", "origin", cwd=clone)
+    run_git("rebase", "--quiet", "origin/main", cwd=clone)
+    (clone / "old.txt").write_text("second attempt\n")
+    run_git("commit", "--quiet", "-am", "second attempt", cwd=clone)
+    local_tree = run_git("rev-parse", "HEAD^{tree}", cwd=clone).stdout.strip()
+
+    implement._push_ticket_branch(clone, "ticket/42")
+
+    remote_tree = run_git("--git-dir", str(remote), "rev-parse",
+                          "ticket/42^{tree}").stdout.strip()
+    assert remote_tree == local_tree
+    shown = run_git("--git-dir", str(remote), "show", "ticket/42:old.txt").stdout
+    assert shown == "second attempt\n"
+
+
+def test_a_resolved_python_command_runs_under_this_interpreter(tmp_path, monkeypatch):
+    """#890: CI says `python -m pytest`; the Mac has no bare `python`."""
+    _, clone = make_clone(tmp_path)
+    seen = []
+    real_run = implement._run
+
+    def spy(argv, **kwargs):
+        seen.append(list(argv))
+        return real_run([sys.executable, "-c", "pass"], **kwargs)
+
+    monkeypatch.setattr(implement, "_run", spy)
+    implement.run_tests(clone, [["python", "-m", "pytest", "-q"]])
+    assert seen[0][0] == sys.executable
+    assert seen[0][1:] == ["-m", "pytest", "-q"]

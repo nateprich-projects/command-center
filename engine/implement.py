@@ -634,6 +634,10 @@ def run_tests(root: pathlib.Path,
     rendered = []
     for command in selected:
         argv = list(command)
+        # A command resolved from CI names `python` or `python3`; the schedule
+        # Mac has no bare `python` on PATH (#890), so run this interpreter.
+        if argv and argv[0] in ("python", "python3"):
+            argv[0] = sys.executable
         _run(argv, cwd=root, env=env)
         rendered.append(shlex.join(argv))
     return rendered, source
@@ -908,6 +912,31 @@ def _failure_note(exc: ImplementError, kept: str = "") -> str:
     return note
 
 
+def _push_ticket_branch(root: pathlib.Path, branch: str) -> None:
+    """Push the ticket branch as a fast-forward, even after a rebase (#890).
+
+    A stale-PR verdict asks the engineer to rebase onto main, which rewrites
+    the branch the remote already holds, so a plain push is rejected as
+    non-fast-forward and the ticket wedges. When the remote branch exists and
+    is not an ancestor of HEAD, record it with an ``ours`` merge: the tree is
+    exactly this run's, the old commits stay in the history, and the push is a
+    fast-forward. Never a force-push; main squash-merges, so the extra merge
+    commit never reaches it.
+    """
+    fetched = _run(["git", "fetch", "origin",
+                    "+refs/heads/{0}:refs/remotes/origin/{0}".format(branch)],
+                   cwd=root, check=False)
+    if fetched.returncode == 0:
+        remote_ref = "origin/{}".format(branch)
+        ancestor = _run(["git", "merge-base", "--is-ancestor", remote_ref, "HEAD"],
+                        cwd=root, check=False)
+        if ancestor.returncode != 0:
+            _run(["git", "merge", "-s", "ours", "--no-edit", "-m",
+                  "Record the previous {} tip before pushing the rebased branch".format(branch),
+                  remote_ref], cwd=root)
+    _run(["git", "push", "--set-upstream", "origin", branch], cwd=root)
+
+
 def _keep_work(root: pathlib.Path, number: int, branch: str, *,
                reason: str = "tests failing") -> str:
     """Commit and push whatever the run produced, so a failure loses time only.
@@ -923,7 +952,7 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *,
                      cwd=root).stdout.strip()
         if not ahead.isdigit() or int(ahead) < 1:
             return "no work to keep"
-        _run(["git", "push", "--set-upstream", "origin", branch], cwd=root)
+        _push_ticket_branch(root, branch)
         return "work kept on {}".format(branch)
     except ImplementError as exc:
         first = str(exc).splitlines()[0] if str(exc) else "unknown error"
@@ -987,10 +1016,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         raise
     continued = _remote_branch_exists(context["root"], context["branch"])
     _commit_if_needed(context["root"], context["number"], answer["summary"])
-    _run(
-        ["git", "push", "--set-upstream", "origin", context["branch"]],
-        cwd=context["root"],
-    )
+    _push_ticket_branch(context["root"], context["branch"])
     body = render_pr_body(ticket, answer, continued=continued, tests=tests,
                          test_source=test_source)
     pr = pr_effect(resolved, context, ticket, body)

@@ -218,6 +218,24 @@ def test_capture_records_caused_by_refs(monkeypatch):
     assert funnel.CAUSED_BY_MARKER in body
 
 
+def test_capture_cli_passes_repeated_caused_by_refs(monkeypatch):
+    received = {}
+
+    def capture(*args):
+        received["args"] = args
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_capture", capture)
+
+    assert funnel.main([
+        "capture", "An idea", "--repo", "owner/repo",
+        "--origin", "nate-relayed", "--caused-by", "#7",
+        "--caused-by", "owner/repo#8",
+    ], _items=[]) == 0
+
+    assert received["args"][-1] == ["#7", "owner/repo#8"]
+
+
 def test_capture_requires_an_explicit_origin_before_resolving_repo(monkeypatch):
     monkeypatch.setattr(
         funnel, "resolve_repo", lambda repo: pytest.fail("repo was resolved")

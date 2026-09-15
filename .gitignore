@@ -1,4 +1,7 @@
 .env
+# The implement runner's structured answer: written in the workspace root and
+# read by finish-ticket, never repo content.
+/answer.json
 __pycache__/
 *.pyc
 .pytest_cache/

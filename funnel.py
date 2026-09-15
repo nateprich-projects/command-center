@@ -504,16 +504,10 @@ BRIEF_SECTION_BUDGETS = {
     "rejected_merges": 0.25,
 }
 
-# These brief sections either feed a gate or carry records that an unattended
-# path promises to surface. Keep the set explicit so a slow read cannot turn a
-# required record into an authoritative-looking empty list.
-BRIEF_GATE_SECTIONS = frozenset({
-    "closed_itself",
-    "cleared_blocks",
-    "unattended_approvals",
-    "rejected_merges",
-})
-
+# No brief section feeds a gate any more: the merge gate reads the
+# rejected-merge counter itself (#801), and every other consumer reads the
+# published brief. A slow or unreadable section therefore degrades into an
+# explicit `degraded` or `missing` entry; it never fails the whole brief.
 #: Drift is reported, never used as a gate. Keep these names short and stable:
 #: callers put them verbatim into comments and the brief.
 DRIFT_PLAN_EDIT = "plan edited after Ready"
@@ -5700,6 +5694,105 @@ def write_dashboard_snapshot(
     return target
 
 
+def _snapshot_generated_at(value: object) -> Optional[float]:
+    """Parse a spool ``generated_at`` to epoch seconds, or None.
+
+    Mirrors the publisher's ordering so routines, /funnel, and the
+    dashboard agree on which snapshot is newest. Naive timestamps read
+    as UTC; anything else means the entry cannot be ordered, so the
+    caller skips it instead of guessing.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text[-1:] in ("Z", "z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    try:
+        return parsed.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _newest_snapshot_entry(
+        spool_dir: pathlib.Path) -> Tuple[Optional[bytes], List[str]]:
+    """Return the newest parseable spool entry's bytes, plus skip warnings.
+
+    A missing spool directory means no brief has been published yet, which
+    is normal on a fresh install: it reads as an empty spool, not an error.
+    """
+    try:
+        names = sorted(os.listdir(spool_dir))
+    except FileNotFoundError:
+        return None, []
+    except OSError as exc:
+        raise OSError(
+            "cannot read snapshot spool {}: {}".format(spool_dir, exc))
+    warnings: List[str] = []
+    best: Optional[Tuple[float, str, bytes]] = None
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = spool_dir / name
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            warnings.append("skipping {}: cannot read it ({})".format(
+                name, exc))
+            continue
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            warnings.append(
+                "skipping {}: not parseable JSON".format(name))
+            continue
+        epoch = _snapshot_generated_at(
+            payload.get("generated_at") if isinstance(payload, dict)
+            else None)
+        if epoch is None:
+            warnings.append(
+                "skipping {}: no parseable generated_at".format(name))
+            continue
+        if best is None or (epoch, name) > (best[0], best[1]):
+            best = (epoch, name, data)
+    if best is None:
+        return None, warnings
+    return best[2], warnings
+
+
+def cmd_snapshot() -> int:
+    """Print the newest published snapshot without running a live brief.
+
+    Runners and routines read this artifact; only the publisher runs
+    ``brief``. The bytes are exactly what ``brief`` spooled, so the
+    top-level ``generated_at`` is the snapshot's age.
+    """
+    spool_dir = _dashboard_spool_dir()
+    try:
+        data, warnings = _newest_snapshot_entry(spool_dir)
+    except OSError as exc:
+        print("funnel: {}".format(exc), file=sys.stderr)
+        return 1
+    for warning in warnings:
+        print("funnel: snapshot warning: {}".format(warning),
+              file=sys.stderr)
+    if data is None:
+        print(
+            "funnel: no published snapshot yet in {} "
+            "(no brief has been spooled)".format(spool_dir),
+            file=sys.stderr,
+        )
+        return 1
+    text = data.decode("utf-8")
+    sys.stdout.write(text if text.endswith("\n") else text + "\n")
+    return 0
+
+
 def parked_items(items: Iterable[Item]) -> List[Item]:
     """Parked projects, newest first.
 
@@ -6990,27 +7083,6 @@ class BriefSectionTimeout(RuntimeError):
         super().__init__(reason)
 
 
-class BriefGateTimeout(RuntimeError):
-    """A gate-feeding brief section cannot safely return a partial brief."""
-
-    def __init__(self, section: str, elapsed: float, budget: float,
-                 reason: str, candidate_count: Optional[int] = None):
-        self.section = section
-        self.elapsed = elapsed
-        self.budget = budget
-        self.reason = reason
-        self.candidate_count = candidate_count
-        super().__init__(
-            "brief gate timeout: section={!r} elapsed={:.3f}s "
-            "budget={:.3f}s candidate count={} reason={}"
-            .format(
-                section, elapsed, budget,
-                "unknown" if candidate_count is None else candidate_count,
-                reason,
-            )
-        )
-
-
 def _brief_timeout_remaining() -> Optional[float]:
     """Return the active section's remaining subprocess budget, if any."""
     state = _BRIEF_SECTION_STATE.get()
@@ -7150,16 +7222,17 @@ def _brief_timed(
     *,
     deadline: Optional[float] = None,
     budget: Optional[float] = None,
-    gate: Optional[bool] = None,
-    candidate_count: Optional[int] = None,
 ) -> object:
-    """Run one brief section, enforce its budget, and record its timing."""
+    """Run one brief section, enforce its budget, and record its timing.
+
+    An over-budget section degrades into an explicit record and yields
+    ``_BRIEF_UNAVAILABLE``; no section fails the whole brief.
+    """
     degraded = degraded if degraded is not None else []
     budget = float(
         BRIEF_SECTION_BUDGETS.get(section, 1.0)
         if budget is None else budget
     )
-    gate = section in BRIEF_GATE_SECTIONS if gate is None else gate
     started = time.perf_counter()
     allowed = max(0.0, budget)
     if deadline is not None:
@@ -7168,11 +7241,6 @@ def _brief_timed(
 
     def stop(reason: str, elapsed: float) -> object:
         timings[section] = round(max(0.0, elapsed), 6)
-        if gate:
-            raise BriefGateTimeout(
-                section, elapsed, budget, reason,
-                candidate_count=candidate_count,
-            )
         degraded.append(_brief_degraded_record(
             section, elapsed, budget, reason
         ))
@@ -7199,11 +7267,6 @@ def _brief_timed(
         reason = "section exceeded its time budget"
         if deadline is not None and started + elapsed > deadline:
             reason = "brief transport budget was exceeded"
-        if gate:
-            raise BriefGateTimeout(
-                section, elapsed, budget, reason,
-                candidate_count=candidate_count,
-            )
         degraded.append(_brief_degraded_record(
             section, elapsed, budget, reason
         ))
@@ -7233,8 +7296,6 @@ def cmd_brief(
         name: str,
         reader: Callable[[], object],
         default,
-        *,
-        candidate_count: Optional[int] = None,
     ):
         value = _brief_timed(
             name,
@@ -7242,7 +7303,6 @@ def cmd_brief(
             timings,
             degraded,
             deadline=deadline,
-            candidate_count=candidate_count,
         )
         return default if value is _BRIEF_UNAVAILABLE else value
 
@@ -7283,7 +7343,6 @@ def cmd_brief(
             "closed_itself",
             lambda: closed_itself_json(items, now, brief_cache=cache),
             [],
-            candidate_count=len(closed_itself_items(items, now)),
         )
         cleared_blocks = section(
             "cleared_blocks", lambda: cleared_blocks_json(items, now), []
@@ -7359,10 +7418,6 @@ def cmd_brief(
             "unattended_approvals",
             lambda: unattended_approvals(items, now, brief_cache=cache),
             [],
-            candidate_count=sum(
-                1 for item in items
-                if _self_approval_transition_times(item, now)
-            ),
         )
         run_summary = section(
             "run_summary", lambda: agent_run_summary(now), []
@@ -7437,13 +7492,6 @@ def cmd_brief(
         )
         print(json.dumps(brief, indent=2))
         return 0
-    except BriefGateTimeout as exc:
-        print(
-            "funnel: brief failed closed: {} (no partial JSON emitted)"
-            .format(exc),
-            file=sys.stderr,
-        )
-        return 2
     finally:
         _ACTIVE_BRIEF_CACHE.reset(cache_token)
 
@@ -10336,6 +10384,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
         help="exclude a candidate for this call; repeat for multiple refs",
     )
     sub.add_parser("brief", help="JSON for the /funnel skill and the morning brief")
+    sub.add_parser(
+        "snapshot",
+        help="newest published brief snapshot, without running a live brief",
+    )
     sub.add_parser("ideas", help="captured ideas, flagged ones first")
     sub.add_parser(
         "doctor", help="check the local install and report actionable failures")
@@ -10548,6 +10600,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
     # the data-dependent consistency check is added when that read succeeds.
     if args.command == "doctor":
         return cmd_doctor()
+    # The published snapshot is a local read by design: runners and routines
+    # must get it without a Project load, which is the slow read this
+    # command exists to avoid.
+    if args.command == "snapshot":
+        return cmd_snapshot()
 
     brief_timings: Optional[Dict[str, float]] = (
         {} if args.command == "brief" else None

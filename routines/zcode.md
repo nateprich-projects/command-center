@@ -60,7 +60,7 @@ asked of it.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha 540480f7c7de20a8d2bbc96d3dcf7a58fee8848cde970a59b7fb8b756b94fd39
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha 4634d981d710d3439cac15c89a1ea04a21dac1b77923fdf7fbaaddfd95910d15
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and says
@@ -237,11 +237,15 @@ Do not change `Status` or `Class` on anything. Those are Nate's gates.
 **If you reviewed a PR above, you are done — go to "Finish".** This section is for
 runs that found nothing to review.
 
+Read the published snapshot — never run a live brief:
+
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py brief | jq '.awaiting_breakdown'
+python3 /Users/nateprich/.claude/command-center-run/funnel.py snapshot | jq '.brief.awaiting_breakdown'
 ```
 
 These are plans Nate has approved that have no tickets yet. Take the oldest.
+The snapshot may lag a live read by a few minutes; if it reports no published
+snapshot yet, there is nothing to break down — finish.
 
 **Read `/Users/nateprich/.claude/command-center-run/skills/breakdown/SKILL.md` and
 follow it.** It carries the sizing standard, the ordering and coverage rules,

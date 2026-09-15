@@ -10,13 +10,18 @@ Render the Command Center funnel readably.
 ## Run this
 
 ```bash
-python3 /Users/nateprich/.claude/command-center/funnel.py brief
+python3 /Users/nateprich/.claude/command-center/funnel.py snapshot
 ```
 
 Use the absolute path, not `~` — it matches the existing `Bash(python3
 /Users/nateprich/.claude/command-center/*)` always-allow rule exactly; a tilde would not.
 
-It prints JSON. Render it as described below.
+It prints the newest published snapshot: `{"brief": ..., "board": ...,
+"generated_at": ...}`. The publisher owns brief generation on its own cadence —
+never run a live brief yourself. Render `.brief` as described below, and say how
+old the snapshot is from the top-level `generated_at` (it mirrors
+`brief.generated_at`) whenever it is older than about fifteen minutes: a stale
+snapshot is weak evidence that nothing is waiting.
 
 **Do not rank, reorder, filter or re-prioritise anything.** `funnel.py` computes all
 ordering, and both agents act on its output. If the order looks wrong, say so — do not
@@ -31,7 +36,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 
 | Field | Meaning |
 |---|---|
-| `generated_at` | UTC timestamp recording when the brief was generated; transport metadata, never surfaced in the voice brief |
+| `generated_at` | UTC timestamp recording when the brief was generated; the snapshot's age. Say it when the snapshot is older than about fifteen minutes — a stale snapshot is weak evidence that nothing is waiting |
 | `total_needing_nate` | How many decisions are waiting |
 | `counts_by_gate` | Open items at each gate. `Ideas` is deliberately excluded — it is unbounded and guilt-free, and counting it turns it into pressure |
 | `items` | The decisions, **already ordered**. Bottom-up: closest to shipping first |
@@ -68,7 +73,7 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `closed_with_access_vocabulary` | Projects that closed with access-shaped words in the plan and no human-step ticket. The detective backstop for when every preventive layer missed one |
 | `missing` | Sections that could not be read, each with the section name and error. A non-empty list means the brief is partial; do not treat a null or empty value in a named section as an all-clear |
 | `timings` | Diagnostic elapsed seconds for each brief section, including the shared `ticket_pr_facts` read, plus `project_load`, `brief_assembly`, and aggregated `graphql.<operation>` timings with matching `.calls` counts. Use it to identify the slow stage when a brief is close to the session reply budget |
-| `degraded` | Informational sections that exceeded their time budget, with the section name, elapsed time, budget, and reason. A gate-feeding section never appears here: it fails the brief closed instead |
+| `degraded` | Sections that exceeded their time budget, with the section name, elapsed time, budget, and reason. Every section degrades this way; none fails the brief |
 
 ## How to render it
 
@@ -150,10 +155,10 @@ treat timing as a queue or gate signal. A session reply timeout
 means the session was busy; the client reports the slow section as unknown when no
 brief response made it back.
 
-When `degraded` is non-empty, say which informational sections exceeded their
-budgets and that the brief is partial. If `brief` exits non-zero, show the error
-and do not use a partial or missing `rejected_merges` value to justify a merge;
-the merge gate reads the counter itself and refuses on a partial read.
+When `degraded` is non-empty, say which sections exceeded their budgets and
+that the brief is partial. If `snapshot` fails, show the error instead of the
+brief. Never use a partial or missing `rejected_merges` value to justify a
+merge; the merge gate reads the counter itself and refuses on a partial read.
 
 For `unclassed_captures`, show each Idea's origin and make the repair owner clear:
 agent-origin entries are for the shaping agent to class, while Nate-origin and unknown

@@ -27,7 +27,7 @@ preempt.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha 2e5150f66f4dab1be170b3dc1ce76773d11e8134498870a7d3ddfbd2454e25cc
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated --routine-sha a1d05749b628bd4e3bf57bcf0943d04cd7a45f413d079cc258b8a97a9d4a4059
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and names
@@ -206,13 +206,16 @@ If nothing escalated was waiting, this run has nothing to do. Finish and stop.
 <details>
 <summary>The old job two, kept until zcode has run it a few times</summary>
 
+Read the published snapshot — never run a live brief:
+
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py brief | jq '.awaiting_breakdown'
+python3 /Users/nateprich/.claude/command-center-run/funnel.py snapshot | jq '.brief.awaiting_breakdown'
 ```
 
 These are plans Nate has approved — **his writing `Ready` is his answer to "is
 the plan good?"** — that have no tickets yet. Until they do, Codex has nothing to
-start and the item waits on the funnel, not on him. Take the oldest.
+start and the item waits on the funnel, not on him. Take the oldest. If it
+reports no published snapshot yet, there is nothing to break down — finish.
 
 **Use the `breakdown` skill.** It carries the sizing standard, the ordering and
 coverage rules, worked examples, and what to do when a plan will not decompose.

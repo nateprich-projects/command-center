@@ -232,6 +232,88 @@ def test_finish_ticket_pushes_opens_pr_releases_and_finishes(tmp_path, monkeypat
     assert pushed == "done\n"
 
 
+def test_pre_pr_stray_check_names_answer_and_never_opens_a_pr(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    (clone / "implemented.txt").write_text("done\n")
+    (clone / "answer.json").write_text(
+        '{"done":true,"summary":"private run summary"}\n'
+    )
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+
+    effects = {"prs": [], "released": [], "finished": []}
+
+    with pytest.raises(implement.StrayFileError, match="answer.json"):
+        implement.finish_done(
+            answer(),
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=lambda *args: effects["prs"].append(args),
+        )
+
+    assert effects["prs"] == []
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][:3] == (
+        "codex", "run-42", "errored",
+    )
+    assert "answer.json" in effects["finished"][0][3]
+    assert run_git("diff", "--cached", "--name-only", cwd=clone).stdout.splitlines() == [
+        "answer.json", "implemented.txt",
+    ]
+    assert "refs/heads/ticket/42" not in run_git(
+        "--git-dir", str(tmp_path / "origin.git"), "show-ref"
+    ).stdout
+
+
+@pytest.mark.parametrize("name", ("packet.json", "scratch.txt", "run-output.json"))
+def test_pre_pr_stray_check_catches_other_run_scratch(tmp_path, name):
+    _, clone = make_clone(tmp_path)
+    (clone / name).write_text("scratch\n")
+
+    with pytest.raises(implement.StrayFileError, match=name):
+        implement._commit_if_needed(clone, 42, "Added the implementation.")
+
+
+def test_pre_pr_stray_check_passes_a_clean_checkout(tmp_path):
+    _, clone = make_clone(tmp_path)
+
+    implement._check_no_run_scratch(clone)
+
+
+def test_pre_pr_stray_check_sees_scratch_already_on_the_ticket_branch(tmp_path):
+    remote, clone = make_clone(tmp_path)
+    (clone / "answer.json").write_text("old run\n")
+    run_git("add", "answer.json", cwd=clone)
+    run_git("commit", "--quiet", "-m", "old run", cwd=clone)
+    run_git("push", "--quiet", "-u", "origin", "ticket/42", cwd=clone)
+
+    with pytest.raises(implement.StrayFileError, match="answer.json"):
+        implement._check_no_run_scratch(clone)
+
+    assert "refs/heads/ticket/42" in run_git(
+        "--git-dir", str(remote), "show-ref"
+    ).stdout
+
+
+def test_staging_uses_an_explicit_sorted_file_list(monkeypatch, tmp_path):
+    seen = []
+
+    def fake_run(command, **kwargs):
+        seen.append(list(command))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(implement, "_run", fake_run)
+    implement._stage_explicit_paths(
+        tmp_path, ["new.txt", "answer.json", "new.txt"]
+    )
+
+    assert seen == [["git", "add", "--", "answer.json", "new.txt"]]
+
+
 def test_finish_ticket_releases_and_errors_when_tests_fail(tmp_path, monkeypatch):
     remote, clone = make_clone(tmp_path)
     (clone / "implemented.txt").write_text("done\n")

@@ -7,6 +7,9 @@ checkout, then either run its tests, commit and push, open the pull request,
 or file the human step, or record the decline — and release the claim and
 finish the heartbeat bound to the ticket.
 
+The commit path stages an explicit file list only; it never uses a blanket add
+or a status sweep. A pre-PR stray-file check also refuses to ship run scratch.
+
 The package imports ``funnel`` and never the reverse.  ``funnel finish-ticket``
 is a process-level CLI forwarder to the standalone entry point, so importing
 this module cannot create a dependency cycle.
@@ -32,6 +35,10 @@ import funnel  # noqa: E402
 
 class ImplementError(RuntimeError):
     """A packet or finish contract could not be completed safely."""
+
+
+class StrayFileError(ImplementError):
+    """The ticket branch contains run scratch that must not reach a PR."""
 
 
 def fetch_ticket(repo: str, number: int) -> dict:
@@ -625,7 +632,7 @@ def run_tests(root: pathlib.Path,
         selected, source = default_test_plan(root)
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     # Whatever ultimately invokes pytest inherits the no-cache guard, so a
-    # resolved `make test` cannot leave .pytest_cache/ for `git add -A`.
+    # resolved `make test` cannot leave .pytest_cache/ for the explicit stage.
     extra = env.get("PYTEST_ADDOPTS", "").strip()
     env["PYTEST_ADDOPTS"] = (
         "{} -p no:cacheprovider".format(extra) if extra
@@ -708,10 +715,104 @@ def _remote_branch_exists(root: pathlib.Path, branch: str) -> bool:
     return proc.returncode == 0
 
 
+_RUN_SCRATCH_FILENAMES = frozenset({
+    "answer.json",
+    "diag.json",
+    "packet.json",
+    "prompt.json",
+    "run.json",
+})
+_RUN_SCRATCH_PREFIXES = (
+    "answer.", "answer-", "diag.", "diag-", "packet.", "packet-",
+    "prompt.", "prompt-", "run.", "run-", "scratch.", "scratch-",
+)
+_RUN_SCRATCH_SUFFIXES = (".scratch", ".tmp")
+_RUN_SCRATCH_DIRECTORIES = frozenset({".scratch", "scratch", ".tmp", "tmp"})
+
+
+def _git_name_paths(root: pathlib.Path, command: Sequence[str]) -> List[str]:
+    """Return NUL-delimited Git paths without losing unusual filenames."""
+    raw = _run(["git", *command], cwd=root).stdout
+    return [path for path in raw.split("\0") if path]
+
+
+def _working_tree_paths(root: pathlib.Path) -> List[str]:
+    """List staged, unstaged, and untracked paths that could be committed."""
+    paths = set()
+    for command in (
+        ("diff", "--name-only", "-z"),
+        ("diff", "--cached", "--name-only", "-z"),
+        ("ls-files", "--others", "--exclude-standard", "-z"),
+    ):
+        paths.update(_git_name_paths(root, command))
+    return sorted(paths)
+
+
+def _staged_paths(root: pathlib.Path) -> List[str]:
+    """List the paths currently in the index, using Git's safe NUL format."""
+    return sorted(set(_git_name_paths(
+        root, ("diff", "--cached", "--name-only", "-z"))))
+
+
+def _branch_paths(root: pathlib.Path) -> List[str]:
+    """List files already present on the ticket branch beyond origin/main."""
+    return sorted(set(_git_name_paths(
+        root, ("diff", "--name-only", "-z", "origin/main...HEAD"))))
+
+
+def _stage_explicit_paths(root: pathlib.Path, paths: Sequence[str]) -> None:
+    """Stage exactly the observed paths, never a blanket add or status sweep."""
+    selected = sorted(set(paths))
+    if selected:
+        _run(["git", "add", "--", *selected], cwd=root)
+
+
+def _is_run_scratch(path: str) -> bool:
+    """Recognise runner scratch names without maintaining a per-repo allowlist."""
+    normalized = path.replace("\\", "/")
+    parts = pathlib.PurePosixPath(normalized).parts
+    lowered_parts = tuple(part.lower() for part in parts)
+    name = lowered_parts[-1] if lowered_parts else ""
+    if any(part in _RUN_SCRATCH_DIRECTORIES for part in lowered_parts):
+        return True
+    # The handoff and its companion diagnostics live at the checkout root.
+    if len(lowered_parts) != 1:
+        return False
+    if name in _RUN_SCRATCH_FILENAMES:
+        return True
+    if name.endswith(_RUN_SCRATCH_SUFFIXES):
+        return True
+    return name.startswith(_RUN_SCRATCH_PREFIXES) and name.endswith(
+        (".json", ".jsonl", ".log", ".txt", ".md"))
+
+
+def _pre_pr_files(root: pathlib.Path,
+                  about_to_commit: Sequence[str] = ()) -> List[str]:
+    """List what would ship: branch, staged, and about-to-be-committed paths."""
+    paths = set(about_to_commit)
+    paths.update(_working_tree_paths(root))
+    paths.update(_staged_paths(root))
+    paths.update(_branch_paths(root))
+    return sorted(paths)
+
+
+def _check_no_run_scratch(root: pathlib.Path,
+                          about_to_commit: Sequence[str] = ()) -> None:
+    """Refuse a PR when named run scratch appears in its file list."""
+    stray = [path for path in _pre_pr_files(root, about_to_commit)
+             if _is_run_scratch(path)]
+    if stray:
+        raise StrayFileError(
+            "pre-PR stray-file check refused; remove and re-stage run scratch: "
+            "{}".format(", ".join(stray)))
+
+
 def _commit_if_needed(root: pathlib.Path, number: int, summary: str) -> bool:
-    dirty = bool(_run(["git", "status", "--porcelain"], cwd=root).stdout.strip())
-    if dirty:
-        _run(["git", "add", "-A"], cwd=root)
+    """Commit explicit paths after the pre-PR scratch check."""
+    paths = _working_tree_paths(root)
+    if paths:
+        _stage_explicit_paths(root, paths)
+        _check_no_run_scratch(root, about_to_commit=paths)
         subject = summary.splitlines()[0].strip()
         if len(subject) > 60:
             subject = subject[:57].rstrip() + "..."
@@ -720,6 +821,7 @@ def _commit_if_needed(root: pathlib.Path, number: int, summary: str) -> bool:
             cwd=root,
         )
         return True
+    _check_no_run_scratch(root)
     ahead = _run(
         ["git", "rev-list", "--count", "origin/main..HEAD"], cwd=root
     ).stdout.strip()
@@ -939,15 +1041,20 @@ def _push_ticket_branch(root: pathlib.Path, branch: str) -> None:
 
 def _keep_work(root: pathlib.Path, number: int, branch: str, *,
                reason: str = "tests failing") -> str:
-    """Commit and push whatever the run produced, so a failure loses time only.
+    """Commit and push explicit paths, so a failure loses time only.
 
-    Never opens a PR. Returns a short phrase for the heartbeat note.
+    Never opens a PR. Returns a short phrase for the heartbeat note. The same
+    pre-PR scratch check applies here so a WIP branch cannot carry run debris.
     """
     try:
-        if _run(["git", "status", "--porcelain"], cwd=root).stdout.strip():
-            _run(["git", "add", "-A"], cwd=root)
+        paths = _working_tree_paths(root)
+        if paths:
+            _stage_explicit_paths(root, paths)
+            _check_no_run_scratch(root, about_to_commit=paths)
             _run(["git", "commit", "-m",
                   "WIP #{}: {}".format(number, reason)], cwd=root)
+        else:
+            _check_no_run_scratch(root)
         ahead = _run(["git", "rev-list", "--count", "origin/main..HEAD"],
                      cwd=root).stdout.strip()
         if not ahead.isdigit() or int(ahead) < 1:
@@ -973,8 +1080,7 @@ def _recover_answer_error(
     the heartbeat names the answer error that prevented validation.
     """
     context = checkout_context(cwd)
-    if not _run(["git", "status", "--porcelain"],
-                cwd=context["root"]).stdout.strip():
+    if not _working_tree_paths(context["root"]):
         return False
     resolved = resolve_checkout_repo(context["root"], repo)
     ref = "{}#{}".format(resolved, context["number"])
@@ -1015,8 +1121,16 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         heartbeat_finish(agent, run, "errored", _failure_note(exc, kept), ref)
         raise
     continued = _remote_branch_exists(context["root"], context["branch"])
-    _commit_if_needed(context["root"], context["number"], answer["summary"])
-    _push_ticket_branch(context["root"], context["branch"])
+    try:
+        _commit_if_needed(context["root"], context["number"], answer["summary"])
+        _push_ticket_branch(context["root"], context["branch"])
+        # Re-read immediately before the PR effect so the guard remains the
+        # last local file-list check, even when an existing branch was merged.
+        _check_no_run_scratch(context["root"])
+    except StrayFileError as exc:
+        release(ref)
+        heartbeat_finish(agent, run, "errored", str(exc), ref)
+        raise
     body = render_pr_body(ticket, answer, continued=continued, tests=tests,
                          test_source=test_source)
     pr = pr_effect(resolved, context, ticket, body)

@@ -51,8 +51,10 @@ BOUND_SECONDS="${MUSE_IMPLEMENT_BOUND_SECONDS:-2700}"
 ROUTINE="$REPO/routines/muse-implement.md"
 WORKSPACE_ROOT="${MUSE_IMPLEMENT_WORKSPACE_ROOT:-$HOME/.claude/command-center-muse-implement-workspaces}"
 WORKSPACE=""
+ANSWER_HANDOFF=""
 # The one file the model hands back: exactly one JSON object, written in the
-# workspace root, read by finish-ticket after the model exits.
+# the workspace root while the model runs, then moved outside the checkout
+# before finish-ticket stages the implementation.
 ANSWER_NAME="answer.json"
 
 if [[ ! -r "$ROUTINE" ]]; then
@@ -99,6 +101,9 @@ export FUNNEL_SESSION
 cleanup() {
   python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
   rm -f -- "$PACKET_FILE" "$PROMPT_FILE" "$DIAG_FILE"
+  if [[ -n "$ANSWER_HANDOFF" ]]; then
+    rm -f -- "$ANSWER_HANDOFF"
+  fi
   if [[ -n "$WORKSPACE" && -d "$WORKSPACE" ]]; then
     rm -rf -- "$WORKSPACE"
   fi
@@ -348,12 +353,24 @@ if [[ ! -f "$ANSWER_FILE" ]]; then
   exit 1
 fi
 
+# answer.json is run scratch, not ticket work. Move the model's handoff out of
+# the checkout before finish-ticket stages its explicit implementation paths;
+# the pre-PR guard must still reject any other answer.json left in a checkout.
+ANSWER_HANDOFF="$(mktemp "${TMPDIR:-/tmp}/muse-implement-answer.XXXXXX")"
+if [[ -z "$ANSWER_HANDOFF" ]] || ! mv -- "$ANSWER_FILE" "$ANSWER_HANDOFF"; then
+  echo "muse-implement: could not move $ANSWER_NAME out of the ticket checkout" >&2
+  release_ticket
+  python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+    --outcome errored --note "could not move $ANSWER_NAME out of the ticket checkout" >&2
+  exit 1
+fi
+
 # finish-ticket owns every side effect from here: it validates the answer,
 # tests the checkout, commits and pushes, opens the PR (or records the
 # blocked or declined path), releases the claim, and finishes the run. A
 # failure there may already have released and finished — the test-failure
 # path does — so the fallback below must tolerate both being done.
-if ! (cd "$WORKSPACE" && python3 "$REPO/finish-ticket" --answer-file "$ANSWER_FILE" \
+if ! (cd "$WORKSPACE" && python3 "$REPO/finish-ticket" --answer-file "$ANSWER_HANDOFF" \
     --run "$BEGIN_RUN" --agent muse --repo "$BEGIN_REPO" 2>"$DIAG_FILE"); then
   finish_err="$(cat "$DIAG_FILE")"
   echo "muse-implement: finish-ticket failed: $finish_err" >&2

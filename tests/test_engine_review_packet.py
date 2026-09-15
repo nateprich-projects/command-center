@@ -348,3 +348,14 @@ def test_cli_leaves_a_non_ticket_branch_without_a_ticket(monkeypatch, capsys):
     assert seen == []
     assert found["ticket"]["body"] is None
     assert found["plan_md_missing"] is True
+
+
+def test_a_pending_status_shape_is_unknown_not_red():
+    """#900: "PENDING" is not in the success set, so the red rule used to
+    swallow it and a legacy Status context that had not reported came back red
+    while the CheckRun shape came back unknown."""
+    assert review.ci_state([{"context": "ci", "state": "PENDING"}]) == "unknown"
+    assert review.ci_state([{"context": "ci", "state": "QUEUED"}]) == "unknown"
+    assert review.ci_state(
+        [{"context": "ci", "state": "PENDING"},
+         {"context": "lint", "state": "FAILURE"}]) == "red"

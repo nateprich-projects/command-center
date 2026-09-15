@@ -135,3 +135,82 @@ def test_the_predicates_fail_closed_without_a_head():
     assert not funnel.rejected_at_current_head(None, "h")
     assert funnel.rejected_at_current_head({"verdict": "rejected", "head_sha": "h"}, "h")
     assert not funnel.rejected_at_current_head({"verdict": "approved", "head_sha": "h"}, "h")
+
+
+# -- Checks still running are waited for, not rejected (#900) -----------------
+#
+# Two shadow reviews on 2026-09-15 rejected a PR with "ci: CI not green (state
+# unknown)" seconds after a push — command-center#898 at c2aeb227 (23:11Z) and
+# jeffy-finance-agent#76 at c6e7a880 (22:36Z) — and the live reviewer approved
+# and merged both within three minutes. Because a recorded verdict covers that
+# head for good, those rejections would have been final once the engine reviewer
+# went live.
+
+def _rollup_row(pr, ticket, opened, rollup, head="abc"):
+    row = _row(pr, ticket, opened, head=head)
+    row["statusCheckRollup"] = rollup
+    return row
+
+
+RUNNING = [{"name": "tests", "status": "IN_PROGRESS", "conclusion": None}]
+GREEN = [{"name": "tests", "status": "COMPLETED", "conclusion": "SUCCESS"}]
+RED = [{"name": "tests", "status": "COMPLETED", "conclusion": "FAILURE"}]
+
+
+def test_a_pr_whose_checks_are_still_running_is_not_offered(monkeypatch):
+    _wire(monkeypatch, [_rollup_row(10, 1, "2026-09-15T23:10:00Z", RUNNING)])
+
+    assert funnel.review_queue([_ticket(1)]) == []
+
+
+def test_the_same_pr_is_offered_once_its_checks_report(monkeypatch):
+    _wire(monkeypatch, [_rollup_row(10, 1, "2026-09-15T23:10:00Z", GREEN)])
+
+    assert [e["pr"] for e in funnel.review_queue([_ticket(1)])] == [10]
+
+
+def test_red_ci_is_still_offered_so_the_precheck_can_reject_it(monkeypatch):
+    _wire(monkeypatch, [_rollup_row(10, 1, "2026-09-15T23:10:00Z", RED)])
+
+    assert [e["pr"] for e in funnel.review_queue([_ticket(1)])] == [10]
+
+
+def test_a_rollup_with_no_checks_is_still_offered(monkeypatch):
+    """No checks at all is an answer, and must stay visible as a refusal."""
+    _wire(monkeypatch, [_rollup_row(10, 1, "2026-09-15T23:10:00Z", [])])
+
+    assert [e["pr"] for e in funnel.review_queue([_ticket(1)])] == [10]
+
+
+def test_one_pending_pr_does_not_hold_back_the_rest(monkeypatch):
+    rows = [_rollup_row(20, 2, "2026-09-15T23:11:00Z", GREEN),
+            _rollup_row(10, 1, "2026-09-15T23:10:00Z", RUNNING)]
+    _wire(monkeypatch, rows)
+
+    assert [e["pr"] for e in funnel.review_queue([_ticket(1), _ticket(2)])] == [20]
+
+
+def test_a_failing_check_beside_a_running_one_is_decided_already(monkeypatch):
+    rows = [_rollup_row(10, 1, "2026-09-15T23:10:00Z",
+                        RED + [{"name": "lint", "status": "QUEUED"}])]
+    _wire(monkeypatch, rows)
+
+    assert [e["pr"] for e in funnel.review_queue([_ticket(1)])] == [10]
+
+
+def test_checks_still_running_reads_both_wire_shapes():
+    assert funnel.checks_still_running(RUNNING)
+    assert funnel.checks_still_running([{"context": "ci", "state": "PENDING"}])
+    assert funnel.checks_still_running([{"name": "tests"}])  # no signal yet
+    assert not funnel.checks_still_running(GREEN)
+    assert not funnel.checks_still_running([{"context": "ci", "state": "SUCCESS"}])
+    assert not funnel.checks_still_running(RED)
+    assert not funnel.checks_still_running([])
+    assert not funnel.checks_still_running(None)
+
+
+def test_the_rollup_reader_is_the_one_the_review_engine_uses():
+    from engine import review
+
+    for rollup in (RUNNING, GREEN, RED, [], [{"context": "ci", "state": "PENDING"}]):
+        assert review.ci_state(rollup) == funnel.ci_rollup_state(rollup)

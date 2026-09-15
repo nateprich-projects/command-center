@@ -2559,6 +2559,38 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
         excluded.add(ticket.ref)
 
 
+def held_claims_before(
+    items: Sequence[Item],
+    now: datetime,
+    ticket: Optional[Item],
+    *,
+    blocked: Optional[Set[str]] = None,
+    agent: str = "codex",
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> List[str]:
+    """Claimed queue entries a selector passed before its chosen ticket.
+
+    ``next_ticket`` already removes live claims before choosing, but ``begin``
+    also needs to make that walk observable. The returned refs keep the same
+    shared ordering as ``startable``; when no ticket can be selected, every
+    otherwise-startable live claim is reported.
+    """
+    claimed = {item.ref for item in in_motion(items, now, pr_facts=pr_facts)}
+    passed: List[str] = []
+    for candidate in startable(
+        items,
+        awaiting_review=blocked,
+        agent=agent,
+        repo_readiness=repo_readiness,
+    ):
+        if ticket is not None and candidate.ref == ticket.ref:
+            break
+        if candidate.ref in claimed:
+            passed.append(candidate.ref)
+    return passed
+
+
 def rejected_merges(items: Iterable[Item], now: datetime) -> Dict[str, object]:
     """Merges Nate checked and found broken.
 
@@ -9238,6 +9270,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         "closed_items", reconcile_closed_items, items)
     if reconciled_statuses:
         out["reconciled_statuses"] = reconciled_statuses
+    released_claims = attempt_reconcile(
+        "closed_claims", reconcile_closed_claims, items)
+    if released_claims:
+        out["released_claims"] = released_claims
     orphaned = attempt_reconcile(
         "orphaned_starts", reconcile_orphaned_starts, items, now)
     if orphaned:
@@ -9317,6 +9353,17 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 repo_readiness=repo_readiness,
                 pr_facts=pr_facts,
             )
+        held = held_claims_before(
+            items,
+            now,
+            ticket,
+            blocked=blocked,
+            agent=agent,
+            repo_readiness=repo_readiness,
+            pr_facts=pr_facts,
+        )
+        if held:
+            out["held"] = held
         if ticket is None:
             holder = lock_holder(items, now, pr_facts=pr_facts)
             withheld = readiness_blockers(
@@ -9892,6 +9939,23 @@ def reconcile_closed_items(items: Sequence[Item]) -> List[str]:
     return repaired
 
 
+def reconcile_closed_claims(items: Sequence[Item]) -> List[str]:
+    """Release claims left on tickets which GitHub already says are closed."""
+    released: List[str] = []
+    candidates = sorted(
+        (
+            item for item in items
+            if item.state == "CLOSED" and item.in_motion_since is not None
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+    for item in candidates:
+        write_lock(item, "")
+        item.in_motion_since = None
+        released.append(item.ref)
+    return released
+
+
 def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
     """Close a finished upkeep project after its last ticket merge.
 
@@ -10102,6 +10166,10 @@ def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
 
     ticket = next((item for item in items if item.ref == ref), None)
     if ticket is not None:
+        if ticket.in_motion_since is not None:
+            write_lock(ticket, "")
+            ticket.in_motion_since = None
+            print("released {}".format(ref))
         _auto_close_parent(items, ticket)
     return 0
 

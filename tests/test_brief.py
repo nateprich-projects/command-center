@@ -23,6 +23,7 @@ def no_resend_network(monkeypatch):
     """Brief fixture tests should not read live heartbeat or outcome branches."""
     monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
     monkeypatch.setattr(funnel, "_read_outcome_signals", lambda now: None)
+    monkeypatch.setattr(funnel, "_read_portfolio_metrics", lambda items, now: None)
 
 
 def fixture_items():
@@ -340,6 +341,30 @@ def test_brief_carries_named_outcome_signals_without_recomputing_them(
     brief = json.loads(capsys.readouterr().out)
 
     assert brief["outcome_signals"] == signals
+
+
+def test_brief_carries_portfolio_metrics_without_recomputing_them(capsys):
+    metrics = {
+        "recorded_cause_regressions": {
+            "broken_projects": 3,
+            "with_recorded_cause": 2,
+        },
+        "command_center_ticket_pr_share": {
+            "merged_prs": 10,
+            "ticket_merged_prs": 4,
+            "share": 0.4,
+        },
+    }
+
+    assert funnel.cmd_brief([], NOW, portfolio_metrics=metrics) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["recorded_cause_regressions"] == metrics[
+        "recorded_cause_regressions"
+    ]
+    assert brief["command_center_ticket_pr_share"] == metrics[
+        "command_center_ticket_pr_share"
+    ]
 
 
 def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(

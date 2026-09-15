@@ -260,10 +260,31 @@ def test_finish_ticket_releases_and_errors_when_tests_fail(tmp_path, monkeypatch
     assert "SystemExit(3)" in finished[3]
     assert finished[4] == REPO + "#42"
 
-    refs = run_git("--git-dir", str(remote), "show-ref").stdout
-    assert "ticket/42" not in refs
-    dirty = run_git("status", "--porcelain", cwd=clone).stdout.strip()
-    assert "implemented.txt" in dirty
+    assert "work kept on ticket/42" in finished[3]
+
+    # The work survives the failure (#877): pushed on the ticket branch as a
+    # WIP commit, with no PR opened.
+    pushed = run_git(
+        "--git-dir", str(remote), "show", "ticket/42:implemented.txt"
+    ).stdout
+    assert pushed == "done\n"
+    subject = run_git("--git-dir", str(remote), "log", "-1", "--format=%s",
+                      "ticket/42").stdout.strip()
+    assert subject == "WIP #42: tests failing"
+
+
+def test_a_failure_note_names_the_failing_tests():
+    output = (
+        "python3 -m pytest -q failed: ....F..E [ 4%]\n"
+        "FAILED tests/test_a.py::test_one - AssertionError\n"
+        "ERROR tests/test_b.py::test_two - Failed: boom\n"
+        "FAILED tests/test_a.py::test_one - AssertionError\n"
+        "==== 1 failed, 90 passed, 1 error in 3.2s ====\n"
+    )
+    note = implement._failure_note(implement.ImplementError(output), "work kept on ticket/9")
+    assert "tests/test_a.py::test_one; tests/test_b.py::test_two" in note
+    assert "1 failed, 90 passed, 1 error in 3.2s" in note
+    assert note.endswith("work kept on ticket/9")
 
 
 def test_finish_ticket_requires_the_deterministic_branch(tmp_path):

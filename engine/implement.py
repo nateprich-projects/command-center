@@ -550,12 +550,52 @@ def finish_heartbeat(agent: str, run: str, outcome: str,
         raise ImplementError("heartbeat finish refused run {}".format(run))
 
 
-def _failure_note(exc: ImplementError) -> str:
-    """Summarise a test failure in one heartbeat-note-sized line."""
-    first = str(exc).splitlines()[0] if str(exc) else "unknown test failure"
-    if len(first) > 200:
-        first = first[:197].rstrip() + "..."
-    return "tests failed: {}".format(first)
+def _failure_note(exc: ImplementError, kept: str = "") -> str:
+    """Summarise a test failure so the next run knows what failed (#877).
+
+    Names up to five FAILED or ERROR test ids and pytest's counts line, rather
+    than the first line of output, which is only the progress dots.
+    """
+    text = str(exc)
+    ids = []
+    for match in re.finditer(r"^(?:FAILED|ERROR) (\S+)", text, re.M):
+        if match.group(1) not in ids:
+            ids.append(match.group(1))
+    counts = re.findall(r"^=* ?(\d+ (?:failed|passed|error)[^=\n]*?) ?=*$", text, re.M)
+    parts = []
+    if ids:
+        more = " (+{} more)".format(len(ids) - 5) if len(ids) > 5 else ""
+        parts.append("; ".join(ids[:5]) + more)
+    if counts:
+        parts.append(counts[-1].strip())
+    if not parts:
+        first = text.splitlines()[0] if text else "unknown test failure"
+        parts.append(first[:197].rstrip() + "..." if len(first) > 200 else first)
+    note = "tests failed: " + " | ".join(parts)
+    if kept:
+        note += " | " + kept
+    return note
+
+
+def _keep_work(root: pathlib.Path, number: int, branch: str) -> str:
+    """Commit and push whatever the run produced, so a failure loses time only.
+
+    Never opens a PR. Returns a short phrase for the heartbeat note.
+    """
+    try:
+        if _run(["git", "status", "--porcelain"], cwd=root).stdout.strip():
+            _run(["git", "add", "-A"], cwd=root)
+            _run(["git", "commit", "-m",
+                  "WIP #{}: tests failing".format(number)], cwd=root)
+        ahead = _run(["git", "rev-list", "--count", "origin/main..HEAD"],
+                     cwd=root).stdout.strip()
+        if not ahead.isdigit() or int(ahead) < 1:
+            return "no work to keep"
+        _run(["git", "push", "--set-upstream", "origin", branch], cwd=root)
+        return "work kept on {}".format(branch)
+    except ImplementError as exc:
+        first = str(exc).splitlines()[0] if str(exc) else "unknown error"
+        return "work NOT kept: {}".format(first[:120])
 
 
 def finish_done(answer: dict, *, run: str, agent: str = "codex",
@@ -575,11 +615,13 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     try:
         tests = run_tests(context["root"], test_commands)
     except ImplementError as exc:
-        # A failing checkout must not strand the run: no commit, push or PR
-        # happens below, so release the claim and finish errored with the
-        # failing command's summary, then re-raise for the nonzero exit.
+        # A failing checkout must not strand the run or lose its work (#877):
+        # commit and push the ticket branch without opening a PR, release the
+        # claim, and finish errored naming what failed, so the next run
+        # continues the branch instead of starting again from main.
+        kept = _keep_work(context["root"], context["number"], context["branch"])
         release(ref)
-        heartbeat_finish(agent, run, "errored", _failure_note(exc), ref)
+        heartbeat_finish(agent, run, "errored", _failure_note(exc, kept), ref)
         raise
     continued = _remote_branch_exists(context["root"], context["branch"])
     _commit_if_needed(context["root"], context["number"], answer["summary"])

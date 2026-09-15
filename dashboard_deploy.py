@@ -69,6 +69,7 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from publisher import (
+    PLACEHOLDER_NAMESPACE_ID,
     PublisherError,
     acquire_lock,
     namespace_id_from_wrangler,
@@ -76,7 +77,6 @@ from publisher import (
 )
 
 KV_BINDING = "FUNNEL_SNAPSHOT"
-PLACEHOLDER_NAMESPACE_ID = "local-funnel-snapshot"
 KV_NAMESPACE_TITLE = "command-center-funnel-snapshot"
 DASHBOARD_SUBDIR = "dashboard"
 WRANGLER_TOML_REL = "dashboard/wrangler.toml"

@@ -10,10 +10,10 @@ shaping — on an unmetered pool. Tracked as #431.
 **Schedule it ran on**, recorded here because the zcode app holds it where nothing can
 read it (#52): every 15 minutes at :08, :23, :38 and :53, first run 2026-09-07 02:11Z.
 
-**To re-enable:** paste the `begin` command below (regenerate its `--routine-sha` with
-`scripts/paste_routine_sha.py`), schedule it in the app, and remove `"zcode"` from
-`heartbeat.RETIRED_AGENTS`. Nothing else was removed — records, `PROVIDERS` entries
-and the `zai` policy in `usage.py` are all still in place.
+**To re-enable:** paste the `begin` command below, schedule it in the app, and
+remove `"zcode"` from `heartbeat.RETIRED_AGENTS`. Nothing else was removed —
+records, `PROVIDERS` entries and the `zai` policy in `usage.py` are all still
+in place.
 
 ---
 
@@ -60,7 +60,7 @@ asked of it.
 ## 1. Start, and find out whether there is anything to do
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown --routine-sha 4634d981d710d3439cac15c89a1ea04a21dac1b77923fdf7fbaaddfd95910d15
+python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown
 ```
 
 **One call does all of it**: records the heartbeat, checks the budget, and says

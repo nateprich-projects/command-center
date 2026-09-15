@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shlex
 import stat
 import subprocess
 import sys
@@ -332,7 +333,9 @@ def test_funnel_finish_ticket_forwards_without_importing_engine(monkeypatch):
         return SimpleNamespace(returncode=7)
 
     monkeypatch.setattr(funnel.subprocess, "run", fake_run)
-    assert funnel.main(["finish-ticket", "--answer", "answer.json", "--run", "r"]) == 7
+    assert funnel.main([
+        "finish-ticket", "--answer-file", "answer.json", "--run", "r"
+    ]) == 7
     assert seen[0][0] == sys.executable
     assert pathlib.Path(seen[0][1]).name == "finish-ticket"
 
@@ -537,6 +540,7 @@ def test_finish_declined_labels_comments_releases_and_finishes(
 def test_finish_main_routes_blocked_and_declined_answers(
         tmp_path, monkeypatch, capsys):
     routed = {}
+    monkeypatch.setattr(implement, "_recover_answer_error", lambda *a, **k: False)
 
     def fake_blocked(blocked_answer, **kwargs):
         routed["blocked"] = (blocked_answer, kwargs)
@@ -552,7 +556,7 @@ def test_finish_main_routes_blocked_and_declined_answers(
     path = tmp_path / "answer.json"
     path.write_text(json.dumps(blocked()))
     assert implement.finish_main(
-        ["--answer", str(path), "--run", "run-42",
+        ["--answer-file", str(path), "--run", "run-42",
          "--agent", "muse", "--repo", REPO]) == 0
     assert routed["blocked"][0] == blocked()["blocked_on_human"]
     assert routed["blocked"][1]["run"] == "run-42"
@@ -561,10 +565,383 @@ def test_finish_main_routes_blocked_and_declined_answers(
 
     path.write_text(json.dumps({"declined": "stale"}))
     assert implement.finish_main(
-        ["--answer", str(path), "--run", "run-42"]) == 0
+        ["--answer-file", str(path), "--run", "run-42"]) == 0
     assert routed["declined"][0] == "stale"
     assert json.loads(capsys.readouterr().out)["declined"] == "stale"
 
     path.write_text(json.dumps({"unknown": True}))
     assert implement.finish_main(
-        ["--answer", str(path), "--run", "run-42"]) == 1
+        ["--answer-file", str(path), "--run", "run-42"]) == 1
+
+
+def test_finish_main_accepts_inline_json(monkeypatch, capsys):
+    routed = {}
+
+    def fake_done(found, **kwargs):
+        routed["done"] = (found, kwargs)
+        return {"number": 91}
+
+    monkeypatch.setattr(implement, "finish_done", fake_done)
+    raw = json.dumps(answer())
+    assert implement.finish_main([
+        "--answer", raw, "--run", "run-42", "--repo", REPO,
+    ]) == 0
+    assert routed["done"][0] == answer()
+    assert routed["done"][1]["run"] == "run-42"
+    assert json.loads(capsys.readouterr().out) == {"number": 91}
+
+
+def test_finish_main_still_accepts_answer_on_stdin(monkeypatch, capsys):
+    routed = {}
+    monkeypatch.setattr(
+        implement.sys, "stdin",
+        SimpleNamespace(read=lambda: json.dumps(answer())),
+    )
+    monkeypatch.setattr(
+        implement, "finish_done",
+        lambda found, **kwargs: routed.update(answer=found) or {"number": 91},
+    )
+
+    assert implement.finish_main([
+        "--answer", "-", "--run", "run-42", "--repo", REPO,
+    ]) == 0
+    assert routed["answer"] == answer()
+    assert json.loads(capsys.readouterr().out) == {"number": 91}
+
+
+@pytest.mark.parametrize(
+    ("answer_text", "error"),
+    ((None, "cannot read answer"), ("not json", "answer is not valid JSON")),
+)
+def test_unreadable_answer_keeps_dirty_work_releases_and_finishes_errored(
+        tmp_path, monkeypatch, capsys, answer_text, error):
+    remote, clone = make_clone(tmp_path)
+    (clone / "implemented.txt").write_text("done\n")
+    answer_path = tmp_path / "handoff.json"
+    if answer_text is not None:
+        answer_path.write_text(answer_text)
+    effects = {"released": [], "finished": []}
+    monkeypatch.chdir(clone)
+    monkeypatch.setattr(implement, "release_claim", effects["released"].append)
+    monkeypatch.setattr(
+        implement, "finish_heartbeat",
+        lambda *args: effects["finished"].append(args),
+    )
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-42",
+        "--repo", REPO,
+    ]) == 1
+
+    assert error in capsys.readouterr().err
+    assert effects["released"] == [REPO + "#42"]
+    (finished,) = effects["finished"]
+    assert finished[:3] == ("codex", "run-42", "errored")
+    assert "answer error: " + error in finished[3]
+    assert "work kept on ticket/42" in finished[3]
+    assert finished[4] == REPO + "#42"
+    assert run_git(
+        "--git-dir", str(remote), "show", "ticket/42:implemented.txt"
+    ).stdout == "done\n"
+    assert run_git(
+        "--git-dir", str(remote), "log", "-1", "--format=%s", "ticket/42"
+    ).stdout.strip() == "WIP #42: answer unreadable"
+
+
+# --- Per-repo test command resolution (#871) ---
+
+
+def write_workflow(root, body, name="tests.yml"):
+    workflows = root / ".github" / "workflows"
+    workflows.mkdir(parents=True, exist_ok=True)
+    (workflows / name).write_text(body)
+    return workflows / name
+
+
+def test_pyproject_override_selects_the_configured_command(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\n\n'
+        '[tool.command-center]\ntest = "make test"\n'
+    )
+    commands, source = implement.default_test_plan(tmp_path)
+    assert commands == [["make", "test"]]
+    assert source == "pyproject.toml [tool.command-center] test"
+
+
+def test_pyproject_override_beats_the_ci_workflow(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.command-center]\ntest = "make test"\n'
+    )
+    write_workflow(
+        tmp_path,
+        "jobs:\n  t:\n    steps:\n"
+        "      - name: Run pytest\n"
+        "        run: python3 -m pytest -q\n",
+    )
+    commands, source = implement.default_test_plan(tmp_path)
+    assert commands == [["make", "test"]]
+    assert source == "pyproject.toml [tool.command-center] test"
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    (
+        ('[tool.command-center]\ntest = "make test"\n', "make test"),
+        ("[tool.command-center]\ntest = 'make test'\n", "make test"),
+        ('[tool.command-center]\ntest = "make test"  # trailing\n',
+         "make test"),
+        ('[tool.other]\ntest = "nope"\n\n'
+         '[tool.command-center]\ntest = "make test"\n', "make test"),
+        ('# test = "nope"\n[tool.command-center]\n'
+         '# test = "nope"\ntest = "make test"\n', "make test"),
+        ('[tool.command-center]\ntest = "make \\"quoted\\""\n',
+         'make "quoted"'),
+        ("[tool.command-center]\nother = 1\n", None),
+        ("[tool.command-center]\ntest = 123\n", None),
+        ('[tool.command-center]\ntest = ""\n', None),
+        ('[tool.command-center-extra]\ntest = "nope"\n', None),
+        ('[project]\nname = "x"\n', None),
+    ),
+)
+def test_pyproject_reader_reads_one_string_key(tmp_path, body, expected):
+    (tmp_path / "pyproject.toml").write_text(body)
+    assert implement.pyproject_test_command(tmp_path) == expected
+
+
+def test_pyproject_reader_returns_none_without_a_file(tmp_path):
+    assert implement.pyproject_test_command(tmp_path) is None
+
+
+@pytest.mark.parametrize("name", ("tests.yml", "tests.yaml"))
+def test_ci_workflow_step_named_tests_selects_its_run_line(tmp_path, name):
+    """The FF-Weekly-Start-Sit shape: a `make test` suite behind a step
+    named `tests`, which the hardcoded pytest could never run."""
+    write_workflow(
+        tmp_path,
+        "name: tests\n"
+        "jobs:\n"
+        "  test:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - name: tests\n"
+        "        run: make test\n",
+        name=name,
+    )
+    (tmp_path / "Makefile").write_text("test:\n\techo ok\n")
+    commands, source = implement.default_test_plan(tmp_path)
+    assert commands == [["make", "test"]]
+    assert source == 'CI .github/workflows/{} step "tests"'.format(name)
+
+
+def test_ci_workflow_selects_the_step_that_runs_pytest(tmp_path):
+    write_workflow(
+        tmp_path,
+        "jobs:\n"
+        "  pytest:\n"
+        "    steps:\n"
+        "      - name: Install pytest\n"
+        "        run: python3 -m pip install --quiet pytest\n"
+        "      - name: Run the suite\n"
+        "        run: python3 -m pytest tests/ -q\n",
+    )
+    commands, source = implement.default_test_plan(tmp_path)
+    assert commands == [["python3", "-m", "pytest", "tests/", "-q"]]
+    assert source == 'CI .github/workflows/tests.yml step "Run the suite"'
+
+
+@pytest.mark.parametrize(
+    ("name", "run", "matched"),
+    (
+        ("tests", "make test", True),
+        ("Run tests", "make test", True),
+        ("Run the test suite", "make test", True),
+        ("Testing", "make test", True),
+        ("Run pytest", "make test", True),
+        ("Install pytest", "python3 -m pip install pytest", False),
+        ("Install test dependencies", "pip install -r req.txt", False),
+        ("Set up the test database", "initdb", False),
+        ("Run the suite", "python3 -m pytest -q", True),
+        ("Suite", "pytest -q", True),
+        ("Suite", "python -m pytest -q", True),
+        ("Suite", "uv run pytest -q", True),
+        ("Suite", "cd sub && python3 -m pytest -q", True),
+        ("Suite", "uv pip install pytest", False),
+        ("Suite", "pip install pytest", False),
+        ("Publish to TestPyPI", "twine upload dist/*", False),
+        ("Lint", "ruff check .", False),
+    ),
+)
+def test_test_step_matching(name, run, matched):
+    assert implement._is_test_step(name, run) is matched
+
+
+def test_ci_workflow_tolerates_env_blocks_and_uses_steps(tmp_path):
+    write_workflow(
+        tmp_path,
+        "jobs:\n"
+        "  check:\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - name: Run tests\n"
+        "        env:\n"
+        "          FOO: bar\n"
+        "        run: make test\n",
+    )
+    commands, source = implement.default_test_plan(tmp_path)
+    assert commands == [["make", "test"]]
+    assert source == 'CI .github/workflows/tests.yml step "Run tests"'
+
+
+def test_ci_workflow_without_a_test_step_falls_through(tmp_path):
+    write_workflow(
+        tmp_path,
+        "jobs:\n  build:\n    steps:\n"
+        "      - name: Lint\n"
+        "        run: ruff check .\n",
+    )
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "node --test"}}')
+    commands, source = implement.default_test_plan(tmp_path)
+    assert commands == [["npm", "test"]]
+    assert source is None
+
+
+def test_default_pytest_names_its_source(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_runner.py").write_text("def test_ok(): pass\n")
+    commands, source = implement.default_test_plan(tmp_path)
+    assert commands == [
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+    ]
+    assert source == "default pytest"
+
+
+def test_multiline_run_lines_run_under_sh(tmp_path):
+    write_workflow(
+        tmp_path,
+        "jobs:\n  t:\n    steps:\n"
+        "      - name: tests\n"
+        "        run: |\n"
+        "          make lint\n"
+        "          make test\n",
+    )
+    commands, source = implement.default_test_plan(tmp_path)
+    assert commands == [["sh", "-c", "make lint\nmake test"]]
+    assert source == 'CI .github/workflows/tests.yml step "tests"'
+
+
+def test_piped_run_lines_run_under_sh(tmp_path):
+    write_workflow(
+        tmp_path,
+        "jobs:\n  t:\n    steps:\n"
+        "      - name: tests\n"
+        "        run: make test 2>&1 | tee test.log\n",
+    )
+    commands, _ = implement.default_test_plan(tmp_path)
+    assert commands == [["sh", "-c", "make test 2>&1 | tee test.log"]]
+
+
+def test_finish_done_records_the_test_source_in_pr_body_and_note(
+        tmp_path, monkeypatch):
+    remote, clone = make_clone(tmp_path)
+    passing = shlex.join([sys.executable, "-c", "pass"])
+    (clone / "pyproject.toml").write_text(
+        '[tool.command-center]\ntest = "{}"\n'.format(passing)
+    )
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+
+    effects = {"prs": [], "released": [], "finished": []}
+
+    def open_pr(repo, context, found_ticket, body):
+        effects["prs"].append(body)
+        return {"number": 91, "url": "https://github.com/owner/repo/pull/91"}
+
+    result = implement.finish_done(
+        answer(),
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        pr_effect=open_pr,
+    )
+
+    assert result["number"] == 91
+    (body,) = effects["prs"]
+    assert "Test command source:\npyproject.toml [tool.command-center] test" in body
+    assert effects["finished"] == [
+        ("codex", "run-42", "done",
+         "PR #91 (tests: pyproject.toml [tool.command-center] test)",
+         REPO + "#42")
+    ]
+
+
+def test_finish_done_keeps_work_when_the_resolved_command_fails(
+        tmp_path, monkeypatch):
+    remote, clone = make_clone(tmp_path)
+    failing = shlex.join([sys.executable, "-c", "raise SystemExit(3)"])
+    (clone / "pyproject.toml").write_text(
+        '[tool.command-center]\ntest = "{}"\n'.format(failing)
+    )
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+
+    effects = {"released": [], "finished": []}
+
+    def no_pr(repo, context, found_ticket, body):
+        raise AssertionError("a failing checkout must not open a PR")
+
+    with pytest.raises(implement.ImplementError, match="SystemExit"):
+        implement.finish_done(
+            answer(),
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=no_pr,
+        )
+
+    assert effects["released"] == [REPO + "#42"]
+    (finished,) = effects["finished"]
+    assert finished[:3] == ("codex", "run-42", "errored")
+    assert finished[3].startswith("tests failed: ")
+    assert "work kept on ticket/42" in finished[3]
+
+    pushed = run_git(
+        "--git-dir", str(remote), "show", "ticket/42:implemented.txt"
+    ).stdout
+    assert pushed == "done\n"
+
+
+def test_dry_run_prints_the_resolved_plan_without_side_effects(
+        tmp_path, monkeypatch, capsys):
+    remote, clone = make_clone(tmp_path)
+    (clone / "pyproject.toml").write_text(
+        '[tool.command-center]\ntest = "make test"\n'
+    )
+    monkeypatch.chdir(clone)
+    assert implement.finish_main(["--dry-run"]) == 0
+    found = json.loads(capsys.readouterr().out)
+    assert found == {
+        "branch": "ticket/42",
+        "number": 42,
+        "test_commands": ["make test"],
+        "test_source": "pyproject.toml [tool.command-center] test",
+    }
+    refs = run_git("--git-dir", str(remote), "show-ref").stdout
+    assert "ticket/42" not in refs
+
+
+def test_dry_run_refuses_a_non_ticket_branch(tmp_path, monkeypatch, capsys):
+    _, clone = make_clone(tmp_path)
+    run_git("switch", "--quiet", "main", cwd=clone)
+    monkeypatch.chdir(clone)
+    assert implement.finish_main(["--dry-run"]) == 1
+    assert "ticket/<number>" in capsys.readouterr().err
+
+
+def test_finish_main_requires_answer_and_run_without_dry_run():
+    with pytest.raises(SystemExit):
+        implement.finish_main([])

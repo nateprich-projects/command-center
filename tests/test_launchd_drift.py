@@ -1,19 +1,16 @@
-"""The installed launchd plist must still match the one in the repo.
+"""The repo's launchd plists are canonical, well-formed, and correctly scheduled.
 
 The repo copy was meant to be symlinked into `~/Library/LaunchAgents`, which
 would have made drift impossible. **launchd refuses a symlinked plist** —
 `Bootstrap failed: 5: Input/output error`, measured 2026-09-07 — so the installed
-file is a copy after all, and a copy drifts. That is the surface #52 exists for,
-reintroduced by an OS constraint rather than by choice.
+file is a copy after all, and a copy drifts.
 
-So it gets the same treatment the Codex automations got: a test, not a note.
-A prompt cannot enforce anything, and `routines/*.md` already require the suite
-to pass before a merge, so a drifted plist now blocks a merge without anyone
-remembering to look.
-
-It **skips** where the plist is not installed — CI runners, a fresh clone — so it
-is a real check on the Mac that runs the schedule and silent everywhere else.
-A skip is honest: absence of the file is not evidence of no drift.
+That installed-versus-repo comparison used to live here, skipping where the
+plist was not installed. It moved to the run-keeper's readiness record (#821),
+which compares every run on the schedule host itself — the only machine where
+the installed copies exist. This file keeps the repo-side invariants: the
+canonical copies, their shape, their schedules, and the installer that copies
+them. Nothing here reads the Mac's installed state.
 """
 
 from __future__ import annotations
@@ -44,7 +41,6 @@ NAMES = MUSE_SCHEDULE_NAMES + [
     KEEPER_NAME, REMOTE_CONTROL_NAME, PUBLISHER_NAME, DEPLOY_NAME]
 INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [
     KEEPER_NAME, PUBLISHER_NAME, DEPLOY_NAME]
-LAUNCH_AGENTS = pathlib.Path.home() / "Library" / "LaunchAgents"
 CLAUDE_CODE_MARKER = "Human step: a Claude Code environment"
 LAUNCHD_CLAUDE_CODE_TRIGGER = re.compile(
     r"\blaunchctl\s+(?:bootstrap|bootout|load)\b"
@@ -93,20 +89,6 @@ def test_the_plist_is_well_formed_xml(name):
     with (ROOT / "launchd" / name).open("rb") as handle:
         plist = plistlib.load(handle)
     assert plist["Label"] == name[: -len(".plist")]
-
-
-@pytest.mark.parametrize("name", NAMES)
-def test_the_installed_plist_matches_the_repo(name):
-    installed_path = LAUNCH_AGENTS / name
-    repo_copy = ROOT / "launchd" / name
-    if not installed_path.exists():
-        pytest.skip("plist not installed here — nothing to compare")
-    installed = installed_path.read_text()
-    canonical = repo_copy.read_text()
-    assert installed == canonical, (
-        "the installed launchd plist has drifted from launchd/{}. "
-        "{}".format(name, console_reload_hint(name))
-    )
 
 
 def test_drift_hint_requires_the_console_session():

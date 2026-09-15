@@ -7,6 +7,10 @@
 # records are committed to the existing orphan `heartbeat` branch through a
 # temporary worktree, so the maintained checkout stays on `main` for the next
 # run.
+#
+# The Codex prompt derivation lives here, in keeper_prompts below: this script
+# is the only writer of the installed automations, and the only reader of them
+# outside the Codex app. Nothing in the pytest suite touches them.
 
 set -u
 
@@ -23,7 +27,6 @@ LAUNCHCTL="${COMMAND_CENTER_KEEPER_LAUNCHCTL:-/bin/launchctl}"
 
 KEEPER_LABEL="com.nateprich.command-center-run-keeper"
 ROUTINE_PATH="routines/codex-work.md"
-SYNC_SCRIPT="$REPO/scripts/sync_codex_automations.py"
 LAUNCH_AGENTS_DIR="${HOME:-}/Library/LaunchAgents"
 
 # Keep the existing keeper responsibility.  A failed refresh must not suppress
@@ -102,6 +105,194 @@ has_process_family() {
 
 health_line="timestamp=$timestamp user_processes=$user_processes maxprocperuid=$maxprocperuid load_1=$load_1 load_5=$load_5 load_15=$load_15 codex=$(has_process_family codex) claude=$(has_process_family claude) muse=$(has_process_family muse)"
 
+# The installed Codex prompt for one automation, compared or written.
+# `keeper_prompts check` prints one `  DRIFTED  <name>` line per stale
+# automation and exits 1 when any drifted; `keeper_prompts install` writes
+# every stale prompt (leaving a `.bak` beside it) and exits 1 when stale
+# prompts remain. Only the `prompt` field is touched; schedule, model and
+# everything else stay exactly as the app wrote them.
+keeper_prompts() {
+  KEEPER_ROUTINE="$REPO/$ROUTINE_PATH" \
+  KEEPER_AUTOMATIONS="${HOME:-}/.codex/automations" \
+  PYTHONDONTWRITEBYTECODE=1 python3 - "$1" <<'PY'
+import datetime
+import hashlib
+import json
+import os
+import pathlib
+import re
+import shutil
+import sys
+import time
+
+ROUTINE = pathlib.Path(os.environ["KEEPER_ROUTINE"])
+AUTOMATIONS = pathlib.Path(os.environ["KEEPER_AUTOMATIONS"])
+GLOB = "command-center-*/automation.toml"
+
+#: Everything above this line in the routine is setup documentation for Nate;
+#: below it is what the agent runs.
+SEPARATOR = "\n---\n"
+BEGIN_LINE = "funnel.py begin --agent codex --tier standard"
+#: A schedule with `BYHOUR` fires only in chosen windows; one without it
+#: fires all day. That one fact decides both which tier a lane works and
+#: whether it pays the presence proxy — read separately for each, so a change
+#: to one can never silently move the other (2026-09-07).
+IDLE_RRULE_MARKER = "BYHOUR="
+
+
+def fires_all_day(automation):
+    """True when the clock cannot vouch for Nate being away. Unknown
+    schedules default to True: refusing to compete with him is the safe
+    direction, assuming he is out is not."""
+    if not automation:
+        return False
+    path = AUTOMATIONS / automation / "automation.toml"
+    try:
+        rule = re.search(r'^rrule = "(.*)"$', path.read_text(), re.MULTILINE)
+    except OSError:
+        return True
+    if not rule:
+        return True
+    return IDLE_RRULE_MARKER not in rule.group(1)
+
+
+def prompt_text(automation=""):
+    """The runtime prompt for one automation: title plus runtime, with the
+    tier and idle flag derived from when the schedule fires."""
+    body = ROUTINE.read_text()
+    title = body.splitlines()[0].strip()
+    if SEPARATOR not in body:
+        raise SystemExit(
+            "no '---' separator; cannot tell setup notes from the runtime prompt"
+        )
+    runtime = body.split(SEPARATOR, 1)[1].strip()
+    tier = "standard" if fires_all_day(automation) else "escalated"
+    begin = BEGIN_LINE.replace("standard", tier)
+    if fires_all_day(automation):
+        begin += " --idle"
+    runtime = runtime.replace(BEGIN_LINE, begin, 1)
+    return "{}\n\n{}\n".format(title, runtime)
+
+
+def same_prompt(existing, wanted):
+    """Whether a stored prompt matches, ignoring the trailing newline the
+    Codex app strips when it saves an automation. Only trailing whitespace
+    is forgiven; any other difference is drift."""
+    if existing is None:
+        return False
+    return existing.rstrip("\n") == wanted.rstrip("\n")
+
+
+def current(text):
+    match = re.search(r'^prompt = (".*")$', text, re.MULTILINE)
+    if not match:
+        return None, None
+    return match.group(1), json.loads(match.group(1))
+
+
+def main(mode):
+    files = sorted(AUTOMATIONS.glob(GLOB))
+    if not files:
+        print(
+            "no Command Center automations found under {}".format(AUTOMATIONS),
+            file=sys.stderr,
+        )
+        return 1
+
+    drifted = []
+    ledger = []
+    stale = []
+    for path in files:
+        name = path.parent.name
+        wanted = prompt_text(name)
+        try:
+            text = path.read_text()
+        except OSError as exc:
+            if mode == "check":
+                raise
+            print("{}: unreadable — {}".format(name, exc), file=sys.stderr)
+            ledger.append((name, "unwritable"))
+            stale.append(name)
+            continue
+        raw, existing = current(text)
+        if raw is None:
+            print("{}: no prompt field — skipped".format(name), file=sys.stderr)
+            if mode != "check":
+                ledger.append((name, "unwritable"))
+                stale.append(name)
+            continue
+        if same_prompt(existing, wanted):
+            print("  ok       {}".format(name))
+            if mode != "check":
+                ledger.append((name, "already current"))
+            continue
+        drifted.append(name)
+        if mode == "check":
+            # Record *when* it changed, not only that it did: a mismatch
+            # alone cannot tell a file someone rewrote from an expected
+            # value that moved underneath it.
+            stat = path.stat()
+            print("  DRIFTED  {}".format(name))
+            print("           file written {}  ({} bytes, sha {})".format(
+                datetime.datetime.fromtimestamp(stat.st_mtime).isoformat(
+                    timespec="seconds"),
+                stat.st_size,
+                hashlib.sha256(path.read_bytes()).hexdigest()[:12]))
+            print("           routine written {}  (expected prompt sha {})".format(
+                datetime.datetime.fromtimestamp(
+                    ROUTINE.stat().st_mtime).isoformat(timespec="seconds"),
+                hashlib.sha256(wanted.encode()).hexdigest()[:12]))
+            first = next((i for i, (a, b) in enumerate(
+                zip((existing or "").splitlines(), wanted.splitlines()))
+                if a != b), None)
+            if first is not None:
+                print("           first differing line {}:".format(first + 1))
+                print("             stored:   {}".format(
+                    (existing or "").splitlines()[first][:88]))
+                print("             expected: {}".format(
+                    wanted.splitlines()[first][:88]))
+            continue
+
+        try:
+            shutil.copy2(path, path.with_suffix(".toml.bak"))
+            text = text.replace(raw, json.dumps(wanted), 1)
+            text = re.sub(r"^updated_at = \d+$",
+                          "updated_at = {}".format(int(time.time() * 1000)),
+                          text, count=1, flags=re.MULTILINE)
+            path.write_text(text)
+
+            _, written = current(path.read_text())
+            if written != wanted:
+                raise SystemExit("{}: wrote the prompt but it did not read back "
+                                 "identically — restore from the .bak".format(path))
+        except OSError as exc:
+            print("{}: unwritable — {}".format(name, exc), file=sys.stderr)
+            ledger.append((name, "unwritable"))
+            stale.append(name)
+            continue
+        ledger.append((name, "updated"))
+        print("  updated  {}".format(name))
+
+    if mode != "check":
+        print("\nSync summary:")
+        for name, outcome in ledger:
+            print("  {:16} {}".format(outcome, name))
+        if stale:
+            print("\nStale prompts remain:")
+            for name in stale:
+                print("  {}".format(name))
+            return 1
+    elif drifted:
+        print("\n{} of {} automations have drifted".format(
+            len(drifted), len(files)))
+        return 1
+    return 0
+
+
+sys.exit(main(sys.argv[1]))
+PY
+}
+
 # Phase 4 (#794): install on change.  There is deliberately no quiet-moment
 # condition: prompts and plists are read at run start, so a replacement
 # affects only the next run (amendment accepted 2026-09-13).  An install
@@ -147,8 +338,8 @@ while IFS= read -r changed_path; do
     launchd/*.plist) install_plist "$changed_path" ;;
   esac
 done <<< "$pulled_changes"
-if [ -n "$routine_changed" ] && [ -f "$SYNC_SCRIPT" ]; then
-  PYTHONDONTWRITEBYTECODE=1 python3 "$SYNC_SCRIPT" || \
+if [ -n "$routine_changed" ]; then
+  keeper_prompts install || \
     echo "run-keeper: prompt install failed; see the readiness record" >&2
 fi
 
@@ -172,23 +363,20 @@ if [ -n "${HOME:-}" ]; then
     fi
   done
 fi
-if [ -f "$SYNC_SCRIPT" ]; then
-  # The DRIFTED lines are the comparison; the exit code also fires on
-  # same-minute lanes, which is a schedule problem, not install drift.
-  check_out=$(PYTHONDONTWRITEBYTECODE=1 python3 "$SYNC_SCRIPT" --check 2>/dev/null || true)
-  while IFS= read -r line; do
-    case "$line" in
-      "  DRIFTED  "*)
-        automation="${line#*DRIFTED  }"
-        automation="$(trim_spaces "$automation")"
-        if [ -n "$automation" ]; then
-          prompts="no"
-          drifted=$(csv_add "$drifted" "codex/$automation")
-        fi
-        ;;
-    esac
-  done <<< "$check_out"
-fi
+# The DRIFTED lines are the comparison.
+check_out=$(keeper_prompts check 2>/dev/null || true)
+while IFS= read -r line; do
+  case "$line" in
+    "  DRIFTED  "*)
+      automation="${line#*DRIFTED  }"
+      automation="$(trim_spaces "$automation")"
+      if [ -n "$automation" ]; then
+        prompts="no"
+        drifted=$(csv_add "$drifted" "codex/$automation")
+      fi
+      ;;
+  esac
+done <<< "$check_out"
 [ -n "$drifted" ] || drifted="-"
 [ -n "$reload_pending" ] || reload_pending="-"
 readiness_line="timestamp=$timestamp prompts=$prompts plists=$plists files=$drifted reload_pending=$reload_pending"

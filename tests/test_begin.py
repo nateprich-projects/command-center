@@ -780,6 +780,7 @@ def test_codex_ticket_begin_carries_the_implementation_packet_and_vendor_block(
     assert result["do"] == "ticket"
     assert result["packet"] == packet
     assert result["vendor"] == funnel.CODEX_IMPLEMENT_VENDOR
+    assert "--answer-file PATH" in result["vendor"]["answer_handoff"]
     assert calls == [(ticket.repo, ticket.number, "codex")]
 
 
@@ -1097,7 +1098,7 @@ def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
         funnel,
         "cmd_begin",
         lambda items, now, agent, tier, idle, breakdown=False,
-        routine_sha_literal=None, repo_readiness=None, caller_role=None: (
+        repo_readiness=None, caller_role=None: (
             received.append(repo_readiness) or 0
         ),
     )

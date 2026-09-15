@@ -9,22 +9,22 @@ against a fake home, never the Mac's real automations or LaunchAgents.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import subprocess
 
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "run-keeper"
 
-spec = importlib.util.spec_from_file_location(
-    "sync_codex_automations", ROOT / "scripts" / "sync_codex_automations.py"
-)
-sync = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(sync)
+#: The derivation the keeper owns, stated independently so these tests can
+#: judge its installs: tier and idle flag from the schedule, setup notes
+#: split from the runtime prompt.
+BEGIN_LINE = "funnel.py begin --agent codex --tier standard"
+SEPARATOR = "\n---\n"
 
 DAY_NAME = "command-center-test-day"
 DAY_RRULE = "FREQ=HOURLY;INTERVAL=1;BYMINUTE=0"
@@ -158,18 +158,12 @@ def make_install_remote(tmp_path: Path) -> tuple[Path, Path, Path]:
     """A heartbeat remote whose main also carries what the keeper installs."""
     bare, checkout = make_heartbeat_remote(tmp_path)
     seed = tmp_path / "seed"
-    # Every top-level module: the keeper shells out to the sync script, which
-    # imports funnel, which imports its siblings. Copying one file passes
-    # today and breaks on the next import.
-    for src in sorted(ROOT.glob("*.py")):
-        (seed / src.name).write_bytes(src.read_bytes())
-    for name in (
-        "routines/codex-work.md",
-        "scripts/sync_codex_automations.py",
-    ):
-        dst = seed / name
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes((ROOT / name).read_bytes())
+    # Only what the keeper installs: the routine it derives prompts from and
+    # the plists it copies. The prompt logic is embedded in the keeper
+    # script itself and needs nothing else from the checkout.
+    dst = seed / "routines" / "codex-work.md"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_bytes((ROOT / "routines" / "codex-work.md").read_bytes())
     for plist in sorted((ROOT / "launchd").glob("*.plist")):
         dst = seed / "launchd" / plist.name
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -219,24 +213,35 @@ def install_launchd_copies(seed: Path, home: Path, skip=()) -> Path:
     return agents
 
 
-def write_current_automation(monkeypatch, home, routine, name, rrule):
+def wanted_prompt(routine: Path, rrule: str) -> str:
+    """The prompt the keeper derives for a lane firing on this rrule."""
+    body = routine.read_text()
+    title = body.splitlines()[0].strip()
+    runtime = body.split(SEPARATOR, 1)[1].strip()
+    all_day = "BYHOUR=" not in rrule
+    tier = "standard" if all_day else "escalated"
+    begin = BEGIN_LINE.replace("standard", tier)
+    if all_day:
+        begin += " --idle"
+    return "{}\n\n{}\n".format(
+        title, runtime.replace(BEGIN_LINE, begin, 1)
+    )
+
+
+def write_current_automation(home, routine, name, rrule):
     """An installed automation matching the given routine copy.
 
     The rrule is written first because the lane's tier, and so its prompt, is
     read back off it.
     """
-    automations = home / ".codex" / "automations"
-    monkeypatch.setattr(sync, "AUTOMATIONS", automations)
-    monkeypatch.setattr(sync, "ROUTINE", routine)
-    path = automations / name / "automation.toml"
+    path = home / ".codex" / "automations" / name / "automation.toml"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text('rrule = "RRULE:{}"\n'.format(rrule))
-    with path.open("a") as fh:
-        fh.write(
-            "prompt = {}\nupdated_at = 1\n".format(
-                json.dumps(sync.prompt_text(name))
-            )
+    path.write_text(
+        'rrule = "RRULE:{}"\n'.format(rrule)
+        + "prompt = {}\nupdated_at = 1\n".format(
+            json.dumps(wanted_prompt(routine, rrule))
         )
+    )
     return path
 
 
@@ -252,7 +257,8 @@ def write_stale_automation(home, name, rrule, prompt="a stale prompt"):
 
 
 def installed_prompt(path: Path):
-    return sync.current(path.read_text())[1]
+    match = re.search(r'^prompt = (".*")$', path.read_text(), re.MULTILINE)
+    return json.loads(match.group(1))
 
 
 def keeper_env(checkout: Path, home: Path, tools: Path, launchctl: Path) -> dict:
@@ -304,14 +310,12 @@ def make_tools(tmp_path: Path, fail_bootstrap: bool = False):
     return tools, launchctl_log
 
 
-def test_keeper_installs_prompts_when_the_routine_changed(tmp_path, monkeypatch):
+def test_keeper_installs_prompts_when_the_routine_changed(tmp_path):
     bare, checkout, seed = make_install_remote(tmp_path)
     home = tmp_path / "home"
     routine = checkout / "routines" / "codex-work.md"
-    day = write_current_automation(monkeypatch, home, routine, DAY_NAME, DAY_RRULE)
-    night = write_current_automation(
-        monkeypatch, home, routine, NIGHT_NAME, NIGHT_RRULE
-    )
+    day = write_current_automation(home, routine, DAY_NAME, DAY_RRULE)
+    night = write_current_automation(home, routine, NIGHT_NAME, NIGHT_RRULE)
     before = {DAY_NAME: installed_prompt(day), NIGHT_NAME: installed_prompt(night)}
     install_launchd_copies(seed, home)
 
@@ -322,12 +326,32 @@ def test_keeper_installs_prompts_when_the_routine_changed(tmp_path, monkeypatch)
     result = run_keeper(checkout, home, tools, tools / "launchctl")
     assert result.returncode == 0, result.stderr
 
-    monkeypatch.setattr(sync, "AUTOMATIONS", home / ".codex" / "automations")
-    monkeypatch.setattr(sync, "ROUTINE", checkout / "routines" / "codex-work.md")
-    for name, path in ((DAY_NAME, day), (NIGHT_NAME, night)):
-        assert installed_prompt(path) == sync.prompt_text(name)
+    routine = checkout / "routines" / "codex-work.md"
+    for name, path, rrule in (
+        (DAY_NAME, day, DAY_RRULE),
+        (NIGHT_NAME, night, NIGHT_RRULE),
+    ):
+        assert installed_prompt(path) == wanted_prompt(routine, rrule)
         assert installed_prompt(path) != before[name]
         assert path.with_suffix(".toml.bak").is_file()
+    # Each lane's tier and idle flag follow when it fires: the all-day lane
+    # takes the cheap continuous tier with the presence proxy, the
+    # hour-restricted one the escalated tier without it.
+    day_begin = next(
+        line for line in installed_prompt(day).splitlines()
+        if "funnel.py begin" in line
+    )
+    night_begin = next(
+        line for line in installed_prompt(night).splitlines()
+        if "funnel.py begin" in line
+    )
+    assert "--tier standard" in day_begin
+    assert " --idle`" in day_begin
+    assert "--tier escalated" in night_begin
+    assert " --idle" not in night_begin
+    # Setup notes stay out of the installed prompt; only the runtime does.
+    assert installed_prompt(day).startswith("# Codex routine")
+    assert "Paste this into" not in installed_prompt(day)
     assert not launchctl_log.exists()
     assert one_readiness_record(bare) == {
         "timestamp": "Sat_Sep_12_21:00:00_2026",
@@ -339,7 +363,35 @@ def test_keeper_installs_prompts_when_the_routine_changed(tmp_path, monkeypatch)
     assert len(show_heartbeat_file(bare, "sentinel.log").splitlines()) == 1
 
 
-def test_keeper_reports_prompt_drift_it_did_not_cause(tmp_path, monkeypatch):
+def test_keeper_treats_the_stripped_trailing_newline_as_current(tmp_path):
+    """The Codex app strips the final newline when it saves an automation.
+    That alone must not read as drift."""
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    routine = checkout / "routines" / "codex-work.md"
+    day = write_current_automation(home, routine, DAY_NAME, DAY_RRULE)
+    text = day.read_text()
+    raw = re.search(r'^prompt = (".*")$', text, re.MULTILINE).group(1)
+    assert json.loads(raw).endswith("\n")
+    day.write_text(
+        text.replace(raw, json.dumps(json.loads(raw).rstrip("\n")), 1)
+    )
+    install_launchd_copies(seed, home)
+
+    tools, _ = make_tools(tmp_path)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    assert one_readiness_record(bare) == {
+        "timestamp": "Sat_Sep_12_21:00:00_2026",
+        "prompts": "yes",
+        "plists": "yes",
+        "files": "-",
+        "reload_pending": "-",
+    }
+
+
+def test_keeper_reports_prompt_drift_it_did_not_cause(tmp_path):
     """Stale prompts without a routine change are reported, not installed.
 
     The pull moved nothing, so the keeper has no install trigger; the
@@ -368,13 +420,11 @@ def test_keeper_reports_prompt_drift_it_did_not_cause(tmp_path, monkeypatch):
     }
 
 
-def test_keeper_copies_and_reloads_only_the_changed_plist(
-    tmp_path, monkeypatch
-):
+def test_keeper_copies_and_reloads_only_the_changed_plist(tmp_path):
     bare, checkout, seed = make_install_remote(tmp_path)
     home = tmp_path / "home"
     routine = checkout / "routines" / "codex-work.md"
-    day = write_current_automation(monkeypatch, home, routine, DAY_NAME, DAY_RRULE)
+    day = write_current_automation(home, routine, DAY_NAME, DAY_RRULE)
     agents = install_launchd_copies(seed, home)
     untouched = agents / UNTOUCHED_PLIST
     old_mtime = int(untouched.stat().st_mtime) - 100
@@ -406,9 +456,7 @@ def test_keeper_copies_and_reloads_only_the_changed_plist(
     }
 
 
-def test_keeper_records_a_failed_reload_and_keeps_both_records(
-    tmp_path, monkeypatch
-):
+def test_keeper_records_a_failed_reload_and_keeps_both_records(tmp_path):
     bare, checkout, seed = make_install_remote(tmp_path)
     home = tmp_path / "home"
     agents = install_launchd_copies(seed, home)
@@ -433,7 +481,7 @@ def test_keeper_records_a_failed_reload_and_keeps_both_records(
     assert len(show_heartbeat_file(bare, "sentinel.log").splitlines()) == 1
 
 
-def test_keeper_copies_but_never_reloads_itself(tmp_path, monkeypatch):
+def test_keeper_copies_but_never_reloads_itself(tmp_path):
     bare, checkout, seed = make_install_remote(tmp_path)
     home = tmp_path / "home"
     agents = install_launchd_copies(seed, home)
@@ -458,7 +506,7 @@ def test_keeper_copies_but_never_reloads_itself(tmp_path, monkeypatch):
     }
 
 
-def test_keeper_leaves_a_never_installed_plist_alone(tmp_path, monkeypatch):
+def test_keeper_leaves_a_never_installed_plist_alone(tmp_path):
     """First install belongs to the installer plus a console reload."""
     bare, checkout, seed = make_install_remote(tmp_path)
     home = tmp_path / "home"
@@ -482,7 +530,7 @@ def test_keeper_leaves_a_never_installed_plist_alone(tmp_path, monkeypatch):
     }
 
 
-def test_keeper_reports_plist_drift_without_recoping_it(tmp_path, monkeypatch):
+def test_keeper_reports_plist_drift_without_recoping_it(tmp_path):
     """A locally edited plist without a pull change is reported, not fixed."""
     bare, checkout, seed = make_install_remote(tmp_path)
     home = tmp_path / "home"

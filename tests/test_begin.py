@@ -32,6 +32,7 @@ def _bindings_never_touch_the_real_spool(monkeypatch):
     monkeypatch.setattr(heartbeat, "record_binding", lambda *args, **kwargs: "pushed")
     monkeypatch.setattr(funnel, "finished_by_comments", lambda items: set())
     monkeypatch.setattr(funnel, "reconcile_orphaned_starts", lambda *args, **kwargs: [])
+    monkeypatch.setattr(funnel, "reconcile_abandoned_claims", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         funnel,
         "implementation_packet",
@@ -784,6 +785,33 @@ def test_codex_ticket_begin_carries_the_implementation_packet_and_vendor_block(
     assert calls == [(ticket.repo, ticket.number, "codex")]
 
 
+def test_codex_begin_binds_before_loading_the_implementation_packet(
+    monkeypatch, capsys
+):
+    import heartbeat
+
+    project, ticket = _ticket(89, 88)
+    events = []
+    monkeypatch.setattr(
+        heartbeat,
+        "record_binding",
+        lambda agent, run, do, work, repo=None: (
+            events.append(("bind", work)) or "pushed"
+        ),
+    )
+
+    def packet(repo, number, agent):
+        events.append(("packet", "{}#{}".format(repo, number)))
+        return {"repo": repo, "ticket": {"number": number}}
+
+    monkeypatch.setattr(funnel, "implementation_packet", packet)
+
+    result, _ = _implementing_begin(monkeypatch, capsys, [project, ticket])
+
+    assert result["do"] == "ticket"
+    assert events == [("bind", ticket.ref), ("packet", ticket.ref)]
+
+
 def test_codex_stop_and_non_codex_ticket_do_not_carry_the_vendor_packet(
     monkeypatch, capsys
 ):
@@ -1047,6 +1075,34 @@ def test_codex_begin_takes_over_the_five_branchless_claims(monkeypatch, capsys):
         set(facts) - {result["work"]["ref"]}
     )
     assert [ref for ref, value in writes if value] == [result["work"]["ref"]]
+
+
+def test_codex_begin_reports_reconciled_abandoned_claims(
+    monkeypatch, capsys
+):
+    project, ticket = _ticket(302, 501)
+    reconciled = [{
+        "run": "abandoned",
+        "agent": "codex",
+        "ref": ticket.ref,
+        "result": "released",
+    }]
+    calls = []
+    monkeypatch.setattr(
+        funnel,
+        "reconcile_abandoned_claims",
+        lambda items, now, pr_facts: (
+            calls.append((items, now, pr_facts)) or reconciled
+        ),
+    )
+    facts = {ticket.ref: None}
+
+    result, _ = _implementing_begin(
+        monkeypatch, capsys, [project, ticket], pr_facts=facts
+    )
+
+    assert result["reconciled_claims"] == reconciled
+    assert calls == [([project, ticket], NOW, facts)]
 
 
 def test_codex_begin_reports_repo_readiness_when_work_is_withheld(

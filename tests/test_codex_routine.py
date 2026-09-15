@@ -39,11 +39,28 @@ def test_runtime_follows_the_packet_and_returns_one_structured_judgement():
     assert "the ticket is already claimed" in runtime
     assert "Treat `packet` as the implementation evidence" in normalized
     assert "Treat `vendor` as binding" in normalized
+    assert "several minutes" in funnel_wait_rule()
     assert '"done":true' in runtime
     assert '"blocked_on_human"' in runtime
     assert '"declined"' in runtime
     assert "tests the checkout, commits and pushes, opens" in runtime
     assert "outside the ticket checkout" in normalized
+
+
+def test_runtime_waits_for_the_same_slow_begin_session():
+    runtime = routine().split("\n---\n", 1)[1]
+    normalized = " ".join(runtime.split())
+
+    assert "`begin` can take several minutes" in normalized
+    assert "keep reading that same exec session until the process exits" in normalized
+    assert "Never treat that yield as a failure" in normalized
+    assert "never invoke `begin` again" in normalized
+
+
+def funnel_wait_rule() -> str:
+    import funnel
+
+    return funnel.CODEX_IMPLEMENT_VENDOR["begin_wait"]
 
 
 def test_routine_is_under_the_500_word_acceptance_limit():

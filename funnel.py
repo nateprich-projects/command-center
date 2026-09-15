@@ -80,6 +80,12 @@ CODEX_IMPLEMENT_VENDOR = {
         "directory, outside the ticket checkout, then invoke finish-ticket "
         "from the checkout with --answer-file PATH."
     ),
+    "begin_wait": (
+        "begin can take several minutes. If the exec tool yields a timeout or "
+        "partial output while the process is still running, keep reading the "
+        "same exec session until the process exits. Never treat that yield as "
+        "a failure and never invoke begin again."
+    ),
 }
 
 # One small, shared shape for every doctor check. Later doctor tickets add
@@ -9304,6 +9310,105 @@ def reconcile_orphaned_starts(
     return closed
 
 
+def reconcile_abandoned_claims(
+    items: Sequence[Item], now: datetime,
+    pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
+) -> List[Dict[str, object]]:
+    """Release heartbeat-bound claims that never produced a ticket branch.
+
+    A slow ``begin`` can outlive the Codex exec tool's first output wait. If
+    the caller walks away, that process may still claim and bind a ticket but
+    no implementation ever reaches the deterministic remote branch. The bind
+    identifies which open heartbeat start owns the claim; explicit branch
+    absence after the normal 30-minute grace makes the abandoned work safe to
+    release. Unknown branch state fails closed.
+
+    The abandoned start is finished as ``errored`` as part of the same
+    reconciliation. Otherwise the claim would recover while the watchdog kept
+    reporting a start with no matching finish. Both writes are append-only or
+    derived from GitHub state, and a later pass is idempotent because the
+    Project claim is empty.
+    """
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import heartbeat
+    except Exception:
+        return []
+
+    by_ref = {item.ref: item for item in items}
+    candidates: List[Tuple[str, Dict, str, Item]] = []
+    for agent in sorted(heartbeat.PROVIDERS):
+        if agent in heartbeat.RETIRED_AGENTS:
+            continue
+        try:
+            records = heartbeat.read(agent)
+        except Exception:
+            continue
+        bound = heartbeat.bindings(records)
+        for start in heartbeat.open_starts(records):
+            run = start.get("run")
+            binding = bound.get(run)
+            if not binding or binding.get("do") != "ticket":
+                continue
+            ref = str(binding.get("work"))
+            item = by_ref.get(ref)
+            if (
+                item is None
+                or item.state != "OPEN"
+                or item.in_motion_since is None
+                or now - item.in_motion_since < CLAIM_BRANCH_GRACE
+            ):
+                continue
+            candidates.append((agent, start, ref, item))
+
+    if not candidates:
+        return []
+    if pr_facts is None:
+        try:
+            pr_facts = ticket_pr_facts(
+                [item for _, _, _, item in candidates]
+            )
+        except GitHubError:
+            return []
+
+    reconciled: List[Dict[str, object]] = []
+    released: Set[str] = set()
+    for agent, start, ref, item in candidates:
+        if ref in released or _ticket_branch_exists(item, pr_facts) is not False:
+            continue
+        write_lock(item, "")
+        item.in_motion_since = None
+        released.add(ref)
+
+        run = start.get("run")
+        record = {
+            "run": run,
+            "agent": agent,
+            "phase": "finish",
+            "ts": int(now.timestamp()),
+            "outcome": "errored",
+            "note": (
+                "reconciled: released {} after no ticket branch activity "
+                "within 30 minutes"
+            ).format(ref),
+            "reconciled_claim": ref,
+        }
+        result: Dict[str, object] = {
+            "run": run,
+            "agent": agent,
+            "ref": ref,
+            "result": "released",
+        }
+        try:
+            result["kept"] = heartbeat.append(agent, record)
+        except Exception as exc:
+            # Instrumentation cannot put the already-released GitHub claim
+            # back. Report the missing finish explicitly in begin's JSON.
+            result["finish_error"] = str(exc)
+        reconciled.append(result)
+    return reconciled
+
+
 def reconcile_approved_merges(
     items: List[Item], now: datetime
 ) -> List[Dict[str, object]]:
@@ -9522,6 +9627,12 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             )
             print(json.dumps(out, indent=2))
             return 0
+        abandoned = attempt_reconcile(
+            "abandoned_claims", reconcile_abandoned_claims,
+            items, now, pr_facts,
+        )
+        if abandoned:
+            out["reconciled_claims"] = abandoned
         blocked = awaiting_review(items)
         # Keep the normal open-PR exclusion as the default. Only the
         # machine-readable approved-plus-conflicting state hands ownership back
@@ -9616,6 +9727,11 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     work=item_json(ticket, now, {i.ref: i for i in items}),
                 )
                 if agent == "codex":
+                    # Bind immediately after the claim, before the packet's
+                    # slower ticket/plan/verdict reads. A process abandoned
+                    # during that load is then attributable and recoverable by
+                    # the next begin's reconciliation.
+                    _bind_run(agent, out)
                     try:
                         out["packet"] = implementation_packet(
                             ticket.repo, ticket.number, agent
@@ -9637,7 +9753,8 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                         )
                     else:
                         out["vendor"] = CODEX_IMPLEMENT_VENDOR
-        _bind_run(agent, out)
+        if "bound" not in out:
+            _bind_run(agent, out)
         print(json.dumps(out, indent=2))
         return 0
 

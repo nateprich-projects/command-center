@@ -53,7 +53,11 @@ BRANCH = "heartbeat"
 #: Like the usage cache and the session transcripts, this is local and is not
 #: state of record: it is a buffer that drains into GitHub, which remains the
 #: state. Anything undrained is flushed by the next run that gets through.
-SPOOL_DIR = os.path.expanduser("~/.claude/command-center-heartbeat")
+#: ``COMMAND_CENTER_HEARTBEAT_SPOOL`` overrides the location. The test suite
+#: sets it so that every subprocess a test launches inherits a temporary spool
+#: (#876); production never sets it.
+SPOOL_DIR = os.environ.get("COMMAND_CENTER_HEARTBEAT_SPOOL") or os.path.expanduser(
+    "~/.claude/command-center-heartbeat")
 
 #: Four attempts over roughly eleven seconds. Long enough to ride out a blip,
 #: short enough not to eat a run's time when GitHub is genuinely down.

@@ -2216,7 +2216,10 @@ def _heartbeat_context(run: Optional[str], agent: Optional[str]):
     if run and agent:
         return run, agent
 
-    spool = pathlib.Path.home() / ".claude" / "command-center-heartbeat"
+    spool = pathlib.Path(
+        os.environ.get("COMMAND_CENTER_HEARTBEAT_SPOOL")
+        or pathlib.Path.home() / ".claude" / "command-center-heartbeat"
+    )
     records = []
     try:
         for path in sorted(spool.glob("*.jsonl")):
@@ -3195,7 +3198,10 @@ CLAUDE_ESTIMATE_MODEL = "opus"
 # These mirror `heartbeat.py:38` and `heartbeat.py:52`. They are intentionally
 # local constants so doctor still works when heartbeat.py itself is unavailable.
 HEARTBEAT_BRANCH = "heartbeat"
-HEARTBEAT_SPOOL = pathlib.Path.home() / ".claude" / "command-center-heartbeat"
+HEARTBEAT_SPOOL = pathlib.Path(
+    os.environ.get("COMMAND_CENTER_HEARTBEAT_SPOOL")
+    or pathlib.Path.home() / ".claude" / "command-center-heartbeat"
+)
 HEARTBEAT_FIX = "restore GitHub access so the heartbeat branch and local spool can drain"
 AUTH_LOGIN_FIX = "gh auth login"
 AUTH_SCOPE_FIX = "gh auth refresh -s project"

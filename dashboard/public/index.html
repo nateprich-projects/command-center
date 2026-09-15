@@ -10,21 +10,32 @@
   </head>
   <body>
     <header class="masthead">
-      <div>
+      <div class="masthead-text">
         <p class="eyebrow">Command Center</p>
         <h1>Funnel</h1>
+        <p id="snapshot-status" class="snapshot-status" role="status">Loading snapshot…</p>
       </div>
-      <button id="refresh" type="button">Request refresh</button>
+      <button id="refresh" type="button">Refresh</button>
     </header>
-    <p id="snapshot-status" class="snapshot-status" role="status">Loading snapshot…</p>
     <main>
-      <section aria-labelledby="brief-heading">
-        <h2 id="brief-heading">Waiting on Nate</h2>
-        <div id="brief"></div>
+      <section class="panel" aria-labelledby="waiting-heading">
+        <div class="panel-head">
+          <h2 id="waiting-heading">Waiting on you</h2>
+          <span id="waiting-count" class="count"></span>
+        </div>
+        <div id="waiting"></div>
       </section>
-      <section aria-labelledby="board-heading">
-        <h2 id="board-heading">Projects</h2>
-        <div id="board" class="board"></div>
+      <section class="panel" aria-labelledby="board-heading">
+        <div class="panel-head">
+          <h2 id="board-heading">Projects</h2>
+          <div class="legend" aria-label="Pip legend">
+            <span class="legend-item"><i class="pip pip-open"></i>open</span>
+            <span class="legend-item"><i class="pip pip-submitted"></i>PR submitted</span>
+            <span class="legend-item"><i class="pip pip-approved"></i>PR approved</span>
+            <span class="legend-item"><i class="pip pip-closed"></i>closed</span>
+          </div>
+        </div>
+        <div id="board"></div>
       </section>
     </main>
     <template id="empty-state">

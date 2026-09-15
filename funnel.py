@@ -5848,23 +5848,101 @@ def _dashboard_stage_age(item: Item, now: datetime) -> str:
     return humanise(max(timedelta(0), now - since))
 
 
+#: Who owes the next move on a ticket, for the dashboard's owner flag. These
+#: are display names for the reader, derived from facts the funnel already
+#: holds: the capability marker, the PR and its verdict, and the risk tier.
+OWNER_NATE = "Nate"
+OWNER_CLAUDE = "Claude"
+OWNER_MUSE = "Muse"
+OWNER_CODEX = "Codex"
+
+
+def _dashboard_ticket(
+    item: Item,
+    pr_fact: Optional[Mapping[str, object]],
+    verdict: Optional[Mapping[str, object]],
+) -> Dict[str, object]:
+    """One ticket row for the dashboard, with its PR, tier and owner flags.
+
+    ``pr_fact`` is the row this ticket's PR already produced for the brief's
+    shared scan, so this adds no per-ticket read. ``verdict`` is looked up by
+    the caller for open PRs only, which bounds the cost by open pull requests
+    rather than by board size.
+    """
+    body = item.body or ""
+    reason = parse_human_step(body)
+    tier = "escalated" if escalation_reasons(item.title, body) else "standard"
+
+    pr_state = str((pr_fact or {}).get("state") or "").upper()
+    pr_number = (pr_fact or {}).get("number")
+    head = (pr_fact or {}).get("headRefOid")
+    pr: Optional[str] = None
+    if pr_state == "MERGED":
+        pr = "merged"
+    elif pr_state == "OPEN":
+        approved = (
+            isinstance(verdict, dict)
+            and verdict.get("verdict") == "approved"
+            and verdict_covers_head(verdict, head)
+        )
+        pr = "approved" if approved else "submitted"
+
+    if item.state != "OPEN":
+        owner: Optional[str] = None
+    elif item.is_blocked:
+        owner = None
+    elif reason == MACHINE_LOCAL_REASON:
+        owner = OWNER_CLAUDE
+    elif reason is not None:
+        owner = OWNER_NATE
+    elif pr == "submitted" or pr == "approved":
+        # An open PR is the reviewer's move, whichever engine wrote it.
+        owner = OWNER_MUSE
+    elif tier == "escalated":
+        owner = OWNER_MUSE
+    else:
+        owner = OWNER_CODEX
+
+    return {
+        "ref": item.ref,
+        "number": item.number,
+        "title": item.title,
+        "url": item.url,
+        "state": item.state,
+        "pr": pr,
+        "pr_number": pr_number if isinstance(pr_number, int) else None,
+        "tier": tier,
+        "owner": owner,
+        "blocked": bool(item.is_blocked),
+        "human_step": reason,
+    }
+
+
 def _dashboard_item(
-    item: Item, now: datetime, by_ref: Dict[str, Item]
+    item: Item,
+    now: datetime,
+    by_ref: Dict[str, Item],
+    tickets: Optional[List[Dict[str, object]]] = None,
 ) -> Dict[str, object]:
     """Render the small parent-project row consumed by the dashboard page."""
     return {
         "repo": item.repo.rsplit("/", 1)[-1],
+        "ref": item.ref,
         "title": item.title,
         "url": item.url,
         "class": effective_class(item, by_ref),
+        "pinned": bool(item.pinned),
         "waited": _dashboard_stage_age(item, now),
         "tickets_closed": item.children_done,
         "tickets_total": item.children_total,
+        "tickets": list(tickets or ()),
     }
 
 
 def dashboard_board(
-    items: Iterable[Item], now: datetime
+    items: Iterable[Item],
+    now: datetime,
+    pr_facts: Optional[Mapping[str, Optional[Mapping[str, object]]]] = None,
 ) -> Dict[str, List[Dict[str, object]]]:
     """Build the ordered parent-project board for one already-loaded brief.
 
@@ -5900,12 +5978,43 @@ def dashboard_board(
             and item.closed_at >= done_cutoff
         )
 
+    children: Dict[str, List[Item]] = {}
+    for row in rows:
+        if row.parent:
+            children.setdefault(row.parent, []).append(row)
+
+    facts = dict(pr_facts or {})
+    verdicts: Dict[str, Optional[Dict]] = {}
+
+    def verdict_for(ticket: Item) -> Optional[Dict]:
+        """Read a verdict only for a ticket whose PR is open (bounded cost)."""
+        fact = facts.get(ticket.ref) or {}
+        if str(fact.get("state") or "").upper() != "OPEN":
+            return None
+        if "verdict" in fact:
+            found = fact.get("verdict")
+            return found if isinstance(found, dict) else None
+        if ticket.ref in verdicts:
+            return verdicts[ticket.ref]
+        number = fact.get("number")
+        found = latest_verdict(ticket.repo, number) if number else None
+        verdicts[ticket.ref] = found
+        return found
+
+    def ticket_rows(parent: Item) -> List[Dict[str, object]]:
+        return [
+            _dashboard_ticket(child, facts.get(child.ref), verdict_for(child))
+            for child in sorted(
+                children.get(parent.ref, ()), key=lambda c: c.number
+            )
+        ]
+
     return {
         "columns": [
             {
                 "stage": stage,
                 "items": [
-                    _dashboard_item(item, now, by_ref)
+                    _dashboard_item(item, now, by_ref, ticket_rows(item))
                     for item in sorted(
                         (item for item in rows if include(item, stage)),
                         key=board_key,
@@ -11208,7 +11317,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         generated_at = now.isoformat()
                     write_dashboard_snapshot(
                         brief_payload,
-                        dashboard_board(items, now),
+                        dashboard_board(items, now, pr_facts=pr_facts),
                         generated_at,
                     )
                 except Exception as exc:

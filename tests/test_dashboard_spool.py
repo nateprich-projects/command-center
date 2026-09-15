@@ -86,12 +86,15 @@ def test_dashboard_board_contains_ordered_parent_projects_and_recent_done_only()
     ]
     assert ready[0] == {
         "repo": "command-center",
+        "ref": older_ready.ref,
         "title": older_ready.title,
         "url": older_ready.url,
         "class": "New",
+        "pinned": False,
         "waited": "8 days",
         "tickets_closed": 0,
         "tickets_total": 0,
+        "tickets": [],
     }
 
 
@@ -124,12 +127,15 @@ def test_successful_brief_spools_without_changing_stdout(
     assert snapshot["brief"] == json.loads(expected)
     assert snapshot["board"]["columns"][3]["items"] == [{
         "repo": "command-center",
+        "ref": project.ref,
         "title": project.title,
         "url": project.url,
         "class": "New",
+        "pinned": False,
         "waited": "7 days",
         "tickets_closed": 1,
         "tickets_total": 3,
+        "tickets": [],
     }]
     assert snapshot["generated_at"] == json.loads(expected)["generated_at"]
 

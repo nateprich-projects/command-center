@@ -246,6 +246,8 @@ def base_argv(tmp_path, kv, spool_dir):
             str(fake_brief),
             "--lock-file",
             str(tmp_path / "publisher.lock"),
+            "--deploy-state-file",
+            str(tmp_path / "deploy-state.json"),
         ],
         fake_brief,
     )
@@ -263,6 +265,7 @@ def run_publisher(argv, monkeypatch, capsys):
         "COMMAND_CENTER_DASHBOARD_API_BASE",
         "COMMAND_CENTER_DASHBOARD_FUNNEL_PY",
         "COMMAND_CENTER_DASHBOARD_LOCK",
+        "COMMAND_CENTER_DASHBOARD_DEPLOY_STATE_FILE",
     ):
         monkeypatch.delenv(name, raising=False)
     code = publisher.main(argv)
@@ -655,6 +658,79 @@ def test_namespace_id_missing_binding_raises(tmp_path):
     path.write_text('name = "x"\n')
     with pytest.raises(publisher.PublisherError):
         publisher.namespace_id_from_wrangler(path)
+
+
+def write_deploy_state(path, namespace_id):
+    path.write_text(
+        json.dumps({"deployed_sha": "a" * 40, "namespace_id": namespace_id})
+        + "\n"
+    )
+    return path
+
+
+def test_namespace_falls_back_to_the_id_the_deployer_recorded(tmp_path):
+    """main keeps the placeholder on purpose, so the deployer's state file is
+    the only place the real id exists (#895)."""
+    wrangler = write_wrangler_toml(
+        tmp_path / "wrangler.toml",
+        namespace=publisher.PLACEHOLDER_NAMESPACE_ID,
+    )
+    state = write_deploy_state(tmp_path / "state.json", "real-namespace-id")
+    assert publisher.resolve_namespace_id(None, wrangler, state) == (
+        "real-namespace-id")
+
+
+def test_a_real_wrangler_id_wins_over_the_deploy_state(tmp_path):
+    wrangler = write_wrangler_toml(tmp_path / "wrangler.toml")
+    state = write_deploy_state(tmp_path / "state.json", "stale-id")
+    assert publisher.resolve_namespace_id(None, wrangler, state) == (
+        FAKE_NAMESPACE)
+
+
+def test_an_explicit_namespace_wins_over_both(tmp_path):
+    wrangler = write_wrangler_toml(tmp_path / "wrangler.toml")
+    state = write_deploy_state(tmp_path / "state.json", "stale-id")
+    assert publisher.resolve_namespace_id("flag-id", wrangler, state) == (
+        "flag-id")
+
+
+def test_the_placeholder_with_no_deploy_state_raises(tmp_path):
+    wrangler = write_wrangler_toml(
+        tmp_path / "wrangler.toml",
+        namespace=publisher.PLACEHOLDER_NAMESPACE_ID,
+    )
+    with pytest.raises(publisher.PublisherError) as excinfo:
+        publisher.resolve_namespace_id(
+            None, wrangler, tmp_path / "missing.json")
+    assert publisher.PLACEHOLDER_NAMESPACE_ID in str(excinfo.value)
+
+
+def test_a_state_file_still_holding_the_placeholder_is_no_id(tmp_path):
+    state = write_deploy_state(
+        tmp_path / "state.json", publisher.PLACEHOLDER_NAMESPACE_ID)
+    assert publisher.namespace_id_from_deploy_state(state) is None
+    assert publisher.namespace_id_from_deploy_state(
+        tmp_path / "missing.json") is None
+
+
+def test_a_placeholder_tick_fails_without_calling_cloudflare(
+    tmp_path, kv, monkeypatch, capsys
+):
+    """The wedge this fixes: 400s every minute against the placeholder."""
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    write_spool_entry(spool, "entry.json", seconds_ago=30)
+    argv, _ = base_argv(tmp_path, kv, spool)
+    write_wrangler_toml(
+        tmp_path / "wrangler.toml",
+        namespace=publisher.PLACEHOLDER_NAMESPACE_ID,
+    )
+
+    code, _, err = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 1
+    assert kv.calls == []
+    assert publisher.PLACEHOLDER_NAMESPACE_ID in err
 
 
 def test_publisher_imports_no_agent_code():

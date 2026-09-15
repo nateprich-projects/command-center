@@ -25,7 +25,12 @@ Configuration, in precedence order (flag, environment, file, default):
 - account: ``--account-id``, ``CLOUDFLARE_ACCOUNT_ID``, then ``.env``.
 - namespace: ``--namespace-id``, ``FUNNEL_KV_NAMESPACE_ID``, then the ``id``
   of the ``FUNNEL_SNAPSHOT`` binding in ``dashboard/wrangler.toml`` (#653 owns
-  that value).
+  that value), and finally — when that id is still the ``local-funnel-snapshot``
+  placeholder ``main`` deliberately keeps — the ``namespace_id`` the deployer
+  recorded in its state file (``--deploy-state-file``,
+  ``COMMAND_CENTER_DASHBOARD_DEPLOY_STATE_FILE``, then the deployer's own
+  default). Without that fallback the publisher sends Cloudflare the
+  placeholder and is rejected on every tick (#895).
 - spool dir, lock file, API base, and funnel.py path each take a ``--`` flag
   or a ``COMMAND_CENTER_DASHBOARD_*`` variable.
 
@@ -77,6 +82,12 @@ DEFAULT_API_BASE = "https://api.cloudflare.com/client/v4"
 TOKEN_ENV = "CLOUDFLARE_API_TOKEN"
 ACCOUNT_ENV = "CLOUDFLARE_ACCOUNT_ID"
 NAMESPACE_ENV = "FUNNEL_KV_NAMESPACE_ID"
+#: ``main`` keeps this placeholder in ``dashboard/wrangler.toml`` on purpose
+#: (#653): the deployer patches the real id into its own worktree copy and
+#: never writes to ``main``. ``dashboard_deploy`` imports it from here so the
+#: two modules cannot disagree about what "not a real id" looks like.
+PLACEHOLDER_NAMESPACE_ID = "local-funnel-snapshot"
+DEPLOY_STATE_ENV = "COMMAND_CENTER_DASHBOARD_DEPLOY_STATE_FILE"
 
 
 class PublisherError(Exception):
@@ -156,6 +167,65 @@ def namespace_id_from_wrangler(path: Path,
     raise PublisherError(
         "no [[kv_namespaces]] id for binding {!r} in {}".format(
             binding, path))
+
+
+def _default_deploy_state_file() -> Path:
+    """Return the state file the #653 deployer writes on this Mac."""
+    return (Path.home() / ".claude" / "command-center-dashboard-deploy"
+            / "state.json")
+
+
+def namespace_id_from_deploy_state(path: Path) -> Optional[str]:
+    """Return the namespace id the deployer recorded, or None.
+
+    The deployer creates the namespace and records its id here; ``main``
+    keeps the placeholder. A missing file means no deploy has run yet, which
+    is not an error — the caller decides what to do without an id.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise PublisherError(
+            "cannot read deploy state file {}: {}".format(path, exc))
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        raise PublisherError(
+            "deploy state file {} is not parseable JSON".format(path))
+    if not isinstance(payload, dict):
+        raise PublisherError(
+            "deploy state file {} does not hold an object".format(path))
+    value = payload.get("namespace_id")
+    if (not isinstance(value, str) or not value
+            or value == PLACEHOLDER_NAMESPACE_ID):
+        return None
+    return value
+
+
+def resolve_namespace_id(namespace_id: Optional[str], wrangler_toml: Path,
+                         deploy_state_file: Path) -> str:
+    """Return the KV namespace id to publish into.
+
+    Flag and environment win, then a real id on ``main``. When ``main``
+    still carries the placeholder, fall back to the id the deployer
+    recorded, so the publisher stops sending Cloudflare a namespace it
+    will reject (#895).
+    """
+    explicit = namespace_id or os.environ.get(NAMESPACE_ENV)
+    if explicit:
+        return explicit
+    from_toml = namespace_id_from_wrangler(wrangler_toml)
+    if from_toml != PLACEHOLDER_NAMESPACE_ID:
+        return from_toml
+    recorded = namespace_id_from_deploy_state(deploy_state_file)
+    if recorded:
+        return recorded
+    raise PublisherError(
+        "{} still carries the {!r} placeholder and {} records no "
+        "namespace_id; the deployer has not created the namespace yet"
+        .format(wrangler_toml, PLACEHOLDER_NAMESPACE_ID, deploy_state_file))
 
 
 def parse_generated_at(value: object) -> Optional[float]:
@@ -411,6 +481,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--env-file", default=None)
     parser.add_argument("--wrangler-toml", default=None)
     parser.add_argument("--namespace-id", default=None)
+    parser.add_argument("--deploy-state-file", default=None)
     parser.add_argument("--account-id", default=None)
     parser.add_argument("--api-base", default=None)
     parser.add_argument("--funnel-py", default=None)
@@ -431,7 +502,8 @@ def _remote_epoch(remote: bytes) -> Optional[float]:
 
 def tick(spool_dir: Path, env_file: Path, wrangler_toml: Path,
          namespace_id: Optional[str], account_id: Optional[str],
-         api_base: str, funnel_py: Path, brief_timeout: float) -> int:
+         api_base: str, funnel_py: Path, brief_timeout: float,
+         deploy_state_file: Optional[Path] = None) -> int:
     dotenv = parse_dotenv(env_file)
     token = os.environ.get(TOKEN_ENV) or dotenv.get(TOKEN_ENV)
     if not token:
@@ -444,10 +516,10 @@ def tick(spool_dir: Path, env_file: Path, wrangler_toml: Path,
         raise PublisherError(
             "{} is not set and {} has no value for it".format(
                 ACCOUNT_ENV, env_file))
-    namespace = (
-        namespace_id or os.environ.get(NAMESPACE_ENV)
-        or namespace_id_from_wrangler(wrangler_toml)
-    )
+    namespace = resolve_namespace_id(
+        namespace_id, wrangler_toml,
+        deploy_state_file if deploy_state_file is not None
+        else _default_deploy_state_file())
     kv = KVClient(api_base, account, namespace, token)
     now = time.time()
 
@@ -523,6 +595,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.wrangler_toml, "COMMAND_CENTER_DASHBOARD_WRANGLER_TOML",
         str(_repo_root() / "dashboard" / "wrangler.toml"),
     )).expanduser()
+    deploy_state_file = Path(_option(
+        args.deploy_state_file, DEPLOY_STATE_ENV,
+        str(_default_deploy_state_file()),
+    )).expanduser()
     funnel_py = Path(_option(
         args.funnel_py, "COMMAND_CENTER_DASHBOARD_FUNNEL_PY",
         str(_repo_root() / "funnel.py"),
@@ -554,6 +630,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             api_base=api_base,
             funnel_py=funnel_py,
             brief_timeout=brief_timeout,
+            deploy_state_file=deploy_state_file,
         )
     except (PublisherError, KVError) as exc:
         log("error: {}".format(exc))

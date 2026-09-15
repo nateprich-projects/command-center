@@ -191,7 +191,8 @@ class Wiring:
     def _review(self, repo, pr, verdict, ci, blocking, note,
                 run=None, agent=None):
         self.reviews.append({"repo": repo, "pr": pr, "verdict": verdict,
-                             "ci": ci, "blocking": blocking, "note": note})
+                             "ci": ci, "blocking": blocking, "note": note,
+                             "run": run, "agent": agent})
         return 0
 
     def _merge(self, items, now, repo, pr, confirmed):
@@ -211,7 +212,8 @@ def test_approved_records_then_merges_and_closes(monkeypatch, capsys):
                    ["7", "--repo", REPO, "--answer", "-"], stdin=answer())
     assert code == 0
     assert wiring.reviews == [{"repo": REPO, "pr": 7, "verdict": "approved",
-                               "ci": "unknown", "blocking": [], "note": None}]
+                               "ci": "unknown", "blocking": [], "note": None,
+                               "run": None, "agent": None}]
     # Confirmed: the gate merges and cmd_merge closes the ticket.
     assert wiring.merges == [{"items": ["items"], "repo": REPO, "pr": 7,
                               "confirmed": True}]
@@ -226,6 +228,19 @@ def test_approved_carries_the_packet_ci_state(monkeypatch, capsys):
     assert wiring.reviews[0]["ci"] == "green"
 
 
+def test_a_verdict_carries_the_run_and_agent_provenance(monkeypatch, capsys):
+    wiring = Wiring(monkeypatch)
+    code = run_cli(
+        monkeypatch, capsys,
+        ["7", "--repo", REPO, "--answer", "-", "--run", "run-897",
+         "--agent", "muse"],
+        stdin=answer(verdict="rejected", blocking=["fix this"]),
+    )
+    assert code == 0
+    assert wiring.reviews[0]["run"] == "run-897"
+    assert wiring.reviews[0]["agent"] == "muse"
+
+
 def test_rejected_records_with_blocking_and_never_merges(monkeypatch, capsys):
     wiring = Wiring(monkeypatch)
     code = run_cli(
@@ -234,7 +249,7 @@ def test_rejected_records_with_blocking_and_never_merges(monkeypatch, capsys):
     assert code == 0
     assert wiring.reviews == [{"repo": REPO, "pr": 7, "verdict": "rejected",
                                "ci": "unknown", "blocking": ["fix this"],
-                               "note": None}]
+                               "note": None, "run": None, "agent": None}]
     assert wiring.merges == []
 
 
@@ -342,6 +357,8 @@ def test_final_malformed_answer_records_rejected_with_raw_output(
     recorded = wiring.reviews[0]
     assert recorded["verdict"] == "rejected"
     assert recorded["note"] == raw
+    assert recorded["run"] is None
+    assert recorded["agent"] is None
     assert "could not be parsed" in recorded["blocking"][0]
     assert "invalid JSON" in recorded["blocking"][0]
     assert wiring.merges == []
@@ -474,4 +491,3 @@ def test_validate_only_final_malformed_exits_1_without_recording(
     out = capsys.readouterr()
     assert "invalid JSON" in out.err
     assert review_apply.ERRORED_OUTCOME not in out.out
-

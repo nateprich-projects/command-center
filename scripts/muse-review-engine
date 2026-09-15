@@ -729,7 +729,7 @@ if [[ "$PACKET_PASS" != "True" ]]; then
   fi
   if python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
       --answer "$ANSWER_FILE" --ci "$PACKET_CI" --head "$PACKET_HEAD" \
-      --attempt 1 >"$DIAG_FILE" 2>&1; then
+      --attempt 1 --run "$BEGIN_RUN" --agent muse >"$DIAG_FILE" 2>&1; then
     finish_done "reviewed PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: rejected without a model call ($REASON_COUNT precheck reason(s))"
     exit 0
   fi
@@ -826,7 +826,8 @@ while true; do
   # (No `set -e`, so the bare failing call below does not abort the run.)
   python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
       --answer "$ANSWER_FILE" --ci "$PACKET_CI" --head "$PACKET_HEAD" \
-      --attempt "$ATTEMPT" >"$DIAG_FILE" 2>&1
+      --attempt "$ATTEMPT" --run "$BEGIN_RUN" --agent muse \
+      >"$DIAG_FILE" 2>&1
   apply_status=$?
   if (( apply_status == 0 )); then
     VERDICT="$(recorded_verdict)"

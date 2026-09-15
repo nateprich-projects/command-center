@@ -691,6 +691,8 @@ def test_a_failing_precheck_applies_rejected_without_calling_muse(tmp_path):
     assert "--answer" in calls[0] and "--attempt 1" in calls[0]
     assert "--ci red" in calls[0]
     assert "--head {}".format(HEAD) in calls[0]
+    assert "--run engine-run" in calls[0]
+    assert "--agent muse" in calls[0]
     applied = json.loads((repo / "apply.answer").read_text())
     assert applied == {"verdict": "rejected",
                        "blocking": ["ci: CI not green (state red): tests",
@@ -734,6 +736,8 @@ def test_an_approval_is_applied_and_finished_done(tmp_path):
     assert len(calls) == 1
     assert "--attempt 1" in calls[0]
     assert "--ci green" in calls[0]
+    assert "--run engine-run" in calls[0]
+    assert "--agent muse" in calls[0]
     assert (repo / "applied.marker").exists()
     assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
         "approved"

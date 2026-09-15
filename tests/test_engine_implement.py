@@ -333,7 +333,9 @@ def test_funnel_finish_ticket_forwards_without_importing_engine(monkeypatch):
         return SimpleNamespace(returncode=7)
 
     monkeypatch.setattr(funnel.subprocess, "run", fake_run)
-    assert funnel.main(["finish-ticket", "--answer", "answer.json", "--run", "r"]) == 7
+    assert funnel.main([
+        "finish-ticket", "--answer-file", "answer.json", "--run", "r"
+    ]) == 7
     assert seen[0][0] == sys.executable
     assert pathlib.Path(seen[0][1]).name == "finish-ticket"
 
@@ -538,6 +540,7 @@ def test_finish_declined_labels_comments_releases_and_finishes(
 def test_finish_main_routes_blocked_and_declined_answers(
         tmp_path, monkeypatch, capsys):
     routed = {}
+    monkeypatch.setattr(implement, "_recover_answer_error", lambda *a, **k: False)
 
     def fake_blocked(blocked_answer, **kwargs):
         routed["blocked"] = (blocked_answer, kwargs)
@@ -553,7 +556,7 @@ def test_finish_main_routes_blocked_and_declined_answers(
     path = tmp_path / "answer.json"
     path.write_text(json.dumps(blocked()))
     assert implement.finish_main(
-        ["--answer", str(path), "--run", "run-42",
+        ["--answer-file", str(path), "--run", "run-42",
          "--agent", "muse", "--repo", REPO]) == 0
     assert routed["blocked"][0] == blocked()["blocked_on_human"]
     assert routed["blocked"][1]["run"] == "run-42"
@@ -562,13 +565,87 @@ def test_finish_main_routes_blocked_and_declined_answers(
 
     path.write_text(json.dumps({"declined": "stale"}))
     assert implement.finish_main(
-        ["--answer", str(path), "--run", "run-42"]) == 0
+        ["--answer-file", str(path), "--run", "run-42"]) == 0
     assert routed["declined"][0] == "stale"
     assert json.loads(capsys.readouterr().out)["declined"] == "stale"
 
     path.write_text(json.dumps({"unknown": True}))
     assert implement.finish_main(
-        ["--answer", str(path), "--run", "run-42"]) == 1
+        ["--answer-file", str(path), "--run", "run-42"]) == 1
+
+
+def test_finish_main_accepts_inline_json(monkeypatch, capsys):
+    routed = {}
+
+    def fake_done(found, **kwargs):
+        routed["done"] = (found, kwargs)
+        return {"number": 91}
+
+    monkeypatch.setattr(implement, "finish_done", fake_done)
+    raw = json.dumps(answer())
+    assert implement.finish_main([
+        "--answer", raw, "--run", "run-42", "--repo", REPO,
+    ]) == 0
+    assert routed["done"][0] == answer()
+    assert routed["done"][1]["run"] == "run-42"
+    assert json.loads(capsys.readouterr().out) == {"number": 91}
+
+
+def test_finish_main_still_accepts_answer_on_stdin(monkeypatch, capsys):
+    routed = {}
+    monkeypatch.setattr(
+        implement.sys, "stdin",
+        SimpleNamespace(read=lambda: json.dumps(answer())),
+    )
+    monkeypatch.setattr(
+        implement, "finish_done",
+        lambda found, **kwargs: routed.update(answer=found) or {"number": 91},
+    )
+
+    assert implement.finish_main([
+        "--answer", "-", "--run", "run-42", "--repo", REPO,
+    ]) == 0
+    assert routed["answer"] == answer()
+    assert json.loads(capsys.readouterr().out) == {"number": 91}
+
+
+@pytest.mark.parametrize(
+    ("answer_text", "error"),
+    ((None, "cannot read answer"), ("not json", "answer is not valid JSON")),
+)
+def test_unreadable_answer_keeps_dirty_work_releases_and_finishes_errored(
+        tmp_path, monkeypatch, capsys, answer_text, error):
+    remote, clone = make_clone(tmp_path)
+    (clone / "implemented.txt").write_text("done\n")
+    answer_path = tmp_path / "handoff.json"
+    if answer_text is not None:
+        answer_path.write_text(answer_text)
+    effects = {"released": [], "finished": []}
+    monkeypatch.chdir(clone)
+    monkeypatch.setattr(implement, "release_claim", effects["released"].append)
+    monkeypatch.setattr(
+        implement, "finish_heartbeat",
+        lambda *args: effects["finished"].append(args),
+    )
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-42",
+        "--repo", REPO,
+    ]) == 1
+
+    assert error in capsys.readouterr().err
+    assert effects["released"] == [REPO + "#42"]
+    (finished,) = effects["finished"]
+    assert finished[:3] == ("codex", "run-42", "errored")
+    assert "answer error: " + error in finished[3]
+    assert "work kept on ticket/42" in finished[3]
+    assert finished[4] == REPO + "#42"
+    assert run_git(
+        "--git-dir", str(remote), "show", "ticket/42:implemented.txt"
+    ).stdout == "done\n"
+    assert run_git(
+        "--git-dir", str(remote), "log", "-1", "--format=%s", "ticket/42"
+    ).stdout.strip() == "WIP #42: answer unreadable"
 
 
 # --- Per-repo test command resolution (#871) ---

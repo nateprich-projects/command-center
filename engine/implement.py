@@ -164,16 +164,12 @@ def packet_main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
-def read_answer(path: str) -> dict:
-    """Read and validate one structured implementation answer.
+def parse_answer(raw: str) -> dict:
+    """Validate one structured implementation answer.
 
     Exactly one shape: the done answer, the blocked_on_human answer, or
     the declined answer. Anything mixed or unknown fails closed.
     """
-    try:
-        raw = sys.stdin.read() if path == "-" else pathlib.Path(path).read_text()
-    except OSError as exc:
-        raise ImplementError("cannot read answer {}: {}".format(path, exc))
     try:
         answer = json.loads(raw)
     except ValueError as exc:
@@ -192,6 +188,15 @@ def read_answer(path: str) -> dict:
         return {"declined": reason.strip()}
     raise ImplementError(
         "answer must be a done, blocked_on_human, or declined answer")
+
+
+def read_answer(path: str) -> dict:
+    """Read a structured answer from ``path`` (or stdin) and validate it."""
+    try:
+        raw = sys.stdin.read() if path == "-" else pathlib.Path(path).read_text()
+    except OSError as exc:
+        raise ImplementError("cannot read answer {}: {}".format(path, exc))
+    return parse_answer(raw)
 
 
 def _read_done_answer(answer: dict) -> dict:
@@ -903,7 +908,8 @@ def _failure_note(exc: ImplementError, kept: str = "") -> str:
     return note
 
 
-def _keep_work(root: pathlib.Path, number: int, branch: str) -> str:
+def _keep_work(root: pathlib.Path, number: int, branch: str, *,
+               reason: str = "tests failing") -> str:
     """Commit and push whatever the run produced, so a failure loses time only.
 
     Never opens a PR. Returns a short phrase for the heartbeat note.
@@ -912,7 +918,7 @@ def _keep_work(root: pathlib.Path, number: int, branch: str) -> str:
         if _run(["git", "status", "--porcelain"], cwd=root).stdout.strip():
             _run(["git", "add", "-A"], cwd=root)
             _run(["git", "commit", "-m",
-                  "WIP #{}: tests failing".format(number)], cwd=root)
+                  "WIP #{}: {}".format(number, reason)], cwd=root)
         ahead = _run(["git", "rev-list", "--count", "origin/main..HEAD"],
                      cwd=root).stdout.strip()
         if not ahead.isdigit() or int(ahead) < 1:
@@ -922,6 +928,36 @@ def _keep_work(root: pathlib.Path, number: int, branch: str) -> str:
     except ImplementError as exc:
         first = str(exc).splitlines()[0] if str(exc) else "unknown error"
         return "work NOT kept: {}".format(first[:120])
+
+
+def _recover_answer_error(
+        exc: ImplementError, *, run: str, agent: str = "codex",
+        repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
+        release: Callable[[str], None] = release_claim,
+        heartbeat_finish: Callable[[str, str, str, str, str], None]
+        = finish_heartbeat) -> bool:
+    """Keep a dirty checkout and close its run after an unreadable answer.
+
+    A clean checkout retains the old fail-closed behaviour: there is no model
+    work to preserve, so this helper performs no side effects and returns
+    false.  Dirty work follows the same WIP-push path as a test failure, but
+    the heartbeat names the answer error that prevented validation.
+    """
+    context = checkout_context(cwd)
+    if not _run(["git", "status", "--porcelain"],
+                cwd=context["root"]).stdout.strip():
+        return False
+    resolved = resolve_checkout_repo(context["root"], repo)
+    ref = "{}#{}".format(resolved, context["number"])
+    kept = _keep_work(
+        context["root"], context["number"], context["branch"],
+        reason="answer unreadable",
+    )
+    release(ref)
+    first = str(exc).splitlines()[0] if str(exc) else "unknown answer error"
+    note = "answer error: {} | {}".format(first[:200], kept)
+    heartbeat_finish(agent, run, "errored", note, ref)
+    return True
 
 
 def finish_done(answer: dict, *, run: str, agent: str = "codex",
@@ -1076,8 +1112,15 @@ def finish_main(argv: Optional[Sequence[str]] = None) -> int:
         description="publish, block, or decline one ticket, then release "
                     "and finish its run"
     )
-    parser.add_argument("--answer", required=False, default=None,
-                        help="structured answer file, or - for stdin")
+    answer_group = parser.add_mutually_exclusive_group()
+    answer_group.add_argument(
+        "--answer", required=False, default=None,
+        help="structured answer as inline JSON, or - for stdin",
+    )
+    answer_group.add_argument(
+        "--answer-file", required=False, default=None,
+        help="path to a file containing the structured answer",
+    )
     parser.add_argument("--run", required=False, default=None,
                         help="bound heartbeat run id")
     parser.add_argument("--agent", default="codex",
@@ -1092,10 +1135,34 @@ def finish_main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
     if args.dry_run:
         return dry_run_main()
-    if not args.answer or not args.run:
-        parser.error("--answer and --run are required without --dry-run")
+    if (args.answer is None and args.answer_file is None) or not args.run:
+        parser.error(
+            "one of --answer/--answer-file and --run are required "
+            "without --dry-run")
     try:
-        answer = read_answer(args.answer)
+        if args.answer_file is not None:
+            answer = read_answer(args.answer_file)
+        elif args.answer == "-":
+            answer = read_answer("-")
+        else:
+            answer = parse_answer(args.answer)
+    except ImplementError as exc:
+        try:
+            _recover_answer_error(
+                exc, run=args.run, agent=args.agent, repo=args.repo,
+                release=release_claim, heartbeat_finish=finish_heartbeat,
+            )
+        except (funnel.GitHubError, ImplementError, OSError,
+                subprocess.SubprocessError) as recovery_exc:
+            print(
+                "finish-ticket: {}; answer-error recovery failed: {}".format(
+                    exc, recovery_exc),
+                file=sys.stderr,
+            )
+            return 1
+        print("finish-ticket: {}".format(exc), file=sys.stderr)
+        return 1
+    try:
         if "done" in answer:
             result = finish_done(
                 answer, run=args.run, agent=args.agent, repo=args.repo,

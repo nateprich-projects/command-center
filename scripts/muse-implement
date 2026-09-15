@@ -353,7 +353,7 @@ fi
 # blocked or declined path), releases the claim, and finishes the run. A
 # failure there may already have released and finished — the test-failure
 # path does — so the fallback below must tolerate both being done.
-if ! (cd "$WORKSPACE" && python3 "$REPO/finish-ticket" --answer "$ANSWER_FILE" \
+if ! (cd "$WORKSPACE" && python3 "$REPO/finish-ticket" --answer-file "$ANSWER_FILE" \
     --run "$BEGIN_RUN" --agent muse --repo "$BEGIN_REPO" 2>"$DIAG_FILE"); then
   finish_err="$(cat "$DIAG_FILE")"
   echo "muse-implement: finish-ticket failed: $finish_err" >&2

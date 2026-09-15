@@ -366,6 +366,12 @@ PROVENANCE_VOICES = ("nate-direct", "nate-relayed", "agent")
 ORIGIN_MARKER = "<!-- command-center-origin -->"
 ORIGIN_VOICES = ("nate-relayed", "agent")
 
+# A capture may carry the earlier PR or ticket that caused the idea. Keep this
+# separate from capture origin: origin says who raised it, while this marker
+# says what the work is a response to. The brief uses the marker as durable
+# evidence instead of scanning human prose for a plausible-looking reference.
+CAUSED_BY_MARKER = "<!-- command-center-caused-by -->"
+
 #: An origin is only a default for who shapes an idea. This marker records the
 #: explicit exception without rewriting that historical fact. Moving work back
 #: toward Nate is always safe; moving it toward agents requires Nate's voice.
@@ -437,6 +443,7 @@ BRIEF_SECTION_BUDGETS = {
     "agent_health": 1.0,
     "working_tree_touched": 1.0,
     "outcome_signals": 3.0,
+    "portfolio_metrics": 3.0,
     "rejected_merges": 0.25,
 }
 
@@ -2024,6 +2031,34 @@ def parse_origin(body: str) -> Optional[Dict]:
     return found
 
 
+def parse_caused_by(body: str) -> List[str]:
+    """Return durable PR/ticket references recorded at capture.
+
+    The first version of the marker stored one string; repeated
+    ``--caused-by`` flags store a list. Reading both shapes keeps the body
+    contract forward-compatible without treating a malformed value as a
+    recorded cause.
+    """
+    found = _marked_json(body, CAUSED_BY_MARKER)
+    if not isinstance(found, dict):
+        return []
+    raw = found.get("caused_by", found.get("refs"))
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        return []
+    result: List[str] = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        value = value.strip()
+        if value and value not in result:
+            result.append(value)
+    return result
+
+
 def parse_origin_override(body: str) -> Optional[Dict]:
     """Return an authorised origin override, or None when it fails closed.
 
@@ -2287,6 +2322,32 @@ def append_origin(body: str, voice: str, at: Optional[datetime] = None,
     return "{}\n\n{}".format(
         body, origin_block(voice, at=at, run=run, agent=agent)
     )
+
+
+def caused_by_block(refs: Iterable[str], at: Optional[datetime] = None) -> str:
+    """Build the machine-readable capture-cause block."""
+    values = []
+    for ref in refs:
+        if not isinstance(ref, str):
+            continue
+        ref = ref.strip()
+        if ref and ref not in values:
+            values.append(ref)
+    if not values:
+        raise ValueError("at least one cause reference is required")
+    fields = {
+        "at": (at or datetime.now(timezone.utc)).isoformat(),
+        "caused_by": values[0] if len(values) == 1 else values,
+    }
+    return "{}\n\n```json\n{}\n```".format(
+        CAUSED_BY_MARKER, json.dumps(fields, indent=2, sort_keys=True)
+    )
+
+
+def append_caused_by(body: str, refs: Iterable[str],
+                     at: Optional[datetime] = None) -> str:
+    """Append durable cause references to a captured issue body."""
+    return "{}\n\n{}".format(body, caused_by_block(refs, at=at))
 
 
 def render_voice(body: str) -> str:
@@ -3091,6 +3152,256 @@ def disposal(items: Iterable[Item], now: datetime) -> Dict[str, object]:
             round(len(done) / len(parked), 3) if parked else None
         ),
         "net_open_growth": len(created) - len(closed),
+    }
+
+
+def _metric_time(value: object) -> Optional[datetime]:
+    """Parse a GitHub timestamp for a portfolio metric.
+
+    The Project loader uses GitHub's second-precision ``Z`` form, while the
+    CLI's PR JSON may also contain fractional seconds or an explicit offset.
+    Metrics should accept both without making a malformed timestamp look old.
+    """
+    if isinstance(value, datetime):
+        found = value
+    elif isinstance(value, str) and value.strip():
+        text = value.strip()
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        try:
+            found = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if found.tzinfo is None:
+        found = found.replace(tzinfo=timezone.utc)
+    return found.astimezone(timezone.utc)
+
+
+def _metric_recent(item: Item, cutoff: datetime) -> bool:
+    """Whether a Project item has a known lifecycle event in the window."""
+    return any(
+        at is not None and at >= cutoff
+        for at in (item.created_at, item.status_since, item.closed_at)
+    )
+
+
+_CAUSE_REFERENCE_RE = re.compile(
+    r"^(?:"
+    r"#(?P<bare_number>[0-9]+)"
+    r"|(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(?P<repo_number>[0-9]+)"
+    r"|(?:PR|pull(?:[ -]+request)?|ticket)\s*#?(?P<label_number>[0-9]+)"
+    r")$",
+    flags=re.IGNORECASE,
+)
+_CAUSE_URL_RE = re.compile(
+    r"^https?://github\.com/"
+    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/"
+    r"(?:issues|pull)/(?P<number>[0-9]+)(?:[/?#].*)?$",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalise_cause_reference(value: object) -> Optional[str]:
+    """Return a canonical issue ref for a PR/ticket-shaped cause value."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    url = _CAUSE_URL_RE.fullmatch(text)
+    if url:
+        return "{}/{}#{}".format(
+            url.group("owner"), url.group("repo"), url.group("number")
+        )
+    match = _CAUSE_REFERENCE_RE.fullmatch(text)
+    if not match:
+        return None
+    number = (
+        match.group("bare_number")
+        or match.group("repo_number")
+        or match.group("label_number")
+    )
+    if match.group("repo"):
+        return "{}#{}".format(match.group("repo"), number)
+    return "{}#{}".format(REPO, number)
+
+
+def _regression_ticket_ref(body: Optional[str]) -> Optional[str]:
+    """Read the machine-readable ticket line from a funnel regression issue."""
+    if not isinstance(body, str):
+        return None
+    for line in body.splitlines():
+        if not re.match(r"^\s*-\s*Ticket:\s*", line, flags=re.IGNORECASE):
+            continue
+        value = re.sub(
+            r"^\s*-\s*Ticket:\s*", "", line, flags=re.IGNORECASE
+        ).strip()
+        return _normalise_cause_reference(value)
+    return None
+
+
+def recorded_cause_regressions(
+    items: Iterable[Item], now: datetime
+) -> Dict[str, object]:
+    """Count recent Broken projects with an explicit cause record.
+
+    A capture marker is durable evidence on the project itself. A rejection
+    marker is the regression issue created by ``funnel reject``; its Ticket
+    line is joined to the loaded child ticket and then to that ticket's
+    parent. Human prose elsewhere in an issue is deliberately ignored.
+    """
+    rows = list(items)
+    cutoff = now - MAINTENANCE_WINDOW
+    projects = [
+        item for item in rows
+        if item.parent is None and item.klass == "Broken"
+    ]
+    recent_projects = [item for item in projects if _metric_recent(item, cutoff)]
+    project_refs = {item.ref for item in recent_projects}
+    recorded = {
+        item.ref
+        for item in recent_projects
+        if any(
+            _normalise_cause_reference(value) is not None
+            for value in parse_caused_by(item.body or "")
+        )
+    }
+
+    by_ref = {item.ref: item for item in rows}
+    for regression in rows:
+        if not regression.title.startswith(REGRESSION_PREFIX):
+            continue
+        if not _metric_recent(regression, cutoff):
+            continue
+        ticket_ref = _regression_ticket_ref(regression.body)
+        ticket = by_ref.get(ticket_ref or "")
+        if ticket is not None and ticket.parent in project_refs:
+            recorded.add(ticket.parent)
+
+    total = len(recent_projects)
+    count = len(recorded)
+    return {
+        "window_days": MAINTENANCE_WINDOW.days,
+        "definition": (
+            "parent projects classified Broken with a created, status, or "
+            "closed event in the last 30 days and a capture caused_by marker "
+            "or a recent funnel reject regression record"
+        ),
+        "status": "available",
+        "available": True,
+        "broken_projects": total,
+        "with_recorded_cause": count,
+        "without_recorded_cause": total - count,
+        "count": count,
+        "share": round(count / total, 3) if total else None,
+        "value": count,
+    }
+
+
+def command_center_ticket_pr_share(
+    items: Iterable[Item], now: datetime
+) -> Dict[str, object]:
+    """Report the fraction of recent command-center merges on ticket branches."""
+    del items  # The bounded repository scan is the source of PR truth.
+    try:
+        index, truncated = ticket_pr_index(REPO)
+    except Exception as exc:
+        return {
+            "window_days": MAINTENANCE_WINDOW.days,
+            "definition": (
+                "merged command-center PRs in the last 30 days whose branch "
+                "is ticket/<number>"
+            ),
+            "status": "unavailable",
+            "available": False,
+            "value": None,
+            "share": None,
+            "reason": "could not read command-center PRs: {}".format(
+                _brief_error(exc)
+            ),
+        }
+
+    rows = list(getattr(index, "all_rows", ()) or ())
+    if not rows:
+        rows = list(index.values())
+    if truncated:
+        return {
+            "window_days": MAINTENANCE_WINDOW.days,
+            "definition": (
+                "merged command-center PRs in the last 30 days whose branch "
+                "is ticket/<number>"
+            ),
+            "status": "unavailable",
+            "available": False,
+            "value": None,
+            "share": None,
+            "reason": (
+                "bounded command-center PR scan was truncated at {} rows"
+            ).format(MERGED_PR_SCAN_LIMIT),
+        }
+
+    cutoff = now - MAINTENANCE_WINDOW
+    merged = 0
+    ticket_merged = 0
+    unknown_timestamps = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        merged_at_raw = row.get("mergedAt") or row.get("merged_at")
+        state = str(row.get("state") or "").upper()
+        if not merged_at_raw and state != "MERGED":
+            continue
+        merged_at = _metric_time(merged_at_raw)
+        if merged_at is None:
+            unknown_timestamps += 1
+            continue
+        if merged_at < cutoff:
+            continue
+        merged += 1
+        if ticket_ref_from_branch(REPO, row.get("headRefName") or ""):
+            ticket_merged += 1
+
+    definition = (
+        "merged command-center PRs in the last 30 days whose branch is "
+        "ticket/<number>"
+    )
+    if unknown_timestamps:
+        return {
+            "window_days": MAINTENANCE_WINDOW.days,
+            "definition": definition,
+            "status": "partial",
+            "available": False,
+            "merged_prs": None,
+            "ticket_merged_prs": None,
+            "value": None,
+            "share": None,
+            "unknown_merged_prs": unknown_timestamps,
+            "reason": "one or more merged PRs had no parseable mergedAt",
+        }
+
+    share = ticket_merged / merged if merged else None
+    return {
+        "window_days": MAINTENANCE_WINDOW.days,
+        "definition": definition,
+        "status": "available" if merged else "insufficient_data",
+        "available": True,
+        "merged_prs": merged,
+        "ticket_merged_prs": ticket_merged,
+        "value": round(share, 3) if share is not None else None,
+        "share": round(share, 3) if share is not None else None,
+        "reason": None if merged else "no merged PRs in the window",
+    }
+
+
+def _read_portfolio_metrics(
+    items: Iterable[Item], now: datetime
+) -> Dict[str, object]:
+    """Read the two parent-plan portfolio signals for the published brief."""
+    return {
+        "recorded_cause_regressions": recorded_cause_regressions(items, now),
+        "command_center_ticket_pr_share": command_center_ticket_pr_share(
+            items, now
+        ),
     }
 
 
@@ -7222,6 +7533,7 @@ def cmd_brief(
     deadline: Optional[float] = None,
     brief_cache: Optional[BriefCache] = None,
     outcome_signals: Optional[Dict[str, object]] = None,
+    portfolio_metrics: Optional[Dict[str, object]] = None,
 ) -> int:
     missing = list(missing or [])
     timings = {} if timings is None else timings
@@ -7410,6 +7722,14 @@ def cmd_brief(
             ] if stale is not None else None,
             "maintenance_load": maintenance,
             "disposal": disposal_report,
+            "recorded_cause_regressions": (
+                portfolio_metrics.get("recorded_cause_regressions")
+                if isinstance(portfolio_metrics, dict) else None
+            ),
+            "command_center_ticket_pr_share": (
+                portfolio_metrics.get("command_center_ticket_pr_share")
+                if isinstance(portfolio_metrics, dict) else None
+            ),
             "resend_ratio": resend,
             "unattended_merges": merges,
             "unattended_approvals": approvals,
@@ -7868,7 +8188,7 @@ def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -
         "A merge that landed without Nate turned out to be broken.",
         "",
         "- Merged PR: {}".format(data.get("url")),
-        "- Ticket: {}".format("#" + ticket_no if ticket_no else "unknown"),
+        "- Ticket: {}".format(ticket.ref if ticket else (ref or "unknown")),
         "",
         "**What this means:** not that there is a bug, but that the auto-merge bar",
         "failed. Three of these in a week and auto-merging stops until the review",
@@ -7973,7 +8293,8 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
                 repo: Optional[str], run: Optional[str] = None,
                 agent: Optional[str] = None,
                 origin: Optional[str] = None,
-                klass: Optional[str] = None) -> int:
+                klass: Optional[str] = None,
+                caused_by: Optional[Sequence[str]] = None) -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
     if origin not in ORIGIN_VOICES:
         raise GitHubError(
@@ -7987,12 +8308,22 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
                 klass, ", ".join(LADDER)
             )
         )
+    caused_by_refs = []
+    if caused_by is not None:
+        caused_by_refs = [
+            value.strip() for value in caused_by
+            if isinstance(value, str) and value.strip()
+        ]
+        if not caused_by_refs:
+            raise GitHubError("--caused-by requires a non-empty PR or ticket reference")
     repo = capture_repo(repo, run, agent)
     body = append_provenance(
         note or "Captured from chat. Not yet thought through.", "agent",
         at=now, run=run, agent=agent,
     )
     body = append_origin(body, origin, at=now, run=run, agent=agent)
+    if caused_by_refs:
+        body = append_caused_by(body, caused_by_refs, at=now)
     args = [
         "gh", "issue", "create", "--repo", repo, "--title", title,
         "--body", body, "--label", "needs-shaping",
@@ -10367,6 +10698,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
         "--class", dest="klass", choices=LADDER, default=None,
         help="ladder class; required when --origin agent",
     )
+    capture.add_argument(
+        "--caused-by", dest="caused_by", action="append", default=None,
+        metavar="REF",
+        help="earlier PR or ticket that caused this idea; repeat for more",
+    )
     shaped = sub.add_parser("shaped", help="record a grilled plan and move to Shaped")
     shaped.add_argument("ref", help="issue number, owner/repo#number, or URL")
     shaped.add_argument("--plan", required=True,
@@ -10633,7 +10969,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_ideas(items, now)
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
-                               args.run, args.agent, args.origin, args.klass)
+                               args.run, args.agent, args.origin, args.klass,
+                               args.caused_by)
         if args.command == "shaped":
             return cmd_shaped(items, now, args.ref, args.plan,
                               args.run, args.agent, args.klass)
@@ -10709,6 +11046,15 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
                 if outcome_signals is _BRIEF_UNAVAILABLE:
                     outcome_signals = None
+                portfolio_metrics = _brief_timed(
+                    "portfolio_metrics",
+                    lambda: _read_portfolio_metrics(items, now),
+                    timings,
+                    degraded,
+                    deadline=deadline,
+                )
+                if portfolio_metrics is _BRIEF_UNAVAILABLE:
+                    portfolio_metrics = None
                 # Keep the existing brief JSON as the command's stdout. The
                 # display snapshot is a separate, best-effort side effect and
                 # must not change what callers parse or whether the command
@@ -10727,6 +11073,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             deadline=deadline,
                             brief_cache=cache,
                             outcome_signals=outcome_signals,
+                            portfolio_metrics=portfolio_metrics,
                         )
                 finally:
                     output = brief_stdout.getvalue()

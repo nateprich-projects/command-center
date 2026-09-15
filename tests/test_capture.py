@@ -185,6 +185,57 @@ def test_capture_records_each_explicit_origin(monkeypatch, origin, klass):
     assert funnel.parse_provenance(body)["voice"] == "agent"
 
 
+def test_capture_records_caused_by_refs(monkeypatch):
+    calls = []
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        if args[:3] == ["gh", "issue", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/owner/repo/issues/42\n",
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"id": "project-item-42"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel, "_option_id", lambda field_id, name: "ideas-option")
+    monkeypatch.setattr(funnel, "gh_graphql", lambda *args, **kwargs: {})
+
+    refs = ["owner/repo#7", "https://github.com/owner/repo/pull/8", "owner/repo#7"]
+    assert funnel.cmd_capture(
+        [], NOW, "An idea", "Raw note", "owner/repo",
+        run="capture-run", agent="claude", origin="nate-relayed",
+        caused_by=refs,
+    ) == 0
+
+    body = calls[0][calls[0].index("--body") + 1]
+    assert funnel.parse_caused_by(body) == refs[:2]
+    assert funnel.CAUSED_BY_MARKER in body
+
+
+def test_capture_cli_passes_repeated_caused_by_refs(monkeypatch):
+    received = {}
+
+    def capture(*args):
+        received["args"] = args
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_capture", capture)
+
+    assert funnel.main([
+        "capture", "An idea", "--repo", "owner/repo",
+        "--origin", "nate-relayed", "--caused-by", "#7",
+        "--caused-by", "owner/repo#8",
+    ], _items=[]) == 0
+
+    assert received["args"][-1] == ["#7", "owner/repo#8"]
+
+
 def test_capture_requires_an_explicit_origin_before_resolving_repo(monkeypatch):
     monkeypatch.setattr(
         funnel, "resolve_repo", lambda repo: pytest.fail("repo was resolved")

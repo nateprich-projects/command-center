@@ -52,6 +52,8 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `working_tree_touched` | Runs during which Nate's own checkout changed. No routine should write it — engineers use their own clones, reviewers are read-only. Reports a *change*, not a crime: him committing mid-run looks the same. A grouped HEAD transition carries an `observers` list of the observing `agent` and `run`; dirty-only rows stay one row per run without that list. Say it plainly when present |
 | `maintenance_load` | `upkeep_share` is the fraction of work closed in the last 30 days that was `Broken` or `Maintenance` |
 | `disposal` | In the same 30-day window, parentless projects accepted to `Done` (`done`), parked (`parked`), their `finished_vs_abandoned` ratio, and created-minus-closed `net_open_growth`; `finished_vs_abandoned` is `null` when no project was parked |
+| `recorded_cause_regressions` | In the same 30-day window, the count of `Broken` parent projects with a capture `caused_by` PR/ticket or a funnel-reject regression record, plus the denominator and count without a recorded cause |
+| `command_center_ticket_pr_share` | In the same 30-day window, the share of merged PRs in `command-center` whose head branch is `ticket/<number>`; `unavailable`, `partial`, or `insufficient_data` is unknown, never zero |
 | `resend_ratio` | Recent total-input over fresh-input ratio for metered agents (`codex` and `zcode`); agents without usable telemetry are omitted |
 | `outcome_signals` | The named signals computed from durable outcome records: cost per merged PR by observed lane, rework rate, and intervention rate. Each signal carries its sample and `status`; `insufficient_data` or `partial` is unknown, never zero. Cost is shown only from an already-priced observation; raw token counts are not dollars |
 | `human_steps` | Open tickets waiting on Nate to go and do the declared `reason`. **Work he owes, not a decision he owes** — deliberately outside `total_needing_nate`, the same distinction that keeps `blocked` out. No agent can pick these up: `startable()` excludes them, so this list is the only place they surface |
@@ -128,6 +130,12 @@ Show cost per merged PR by lane (including its unit), then the rework and interv
 rates with their sample sizes. Treat `insufficient_data` and `partial` as unknown and
 say what is missing; never turn them into zero. Do not combine the signals into a score,
 and do not read raw token counts as a dollar cost.
+
+Then `recorded_cause_regressions` and `command_center_ticket_pr_share` as portfolio
+signals. Show the Broken-project numerator and denominator for the first, and the
+ticket-branch numerator, merged-PR denominator, and percentage for the second. Treat
+`unavailable`, `partial`, and `insufficient_data` as unknown; never turn a missing or
+bounded scan into zero.
 
 Then the gate counts on one line. Then anything unusual, and only if present:
 `prose_dependencies`, `suspected_human_steps`, `unclassed_captures`, `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`,

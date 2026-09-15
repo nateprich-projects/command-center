@@ -7,6 +7,8 @@ const DIAGNOSTICS = [
   ["closed_itself", "Projects closed by the funnel"],
   ["cleared_blocks", "Blocks cleared by the funnel"],
   ["unattended_approvals", "Unattended approvals"],
+  ["recorded_cause_regressions", "Broken projects with recorded cause"],
+  ["command_center_ticket_pr_share", "Command Center ticket PR share"],
   ["blocked", "Blocked"],
   ["parked", "Parked"],
   ["prose_dependencies", "Prose dependencies"],

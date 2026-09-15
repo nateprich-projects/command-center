@@ -18,28 +18,24 @@ import heartbeat
 LIVE_SPOOL_DIR = Path("~/.claude/command-center-heartbeat").expanduser()
 
 
-def _spool_sizes(directory: Path):
-    """Return the current byte size of every live heartbeat spool file."""
-    try:
-        paths = sorted(directory.glob("*.jsonl"))
-    except OSError:
-        return {}
-    return {
-        path: path.stat().st_size
-        for path in paths
-        if path.is_file()
-    }
-
-
 @pytest.fixture(autouse=True)
 def heartbeat_isolation(monkeypatch, tmp_path):
-    """Keep heartbeat records local to this test and GitHub calls offline."""
-    live_before = _spool_sizes(LIVE_SPOOL_DIR)
+    """Keep heartbeat records local to this test and GitHub calls offline.
+
+    In-process writes are redirected by patching ``heartbeat.SPOOL_DIR``;
+    subprocesses inherit ``COMMAND_CENTER_HEARTBEAT_SPOOL``. Until #876 this
+    fixture also failed any test during which a live spool file grew in size.
+    On the schedule host the agents append to that spool every few minutes, so
+    the size check reported concurrency as a leak and the full suite could not
+    pass there; ``test_heartbeat_isolation.py`` now proves isolation by content
+    instead.
+    """
     test_spool = tmp_path / "heartbeat-spool"
     monkeypatch.setenv(
         "COMMAND_CENTER_DASHBOARD_SPOOL",
         str(tmp_path / "dashboard-spool"),
     )
+    monkeypatch.setenv("COMMAND_CENTER_HEARTBEAT_SPOOL", str(test_spool))
 
     monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(test_spool))
 
@@ -49,15 +45,3 @@ def heartbeat_isolation(monkeypatch, tmp_path):
     monkeypatch.setattr(heartbeat, "gh", offline_gh)
 
     yield test_spool
-
-    live_after = _spool_sizes(LIVE_SPOOL_DIR)
-    grown = sorted(
-        path for path, size in live_after.items()
-        if size > live_before.get(path, 0)
-    )
-    if grown:
-        pytest.fail(
-            "live heartbeat spool grew: {}".format(
-                ", ".join(str(path) for path in grown)
-            )
-        )

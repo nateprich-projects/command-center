@@ -109,3 +109,4 @@
 {"agent": "claude", "api_cost": {"gh_calls": 1, "graphql_points": null}, "phase": "api_cost", "run": "52471081ab3b", "ts": 1789536428}
 {"agent": "claude", "api_cost": {"gh_calls": 18, "graphql_points": null}, "phase": "api_cost", "run": "52471081ab3b", "ts": 1789536669}
 {"agent": "claude", "api_cost": {"gh_calls": 18, "graphql_points": null}, "phase": "api_cost", "run": "52471081ab3b", "ts": 1789536716}
+{"agent": "claude", "api_cost": {"gh_calls": 19, "graphql_points": null}, "phase": "api_cost", "run": "52471081ab3b", "ts": 1789536951}

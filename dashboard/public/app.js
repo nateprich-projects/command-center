@@ -166,6 +166,10 @@ function pips(item, tickets, closed, total) {
 
 function prCell(state, number) {
   if (!state) return element("span", "muted", "—");
+  if (state === "unknown") {
+    // The scan failed, so this is not "no PR": say so rather than implying it.
+    return chip("?", "chip-pr chip-pr-unknown", "PR state could not be read");
+  }
   return chip(state, `chip-pr chip-pr-${state}`, number ? `PR #${number}` : null);
 }
 

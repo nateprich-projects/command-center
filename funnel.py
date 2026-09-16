@@ -420,7 +420,7 @@ CLEARED_BLOCK_WINDOW = timedelta(days=7)
 # 120 s total remains the transport envelope.
 BRIEF_TOTAL_BUDGET_SECONDS = 120.0
 BRIEF_SECTION_BUDGETS = {
-    "ticket_pr_facts": 8.0,
+    "ticket_pr_facts": 20.0,
     "items": 0.25,
     "counts_by_gate": 0.25,
     "in_motion": 0.25,
@@ -5938,6 +5938,7 @@ def _dashboard_ticket(
     verdict: Optional[Mapping[str, object]],
     queue_rank: Optional[int] = None,
     blockers: Sequence[str] = (),
+    pr_known: bool = True,
 ) -> Dict[str, object]:
     """One ticket row for the dashboard, with its PR, tier and owner flags.
 
@@ -5954,7 +5955,11 @@ def _dashboard_ticket(
     pr_number = (pr_fact or {}).get("number")
     head = (pr_fact or {}).get("headRefOid")
     pr: Optional[str] = None
-    if pr_state == "MERGED":
+    if not pr_known and item.state == "OPEN":
+        # The PR scan failed or timed out. "No PR" would be a guess, and the
+        # column cannot tell the two apart (#934).
+        pr = "unknown"
+    elif pr_state == "MERGED":
         pr = "merged"
     elif pr_state == "OPEN":
         approved = (
@@ -6032,7 +6037,9 @@ def _dashboard_item(
 
 #: Progress order for the sub-issue bar: finished work fills from the left,
 #: the way a progress bar reads, whatever order the tickets are queued in.
-PIP_PROGRESS_ORDER = ("closed", "approved", "submitted", "blocked", "open")
+PIP_PROGRESS_ORDER = (
+    "closed", "approved", "submitted", "unknown", "blocked", "open",
+)
 
 
 def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
@@ -6044,6 +6051,8 @@ def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
         return "approved"
     if pr in ("submitted", "merged"):
         return "submitted"
+    if pr == "unknown":
+        return "unknown"
     if ticket.get("blocked"):
         return "blocked"
     return "open"
@@ -6107,6 +6116,7 @@ def dashboard_board(
     items: Iterable[Item],
     now: datetime,
     pr_facts: Optional[Mapping[str, Optional[Mapping[str, object]]]] = None,
+    pr_facts_known: Optional[bool] = None,
 ) -> Dict[str, List[Dict[str, object]]]:
     """Build the ordered parent-project board for one already-loaded brief.
 
@@ -6123,6 +6133,11 @@ def dashboard_board(
     max_time = datetime.max.replace(tzinfo=timezone.utc)
 
     facts = dict(pr_facts or {})
+    # The brief returns an empty mapping both when nothing has a PR and when
+    # the scan failed, so it says which through ``pr_facts_known``. A caller
+    # that says nothing is not claiming a failure: fixture-pure callers pass no
+    # facts at all and expect the old "no PR recorded" reading.
+    known = True if pr_facts_known is None else bool(pr_facts_known)
     in_review = {
         ref for ref, fact in facts.items()
         if isinstance(fact, Mapping)
@@ -6181,6 +6196,7 @@ def dashboard_board(
                 # Native edges when there are any, else the refs parsed from
                 # the block comment, so "blocked" always says by what.
                 list(child.open_blockers or child.block_references),
+                known,
             )
             for child in sorted(children.get(parent.ref, ()), key=ticket_key)
         ]
@@ -11511,7 +11527,9 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     degraded,
                     deadline=deadline,
                 )
+                pr_facts_missing = bool(pr_facts_error)
                 if pr_facts is _BRIEF_UNAVAILABLE:
+                    pr_facts_missing = True
                     # A missing PR/branch scan must not turn a stale claim into a
                     # false diagnostic. An empty mapping says those facts are
                     # unavailable, so the pure consumers preserve the safe side.
@@ -11574,7 +11592,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         generated_at = now.isoformat()
                     write_dashboard_snapshot(
                         brief_payload,
-                        dashboard_board(items, now, pr_facts=pr_facts),
+                        dashboard_board(
+                            items, now, pr_facts=pr_facts,
+                            pr_facts_known=not pr_facts_missing,
+                        ),
                         generated_at,
                     )
                 except Exception as exc:

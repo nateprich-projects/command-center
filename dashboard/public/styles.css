@@ -271,6 +271,8 @@ main {
 }
 .chip-pr-submitted { border-color: rgba(124, 199, 255, 0.5); color: var(--pip-submitted); }
 .chip-pr-approved { border-color: rgba(194, 168, 255, 0.55); color: var(--pip-approved); }
+.pip-unknown { background: repeating-linear-gradient(135deg, #39404a 0 3px, #4b535f 3px 6px); }
+.chip-pr-unknown { border-color: #3c434d; color: var(--ink-faint); }
 .chip-pr-merged { border-color: rgba(137, 87, 229, 0.5); color: #b392f0; }
 .chip-tier-escalated { border-color: rgba(240, 136, 62, 0.5); color: var(--pip-blocked); }
 .chip-tier-standard { color: var(--ink-faint); }

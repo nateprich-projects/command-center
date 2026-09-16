@@ -5271,6 +5271,11 @@ EXHAUSTED_SIGNALS = (
     "rate limit exceeded",
 )
 
+# This is deliberately outside the ``skipped-*`` family.  A begin that could
+# not start because the shared pool was empty is visible health data, not a
+# normal budget decline (#932).
+BEGIN_BUDGET_EXHAUSTED_OUTCOME = "budget-exhausted"
+
 
 def route_exhausted() -> Optional[Dict[str, object]]:
     """The exhaustion record for this process, or None while the route is live."""
@@ -5355,6 +5360,27 @@ def _refuse_if_exhausted(command: Sequence[str]) -> None:
 def graphql_spend() -> Dict[str, object]:
     """What this process has spent on GraphQL so far, read from responses."""
     return dict(_GRAPHQL_SPEND)
+
+
+def _budget_exhaustion_signal() -> Optional[Tuple[int, str]]:
+    """Return the structured zero-budget signal, if this run observed it.
+
+    The rate-limit error text is not a sufficient discriminator: it is a
+    diagnostic string and can be emitted for several transport shapes.  A
+    named lost tick requires both values GitHub reports in ``rateLimit``.
+    """
+    spend = graphql_spend()
+    remaining = spend.get("remaining")
+    reset_at = spend.get("reset_at")
+    if (
+        isinstance(remaining, int)
+        and not isinstance(remaining, bool)
+        and remaining == 0
+        and isinstance(reset_at, str)
+        and reset_at.strip()
+    ):
+        return remaining, reset_at.strip()
+    return None
 
 
 def reset_api_usage() -> None:
@@ -5548,12 +5574,25 @@ def gh_graphql(query: str, **variables) -> dict:
                 time.sleep(GRAPHQL_RETRY_DELAY_SECONDS)
                 continue
 
+            data = payload.get("data")
+            # GitHub can return a partial GraphQL answer: the error tells us
+            # the query failed while the data-side rateLimit block still
+            # carries the authoritative remaining/resetAt pair. Record it
+            # before handling errors so begin can classify that failure
+            # without matching prose or an exit code.
+            if isinstance(data, dict):
+                block = data.get("rateLimit")
+                _record_rate_limit(block)
+                if isinstance(block, dict) and block.get("remaining") == 0:
+                    _mark_exhausted(
+                        "rateLimit.remaining is 0", block.get("resetAt")
+                    )
+
             if payload.get("errors"):
                 raise GitHubError(
                     json.dumps(payload["errors"]), request_id=request_id
                 )
 
-            data = payload.get("data")
             if not isinstance(data, dict):
                 error = GitHubError(
                     "malformed GraphQL response: data is not an object",
@@ -5565,10 +5604,6 @@ def gh_graphql(query: str, **variables) -> dict:
                 time.sleep(GRAPHQL_RETRY_DELAY_SECONDS)
                 continue
 
-            block = data.get("rateLimit")
-            _record_rate_limit(block)
-            if isinstance(block, dict) and block.get("remaining") == 0:
-                _mark_exhausted("rateLimit.remaining is 0", block.get("resetAt"))
             return data
 
         # The loop always returns or raises. Keep a defensive error for static
@@ -9867,6 +9902,53 @@ def _start_begin_heartbeat(agent: str) -> Optional[str]:
     return run_id
 
 
+def _finish_begin_budget_exhausted(
+    agent: str, run: Optional[str], remaining: int, reset_at: str
+) -> None:
+    """Close a begin run with the structured exhausted-budget outcome.
+
+    Heartbeat is instrumentation, so a failure to append this diagnostic must
+    not replace the original begin error or change its exit status.
+    """
+    if not run:
+        return
+    note = "{} remaining={} resetAt={}".format(
+        BEGIN_BUDGET_EXHAUSTED_OUTCOME, remaining, reset_at
+    )
+    command = [
+        sys.executable,
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "heartbeat.py"),
+        "finish",
+        "--agent", agent,
+        "--run", str(run),
+        "--outcome", BEGIN_BUDGET_EXHAUSTED_OUTCOME,
+        "--note", note,
+    ]
+    try:
+        proc = _run_bounded_subprocess(command, capture_output=True, text=True)
+    except Exception as exc:
+        detail = str(exc).strip() or type(exc).__name__
+        print(
+            "funnel: could not record budget-exhausted heartbeat: {}".format(
+                detail
+            ),
+            file=sys.stderr,
+        )
+        return
+    if getattr(proc, "returncode", 0) != 0:
+        detail = (
+            getattr(proc, "stderr", None)
+            or getattr(proc, "stdout", None)
+            or "heartbeat finish exited {}".format(proc.returncode)
+        )
+        print(
+            "funnel: could not record budget-exhausted heartbeat: {}".format(
+                str(detail).strip()
+            ),
+            file=sys.stderr,
+        )
+
+
 def implementation_packet(repo: str, number: int, agent: str) -> Dict:
     """Read one implementation packet through the standalone engine.
 
@@ -10291,6 +10373,10 @@ def _begin_error_envelope(agent: str, error: GitHubError) -> None:
     why, transient = _github_error_text(error)
     if start_error:
         why += "; heartbeat start failed: {}".format(start_error)
+
+    signal = _budget_exhaustion_signal()
+    if signal is not None:
+        _finish_begin_budget_exhausted(agent, run, *signal)
 
     print(json.dumps({
         "agent": agent,

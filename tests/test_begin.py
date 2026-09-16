@@ -183,6 +183,128 @@ def test_begin_prints_a_transient_json_envelope_when_project_load_is_truncated(
     assert funnel._API_USAGE["graphql_calls"] == 3
     assert funnel.graphql_spend()["calls"] == 3
     assert len([call for call in calls if call[:3] == ["gh", "api", "graphql"]]) == 3
+    assert not any(
+        "finish" in call and "budget-exhausted" in call for call in calls
+    )
+
+
+def test_begin_records_a_named_finish_for_a_structured_exhaustion(
+    monkeypatch, capsys
+):
+    funnel.reset_route_state()
+    funnel.reset_api_usage()
+    reset_at = "2026-09-16T05:30:32Z"
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[:3] == ["gh", "api", "graphql"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({
+                    "data": {
+                        "rateLimit": {
+                            "cost": 0,
+                            "remaining": 0,
+                            "resetAt": reset_at,
+                        },
+                    },
+                    "errors": [{"message": "API rate limit already exceeded"}],
+                }),
+                stderr="",
+            )
+        if any("heartbeat.py" in str(part) for part in argv):
+            if "finish" in argv:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout="begin-run\n", stderr="")
+        raise AssertionError("unexpected subprocess: {}".format(argv))
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    def load_exhausted_project():
+        funnel.gh_graphql("{viewer{login}}")
+        return []
+
+    assert funnel.main(
+        ["begin", "--agent", "codex", "--tier", "standard"],
+        _items_loader=load_exhausted_project,
+    ) == 2
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["run"] == "begin-run"
+    assert result["gate"] == "unknown"
+    assert result["do"] == "stop"
+    finishes = [call for call in calls if "finish" in call]
+    assert len(finishes) == 1
+    finish = finishes[0]
+    assert finish[finish.index("--outcome") + 1] == "budget-exhausted"
+    assert finish[finish.index("--note") + 1] == (
+        "budget-exhausted remaining=0 resetAt={}".format(reset_at)
+    )
+    funnel.reset_route_state()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {
+            "data": {
+                "rateLimit": {
+                    "cost": 0,
+                    "remaining": 0,
+                    "resetAt": "2026-09-16T05:30:32Z",
+                },
+            },
+            "errors": [{"message": "API rate limit already exceeded"}],
+        },
+        {
+            "data": {
+                "viewer": {"login": "n"},
+                "rateLimit": {
+                    "cost": 0,
+                    "remaining": 0,
+                    "resetAt": "2026-09-16T05:30:32Z",
+                },
+            },
+        },
+    ],
+)
+def test_begin_exhaustion_shapes_produce_the_same_named_finish(
+    monkeypatch, response
+):
+    funnel.reset_route_state()
+    funnel.reset_api_usage()
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[:3] == ["gh", "api", "graphql"]:
+            return SimpleNamespace(
+                returncode=0, stdout=json.dumps(response), stderr=""
+            )
+        if any("heartbeat.py" in str(part) for part in argv):
+            if "finish" in argv:
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout="begin-run\n", stderr="")
+        raise AssertionError("unexpected subprocess: {}".format(argv))
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    error = None
+    try:
+        funnel.gh_graphql("{viewer{login}}")
+    except funnel.GitHubError as exc:
+        error = exc
+    if error is None:
+        error = funnel.GitHubError("begin failed after a zero-budget response")
+
+    funnel._begin_error_envelope("codex", error)
+
+    finish = next(call for call in calls if "finish" in call)
+    assert finish[finish.index("--outcome") + 1] == "budget-exhausted"
+    assert finish[finish.index("--note") + 1] == (
+        "budget-exhausted remaining=0 resetAt=2026-09-16T05:30:32Z"
+    )
+    funnel.reset_route_state()
 
 
 def test_begin_error_after_heartbeat_start_does_not_start_a_second_run(

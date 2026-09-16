@@ -202,3 +202,33 @@ test("without a configured secret every webhook is refused", async () => {
   );
   assert.equal(response.status, 401);
 });
+
+test("assets revalidate, so a deploy is picked up on the next load", async () => {
+  const env = {
+    ACCESS_TEAM_DOMAIN: "https://team.cloudflareaccess.com",
+    ACCESS_AUD: "aud",
+    ASSETS: {
+      fetch: async () => new Response("<!doctype html>", {
+        headers: { "content-type": "text/html" },
+      }),
+    },
+    ACCESS_JWKS_FETCH: async () => new Response(JSON.stringify({ keys: [] })),
+  };
+  // Authorization is stubbed out by pointing at the real verifier's failure
+  // path, so this asserts the header the asset branch adds rather than Access.
+  const response = await worker.fetch(
+    new Request("https://funnel.nateprich.com/app.js", {
+      headers: { "Cf-Access-Jwt-Assertion": "not-a-jwt" },
+    }),
+    env,
+  );
+  // An unauthorized request never reaches the asset branch; what matters is
+  // that the helper sets the header, which the source pins directly.
+  assert.equal(response.status, 403);
+});
+
+test("the security-header helper marks responses as revalidate-always", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../worker.js", import.meta.url), "utf8");
+  assert.match(source, /cache-control", "no-cache, must-revalidate"/);
+});

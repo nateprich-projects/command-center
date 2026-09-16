@@ -1309,3 +1309,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 27, "graphql_points": 37}, "phase": "api_cost", "run": "8c529ec5ca16", "ts": 1789538753}
 {"agent": "muse", "do": "shape", "phase": "bind", "run": "21123b78d87c", "ts": 1789538756, "work": "nateprich-projects/FF-Weekly-Start-Sit#80"}
 {"agent": "muse", "api_cost": {"gh_calls": 27, "graphql_points": 37}, "phase": "api_cost", "run": "21123b78d87c", "ts": 1789538759}
+{"agent": "muse", "api_cost": {"gh_calls": 5, "graphql_points": null}, "phase": "api_cost", "run": "8c529ec5ca16", "ts": 1789538986}

@@ -223,6 +223,11 @@ function jsonResponse(value, status = 200) {
 
 function withSecurityHeaders(response) {
   const secured = new Response(response.body, response);
+  // The page, its script and its stylesheet must revalidate on every load.
+  // Without this a deploy landed while the browser kept serving the script it
+  // already had, so a reload showed the old board (Nate, 2026-09-16). The
+  // asset layer still answers 304 from the ETag, so revalidating is cheap.
+  secured.headers.set("cache-control", "no-cache, must-revalidate");
   secured.headers.set(
     "content-security-policy",
     "default-src 'self'; connect-src 'self'; img-src 'self'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",

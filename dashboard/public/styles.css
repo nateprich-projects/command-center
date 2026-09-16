@@ -115,6 +115,7 @@ main {
 
 .waiting-section { padding: 14px 18px; }
 .waiting-section + .waiting-section { border-top: 1px solid var(--line); }
+.brief-sections { min-width: 0; }
 .waiting-head { display: flex; align-items: center; gap: 9px; margin-bottom: 10px; }
 .waiting-head h3 {
   margin: 0;
@@ -306,10 +307,37 @@ main {
   .masthead, main { padding-left: 12px; padding-right: 12px; }
   .table { --cols: 24px minmax(160px, 3fr) 92px 104px 110px; }
   .cell-repo, .cell-tier, .cell-class, .cell-age { display: none; }
-  .legend { display: none; }
+  .panel-head { align-items: flex-start; flex-wrap: wrap; }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    row-gap: 6px;
+    margin-left: 0;
+  }
 }
 
 @media (max-width: 600px) {
+  .brief-sections {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .waiting-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: 4px;
+  }
+  .waiting-title { min-width: 0; }
+  .waiting-meta {
+    margin-left: 0;
+    white-space: normal;
+  }
+  .waiting-row .chip {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .table { display: none; }
   .phone-board { display: block; }
 

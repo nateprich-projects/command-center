@@ -135,6 +135,18 @@ test("the phone board keeps four summary fields and discloses details recursivel
   assert.match(css, /grid-template-columns: 24px minmax\(0, 1fr\) minmax\(0, 76px\) auto auto;/);
 });
 
+test("the narrow brief stays ordered, single-column, and legend-visible", async () => {
+  const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.match(app, /element\("div", "brief-sections"\)/);
+  assert.ok(
+    app.indexOf('"Decisions waiting on you"') < app.indexOf('"Actions waiting on you"'),
+  );
+  assert.match(css, /@media \(max-width: 900px\) \{[\s\S]*\.legend \{[\s\S]*display: flex;/);
+  assert.match(css, /@media \(max-width: 600px\) \{[\s\S]*\.brief-sections \{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
+  assert.match(css, /\.waiting-row \{[\s\S]*display: grid;/);
+});
+
 
 test("the bar uses the producer's progress order, and the rows keep queue order", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");

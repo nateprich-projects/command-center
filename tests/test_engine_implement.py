@@ -1098,3 +1098,34 @@ def test_a_resolved_python_command_runs_under_this_interpreter(tmp_path, monkeyp
     implement.run_tests(clone, [["python", "-m", "pytest", "-q"]])
     assert seen[0][0] == sys.executable
     assert seen[0][1:] == ["-m", "pytest", "-q"]
+
+
+def test_a_resolved_make_command_gets_this_interpreter_as_python(
+        tmp_path, monkeypatch):
+    """#953: FF's `PYTHON ?= python3` became Apple's sandboxed python3 under
+    Codex, and compileall failed on its cache three runs in a row."""
+    _, clone = make_clone(tmp_path)
+    seen = []
+    real_run = implement._run
+
+    def spy(argv, **kwargs):
+        seen.append((list(argv), kwargs.get("env") or {}))
+        return real_run([sys.executable, "-c", "pass"], **kwargs)
+
+    monkeypatch.setattr(implement, "_run", spy)
+    implement.run_tests(clone, [["make", "check", "test"]])
+    argv, env = seen[0]
+    assert argv == ["make", "check", "test"]
+    assert env["PYTHON"] == sys.executable
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+
+
+def test_a_failed_command_reports_stdout_as_well_as_stderr(tmp_path):
+    """compileall prints on stdout; make's stderr said only "Error 1"."""
+    # Joined at run time, so the error's echo of the command cannot match.
+    script = ("import sys; print('*** Permission' + 'Error: cache'); "
+              "sys.stderr.write('make: *** [check] ' + 'Error 1'); sys.exit(2)")
+    with pytest.raises(implement.ImplementError) as caught:
+        implement._run([sys.executable, "-c", script], cwd=tmp_path)
+    assert "PermissionError: cache" in str(caught.value)
+    assert "[check] Error 1" in str(caught.value)

@@ -257,7 +257,11 @@ def _run(command: Sequence[str], *, cwd: pathlib.Path,
         capture_output=True, text=True,
     )
     if check and proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
+        # Both streams: `compileall` reports on stdout while make prints only
+        # its own "Error 1" on stderr, and that line alone hid the cause (#953).
+        detail = "\n".join(
+            part.strip() for part in (proc.stdout, proc.stderr)
+            if part and part.strip())
         raise ImplementError(
             "{} failed{}".format(
                 shlex.join(command), ": " + detail if detail else ""
@@ -636,7 +640,10 @@ def run_tests(root: pathlib.Path,
         source: Optional[str] = None
     else:
         selected, source = default_test_plan(root)
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    # PYTHON reaches a resolved `make` whose Makefile says `PYTHON ?= python3`.
+    # In Codex's sandbox that bare name is Apple's /usr/bin/python3, whose
+    # compileall cannot write its cache (#953); run this interpreter instead.
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHON=sys.executable)
     # Whatever ultimately invokes pytest inherits the no-cache guard, so a
     # resolved `make test` cannot leave .pytest_cache/ for the explicit stage.
     extra = env.get("PYTEST_ADDOPTS", "").strip()

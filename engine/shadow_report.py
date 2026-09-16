@@ -74,6 +74,7 @@ REVIEW_HEAD_RE = re.compile(
     r"\bat\s+(?P<head>[0-9a-f]{7,64})(?=[^0-9a-f]|$)",
     re.IGNORECASE,
 )
+PR_NOT_OPEN_RE = re.compile(r"\bpr_not_open\s+state=", re.IGNORECASE)
 REVIEW_REPO_RE = re.compile(
     r"\bin\s+(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b",
     re.IGNORECASE,
@@ -427,6 +428,12 @@ def _review_head(row: Optional[Dict]) -> Optional[str]:
             return value.strip()
     match = REVIEW_HEAD_RE.search(_note(row))
     return match.group("head") if match else None
+
+
+def _is_decided_pr_stop(job: Dict) -> bool:
+    """Whether a review finish records the deterministic non-OPEN stop."""
+    finish = job.get("finish")
+    return isinstance(finish, dict) and bool(PR_NOT_OPEN_RE.search(_note(finish)))
 
 
 def _heads_match(actual: object, expected: object) -> bool:
@@ -1560,6 +1567,7 @@ def build_report(
     comparable = [
         (left, right)
         for left, right in pairs
+        if not any(_is_decided_pr_stop(job) for job in (left, right))
         if left.get("decision") in {"approved", "rejected"}
         and right.get("decision") in {"approved", "rejected"}
     ]

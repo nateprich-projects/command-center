@@ -181,6 +181,15 @@ failure() {
 
 finish_done() {
   local note="$1"
+  local review_result="${2:-}"
+  if [[ "$review_result" == "approved" || "$review_result" == "rejected" ]]; then
+    if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+        --outcome done --note "$note" --review-result "$review_result"; then
+      echo "muse-review-engine: could not finish the run" >&2
+      exit 1
+    fi
+    return 0
+  fi
   if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
       --outcome done --note "$note"; then
     echo "muse-review-engine: could not finish the run" >&2
@@ -708,7 +717,7 @@ record_shadow() {
     failure "shadow review of PR #$BEGIN_PR in $BEGIN_REPO recorded no verdict (gh pr comment failed: $gh_err); answer: $answer_note" || true
     exit 1
   fi
-  finish_done "shadow review of PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $verdict; answer: $answer_note"
+  finish_done "shadow review of PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $verdict; answer: $answer_note" "$verdict"
 }
 
 if [[ "$PACKET_PASS" != "True" ]]; then
@@ -730,7 +739,7 @@ if [[ "$PACKET_PASS" != "True" ]]; then
   if python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
       --answer "$ANSWER_FILE" --ci "$PACKET_CI" --head "$PACKET_HEAD" \
       --attempt 1 --run "$BEGIN_RUN" --agent muse >"$DIAG_FILE" 2>&1; then
-    finish_done "reviewed PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: rejected without a model call ($REASON_COUNT precheck reason(s))"
+    finish_done "reviewed PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: rejected without a model call ($REASON_COUNT precheck reason(s))" rejected
     exit 0
   fi
   apply_err="$(cat "$DIAG_FILE")"
@@ -834,7 +843,7 @@ while true; do
     if [[ -z "$VERDICT" ]]; then
       VERDICT="recorded"
     fi
-    finish_done "reviewed PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $VERDICT"
+    finish_done "reviewed PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $VERDICT" "$VERDICT"
     exit 0
   fi
   if (( apply_status == 3 && ATTEMPT == 1 )); then

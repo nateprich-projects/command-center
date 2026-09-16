@@ -24,7 +24,7 @@ import statistics
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -61,6 +61,14 @@ LOOSE_DECISION_RE = re.compile(
 )
 MALFORMED_RE = re.compile(
     r"malformed|unparseable|could not be parsed|parse error|no verdict",
+    re.IGNORECASE,
+)
+REVIEW_HEAD_RE = re.compile(
+    r"\bat\s+(?P<head>[0-9a-f]{7,64})(?=[^0-9a-f]|$)",
+    re.IGNORECASE,
+)
+REVIEW_REPO_RE = re.compile(
+    r"\bin\s+(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b",
     re.IGNORECASE,
 )
 
@@ -221,6 +229,68 @@ def _review_target(note: str) -> Optional[str]:
     return "pr#{}".format(match.group("number"))
 
 
+def _positive_pr_number(value: object) -> Optional[int]:
+    """Read a PR number from a bare number or an issue-style reference."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text.isdigit():
+        number = int(text)
+        return number if number > 0 else None
+    match = re.search(r"#([1-9][0-9]*)$", text)
+    return int(match.group(1)) if match else None
+
+
+def _review_number(binding: Optional[Dict], finish: Dict) -> Optional[int]:
+    """Return the PR number, preferring the explicit number in the note."""
+    target = _review_target(_note(finish))
+    if target:
+        return _positive_pr_number(target)
+    for row in (finish, binding or {}):
+        for key in ("pr", "work", "job", "ticket"):
+            number = _positive_pr_number(row.get(key))
+            if number is not None:
+                return number
+    return None
+
+
+def _review_repo(binding: Optional[Dict], finish: Dict) -> Optional[str]:
+    """Return the repository stored on the run binding or review note."""
+    for row in (finish, binding or {}):
+        value = row.get("repo")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    match = REVIEW_REPO_RE.search(_note(finish))
+    return match.group("repo") if match else None
+
+
+def _review_head(row: Optional[Dict]) -> Optional[str]:
+    """Return a full or abbreviated head recorded by a review finish."""
+    if not isinstance(row, dict):
+        return None
+    for key in ("head_sha", "head_oid", "reviewed_head"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    match = REVIEW_HEAD_RE.search(_note(row))
+    return match.group("head") if match else None
+
+
+def _heads_match(actual: object, expected: object) -> bool:
+    """Compare full and abbreviated commit ids without treating blanks as equal."""
+    if not isinstance(actual, str) or not isinstance(expected, str):
+        return False
+    actual = actual.strip().lower()
+    expected = expected.strip().lower()
+    if not actual or not expected:
+        return False
+    return actual == expected or actual.startswith(expected) or expected.startswith(actual)
+
+
 def _work_key(binding: Optional[Dict], finish: Dict) -> Optional[str]:
     """Use the PR target first, then the runner's bound work value."""
     target = _review_target(_note(finish))
@@ -282,6 +352,9 @@ def jobs_from_records(
         jobs.append({
             "run": run,
             "key": _work_key(binding, finish) or "run#{}".format(run),
+            "repo": _review_repo(binding, finish),
+            "pr": _review_number(binding, finish),
+            "head_sha": _review_head(finish) or _review_head(binding),
             "finished_at": finished_at,
             "decision": decision(finish),
             "malformed": is_malformed(finish),
@@ -337,6 +410,62 @@ def _pair_jobs(shadow: Sequence[Dict], live: Sequence[Dict]) -> List[Tuple[Dict,
     return pairs
 
 
+_MISSING = object()
+
+
+def _lookup_live_verdict(
+    live_verdicts: Mapping[object, object], job: Dict,
+) -> object:
+    """Find one caller-supplied verdict using stable job identity variants."""
+    repo = job.get("repo")
+    pr = job.get("pr")
+    candidates = [job.get("run"), job.get("key")]
+    if repo and pr is not None:
+        candidates.extend([(repo, pr), "{}#{}".format(repo, pr)])
+    if pr is not None:
+        candidates.extend(["pr#{}".format(pr), pr, str(pr)])
+    seen = set()
+    for candidate in candidates:
+        try:
+            marker = repr(candidate)
+            if marker in seen or candidate not in live_verdicts:
+                continue
+            seen.add(marker)
+            return live_verdicts[candidate]
+        except (TypeError, AttributeError):
+            continue
+    return _MISSING
+
+
+def _verdict_value(value: object) -> Optional[str]:
+    """Read an approved/rejected word from a caller-supplied verdict."""
+    if isinstance(value, str):
+        found = value.lower()
+        return found if found in {"approved", "rejected"} else None
+    if isinstance(value, dict):
+        return decision(value)
+    return None
+
+
+def _apply_live_verdicts(
+    live: Sequence[Dict], live_verdicts: Optional[Mapping[object, object]],
+) -> None:
+    """Overlay validated recorded verdicts while retaining note fallbacks."""
+    if not live_verdicts:
+        return
+    for job in live:
+        candidate = _lookup_live_verdict(live_verdicts, job)
+        if candidate is _MISSING:
+            continue
+        value = _verdict_value(candidate)
+        if value is None:
+            continue
+        if isinstance(candidate, dict) and job.get("head_sha"):
+            if not _heads_match(candidate.get("head_sha"), job.get("head_sha")):
+                continue
+        job["decision"] = value
+
+
 def _rate(count: int, total: int) -> Optional[float]:
     return count / total if total else None
 
@@ -363,6 +492,7 @@ def build_report(
     shadow_records: Sequence[Dict],
     live_records: Optional[Sequence[Dict]] = None,
     *,
+    live_verdicts: Optional[Mapping[object, object]] = None,
     now: Optional[float] = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
     since: Optional[float] = None,
@@ -373,6 +503,10 @@ def build_report(
     Passing one stream (or the same list object for both arguments) activates
     the note-based shadow/live split used by the current Muse schedules.
     Passing two streams treats the first as shadow and the second as live.
+    ``live_verdicts`` is an optional caller-supplied mapping of job identity to
+    the recorded PR verdict. It is applied only when its head matches a head
+    recorded on the job; an absent or mismatched value leaves the heartbeat
+    decision as the fallback.
     """
     start, end = window_bounds(
         now=now, window_seconds=window_seconds, since=since, until=until
@@ -383,6 +517,7 @@ def build_report(
         shadow_rows, live_rows = list(shadow_records), list(live_records)
     shadow = jobs_from_records(shadow_rows, since=start, until=end)
     live = jobs_from_records(live_rows, since=start, until=end)
+    _apply_live_verdicts(live, live_verdicts)
     pairs = _pair_jobs(shadow, live)
     comparable = [
         (left, right)
@@ -459,28 +594,90 @@ def _parse_cli_timestamp(value: Optional[str]) -> Optional[float]:
     return parsed
 
 
+def _current_pr_head(repo: str, pr: int) -> Optional[str]:
+    """Read the PR head used to validate a recorded verdict."""
+    import funnel
+
+    data = funnel._gh_json(
+        "gh", "pr", "view", str(pr), "--repo", repo, "--json", "headRefOid"
+    )
+    if not isinstance(data, dict):
+        return None
+    head = data.get("headRefOid")
+    return head.strip() if isinstance(head, str) and head.strip() else None
+
+
+def fetch_live_verdicts(
+    live_jobs: Sequence[Dict],
+    *,
+    latest_verdict: Optional[Callable[[str, int], Optional[Dict]]] = None,
+    current_head: Optional[Callable[[str, int], Optional[str]]] = None,
+) -> Dict[str, Dict]:
+    """Fetch current-head PR verdicts for live jobs, best effort.
+
+    This is the stateful caller-side boundary. The report builder remains
+    fixture-pure: it receives the already-read verdicts and keeps heartbeat
+    prose as a fallback. A missing PR, verdict, or head is intentionally
+    omitted so it cannot inflate agreement.
+    """
+    import funnel
+
+    read_verdict = latest_verdict or funnel.latest_verdict
+    read_head = current_head or _current_pr_head
+    found: Dict[str, Dict] = {}
+    for job in live_jobs:
+        repo = job.get("repo")
+        pr = _positive_pr_number(job.get("pr"))
+        run = job.get("run")
+        if not isinstance(repo, str) or not repo.strip() or pr is None or not run:
+            continue
+        try:
+            verdict = read_verdict(repo, pr)
+            head = read_head(repo, pr)
+        except Exception:
+            # The report is diagnostic. One unreadable PR must not erase the
+            # other pairs, and the heartbeat decision remains available.
+            continue
+        if not funnel.verdict_covers_head(verdict, head):
+            continue
+        recorded_head = job.get("head_sha")
+        if recorded_head and not _heads_match(recorded_head, head):
+            continue
+        if isinstance(verdict, dict):
+            found[str(run)] = verdict
+    return found
+
+
 def load_report(
     shadow_agent: str = DEFAULT_AGENT,
     live_agent: str = DEFAULT_AGENT,
     *,
+    live_verdicts: Optional[Mapping[object, object]] = None,
     now: Optional[float] = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
     since: Optional[float] = None,
     until: Optional[float] = None,
 ) -> Dict[str, object]:
-    """Read the selected heartbeat stream(s) and build a report."""
+    """Read heartbeat streams, recover live verdicts, and build a report."""
     if shadow_agent == live_agent:
         records = heartbeat.read(shadow_agent)
-        return build_report(
-            records,
-            now=now,
-            window_seconds=window_seconds,
-            since=since,
-            until=until,
+        shadow_rows, live_rows = partition_records(records)
+    else:
+        shadow_rows, live_rows = (
+            heartbeat.read(shadow_agent), heartbeat.read(live_agent)
         )
+    if live_verdicts is None:
+        start, end = window_bounds(
+            now=now, window_seconds=window_seconds, since=since, until=until
+        )
+        shadow_jobs = jobs_from_records(shadow_rows, since=start, until=end)
+        live_jobs = jobs_from_records(live_rows, since=start, until=end)
+        matched_live = [right for _, right in _pair_jobs(shadow_jobs, live_jobs)]
+        live_verdicts = fetch_live_verdicts(matched_live)
     return build_report(
-        heartbeat.read(shadow_agent),
-        heartbeat.read(live_agent),
+        shadow_rows,
+        live_rows,
+        live_verdicts=live_verdicts,
         now=now,
         window_seconds=window_seconds,
         since=since,

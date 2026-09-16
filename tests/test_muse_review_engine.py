@@ -702,7 +702,7 @@ def test_a_failing_precheck_applies_rejected_without_calling_muse(tmp_path):
     assert _heartbeat(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note reviewed PR #7 in owner/repo at {}: rejected without a "
-        "model call (2 precheck reason(s))\n".format(HEAD)
+        "model call (2 precheck reason(s)) --review-result rejected\n".format(HEAD)
     )
 
 
@@ -743,7 +743,8 @@ def test_an_approval_is_applied_and_finished_done(tmp_path):
         "approved"
     assert _heartbeat(repo) == (
         "finish --agent muse --run engine-run --outcome done "
-        "--note reviewed PR #7 in owner/repo at {}: approved\n".format(HEAD)
+        "--note reviewed PR #7 in owner/repo at {}: approved "
+        "--review-result approved\n".format(HEAD)
     )
 
 
@@ -758,7 +759,8 @@ def test_a_rejection_records_the_model_blocking_list(tmp_path):
     assert applied["blocking"] == ["the diff ignores the plan"]
     assert _heartbeat(repo) == (
         "finish --agent muse --run engine-run --outcome done "
-        "--note reviewed PR #7 in owner/repo at {}: rejected\n".format(HEAD)
+        "--note reviewed PR #7 in owner/repo at {}: rejected "
+        "--review-result rejected\n".format(HEAD)
     )
 
 
@@ -805,7 +807,7 @@ def test_a_malformed_first_answer_retries_once_with_the_parse_error(tmp_path):
     assert "--attempt 1" in calls[0]
     assert "--attempt 2" in calls[1]
     assert (repo / "applied.marker").exists()
-    assert _heartbeat(repo).endswith(": approved\n")
+    assert _heartbeat(repo).endswith("--review-result approved\n")
 
 
 def test_a_malformed_final_answer_records_rejected_and_errors(tmp_path):
@@ -895,6 +897,7 @@ def test_a_shadow_run_applies_nothing_and_records_its_answer(tmp_path):
         "answer: ".format(HEAD)
     )
     assert '"verdict": "approved"' in heartbeat
+    assert "--review-result approved" in heartbeat
 
 
 def test_shadow_accepts_the_flag_in_any_position(tmp_path):
@@ -925,6 +928,7 @@ def test_a_shadow_precheck_failure_calls_no_model(tmp_path):
     assert "--outcome done" in heartbeat
     assert "shadow review of PR #7 in owner/repo" in heartbeat
     assert "rejected" in heartbeat
+    assert "--review-result rejected" in heartbeat
 
 
 def test_an_unsure_answer_is_decided_rejected_in_shadow(tmp_path):

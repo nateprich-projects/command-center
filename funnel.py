@@ -9930,7 +9930,15 @@ def _pr_rows_for_ref(
             row for row in rows_by_ref[ref] if isinstance(row, dict)
         )
     fact = pr_facts.get(ref)
-    return (fact,) if isinstance(fact, dict) else ()
+    # A fact with neither a PR number nor a state is a branch-only record: a
+    # truncated PR scan or a pushed branch with no PR. It is not a PR row, and
+    # reading it as one made every command-center ticket look awaiting review
+    # (#968). Older fixture maps carry ``state`` without ``number``.
+    if isinstance(fact, dict) and (
+        fact.get("number") is not None or fact.get("state")
+    ):
+        return (fact,)
+    return ()
 
 
 def _row_verdict(row: Mapping[str, object], repo: str) -> Optional[Dict]:

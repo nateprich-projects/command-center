@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
     <title>Command Center</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/styles.css">
     <script type="module" src="/app.js"></script>
   </head>
@@ -15,14 +16,10 @@
         <h1>Funnel</h1>
         <p id="snapshot-status" class="snapshot-status" role="status">Loading snapshot…</p>
       </div>
-      <button id="refresh" type="button">Refresh</button>
     </header>
     <main>
       <section class="panel" aria-labelledby="waiting-heading">
-        <div class="panel-head">
-          <h2 id="waiting-heading">Decisions waiting on you</h2>
-          <span id="waiting-count" class="count"></span>
-        </div>
+        <h2 id="waiting-heading" class="visually-hidden">Waiting on you</h2>
         <div id="waiting"></div>
       </section>
       <section class="panel" aria-labelledby="board-heading">

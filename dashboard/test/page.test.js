@@ -93,9 +93,10 @@ test("the page renders no brief section other than the board and human steps", a
 test("the row toggle is bound once, so a chevron click does not cancel itself", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   const listeners = source.match(/addEventListener\("click", /g) || [];
-  // One on the row (the chevron is inside it), one on the group header, one on
-  // the refresh button. A second listener on the chevron toggled twice (#902).
-  assert.equal(listeners.length, 3);
+  // One on the row (the chevron is inside it) and one on the group header.
+  // The refresh button's listener went with the button. A second listener on
+  // the chevron toggled twice and the row never opened (#902).
+  assert.equal(listeners.length, 2);
   assert.doesNotMatch(source, /twisty\.addEventListener\("click"/);
 });
 
@@ -118,4 +119,26 @@ test("expanded projects survive a re-render", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(source, /const expanded = new Set\(\)/);
   assert.match(source, /expanded\.has\(item\.ref\)/);
+});
+
+
+test("the bar uses the producer's progress order, and the rows keep queue order", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(source, /item\.pips/);
+  // Still no client-side ordering: the producer sends both orders.
+  assert.doesNotMatch(source, /\.(?:sort|filter|reverse)\s*\(/);
+});
+
+test("the refresh button is gone; the webhook and the scheduled brief replace it", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /api\/refresh/);
+  assert.doesNotMatch(html, /id="refresh"/);
+});
+
+test("the page ships its own favicon rather than borrowing a default", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.match(html, /rel="icon" href="\/favicon\.svg"/);
+  const icon = await readFile(new URL("../public/favicon.svg", import.meta.url), "utf8");
+  assert.match(icon, /<svg/);
 });

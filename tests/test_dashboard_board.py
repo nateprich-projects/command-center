@@ -209,3 +209,32 @@ def test_startable_work_still_outranks_the_ladder_for_unpinned_projects():
     )["columns"]
     column = next(c for c in rows if c["stage"] == "Building")
     assert [i["title"] for i in column["items"]] == ["has work", "stuck broken"]
+
+
+def test_the_bar_fills_from_the_left_whatever_the_queue_order():
+    """#902: finished work reads as progress, so it leads the bar."""
+    rows = funnel.dashboard_board(
+        [project(status="Building", children_total=4, children_done=2),
+         ticket(11), ticket(12, state="CLOSED"), ticket(13),
+         ticket(14, state="CLOSED")],
+        NOW,
+    )["columns"]
+    row = next(c for c in rows if c["stage"] == "Building")["items"][0]
+    assert row["pips"] == ["closed", "closed", "open", "open"]
+    # The rows under the bar still answer "what next", in queue order.
+    assert [t["state"] for t in row["tickets"]] == ["OPEN", "OPEN", "CLOSED", "CLOSED"]
+
+
+def test_bar_segments_rank_by_how_far_the_work_has_travelled():
+    facts = {
+        REPO + "#11": {"state": "OPEN", "number": 7, "headRefOid": "abc",
+                       "verdict": {"verdict": "approved", "head_sha": "abc"}},
+        REPO + "#12": {"state": "OPEN", "number": 8, "headRefOid": "def"},
+    }
+    rows = funnel.dashboard_board(
+        [project(status="Building", children_total=3),
+         ticket(11), ticket(12), ticket(13)],
+        NOW, pr_facts=facts,
+    )["columns"]
+    row = next(c for c in rows if c["stage"] == "Building")["items"][0]
+    assert row["pips"] == ["approved", "submitted", "open"]

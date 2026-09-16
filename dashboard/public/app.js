@@ -225,6 +225,8 @@ function ticketRow(ticket) {
 
 // `?expand` opens every project's tickets on load: useful for a wide screen,
 // and it is how this view is checked in a headless render.
+const expanded = new Set();
+
 function expandAll() {
   if (typeof window === "undefined" || !window.location) return false;
   return new URLSearchParams(window.location.search).has("expand");
@@ -237,7 +239,7 @@ function projectRow(item) {
 
   const twisty = element("button", "twisty");
   twisty.type = "button";
-  twisty.setAttribute("aria-expanded", String(expandAll()));
+  twisty.setAttribute("aria-expanded", "false");
   twisty.setAttribute("aria-label", `Show tickets for ${item.title || item.ref || "project"}`);
   twisty.textContent = tickets.length ? "\u25B8" : "";
   twisty.disabled = tickets.length === 0;
@@ -261,7 +263,8 @@ function projectRow(item) {
 
   if (tickets.length) {
     const children = element("div", "children");
-    children.hidden = !expandAll();
+    const openAtRender = expandAll() || (item.ref && expanded.has(item.ref));
+    children.hidden = !openAtRender;
     for (const ticket of tickets) children.append(ticketRow(ticket));
     wrap.append(children);
     const toggle = () => {
@@ -270,6 +273,10 @@ function projectRow(item) {
       twisty.setAttribute("aria-expanded", String(open));
       twisty.textContent = open ? "\u25BE" : "\u25B8";
       row.classList.toggle("expanded", open);
+      if (item.ref) {
+        if (open) expanded.add(item.ref);
+        else expanded.delete(item.ref);
+      }
     };
     // One handler on the row: the chevron is inside it, and a second handler
     // there would toggle twice and leave the row looking dead.
@@ -371,18 +378,47 @@ function failureState(snapshot) {
   return snapshot.last_brief_failed ?? snapshot.status?.last_brief_failed ?? false;
 }
 
-async function loadSnapshot() {
-  const response = await fetch("/api/snapshot", { cache: "no-store" });
-  if (!response.ok) throw new Error(`Snapshot returned ${response.status}`);
-  const snapshot = await response.json();
-  const generatedAt = snapshot.generated_at || snapshot.brief?.generated_at;
-  const status = document.querySelector("#snapshot-status");
-  const failure = failureState(snapshot);
-  status.textContent = generatedAt ? `Snapshot ${age(generatedAt)}` : "Snapshot age unknown";
-  if (failure) status.textContent += " · last brief failed";
-  status.classList.toggle("failed", Boolean(failure));
-  renderWaiting(snapshot.brief || {});
-  renderBoard(snapshot.board || {});
+let lastGeneratedAt = null;
+let loading = false;
+
+// The page polls its own snapshot: a published snapshot is a KV read through
+// the Worker, so this costs no GitHub budget, and it re-renders only when the
+// producer's timestamp actually moved. Without it an open tab showed whatever
+// was current when it loaded (Nate, 2026-09-15).
+const POLL_MS = 30000;
+
+async function loadSnapshot({ force = false } = {}) {
+  if (loading) return;
+  loading = true;
+  try {
+    const response = await fetch("/api/snapshot", { cache: "no-store" });
+    if (!response.ok) throw new Error(`Snapshot returned ${response.status}`);
+    const snapshot = await response.json();
+    const generatedAt = snapshot.generated_at || snapshot.brief?.generated_at;
+    const status = document.querySelector("#snapshot-status");
+    const failure = failureState(snapshot);
+    status.textContent = generatedAt ? `Snapshot ${age(generatedAt)}` : "Snapshot age unknown";
+    if (failure) status.textContent += " · last brief failed";
+    status.classList.toggle("failed", Boolean(failure));
+    if (!force && generatedAt && generatedAt === lastGeneratedAt) return;
+    lastGeneratedAt = generatedAt || null;
+    renderWaiting(snapshot.brief || {});
+    renderBoard(snapshot.board || {});
+  } finally {
+    loading = false;
+  }
+}
+
+function startPolling() {
+  window.setInterval(() => {
+    // A hidden tab is not being read; skip the request rather than poll a
+    // background window every thirty seconds.
+    if (document.visibilityState === "hidden") return;
+    loadSnapshot().catch(() => {});
+  }, POLL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") loadSnapshot().catch(() => {});
+  });
 }
 
 async function requestRefresh() {
@@ -404,11 +440,14 @@ async function requestRefresh() {
 
 if (typeof document !== "undefined") {
   document.querySelector("#refresh").addEventListener("click", requestRefresh);
-  loadSnapshot().catch((error) => {
-    const status = document.querySelector("#snapshot-status");
-    status.textContent = error.message;
-    status.classList.add("failed");
-  });
+  loadSnapshot({ force: true })
+    .then(startPolling)
+    .catch((error) => {
+      const status = document.querySelector("#snapshot-status");
+      status.textContent = error.message;
+      status.classList.add("failed");
+      startPolling();
+    });
 }
 
 export { STAGES, age, boardColumns, failureState, nextOwner, pipState, rowPrState, rowTier, shortRepo };

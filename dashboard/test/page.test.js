@@ -105,3 +105,17 @@ test("the sub-issue bar fills its column rather than capping its pips", async ()
   assert.doesNotMatch(app, /PIP_LIMIT/);
   assert.match(css, /\.pip-bar \.pip \{ flex: 1 1 0;/);
 });
+
+test("the page polls its own snapshot and re-renders only on a new timestamp", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(source, /setInterval/);
+  assert.match(source, /generatedAt === lastGeneratedAt/);
+  // A hidden tab is not read, so it should not poll.
+  assert.match(source, /visibilityState === "hidden"/);
+});
+
+test("expanded projects survive a re-render", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(source, /const expanded = new Set\(\)/);
+  assert.match(source, /expanded\.has\(item\.ref\)/);
+});

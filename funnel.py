@@ -3,8 +3,9 @@
 
 Both Claude and Codex call this; neither ranks anything itself. See AGENTS.md.
 
-GitHub is the state. There is no cache, no state file and no lock file here, and
-adding one is a wrong turn.
+GitHub is the state. There is no funnel-owned cache, state file or lock file here.
+The GitHub CLI's response cache is used only for explicitly non-gating REST reads;
+it never becomes a source of funnel state.
 
 Authentication is delegated entirely to the `gh` CLI, so no token is ever read,
 stored or passed by this program.
@@ -289,6 +290,11 @@ BRIEF_PR_FACT_SECTIONS = (
 # per member repository; a hand merge older than the newest 100 PRs is outside
 # this diagnostic's deliberately finite window.
 MERGED_PR_SCAN_LIMIT = 100
+
+# `gh api --cache` is safe only for reads whose staleness cannot change queue,
+# claim, or gate decisions. Keep the duration in one place so every cached REST
+# lookup has the same bounded freshness window and tests can pin the policy.
+GH_API_CACHE_DURATION = "5m"
 
 #: GraphQL reserve floors, expressed in **loads remaining** rather than raw
 #: points so they stay correct as the per-load cost changes — #272 is about to
@@ -4398,8 +4404,10 @@ def gh_branch_exists() -> bool:
     """Return whether the heartbeat branch exists, or raise on other failures."""
     try:
         proc = _run_gh(
-            ["gh", "api", "repos/{}/git/ref/heads/{}".format(
-                REPO, HEARTBEAT_BRANCH)],
+            _gh_api_command(
+                "repos/{}/git/ref/heads/{}".format(REPO, HEARTBEAT_BRANCH),
+                cache=True,
+            ),
             capture_output=True,
             text=True,
         )
@@ -4598,8 +4606,9 @@ def _stock_label_names(labels: Iterable[str]) -> Tuple[str, ...]:
 def _dependabot_configured(repo: str) -> bool:
     """Whether either supported Dependabot config filename exists."""
     for filename in ("dependabot.yml", "dependabot.yaml"):
-        payload = _gh_json(
-            "gh", "api", "repos/{}/contents/.github/{}".format(repo, filename)
+        payload = _gh_api_json(
+            "repos/{}/contents/.github/{}".format(repo, filename),
+            cache=True,
         )
         if payload is not None:
             return True
@@ -4608,11 +4617,15 @@ def _dependabot_configured(repo: str) -> bool:
 
 def member_repo_readiness(repo: str) -> MemberRepoReadiness:
     """Read the checkable onboarding facts for one topic-bearing repository."""
-    workflows = _gh_json(
-        "gh", "api", "repos/{}/actions/workflows".format(repo)
+    # CI workflow presence is a blocking queue-readiness gate. It must stay
+    # live so a newly removed workflow cannot be hidden by a stale response.
+    workflows = _gh_api_json(
+        "repos/{}/actions/workflows".format(repo), cache=False
     )
-    labels = _gh_json(
-        "gh", "api", "repos/{}/labels?per_page=100".format(repo)
+    # Labels and Dependabot are advisory onboarding context, never a reason to
+    # hand out or withhold a ticket, so their REST responses may be cached.
+    labels = _gh_api_json(
+        "repos/{}/labels?per_page=100".format(repo), cache=True
     )
     return MemberRepoReadiness(
         repo=repo,
@@ -9110,6 +9123,25 @@ def _gh_json(*args: str):
         return None
 
 
+def _gh_api_command(endpoint: str, *, cache: bool = False) -> List[str]:
+    """Build one read-only REST command with an explicit cache policy.
+
+    The endpoint-only form is a GET. `cache=True` is reserved for data that is
+    advisory or diagnostic; callers that influence queue, claim, or gate
+    decisions must leave it false. Put the flags after the endpoint so the
+    command remains easy for fixture doubles to inspect and for `gh` to parse.
+    """
+    command = ["gh", "api", endpoint]
+    if cache:
+        command.extend(["--cache", GH_API_CACHE_DURATION])
+    return command
+
+
+def _gh_api_json(endpoint: str, *, cache: bool = False):
+    """Read one REST GET, optionally through `gh`'s bounded response cache."""
+    return _gh_json(*_gh_api_command(endpoint, cache=cache))
+
+
 def _issue_comments(item: Item) -> List[dict]:
     """Read one issue's comments, keeping a failed response distinguishable."""
     payload = _gh_json(
@@ -9493,11 +9525,14 @@ def ticket_pr_index(
 
 def ticket_branch_index(repo: str) -> Tuple[Set[str], bool]:
     """Remote ``ticket/<n>`` branches from one bounded repository scan."""
-    rows = _gh_json(
-        "gh", "api",
+    # Branch presence protects stale-claim recovery and WIP ownership. Never
+    # serve it from the response cache: a stale branch read can release work
+    # that is still being pushed or preserve a claim that should be recovered.
+    rows = _gh_api_json(
         "repos/{}/git/matching-refs/heads/ticket?per_page={}".format(
             repo, MERGED_PR_SCAN_LIMIT
         ),
+        cache=False,
     )
     if rows is None:
         raise GitHubError("could not read ticket branches for {}".format(repo))

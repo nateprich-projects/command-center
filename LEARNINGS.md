@@ -8,6 +8,21 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Non-gating REST reads use the GitHub CLI response cache
+
+**2026-09-16 · GitHub CLI · measured in fixture coverage**
+
+The #655 before number remains **42 API calls and 47 measured GraphQL points** for
+`funnel doctor`. The cache seam is deliberately narrower than that whole command:
+advisory labels, Dependabot configuration, and the heartbeat-branch health read use
+`gh api --cache 5m`; CI workflow presence and ticket-branch presence stay live because
+they can affect queue eligibility or claim recovery. GraphQL, PR, verdict, and merge
+reads are also live.
+
+The fixture cache replay made two identical advisory reads with one live CLI attempt,
+a **50% reduction in live REST calls**. This is a repeated-read measurement, not a
+claim about GraphQL points: the CLI does not expose a per-query cost for these reads.
+
 ### Begin Project reads keep history to the candidate set
 
 **2026-09-16 · GitHub GraphQL · measured in fixture coverage**

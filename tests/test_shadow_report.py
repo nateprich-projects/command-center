@@ -235,7 +235,8 @@ def test_breakdown_shape_mode_reports_issue_population_without_comparing():
     records = (
         _issue_job(
             "shadow-breakdown", "breakdown", 820,
-            "shadow breakdown of owner/repo#103: 2 tickets",
+            "shadow breakdown of owner/repo#103: 2 tickets; answer: "
+            "{\"tickets\":[{},{}],\"needs_decision\":null}",
         )
         + _issue_job(
             "live-breakdown", "breakdown", 830,
@@ -265,6 +266,9 @@ def test_breakdown_shape_mode_reports_issue_population_without_comparing():
         "truncated": False,
     }
     assert report["breakdown_shape_agreement"] == {
+        "agree": 0,
+        "disagree": 0,
+        "rate": None,
         "jobs": {"shadow": 2, "live": 2, "matched": 2, "compared": 0},
         "malformed_output": {
             "shadow": {"count": 0, "rate": 0.0},
@@ -280,6 +284,103 @@ def test_breakdown_shape_mode_reports_issue_population_without_comparing():
                 "median_seconds": 20, "p90_seconds": 20.0,
             },
         },
+    }
+
+
+def _shape_comparison_records(*, shadow_status="Ready", live_note="shaped owner/repo#103 to Ready"):
+    return (
+        _issue_job(
+            "shadow-breakdown", "breakdown", 820,
+            "shadow breakdown of owner/repo#103: 2 tickets; answer: "
+            "{\"tickets\":[{},{}],\"needs_decision\":\"  Where?  \"}",
+        )
+        + _issue_job(
+            "live-breakdown", "breakdown", 830,
+            "broke down owner/repo#103 into 3 tickets; "
+            "needs-decision question: where?",
+        )
+        + _issue_job(
+            "shadow-shape", "shape", 840,
+            "shadow shape of owner/repo#103: {}".format(shadow_status),
+        )
+        + _issue_job(
+            "live-shape", "shape", 850, live_note,
+        )
+    )
+
+
+def test_breakdown_shape_mode_compares_count_question_and_shape_outcome():
+    report = shadow_report.build_report(
+        _shape_comparison_records(),
+        now=1000,
+        window_seconds=200,
+        mode="breakdown-shape",
+        live_shape_statuses={
+            "live-shape": {"status": "Ready", "status_since": 845},
+        },
+    )
+
+    assert report["breakdown_shape_agreement"]["agree"] == 1
+    assert report["breakdown_shape_agreement"]["disagree"] == 0
+    assert report["breakdown_shape_agreement"]["rate"] == 1.0
+    assert report["breakdown_shape_agreement"]["jobs"]["compared"] == 1
+
+
+def test_shape_disagreement_is_counted_after_reading_live_status():
+    report = shadow_report.build_report(
+        _shape_comparison_records(shadow_status="Shaped"),
+        now=1000,
+        window_seconds=200,
+        mode="breakdown-shape",
+        live_shape_statuses={
+            "live-shape": {"status": "Ready", "status_since": 845},
+        },
+    )
+
+    assert report["breakdown_shape_agreement"]["agree"] == 0
+    assert report["breakdown_shape_agreement"]["disagree"] == 1
+    assert report["breakdown_shape_agreement"]["rate"] == 0.0
+
+
+def test_stale_live_shape_status_is_excluded_from_the_denominator():
+    report = shadow_report.build_report(
+        _shape_comparison_records(),
+        now=1000,
+        window_seconds=200,
+        mode="breakdown-shape",
+        live_shape_statuses={
+            "live-shape": {"status": "Ready", "status_since": 829},
+        },
+    )
+
+    assert report["breakdown_shape_agreement"]["jobs"]["compared"] == 0
+    assert report["breakdown_shape_agreement"]["agree"] == 0
+    assert report["breakdown_shape_agreement"]["disagree"] == 0
+    assert report["breakdown_shape_agreement"]["rate"] is None
+
+
+def test_malformed_shadow_shape_is_separate_from_a_stale_status_read():
+    records = _shape_comparison_records()
+    records[8]["malformed"] = True
+    report = shadow_report.build_report(
+        records,
+        now=1000,
+        window_seconds=200,
+        mode="breakdown-shape",
+        live_shape_statuses={
+            "live-shape": {"status": "Ready", "status_since": 845},
+        },
+    )
+
+    assert report["breakdown_shape_agreement"]["jobs"]["compared"] == 0
+    assert report["breakdown_shape_agreement"]["rate"] is None
+    assert report["breakdown_shape_agreement"]["malformed_output"]["live"] == {
+        "count": 0,
+        "rate": 0.0,
+    }
+    assert report["breakdown_shape_agreement"]["malformed_output"]["shadow"] == {
+        "count": 1,
+        "rate": 0.5,
     }
 
 

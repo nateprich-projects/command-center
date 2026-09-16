@@ -543,17 +543,22 @@ function renderWaiting(brief) {
     return;
   }
 
+  // Keep the two rendered brief sections in the same order as /funnel: Nate's
+  // decisions first, then work he owes. CSS changes their narrow presentation
+  // without changing the producer's payload or its ordering.
+  const sections = element("div", "brief-sections");
   if (decisions.length) {
-    container.append(waitingSection(
+    sections.append(waitingSection(
       "Decisions waiting on you", decisions.length, decisions.map(decisionRow),
     ));
   }
   if (present(brief.human_steps)) {
-    container.append(waitingSection(
+    sections.append(waitingSection(
       "Actions waiting on you", brief.human_steps.length,
       brief.human_steps.map(humanStepRow),
     ));
   }
+  container.append(sections);
 }
 
 function failureState(snapshot) {

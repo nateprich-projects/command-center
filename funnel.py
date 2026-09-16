@@ -9983,12 +9983,56 @@ def implementation_packet(repo: str, number: int, agent: str) -> Dict:
     return packet
 
 
+def _begin_preflight(
+    now: datetime, agent: str, idle: bool
+) -> Tuple[Dict[str, object], Optional[Dict[str, object]]]:
+    """Start a run and apply the local gates before reading Project state.
+
+    ``load_items`` is the expensive part of an otherwise empty poll.  Usage
+    and idle are local facts, so a refusal must happen before the Project list
+    query; ``#655`` measured the old baseline at 42 API calls and 47 GraphQL
+    points.  The selected run keeps the exact same reading for later shaping
+    decisions.  ``None`` for the reading means the preflight produced a stop
+    envelope, not that a caller may guess at headroom.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import usage
+
+    out: Dict[str, object] = {"agent": agent}
+    out["run"] = _start_begin_heartbeat(agent)
+
+    reading = usage.read_agent(agent, now.timestamp())
+    if reading is None:
+        out.update(gate="unknown", do="stop",
+                   why="usage could not be read; a run that cannot read its "
+                       "budget does not work")
+        return out, None
+
+    verdict = usage.pace(reading, now.timestamp(),
+                         provider=usage.provider_of(agent))
+    idle_verdict = usage.idle_verdict(agent, reading) if idle else None
+    if verdict.get("over_pace") or (idle_verdict or {}).get("over"):
+        out.update(gate="over", do="stop",
+                   why=(idle_verdict or {}).get("why") or "over pace")
+        return out, None
+
+    out["gate"] = "ok"
+    if reading.get("unmetered"):
+        # Say so rather than letting ``gate: ok`` imply a budget was checked.
+        # An unmetered provider is a standing exception recorded in AGENTS.md.
+        out["unmetered"] = True
+    return out, reading
+
+
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
               repo_readiness: Optional[
                   Mapping[str, MemberRepoReadiness]
               ] = None,
-              caller_role: Optional[str] = None) -> int:
+              caller_role: Optional[str] = None,
+              _preflight: Optional[
+                  Tuple[Dict[str, object], Optional[Dict[str, object]]]
+              ] = None) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
     A polling routine spends most of its runs discovering there is nothing to
@@ -10004,35 +10048,13 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import heartbeat
-    import usage
 
-    out: Dict[str, object] = {"agent": agent}
-    out["run"] = _start_begin_heartbeat(agent)
-
-    reading = usage.read_agent(agent, now.timestamp())
+    if _preflight is None:
+        _preflight = _begin_preflight(now, agent, idle)
+    out, reading = _preflight
     if reading is None:
-        out.update(gate="unknown", do="stop",
-                   why="usage could not be read; a run that cannot read its "
-                       "budget does not work")
         print(json.dumps(out, indent=2))
         return 0
-
-    verdict = usage.pace(reading, now.timestamp(),
-                         provider=usage.provider_of(agent))
-    idle_verdict = usage.idle_verdict(agent, reading) if idle else None
-    if verdict.get("over_pace") or (idle_verdict or {}).get("over"):
-        out.update(gate="over", do="stop",
-                   why=(idle_verdict or {}).get("why") or "over pace")
-        print(json.dumps(out, indent=2))
-        return 0
-
-    out["gate"] = "ok"
-    if reading.get("unmetered"):
-        # Say so rather than letting `gate: ok` imply a budget was checked. An
-        # unmetered provider is a standing exception recorded in AGENTS.md, and
-        # a run that never had a budget to check should not read like one that
-        # passed a check.
-        out["unmetered"] = True
 
     # Reconcile first, and never fatally. A step that cannot reach GitHub
     # records its failure and selection proceeds without it; only a failure
@@ -11466,6 +11488,16 @@ def main(argv: Optional[Sequence[str]] = None, *,
     if args.command == "snapshot":
         return cmd_snapshot()
 
+    # ``begin`` can refuse on local usage or presence facts without consulting
+    # the Project. Keep that gate ahead of the shared loader; an ordinary poll
+    # must not spend the full Project read merely to learn that it cannot run.
+    begin_preflight = None
+    if args.command == "begin":
+        begin_preflight = _begin_preflight(now, args.agent, args.idle)
+        if begin_preflight[1] is None:
+            print(json.dumps(begin_preflight[0], indent=2))
+            return 0
+
     brief_timings: Optional[Dict[str, float]] = (
         {} if args.command == "brief" else None
     )
@@ -11570,7 +11602,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_begin(items, now, args.agent, args.tier, args.idle,
                              args.breakdown,
                              repo_readiness=repo_readiness,
-                             caller_role=args.caller_role)
+                             caller_role=args.caller_role,
+                             _preflight=begin_preflight)
         if args.command == "next-review":
             return cmd_next_review(items, args.tier)
         if args.command == "review":

@@ -188,6 +188,106 @@ def test_begin_prints_a_transient_json_envelope_when_project_load_is_truncated(
     )
 
 
+@pytest.mark.parametrize("gate", ["pace", "idle"])
+def test_main_applies_begin_gates_before_loading_the_project(
+    monkeypatch, capsys, gate
+):
+    """#655's 42-call/47-point before number is not paid by a refusal."""
+    events = []
+
+    monkeypatch.setattr(
+        funnel,
+        "_start_begin_heartbeat",
+        lambda agent: events.append("heartbeat") or "run-id",
+    )
+    monkeypatch.setattr(
+        usage,
+        "read_agent",
+        lambda agent, timestamp: events.append("usage") or {
+            "windows": {"five_hour": {"used_percent": 1.0}},
+        },
+    )
+    monkeypatch.setattr(
+        usage,
+        "pace",
+        lambda reading, timestamp, provider: (
+            events.append("pace")
+            or {"over_pace": gate == "pace"}
+        ),
+    )
+    monkeypatch.setattr(
+        usage,
+        "idle_verdict",
+        lambda agent, reading: events.append("idle") or {
+            "over": gate == "idle",
+            "why": "idle refusal",
+        },
+    )
+    monkeypatch.setattr(
+        funnel,
+        "load_items",
+        lambda: pytest.fail("a refused begin must not load the Project"),
+    )
+
+    argv = ["begin", "--agent", "codex", "--tier", "standard"]
+    if gate == "idle":
+        argv.append("--idle")
+    assert funnel.main(argv) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["do"] == "stop"
+    assert result["gate"] == "over"
+    assert events == ["heartbeat", "usage", "pace"] + (
+        ["idle"] if gate == "idle" else []
+    )
+
+
+def test_main_loads_the_project_after_begin_gates_pass(
+    monkeypatch, capsys
+):
+    """A passing preflight still reaches the normal queue and WIP checks."""
+    events = []
+    monkeypatch.setattr(
+        funnel,
+        "_start_begin_heartbeat",
+        lambda agent: events.append("heartbeat") or "run-id",
+    )
+    monkeypatch.setattr(
+        usage,
+        "read_agent",
+        lambda agent, timestamp: events.append("usage") or {"windows": {}},
+    )
+    monkeypatch.setattr(
+        usage,
+        "pace",
+        lambda reading, timestamp, provider: events.append("pace") or {
+            "over_pace": False,
+        },
+    )
+    monkeypatch.setattr(
+        funnel,
+        "load_items",
+        lambda: events.append("load") or [],
+    )
+    monkeypatch.setattr(funnel, "repo_readiness_for_items", lambda items: {})
+    monkeypatch.setattr(
+        funnel,
+        "cmd_begin",
+        lambda items, now, agent, tier, idle, breakdown=False,
+        repo_readiness=None, caller_role=None, _preflight=None: (
+            events.append(("begin", items, _preflight)) or 0
+        ),
+    )
+
+    assert funnel.main(["begin", "--agent", "codex", "--tier", "standard"]) == 0
+    capsys.readouterr()
+    assert [event for event in events if isinstance(event, str)] == [
+        "heartbeat", "usage", "pace", "load",
+    ]
+    assert events[-1][0] == "begin"
+    assert events[-1][2][0]["gate"] == "ok"
+
+
 def test_begin_records_a_named_finish_for_a_structured_exhaustion(
     monkeypatch, capsys
 ):
@@ -1276,7 +1376,7 @@ def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
         funnel,
         "cmd_begin",
         lambda items, now, agent, tier, idle, breakdown=False,
-        repo_readiness=None, caller_role=None: (
+        repo_readiness=None, caller_role=None, _preflight=None: (
             received.append(repo_readiness) or 0
         ),
     )

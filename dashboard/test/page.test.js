@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
-  STAGES, age, boardColumns, failureState, pipState, rowOwners, rowPrState, rowTier, shortRepo,
+  STAGES, age, boardColumns, failureState, nextOwner, pipState, rowPrState, rowTier, shortRepo,
 } from "../public/app.js";
 
 test("the board uses payload order within the fixed plan stages", () => {
@@ -43,16 +43,22 @@ test("a row's PR flag is the furthest of its tickets, and closed work is not a f
   assert.equal(rowPrState([{ state: "CLOSED" }]), null);
 });
 
-test("tier and owners describe open tickets only, without duplicates", () => {
+test("tier describes open tickets only", () => {
   const tickets = [
-    { state: "CLOSED", tier: "escalated", owner: "Muse" },
-    { state: "OPEN", tier: "standard", owner: "Codex" },
-    { state: "OPEN", tier: "escalated", owner: "Codex" },
+    { state: "CLOSED", tier: "escalated" },
+    { state: "OPEN", tier: "standard" },
+    { state: "OPEN", tier: "escalated" },
   ];
   assert.equal(rowTier(tickets), "escalated");
-  assert.deepEqual(rowOwners(tickets), ["Codex"]);
   assert.equal(rowTier([{ state: "CLOSED", tier: "escalated" }]), null);
-  assert.deepEqual(rowOwners([{ state: "CLOSED", owner: "Muse" }]), []);
+});
+
+test("the next step is the producer's next owner, never a summary of owners", () => {
+  assert.equal(nextOwner({ next_owner: "Muse", tickets: [{ state: "OPEN", owner: "Codex" }] }), "Muse");
+  // Fallback for an older snapshot: the first open ticket, which the producer
+  // already sorted into queue order.
+  assert.equal(nextOwner({ tickets: [{ state: "CLOSED", owner: "Muse" }, { state: "OPEN", owner: "Codex" }] }), "Codex");
+  assert.equal(nextOwner({ tickets: [{ state: "CLOSED", owner: "Muse" }] }), null);
 });
 
 test("snapshot age and last-failure status are explicit", () => {

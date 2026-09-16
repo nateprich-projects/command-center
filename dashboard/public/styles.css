@@ -203,6 +203,7 @@ main {
   height: 1px;
   background: #2c333d;
 }
+.ticket-blocked .ticket-title { color: #8a6a52; }
 .ticket-title { color: var(--ink-dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
 .ticket-closed .ticket-title { color: var(--ink-faint); text-decoration: line-through; text-decoration-color: #3c434d; }
 .owners { display: inline-flex; gap: 5px; }
@@ -211,7 +212,7 @@ main {
    way GitHub's sub-issue progress does, so a project with thirty tickets and
    one with three both read at a glance. */
 .pips { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; }
-.pip-bar { display: flex; align-items: center; gap: 2px; flex: 1 1 auto; min-width: 0; }
+.pip-bar { display: flex; align-items: center; gap: 2px; flex: 1 1 auto; min-width: 0; overflow: hidden; }
 .pip {
   width: 8px;
   height: 8px;
@@ -229,7 +230,13 @@ main {
 .pip-blocked { background: var(--pip-blocked); }
 .owner-more { margin-left: 4px; font-size: 11px; color: var(--ink-faint); }
 .tier-standard { color: #5b636e; font-size: 11.5px; }
-.pip-count { flex: 0 0 auto; font-size: 11.5px; color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+.pip-count {
+  flex: 0 0 46px;
+  text-align: right;
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+}
 
 .chip {
   display: inline-flex;

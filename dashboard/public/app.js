@@ -3,7 +3,6 @@
 // the same board drift apart. Nate, 2026-09-15: the page carries the board and
 // human steps, and no other brief section.
 
-const OWNER_LIMIT = 2;
 
 // Stages that open collapsed: finished and stopped work is reference, not
 // the working board.
@@ -93,13 +92,14 @@ function rowTier(tickets) {
 
 // Owners of open tickets, in the order the producer sent them, without
 // duplicates: this is a summary of the rows below, never a re-ranking.
-function rowOwners(tickets) {
-  const owners = [];
-  for (const ticket of tickets || []) {
-    if (ticket.state !== "OPEN" || !ticket.owner) continue;
-    if (!owners.includes(ticket.owner)) owners.push(ticket.owner);
+// The producer names the owner of the next step in the chain; the page shows
+// that and nothing else (Nate, 2026-09-15).
+function nextOwner(item) {
+  if (item && item.next_owner) return item.next_owner;
+  for (const ticket of (item && item.tickets) || []) {
+    if (ticket.state === "OPEN" && ticket.owner) return ticket.owner;
   }
-  return owners;
+  return null;
 }
 
 function element(tag, className, text) {
@@ -172,19 +172,9 @@ function tierCell(tier) {
   return chip(tier, `chip-tier chip-tier-${tier}`);
 }
 
-function ownerCell(owners) {
-  const list = Array.isArray(owners) ? owners : owners ? [owners] : [];
-  if (!list.length) return element("span", "muted", "—");
-  const wrap = element("span", "owners");
-  const shown = list.length > OWNER_LIMIT ? list.slice(0, OWNER_LIMIT) : list;
-  for (const owner of shown) {
-    wrap.append(chip(owner, `chip-owner ${OWNER_CLASS[owner] || ""}`));
-  }
-  if (list.length > OWNER_LIMIT) {
-    wrap.append(element("span", "owner-more", `+${list.length - OWNER_LIMIT}`));
-    wrap.title = list.join(", ");
-  }
-  return wrap;
+function ownerCell(owner) {
+  if (!owner) return element("span", "muted", "—");
+  return chip(owner, `chip-owner ${OWNER_CLASS[owner] || ""}`);
 }
 
 function headerRow() {
@@ -212,7 +202,15 @@ function ticketRow(ticket) {
   const title = element("div", "cell cell-title cell-child");
   title.append(element("span", "child-rule"));
   title.append(link(`#${ticket.number} ${ticket.title || ""}`, ticket.url, "ticket-title"));
-  if (ticket.blocked) title.append(chip("blocked", "chip-blocked"));
+  if (ticket.blocked) {
+    const refs = Array.isArray(ticket.blockers) ? ticket.blockers : [];
+    const names = refs.map((ref) => `#${String(ref).split("#").pop()}`);
+    title.append(chip(
+      names.length ? `blocked by ${names.join(", ")}` : "blocked",
+      "chip-blocked",
+      refs.join(", ") || null,
+    ));
+  }
   row.append(title);
 
   row.append(cell("cell-repo", element("span", "muted", "")));
@@ -253,7 +251,7 @@ function projectRow(item) {
   row.append(cell("cell-repo", element("span", "repo", shortRepo(item.repo || item.repository) || "")));
   row.append(cell("cell-pr", prCell(rowPrState(tickets))));
   row.append(cell("cell-tier", tierCell(rowTier(tickets))));
-  row.append(cell("cell-owner", ownerCell(rowOwners(tickets))));
+  row.append(cell("cell-owner", ownerCell(nextOwner(item))));
   row.append(cell("cell-pips", pips(tickets, item.tickets_closed, item.tickets_total)));
   row.append(cell("cell-class", item.class
     ? chip(item.class, `chip-class chip-class-${String(item.class).toLowerCase()}`)
@@ -361,7 +359,7 @@ function renderWaiting(brief) {
 
   if (present(brief.human_steps)) {
     const section = element("div", "human-steps");
-    section.append(element("h3", null, "Human steps"));
+    section.append(element("h3", null, "Actions waiting on you"));
     const list = element("ul", null);
     for (const step of brief.human_steps) list.append(humanStepRow(step));
     section.append(list);
@@ -413,4 +411,4 @@ if (typeof document !== "undefined") {
   });
 }
 
-export { STAGES, age, boardColumns, failureState, pipState, rowOwners, rowPrState, rowTier, shortRepo };
+export { STAGES, age, boardColumns, failureState, nextOwner, pipState, rowPrState, rowTier, shortRepo };

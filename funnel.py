@@ -5920,6 +5920,8 @@ def _dashboard_ticket(
     item: Item,
     pr_fact: Optional[Mapping[str, object]],
     verdict: Optional[Mapping[str, object]],
+    queue_rank: Optional[int] = None,
+    blockers: Sequence[str] = (),
 ) -> Dict[str, object]:
     """One ticket row for the dashboard, with its PR, tier and owner flags.
 
@@ -5968,6 +5970,12 @@ def _dashboard_ticket(
         "title": item.title,
         "url": item.url,
         "state": item.state,
+        # Where this ticket sits in the engineers' own queue: 0 is the ticket
+        # the next run takes. None means it is not startable — closed, blocked,
+        # or already sitting in review. The order is `startable()`'s, never a
+        # second opinion computed here.
+        "queue_rank": queue_rank,
+        "blockers": list(blockers),
         "pr": pr,
         "pr_number": pr_number if isinstance(pr_number, int) else None,
         "tier": tier,
@@ -5994,8 +6002,21 @@ def _dashboard_item(
         "waited": _dashboard_stage_age(item, now),
         "tickets_closed": item.children_done,
         "tickets_total": item.children_total,
+        # The owner of the next step in the chain, not every owner on the
+        # project: Nate, 2026-09-15, "only the assignment for the next step".
+        "next_owner": _dashboard_next_owner(tickets or ()),
         "tickets": list(tickets or ()),
     }
+
+
+def _dashboard_next_owner(
+    tickets: Sequence[Mapping[str, object]]
+) -> Optional[str]:
+    """Owner of the first open ticket in queue order, or None."""
+    for ticket in tickets:
+        if ticket.get("state") == "OPEN" and ticket.get("owner"):
+            return str(ticket["owner"])
+    return None
 
 
 def dashboard_board(
@@ -6005,44 +6026,41 @@ def dashboard_board(
 ) -> Dict[str, List[Dict[str, object]]]:
     """Build the ordered parent-project board for one already-loaded brief.
 
-    Only recent closed ``Done`` projects are retained. All other rows are
-    selected by their Project Status; the existing Project facts are enough,
-    so building this display never performs another GitHub read.
+    Rows are ordered by the engineers' own queue, so the board reads as the
+    priority it actually is: within a project the next ticket to be taken is
+    first and closed tickets sink to the bottom, and projects are ordered by
+    their best ticket. `Done` is newest-first; every other stage keeps its
+    time-at-gate order for projects with nothing startable. Ordering is
+    `startable()`'s throughout — this function never invents a rank.
     """
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
     done_cutoff = now - DASHBOARD_DONE_WINDOW
     max_time = datetime.max.replace(tzinfo=timezone.utc)
 
-    def stage_since(item: Item) -> Optional[datetime]:
-        return _dashboard_stage_since(item)
-
-    def board_key(item: Item):
-        since = stage_since(item)
-        return (
-            since is None,
-            since or max_time,
-            item.repo,
-            item.number,
-        )
-
-    def include(item: Item, stage: str) -> bool:
-        if item.parent is not None or item.status != stage:
-            return False
-        if stage != "Done":
-            return True
-        return (
-            item.state == "CLOSED"
-            and item.closed_at is not None
-            and item.closed_at >= done_cutoff
-        )
+    facts = dict(pr_facts or {})
+    in_review = {
+        ref for ref, fact in facts.items()
+        if isinstance(fact, Mapping)
+        and str(fact.get("state") or "").upper() == "OPEN"
+    }
+    try:
+        # Match what `cmd_next` withholds, so the rank shown is the rank the
+        # engineers actually use: work already in review, and work finished by
+        # comments and waiting on Nate to close.
+        withheld = set(in_review) | set(finished_by_comments(rows))
+        queue = startable(rows, awaiting_review=withheld)
+    except Exception:
+        # The board is instrumentation: an ordering failure must not cost the
+        # snapshot. Fall back to no ranks rather than no board.
+        queue = []
+    queue_rank = {item.ref: index for index, item in enumerate(queue)}
 
     children: Dict[str, List[Item]] = {}
     for row in rows:
         if row.parent:
             children.setdefault(row.parent, []).append(row)
 
-    facts = dict(pr_facts or {})
     verdicts: Dict[str, Optional[Dict]] = {}
 
     def verdict_for(ticket: Item) -> Optional[Dict]:
@@ -6060,13 +6078,69 @@ def dashboard_board(
         verdicts[ticket.ref] = found
         return found
 
+    def ticket_key(child: Item):
+        """Next-to-be-taken first, then other open work, then closed."""
+        rank = queue_rank.get(child.ref)
+        if child.state != "OPEN":
+            return (2, 0, child.number)
+        if rank is None:
+            return (1, 0, child.number)
+        return (0, rank, child.number)
+
     def ticket_rows(parent: Item) -> List[Dict[str, object]]:
         return [
-            _dashboard_ticket(child, facts.get(child.ref), verdict_for(child))
-            for child in sorted(
-                children.get(parent.ref, ()), key=lambda c: c.number
+            _dashboard_ticket(
+                child,
+                facts.get(child.ref),
+                verdict_for(child),
+                queue_rank.get(child.ref),
+                # Native edges when there are any, else the refs parsed from
+                # the block comment, so "blocked" always says by what.
+                list(child.open_blockers or child.block_references),
             )
+            for child in sorted(children.get(parent.ref, ()), key=ticket_key)
         ]
+
+    def best_rank(item: Item) -> Optional[int]:
+        ranks = [
+            queue_rank[child.ref]
+            for child in children.get(item.ref, ())
+            if child.ref in queue_rank
+        ]
+        return min(ranks) if ranks else None
+
+    def stage_since(item: Item) -> Optional[datetime]:
+        return _dashboard_stage_since(item)
+
+    def board_key(item: Item):
+        """Projects with startable work lead, in queue order; then by gate age."""
+        rank = best_rank(item)
+        since = stage_since(item)
+        return (
+            rank is None,
+            rank if rank is not None else 0,
+            since is None,
+            since or max_time,
+            item.repo,
+            item.number,
+        )
+
+    def done_key(item: Item):
+        """Done reads newest-first: the last thing finished is the useful one."""
+        closed = item.closed_at or stage_since(item)
+        return (closed is None, -(closed.timestamp() if closed else 0),
+                item.repo, item.number)
+
+    def include(item: Item, stage: str) -> bool:
+        if item.parent is not None or item.status != stage:
+            return False
+        if stage != "Done":
+            return True
+        return (
+            item.state == "CLOSED"
+            and item.closed_at is not None
+            and item.closed_at >= done_cutoff
+        )
 
     return {
         "columns": [
@@ -6076,7 +6150,7 @@ def dashboard_board(
                     _dashboard_item(item, now, by_ref, ticket_rows(item))
                     for item in sorted(
                         (item for item in rows if include(item, stage)),
-                        key=board_key,
+                        key=done_key if stage == "Done" else board_key,
                     )
                 ],
             }

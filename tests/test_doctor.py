@@ -837,26 +837,30 @@ def test_merged_pr_facts_intersects_one_bounded_repo_scan(monkeypatch):
     )
     calls = []
 
-    def fake_gh_json(*args):
-        calls.append(args)
-        return [
-            {"headRefName": "ticket/7"},
-            {"headRefName": "feature/not-a-ticket"},
-        ]
+    def fake_graphql(query, **variables):
+        calls.append((query, variables))
+        return {
+            "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},
+            "repo0": {
+                "pullRequests": {
+                    "nodes": [
+                        {"number": 7, "headRefName": "ticket/7", "state": "MERGED"},
+                        {"number": 8, "headRefName": "feature/not-a-ticket", "state": "MERGED"},
+                    ],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            },
+        }
 
-    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    monkeypatch.setattr(funnel, "gh_graphql", fake_graphql)
 
     result = funnel.merged_pr_facts([ticket])
 
     assert result == funnel.MergedPRFacts(frozenset([ticket.ref]), False)
     assert len(calls) == 1
-    assert calls[0][0:6] == (
-        "gh", "pr", "list", "--repo", "owner/repo", "--state",
-    )
-    assert calls[0][-3:] == (
-        "headRefName", "--limit", str(funnel.MERGED_PR_SCAN_LIMIT + 1),
-    )
-    assert str(funnel.MERGED_PR_SCAN_LIMIT + 1) in calls[0]
+    assert "pullRequests(first: 100" in calls[0][0]
+    assert "states: [MERGED]" in calls[0][0]
+    assert "rateLimit { cost remaining resetAt }" in calls[0][0]
 
 
 def test_merged_pr_scan_truncation_is_visible_in_the_finding(monkeypatch):
@@ -869,7 +873,27 @@ def test_merged_pr_scan_truncation_is_visible_in_the_finding(monkeypatch):
         {"headRefName": "feature/{}".format(number)}
         for number in range(funnel.MERGED_PR_SCAN_LIMIT)
     )
-    monkeypatch.setattr(funnel, "_gh_json", lambda *args: rows)
+    def fake_graphql(query, **variables):
+        first = int(query.split("pullRequests(first: ", 1)[1].split(",", 1)[0])
+        nodes = []
+        for index, row in enumerate(rows[:first], start=1):
+            node = dict(row)
+            node.update({"number": index, "state": "MERGED"})
+            nodes.append(node)
+        return {
+            "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},
+            "repo0": {
+                "pullRequests": {
+                    "nodes": nodes,
+                    "pageInfo": {
+                        "hasNextPage": len(rows) > first,
+                        "endCursor": "cursor-1" if len(rows) > first else None,
+                    },
+                }
+            },
+        }
+
+    monkeypatch.setattr(funnel, "gh_graphql", fake_graphql)
 
     facts = funnel.merged_pr_facts([ticket])
     result = funnel.check_item_consistency([ticket], merged_pr_facts=facts)

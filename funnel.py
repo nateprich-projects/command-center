@@ -20,6 +20,7 @@ from collections import namedtuple
 import errno
 import glob
 import hmac
+import inspect
 import io
 import json
 import os
@@ -155,6 +156,46 @@ class TicketPRIndex(dict):
     def __init__(self, *args, all_rows: Iterable[Dict] = ()):
         super().__init__(*args)
         self.all_rows = tuple(all_rows)
+
+
+@dataclass(frozen=True)
+class BatchedPRRead:
+    """Repository-wide PR observations returned by one GraphQL batch.
+
+    The row lists stay grouped by repository so callers can preserve their
+    existing bounded-scan contracts. Branch refs travel with the same query:
+    the queue needs them for abandoned claims, while a second REST scan would
+    put the fan-out back under a different name.
+    """
+
+    rows_by_repo: Mapping[str, Tuple[Dict[str, object], ...]]
+    branch_refs_by_repo: Mapping[str, Set[str]]
+    pr_truncated_by_repo: Mapping[str, bool]
+    branches_truncated_by_repo: Mapping[str, bool]
+
+
+class TicketPRFacts(dict):
+    """Primary ticket facts plus every PR row on each ticket branch.
+
+    Most queue and brief consumers need one newest row. Review and merge
+    reconciliation need all open rows so an older PR on the same branch cannot
+    hide a current candidate. Keeping the extra rows as an in-memory attribute
+    preserves the established mapping returned to callers and keeps GitHub as
+    the only source of state.
+    """
+
+    def __init__(
+        self,
+        *args,
+        rows_by_ref: Optional[
+            Mapping[str, Iterable[Mapping[str, object]]]
+        ] = None,
+    ):
+        super().__init__(*args)
+        self.rows_by_ref = {
+            ref: tuple(dict(row) for row in rows if isinstance(row, Mapping))
+            for ref, rows in (rows_by_ref or {}).items()
+        }
 
 #: The single-in-motion lock. Codex acts as Nate through the gh CLI — no bot
 #: identity, no originating-app marker — so no GitHub write can identify it and
@@ -2567,22 +2608,23 @@ def approved_conflicting_refs(
     }
 
 
-def awaiting_review(items: Sequence[Item]) -> Set[str]:
+def awaiting_review(
+    items: Sequence[Item],
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
+) -> Set[str]:
     """Tickets whose work is already in an open PR, waiting to be reviewed.
 
     Found by the `ticket/<number>` branch name the routine guarantees, which is
-    the same handle `ticket_pr_index` uses. One `gh pr list` per member repo, and
-    for repos that actually have candidate tickets.
+    the same handle `ticket_pr_index` uses. The normal caller supplies the
+    shared batch from ``ticket_pr_facts``; a direct caller creates that one
+    repository-wide GraphQL read here rather than paying once per PR.
     """
-    repos = {i.repo for i in items}
+    if pr_facts is None:
+        pr_facts = ticket_pr_facts(items)
     blocked: Set[str] = set()
-    for repo in sorted(repos):
-        rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "open",
-                        "--json", "headRefName,headRefOid,number",
-                        "--limit", "100") or []
-        for row in rows:
-            head = row.get("headRefName") or ""
-            if not head.startswith("ticket/"):
+    for item in items:
+        for row in _pr_rows_for_ref(pr_facts, item.ref):
+            if str(row.get("state") or "OPEN").upper() != "OPEN":
                 continue
             # A PR whose review asked for changes is *not* blocked: its ticket
             # goes back to the engineer to fix. Without this a rejected PR has no
@@ -2590,10 +2632,10 @@ def awaiting_review(items: Sequence[Item]) -> Set[str]:
             # offered it — so it waits for Nate. That is #39. The hand-back
             # lasts only while the rejected head is still the head: once the
             # engineer pushes, the ticket is review work again (#487).
-            verdict = latest_verdict(repo, row.get("number"))
+            verdict = _row_verdict(row, item.repo)
             if rejected_at_current_head(verdict, row.get("headRefOid")):
                 continue
-            blocked.add("{}#{}".format(repo, head.split("/", 1)[1]))
+            blocked.add(item.ref)
     return blocked
 
 
@@ -2676,9 +2718,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
         if ticket is None or tier is None:
             return ticket
 
-        reasons = escalation_reasons(
-            ticket.title, _ticket_body(ticket.repo, ticket.number)
-        )
+        reasons = escalation_reasons(ticket.title, _loaded_item_body(ticket))
         wanted = bool(reasons) if tier == "escalated" else not reasons
         if wanted:
             return ticket
@@ -5248,6 +5288,8 @@ def _graphql_operation(query: str) -> str:
     compact = " ".join(query.split())
     if "repositories(first:" in compact:
         return "member_repos"
+    if "pullRequests(first:" in compact:
+        return "pull_requests"
     if "nodes(ids:" in compact:
         return "project_item_details"
     if "projectV2(number:" in compact and "items(first:" in compact:
@@ -6083,9 +6125,9 @@ def _dashboard_ticket(
     """One ticket row for the dashboard, with its PR, tier and owner flags.
 
     ``pr_fact`` is the row this ticket's PR already produced for the brief's
-    shared scan, so this adds no per-ticket read. ``verdict`` is looked up by
-    the caller for open PRs only, which bounds the cost by open pull requests
-    rather than by board size.
+    shared scan, so this adds no per-ticket read. ``verdict`` normally comes
+    from the same batch; the dashboard retains a legacy fallback for fixture
+    callers that provide a row without the batch's comment tail.
 
     A ticket reads as blocked for any block the funnel honours, not only its
     own label: an open native blocker, or a blocked parent (``parent_block``
@@ -6324,7 +6366,7 @@ def dashboard_board(
     verdicts: Dict[str, Optional[Dict]] = {}
 
     def verdict_for(ticket: Item) -> Optional[Dict]:
-        """Read a verdict only for a ticket whose PR is open (bounded cost)."""
+        """Return the batch verdict, with a fixture-only legacy fallback."""
         fact = facts.get(ticket.ref) or {}
         if str(fact.get("state") or "").upper() != "OPEN":
             return None
@@ -7824,7 +7866,16 @@ def cmd_next(
             write_lock(declined, "")
             object.__setattr__(declined, "in_motion_since", None)
             print("released {} (declined)".format(declined.ref), file=sys.stderr)
-    blocked = awaiting_review(items)
+    shared_review_read = _accepts_keyword(awaiting_review, "pr_facts")
+    if pr_facts is None and shared_review_read:
+        pr_facts = ticket_pr_facts(items)
+    blocked = (
+        _call_with_optional_keyword(
+            awaiting_review, "pr_facts", pr_facts, items
+        )
+        if shared_review_read
+        else awaiting_review(items)
+    )
     # An approved current head that GitHub now reports as conflicting is no
     # longer review work: the reviewer already judged it, and the engineer must
     # rebase it. Every other open PR remains withheld, including UNKNOWN and
@@ -9502,13 +9553,420 @@ def _ticket_body(repo: str, number: int) -> str:
     return row.get("body") or ""
 
 
+def _loaded_item_body(item: Item) -> str:
+    """Use the Project-loaded body without opening a candidate issue view."""
+    body = getattr(item, "body", None)
+    if isinstance(body, str):
+        return body
+    # A few library callers pass a lightweight candidate object rather than an
+    # Item. Keep that compatibility path explicit; real Project Items always
+    # carry ``body`` from the single Project load above.
+    if not hasattr(item, "body"):
+        repo = getattr(item, "repo", None)
+        number = getattr(item, "number", None)
+        if isinstance(repo, str) and number is not None:
+            return _ticket_body(repo, number)
+    return ""
+
+
+def _accepts_keyword(func: Callable, name: str) -> bool:
+    """Whether a callable can receive a keyword added by a newer seam."""
+    try:
+        parameters = inspect.signature(func).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    return any(
+        parameter.name == name
+        or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _call_with_optional_keyword(
+    func: Callable, keyword: str, value: object, *args
+):
+    """Call a seam with its new shared snapshot when the seam supports it."""
+    if _accepts_keyword(func, keyword):
+        return func(*args, **{keyword: value})
+    return func(*args)
+
+
+PR_GRAPHQL_PAGE_SIZE = 100
+PR_GRAPHQL_COMMENT_PAGE_SIZE = 100
+PR_GRAPHQL_REF_PAGE_SIZE = 100
+
+
+def _batched_pr_query(
+    repos: Sequence[str],
+    first: Mapping[str, int],
+    states: Sequence[str],
+    *,
+    include_comments: bool,
+    include_reviews: bool,
+    include_closing_refs: bool,
+    include_refs: bool,
+) -> Tuple[str, Dict[str, str]]:
+    """Build one GraphQL document for the active repository PR pages.
+
+    Repository names are known GitHub refs, but JSON quoting still matters:
+    they become GraphQL string literals rather than variables because a single
+    document needs a separate repository root for each member repo. Cursors
+    remain variables so the same batch can page without constructing an
+    unbounded number of documents.
+    """
+    if not repos:
+        raise ValueError("at least one repository is required")
+    if not states:
+        raise ValueError("at least one pull-request state is required")
+
+    aliases: Dict[str, str] = {}
+    lines = ["query({}) {{".format(
+        ", ".join("${}: String".format("cursor{}".format(index))
+                  for index in range(len(repos)))
+    )]
+    lines.append("  rateLimit { cost remaining resetAt }")
+    state_literal = "[{}]".format(", ".join(states))
+
+    for index, repo in enumerate(repos):
+        try:
+            owner, name = repo.split("/", 1)
+        except ValueError:
+            raise GitHubError("invalid repository ref {}".format(repo))
+        alias = "repo{}".format(index)
+        cursor_name = "cursor{}".format(index)
+        aliases[repo] = alias
+        lines.append(
+            "  {}: repository(owner: {}, name: {}) {{".format(
+                alias, json.dumps(owner), json.dumps(name)
+            )
+        )
+        lines.append(
+            "    pullRequests(first: {}, after: ${}, states: {}, "
+            "orderBy: {{field: CREATED_AT, direction: DESC}}) {{".format(
+                first[repo], cursor_name, state_literal
+            )
+        )
+        lines.append("      pageInfo { hasNextPage endCursor }")
+        lines.append("      nodes {")
+        lines.append(
+            "        number title state url headRefName headRefOid "
+            "mergeable mergedAt createdAt closedAt"
+        )
+        lines.append("        author { login }")
+        lines.append("        mergedBy { login }")
+        if include_reviews:
+            lines.append(
+                "        reviews(first: {}) {{ nodes {{ body state submittedAt "
+                "author {{ login }} }} }}".format(PR_GRAPHQL_PAGE_SIZE)
+            )
+        if include_comments:
+            lines.append(
+                "        comments(last: {}) {{ nodes {{ body createdAt "
+                "author {{ login }} }} }}".format(
+                    PR_GRAPHQL_COMMENT_PAGE_SIZE
+                )
+            )
+        if include_closing_refs:
+            lines.append(
+                "        closingIssuesReferences(first: {}) {{ nodes {{ number "
+                "repository {{ nameWithOwner }} }} }}".format(
+                    PR_GRAPHQL_PAGE_SIZE
+                )
+            )
+        lines.append("        commits(last: 1) {")
+        lines.append("          nodes {")
+        lines.append("            commit {")
+        lines.append("              statusCheckRollup {")
+        lines.append("                contexts(first: {}) {{".format(
+            PR_GRAPHQL_PAGE_SIZE
+        ))
+        lines.append("                  nodes {")
+        lines.append("                    __typename")
+        lines.append(
+            "                    ... on CheckRun { name conclusion status }"
+        )
+        lines.append(
+            "                    ... on StatusContext { context state }"
+        )
+        lines.append("                  }")
+        lines.append("                }")
+        lines.append("              }")
+        lines.append("            }")
+        lines.append("          }")
+        lines.append("        }")
+        lines.append("      }")
+        lines.append("    }")
+        if include_refs:
+            lines.append(
+                "    refs(refPrefix: \"refs/heads/\", first: {}) "
+                "{{ pageInfo {{ hasNextPage }} "
+                "nodes {{ name }} }}".format(PR_GRAPHQL_REF_PAGE_SIZE)
+            )
+        lines.append("  }")
+    lines.append("}")
+    return "\n".join(lines), aliases
+
+
+def _normalise_pr_node(node: object) -> Optional[Dict[str, object]]:
+    """Convert one GraphQL PullRequest node to the established row shape."""
+    if not isinstance(node, dict) or node.get("number") is None:
+        return None
+
+    row: Dict[str, object] = {
+        name: node.get(name)
+        for name in (
+            "number", "title", "state", "url", "headRefName",
+            "headRefOid", "mergeable", "mergedAt", "createdAt", "closedAt",
+        )
+    }
+    for name in ("author", "mergedBy"):
+        value = node.get(name)
+        row[name] = value if isinstance(value, dict) else None
+
+    for name in ("reviews", "comments", "closingIssuesReferences"):
+        connection = node.get(name)
+        if isinstance(connection, dict) and isinstance(connection.get("nodes"), list):
+            row[name] = [
+                value for value in connection["nodes"] if isinstance(value, dict)
+            ]
+
+    checks: List[Dict[str, object]] = []
+    commits = node.get("commits")
+    commit_nodes = commits.get("nodes") if isinstance(commits, dict) else None
+    if isinstance(commit_nodes, list):
+        for commit_node in commit_nodes:
+            if not isinstance(commit_node, dict):
+                continue
+            commit = commit_node.get("commit")
+            rollup = (
+                commit.get("statusCheckRollup")
+                if isinstance(commit, dict) else None
+            )
+            contexts = (
+                rollup.get("contexts")
+                if isinstance(rollup, dict) else None
+            )
+            context_nodes = (
+                contexts.get("nodes") if isinstance(contexts, dict) else None
+            )
+            if isinstance(context_nodes, list):
+                checks.extend(
+                    value for value in context_nodes if isinstance(value, dict)
+                )
+    row["statusCheckRollup"] = checks
+    return row
+
+
+def _read_batched_pr_snapshots(
+    repos: Sequence[str],
+    *,
+    states: Sequence[str] = ("OPEN", "CLOSED", "MERGED"),
+    limit: int = MERGED_PR_SCAN_LIMIT,
+    include_comments: bool = False,
+    include_reviews: bool = False,
+    include_closing_refs: bool = False,
+    include_refs: bool = False,
+) -> BatchedPRRead:
+    """Read bounded PR and ticket-branch facts in repository-wide batches.
+
+    A normal funnel read fits in one GraphQL request across all member repos.
+    Larger historical consumers page at 100 nodes, still batching every active
+    repository and never falling back to a request per PR. Every document asks
+    for its own ``rateLimit.cost`` so the measured spend belongs to the query
+    that produced it.
+    """
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        raise ValueError("PR scan limit must be an integer")
+    if limit <= 0:
+        raise ValueError("PR scan limit must be positive")
+    unique_repos = sorted(set(repos))
+    if not unique_repos:
+        return BatchedPRRead({}, {}, {}, {})
+
+    rows_by_repo: Dict[str, List[Dict[str, object]]] = {
+        repo: [] for repo in unique_repos
+    }
+    branch_refs_by_repo: Dict[str, Set[str]] = {
+        repo: set() for repo in unique_repos
+    }
+    pr_truncated_by_repo: Dict[str, bool] = {
+        repo: False for repo in unique_repos
+    }
+    branches_truncated_by_repo: Dict[str, bool] = {
+        repo: False for repo in unique_repos
+    }
+    active = list(unique_repos)
+    cursors: Dict[str, Optional[str]] = {repo: None for repo in unique_repos}
+    page_number = 0
+
+    while active:
+        first = {
+            repo: min(
+                PR_GRAPHQL_PAGE_SIZE,
+                limit + 1 - len(rows_by_repo[repo])
+                if limit < PR_GRAPHQL_PAGE_SIZE
+                else PR_GRAPHQL_PAGE_SIZE,
+            )
+            for repo in active
+        }
+        # A page is never empty: a limit below 100 still requests one extra
+        # row to preserve the old truncation signal.
+        first = {repo: max(1, value) for repo, value in first.items()}
+        query, aliases = _batched_pr_query(
+            active,
+            first,
+            states,
+            include_comments=include_comments,
+            include_reviews=include_reviews,
+            include_closing_refs=include_closing_refs,
+            include_refs=include_refs and page_number == 0,
+        )
+        variables = {
+            "cursor{}".format(index): cursors[repo]
+            for index, repo in enumerate(active)
+            if cursors[repo] is not None
+        }
+        data = gh_graphql(query, **variables)
+        if not isinstance(data, dict):
+            raise GitHubError("batched PR response was not an object")
+
+        next_active: List[str] = []
+        for repo in active:
+            alias = aliases[repo]
+            repository = data.get(alias)
+            if not isinstance(repository, dict):
+                raise GitHubError(
+                    "could not read repository {} in batched PR response".format(
+                        repo
+                    )
+                )
+            pull_requests = repository.get("pullRequests")
+            if not isinstance(pull_requests, dict):
+                raise GitHubError(
+                    "invalid pull-request response for {}".format(repo)
+                )
+            nodes = pull_requests.get("nodes")
+            page_info = pull_requests.get("pageInfo")
+            if not isinstance(nodes, list) or not isinstance(page_info, dict):
+                raise GitHubError(
+                    "invalid pull-request page for {}".format(repo)
+                )
+            rows_by_repo[repo].extend(
+                row for row in (_normalise_pr_node(node) for node in nodes)
+                if row is not None
+            )
+
+            if page_number == 0 and include_refs:
+                refs = repository.get("refs")
+                if not isinstance(refs, dict) or not isinstance(
+                    refs.get("nodes"), list
+                ):
+                    raise GitHubError(
+                        "invalid ticket-branch response for {}".format(repo)
+                    )
+                for ref_node in refs["nodes"]:
+                    if not isinstance(ref_node, dict):
+                        continue
+                    branch = str(ref_node.get("name") or "")
+                    ref = ticket_ref_from_branch(repo, branch)
+                    if ref:
+                        branch_refs_by_repo[repo].add(ref)
+                branches_truncated_by_repo[repo] = bool(
+                    (refs.get("pageInfo") or {}).get("hasNextPage")
+                )
+
+            has_next = bool(page_info.get("hasNextPage"))
+            if len(rows_by_repo[repo]) >= limit:
+                pr_truncated_by_repo[repo] = has_next or len(
+                    rows_by_repo[repo]
+                ) > limit
+                rows_by_repo[repo] = rows_by_repo[repo][:limit]
+                continue
+            if not has_next:
+                continue
+            cursor = page_info.get("endCursor")
+            if not isinstance(cursor, str) or not cursor:
+                raise GitHubError(
+                    "pull-request page for {} has no next cursor".format(repo)
+                )
+            cursors[repo] = cursor
+            next_active.append(repo)
+        active = next_active
+        page_number += 1
+
+    return BatchedPRRead(
+        rows_by_repo={repo: tuple(rows) for repo, rows in rows_by_repo.items()},
+        branch_refs_by_repo=branch_refs_by_repo,
+        pr_truncated_by_repo=pr_truncated_by_repo,
+        branches_truncated_by_repo=branches_truncated_by_repo,
+    )
+
+
+def _latest_verdict_from_comments(comments: object) -> Optional[Dict]:
+    """Return the newest structured verdict from an already-read comment tail."""
+    if not isinstance(comments, list):
+        return None
+    for row in reversed(comments):
+        if not isinstance(row, dict):
+            continue
+        found = parse_verdict(row.get("body") or "")
+        if found:
+            return found
+    return None
+
+
+def _pr_rows_for_ref(
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]],
+    ref: str,
+) -> Tuple[Dict[str, object], ...]:
+    """Return every row for a ticket branch, with legacy-map compatibility."""
+    if pr_facts is None:
+        return ()
+    rows_by_ref = getattr(pr_facts, "rows_by_ref", None)
+    if isinstance(rows_by_ref, Mapping) and ref in rows_by_ref:
+        return tuple(
+            row for row in rows_by_ref[ref] if isinstance(row, dict)
+        )
+    fact = pr_facts.get(ref)
+    return (fact,) if isinstance(fact, dict) else ()
+
+
+def _row_verdict(row: Mapping[str, object], repo: str) -> Optional[Dict]:
+    """Use the batch's comment tail, falling back for old fixture maps."""
+    if "verdict" in row:
+        value = row.get("verdict")
+        return value if isinstance(value, dict) else None
+    number = row.get("number")
+    return latest_verdict(repo, number) if number is not None else None
+
+
+def _pr_fact_for_number(
+    repo: str, number: int, *, include_comments: bool = True
+) -> Optional[Dict[str, object]]:
+    """Read one repository batch and select a PR by number for explicit gates."""
+    snapshot = _read_batched_pr_snapshots(
+        [repo],
+        states=("OPEN", "CLOSED", "MERGED"),
+        limit=PR_GRAPHQL_PAGE_SIZE,
+        include_comments=include_comments,
+        include_reviews=False,
+        include_refs=False,
+    )
+    for row in snapshot.rows_by_repo.get(repo, ()):
+        if row.get("number") == number:
+            return dict(row)
+    return None
+
+
 def ticket_pr_index(
     repo: str, limit: int = MERGED_PR_SCAN_LIMIT, *,
     include_comments: bool = False,
 ) -> Tuple[Dict[str, Dict], bool]:
     """Every `ticket/<n>` PR in one repo, indexed by ticket ref.
 
-    One bounded ``gh pr list`` for the whole repository, so a caller pays once
+    One bounded GraphQL page for the whole repository, so a caller pays once
     however many tickets it is about to ask about. Returns the index and whether
     the scan was truncated, because a truncated scan cannot tell "no PR" from
     "PR older than the window" and only the caller knows which answer is safe.
@@ -9528,24 +9986,17 @@ def ticket_pr_index(
         raise ValueError("ticket PR scan limit must be an integer")
     if limit <= 0:
         raise ValueError("ticket PR scan limit must be positive")
-    fields = (
-        "number,state,url,headRefName,headRefOid,mergeable,mergedAt,reviews,"
-        "createdAt,closedAt,statusCheckRollup,author,mergedBy"
+    snapshot = _read_batched_pr_snapshots(
+        [repo],
+        states=("OPEN", "CLOSED", "MERGED"),
+        limit=limit,
+        include_comments=include_comments,
+        include_reviews=include_comments,
+        include_closing_refs=include_comments,
+        include_refs=False,
     )
-    if include_comments:
-        fields += ",comments,closingIssuesReferences"
-    rows = _gh_json(
-        "gh", "pr", "list", "--repo", repo, "--state", "all",
-        "--json", fields,
-        "--limit", str(limit + 1),
-    )
-    if rows is None:
-        raise GitHubError("could not read PRs for {}".format(repo))
-    if not isinstance(rows, list):
-        raise GitHubError("invalid PR response for {}".format(repo))
-
-    bounded_rows = [row for row in rows[:limit] if isinstance(row, dict)]
-    truncated = len(rows) > limit
+    bounded_rows = list(snapshot.rows_by_repo.get(repo, ()))
+    truncated = bool(snapshot.pr_truncated_by_repo.get(repo))
     index = TicketPRIndex(all_rows=bounded_rows)
     for row in bounded_rows:
         if not isinstance(row, dict):
@@ -9595,11 +10046,11 @@ def ticket_pr_facts(
 ) -> Dict[str, Optional[Dict[str, object]]]:
     """Read PR facts needed by the brief's stranded-work diagnostics.
 
-    Two bounded reads per member repository — one PR list and one remote ticket
-    branch list — never one lookup per ticket. The per-ticket PR form was the
-    single largest GraphQL consumer in the system: 68 requests on the board of
-    2026-09-08, 93 of a full brief's 110 points, and it grew with the board
-    (#272).
+    One bounded GraphQL batch per active page covers every member repository's
+    PR rows, comment tails, CI contexts, and ticket branches — never one lookup
+    per ticket or PR. The per-ticket PR form was the single largest GraphQL
+    consumer in the system: 68 requests on the board of 2026-09-08, 93 of a
+    full brief's 110 points, and it grew with the board (#272).
 
     An explicit ``None`` means both scans established no PR and no branch. A
     dict carries PR data when present plus ``branch_exists``; a branch without
@@ -9612,53 +10063,82 @@ def ticket_pr_facts(
         item.ref: item for item in items
         if item.parent or (item.state == "OPEN" and item.in_motion_since is not None)
     }
-    facts: Dict[str, Optional[Dict[str, object]]] = {}
+    facts: TicketPRFacts = TicketPRFacts()
+    repos = sorted({item.repo for item in wanted.values()})
+    if not repos:
+        return facts
 
-    for repo in sorted({item.repo for item in wanted.values()}):
-        index, truncated = ticket_pr_index(repo)
-        branch_refs, branches_truncated = ticket_branch_index(repo)
-        for ref, item in wanted.items():
-            if item.repo != repo:
-                continue
-            fact: Optional[Dict[str, object]]
-            if ref in index:
-                fact = dict(index[ref])
-                if (
-                    item.state == "OPEN"
-                    and str(fact.get("state") or "").upper() == "OPEN"
-                ):
-                    if str(fact.get("mergeable") or "").upper() == "CONFLICTING":
-                        # Kept conditional: a verdict lookup per ticket would
-                        # undo the saving this scan exists for.
-                        fact["verdict"] = latest_verdict(
-                            item.repo, fact.get("number")
-                        )
-            elif not truncated:
-                fact = None
-            else:
-                # PR absence is unknown beyond the bounded history, but a
-                # complete branch scan can still establish branch absence.
-                fact = {}
+    snapshot = _read_batched_pr_snapshots(
+        repos,
+        states=("OPEN", "CLOSED", "MERGED"),
+        limit=MERGED_PR_SCAN_LIMIT,
+        include_comments=True,
+        include_reviews=False,
+        include_closing_refs=False,
+        include_refs=True,
+    )
+    rows_by_ref: Dict[str, List[Dict[str, object]]] = {}
+    for repo in repos:
+        for row in snapshot.rows_by_repo.get(repo, ()):
+            ref = ticket_ref_from_branch(repo, row.get("headRefName") or "")
+            if ref:
+                rows_by_ref.setdefault(ref, []).append(row)
 
-            if ref in branch_refs:
-                if fact is None:
-                    fact = {"headRefName": "ticket/{}".format(item.number)}
-                fact["branch_exists"] = True
-                facts[ref] = fact
-            elif not branches_truncated:
-                if fact is not None:
-                    fact["branch_exists"] = False
-                facts[ref] = fact
-            elif fact:
-                # Preserve useful PR diagnostics while explicitly withholding
-                # the branch-absence conclusion from stale-lock detection.
-                fact["branch_exists"] = None
-                facts[ref] = fact
+    # Verdicts are derived from the same bounded comment tails. This keeps the
+    # current-head rules intact while making the cost visible on the batch
+    # response instead of issuing one ``gh pr view`` per open PR.
+    for rows in rows_by_ref.values():
+        for row in rows:
+            if str(row.get("state") or "").upper() == "OPEN":
+                row["verdict"] = _latest_verdict_from_comments(
+                    row.get("comments")
+                )
+
+    facts = TicketPRFacts(rows_by_ref=rows_by_ref)
+    for ref, item in wanted.items():
+        repo_rows = rows_by_ref.get(ref, [])
+        repo = item.repo
+        truncated = bool(snapshot.pr_truncated_by_repo.get(repo))
+        branches_truncated = bool(
+            snapshot.branches_truncated_by_repo.get(repo)
+        )
+        fact: Optional[Dict[str, object]]
+        if repo_rows:
+            fact = dict(repo_rows[0])
+        elif not truncated:
+            fact = None
+        else:
+            # PR absence is unknown beyond the bounded history, but a complete
+            # branch scan can still establish branch absence.
+            fact = {}
+
+        if ref in snapshot.branch_refs_by_repo.get(repo, set()):
+            if fact is None:
+                fact = {"headRefName": "ticket/{}".format(item.number)}
+            fact["branch_exists"] = True
+        elif not branches_truncated:
+            if fact is not None:
+                fact["branch_exists"] = False
+        elif fact:
+            # Preserve useful PR diagnostics while explicitly withholding the
+            # branch-absence conclusion from stale-lock detection.
+            fact["branch_exists"] = None
+
+        if fact is not None:
+            facts[ref] = fact
+        elif not branches_truncated:
+            # A complete branch scan established both absences. With a
+            # truncated branch page, omitting the key keeps stale-lock and
+            # stranded consumers from treating unknown as no branch.
+            facts[ref] = None
 
     return facts
 
 
-def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict]:
+def review_queue(
+    items: Sequence[Item], tier: Optional[str] = None,
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
+) -> List[Dict]:
     """Open ticket PRs that need a review, best-first.
 
     A PR needs review when no verdict covers its **current head**. That covers
@@ -9677,19 +10157,18 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
     and a rollup with no checks in it are still offered: those are answers,
     not a signal that has yet to arrive.
     """
+    if pr_facts is None:
+        pr_facts = ticket_pr_facts(items)
     found: List[Dict] = []
-    for repo in sorted({i.repo for i in items}):
-        rows = _gh_json("gh", "pr", "list", "--repo", repo, "--state", "open",
-                        "--json", "number,headRefName,headRefOid,createdAt,"
-                        "statusCheckRollup",
-                        "--limit", "100") or []
-        for row in rows:
+    for ticket in items:
+        if str(getattr(ticket, "state", "OPEN") or "OPEN").upper() != "OPEN":
+            continue
+        for row in _pr_rows_for_ref(pr_facts, ticket.ref):
+            repo = ticket.repo
+            if str(row.get("state") or "OPEN").upper() != "OPEN":
+                continue
             head = row.get("headRefName") or ""
             if not head.startswith("ticket/"):
-                continue
-            ref = "{}#{}".format(repo, head.split("/", 1)[1])
-            ticket = next((i for i in items if i.ref == ref), None)
-            if ticket is None:
                 continue
             if checks_still_running(row.get("statusCheckRollup")):
                 # The checks have not reported yet, so the only answer a
@@ -9698,14 +10177,16 @@ def review_queue(items: Sequence[Item], tier: Optional[str] = None) -> List[Dict
                 # out of re-review once CI turns green (#900). Wait instead:
                 # the next tick reconsiders, because nothing was recorded.
                 continue
-            verdict = latest_verdict(repo, row.get("number"))
+            verdict = _row_verdict(row, repo)
             if verdict_covers_head(verdict, row.get("headRefOid")):
                 continue  # this exact diff has already been judged
             needed = required_tier(
-                ticket.title, _ticket_body(repo, ticket.number))
+                ticket.title, _loaded_item_body(ticket)
+            )
             if tier and needed != tier:
                 continue
-            found.append({"pr": row.get("number"), "repo": repo, "ref": ref,
+            found.append({"pr": row.get("number"), "repo": repo,
+                          "ref": ticket.ref,
                           "tier": needed, "url": ticket.url,
                           "title": ticket.title,
                           "opened": row.get("createdAt") or ""})
@@ -9735,16 +10216,17 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     for item in ideas(items):
         if "needs-shaping" not in getattr(item, "labels", ()):
             continue
-        body = getattr(item, "body", None)
-        if body is None:
-            body = _ticket_body(item.repo, item.number)
+        body = _loaded_item_body(item)
         if tier is not None and required_tier(item.title, body) != tier:
             continue
         return item
     return None
 
 
-def approved_merge_candidates(items: Sequence[Item]) -> List[Dict[str, object]]:
+def approved_merge_candidates(
+    items: Sequence[Item],
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
+) -> List[Dict[str, object]]:
     """Find open ticket PRs whose latest verdict approves their current head."""
     tickets = {
         item.ref: item
@@ -9753,23 +10235,20 @@ def approved_merge_candidates(items: Sequence[Item]) -> List[Dict[str, object]]:
     }
     if not tickets:
         return []
+    if pr_facts is None:
+        pr_facts = ticket_pr_facts(items)
 
     candidates: List[Dict[str, object]] = []
-    for repo in sorted({item.repo for item in tickets.values()}):
-        rows = _gh_json(
-            "gh", "pr", "list", "--repo", repo, "--state", "open",
-            "--json", "number,headRefName,headRefOid", "--limit", "100",
-        ) or []
-        if not isinstance(rows, list):
-            continue
-        for row in rows:
-            if not isinstance(row, dict):
+    for ref, ticket in tickets.items():
+        for row in _pr_rows_for_ref(pr_facts, ref):
+            repo = ticket.repo
+            if str(row.get("state") or "OPEN").upper() != "OPEN":
                 continue
             branch = row.get("headRefName") or ""
-            ref = ticket_ref_from_branch(repo, branch)
-            if ref is None or ref not in tickets or row.get("number") is None:
+            row_ref = ticket_ref_from_branch(repo, branch)
+            if row_ref != ref or row.get("number") is None:
                 continue
-            verdict = latest_verdict(repo, row.get("number"))
+            verdict = _row_verdict(row, repo)
             # The current-head proof is deliberately strict here. The stranded
             # diagnostic accepts fixture rows without SHAs, but reconciliation
             # must never turn missing evidence into an unattended merge.
@@ -9988,7 +10467,8 @@ def reconcile_abandoned_claims(
 
 
 def reconcile_approved_merges(
-    items: List[Item], now: datetime
+    items: List[Item], now: datetime,
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
 ) -> List[Dict[str, object]]:
     """Retry the merge gate for every approved current-head ticket PR.
 
@@ -9999,12 +10479,21 @@ def reconcile_approved_merges(
     """
     results: List[Dict[str, object]] = []
     by_ref = {item.ref: item for item in items}
-    for candidate in approved_merge_candidates(items):
+    for candidate in approved_merge_candidates(items, pr_facts=pr_facts):
         stdout = io.StringIO()
         stderr = io.StringIO()
         try:
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-                code = cmd_merge(
+                fact = None
+                if pr_facts is not None:
+                    for row in _pr_rows_for_ref(pr_facts, candidate["ref"]):
+                        if row.get("number") == candidate["pr"]:
+                            fact = row
+                            break
+                code = _call_with_optional_keyword(
+                    cmd_merge,
+                    "pr_fact",
+                    fact,
                     items,
                     now,
                     candidate["repo"],
@@ -10266,8 +10755,21 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             })
             return []
 
+    # One PR snapshot feeds merge reconciliation and whichever queue follows.
+    # Keeping it here prevents the approved-merge pass, engineer hand-back, and
+    # reviewer queue from each paying for the same repository fan-out.
+    try:
+        pr_facts = ticket_pr_facts(items)
+    except GitHubError as exc:
+        out.update(
+            do="stop",
+            why="could not establish ticket branch facts: {}".format(exc),
+        )
+        print(json.dumps(out, indent=2))
+        return 0
+
     reconciled_merges = attempt_reconcile(
-        "approved_merges", reconcile_approved_merges, items, now)
+        "approved_merges", reconcile_approved_merges, items, now, pr_facts)
     if reconciled_merges:
         out["reconciled_merges"] = reconciled_merges
 
@@ -10297,22 +10799,15 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         )
         if cleared:
             out["cleared_blocks"] = cleared
-        try:
-            pr_facts = ticket_pr_facts(items)
-        except GitHubError as exc:
-            out.update(
-                do="stop",
-                why="could not establish ticket branch facts: {}".format(exc),
-            )
-            print(json.dumps(out, indent=2))
-            return 0
         abandoned = attempt_reconcile(
             "abandoned_claims", reconcile_abandoned_claims,
             items, now, pr_facts,
         )
         if abandoned:
             out["reconciled_claims"] = abandoned
-        blocked = awaiting_review(items)
+        blocked = _call_with_optional_keyword(
+            awaiting_review, "pr_facts", pr_facts, items
+        )
         # Keep the normal open-PR exclusion as the default. Only the
         # machine-readable approved-plus-conflicting state hands ownership back
         # to the engineer; the supplied PR snapshot is also the one used by the
@@ -10439,7 +10934,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         print(json.dumps(out, indent=2))
         return 0
 
-    queue = review_queue(items, tier)
+    queue = _call_with_optional_keyword(
+        review_queue, "pr_facts", pr_facts, items, tier
+    )
     review = queue[0] if queue else None
 
     # The fixed job order remains the tiebreak within a class group, but a
@@ -10491,7 +10988,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 "url": item.url,
                 "title": item.title,
                 "access_signals": access_signals(
-                    _ticket_body(item.repo, item.number)
+                    _loaded_item_body(item)
                 ),
             }
             out.update(do="breakdown", work=work)
@@ -10660,9 +11157,23 @@ def _reserve_verdict(do: object) -> Optional[Dict[str, object]]:
     return None
 
 
-def cmd_next_review(items: List[Item], tier: Optional[str]) -> int:
+def cmd_next_review(
+    items: List[Item], tier: Optional[str],
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
+) -> int:
     """The single PR this reviewer should read, or nothing."""
-    queue = review_queue(items, tier)
+    if pr_facts is None:
+        pr_facts = ticket_pr_facts(items)
+        cache = _ACTIVE_BRIEF_CACHE.get()
+        if cache is not None:
+            # A session may follow this read with ``brief``. Retain the fresh
+            # snapshot so that later diagnostic sections reuse the same query,
+            # while the session's normal non-brief invalidation still clears
+            # observations from an earlier command before this one starts.
+            cache._pr_facts = pr_facts
+    queue = _call_with_optional_keyword(
+        review_queue, "pr_facts", pr_facts, items, tier
+    )
     if not queue:
         print("nothing — no {}review waiting".format(
             (tier + " ") if tier else ""), file=sys.stderr)
@@ -10742,7 +11253,9 @@ def _is_conflicting_branch_blocker(reason: str) -> bool:
     )
 
 
-def _record_unmergeable_rejection(repo: str, pr: int) -> None:
+def _record_unmergeable_rejection(
+    repo: str, pr: int, pr_fact: Optional[Mapping[str, object]] = None
+) -> None:
     """Reject an approved current head that the live merge gate finds conflicting.
 
     Re-reading the head and mergeability keeps the verdict tied to the fact the
@@ -10751,10 +11264,9 @@ def _record_unmergeable_rejection(repo: str, pr: int) -> None:
     It also makes retries idempotent, because the newest verdict is then already
     the gate-authored rejection rather than an approval.
     """
-    data = _gh_json(
-        "gh", "pr", "view", str(pr), "--repo", repo, "--json",
-        "state,headRefName,headRefOid,mergeable",
-    ) or {}
+    data = dict(pr_fact) if isinstance(pr_fact, Mapping) else None
+    if data is None:
+        data = _pr_fact_for_number(repo, pr, include_comments=True) or {}
     if data.get("state") != "OPEN":
         return
     sha = data.get("headRefOid")
@@ -10762,7 +11274,7 @@ def _record_unmergeable_rejection(repo: str, pr: int) -> None:
     if not sha or reason is None:
         return
 
-    verdict = latest_verdict(repo, pr)
+    verdict = _row_verdict(data, repo)
     if (
         verdict is None
         or verdict.get("verdict") != "approved"
@@ -11001,11 +11513,10 @@ def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
 def merged_pr_facts(items: Sequence[Item]) -> MergedPRFacts:
     """Find open tickets whose convention-named PR has already merged.
 
-    The scan is one `gh pr list` request per member repository, independent of
-    the number of tickets. It asks for one row beyond
-    ``MERGED_PR_SCAN_LIMIT`` so a bounded result can report that it was
-    truncated. Only the branch name is needed; the pure detector receives the
-    intersected ticket refs rather than querying GitHub itself.
+    The scan is one batched GraphQL request across member repositories,
+    independent of the number of tickets. ``pageInfo`` reports truncation, so
+    the pure detector receives the intersected ticket refs rather than querying
+    GitHub itself.
     """
     open_ticket_refs = {
         item.ref for item in items
@@ -11015,21 +11526,20 @@ def merged_pr_facts(items: Sequence[Item]) -> MergedPRFacts:
     merged_ticket_refs: Set[str] = set()
     truncated = False
 
+    snapshot = _read_batched_pr_snapshots(
+        repos,
+        states=("MERGED",),
+        limit=MERGED_PR_SCAN_LIMIT,
+        include_comments=False,
+        include_reviews=False,
+        include_closing_refs=False,
+        include_refs=False,
+    )
     for repo in repos:
-        rows = _gh_json(
-            "gh", "pr", "list", "--repo", repo, "--state", "merged",
-            "--json", "headRefName", "--limit", str(MERGED_PR_SCAN_LIMIT + 1),
+        truncated = truncated or bool(
+            snapshot.pr_truncated_by_repo.get(repo)
         )
-        if rows is None:
-            raise GitHubError("could not read merged PRs for {}".format(repo))
-        if not isinstance(rows, list):
-            raise GitHubError("invalid merged PR response for {}".format(repo))
-
-        if len(rows) > MERGED_PR_SCAN_LIMIT:
-            truncated = True
-        for row in rows[:MERGED_PR_SCAN_LIMIT]:
-            if not isinstance(row, dict):
-                continue
+        for row in snapshot.rows_by_repo.get(repo, ()):
             ref = ticket_ref_from_branch(repo, row.get("headRefName") or "")
             if ref in open_ticket_refs:
                 merged_ticket_refs.add(ref)
@@ -11037,16 +11547,19 @@ def merged_pr_facts(items: Sequence[Item]) -> MergedPRFacts:
     return MergedPRFacts(frozenset(merged_ticket_refs), truncated)
 
 
-def merge_blockers(repo: str, pr: int, items: List[Item],
-                   now: datetime) -> List[str]:
+def merge_blockers(
+    repo: str, pr: int, items: List[Item], now: datetime,
+    pr_fact: Optional[Mapping[str, object]] = None,
+) -> List[str]:
     """Every reason this PR may not be merged. Empty means it may.
 
     Deliberately a list rather than a bool: a gate that says only "no" makes the
     caller guess, and the reviewer needs to know which condition to fix.
     """
     why: List[str] = []
-    data = _gh_json("gh", "pr", "view", str(pr), "--repo", repo, "--json",
-                    "state,headRefName,headRefOid,mergeable,statusCheckRollup") or {}
+    data = dict(pr_fact) if isinstance(pr_fact, Mapping) else None
+    if data is None:
+        data = _pr_fact_for_number(repo, pr, include_comments=True) or {}
     if not data:
         return ["PR #{} could not be read".format(pr)]
 
@@ -11097,7 +11610,7 @@ def merge_blockers(repo: str, pr: int, items: List[Item],
     elif not checks:
         why.append("no CI checks reported — refusing to merge unverified work")
 
-    verdict = latest_verdict(repo, pr)
+    verdict = _row_verdict(data, repo)
     if verdict is None:
         why.append("no review verdict recorded")
     else:
@@ -11114,8 +11627,10 @@ def merge_blockers(repo: str, pr: int, items: List[Item],
     return why
 
 
-def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
-              confirmed: bool) -> int:
+def cmd_merge(
+    items: List[Item], now: datetime, repo: Optional[str], pr: int,
+    confirmed: bool, pr_fact: Optional[Mapping[str, object]] = None,
+) -> int:
     """Merge a PR, but only when every condition holds.
 
     The model decides *approval*; this decides *merge*. A model adds value
@@ -11124,10 +11639,16 @@ def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
     unattended merge impossible to audit — which is why v0 is still unaccepted.
     """
     repo = resolve_repo(repo)
-    why = merge_blockers(repo, pr, items, now)
+    supports_fact = _accepts_keyword(merge_blockers, "pr_fact")
+    if pr_fact is None and supports_fact:
+        pr_fact = _pr_fact_for_number(repo, pr, include_comments=True)
+    gate_fact = pr_fact if pr_fact is not None else {}
+    why = _call_with_optional_keyword(
+        merge_blockers, "pr_fact", gate_fact, repo, pr, items, now
+    )
     if why:
         if any(_is_conflicting_branch_blocker(reason) for reason in why):
-            _record_unmergeable_rejection(repo, pr)
+            _record_unmergeable_rejection(repo, pr, pr_fact=gate_fact)
         print("refusing to merge PR #{}:".format(pr), file=sys.stderr)
         for reason in why:
             print("  - " + reason, file=sys.stderr)
@@ -11138,10 +11659,15 @@ def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
         print("Nothing was changed. Re-run with --yes to merge.")
         return 0
 
-    # Read the branch before merging: `--delete-branch` removes it, and the
-    # branch is how the ticket is identified.
-    view = _gh_json("gh", "pr", "view", str(pr), "--repo", repo,
-                    "--json", "headRefName,title") or {}
+    # The batch read already carries the branch and title. Reading them again
+    # immediately before the merge recreated the per-PR fan-out and could also
+    # make the gate reason differ from the merge subject. A legacy injected
+    # merge-blocker seam has no batch fact, so retain its old test/library path.
+    if supports_fact:
+        view = dict(pr_fact) if isinstance(pr_fact, Mapping) else {}
+    else:
+        view = _gh_json("gh", "pr", "view", str(pr), "--repo", repo,
+                        "--json", "headRefName,title") or {}
     branch = view.get("headRefName") or ""
     ref = ticket_ref_from_branch(repo, branch)
 

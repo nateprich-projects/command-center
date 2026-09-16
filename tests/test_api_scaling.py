@@ -59,6 +59,25 @@ def _measure_fixture_load(monkeypatch, item_count):
 
         def gh_graphql(*args, **kwargs):
             calls["graphql"].append((args, kwargs))
+            if "pullRequests(first:" in args[0]:
+                return {
+                    "rateLimit": {
+                        "cost": 1, "remaining": 99, "resetAt": "later"
+                    },
+                    "repo0": {
+                        "pullRequests": {
+                            "nodes": [],
+                            "pageInfo": {
+                                "hasNextPage": False,
+                                "endCursor": None,
+                            },
+                        },
+                        "refs": {
+                            "nodes": [],
+                            "pageInfo": {"hasNextPage": False},
+                        },
+                    },
+                }
             return {
                 "user": {
                     "projectV2": {
@@ -85,8 +104,6 @@ def _measure_fixture_load(monkeypatch, item_count):
                         {"body": "**Blocked on #84:** Wait for the decision."}
                     ]
                 }
-            if args[:3] == ("gh", "pr", "list"):
-                return []
             # Keep unexpected reads countable. A reintroduced dependency or
             # per-ticket PR lookup must make the 10/100 counts diverge.
             return []
@@ -107,9 +124,8 @@ def _measure_fixture_load(monkeypatch, item_count):
             if args[:3] == ("gh", "issue", "view")
         ) == 1
         assert sum(
-            1
-            for args in calls["json"]
-            if args[:3] == ("gh", "pr", "list")
+            1 for query, _variables in calls["graphql"]
+            if "pullRequests(first:" in query[0]
         ) == 1
         return {kind: len(entries) for kind, entries in calls.items()}
 

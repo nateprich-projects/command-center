@@ -219,3 +219,108 @@ def test_window_bounds_are_inclusive_and_inverted_windows_fail():
         assert "starts after" in str(exc)
     else:
         raise AssertionError("an inverted report window must fail")
+
+
+def _issue_job(run, kind, finished, note, *, target="owner/repo#103"):
+    return [
+        {"run": run, "phase": "start", "ts": finished - 20},
+        {"run": run, "phase": "bind", "ts": finished - 19,
+         "do": kind, "work": target},
+        {"run": run, "phase": "finish", "ts": finished,
+         "note": note, "outcome": "done"},
+    ]
+
+
+def test_breakdown_shape_mode_reports_issue_population_without_comparing():
+    records = (
+        _issue_job(
+            "shadow-breakdown", "breakdown", 820,
+            "shadow breakdown of owner/repo#103: 2 tickets",
+        )
+        + _issue_job(
+            "live-breakdown", "breakdown", 830,
+            "broke down owner/repo#103: created 2 tickets",
+        )
+        + _issue_job(
+            "shadow-shape", "shape", 840,
+            "shadow shape of owner/repo#104: Ready",
+            target="owner/repo#104",
+        )
+        + _issue_job(
+            "live-shape", "shape", 850,
+            "shaped owner/repo#104: Ready",
+            target="owner/repo#104",
+        )
+    )
+
+    report = shadow_report.build_report(
+        records, now=1000, window_seconds=200, mode="breakdown-shape"
+    )
+
+    assert report["window"] == {
+        "since": 800.0,
+        "until": 1000.0,
+        "seconds": 200.0,
+        "data_since": 800.0,
+        "truncated": False,
+    }
+    assert report["breakdown_shape_agreement"] == {
+        "jobs": {"shadow": 2, "live": 2, "matched": 2, "compared": 0},
+        "malformed_output": {
+            "shadow": {"count": 0, "rate": 0.0},
+            "live": {"count": 0, "rate": 0.0},
+        },
+        "time_per_job": {
+            "shadow": {
+                "jobs": 2, "measured": 2,
+                "median_seconds": 20, "p90_seconds": 20.0,
+            },
+            "live": {
+                "jobs": 2, "measured": 2,
+                "median_seconds": 20, "p90_seconds": 20.0,
+            },
+        },
+    }
+
+
+def test_issue_mode_uses_binding_kind_and_pairs_duplicate_targets_in_order():
+    shadow = (
+        _issue_job(
+            "shadow-one", "shape", 810,
+            "shadow shape of owner/repo#103: Ready",
+        )
+        + _issue_job(
+            "shadow-two", "shape", 820,
+            "shadow shape of owner/repo#103: Shaped",
+        )
+    )
+    live = _issue_job(
+        "live-one", "shape", 830,
+        "shaped owner/repo#103: Ready",
+    )
+
+    report = shadow_report.build_report(
+        shadow, live, now=900, window_seconds=200,
+        mode="breakdown-shape",
+    )
+
+    assert report["breakdown_shape_agreement"]["jobs"] == {
+        "shadow": 2, "live": 1, "matched": 1, "compared": 0,
+    }
+
+
+def test_issue_mode_falls_back_to_narrow_finish_markers_without_bindings():
+    rows = [
+        {"run": "shadow", "phase": "start", "ts": 10},
+        {"run": "shadow", "phase": "finish", "ts": 20,
+         "note": "shadow breakdown of owner/repo#7: 1 ticket"},
+        {"run": "live", "phase": "start", "ts": 11},
+        {"run": "live", "phase": "finish", "ts": 30,
+         "note": "shaped owner/repo#8: Ready"},
+    ]
+
+    jobs = shadow_report.issue_jobs_from_records(rows)
+    assert [(job["kind"], job["key"]) for job in jobs] == [
+        ("breakdown", "owner/repo#7"),
+        ("shape", "owner/repo#8"),
+    ]

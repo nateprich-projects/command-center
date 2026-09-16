@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Summarise the review-engine shadow period from heartbeat records.
+"""Summarise review, breakdown, and shape shadow periods from heartbeats.
 
 The review engine and the older reviewer currently write to the same ``muse``
 heartbeat stream.  Shadow finishes carry ``shadow review`` in their note, while
 the live reviewer carries ``reviewed PR``.  The report also accepts two
 different heartbeat streams, which keeps the reader useful if the schedules
 are separated later.
+
+The optional ``breakdown-shape`` mode reads the corresponding issue jobs from
+the same streams and reports their matched population.  It is intentionally a
+skeleton: outcome comparisons are added by a later slice.
 
 Only completed review jobs inside the requested window count.  A missing or
 ambiguous verdict is not silently treated as a rejection: it is excluded from
@@ -71,6 +75,31 @@ REVIEW_REPO_RE = re.compile(
     r"\bin\s+(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\b",
     re.IGNORECASE,
 )
+ISSUE_REF_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"
+    r"\s*#\s*(?P<number>[1-9][0-9]*)\b",
+    re.IGNORECASE,
+)
+ISSUE_URL_RE = re.compile(
+    r"github\.com/(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/"
+    r"(?P<number>[1-9][0-9]*)\b",
+    re.IGNORECASE,
+)
+ISSUE_SHADOW_RE = re.compile(
+    r"(?:command-center-shadow-(?:breakdown|shape)|shadow\s+(?:breakdown|shape))",
+    re.IGNORECASE,
+)
+ISSUE_BREAKDOWN_NOTE_RE = re.compile(
+    r"(?:command-center-shadow-breakdown|shadow\s+breakdown|broke\s+down)\b",
+    re.IGNORECASE,
+)
+ISSUE_SHAPE_NOTE_RE = re.compile(
+    r"(?:command-center-shadow-shape|shadow\s+shape|\bshaped\s+"
+    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\s*#\s*[1-9][0-9]*)",
+    re.IGNORECASE,
+)
+ISSUE_KINDS = {"breakdown", "shape"}
+REPORT_MODES = {"review", "breakdown-shape"}
 
 
 def _timestamp(value: object) -> Optional[float]:
@@ -245,6 +274,89 @@ def _positive_pr_number(value: object) -> Optional[int]:
     return int(match.group(1)) if match else None
 
 
+def _issue_ref(value: object, repo: object = None) -> Optional[str]:
+    """Return a canonical ``owner/repo#number`` from a reference value."""
+    if isinstance(value, dict):
+        for key in ("ref", "work", "ticket", "issue"):
+            found = _issue_ref(value.get(key), value.get("repo") or repo)
+            if found:
+                return found
+        number = _positive_pr_number(value.get("number"))
+        value_repo = value.get("repo") or repo
+        if number and isinstance(value_repo, str) and "/" in value_repo:
+            return "{}#{}".format(value_repo.strip().lower(), number)
+        return None
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        number = value if value > 0 else None
+        if number and isinstance(repo, str) and "/" in repo:
+            return "{}#{}".format(repo.strip().lower(), number)
+        return None
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+    match = ISSUE_REF_RE.search(text) or ISSUE_URL_RE.search(text)
+    if match:
+        return "{}#{}".format(
+            match.group("repo").lower(), match.group("number")
+        )
+    number = _positive_pr_number(text)
+    if number and isinstance(repo, str) and "/" in repo:
+        return "{}#{}".format(repo.strip().lower(), number)
+    return None
+
+
+def _issue_target(binding: Optional[Dict], finish: Dict) -> Optional[str]:
+    """Return the issue target from binding data, then finish-note fallback."""
+    for row in (binding or {}, finish):
+        if not isinstance(row, dict):
+            continue
+        for key in ("ref", "work", "ticket", "issue", "number"):
+            found = _issue_ref(row.get(key), row.get("repo"))
+            if found:
+                return found
+    note = _note(finish)
+    match = ISSUE_REF_RE.search(note) or ISSUE_URL_RE.search(note)
+    if match:
+        return "{}#{}".format(
+            match.group("repo").lower(), match.group("number")
+        )
+    return None
+
+
+def _issue_kind(binding: Optional[Dict], finish: Dict) -> Optional[str]:
+    """Identify a breakdown or shape run, preferring its run binding."""
+    if isinstance(binding, dict):
+        bound_do = str(binding.get("do") or "").strip().lower()
+        if bound_do:
+            return bound_do if bound_do in ISSUE_KINDS else None
+
+    for row in (finish,):
+        for key in ("issue_kind", "job_kind"):
+            value = row.get(key)
+            if isinstance(value, str) and value.strip().lower() in ISSUE_KINDS:
+                return value.strip().lower()
+
+    note = _note(finish)
+    if ISSUE_BREAKDOWN_NOTE_RE.search(note):
+        return "breakdown"
+    if ISSUE_SHAPE_NOTE_RE.search(note):
+        return "shape"
+    return None
+
+
+def _issue_is_shadow(row: Optional[Dict]) -> bool:
+    """Recognise issue-job shadow markers without changing review parsing."""
+    if not isinstance(row, dict):
+        return False
+    return is_shadow(row) or bool(ISSUE_SHADOW_RE.search(_note(row)))
+
+
 def _review_number(binding: Optional[Dict], finish: Dict) -> Optional[int]:
     """Return the PR number, preferring the explicit number in the note."""
     target = _review_target(_note(finish))
@@ -364,6 +476,62 @@ def jobs_from_records(
     return sorted(jobs, key=lambda job: (job["finished_at"], job["run"]))
 
 
+def partition_issue_records(
+    records: Sequence[Dict],
+) -> Tuple[List[Dict], List[Dict]]:
+    """Split a shared heartbeat stream into shadow and live issue runs."""
+    rows = [row for row in records if isinstance(row, dict)]
+    shadow_runs = {
+        str(row["run"])
+        for row in rows
+        if row.get("run") and _issue_is_shadow(row)
+    }
+    shadow = [row for row in rows if str(row.get("run")) in shadow_runs]
+    live = [row for row in rows if str(row.get("run")) not in shadow_runs]
+    return shadow, live
+
+
+def issue_jobs_from_records(
+    records: Sequence[Dict],
+    *,
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+) -> List[Dict]:
+    """Build completed breakdown or shape jobs from heartbeat rows."""
+    rows = [row for row in records if isinstance(row, dict)]
+    starts = _earliest_by_run(rows, "start")
+    finishes = _latest_by_run(rows, "finish")
+    bindings = _bindings(rows)
+    jobs: List[Dict] = []
+    for run, finish in finishes.items():
+        finished_at = _timestamp(finish.get("ts"))
+        if finished_at is None:
+            continue
+        if since is not None and finished_at < since:
+            continue
+        if until is not None and finished_at > until:
+            continue
+        binding = bindings.get(run)
+        kind = _issue_kind(binding, finish)
+        if heartbeat.is_rebegin_finish(finish) or kind is None:
+            continue
+        started = starts.get(run)
+        started_at = _timestamp(started.get("ts")) if started else None
+        duration = None
+        if started_at is not None and finished_at >= started_at:
+            duration = finished_at - started_at
+        jobs.append({
+            "run": run,
+            "kind": kind,
+            "key": _issue_target(binding, finish),
+            "finished_at": finished_at,
+            "malformed": is_malformed(finish),
+            "duration_seconds": duration,
+            "finish": finish,
+        })
+    return sorted(jobs, key=lambda job: (job["finished_at"], job["run"]))
+
+
 def _percentile(values: Sequence[float], percentile: float) -> Optional[float]:
     """Linearly interpolated percentile, with an explicit empty result."""
     if not values:
@@ -402,6 +570,28 @@ def _pair_jobs(shadow: Sequence[Dict], live: Sequence[Dict]) -> List[Tuple[Dict,
         shadow_by_key.setdefault(str(job["key"]), []).append(job)
     for job in live:
         live_by_key.setdefault(str(job["key"]), []).append(job)
+    pairs: List[Tuple[Dict, Dict]] = []
+    for key in sorted(set(shadow_by_key) & set(live_by_key)):
+        left = sorted(shadow_by_key[key], key=lambda job: job["finished_at"])
+        right = sorted(live_by_key[key], key=lambda job: job["finished_at"])
+        pairs.extend(zip(left, right))
+    return pairs
+
+
+def _pair_issue_jobs(
+    shadow: Sequence[Dict], live: Sequence[Dict]
+) -> List[Tuple[Dict, Dict]]:
+    """Pair same-kind issue jobs by target and chronological occurrence."""
+    shadow_by_key: Dict[Tuple[str, str], List[Dict]] = {}
+    live_by_key: Dict[Tuple[str, str], List[Dict]] = {}
+    for job in shadow:
+        key = job.get("key")
+        if key is not None:
+            shadow_by_key.setdefault((str(job.get("kind")), str(key)), []).append(job)
+    for job in live:
+        key = job.get("key")
+        if key is not None:
+            live_by_key.setdefault((str(job.get("kind")), str(key)), []).append(job)
     pairs: List[Tuple[Dict, Dict]] = []
     for key in sorted(set(shadow_by_key) & set(live_by_key)):
         left = sorted(shadow_by_key[key], key=lambda job: job["finished_at"])
@@ -503,10 +693,77 @@ def _oldest_timestamp(*record_sets: Optional[Sequence[Dict]]) -> Optional[float]
     return min(timestamps) if timestamps else None
 
 
+def build_breakdown_shape_report(
+    shadow_records: Sequence[Dict],
+    live_records: Optional[Sequence[Dict]] = None,
+    *,
+    now: Optional[float] = None,
+    window_seconds: int = DEFAULT_WINDOW_SECONDS,
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+) -> Dict[str, object]:
+    """Build the breakdown/shape report skeleton from heartbeat rows.
+
+    This first mode only establishes the population that a later comparison
+    can measure.  It deliberately leaves ``compared`` at zero: no breakdown
+    or shape outcomes are compared in this slice.
+    """
+    start, end = window_bounds(
+        now=now, window_seconds=window_seconds, since=since, until=until
+    )
+    if live_records is None or live_records is shadow_records:
+        shadow_rows, live_rows = partition_issue_records(shadow_records)
+    else:
+        shadow_rows, live_rows = list(shadow_records), list(live_records)
+    shadow = issue_jobs_from_records(shadow_rows, since=start, until=end)
+    live = issue_jobs_from_records(live_rows, since=start, until=end)
+    data_since = _oldest_timestamp(shadow_records, live_records)
+    pairs = _pair_issue_jobs(shadow, live)
+
+    return {
+        "window": {
+            "since": start,
+            "until": end,
+            "seconds": end - start,
+            "data_since": data_since,
+            "truncated": data_since is not None and data_since > start,
+        },
+        "breakdown_shape_agreement": {
+            "jobs": {
+                "shadow": len(shadow),
+                "live": len(live),
+                "matched": len(pairs),
+                "compared": 0,
+            },
+            "malformed_output": {
+                "shadow": {
+                    "count": sum(bool(job.get("malformed")) for job in shadow),
+                    "rate": _rate(
+                        sum(bool(job.get("malformed")) for job in shadow),
+                        len(shadow),
+                    ),
+                },
+                "live": {
+                    "count": sum(bool(job.get("malformed")) for job in live),
+                    "rate": _rate(
+                        sum(bool(job.get("malformed")) for job in live),
+                        len(live),
+                    ),
+                },
+            },
+            "time_per_job": {
+                "shadow": _time_stats(shadow),
+                "live": _time_stats(live),
+            },
+        },
+    }
+
+
 def build_report(
     shadow_records: Sequence[Dict],
     live_records: Optional[Sequence[Dict]] = None,
     *,
+    mode: str = "review",
     live_verdicts: Optional[Mapping[object, object]] = None,
     now: Optional[float] = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
@@ -523,6 +780,17 @@ def build_report(
     recorded on the job; an absent or mismatched value leaves the heartbeat
     decision as the fallback.
     """
+    if mode == "breakdown-shape":
+        return build_breakdown_shape_report(
+            shadow_records,
+            live_records,
+            now=now,
+            window_seconds=window_seconds,
+            since=since,
+            until=until,
+        )
+    if mode != "review":
+        raise ValueError("unknown shadow-report mode {!r}".format(mode))
     start, end = window_bounds(
         now=now, window_seconds=window_seconds, since=since, until=until
     )
@@ -670,6 +938,7 @@ def load_report(
     shadow_agent: str = DEFAULT_AGENT,
     live_agent: str = DEFAULT_AGENT,
     *,
+    mode: str = "review",
     live_verdicts: Optional[Mapping[object, object]] = None,
     now: Optional[float] = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
@@ -677,14 +946,19 @@ def load_report(
     until: Optional[float] = None,
 ) -> Dict[str, object]:
     """Read heartbeat streams, recover live verdicts, and build a report."""
+    if mode not in REPORT_MODES:
+        raise ValueError("unknown shadow-report mode {!r}".format(mode))
     if shadow_agent == live_agent:
         records = heartbeat.read(shadow_agent)
-        shadow_rows, live_rows = partition_records(records)
+        if mode == "review":
+            shadow_rows, live_rows = partition_records(records)
+        else:
+            shadow_rows, live_rows = partition_issue_records(records)
     else:
         shadow_rows, live_rows = (
             heartbeat.read(shadow_agent), heartbeat.read(live_agent)
         )
-    if live_verdicts is None:
+    if mode == "review" and live_verdicts is None:
         start, end = window_bounds(
             now=now, window_seconds=window_seconds, since=since, until=until
         )
@@ -695,6 +969,7 @@ def load_report(
     return build_report(
         shadow_rows,
         live_rows,
+        mode=mode,
         live_verdicts=live_verdicts,
         now=now,
         window_seconds=window_seconds,
@@ -705,7 +980,7 @@ def load_report(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
-        description="report review shadow agreement from heartbeat records"
+        description="report shadow agreement from heartbeat records"
     )
     parser.add_argument(
         "agents", nargs="*", metavar="AGENT",
@@ -713,6 +988,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument("--shadow-agent", default=None)
     parser.add_argument("--live-agent", default=None)
+    parser.add_argument(
+        "--mode", choices=sorted(REPORT_MODES), default="review",
+        help="report population to read (default: review)",
+    )
     parser.add_argument(
         "--hours", "--window-hours", dest="hours", type=float, default=48.0,
         help="trailing window in hours (default: 48)",
@@ -738,6 +1017,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         report_data = load_report(
             shadow_agent,
             live_agent,
+            mode=args.mode,
             now=_parse_cli_timestamp(args.now),
             window_seconds=int(args.hours * 60 * 60),
             since=_parse_cli_timestamp(args.since),

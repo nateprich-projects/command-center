@@ -3,7 +3,6 @@
 // the same board drift apart. Nate, 2026-09-15: the page carries the board and
 // human steps, and no other brief section.
 
-const PIP_LIMIT = 8;
 const OWNER_LIMIT = 2;
 
 // Stages that open collapsed: finished and stopped work is reference, not
@@ -139,22 +138,21 @@ function gridRow(tag, className) {
 
 function pips(tickets, closed, total) {
   const wrap = element("div", "pips");
+  const bar = element("div", "pip-bar");
   const rows = Array.isArray(tickets) ? tickets : [];
   if (rows.length) {
-    // Long ticket lists overflow the column, so show the first PIP_LIMIT and
-    // count the rest; the expanded rows below carry the detail either way.
-    const shown = rows.length > PIP_LIMIT ? rows.slice(0, PIP_LIMIT) : rows;
-    for (const ticket of shown) {
+    for (const ticket of rows) {
       const state = pipState(ticket);
       const pip = element("i", `pip pip-${state}`);
       pip.title = `#${ticket.number} ${ticket.title || ""} — ${state}`;
-      wrap.append(pip);
+      bar.append(pip);
     }
   } else if (Number.isFinite(total)) {
     for (let index = 0; index < total; index += 1) {
-      wrap.append(element("i", `pip pip-${index < closed ? "closed" : "open"}`));
+      bar.append(element("i", `pip pip-${index < closed ? "closed" : "open"}`));
     }
   }
+  if (bar.childElementCount) wrap.append(bar);
   if (Number.isFinite(closed) && Number.isFinite(total) && total > 0) {
     wrap.append(element("span", "pip-count", `${closed}/${total}`));
   }
@@ -275,7 +273,8 @@ function projectRow(item) {
       twisty.textContent = open ? "\u25BE" : "\u25B8";
       row.classList.toggle("expanded", open);
     };
-    twisty.addEventListener("click", toggle);
+    // One handler on the row: the chevron is inside it, and a second handler
+    // there would toggle twice and leave the row looking dead.
     row.addEventListener("click", (event) => {
       if (event.target.closest("a")) return;
       toggle();

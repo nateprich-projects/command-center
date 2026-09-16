@@ -130,3 +130,55 @@ def test_a_verdict_is_read_once_for_an_open_pr_without_one(monkeypatch):
                  {REPO + "#11": {"state": "OPEN", "number": 7, "headRefOid": "abc"}})
     assert calls == [(REPO, 7)]
     assert found[0]["tickets"][0]["pr"] == "approved"
+
+
+def test_tickets_read_in_queue_order_with_closed_work_last():
+    """The board reads as the priority it is: next to be taken first (#902)."""
+    rows = funnel.dashboard_board(
+        [project(status="Building", children_total=3, children_done=1),
+         ticket(11, state="CLOSED"),
+         ticket(12, body="Risk: standard"),
+         ticket(13, body="Risk: standard")],
+        NOW,
+    )["columns"]
+    column = next(c for c in rows if c["stage"] == "Building")
+    tickets = column["items"][0]["tickets"]
+    assert [t["number"] for t in tickets] == [12, 13, 11]
+    assert tickets[0]["queue_rank"] == 0
+    assert tickets[-1]["queue_rank"] is None
+
+
+def test_the_project_row_names_only_the_next_step_owner():
+    rows = funnel.dashboard_board(
+        [project(status="Building", children_total=2),
+         ticket(11, body="Risk: standard"),
+         ticket(12, body="Human step: entering a credential\nRisk: standard")],
+        NOW,
+    )["columns"]
+    column = next(c for c in rows if c["stage"] == "Building")
+    row = column["items"][0]
+    assert row["next_owner"] == row["tickets"][0]["owner"]
+    assert row["next_owner"] == "Codex"
+
+
+def test_a_ticket_in_review_is_not_ranked_as_next():
+    facts = {REPO + "#11": {"state": "OPEN", "number": 7, "headRefOid": "abc"}}
+    rows = funnel.dashboard_board(
+        [project(status="Building", children_total=2), ticket(11), ticket(12)],
+        NOW, pr_facts=facts,
+    )["columns"]
+    column = next(c for c in rows if c["stage"] == "Building")
+    ranks = {t["number"]: t["queue_rank"] for t in column["items"][0]["tickets"]}
+    assert ranks[11] is None
+    assert ranks[12] == 0
+
+
+def test_done_reads_newest_first():
+    from datetime import timedelta
+    older = project(number=2, status="Done", state="CLOSED",
+                    closed_at=NOW - timedelta(days=5))
+    newer = project(number=3, status="Done", state="CLOSED",
+                    closed_at=NOW - timedelta(days=1))
+    rows = funnel.dashboard_board([older, newer], NOW)["columns"]
+    column = next(c for c in rows if c["stage"] == "Done")
+    assert [i["ref"] for i in column["items"]] == [newer.ref, older.ref]

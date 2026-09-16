@@ -76,15 +76,18 @@ def test_dashboard_board_contains_ordered_parent_projects_and_recent_done_only()
         "Ideas", "Shaped", "Ready", "Building", "Parked", "Done",
     ]
     ready = board["columns"][2]["items"]
+    # A project with startable work leads its stage, in the engineers' queue
+    # order (#902); projects with nothing startable keep time-at-gate order
+    # behind it, which is why the older one is second here.
     assert [row["title"] for row in ready] == [
-        older_ready.title, newer_ready.title,
+        newer_ready.title, older_ready.title,
     ]
     assert board["columns"][3]["items"] == []
     assert board["columns"][4]["items"][0]["title"] == parked.title
     assert [row["title"] for row in board["columns"][5]["items"]] == [
         recent_done.title,
     ]
-    assert ready[0] == {
+    assert ready[1] == {
         "repo": "command-center",
         "ref": older_ready.ref,
         "title": older_ready.title,
@@ -94,6 +97,7 @@ def test_dashboard_board_contains_ordered_parent_projects_and_recent_done_only()
         "waited": "8 days",
         "tickets_closed": 0,
         "tickets_total": 0,
+        "next_owner": None,
         "tickets": [],
     }
 
@@ -135,6 +139,7 @@ def test_successful_brief_spools_without_changing_stdout(
         "waited": "7 days",
         "tickets_closed": 1,
         "tickets_total": 3,
+        "next_owner": None,
         "tickets": [],
     }]
     assert snapshot["generated_at"] == json.loads(expected)["generated_at"]

@@ -8,6 +8,7 @@ module-specific patch.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -18,8 +19,19 @@ import heartbeat
 LIVE_SPOOL_DIR = Path("~/.claude/command-center-heartbeat").expanduser()
 
 
+@pytest.fixture(scope="session")
+def offline_bin(tmp_path_factory):
+    """A directory holding a ``gh`` that refuses, outside every tmp_path."""
+    directory = tmp_path_factory.mktemp("offline-bin")
+    offline = directory / "gh"
+    offline.write_text(
+        "#!/bin/sh\necho 'gh is offline in tests' >&2\nexit 1\n")
+    offline.chmod(0o755)
+    return directory
+
+
 @pytest.fixture(autouse=True)
-def heartbeat_isolation(monkeypatch, tmp_path):
+def heartbeat_isolation(monkeypatch, tmp_path, offline_bin):
     """Keep heartbeat records local to this test and GitHub calls offline.
 
     In-process writes are redirected by patching ``heartbeat.SPOOL_DIR``;
@@ -43,5 +55,13 @@ def heartbeat_isolation(monkeypatch, tmp_path):
         raise heartbeat.HeartbeatError("offline in tests")
 
     monkeypatch.setattr(heartbeat, "gh", offline_gh)
+
+    # Subprocesses must not reach the real, authenticated gh either: on the
+    # schedule Mac one live call made while the shared GraphQL budget was
+    # exhausted tripped funnel's process-wide stop and failed 32 later
+    # tests (#942). A test that needs a fake gh still prepends its own.
+    monkeypatch.setenv(
+        "PATH", "{}{}{}".format(offline_bin, os.pathsep,
+                                os.environ.get("PATH", "")))
 
     yield test_spool

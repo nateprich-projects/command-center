@@ -238,3 +238,59 @@ def test_bar_segments_rank_by_how_far_the_work_has_travelled():
     )["columns"]
     row = next(c for c in rows if c["stage"] == "Building")["items"][0]
     assert row["pips"] == ["approved", "submitted", "open"]
+
+
+def bar_for(closed=0, approved=0, submitted=0, blocked=0, open_=0):
+    rows = []
+    number = 10
+    for _ in range(closed):
+        number += 1
+        rows.append(ticket(number, state="CLOSED"))
+    for _ in range(approved + submitted + blocked + open_):
+        number += 1
+        rows.append(ticket(number))
+    facts = {}
+    index = closed - 1
+    for _ in range(approved):
+        index += 1
+        facts[rows[index].ref] = {
+            "state": "OPEN", "number": index, "headRefOid": "a",
+            "verdict": {"verdict": "approved", "head_sha": "a"},
+        }
+    for _ in range(submitted):
+        index += 1
+        facts[rows[index].ref] = {"state": "OPEN", "number": index, "headRefOid": "b"}
+    total = closed + approved + submitted + blocked + open_
+    board = funnel.dashboard_board(
+        [project(status="Building", children_total=total)] + rows, NOW,
+        pr_facts=facts,
+    )["columns"]
+    return next(c for c in board if c["stage"] == "Building")["items"][0]["pips"]
+
+
+def test_a_large_project_gets_a_proportional_bar_not_one_pip_per_ticket():
+    """#902: 44 tickets rendered as one solid block in a 130px column."""
+    bar = bar_for(closed=37, open_=7)
+    assert len(bar) == funnel.PIP_SEGMENTS
+    assert bar.count("closed") == 10
+    assert bar.count("open") == 2
+
+
+def test_in_flight_work_keeps_a_segment_and_sits_at_the_end_of_the_colour():
+    bar = bar_for(closed=30, approved=2, submitted=3, open_=9)
+    assert len(bar) == funnel.PIP_SEGMENTS
+    assert bar.count("approved") >= 1 and bar.count("submitted") >= 1
+    # The coloured run ends with the work in flight, then the open remainder.
+    assert bar.index("approved") > bar.index("closed")
+    assert bar.index("submitted") > bar.index("approved")
+    assert bar.index("open") > bar.index("submitted")
+
+
+def test_one_submitted_pr_among_forty_is_still_visible():
+    bar = bar_for(closed=39, submitted=1)
+    assert bar.count("submitted") == 1
+    assert bar[-1] == "submitted"
+
+
+def test_a_small_project_still_shows_one_pip_per_ticket():
+    assert bar_for(closed=5, open_=1) == ["closed"] * 5 + ["open"]

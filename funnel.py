@@ -6049,16 +6049,48 @@ def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
     return "open"
 
 
+#: The bar is this many segments whatever the ticket count. Forty-four
+#: segments in a 130px column render as one solid block (Nate, 2026-09-16),
+#: so past this the bar becomes proportional rather than one-per-ticket.
+PIP_SEGMENTS = 12
+
+
 def _dashboard_pips(
     tickets: Sequence[Mapping[str, object]]
 ) -> List[str]:
-    """Bar segments in progress order, separate from the queue order above.
+    """Bar segments in progress order, proportional once the count is large.
 
-    The rows below the bar answer "what happens next" and stay in queue order;
-    the bar answers "how far has this got" and fills from the left.
+    Up to ``PIP_SEGMENTS`` tickets get one segment each. Beyond that the
+    states are scaled to that many segments by largest remainder, and any
+    state with at least one ticket keeps at least one segment: three submitted
+    PRs among forty-four tickets must still be visible, and they sit at the
+    end of the coloured run where the work actually is.
     """
     states = [_dashboard_pip_state(ticket) for ticket in tickets]
-    return sorted(states, key=PIP_PROGRESS_ORDER.index)
+    if len(states) <= PIP_SEGMENTS:
+        return sorted(states, key=PIP_PROGRESS_ORDER.index)
+
+    counts = {state: states.count(state) for state in PIP_PROGRESS_ORDER}
+    present = [state for state in PIP_PROGRESS_ORDER if counts[state]]
+    total = len(states)
+    exact = {state: counts[state] * PIP_SEGMENTS / total for state in present}
+    share = {state: max(1, int(exact[state])) for state in present}
+
+    # Largest remainder, then trim from the largest share, so the segments
+    # always sum to PIP_SEGMENTS without dropping a state to zero.
+    while sum(share.values()) < PIP_SEGMENTS:
+        state = max(present, key=lambda s: (exact[s] - share[s], counts[s]))
+        share[state] += 1
+    while sum(share.values()) > PIP_SEGMENTS:
+        state = max(present, key=lambda s: (share[s] - exact[s], share[s]))
+        if share[state] <= 1:
+            break
+        share[state] -= 1
+
+    bar: List[str] = []
+    for state in PIP_PROGRESS_ORDER:
+        bar.extend([state] * share.get(state, 0))
+    return bar
 
 
 def _dashboard_next_owner(

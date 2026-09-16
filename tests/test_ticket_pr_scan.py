@@ -135,6 +135,37 @@ def test_branch_absence_survives_a_truncated_pr_scan(monkeypatch):
     assert facts["nateprich/beta#42"] == {"branch_exists": False}
 
 
+def test_a_truncated_pr_scan_leaves_a_ticket_without_a_pr_startable(monkeypatch):
+    """Branch-only facts are not open PRs (#968)."""
+    limit = funnel.MERGED_PR_SCAN_LIMIT
+    rows = [
+        pr_row(n, "ticket/{}".format(n), state="MERGED")
+        for n in range(1000, 1000 + limit + 1)
+    ]
+    monkeypatch.setattr(funnel, "gh_graphql", repo_graphql_reads(rows))
+    items = [ticket(42)]
+
+    facts = funnel.ticket_pr_facts(items)
+
+    assert facts["nateprich/beta#42"] == {"branch_exists": False}
+    assert funnel.awaiting_review(items, pr_facts=facts) == set()
+    assert funnel.review_queue(items, pr_facts=facts) == []
+
+
+def test_a_branch_without_a_pr_is_neither_awaiting_nor_offered_for_review(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        funnel, "gh_graphql", repo_graphql_reads([], [branch_row(42)])
+    )
+    items = [ticket(42)]
+
+    facts = funnel.ticket_pr_facts(items)
+
+    assert funnel.awaiting_review(items, pr_facts=facts) == set()
+    assert funnel.review_queue(items, pr_facts=facts) == []
+
+
 def test_a_truncated_branch_scan_never_implies_branch_absence(monkeypatch):
     limit = funnel.MERGED_PR_SCAN_LIMIT
     branches = [branch_row(n) for n in range(1000, 1000 + limit)]

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Command Center funnel">
+  <title>Command Center</title>
+  <rect width="32" height="32" rx="7" fill="#0b0d10"/>
+  <!-- A funnel: wide intake, narrowing stem, one drop leaving the bottom. -->
+  <path d="M7 8h18L18.5 17.4V25L13.5 22.2V17.4Z" fill="none" stroke="#c6f24e" stroke-width="2.2" stroke-linejoin="round"/>
+  <circle cx="16" cy="29" r="1.6" fill="#7cc7ff"/>
+</svg>

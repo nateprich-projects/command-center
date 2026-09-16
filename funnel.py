@@ -6005,8 +6005,40 @@ def _dashboard_item(
         # The owner of the next step in the chain, not every owner on the
         # project: Nate, 2026-09-15, "only the assignment for the next step".
         "next_owner": _dashboard_next_owner(tickets or ()),
+        "pips": _dashboard_pips(tickets or ()),
         "tickets": list(tickets or ()),
     }
+
+
+#: Progress order for the sub-issue bar: finished work fills from the left,
+#: the way a progress bar reads, whatever order the tickets are queued in.
+PIP_PROGRESS_ORDER = ("closed", "approved", "submitted", "blocked", "open")
+
+
+def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
+    """The furthest state one ticket has reached, for its bar segment."""
+    if ticket.get("state") != "OPEN":
+        return "closed"
+    pr = ticket.get("pr")
+    if pr == "approved":
+        return "approved"
+    if pr in ("submitted", "merged"):
+        return "submitted"
+    if ticket.get("blocked"):
+        return "blocked"
+    return "open"
+
+
+def _dashboard_pips(
+    tickets: Sequence[Mapping[str, object]]
+) -> List[str]:
+    """Bar segments in progress order, separate from the queue order above.
+
+    The rows below the bar answer "what happens next" and stay in queue order;
+    the bar answers "how far has this got" and fills from the left.
+    """
+    states = [_dashboard_pip_state(ticket) for ticket in tickets]
+    return sorted(states, key=PIP_PROGRESS_ORDER.index)
 
 
 def _dashboard_next_owner(

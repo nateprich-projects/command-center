@@ -136,11 +136,16 @@ function gridRow(tag, className) {
   return element(tag, `grid-row ${className}`);
 }
 
-function pips(tickets, closed, total) {
+function pips(item, tickets, closed, total) {
   const wrap = element("div", "pips");
   const bar = element("div", "pip-bar");
+  // The producer sends bar segments already in progress order, so finished
+  // work fills from the left while the rows below stay in queue order.
+  const states = Array.isArray(item && item.pips) ? item.pips : null;
   const rows = Array.isArray(tickets) ? tickets : [];
-  if (rows.length) {
+  if (states) {
+    for (const state of states) bar.append(element("i", `pip pip-${state}`));
+  } else if (rows.length) {
     for (const ticket of rows) {
       const state = pipState(ticket);
       const pip = element("i", `pip pip-${state}`);
@@ -254,7 +259,7 @@ function projectRow(item) {
   row.append(cell("cell-pr", prCell(rowPrState(tickets))));
   row.append(cell("cell-tier", tierCell(rowTier(tickets))));
   row.append(cell("cell-owner", ownerCell(nextOwner(item))));
-  row.append(cell("cell-pips", pips(tickets, item.tickets_closed, item.tickets_total)));
+  row.append(cell("cell-pips", pips(item, tickets, item.tickets_closed, item.tickets_total)));
   row.append(cell("cell-class", item.class
     ? chip(item.class, `chip-class chip-class-${String(item.class).toLowerCase()}`)
     : element("span", "muted", "—")));
@@ -330,47 +335,60 @@ function renderBoard(board) {
   container.append(table);
 }
 
-function decisionCard(item) {
-  const card = element("article", "decision");
-  card.append(link(item.title || item.ref || "Untitled", item.url, "decision-title"));
-  const meta = element("p", "decision-meta");
-  if (item.waiting_on) meta.append(chip(item.waiting_on, "chip-gate"));
-  if (item.class) meta.append(chip(item.class, `chip-class chip-class-${String(item.class).toLowerCase()}`));
-  if (item.pinned) meta.append(chip("pinned", "chip-pin"));
-  meta.append(element("span", "decision-age", `${shortRepo(item.repo) || item.ref || ""} · ${item.waited || ""}`));
-  card.append(meta);
-  return card;
+function decisionRow(item) {
+  const row = element("li", "waiting-row");
+  row.append(link(item.title || item.ref || "Untitled", item.url, "waiting-title"));
+  if (item.waiting_on) row.append(chip(item.waiting_on, "chip-gate"));
+  if (item.class) {
+    row.append(chip(item.class, `chip-class chip-class-${String(item.class).toLowerCase()}`));
+  }
+  if (item.pinned) row.append(chip("pinned", "chip-pin"));
+  row.append(element("span", "waiting-meta",
+    `${shortRepo(item.repo) || item.ref || ""} · ${item.waited || ""}`));
+  return row;
 }
 
 function humanStepRow(step) {
-  const row = element("li", "human-step");
-  row.append(link(step.title || step.ref || "Untitled", step.url, "human-step-title"));
+  const row = element("li", "waiting-row");
+  row.append(link(step.title || step.ref || "Untitled", step.url, "waiting-title"));
   if (step.reason) row.append(chip(step.reason, "chip-reason"));
+  row.append(element("span", "waiting-meta", shortRepo(step.ref) || ""));
   return row;
+}
+
+function waitingSection(title, count, rows) {
+  const section = element("div", "waiting-section");
+  const head = element("div", "waiting-head");
+  head.append(element("h3", null, title));
+  if (Number.isFinite(count)) head.append(element("span", "count", count));
+  section.append(head);
+  const list = element("ul", "waiting-list");
+  for (const row of rows) list.append(row);
+  section.append(list);
+  return section;
 }
 
 function renderWaiting(brief) {
   const container = document.querySelector("#waiting");
   container.replaceChildren();
-  const count = document.querySelector("#waiting-count");
   const total = brief.total_needing_nate;
-  count.textContent = Number.isFinite(total) ? String(total) : "";
+  const decisions = brief.items || [];
 
-  if (total === 0) {
+  if (total === 0 && !present(brief.human_steps)) {
     container.append(document.querySelector("#empty-state").content.cloneNode(true));
-  } else {
-    const list = element("div", "decisions");
-    for (const item of brief.items || []) list.append(decisionCard(item));
-    container.append(list);
+    return;
   }
 
+  if (decisions.length) {
+    container.append(waitingSection(
+      "Decisions waiting on you", decisions.length, decisions.map(decisionRow),
+    ));
+  }
   if (present(brief.human_steps)) {
-    const section = element("div", "human-steps");
-    section.append(element("h3", null, "Actions waiting on you"));
-    const list = element("ul", null);
-    for (const step of brief.human_steps) list.append(humanStepRow(step));
-    section.append(list);
-    container.append(section);
+    container.append(waitingSection(
+      "Actions waiting on you", brief.human_steps.length,
+      brief.human_steps.map(humanStepRow),
+    ));
   }
 }
 
@@ -421,25 +439,7 @@ function startPolling() {
   });
 }
 
-async function requestRefresh() {
-  const button = document.querySelector("#refresh");
-  button.disabled = true;
-  try {
-    const response = await fetch("/api/refresh", { method: "POST" });
-    if (!response.ok) throw new Error(`Refresh returned ${response.status}`);
-    button.textContent = "Requested";
-  } catch (error) {
-    button.textContent = error.message;
-  } finally {
-    window.setTimeout(() => {
-      button.disabled = false;
-      button.textContent = "Refresh";
-    }, 3000);
-  }
-}
-
 if (typeof document !== "undefined") {
-  document.querySelector("#refresh").addEventListener("click", requestRefresh);
   loadSnapshot({ force: true })
     .then(startPolling)
     .catch((error) => {

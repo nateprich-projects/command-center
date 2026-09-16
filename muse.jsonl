@@ -1391,3 +1391,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 26, "graphql_points": 37}, "phase": "api_cost", "run": "a54dcb7e2361", "ts": 1789541449}
 {"agent": "muse", "do": "shape", "phase": "bind", "run": "1c3b2fd55e17", "ts": 1789541452, "work": "nateprich-projects/workbench#34"}
 {"agent": "muse", "api_cost": {"gh_calls": 26, "graphql_points": 37}, "phase": "api_cost", "run": "1c3b2fd55e17", "ts": 1789541454}
+{"agent": "muse", "api_cost": {"gh_calls": 4, "graphql_points": null}, "phase": "api_cost", "run": "1c3b2fd55e17", "ts": 1789541592}

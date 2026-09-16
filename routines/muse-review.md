@@ -26,6 +26,10 @@ the plan rejected?
 - `verdict` is the newest recorded verdict, if any; `verdict_head_sha` is
   the commit it judged. A rejection at an older head is already answered
   unless the new diff repeats the fault.
+- `ticket_prior_prs` names PRs already merged on this branch, with the
+  files each touched. When it is non-empty this diff is one instalment of
+  the ticket: judge what it adds, and never fault it for work an earlier
+  instalment landed.
 - `overlap` names other open PRs touching the same files: a merge changes
   `main` underneath this one, so weigh staleness before approving.
 - `protected.touched` names protected paths in the diff; the ticket must
@@ -41,7 +45,8 @@ Reply with exactly one JSON object and nothing else — no prose, no fences:
 {"verdict": "approved" | "rejected", "blocking": [...], "unsure": [...]}
 
 - `verdict` is `approved` only when the diff does what the ticket and the
-  plan say and avoids what the plan rejected. Anything else is `rejected`.
+  plan say and avoids what the plan rejected — with prior instalments, the
+  part this diff set out to deliver. Anything else is `rejected`.
 - `blocking` lists each unmet requirement as one specific item naming the
   file and the fault. An approval carries no blocking items.
 - `unsure` lists each genuine uncertainty the packet cannot resolve. A

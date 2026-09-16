@@ -6113,12 +6113,23 @@ def dashboard_board(
         return _dashboard_stage_since(item)
 
     def board_key(item: Item):
-        """Projects with startable work lead, in queue order; then by gate age."""
+        """Pinned first, then queue order, then the ladder, then gate age.
+
+        A pin is Nate's explicit ordering call and leads whatever else is
+        true. Projects whose tickets are startable follow in the engineers'
+        own queue order. The rest are ordered by the ladder their class sits
+        on, so a `Broken` project with everything blocked still reads above an
+        `Improve` one, and by time at gate within a class. Without the ladder
+        term a board with nothing startable fell back to age alone and the
+        pinned project sank (#902).
+        """
         rank = best_rank(item)
         since = stage_since(item)
         return (
+            0 if item.pinned else 1,
             rank is None,
             rank if rank is not None else 0,
+            ladder_index(effective_class(item, by_ref)),
             since is None,
             since or max_time,
             item.repo,

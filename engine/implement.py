@@ -506,10 +506,16 @@ def _is_test_step(name: str, run: str) -> bool:
     must say tests — a ``test``/``tests``/``testing`` word or ``pytest`` —
     and must not say ``install``/``setup``, so ``Install pytest`` and
     ``Set up the test database`` never select an installer as the suite.
+    An unnamed step is judged by the name GitHub shows for it, ``Run``
+    and the first line of its ``run:``, so ``- run: make check test``
+    counts (FF-Weekly-Start-Sit's suite, which fell back to pytest).
     """
     if _run_invokes_pytest(run):
         return True
     lowered = name.strip().lower()
+    if not lowered:
+        lines = run.strip().splitlines()
+        lowered = "run " + lines[0].strip().lower() if lines else ""
     if "install" in lowered or "setup" in lowered or "set up" in lowered:
         return False
     if re.search(r"\btests?\b|\btesting\b", lowered):

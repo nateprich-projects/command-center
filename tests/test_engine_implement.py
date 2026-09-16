@@ -852,10 +852,33 @@ def test_ci_workflow_selects_the_step_that_runs_pytest(tmp_path):
         ("Suite", "pip install pytest", False),
         ("Publish to TestPyPI", "twine upload dist/*", False),
         ("Lint", "ruff check .", False),
+        ("", "make check test", True),
+        ("", "npm test", True),
+        ("", "make lint", False),
+        ("", "pip install -r test-requirements.txt", False),
     ),
 )
 def test_test_step_matching(name, run, matched):
     assert implement._is_test_step(name, run) is matched
+
+
+def test_ci_workflow_selects_an_unnamed_make_test_step(tmp_path):
+    """FF-Weekly-Start-Sit's suite is an unnamed ``make check test`` step;
+    missing it fell back to pytest, which that repo does not use."""
+    write_workflow(
+        tmp_path,
+        "jobs:\n"
+        "  offline:\n"
+        "    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - uses: actions/setup-python@v5\n"
+        "      - run: make check test\n",
+    )
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_runner.py").write_text("import unittest\n")
+    commands, source = implement.default_test_plan(tmp_path)
+    assert commands == [["make", "check", "test"]]
+    assert source == 'CI .github/workflows/tests.yml step "make check test"'
 
 
 def test_ci_workflow_tolerates_env_blocks_and_uses_steps(tmp_path):

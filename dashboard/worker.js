@@ -1,5 +1,17 @@
 const SNAPSHOT_KEY = "snapshot";
 const REFRESH_KEY = "refresh-requested";
+const WEBHOOK_PATH = "/api/github-webhook";
+
+//: GitHub events worth a fresh snapshot. A push or a workflow run changes no
+//: funnel state, so they are acknowledged and ignored rather than paying for a
+//: brief.
+const WEBHOOK_EVENTS = new Set([
+  "issues",
+  "issue_comment",
+  "pull_request",
+  "pull_request_review",
+  "projects_v2_item",
+]);
 const JWKS_TTL_MS = 5 * 60 * 1000;
 const CLOCK_SKEW_SECONDS = 30;
 
@@ -130,6 +142,59 @@ export async function verifyAccessJwt(
   }
 }
 
+function timingSafeEqual(left, right) {
+  if (left.length !== right.length) return false;
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
+function hex(buffer) {
+  return Array.from(new Uint8Array(buffer))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// GitHub signs the raw body with the shared secret. The signature is the only
+// authentication this path has, so an absent secret refuses every request
+// rather than accepting unsigned ones.
+async function isSignedByGitHub(request, secret, body) {
+  const provided = request.headers.get("X-Hub-Signature-256");
+  if (typeof secret !== "string" || !secret || !provided) return false;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    textEncoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, textEncoder.encode(body));
+  return timingSafeEqual(provided, `sha256=${hex(signature)}`);
+}
+
+async function handleWebhook(request, env) {
+  if (request.method !== "POST") {
+    return jsonResponse({ error: "method not allowed" }, 405);
+  }
+  const body = await request.text();
+  if (body.length > 1024 * 1024) {
+    return jsonResponse({ error: "payload too large" }, 413);
+  }
+  if (!(await isSignedByGitHub(request, env.GITHUB_WEBHOOK_SECRET, body))) {
+    return jsonResponse({ error: "bad signature" }, 401);
+  }
+  const event = request.headers.get("X-GitHub-Event") || "";
+  if (event === "ping") return jsonResponse({ pong: true }, 200);
+  if (!WEBHOOK_EVENTS.has(event)) {
+    return jsonResponse({ ignored: event }, 202);
+  }
+  const requestedAt = new Date().toISOString();
+  await env.FUNNEL_SNAPSHOT.put(REFRESH_KEY, requestedAt);
+  return jsonResponse({ requested_at: requestedAt, event }, 202);
+}
+
 async function isAuthorized(request, env) {
   const assertion = request.headers.get("Cf-Access-Jwt-Assertion");
   if (!assertion) {
@@ -169,6 +234,13 @@ function withSecurityHeaders(response) {
 }
 
 async function handleRequest(request, env) {
+  const requested = new URL(request.url);
+  // The webhook carries GitHub's signature instead of an Access assertion:
+  // GitHub cannot complete an Access login, and this path reads nothing and
+  // writes only the refresh flag.
+  if (requested.pathname === WEBHOOK_PATH) {
+    return handleWebhook(request, env);
+  }
   if (!(await isAuthorized(request, env))) {
     return new Response("Forbidden", {
       status: 403,

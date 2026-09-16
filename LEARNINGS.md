@@ -8,6 +8,27 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### `funnel doctor` baseline: 42 calls and 47 measured GraphQL points
+
+**2026-09-16 · GitHub GraphQL · measured**
+
+On local `main` at `origin/main` commit `9f1a312`, the reproducible command
+`PYTHONDONTWRITEBYTECODE=1 python3 funnel.py doctor` made **42 API calls**: 15
+direct GraphQL calls and 27 `gh` CLI calls. The direct GraphQL responses summed to
+**47 points** from their own `rateLimit.cost` fields.
+
+The Project load accounted for 10 direct GraphQL reads: two member-repository pages
+(2 points) and eight Project item pages (40 points), plus four blocked-comment
+`gh issue view` reads. The merged-PR scan made four repo-wide `gh pr list
+--state merged` calls, one per member repository; `GH_DEBUG=api` observed five
+underlying GraphQL HTTP responses, but `gh` does not expose their per-query point
+cost. The remaining doctor checks made five direct GraphQL points and 19 more CLI
+reads.
+
+CLI point cost remains explicitly unknown: the shared-token `remaining` delta is not
+a valid attribution method. This is the before number for #656–#661; the full phase
+table and exact output are recorded in parent issue #518.
+
 ### Routine-SHA outcomes must keep transcription separate from drift
 
 **2026-09-13 · Command Center / #748 · measured**

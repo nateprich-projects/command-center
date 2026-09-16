@@ -316,7 +316,7 @@ def test_a_conflicting_approval_for_an_old_head_stays_withheld(
 # had already merged. These tests hold the close to the merge itself.
 
 def _merge_wired(monkeypatch, issue_state="OPEN", close_rc=0, close_err="",
-                 rows=None, drift=None):
+                 rows=None, drift=None, pr_fields=None):
     """Run cmd_merge past a clean gate, recording the subprocesses it runs."""
     calls = []
     graphql_calls = []
@@ -328,7 +328,7 @@ def _merge_wired(monkeypatch, issue_state="OPEN", close_rc=0, close_err="",
             return {"state": issue_state}
         if "comments" in args:
             return {"comments": [{"body": verdict()}]}
-        return pr()
+        return pr(**(pr_fields or {}))
 
     def fake_run(argv, **kwargs):
         calls.append(argv)
@@ -357,6 +357,27 @@ def test_merge_closes_the_ticket_the_branch_names(monkeypatch):
     assert rc == 0
     assert ["gh", "issue", "close", "9", "--repo", REPO,
             "--reason", "completed"] in calls
+
+
+def _merge_argv(calls):
+    return [c for c in calls if c[:3] == ["gh", "pr", "merge"]][0]
+
+
+def test_merge_names_the_squash_after_the_pr_title(monkeypatch):
+    """#951: a one-commit PR whose commit read "WIP #82: tests failing" landed
+    on main under that subject, though the PR was green and correctly titled."""
+    rc, calls, _ = _merge_wired(
+        monkeypatch, pr_fields={"title": "Send FF alerts over iMessage (#82)"})
+    assert rc == 0
+    argv = _merge_argv(calls)
+    assert argv[argv.index("--subject") + 1] == (
+        "Send FF alerts over iMessage (#82) (#7)")
+
+
+def test_merge_without_a_readable_title_keeps_github_default(monkeypatch):
+    rc, calls, _ = _merge_wired(monkeypatch)
+    assert rc == 0
+    assert "--subject" not in _merge_argv(calls)
 
 
 def test_merge_does_not_reclose_a_ticket_github_already_closed(monkeypatch):

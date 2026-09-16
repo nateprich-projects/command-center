@@ -10837,13 +10837,20 @@ def cmd_merge(items: List[Item], now: datetime, repo: Optional[str], pr: int,
 
     # Read the branch before merging: `--delete-branch` removes it, and the
     # branch is how the ticket is identified.
-    branch = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
-                       "--json", "headRefName") or {}).get("headRefName") or ""
+    view = _gh_json("gh", "pr", "view", str(pr), "--repo", repo,
+                    "--json", "headRefName,title") or {}
+    branch = view.get("headRefName") or ""
     ref = ticket_ref_from_branch(repo, branch)
 
-    out = _run_gh(
-        ["gh", "pr", "merge", str(pr), "--repo", repo, "--squash",
-         "--delete-branch"], capture_output=True, text=True)
+    argv = ["gh", "pr", "merge", str(pr), "--repo", repo, "--squash",
+            "--delete-branch"]
+    # Name the squash after the PR. Left to GitHub, a one-commit PR takes that
+    # commit's subject, and finish-ticket's "WIP #N: tests failing" commit put
+    # exactly that on FF-Weekly-Start-Sit's main for a green PR (#951).
+    title = str(view.get("title") or "").strip()
+    if title:
+        argv += ["--subject", "{} (#{})".format(title, pr)]
+    out = _run_gh(argv, capture_output=True, text=True)
     if out.returncode != 0:
         raise GitHubError(out.stderr.strip())
     print("merged PR #{} in {}".format(pr, repo))

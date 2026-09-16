@@ -172,3 +172,32 @@ def test_non_transient_graphql_failure_does_not_retry(monkeypatch):
     assert len(attempts) == 1
     assert funnel._API_USAGE["graphql_calls"] == 1
     assert funnel.graphql_spend()["calls"] == 1
+
+
+def test_graphql_error_preserves_the_partial_rate_limit_signal(monkeypatch):
+    """A failed payload can still identify an exhausted shared pool."""
+    funnel.reset_route_state()
+    funnel.reset_api_usage()
+    reset_at = "2026-09-16T05:30:32Z"
+    response = {
+        "data": {
+            "rateLimit": {"cost": 0, "remaining": 0, "resetAt": reset_at},
+        },
+        "errors": [{"message": "API rate limit already exceeded"}],
+    }
+
+    monkeypatch.setattr(
+        funnel.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout=json.dumps(response), stderr=""
+        ),
+    )
+
+    with pytest.raises(funnel.GitHubError, match="rate limit"):
+        funnel.gh_graphql("{viewer{login}}")
+
+    assert funnel.graphql_spend()["remaining"] == 0
+    assert funnel.graphql_spend()["reset_at"] == reset_at
+    assert funnel.route_exhausted()["reset_at"] == reset_at
+    funnel.reset_route_state()

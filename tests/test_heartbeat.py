@@ -590,5 +590,10 @@ def test_the_reserve_decline_is_in_the_skipped_family():
     assert "skipped-api-reserve".startswith("skipped-")
 
 
+def test_budget_exhausted_is_a_named_non_skipped_finish():
+    assert "budget-exhausted" in heartbeat.OUTCOMES
+    assert not "budget-exhausted".startswith("skipped-")
+
+
 def test_heartbeat_retains_enough_records_for_a_48_hour_shadow_window():
     assert heartbeat.KEEP == 10000

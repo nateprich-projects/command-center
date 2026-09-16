@@ -83,6 +83,7 @@ OUTCOMES = [
     "skipped-blocked",     # prerequisite has not landed; no change made
     "skipped-human-step",   # paused for a required human action
     "skipped-api-reserve",  # GraphQL budget below the reserve floor (#273)
+    "budget-exhausted",     # begin could not start after the GraphQL pool hit zero
     "errored",             # tried and failed
 ]
 

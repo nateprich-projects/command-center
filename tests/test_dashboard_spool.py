@@ -98,6 +98,9 @@ def test_dashboard_board_contains_ordered_parent_projects_and_recent_done_only()
         "tickets_closed": 0,
         "tickets_total": 0,
         "next_owner": None,
+        "blocked": False,
+        "blockers": [],
+        "block_reason": None,
         "pips": [],
         "tickets": [],
     }
@@ -141,6 +144,9 @@ def test_successful_brief_spools_without_changing_stdout(
         "tickets_closed": 1,
         "tickets_total": 3,
         "next_owner": None,
+        "blocked": False,
+        "blockers": [],
+        "block_reason": None,
         "pips": [],
         "tickets": [],
     }]

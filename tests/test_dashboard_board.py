@@ -318,3 +318,63 @@ def test_a_successful_scan_with_no_prs_still_reads_as_no_pr():
     )["columns"]
     row = next(c for c in rows if c["stage"] == "Building")["items"][0]
     assert row["tickets"][0]["pr"] is None
+
+
+def test_an_open_native_blocker_reads_blocked_with_no_owner():
+    # #807 on 2026-09-16: blocked by #806 natively, no label, shown as Muse's.
+    found = rows([
+        project(children_total=2),
+        ticket(11, open_blockers=[REPO + "#10"]),
+        ticket(12),
+    ])
+    by_number = {t["number"]: t for t in found[0]["tickets"]}
+    assert by_number[11]["blocked"] is True
+    assert by_number[11]["owner"] is None
+    assert by_number[11]["blockers"] == [REPO + "#10"]
+    assert by_number[12]["blocked"] is False
+    assert by_number[12]["owner"] == "Codex"
+    assert found[0]["next_owner"] == "Codex"
+
+
+def test_tickets_under_a_blocked_project_read_blocked_with_its_reason():
+    # #25 on 2026-09-16: the project waits on #794; its tickets showed Codex's.
+    found = rows(
+        [
+            project(
+                status="Ready", labels=["blocked"], block_references=["#794"],
+                block_reason="Put behind the engine plan.",
+            ),
+            ticket(11),
+            ticket(12, state="CLOSED"),
+        ],
+        stage="Ready",
+    )
+    row = found[0]
+    assert row["blocked"] is True
+    assert row["blockers"] == ["#794"]
+    assert row["block_reason"] == "Put behind the engine plan."
+    assert row["next_owner"] is None
+    by_number = {t["number"]: t for t in row["tickets"]}
+    assert by_number[11]["blocked"] is True
+    assert by_number[11]["owner"] is None
+    assert by_number[11]["block_reason"] == "project blocked by #794"
+    assert by_number[12]["blocked"] is False
+
+
+def test_a_blocked_project_without_refs_passes_down_its_reason():
+    found = rows(
+        [
+            project(labels=["blocked"], block_reason="Waiting on Nate."),
+            ticket(11),
+        ],
+    )
+    ticket_row = found[0]["tickets"][0]
+    assert ticket_row["block_reason"] == "project blocked: Waiting on Nate."
+
+
+def test_an_unblocked_project_row_says_so():
+    found = rows([project(), ticket(11)])
+    assert found[0]["blocked"] is False
+    assert found[0]["blockers"] == []
+    assert found[0]["block_reason"] is None
+    assert found[0]["tickets"][0]["block_reason"] is None

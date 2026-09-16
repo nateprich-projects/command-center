@@ -214,11 +214,89 @@ def test_packet_carries_every_field():
     assert found["verdict"]["verdict"] == "approved"
     assert found["verdict_head_sha"] == SHA
     assert found["overlap"] == []
+    assert found["ticket_prior_prs"] == []
     assert found["protected"] == {
         "touched": [], "rules": [], "resolved_path_spelling": False}
     assert found["stop_auto_merging"] == STOP_COUNTER
     assert found["collected_at"] == "2026-09-13T00:00:00+00:00"
     json.dumps(found)  # the packet is JSON by contract
+
+
+# -- prior instalments of the same ticket (#908) ----------------------------
+
+def merged_row(number, branch="ticket/9", **kw):
+    row = {"number": number,
+           "title": "slice {}".format(number),
+           "mergedAt": "2026-09-1{}T00:00:00Z".format(number),
+           "headRefName": branch,
+           "files": [{"path": "dashboard/public/app.js"}]}
+    row.update(kw)
+    return row
+
+
+def test_prior_prs_are_the_merges_on_this_same_branch():
+    prior = review.ticket_prior_prs(
+        "ticket/9", [merged_row(4), merged_row(5)], 7)
+    assert [entry["pr"] for entry in prior] == [4, 5]
+    assert prior[0]["title"] == "slice 4"
+    assert prior[0]["files"] == ["dashboard/public/app.js"]
+
+
+def test_prior_prs_ignore_other_branches():
+    prior = review.ticket_prior_prs(
+        "ticket/9", [merged_row(4, branch="ticket/8")], 7)
+    assert prior == []
+
+
+def test_prior_prs_exclude_the_candidate_itself():
+    """Reviewing an already-merged PR must not list it as its own predecessor."""
+    prior = review.ticket_prior_prs("ticket/9", [merged_row(7)], 7)
+    assert prior == []
+
+
+def test_prior_prs_are_oldest_first():
+    rows = [merged_row(5, mergedAt="2026-09-15T00:00:00Z"),
+            merged_row(4, mergedAt="2026-09-14T00:00:00Z")]
+    assert [e["pr"] for e in review.ticket_prior_prs("ticket/9", rows, 7)] == [4, 5]
+
+
+def test_prior_prs_are_empty_without_a_branch():
+    assert review.ticket_prior_prs(None, [merged_row(4)], 7) == []
+    assert review.ticket_prior_prs("", [merged_row(4)], 7) == []
+
+
+def test_prior_prs_survive_rubbish_rows():
+    rows = [None, "nonsense", {}, merged_row(4)]
+    assert [e["pr"] for e in review.ticket_prior_prs("ticket/9", rows, 7)] == [4]
+
+
+def test_an_older_prior_slice_is_not_a_merged_overlap():
+    """The regression behind #908.
+
+    #907 was rejected for not containing #904's work. ``merged_overlap``
+    could never have surfaced #904: it reports only merges strictly newer
+    than the candidate's head, and a prior instalment is older. So the
+    packet said nothing about it, and the reviewer judged one slice against
+    the whole ticket.
+    """
+    older = merged_row(4, mergedAt="2026-09-01T00:00:00Z")
+    view = pr_view(commits=[{"committedDate": "2026-09-10T00:00:00Z"}])
+    found = packet(pr_view=view, merged_prs=[older])
+    assert found["merged_overlap"] == []
+    assert [entry["pr"] for entry in found["ticket_prior_prs"]] == [4]
+
+
+def test_packet_carries_prior_slices_from_the_pr_view_branch():
+    found = packet(merged_prs=[merged_row(4), merged_row(5, branch="other")])
+    assert [entry["pr"] for entry in found["ticket_prior_prs"]] == [4]
+
+
+# -- the review question names them (#908) ----------------------------------
+
+def test_the_review_question_tells_the_model_to_judge_the_increment():
+    text = (ROOT / "routines" / "muse-review.md").read_text()
+    assert "ticket_prior_prs" in text
+    assert "adds" in text
 
 
 def test_packet_without_a_verdict_says_so_plainly():

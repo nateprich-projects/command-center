@@ -291,6 +291,46 @@ def merged_overlap(candidate_files: Sequence[str],
     return overlapping
 
 
+def ticket_prior_prs(branch: Optional[str],
+                     merged_prs: Sequence[dict],
+                     candidate_pr: int) -> List[Dict]:
+    """Already-merged PRs delivering the same ticket, oldest first.
+
+    A ticket is often delivered in several PRs off one ``ticket/<n>``
+    branch: #902 took three. Each later PR carries only its own slice, so a
+    reviewer handed the whole ticket body and one slice will reject it for
+    the work the earlier slices already landed — which is what happened to
+    #907 (see #908). These rows are what lets the review question ask what
+    the diff *adds*.
+
+    Matched on the head branch rather than on closing keywords: the branch
+    is what the runner derives the ticket from in the first place, and it is
+    already in every row. ``merged_overlap`` cannot serve here — it looks
+    only at merges strictly newer than the candidate's head, and a prior
+    slice is by definition older.
+    """
+    if not branch:
+        return []
+    prior = []
+    for row in merged_prs or []:
+        if not isinstance(row, dict) or row.get("number") == candidate_pr:
+            continue
+        if (row.get("headRefName") or "") != branch:
+            continue
+        prior.append({
+            "pr": row.get("number"),
+            "title": row.get("title"),
+            "merged_at": row.get("mergedAt"),
+            "files": sorted({
+                entry.get("path") for entry in (row.get("files") or [])
+                if isinstance(entry, dict) and entry.get("path")
+            }),
+        })
+    prior.sort(key=lambda entry: (entry.get("merged_at") or "",
+                                  entry.get("pr") or 0))
+    return prior
+
+
 def precheck_freeze(packet: dict) -> List[str]:
     """Row 1: frozen ground needs a ticket under #794."""
     touches = freeze_touches(packet.get("changed_files"), packet.get("diff"))
@@ -419,7 +459,9 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     ``ticket`` is None when the branch is not a ticket/<n> branch; the
     verdict's head_sha sits beside it so a reader can compare it with the
     current head without parsing the verdict. ``merged_prs`` rows carry
-    number, mergedAt, and files [{path}]; None reads as no merges scanned.
+    number, title, mergedAt, headRefName and files [{path}]; None reads as
+    no merges scanned. Rows on the candidate's own head branch become
+    ``ticket_prior_prs``: the slices of this ticket that already merged.
     """
     pr_view = pr_view or {}
     changed_files = sorted({
@@ -464,6 +506,8 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "overlap": file_overlap(changed_files, open_prs, pr_number),
         "merged_overlap": merged_overlap(changed_files, merged_prs, head,
                                          pr_number),
+        "ticket_prior_prs": ticket_prior_prs(
+            pr_view.get("headRefName"), merged_prs, pr_number),
         "protected": protected_touches(changed_files, diff),
         "stop_auto_merging": stop_counter,
         "collected_at": collected_at,
@@ -541,10 +585,16 @@ def fetch_open_prs(repo: str) -> List[dict]:
 
 def fetch_merged_prs(repo: str,
                      limit: int = MERGED_PR_SCAN_LIMIT) -> List[dict]:
-    """Recently merged PRs with their merge time and changed files."""
+    """Recently merged PRs with their merge time, branch and changed files.
+
+    ``headRefName`` is what ``ticket_prior_prs`` matches on; ``title`` is
+    for the reviewer to read. Both ride the call ``merged_overlap`` already
+    makes, so neither costs a GitHub read.
+    """
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "merged",
-        "--json", "number,mergedAt,files", "--limit", str(limit))
+        "--json", "number,title,mergedAt,files,headRefName",
+        "--limit", str(limit))
     if rows is None or not isinstance(rows, list):
         raise funnel.GitHubError(
             "could not list merged PRs in {}".format(repo))

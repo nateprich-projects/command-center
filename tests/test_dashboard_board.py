@@ -182,3 +182,30 @@ def test_done_reads_newest_first():
     rows = funnel.dashboard_board([older, newer], NOW)["columns"]
     column = next(c for c in rows if c["stage"] == "Done")
     assert [i["ref"] for i in column["items"]] == [newer.ref, older.ref]
+
+
+def test_a_pinned_project_leads_its_stage_even_with_nothing_startable():
+    """#902: with no startable ticket the pin used to sink under gate age."""
+    from datetime import timedelta
+    pinned = project(number=5, title="pinned", pinned=True, klass="New",
+                     status_since=NOW - timedelta(hours=1))
+    broken = project(number=6, title="broken", klass="Broken",
+                     status_since=NOW - timedelta(days=4))
+    improve = project(number=7, title="improve", klass="Improve",
+                      status_since=NOW - timedelta(days=9))
+    rows = funnel.dashboard_board([pinned, broken, improve], NOW)["columns"]
+    column = next(c for c in rows if c["stage"] == "Building")
+    assert [i["title"] for i in column["items"]] == ["pinned", "broken", "improve"]
+
+
+def test_startable_work_still_outranks_the_ladder_for_unpinned_projects():
+    from datetime import timedelta
+    ready = project(number=8, title="has work", klass="Improve",
+                    children_total=1, status_since=NOW - timedelta(days=1))
+    stuck = project(number=9, title="stuck broken", klass="Broken",
+                    status_since=NOW - timedelta(days=3))
+    rows = funnel.dashboard_board(
+        [ready, stuck, ticket(21, parent=ready.ref)], NOW,
+    )["columns"]
+    column = next(c for c in rows if c["stage"] == "Building")
+    assert [i["title"] for i in column["items"]] == ["has work", "stuck broken"]

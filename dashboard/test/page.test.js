@@ -121,6 +121,20 @@ test("expanded projects survive a re-render", async () => {
   assert.match(source, /expanded\.has\(item\.ref\)/);
 });
 
+test("the phone board keeps four summary fields and discloses details recursively", async () => {
+  const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.match(app, /element\("div", "phone-board"\)/);
+  assert.match(app, /element\("details", "phone-row"\)/);
+  assert.match(app, /element\("span", "phone-counter", `\$\{closed\}\/\$\{total\}`\)/);
+  assert.match(app, /for \(const child of children\) \{\s+childList\.append\(phoneRow\(child, className\)\);/);
+  assert.match(app, /row\.addEventListener\("toggle",/);
+  assert.match(css, /@media \(max-width: 600px\)/);
+  assert.match(css, /\.table \{ display: none; \}/);
+  assert.match(css, /\.phone-board \{ display: block; \}/);
+  assert.match(css, /grid-template-columns: 24px minmax\(0, 1fr\) minmax\(0, 76px\) auto auto;/);
+});
+
 
 test("the bar uses the producer's progress order, and the rows keep queue order", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");

@@ -245,6 +245,147 @@ function ticketRow(ticket) {
   return row;
 }
 
+function phoneChildren(item) {
+  return item && Array.isArray(item.tickets) ? item.tickets : [];
+}
+
+function phoneRepo(item) {
+  let repo = item && (item.repo || item.repository);
+  if (!repo && item && typeof item.ref === "string") repo = item.ref.split("#")[0];
+  return shortRepo(repo) || "";
+}
+
+function phoneCounterParts(item, children) {
+  let closed = Number.isFinite(item && item.tickets_closed)
+    ? item.tickets_closed : 0;
+  const total = Number.isFinite(item && item.tickets_total)
+    ? item.tickets_total : children.length;
+  if (!Number.isFinite(item && item.tickets_closed)) {
+    closed = 0;
+    for (const child of children) {
+      if (child && child.state !== "OPEN") closed += 1;
+    }
+  }
+  return { closed, total };
+}
+
+function phoneClass(value) {
+  if (!value) return element("span", "muted", "—");
+  return chip(value, `chip-class chip-class-${String(value).toLowerCase()}`);
+}
+
+function phoneTitle(item) {
+  if (Number.isFinite(item && item.number)) {
+    return `#${item.number} ${item.title || ""}`;
+  }
+  return item && (item.title || item.ref) || "Untitled";
+}
+
+function phoneField(label, value) {
+  const field = element("div", "phone-field");
+  field.append(element("dt", "phone-label", label));
+  const content = element("dd", "phone-value");
+  content.append(value || element("span", "muted", "—"));
+  field.append(content);
+  return field;
+}
+
+function phoneProgress(item, children) {
+  const { closed, total } = phoneCounterParts(item, children);
+  const value = pips(item, children, closed, total);
+  if (!value.childElementCount) return element("span", "muted", "—");
+  value.classList.add("phone-progress");
+  value.setAttribute("role", "img");
+  value.setAttribute("aria-label", `Sub-issue progress: ${closed}/${total}`);
+  value.append(element("span", "phone-progress-copy", `${closed}/${total}`));
+  return value;
+}
+
+function phoneDetails(item, inheritedClass, children) {
+  const fields = element("dl", "phone-fields");
+  const project = !Number.isFinite(item && item.number);
+  const className = item && item.class || inheritedClass;
+
+  if (project) {
+    fields.append(phoneField("PR", prCell(rowPrState(children))));
+    fields.append(phoneField("Tier", tierCell(rowTier(children))));
+    fields.append(phoneField("Next step", ownerCell(nextOwner(item))));
+    fields.append(phoneField("Progress", phoneProgress(item, children)));
+    fields.append(phoneField("Updated", element("span", "age", item.waited || "—")));
+  } else {
+    fields.append(phoneField("PR", prCell(item.pr, item.pr_number)));
+    fields.append(phoneField(
+      "Tier", tierCell(item.state === "OPEN" ? item.tier : null),
+    ));
+    fields.append(phoneField("Next step", ownerCell(item.owner)));
+    if (item.blocked) fields.append(phoneField("Blocked", blockedChip(item)));
+    if (children.length || Number.isFinite(item.tickets_total)) {
+      fields.append(phoneField("Progress", phoneProgress(item, children)));
+    }
+  }
+
+  const detail = element("div", "phone-details");
+  detail.append(fields);
+  if (children.length) {
+    const childList = element("div", "phone-children");
+    childList.append(element("div", "phone-children-label", "Sub-issues"));
+    for (const child of children) {
+      childList.append(phoneRow(child, className));
+    }
+    detail.append(childList);
+  }
+  return detail;
+}
+
+function phoneRow(item, inheritedClass) {
+  const children = phoneChildren(item);
+  const className = item && item.class || inheritedClass;
+  const { closed, total } = phoneCounterParts(item, children);
+  const row = element("details", "phone-row");
+  const summary = element("summary", "phone-summary");
+  summary.append(element("span", "phone-arrow", "\u25B8"));
+
+  const title = element("span", "phone-title");
+  title.append(link(phoneTitle(item), item && item.url, "phone-title-link"));
+  summary.append(title);
+  summary.append(element("span", "phone-repo", phoneRepo(item) || "—"));
+  summary.append(element("span", "phone-counter", `${closed}/${total}`));
+  summary.append(element("span", "phone-class", phoneClass(className)));
+  row.append(summary);
+  row.append(phoneDetails(item, className, children));
+
+  const key = item && item.ref;
+  if (expandAll() || (key && expanded.has(key))) row.open = true;
+  if (key) {
+    row.addEventListener("toggle", () => {
+      if (row.open) expanded.add(key);
+      else expanded.delete(key);
+    });
+  }
+  return row;
+}
+
+function renderPhoneBoard(columns) {
+  const board = element("div", "phone-board");
+  for (const column of columns) {
+    const items = Array.isArray(column.items) ? column.items : [];
+    if (!items.length) continue;
+    const group = element("details", "phone-group");
+    group.open = !COLLAPSED_STAGES.includes(column.stage);
+    const head = element("summary", "phone-group-head");
+    head.append(element("span", "group-twisty", "\u25B8"));
+    head.append(element("span", `dot dot-${column.stage.toLowerCase()}`));
+    head.append(element("span", "group-name", column.stage));
+    head.append(element("span", "count", items.length));
+    group.append(head);
+    const body = element("div", "phone-group-body");
+    for (const item of items) body.append(phoneRow(item));
+    group.append(body);
+    board.append(group);
+  }
+  return board;
+}
+
 // `?expand` opens every project's tickets on load: useful for a wide screen,
 // and it is how this view is checked in a headless render.
 const expanded = new Set();
@@ -313,10 +454,11 @@ function projectRow(item) {
 function renderBoard(board) {
   const container = document.querySelector("#board");
   container.replaceChildren();
+  const columns = boardColumns(board);
   const table = element("div", "table");
   table.append(headerRow());
   let rendered = 0;
-  for (const column of boardColumns(board)) {
+  for (const column of columns) {
     const items = Array.isArray(column.items) ? column.items : [];
     if (!items.length) continue;
     const collapsed = COLLAPSED_STAGES.includes(column.stage);
@@ -350,6 +492,7 @@ function renderBoard(board) {
     return;
   }
   container.append(table);
+  container.append(renderPhoneBoard(columns));
 }
 
 function decisionRow(item) {

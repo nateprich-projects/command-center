@@ -63,9 +63,10 @@ SPOOL_DIR = os.environ.get("COMMAND_CENTER_HEARTBEAT_SPOOL") or os.path.expandus
 #: short enough not to eat a run's time when GitHub is genuinely down.
 BACKOFF = [1, 3, 7]
 
-#: Records kept per agent. Enough to measure run cost over several weeks;
-#: bounded so the file never needs pagination.
-KEEP = 1000
+#: Records kept per agent. At the measured Muse rate of about 135 records per
+#: hour, 10,000 records cover roughly 74 hours, holding a 48-hour window with
+#: margin while remaining bounded.
+KEEP = 10000
 
 #: The run accounting shown in the brief and watchdog log. Keep it short
 #: enough to describe current health without making old one-off runs dominate

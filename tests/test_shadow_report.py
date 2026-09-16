@@ -55,6 +55,44 @@ def test_malformed_rate_is_separate_and_duration_percentiles_are_measured():
     }
 
 
+def test_window_reports_full_data_floor_without_changing_nominal_window():
+    report = shadow_report.build_report(_records(), now=1000, window_seconds=200)
+
+    assert report["window"] == {
+        "since": 800.0,
+        "until": 1000.0,
+        "seconds": 200.0,
+        "data_since": 790.0,
+        "truncated": False,
+    }
+
+
+def test_window_reports_truncated_data_floor():
+    records = [row for row in _records() if row["ts"] >= 850]
+
+    report = shadow_report.build_report(records, now=1000, window_seconds=200)
+
+    assert report["window"] == {
+        "since": 800.0,
+        "until": 1000.0,
+        "seconds": 200.0,
+        "data_since": 850.0,
+        "truncated": True,
+    }
+
+
+def test_empty_window_data_shape_is_not_marked_truncated():
+    report = shadow_report.build_report([], now=1000, window_seconds=200)
+
+    assert report["window"] == {
+        "since": 800.0,
+        "until": 1000.0,
+        "seconds": 200.0,
+        "data_since": None,
+        "truncated": False,
+    }
+
+
 def test_separate_streams_accept_structured_review_results():
     shadow = [
         {"run": "s", "phase": "start", "ts": 10},

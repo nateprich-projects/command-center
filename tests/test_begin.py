@@ -268,14 +268,15 @@ def test_main_loads_the_project_after_begin_gates_pass(
     monkeypatch.setattr(
         funnel,
         "load_items",
-        lambda: events.append("load") or [],
+        lambda include_details=True: events.append("load") or [],
     )
     monkeypatch.setattr(funnel, "repo_readiness_for_items", lambda items: {})
     monkeypatch.setattr(
         funnel,
         "cmd_begin",
         lambda items, now, agent, tier, idle, breakdown=False,
-        repo_readiness=None, caller_role=None, _preflight=None: (
+        repo_readiness=None, caller_role=None, _detail_loader=None,
+        _preflight=None: (
             events.append(("begin", items, _preflight)) or 0
         ),
     )

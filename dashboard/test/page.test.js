@@ -154,3 +154,8 @@ test("actions show how long they have waited, like decisions do", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(source, /step\.waited/);
 });
+
+test("an action row names the repository without its ticket number", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(source, /String\(step\.ref \|\| ""\)\.split\("#"\)\[0\]/);
+});

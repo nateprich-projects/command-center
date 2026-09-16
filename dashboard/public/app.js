@@ -365,8 +365,11 @@ function humanStepRow(step) {
   const row = element("li", "waiting-row");
   row.append(link(step.title || step.ref || "Untitled", step.url, "waiting-title"));
   if (step.reason) row.append(chip(step.reason, "chip-reason"));
+  // The ref carries the ticket number; the row wants the repository and the
+  // wait, as the decision rows have (Nate, 2026-09-16).
+  const repo = shortRepo(String(step.ref || "").split("#")[0]) || "";
   row.append(element("span", "waiting-meta",
-    `${shortRepo(step.ref) || ""}${step.waited ? ` · ${step.waited}` : ""}`));
+    `${repo}${step.waited ? ` · ${step.waited}` : ""}`));
   return row;
 }
 

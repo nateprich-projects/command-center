@@ -83,3 +83,19 @@ test("the page renders no brief section other than the board and human steps", a
     assert.doesNotMatch(source, new RegExp(`brief\\.${dropped}\\b`), `page still reads ${dropped}`);
   }
 });
+
+test("the row toggle is bound once, so a chevron click does not cancel itself", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const listeners = source.match(/addEventListener\("click", /g) || [];
+  // One on the row (the chevron is inside it), one on the group header, one on
+  // the refresh button. A second listener on the chevron toggled twice (#902).
+  assert.equal(listeners.length, 3);
+  assert.doesNotMatch(source, /twisty\.addEventListener\("click"/);
+});
+
+test("the sub-issue bar fills its column rather than capping its pips", async () => {
+  const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.doesNotMatch(app, /PIP_LIMIT/);
+  assert.match(css, /\.pip-bar \.pip \{ flex: 1 1 0;/);
+});

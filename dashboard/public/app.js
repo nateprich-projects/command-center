@@ -200,6 +200,27 @@ function headerRow() {
   return row;
 }
 
+// What a block is waiting on, in one chip: the blocking tickets, the date it
+// lifts, or the recorded reason. A bare "blocked" says nothing, which is what
+// #711 looked like on the board.
+function blockedChip(ticket) {
+  const refs = Array.isArray(ticket.blockers) ? ticket.blockers : [];
+  const names = refs.map((ref) => `#${String(ref).split("#").pop()}`);
+  if (names.length) {
+    return chip(`blocked by ${names.join(", ")}`, "chip-blocked", refs.join(", "));
+  }
+  if (ticket.blocked_until) {
+    return chip(`blocked until ${ticket.blocked_until}`, "chip-blocked",
+      ticket.block_reason || null);
+  }
+  if (ticket.block_reason) {
+    const short = ticket.block_reason.length > 48
+      ? `${ticket.block_reason.slice(0, 45)}…` : ticket.block_reason;
+    return chip(`blocked: ${short}`, "chip-blocked", ticket.block_reason);
+  }
+  return chip("blocked, no reason recorded", "chip-blocked");
+}
+
 function ticketRow(ticket) {
   const row = gridRow("div", `ticket ticket-${pipState(ticket)}`);
   row.append(cell("cell-twisty", element("i", `pip pip-${pipState(ticket)}`)));
@@ -207,15 +228,7 @@ function ticketRow(ticket) {
   const title = element("div", "cell cell-title cell-child");
   title.append(element("span", "child-rule"));
   title.append(link(`#${ticket.number} ${ticket.title || ""}`, ticket.url, "ticket-title"));
-  if (ticket.blocked) {
-    const refs = Array.isArray(ticket.blockers) ? ticket.blockers : [];
-    const names = refs.map((ref) => `#${String(ref).split("#").pop()}`);
-    title.append(chip(
-      names.length ? `blocked by ${names.join(", ")}` : "blocked",
-      "chip-blocked",
-      refs.join(", ") || null,
-    ));
-  }
+  if (ticket.blocked) title.append(blockedChip(ticket));
   row.append(title);
 
   row.append(cell("cell-repo", element("span", "muted", "")));
@@ -352,7 +365,8 @@ function humanStepRow(step) {
   const row = element("li", "waiting-row");
   row.append(link(step.title || step.ref || "Untitled", step.url, "waiting-title"));
   if (step.reason) row.append(chip(step.reason, "chip-reason"));
-  row.append(element("span", "waiting-meta", shortRepo(step.ref) || ""));
+  row.append(element("span", "waiting-meta",
+    `${shortRepo(step.ref) || ""}${step.waited ? ` · ${step.waited}` : ""}`));
   return row;
 }
 

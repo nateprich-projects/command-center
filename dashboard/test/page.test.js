@@ -142,3 +142,15 @@ test("the page ships its own favicon rather than borrowing a default", async () 
   const icon = await readFile(new URL("../public/favicon.svg", import.meta.url), "utf8");
   assert.match(icon, /<svg/);
 });
+
+test("a blocked ticket always says what it waits on", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(source, /blocked by \$\{names/);
+  assert.match(source, /blocked until \$\{ticket\.blocked_until\}/);
+  assert.match(source, /blocked, no reason recorded/);
+});
+
+test("actions show how long they have waited, like decisions do", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(source, /step\.waited/);
+});

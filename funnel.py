@@ -5916,6 +5916,22 @@ OWNER_MUSE = "Muse"
 OWNER_CODEX = "Codex"
 
 
+def _dashboard_block_reason(item: Item) -> Optional[str]:
+    """One short phrase saying why a ticket is blocked, or None.
+
+    A block whose comment the funnel could not parse still has its first line,
+    which is better than a bare "blocked" chip: #711 carried a date hold whose
+    header was missing its colon, so nothing downstream could say why.
+    """
+    if item.block_reason:
+        return item.block_reason.strip().splitlines()[0][:120]
+    for comment in item.unparseable_block_comments or ():
+        text = str(comment).strip()
+        if text:
+            return text.splitlines()[0][:120] + " (unparsed)"
+    return None
+
+
 def _dashboard_ticket(
     item: Item,
     pr_fact: Optional[Mapping[str, object]],
@@ -5976,6 +5992,10 @@ def _dashboard_ticket(
         # second opinion computed here.
         "queue_rank": queue_rank,
         "blockers": list(blockers),
+        "blocked_until": (
+            item.blocked_until.isoformat() if item.blocked_until else None
+        ),
+        "block_reason": _dashboard_block_reason(item),
         "pr": pr,
         "pr_number": pr_number if isinstance(pr_number, int) else None,
         "tier": tier,
@@ -6862,18 +6882,32 @@ def human_step_items(items: Iterable[Item]) -> List[Item]:
     )
 
 
-def _human_step_item_json(item: Item) -> Dict[str, object]:
-    return {
+def _human_step_item_json(
+    item: Item, now: Optional[datetime] = None
+) -> Dict[str, object]:
+    row = {
         "ref": item.ref,
         "title": item.title,
         "url": item.url,
         "reason": _item_human_step_reason(item),
     }
+    # How long this action has been waiting on him, phrased exactly as the
+    # decision rows are (Nate, 2026-09-16). A ticket with no creation time
+    # recorded says so rather than guessing.
+    since = item.created_at
+    if now is not None:
+        row["waited"] = (
+            humanise(max(timedelta(0), now - since))
+            if since is not None else "unknown"
+        )
+    return row
 
 
-def human_step_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+def human_step_json(
+    items: Iterable[Item], now: Optional[datetime] = None
+) -> List[Dict[str, object]]:
     """Render the open human-step work owed by Nate."""
-    return [_human_step_item_json(item) for item in human_step_items(items)]
+    return [_human_step_item_json(item, now) for item in human_step_items(items)]
 
 
 def blocked_human_step_items(items: Iterable[Item]) -> List[Item]:
@@ -7898,7 +7932,7 @@ def cmd_brief(
             lambda: suspected_human_step_json(items),
             [],
         )
-        human = section("human_steps", lambda: human_step_json(items), [])
+        human = section("human_steps", lambda: human_step_json(items, now), [])
         machine_local = section(
             "machine_local_steps",
             lambda: machine_local_step_json(items),

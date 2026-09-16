@@ -8,9 +8,11 @@ different heartbeat streams, which keeps the reader useful if the schedules
 are separated later.
 
 The optional ``breakdown-shape`` mode reads the corresponding issue jobs from
-the same streams and reports their matched population.  Breakdown jobs also
-compare the ticket count and ``needs_decision`` answer; shape outcomes are
-handled by a later slice.
+the same streams and reports the three-part outcome agreement defined by the
+breakdown/shape cutover plan.  Breakdown jobs compare ticket count and
+``needs_decision``; live shape outcomes are read from the Project Status field
+at report time and accepted only when the status transition falls inside the
+live shape job, so an old read cannot become false agreement.
 
 Only completed review jobs inside the requested window count.  A missing or
 ambiguous verdict is not silently treated as a rejection: it is excluded from
@@ -101,12 +103,30 @@ ISSUE_SHAPE_NOTE_RE = re.compile(
 )
 ISSUE_KINDS = {"breakdown", "shape"}
 REPORT_MODES = {"review", "breakdown-shape"}
+SHAPE_STATUS_RE = re.compile(r"\b(?P<status>shaped|ready)\b", re.IGNORECASE)
+SHADOW_SHAPE_STATUS_RE = re.compile(
+    r"\bshadow\s+shape\b[^:\n]*:\s*(?P<status>shaped|ready)\b",
+    re.IGNORECASE,
+)
+ANSWER_MARKER_RE = re.compile(r"\banswer\s*:\s*", re.IGNORECASE)
+LIVE_TICKET_COUNT_RE = re.compile(
+    r"\b(?:created|opened|added|made|with|into)\s+"
+    r"(?P<count>[0-9]+)\s+(?:sub[- ]?issues?|tickets?)\b",
+    re.IGNORECASE,
+)
+LIVE_NEEDS_DECISION_RE = re.compile(
+    r"\bneeds[_ -]?decision(?:\s+question)?\s*[:=]\s*"
+    r"(?P<question>[^;\n]+)",
+    re.IGNORECASE,
+)
 
 
 def _timestamp(value: object) -> Optional[float]:
     """Return an epoch timestamp from heartbeat's numeric or ISO shapes."""
     if isinstance(value, bool):
         return None
+    if isinstance(value, datetime):
+        return value.timestamp()
     if isinstance(value, (int, float)):
         return float(value)
     if not isinstance(value, str) or not value.strip():
@@ -358,6 +378,22 @@ def _issue_is_shadow(row: Optional[Dict]) -> bool:
     return is_shadow(row) or bool(ISSUE_SHADOW_RE.search(_note(row)))
 
 
+def _issue_is_malformed(row: Dict) -> bool:
+    """Detect malformed issue output without scanning answer prose.
+
+    Shape plans can legitimately discuss malformed output in their JSON
+    rationale.  Only the finish metadata and the prose before ``answer:``
+    describe the run's own parse result.
+    """
+    for key in ("malformed", "malformed_output", "parse_error"):
+        if _truthy(row.get(key)):
+            return True
+    note = _note(row)
+    marker = ANSWER_MARKER_RE.search(note)
+    prefix = note[:marker.start()] if marker else note
+    return bool(prefix and MALFORMED_RE.search(prefix))
+
+
 def _review_number(binding: Optional[Dict], finish: Dict) -> Optional[int]:
     """Return the PR number, preferring the explicit number in the note."""
     target = _review_target(_note(finish))
@@ -525,8 +561,9 @@ def issue_jobs_from_records(
             "run": run,
             "kind": kind,
             "key": _issue_target(binding, finish),
+            "started_at": started_at,
             "finished_at": finished_at,
-            "malformed": is_malformed(finish),
+            "malformed": _issue_is_malformed(finish),
             "duration_seconds": duration,
             "finish": finish,
         })
@@ -599,6 +636,313 @@ def _pair_issue_jobs(
         right = sorted(live_by_key[key], key=lambda job: job["finished_at"])
         pairs.extend(zip(left, right))
     return pairs
+
+
+def _answer_payload(row: Dict) -> object:
+    """Read a JSON answer carried by a finish row or its note."""
+    for key in ("answer", "payload"):
+        value = row.get(key)
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = json.loads(value)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+
+    note = _note(row)
+    marker = ANSWER_MARKER_RE.search(note)
+    if marker:
+        try:
+            parsed, _ = json.JSONDecoder().raw_decode(note[marker.end():].lstrip())
+        except (TypeError, ValueError):
+            return _MISSING
+        return parsed if isinstance(parsed, dict) else _MISSING
+    return _MISSING
+
+
+def _shape_status(value: object) -> Optional[str]:
+    """Normalise one of the two Project outcomes used by the shape gate."""
+    if not isinstance(value, str):
+        return None
+    match = SHAPE_STATUS_RE.fullmatch(value.strip())
+    return match.group("status").title() if match else None
+
+
+def _shadow_shape_status(finish: Dict) -> Optional[str]:
+    """Read the shadow shape result, with structured fields taking priority."""
+    for key in (
+        "shape_status", "shape_result", "shape_outcome", "project_status",
+        "status",
+    ):
+        status = _shape_status(finish.get(key))
+        if status:
+            return status
+
+    payload = _answer_payload(finish)
+    if isinstance(payload, dict):
+        for key in ("shape_status", "shape_result", "shape_outcome", "status"):
+            status = _shape_status(payload.get(key))
+            if status:
+                return status
+
+    match = SHADOW_SHAPE_STATUS_RE.search(_note(finish))
+    return _shape_status(match.group("status")) if match else None
+
+
+def _normalized_question(value: object) -> Optional[str]:
+    """Normalise a needs-decision question exactly as the plan specifies."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return _MISSING  # type: ignore[return-value]
+    normalized = value.strip().casefold()
+    return normalized if normalized else _MISSING  # type: ignore[return-value]
+
+
+def _breakdown_observation(finish: Dict) -> Optional[Tuple[int, Optional[str]]]:
+    """Read ticket count and needs-decision from a shadow breakdown answer."""
+    payload = _answer_payload(finish)
+    if payload is _MISSING and "tickets" in finish and "needs_decision" in finish:
+        payload = finish
+    if not isinstance(payload, dict):
+        return None
+    tickets = payload.get("tickets")
+    if not isinstance(tickets, list) or "needs_decision" not in payload:
+        return None
+    question = _normalized_question(payload.get("needs_decision"))
+    if question is _MISSING:
+        return None
+    return len(tickets), question
+
+
+def _live_ticket_count(note: str) -> Optional[int]:
+    """Extract the created sub-issue count from a live breakdown note."""
+    match = LIVE_TICKET_COUNT_RE.search(note)
+    if match:
+        return int(match.group("count"))
+
+    lowered = note.lower()
+    if re.search(r"\b(?:one|a|an)\s+(?:sub[- ]?issues?|tickets?)\b", lowered):
+        return 1
+
+    marker = re.search(r"\b(?:into|created|opened|added)\b(?P<tail>.*)", note,
+                       re.IGNORECASE)
+    if not marker:
+        return None
+    # A breakdown note names the new issues with #N.  Count distinct refs so a
+    # dependency mentioned later in the prose cannot double-count a ticket.
+    refs = set(re.findall(r"(?<![A-Za-z0-9])#([1-9][0-9]*)\b", marker.group("tail")))
+    return len(refs) if refs else None
+
+
+def _live_breakdown_observation(finish: Dict) -> Optional[Tuple[int, Optional[str]]]:
+    """Read the live side of a breakdown from structured fields or its note."""
+    count: Optional[int] = None
+    for key in ("ticket_count", "created_ticket_count", "sub_issue_count"):
+        value = finish.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            count = value
+            break
+    if count is None:
+        for key in ("tickets", "created_tickets", "sub_issues"):
+            value = finish.get(key)
+            if isinstance(value, list):
+                count = len(value)
+                break
+
+    note = _note(finish)
+    if count is None:
+        count = _live_ticket_count(note)
+
+    question_value: object = _MISSING
+    for key in ("needs_decision", "needsDecision"):
+        if key in finish:
+            question_value = finish.get(key)
+            break
+    if question_value is _MISSING:
+        match = LIVE_NEEDS_DECISION_RE.search(note)
+        question_value = match.group("question") if match else None
+    question = _normalized_question(question_value)
+    if count is None or question is _MISSING:
+        return None
+    return count, question
+
+
+def _issue_key_parts(key: object) -> Optional[Tuple[str, int]]:
+    if not isinstance(key, str):
+        return None
+    match = re.fullmatch(
+        r"(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(?P<number>[1-9][0-9]*)",
+        key.strip(), re.IGNORECASE,
+    )
+    if not match:
+        return None
+    return match.group("repo"), int(match.group("number"))
+
+
+def _shape_status_observation(value: object) -> Dict[str, object]:
+    """Make callback and Project-item status reads share one shape."""
+    if isinstance(value, (tuple, list)) and len(value) >= 2:
+        return {
+            "status": _shape_status(value[0]),
+            "status_since": value[1],
+        }
+    if isinstance(value, dict):
+        status_value = value.get("status")
+        if status_value is None:
+            status_value = value.get("name")
+        status_at = None
+        for key in ("status_since", "status_at", "changed_at", "updated_at", "ts"):
+            if key in value:
+                status_at = value.get(key)
+                break
+        return {"status": _shape_status(status_value), "status_since": status_at}
+
+    status_value = getattr(value, "status", None)
+    status_at = getattr(value, "status_since", None)
+    if status_value is not None or status_at is not None:
+        return {"status": _shape_status(status_value), "status_since": status_at}
+    return {"status": _shape_status(value), "status_since": None}
+
+
+def _fresh_shape_status(job: Dict, value: object) -> Optional[str]:
+    """Accept a status only when its transition belongs to this live job."""
+    observation = _shape_status_observation(value)
+    status = observation.get("status")
+    changed_at = _timestamp(observation.get("status_since"))
+    started_at = _timestamp(job.get("started_at"))
+    finished_at = _timestamp(job.get("finished_at"))
+    if (
+        status not in {"Shaped", "Ready"}
+        or changed_at is None
+        or started_at is None
+        or finished_at is None
+        or changed_at < started_at
+        or changed_at > finished_at
+    ):
+        return None
+    return status
+
+
+def _lookup_live_shape_status(
+    live_shape_statuses: Mapping[object, object], job: Dict,
+) -> object:
+    candidates = [job.get("run"), job.get("key")]
+    seen = set()
+    for candidate in candidates:
+        try:
+            marker = repr(candidate)
+            if marker in seen or candidate not in live_shape_statuses:
+                continue
+            seen.add(marker)
+            return live_shape_statuses[candidate]
+        except (TypeError, AttributeError):
+            continue
+    return _MISSING
+
+
+def _apply_live_shape_statuses(
+    live: Sequence[Dict],
+    live_shape_statuses: Optional[Mapping[object, object]],
+) -> None:
+    """Overlay only current, transition-matched live Project statuses."""
+    if not live_shape_statuses:
+        return
+    for job in live:
+        if job.get("kind") != "shape":
+            continue
+        candidate = _lookup_live_shape_status(live_shape_statuses, job)
+        if candidate is _MISSING:
+            continue
+        status = _fresh_shape_status(job, candidate)
+        if status:
+            job["shape_status"] = status
+
+
+def _read_current_issue_statuses() -> Dict[str, Dict[str, object]]:
+    """Read current Project statuses once for the matched live shape jobs."""
+    import funnel
+
+    try:
+        items = funnel.load_items()
+    except Exception:
+        # Reporting is diagnostic. A status read failure must remove shape
+        # observations from the denominator, not stop review telemetry.
+        return {}
+    found: Dict[str, Dict[str, object]] = {}
+    for item in items:
+        key = getattr(item, "ref", None)
+        if not isinstance(key, str):
+            continue
+        found[key.lower()] = {
+            "status": getattr(item, "status", None),
+            "status_since": getattr(item, "status_since", None),
+        }
+    return found
+
+
+def fetch_live_shape_statuses(
+    live_jobs: Sequence[Dict],
+    *,
+    current_status: Optional[Callable[[str, int], object]] = None,
+) -> Dict[str, Dict[str, object]]:
+    """Fetch live shape statuses and keep only transition-fresh observations.
+
+    The default reader makes one Project read for all jobs. Tests and other
+    callers can inject a per-issue reader returning ``status`` plus
+    ``status_since``. A status without a transition timestamp is deliberately
+    unusable: a report must never turn an old Project read into agreement.
+    """
+    shape_jobs = [job for job in live_jobs if job.get("kind") == "shape"]
+    if not shape_jobs:
+        return {}
+    by_key = _read_current_issue_statuses() if current_status is None else None
+    found: Dict[str, Dict[str, object]] = {}
+    for job in shape_jobs:
+        candidate: object = _MISSING
+        if current_status is not None:
+            parts = _issue_key_parts(job.get("key"))
+            if parts is not None:
+                try:
+                    candidate = current_status(parts[0], parts[1])
+                except Exception:
+                    candidate = _MISSING
+        else:
+            key = job.get("key")
+            if isinstance(key, str):
+                candidate = by_key.get(key.lower(), _MISSING)
+        if candidate is _MISSING:
+            continue
+        if _fresh_shape_status(job, candidate):
+            found[str(job.get("run"))] = _shape_status_observation(candidate)
+    return found
+
+
+def _comparison_pairs(
+    pairs: Sequence[Tuple[Dict, Dict]],
+) -> List[Tuple[Tuple[Dict, Dict], Tuple[Dict, Dict]]]:
+    """Join breakdown and shape pairs by target and occurrence."""
+    breakdown: Dict[str, List[Tuple[Dict, Dict]]] = {}
+    shape: Dict[str, List[Tuple[Dict, Dict]]] = {}
+    for left, right in pairs:
+        key = left.get("key")
+        if key is None or key != right.get("key"):
+            continue
+        destination = breakdown if left.get("kind") == "breakdown" else shape
+        destination.setdefault(str(key), []).append((left, right))
+    joined: List[Tuple[Tuple[Dict, Dict], Tuple[Dict, Dict]]] = []
+    for key in sorted(set(breakdown) & set(shape)):
+        left_pairs = sorted(
+            breakdown[key], key=lambda pair: pair[0]["finished_at"]
+        )
+        right_pairs = sorted(
+            shape[key], key=lambda pair: pair[0]["finished_at"]
+        )
+        joined.extend(zip(left_pairs, right_pairs))
+    return joined
 
 
 _MISSING = object()
@@ -918,7 +1262,7 @@ def _breakdown_pair_agrees(left: object, right: object) -> object:
 
 
 def _issue_malformed_count(
-    jobs: Sequence[Dict], observations: Mapping[int, object],
+    jobs: Sequence[Dict], observations: Mapping[int, object], *, shadow: bool,
 ) -> int:
     """Count explicit or comparison-unreadable issue jobs once each."""
     return sum(
@@ -927,8 +1271,26 @@ def _issue_malformed_count(
             job.get("kind") == "breakdown"
             and observations.get(id(job)) is _COMPARISON_UNREADABLE
         )
+        or (
+            shadow
+            and job.get("kind") == "shape"
+            and observations.get(id(job)) is None
+        )
         for job in jobs
     )
+
+
+def _unreadable_issue_job(job: Dict, *, shadow: bool) -> bool:
+    """Whether a job's model output cannot participate in a comparison."""
+    if bool(job.get("malformed")):
+        return True
+    if job.get("kind") == "breakdown":
+        if shadow:
+            return _shadow_breakdown_observation(job) is _COMPARISON_UNREADABLE
+        return _live_breakdown_observation(job) is _COMPARISON_UNREADABLE
+    if shadow and job.get("kind") == "shape":
+        return _shadow_shape_status(job.get("finish") or {}) is None
+    return False
 
 
 def _lookup_live_verdict(
@@ -1026,18 +1388,20 @@ def build_breakdown_shape_report(
     live_records: Optional[Sequence[Dict]] = None,
     *,
     live_issue_data: Optional[Mapping[object, object]] = None,
+    live_shape_statuses: Optional[Mapping[object, object]] = None,
     now: Optional[float] = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
     since: Optional[float] = None,
     until: Optional[float] = None,
 ) -> Dict[str, object]:
-    """Build the breakdown/shape report from heartbeat rows.
+    """Build the breakdown/shape report from already-read observations.
 
-    Breakdown pairs compare their ticket count and ``needs_decision`` answer.
-    ``live_issue_data`` is an optional fixture-pure pre-read map keyed by live
-    run or target; when supplied, a missing key is unreadable rather than an
-    empty issue set.  Shape pairs remain population-only until their dependent
-    comparison slice lands.
+    The builder is fixture-pure.  ``live_issue_data`` and
+    ``live_shape_statuses`` are optional caller-supplied reads for the live
+    breakdown issue set and Project status.  A supplied map is authoritative:
+    missing data is unreadable rather than an empty result.  Shape statuses
+    are accepted only when their transition falls between the live shape
+    job's start and finish.
     """
     start, end = window_bounds(
         now=now, window_seconds=window_seconds, since=since, until=until
@@ -1048,32 +1412,62 @@ def build_breakdown_shape_report(
         shadow_rows, live_rows = list(shadow_records), list(live_records)
     shadow = issue_jobs_from_records(shadow_rows, since=start, until=end)
     live = issue_jobs_from_records(live_rows, since=start, until=end)
+    _apply_live_shape_statuses(live, live_shape_statuses)
     data_since = _oldest_timestamp(shadow_records, live_records)
     pairs = _pair_issue_jobs(shadow, live)
+
     shadow_observations = {
         id(job): _shadow_breakdown_observation(job)
-        if job.get("kind") == "breakdown" else None
+        if job.get("kind") == "breakdown"
+        else (_shadow_shape_status(job.get("finish") or {})
+              if job.get("kind") == "shape" else None)
         for job in shadow
     }
     live_observations = {
         id(job): _live_breakdown_observation(job, live_issue_data)
-        if job.get("kind") == "breakdown" else None
+        if job.get("kind") == "breakdown"
+        else (job.get("shape_status")
+              if job.get("kind") == "shape" else None)
         for job in live
     }
+
+    comparison_pairs = _comparison_pairs(pairs)
     comparable = []
-    for left, right in pairs:
-        if left.get("kind") != "breakdown":
-            continue
-        result = _breakdown_pair_agrees(
-            shadow_observations.get(id(left)),
-            live_observations.get(id(right)),
+    for breakdown_pair, shape_pair in comparison_pairs:
+        shadow_breakdown, live_breakdown = breakdown_pair
+        shadow_shape, live_shape = shape_pair
+        breakdown_agrees = _breakdown_pair_agrees(
+            shadow_observations.get(id(shadow_breakdown)),
+            live_observations.get(id(live_breakdown)),
         )
-        if result is not _COMPARISON_UNREADABLE:
-            comparable.append(result)
+        shadow_shape_status = shadow_observations.get(id(shadow_shape))
+        live_shape_status = live_observations.get(id(live_shape))
+        if (
+            any(
+                bool(job.get("malformed"))
+                for job in (
+                    shadow_breakdown, live_breakdown,
+                    shadow_shape, live_shape,
+                )
+            )
+            or
+            breakdown_agrees is _COMPARISON_UNREADABLE
+            or shadow_shape_status not in {"Shaped", "Ready"}
+            or live_shape_status not in {"Shaped", "Ready"}
+        ):
+            continue
+        comparable.append(
+            bool(breakdown_agrees and shadow_shape_status == live_shape_status)
+        )
+
     agree = sum(comparable)
     compared = len(comparable)
-    shadow_malformed = _issue_malformed_count(shadow, shadow_observations)
-    live_malformed = _issue_malformed_count(live, live_observations)
+    shadow_malformed = _issue_malformed_count(
+        shadow, shadow_observations, shadow=True
+    )
+    live_malformed = _issue_malformed_count(
+        live, live_observations, shadow=False
+    )
 
     return {
         "window": {
@@ -1118,6 +1512,7 @@ def build_report(
     mode: str = "review",
     live_verdicts: Optional[Mapping[object, object]] = None,
     live_issue_data: Optional[Mapping[object, object]] = None,
+    live_shape_statuses: Optional[Mapping[object, object]] = None,
     now: Optional[float] = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
     since: Optional[float] = None,
@@ -1132,15 +1527,17 @@ def build_report(
     the recorded PR verdict. It is applied only when its head matches a head
     recorded on the job; an absent or mismatched value leaves the heartbeat
     decision as the fallback.
-    ``live_issue_data`` is the corresponding optional pre-read map for live
-    breakdown issue sets and questions; it is used only by breakdown-shape
-    mode.
+    ``live_issue_data`` and ``live_shape_statuses`` are the corresponding
+    caller-supplied maps for breakdown issue sets and live shape jobs.  Shape
+    observations must include a transition timestamp so stale reads are
+    rejected.
     """
     if mode == "breakdown-shape":
         return build_breakdown_shape_report(
             shadow_records,
             live_records,
             live_issue_data=live_issue_data,
+            live_shape_statuses=live_shape_statuses,
             now=now,
             window_seconds=window_seconds,
             since=since,
@@ -1298,6 +1695,7 @@ def load_report(
     mode: str = "review",
     live_verdicts: Optional[Mapping[object, object]] = None,
     live_issue_data: Optional[Mapping[object, object]] = None,
+    live_shape_statuses: Optional[Mapping[object, object]] = None,
     now: Optional[float] = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
     since: Optional[float] = None,
@@ -1324,12 +1722,25 @@ def load_report(
         live_jobs = jobs_from_records(live_rows, since=start, until=end)
         matched_live = [right for _, right in _pair_jobs(shadow_jobs, live_jobs)]
         live_verdicts = fetch_live_verdicts(matched_live)
+    if mode == "breakdown-shape" and live_shape_statuses is None:
+        start, end = window_bounds(
+            now=now, window_seconds=window_seconds, since=since, until=until
+        )
+        shadow_jobs = issue_jobs_from_records(shadow_rows, since=start, until=end)
+        live_jobs = issue_jobs_from_records(live_rows, since=start, until=end)
+        matched_live = [
+            right
+            for _, right in _pair_issue_jobs(shadow_jobs, live_jobs)
+            if right.get("kind") == "shape"
+        ]
+        live_shape_statuses = fetch_live_shape_statuses(matched_live)
     return build_report(
         shadow_rows,
         live_rows,
         mode=mode,
         live_verdicts=live_verdicts,
         live_issue_data=live_issue_data,
+        live_shape_statuses=live_shape_statuses,
         now=now,
         window_seconds=window_seconds,
         since=since,

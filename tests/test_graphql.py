@@ -26,6 +26,7 @@ def test_every_read_query_requests_rate_limit():
         funnel.PROJECT_FIELDS_QUERY,
         funnel.REPO_QUERY,
         funnel.ITEM_QUERY,
+        funnel.ITEM_DETAILS_QUERY,
         funnel.SUB_ISSUES,
     ]
 
@@ -74,6 +75,35 @@ def test_gh_graphql_returns_rate_limit_alongside_existing_data(monkeypatch):
     assert data["rateLimit"] == response["data"]["rateLimit"]
     query_arg = next(arg for arg in calls[0] if arg.startswith("query="))
     assert RATE_LIMIT in compact(query_arg.removeprefix("query="))
+
+
+def test_gh_graphql_encodes_list_variables_as_graphql_array_fields(monkeypatch):
+    calls = []
+
+    def run(args, capture_output, text):
+        calls.append(args)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({
+                "data": {
+                    "nodes": [],
+                    "rateLimit": {
+                        "cost": 1,
+                        "remaining": 99,
+                        "resetAt": "later",
+                    },
+                }
+            }),
+            stderr="",
+        )
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    funnel.gh_graphql(funnel.ITEM_DETAILS_QUERY, ids=["item-1", "item-2"])
+
+    assert calls[0][-4:] == [
+        "-F", "ids[]=item-1", "-F", "ids[]=item-2",
+    ]
 
 
 def test_brief_profile_records_graphql_operation_time_and_count(monkeypatch):

@@ -141,6 +141,82 @@ def test_project_item_query_uses_maximum_bounded_page():
     assert funnel.PROJECT_ITEM_PAGE_SIZE == 100
 
 
+def test_project_item_list_is_compact_and_detail_read_is_candidate_bounded(
+    monkeypatch,
+):
+    """The #655 42-call/47-point before number is not paid for every row.
+
+    A 100-item paged list carries no child or timeline connections. Hydrating
+    one candidate asks for one detail id, so the nested payload stays bounded
+    as the board grows.
+    """
+    nodes = [_node(1)]
+    nodes.extend(_node(number, parent=1) for number in range(2, 101))
+    for node in nodes:
+        node["id"] = "project-item-{}".format(node["content"]["number"])
+
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        if "nodes(ids:" in query:
+            assert variables["ids"] == ["project-item-1"]
+            return {
+                "nodes": [{
+                    "id": "project-item-1",
+                    "content": {
+                        "subIssues": {
+                            "nodes": [{
+                                "createdAt": "2026-09-10T00:00:00Z",
+                                "closedAt": None,
+                            }]
+                        },
+                        "timelineItems": {
+                            "nodes": [{
+                                "__typename": "ProjectV2ItemStatusChangedEvent",
+                                "createdAt": "2026-09-09T00:00:00Z",
+                                "previousStatus": "Ready",
+                                "status": "Building",
+                                "project": {"number": funnel.PROJECT_NUMBER},
+                            }]
+                        },
+                    },
+                }]
+            }
+        return {
+            "user": {
+                "projectV2": {
+                    "items": {
+                        "nodes": nodes,
+                        "pageInfo": {
+                            "hasNextPage": False,
+                            "endCursor": None,
+                        },
+                    }
+                }
+            }
+        }
+
+    monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    items = funnel.load_items(include_details=False)
+    assert len(items) == 100
+    assert len(calls) == 1
+    list_query = " ".join(calls[0][0].split())
+    assert "subIssues(" not in list_query
+    assert "timelineItems(" not in list_query
+
+    funnel.hydrate_item_details(items, [items[0]])
+
+    assert len(calls) == 2
+    detail_query = " ".join(calls[1][0].split())
+    assert "subIssues(first: 50)" in detail_query
+    assert "timelineItems(last: 60" in detail_query
+    assert items[0].first_child_created_at is not None
+    assert items[0].status_since is not None
+
+
 def test_load_items_follows_the_cursor_after_a_full_page(monkeypatch):
     """The larger page does not drop items when the Project still continues."""
     pages = [

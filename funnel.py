@@ -5106,25 +5106,8 @@ query($login: String!, $number: Int!, $cursor: String) {
               assignees(first: 10) { nodes { login } }
               parent { number repository { nameWithOwner } }
               subIssuesSummary { total completed }
-              subIssues(first: 50) {
-                nodes { createdAt closedAt }
-              }
               blockedBy(first: 50) {
                 nodes { number state stateReason repository { nameWithOwner } }
-              }
-              timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
-                nodes {
-                  __typename
-                  ... on ProjectV2ItemStatusChangedEvent {
-                    createdAt previousStatus status project { number }
-                  }
-                  ... on LabeledEvent {
-                    createdAt label { name }
-                  }
-                  ... on UnlabeledEvent {
-                    createdAt label { name }
-                  }
-                }
               }
             }
           }
@@ -5134,6 +5117,43 @@ query($login: String!, $number: Int!, $cursor: String) {
   }
 }
 """ % PROJECT_ITEM_PAGE_SIZE
+
+# The paged list is the cheap gate input. History and child timestamps are
+# fetched below only for the candidate items a caller has kept after its cheap
+# checks; they do not belong on every Project row.
+PROJECT_ITEM_DETAIL_BATCH_SIZE = 100
+
+ITEM_DETAILS_QUERY = """
+query($ids: [ID!]!) {
+  rateLimit { cost remaining resetAt }
+  nodes(ids: $ids) {
+    ... on ProjectV2Item {
+      id
+      content {
+        ... on Issue {
+          subIssues(first: 50) {
+            nodes { createdAt closedAt }
+          }
+          timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
+            nodes {
+              __typename
+              ... on ProjectV2ItemStatusChangedEvent {
+                createdAt previousStatus status project { number }
+              }
+              ... on LabeledEvent {
+                createdAt label { name }
+              }
+              ... on UnlabeledEvent {
+                createdAt label { name }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 ITEM_LOCK_QUERY = """
 query($item: ID!) {
@@ -5215,6 +5235,8 @@ def _graphql_operation(query: str) -> str:
     compact = " ".join(query.split())
     if "repositories(first:" in compact:
         return "member_repos"
+    if "nodes(ids:" in compact:
+        return "project_item_details"
     if "projectV2(number:" in compact and "items(first:" in compact:
         return "project_items"
     if "comments(last:" in compact:
@@ -5506,6 +5528,15 @@ def gh_graphql(query: str, **variables) -> dict:
     try:
         cmd = ["gh", "api", "graphql", "-f", "query=" + query]
         for key, value in variables.items():
+            if isinstance(value, (list, tuple)):
+                # `gh api` builds GraphQL list variables from repeated `key[]`
+                # fields. Passing Python's repr as one raw field produces an
+                # invalid GraphQL variable (and silently turns a batch into a
+                # failed per-item fallback), so keep list encoding here with
+                # the scalar path in one place.
+                for entry in value:
+                    cmd += ["-F", "{}[]={}".format(key, entry)]
+                continue
             flag = "-F" if isinstance(value, (int, bool)) else "-f"
             cmd += [flag, "{}={}".format(key, value)]
         last_request_id = None
@@ -5707,14 +5738,8 @@ def resolve_repo(repo: Optional[str]) -> str:
     )
 
 
-def _from_node(node: dict) -> Optional[Item]:
-    content = node.get("content") or {}
-    if not content.get("number"):
-        return None  # a draft issue, or a pull request
-
-    status = (node.get("status") or {}).get("name")
-    parent = content.get("parent")
-    summary = content.get("subIssuesSummary") or {}
+def _apply_item_detail_fields(item: Item, content: dict) -> None:
+    """Apply the two history-shaped fields from a targeted Project read."""
     child_times = []
     child_close_times = []
     for child in ((content.get("subIssues") or {}).get("nodes") or []):
@@ -5726,6 +5751,51 @@ def _from_node(node: dict) -> Optional[Item]:
         closed_at = parse_time(child.get("closedAt"))
         if closed_at is not None:
             child_close_times.append(closed_at)
+
+    item.first_child_created_at = min(child_times) if child_times else None
+    item.last_child_closed_at = max(child_close_times) if child_close_times else None
+    item.status_events = []
+    item.status_since = None
+    item.blocked_since = None
+    item.blocked_cleared_at = None
+
+    # Time at the current gate: the last status change into the status the item
+    # actually holds, in *this* project. Events arrive oldest-first, and an
+    # issue may sit in several projects — filtering on the project is what
+    # stops time-at-gate being silently wrong.
+    timeline_nodes = ((content.get("timelineItems") or {}).get("nodes") or [])
+    for event in timeline_nodes:
+        if not event:
+            continue
+        label = (event.get("label") or {}).get("name")
+        if label == "blocked" and event.get("__typename") == "LabeledEvent":
+            item.blocked_since = parse_time(event.get("createdAt"))
+            continue
+        if label == "blocked" and event.get("__typename") == "UnlabeledEvent":
+            item.blocked_cleared_at = parse_time(event.get("createdAt"))
+            continue
+        if (event.get("project") or {}).get("number") != PROJECT_NUMBER:
+            continue
+        if event.get("__typename") == "ProjectV2ItemStatusChangedEvent":
+            at = parse_time(event.get("createdAt"))
+            if at is not None:
+                item.status_events.append({
+                    "previous_status": event.get("previousStatus"),
+                    "status": event.get("status"),
+                    "at": at,
+                })
+        if event.get("status") == item.status:
+            item.status_since = parse_time(event.get("createdAt"))
+
+
+def _from_node(node: dict) -> Optional[Item]:
+    content = node.get("content") or {}
+    if not content.get("number"):
+        return None  # a draft issue, or a pull request
+
+    status = (node.get("status") or {}).get("name")
+    parent = content.get("parent")
+    summary = content.get("subIssuesSummary") or {}
 
     item = Item(
         repo=content["repository"]["nameWithOwner"],
@@ -5748,12 +5818,13 @@ def _from_node(node: dict) -> Optional[Item]:
         ),
         children_total=summary.get("total") or 0,
         children_done=summary.get("completed") or 0,
-        first_child_created_at=min(child_times) if child_times else None,
-        last_child_closed_at=max(child_close_times) if child_close_times else None,
         closed_at=parse_time(content.get("closedAt")),
         item_id=node.get("id"),
         in_motion_since=parse_time((node.get("lock") or {}).get("text")),
     )
+    # Keep fixture and caller-supplied full nodes compatible while the live
+    # paged query stays compact. A targeted read can apply these fields again.
+    _apply_item_detail_fields(item, content)
 
     # Native dependencies apply to tickets, not the parent project, and the
     # same open/dead split the REST helper produces. This comes out of the
@@ -5764,37 +5835,55 @@ def _from_node(node: dict) -> Optional[Item]:
         item.open_blockers = dependencies["open"]
         item.dead_blockers = dependencies["dead"]
 
-    # Time at the current gate: the last status change into the status the item
-    # actually holds, in *this* project. Events arrive oldest-first, and an
-    # issue may sit in several projects — filtering on the project is what stops
-    # time-at-gate being silently wrong.
-    timeline_nodes = ((content.get("timelineItems") or {}).get("nodes") or [])
-    for event in timeline_nodes:
-        if not event:
-            continue
-        label = (event.get("label") or {}).get("name")
-        if label == "blocked" and event.get("__typename") == "LabeledEvent":
-            item.blocked_since = parse_time(event.get("createdAt"))
-            continue
-        if label == "blocked" and event.get("__typename") == "UnlabeledEvent":
-            item.blocked_cleared_at = parse_time(event.get("createdAt"))
-            continue
-        if (event.get("project") or {}).get("number") != PROJECT_NUMBER:
-            continue
-        if event.get("__typename") == "ProjectV2ItemStatusChangedEvent":
-            at = parse_time(event.get("createdAt"))
-            if at is not None:
-                item.status_events.append({
-                    "previous_status": event.get("previousStatus"),
-                    "status": event.get("status"),
-                    "at": at,
-                })
-        if event.get("status") == status:
-            item.status_since = parse_time(event.get("createdAt"))
     return item
 
 
-def load_items() -> List[Item]:
+def hydrate_item_details(
+    items: Sequence[Item], candidates: Optional[Iterable[Item]] = None,
+) -> None:
+    """Read child timestamps and timeline history for selected Project items.
+
+    The paged Project list is deliberately the cheap candidate scan. Callers
+    that need a full board view may omit ``candidates``; queue paths pass only
+    the items that survived their cheap gates. A missing detail response is a
+    load failure, never permission to guess at gate age.
+    """
+    by_id = {
+        item.item_id: item
+        for item in items
+        if isinstance(item.item_id, str) and item.item_id
+    }
+    selected = list(items if candidates is None else candidates)
+    ids = []
+    seen: Set[str] = set()
+    for item in selected:
+        item_id = item.item_id
+        if (
+            isinstance(item_id, str)
+            and item_id in by_id
+            and item_id not in seen
+        ):
+            ids.append(item_id)
+            seen.add(item_id)
+    if not ids:
+        return
+
+    for start in range(0, len(ids), PROJECT_ITEM_DETAIL_BATCH_SIZE):
+        batch = ids[start:start + PROJECT_ITEM_DETAIL_BATCH_SIZE]
+        data = gh_graphql(ITEM_DETAILS_QUERY, ids=batch)
+        nodes = data.get("nodes") if isinstance(data, dict) else None
+        if not isinstance(nodes, list):
+            raise GitHubError("Project item detail response was malformed")
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            item = by_id.get(node.get("id"))
+            content = node.get("content")
+            if item is not None and isinstance(content, dict):
+                _apply_item_detail_fields(item, content)
+
+
+def load_items(include_details: bool = True) -> List[Item]:
     members = set(member_repos())
     items: List[Item] = []
     cursor = None
@@ -5827,6 +5916,8 @@ def load_items() -> List[Item]:
         if not page["pageInfo"]["hasNextPage"]:
             break
         cursor = page["pageInfo"]["endCursor"]
+    if include_details:
+        hydrate_item_details(items)
     mark_projects_that_carried_human_steps(items)
     return items
 
@@ -9983,12 +10074,38 @@ def implementation_packet(repo: str, number: int, agent: str) -> Dict:
     return packet
 
 
+def begin_detail_candidates(
+    items: Sequence[Item], breakdown: bool = False,
+) -> List[Item]:
+    """Return non-ticket begin candidates whose ordering needs history."""
+    found: Dict[str, Item] = {}
+    if breakdown:
+        for item in items:
+            if (
+                item.state == "OPEN"
+                and item.status == "Ready"
+                and not item.children_total
+                and not item.is_blocked
+            ):
+                found[item.ref] = item
+    for item in items:
+        if (
+            item.state == "OPEN"
+            and item.status == "Ideas"
+            and "needs-shaping" in item.labels
+        ):
+            found[item.ref] = item
+    return [item for item in items if item.ref in found]
+
+
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
               repo_readiness: Optional[
                   Mapping[str, MemberRepoReadiness]
               ] = None,
-              caller_role: Optional[str] = None) -> int:
+              caller_role: Optional[str] = None,
+              _detail_loader: Optional[Callable[[Sequence[Item]], None]] = None,
+              ) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
     A polling routine spends most of its runs discovering there is nothing to
@@ -10033,6 +10150,13 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         # a run that never had a budget to check should not read like one that
         # passed a check.
         out["unmetered"] = True
+
+    if _detail_loader is not None and not begin_uses_ticket_path(
+        agent, tier, caller_role
+    ):
+        candidates = begin_detail_candidates(items, breakdown)
+        if candidates:
+            _detail_loader(candidates)
 
     # Reconcile first, and never fatally. A step that cannot reach GitHub
     # records its failure and selection proceeds without it; only a failure
@@ -10182,6 +10306,8 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 why = "nothing to do"
             out.update(do="stop", why=why)
         else:
+            if _detail_loader is not None:
+                _detail_loader([ticket])
             refusal = claim_ticket(items, now, ticket, pr_facts=pr_facts)
             if refusal is not None:
                 out.update(do="stop", why=refusal)
@@ -11476,11 +11602,20 @@ def main(argv: Optional[Sequence[str]] = None, *,
     brief_load_started = (
         time.perf_counter() if brief_timings is not None else None
     )
+    begin_detail_loader: Optional[Callable[[Sequence[Item]], None]] = None
     try:
         if _items is not None:
             items = _items
         elif _items_loader is not None:
             items = _items_loader()
+        elif args.command == "begin":
+            # `begin` selects one job after its cheap gates. Keep the initial
+            # Project scan compact; cmd_begin hydrates only the candidates it
+            # actually needs to order or hand out.
+            items = load_items(include_details=False)
+            begin_detail_loader = lambda candidates: hydrate_item_details(
+                items, candidates
+            )
         else:
             items = load_items()
     except GitHubError as exc:
@@ -11567,10 +11702,16 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_shaped(items, now, args.ref, args.plan,
                               args.run, args.agent, args.klass)
         if args.command == "begin":
-            return cmd_begin(items, now, args.agent, args.tier, args.idle,
-                             args.breakdown,
-                             repo_readiness=repo_readiness,
-                             caller_role=args.caller_role)
+            begin_kwargs = {
+                "repo_readiness": repo_readiness,
+                "caller_role": args.caller_role,
+            }
+            if begin_detail_loader is not None:
+                begin_kwargs["_detail_loader"] = begin_detail_loader
+            return cmd_begin(
+                items, now, args.agent, args.tier, args.idle,
+                args.breakdown, **begin_kwargs
+            )
         if args.command == "next-review":
             return cmd_next_review(items, args.tier)
         if args.command == "review":

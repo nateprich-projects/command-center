@@ -294,3 +294,27 @@ def test_one_submitted_pr_among_forty_is_still_visible():
 
 def test_a_small_project_still_shows_one_pip_per_ticket():
     assert bar_for(closed=5, open_=1) == ["closed"] * 5 + ["open"]
+
+
+def test_a_failed_pr_scan_reads_unknown_rather_than_no_pr():
+    """#934: an empty scan and a failed scan looked identical on the page."""
+    rows = funnel.dashboard_board(
+        [project(status="Building", children_total=2), ticket(11),
+         ticket(12, state="CLOSED")],
+        NOW, pr_facts={}, pr_facts_known=False,
+    )["columns"]
+    row = next(c for c in rows if c["stage"] == "Building")["items"][0]
+    states = {t["number"]: t["pr"] for t in row["tickets"]}
+    assert states[11] == "unknown"
+    # A closed ticket needs no PR state; only open work can be in review.
+    assert states[12] is None
+    assert "unknown" in row["pips"]
+
+
+def test_a_successful_scan_with_no_prs_still_reads_as_no_pr():
+    rows = funnel.dashboard_board(
+        [project(status="Building", children_total=1), ticket(11)],
+        NOW, pr_facts={}, pr_facts_known=True,
+    )["columns"]
+    row = next(c for c in rows if c["stage"] == "Building")["items"][0]
+    assert row["tickets"][0]["pr"] is None

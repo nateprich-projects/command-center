@@ -1266,7 +1266,9 @@ def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
         ),
     }
     received = []
-    monkeypatch.setattr(funnel, "load_items", lambda: rows)
+    monkeypatch.setattr(
+        funnel, "load_items", lambda include_details=True: rows
+    )
     monkeypatch.setattr(
         funnel,
         "repo_readiness_for_items",
@@ -1276,7 +1278,7 @@ def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
         funnel,
         "cmd_begin",
         lambda items, now, agent, tier, idle, breakdown=False,
-        repo_readiness=None, caller_role=None: (
+        repo_readiness=None, caller_role=None, _detail_loader=None: (
             received.append(repo_readiness) or 0
         ),
     )

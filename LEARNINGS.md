@@ -8,6 +8,18 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Begin Project reads keep history to the candidate set
+
+**2026-09-16 · GitHub GraphQL · measured in fixture coverage**
+
+The #655 before number was **42 API calls and 47 measured GraphQL points** for
+`funnel doctor`. The paged Project list now omits `subIssues` and
+`timelineItems`; `begin` hydrates only the candidates that remain after its
+cheap checks through one batched `nodes(ids: ...)` read. In the scaling fixture,
+the list grew from one to 100 Project rows while the targeted history payload
+stayed at one candidate id — a 99% reduction in nested rows. This is a fixture
+measurement of payload boundedness, not a live-token point attribution.
+
 ### `funnel doctor` baseline: 42 calls and 47 measured GraphQL points
 
 **2026-09-16 · GitHub GraphQL · measured**

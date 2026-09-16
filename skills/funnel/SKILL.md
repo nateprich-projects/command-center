@@ -201,8 +201,11 @@ unless `--yes` is passed**.
 An investigation that records evidence and produces no follow-up tickets uses the
 existing explicit escape hatch: `funnel accept <ref> --no-tickets --yes`. That flag is
 only for work that happened outside the ticket path; it is not a new gate or a way to
-accept a project whose tickets are still open. If an investigation produced tickets,
-wait for the ordinary all-children-closed accept path instead.
+accept a project whose tickets are still open. If an investigation had tickets of its
+own (the evidence-gathering run), wait for the ordinary all-children-closed accept path
+instead. Follow-up work an investigation finds is never one of its tickets: it is
+captured as new ideas with their own class (plan.md, Investigate), so it cannot hold the
+investigation open.
 
 **The decision is always his. The typing does not have to be.** Nate authorised agents
 to run both on his explicit instruction (2026-09-05), replacing an earlier rule

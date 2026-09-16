@@ -66,10 +66,12 @@ not his.
 
 Use `Investigate` when the captured question is whether an observed defect exists, or
 what the observed behaviour actually means, and the deliverable is evidence that answers
-that question. It is not a synonym for an uncertain implementation: once a defect is
-established, the investigation run files the resulting work as sub-issue tickets under
-the investigation project before the question closes. If there is no defect to fix, the
-evidence is recorded and the project uses the existing `accept --no-tickets` ending.
+that question. It is not a synonym for an uncertain implementation, and it never holds the fix: once
+the evidence is posted the investigation closes, and any work it calls for is captured as
+**new ideas**, each classed for the work itself (usually `Broken` or `Improve`) and
+linking back to the investigation. Never file follow-up work as sub-issues of the
+investigation. If there is no defect to fix, the evidence is recorded and the project
+uses the existing `accept --no-tickets` ending.
 
 **Still his:** the class on anything *he* raises, and any reclassification of
 something already filed. Propose, do not set.

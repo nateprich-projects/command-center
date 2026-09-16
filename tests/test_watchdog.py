@@ -13,11 +13,16 @@ import sys
 import time
 from datetime import datetime
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 SILENCE_FIXTURE = ROOT / "tests" / "fixtures" / "heartbeat_silence_window.json"
 
 import heartbeat  # noqa: E402
+
+# conftest swaps `heartbeat.gh` for an offline fake per test; keep the real one.
+_REAL_GH = heartbeat.gh
 
 spec = importlib.util.spec_from_file_location(
     "watchdog", ROOT / ".github" / "scripts" / "watchdog.py"
@@ -505,16 +510,78 @@ def test_the_spool_drains_when_github_returns(tmp_path, monkeypatch):
     monkeypatch.setattr(heartbeat, "_fetch", lambda agent: (None, None))
     def ok(*args, **k):
         sent["args"] = args
+        sent["input"] = k.get("input")
         return "{}"
     monkeypatch.setattr(heartbeat, "gh", ok)
 
     assert heartbeat.append(
         "codex", {"run": "c", "phase": "start", "ts": 3}) == "pushed"
     assert heartbeat._spooled("codex") == []
-    body = [a for a in sent["args"] if a.startswith("content=")][0]
     import base64
-    text = base64.b64decode(body.split("=", 1)[1]).decode()
+    text = base64.b64decode(json.loads(sent["input"])["content"]).decode()
     assert [json.loads(l)["run"] for l in text.splitlines()] == ["a", "b", "c"]
+
+
+def test_a_push_larger_than_arg_max_travels_on_stdin(tmp_path, monkeypatch):
+    """#949: once muse.jsonl passed about 768 KB, its base64 `content=` argument
+    overran macOS ARG_MAX and every push failed with E2BIG for hours."""
+    _isolate_spool(tmp_path, monkeypatch)
+    big = "\n".join(json.dumps({"run": str(i), "pad": "x" * 400})
+                     for i in range(3000)) + "\n"
+    monkeypatch.setattr(heartbeat, "_fetch", lambda agent: (big, "abc"))
+    sent = {}
+
+    def ok(*args, **k):
+        sent["args"] = args
+        sent["input"] = k.get("input")
+        return "{}"
+
+    monkeypatch.setattr(heartbeat, "gh", ok)
+    heartbeat.append("muse", {"run": "new", "phase": "start", "ts": 1})
+    assert "--input" in sent["args"]
+    assert sum(len(a) for a in sent["args"]) < 1000
+    request = json.loads(sent["input"])
+    assert len(request["content"]) > 1_048_576
+    assert request["sha"] == "abc" and request["branch"] == heartbeat.BRANCH
+    assert heartbeat._spooled("muse") == []
+
+
+def test_gh_that_cannot_start_is_a_heartbeat_error(monkeypatch):
+    """An OSError used to escape `_push`'s retries and read as a silent spool."""
+    def e2big(*a, **k):
+        raise OSError(7, "Argument list too long")
+
+    monkeypatch.setattr(heartbeat.subprocess, "run", e2big)
+    with pytest.raises(heartbeat.HeartbeatError, match="Argument list too long"):
+        _REAL_GH("api", "x")
+
+
+def test_a_file_over_one_megabyte_is_read_raw(monkeypatch):
+    """Above 1 MB the Contents API omits `content`; treating that as an empty
+    file would rewrite the branch from nothing."""
+    calls = []
+
+    def fake(*args, **k):
+        calls.append(args)
+        if "Accept: application/vnd.github.raw" in args:
+            return "line1\nline2\n"
+        return json.dumps({"sha": "s1", "size": 2_000_000,
+                           "encoding": "none", "content": ""})
+
+    monkeypatch.setattr(heartbeat, "gh", fake)
+    assert heartbeat._fetch("muse") == ("line1\nline2\n", "s1")
+
+
+def test_a_failed_raw_read_raises_rather_than_reading_empty(monkeypatch):
+    def fake(*args, **k):
+        if "Accept: application/vnd.github.raw" in args:
+            raise heartbeat.HeartbeatError("boom")
+        return json.dumps({"sha": "s1", "size": 2_000_000,
+                           "encoding": "none", "content": ""})
+
+    monkeypatch.setattr(heartbeat, "gh", fake)
+    with pytest.raises(heartbeat.HeartbeatError):
+        heartbeat._fetch("muse")
 
 
 def test_read_includes_records_not_yet_pushed(tmp_path, monkeypatch):
@@ -553,6 +620,7 @@ def test_an_unspoolable_record_goes_straight_to_github(tmp_path, monkeypatch):
 
     def ok(*args, **k):
         sent["args"] = args
+        sent["input"] = k.get("input")
         return "{}"
 
     monkeypatch.setattr(heartbeat, "SPOOL_DIR", "/proc/nonexistent/nope")
@@ -562,8 +630,7 @@ def test_an_unspoolable_record_goes_straight_to_github(tmp_path, monkeypatch):
         "codex", {"run": "a", "phase": "start", "ts": 1}) == "pushed"
 
     import base64
-    body = [a for a in sent["args"] if a.startswith("content=")][0]
-    text = base64.b64decode(body.split("=", 1)[1]).decode()
+    text = base64.b64decode(json.loads(sent["input"])["content"]).decode()
     assert [json.loads(l)["run"] for l in text.splitlines()] == ["a"]
 
 

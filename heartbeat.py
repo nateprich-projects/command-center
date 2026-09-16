@@ -146,7 +146,13 @@ class HeartbeatError(RuntimeError):
 
 
 def gh(*args: str, **kw) -> str:
-    proc = subprocess.run(["gh"] + list(args), capture_output=True, text=True, **kw)
+    try:
+        proc = subprocess.run(["gh"] + list(args), capture_output=True, text=True, **kw)
+    except OSError as exc:
+        # E2BIG, a missing binary, a sandbox refusal: GitHub was not reached, which
+        # is what HeartbeatError means to every caller. As a bare OSError it
+        # skipped `_push`'s retries and read as "spooled" with no reason (#949).
+        raise HeartbeatError("gh could not run: {}".format(exc)) from exc
     if proc.returncode != 0:
         raise HeartbeatError(proc.stderr.strip() or "gh exited {}".format(proc.returncode))
     return proc.stdout
@@ -167,6 +173,13 @@ def _fetch(agent: str, timeout: Optional[float] = None):
     except HeartbeatError:
         return None, None
     payload = json.loads(raw)
+    if payload.get("encoding") == "none" or (payload.get("size") and not payload.get("content")):
+        # Above 1 MB the Contents API returns metadata only. Reading that as an
+        # empty file would let `_push` rewrite the branch from nothing, so read
+        # the raw body instead, and let a failure raise rather than return "" (#949).
+        text = gh(*args, "-H", "Accept: application/vnd.github.raw",
+                  **({"timeout": timeout} if timeout is not None else {}))
+        return text, payload.get("sha")
     content = base64.b64decode(payload.get("content", "")).decode("utf-8", "replace")
     return content, payload.get("sha")
 
@@ -233,16 +246,19 @@ def _push(agent: str, extra: Optional[List[Dict]] = None) -> None:
         lines += [json.dumps(r, sort_keys=True) for r in pending]
         body = ("\n".join(lines[-KEEP:]) + "\n").encode("utf-8")
 
-        args = [
-            "api", "-X", "PUT", "repos/{}/contents/{}".format(REPO, _path(agent)),
-            "-f", "message=heartbeat: {} +{} record(s)".format(agent, len(pending)),
-            "-f", "branch=" + BRANCH,
-            "-f", "content=" + base64.b64encode(body).decode("ascii"),
-        ]
+        # The body goes on stdin: as an argument it overran ARG_MAX (1 MB on
+        # macOS) once the file passed about 768 KB, and every push failed (#949).
+        request = {
+            "message": "heartbeat: {} +{} record(s)".format(agent, len(pending)),
+            "branch": BRANCH,
+            "content": base64.b64encode(body).decode("ascii"),
+        }
         if sha:
-            args += ["-f", "sha=" + sha]
+            request["sha"] = sha
         try:
-            gh(*args)
+            gh("api", "-X", "PUT",
+               "repos/{}/contents/{}".format(REPO, _path(agent)),
+               "--input", "-", input=json.dumps(request))
             # Only clear what came *from the spool*: a record spooled while this
             # was in flight must survive to the next drain, and an `extra` was
             # never in the spool to begin with.

@@ -680,6 +680,17 @@ def _failing_packet():
     )
 
 
+def _non_open_packet():
+    return _packet(
+        state="CLOSED",
+        merged_at="2026-09-16T03:46:42Z",
+        precheck={"pass": False,
+                  "reasons": [
+                      "pr_not_open state=CLOSED merged_at=2026-09-16T03:46:42Z",
+                  ]},
+    )
+
+
 def test_a_failing_precheck_applies_rejected_without_calling_muse(tmp_path):
     proc, repo = _stubbed_runner(tmp_path, _begin(), _failing_packet())
 
@@ -717,6 +728,37 @@ def test_a_refused_precheck_rejection_finishes_errored(tmp_path):
     assert "--outcome errored" in heartbeat
     assert "review-apply refused the precheck rejection" in heartbeat
     assert "not the current head" in heartbeat
+
+
+def test_a_non_open_precheck_stops_without_a_verdict_or_blocking_note(tmp_path):
+    proc, repo = _stubbed_runner(tmp_path, _begin(), _non_open_packet())
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat(repo)
+    assert "pr_not_open state=CLOSED merged_at=2026-09-16T03:46:42Z" in heartbeat
+    assert "no verdict recorded" in heartbeat
+    assert "--review-result" not in heartbeat
+    assert not (repo / "gh.log").exists()
+
+
+def test_a_shadow_non_open_precheck_records_no_verdict(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _non_open_packet(), args=("--shadow",))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    body = (repo / "gh.body").read_text()
+    assert "No model was called" in body
+    assert "pr_not_open state=CLOSED merged_at=2026-09-16T03:46:42Z" in body
+    assert "No verdict was recorded" in body
+    heartbeat = _heartbeat(repo)
+    assert "no decision" in heartbeat
+    assert "--review-result" not in heartbeat
 
 
 # -- live review: one question, one answer -------------------------------------

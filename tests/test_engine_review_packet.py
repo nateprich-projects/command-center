@@ -30,6 +30,8 @@ def pr_view(**kw):
         "headRefOid": SHA,
         "baseRefName": "main",
         "state": "OPEN",
+        "mergedAt": None,
+        "closedAt": None,
         "mergeable": "MERGEABLE",
         "statusCheckRollup": [
             {"name": "tests", "conclusion": "SUCCESS", "status": "COMPLETED"},
@@ -200,6 +202,9 @@ def test_packet_carries_every_field():
     assert found["pr"] == 7
     assert found["pr_title"] == "do the thing"
     assert found["branch"] == "ticket/9"
+    assert found["state"] == "OPEN"
+    assert found["merged_at"] is None
+    assert found["closed_at"] is None
     assert found["head_sha"] == SHA
     assert found["ticket"]["body"].startswith("Parent: #1.")
     assert found["ticket"]["ref"] == REPO + "#9"

@@ -3575,3 +3575,4 @@
 {"agent": "muse", "do": "shape", "phase": "bind", "run": "0b5c563555a0", "ts": 1789601761, "work": "nateprich-projects/jeffy-finance-agent#123"}
 {"agent": "muse", "api_cost": {"gh_calls": 27, "graphql_points": 62}, "phase": "api_cost", "run": "0b5c563555a0", "ts": 1789601765}
 {"agent": "muse", "do": "shape", "phase": "bind", "run": "b5edc37ed252", "ts": 1789601768, "work": "nateprich-projects/jeffy-finance-agent#123"}
+{"agent": "muse", "api_cost": {"gh_calls": 27, "graphql_points": 62}, "phase": "api_cost", "run": "b5edc37ed252", "ts": 1789601772}

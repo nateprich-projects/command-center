@@ -231,11 +231,13 @@ def _issue_job(run, kind, finished, note, *, target="owner/repo#103"):
     ]
 
 
-def test_breakdown_shape_mode_reports_issue_population_without_comparing():
+def test_breakdown_shape_mode_compares_breakdowns_and_keeps_shapes_population_only():
     records = (
         _issue_job(
             "shadow-breakdown", "breakdown", 820,
-            "shadow breakdown of owner/repo#103: 2 tickets",
+            "shadow breakdown of owner/repo#103: 2 tickets; answer: "
+            + json.dumps({"needs_decision": None,
+                          "tickets": [{}, {}]}),
         )
         + _issue_job(
             "live-breakdown", "breakdown", 830,
@@ -265,7 +267,10 @@ def test_breakdown_shape_mode_reports_issue_population_without_comparing():
         "truncated": False,
     }
     assert report["breakdown_shape_agreement"] == {
-        "jobs": {"shadow": 2, "live": 2, "matched": 2, "compared": 0},
+        "agree": 1,
+        "disagree": 0,
+        "rate": 1.0,
+        "jobs": {"shadow": 2, "live": 2, "matched": 2, "compared": 1},
         "malformed_output": {
             "shadow": {"count": 0, "rate": 0.0},
             "live": {"count": 0, "rate": 0.0},
@@ -280,6 +285,123 @@ def test_breakdown_shape_mode_reports_issue_population_without_comparing():
                 "median_seconds": 20, "p90_seconds": 20.0,
             },
         },
+    }
+
+
+def _breakdown_shadow_job(run, finished, count, question=None,
+                          *, target="owner/repo#103", answer=True):
+    note = "shadow breakdown of {}: {} tickets".format(target, count)
+    if answer:
+        note += "; answer: " + json.dumps({
+            "needs_decision": question,
+            "tickets": [{} for _ in range(count)],
+        })
+    return _issue_job(run, "breakdown", finished, note, target=target)
+
+
+def _breakdown_live_job(run, finished, count, question=None,
+                        *, target="owner/repo#103", structured=False):
+    rows = _issue_job(
+        run, "breakdown", finished,
+        "broke down {}: created {} ticket{}".format(
+            target, count, "" if count == 1 else "s"),
+        target=target,
+    )
+    if structured:
+        rows[-1]["created"] = [{} for _ in range(count)]
+        rows[-1]["needs_decision"] = question
+    return rows
+
+
+def test_breakdown_ticket_counts_allow_one_and_disagree_past_one():
+    records = []
+    for index, live_count in enumerate((2, 1, 0), 1):
+        target = "owner/repo#{}".format(100 + index)
+        records += _breakdown_shadow_job(
+            "shadow-{}".format(index), 810 + index, 2, target=target,
+        )
+        records += _breakdown_live_job(
+            "live-{}".format(index), 820 + index, live_count,
+            target=target,
+        )
+
+    report = shadow_report.build_report(
+        records, now=900, window_seconds=200, mode="breakdown-shape",
+    )
+
+    assert report["breakdown_shape_agreement"]["jobs"] == {
+        "shadow": 3, "live": 3, "matched": 3, "compared": 3,
+    }
+    assert report["breakdown_shape_agreement"]["agree"] == 2
+    assert report["breakdown_shape_agreement"]["disagree"] == 1
+    assert report["breakdown_shape_agreement"]["rate"] == 2 / 3
+
+
+def test_breakdown_needs_decision_matches_normalized_text_and_presence():
+    cases = (
+        (None, None, True),
+        ("  Which repo owns this?  ", "which repo owns this?", True),
+        (None, "Which repo owns this?", False),
+        ("Which repo owns this?", "Which project owns this?", False),
+    )
+    records = []
+    for index, (shadow_question, live_question, expected) in enumerate(cases, 1):
+        target = "owner/repo#{}".format(200 + index)
+        records += _breakdown_shadow_job(
+            "shadow-question-{}".format(index), 810 + index, 1,
+            shadow_question, target=target,
+        )
+        records += _breakdown_live_job(
+            "live-question-{}".format(index), 820 + index, 1,
+            live_question, target=target, structured=True,
+        )
+
+    report = shadow_report.build_report(
+        records, now=900, window_seconds=200, mode="breakdown-shape",
+    )
+    agreement = report["breakdown_shape_agreement"]
+
+    assert agreement["jobs"]["compared"] == len(cases)
+    assert agreement["agree"] == sum(expected for _, _, expected in cases)
+    assert agreement["disagree"] == 2
+    assert agreement["rate"] == 0.5
+
+
+def test_unreadable_breakdown_payload_and_missing_live_map_fail_closed():
+    shadow = _breakdown_shadow_job(
+        "shadow-malformed", 820, 1, target="owner/repo#301", answer=False,
+    )
+    live = _breakdown_live_job(
+        "live-malformed", 830, 1, target="owner/repo#301",
+    )
+    report = shadow_report.build_report(
+        shadow + live, now=900, window_seconds=200, mode="breakdown-shape",
+    )
+    agreement = report["breakdown_shape_agreement"]
+    assert agreement["jobs"] == {
+        "shadow": 1, "live": 1, "matched": 1, "compared": 0,
+    }
+    assert agreement["agree"] == 0
+    assert agreement["disagree"] == 0
+    assert agreement["rate"] is None
+    assert agreement["malformed_output"]["shadow"] == {
+        "count": 1, "rate": 1.0,
+    }
+
+    valid_shadow = _breakdown_shadow_job(
+        "shadow-missing-live", 820, 1, target="owner/repo#302",
+    )
+    valid_live = _breakdown_live_job(
+        "live-missing-live", 830, 1, target="owner/repo#302",
+    )
+    missing = shadow_report.build_report(
+        valid_shadow + valid_live, now=900, window_seconds=200,
+        mode="breakdown-shape", live_issue_data={},
+    )["breakdown_shape_agreement"]
+    assert missing["jobs"]["compared"] == 0
+    assert missing["rate"] is None
+    assert missing["malformed_output"]["live"] == {
+        "count": 1, "rate": 1.0,
     }
 
 

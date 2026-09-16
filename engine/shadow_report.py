@@ -8,8 +8,9 @@ different heartbeat streams, which keeps the reader useful if the schedules
 are separated later.
 
 The optional ``breakdown-shape`` mode reads the corresponding issue jobs from
-the same streams and reports their matched population.  It is intentionally a
-skeleton: outcome comparisons are added by a later slice.
+the same streams and reports their matched population.  Breakdown jobs also
+compare the ticket count and ``needs_decision`` answer; shape outcomes are
+handled by a later slice.
 
 Only completed review jobs inside the requested window count.  A missing or
 ambiguous verdict is not silently treated as a rejection: it is excluded from
@@ -601,6 +602,333 @@ def _pair_issue_jobs(
 
 
 _MISSING = object()
+_COMPARISON_UNREADABLE = object()
+_UNKNOWN_QUESTION = object()
+
+_ISSUE_SOURCE_FIELDS = (
+    "tickets", "created", "created_tickets", "created_issues",
+    "sub_issues", "subissues", "issues", "ticket_numbers",
+    "created_count", "ticket_count", "sub_issue_count", "count",
+    "needs_decision", "needs_decision_question", "question",
+)
+_LIVE_CREATED_COUNT_RE = re.compile(
+    r"\b(?:created|into)\s+(?P<count>[0-9]+)\s+"
+    r"(?:tickets?|sub[- ]issues?)\b", re.IGNORECASE
+)
+_LIVE_CREATED_ZERO_RE = re.compile(
+    r"\b(?:created|into)\s+(?:no|zero)\s+"
+    r"(?:tickets?|sub[- ]issues?)\b", re.IGNORECASE
+)
+_LIVE_CREATED_ONE_RE = re.compile(
+    r"\b(?:created|into)\s+(?:one|a|an)\s+"
+    r"(?:ticket|sub[- ]issue)\b", re.IGNORECASE
+)
+_LIVE_TICKET_REF_RE = re.compile(
+    r"(?<![A-Za-z0-9_])#[1-9][0-9]*\b"
+)
+_NEEDS_QUESTION_VALUE_RE = re.compile(
+    r"\bneeds[_ -]?decision(?:\s+question)?\s*[:=]\s*"
+    r"(?P<question>.+?)\s*$", re.IGNORECASE
+)
+_NEEDS_QUESTION_MARKER_RE = re.compile(
+    r"\basked\s+(?:a\s+)?needs[_ -]?decision\s+question\b",
+    re.IGNORECASE,
+)
+
+
+def _note_answer(note: str) -> object:
+    """Read the JSON answer appended to a shadow issue finish note."""
+    if not isinstance(note, str) or not note.strip():
+        return _MISSING
+    matches = list(re.finditer(
+        r"(?:^|;\s*)answer\s*:\s*", note, re.IGNORECASE
+    ))
+    if not matches:
+        matches = list(re.finditer(r"\banswer\s*:\s*", note,
+                                   re.IGNORECASE))
+    if not matches:
+        return _MISSING
+    encoded = note[matches[0].end():].lstrip()
+    try:
+        value, _ = json.JSONDecoder().raw_decode(encoded)
+    except (TypeError, ValueError):
+        return _COMPARISON_UNREADABLE
+    return dict(value) if isinstance(value, Mapping) else _COMPARISON_UNREADABLE
+
+
+def _structured_answer(row: object) -> object:
+    """Read an explicitly structured breakdown result, if a row has one."""
+    if not isinstance(row, Mapping):
+        return _COMPARISON_UNREADABLE
+    for key in ("breakdown_answer", "answer", "result", "payload"):
+        if key not in row:
+            continue
+        value = row.get(key)
+        if isinstance(value, Mapping):
+            return dict(value)
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except ValueError:
+                return _COMPARISON_UNREADABLE
+            return (dict(decoded) if isinstance(decoded, Mapping)
+                    else _COMPARISON_UNREADABLE)
+        return _COMPARISON_UNREADABLE
+    return _MISSING
+
+
+def _structured_issue_source(row: object) -> object:
+    """Combine structured result fields without scraping their prose."""
+    if not isinstance(row, Mapping):
+        return _COMPARISON_UNREADABLE
+    answer = _structured_answer(row)
+    if answer is _COMPARISON_UNREADABLE:
+        return answer
+    source: Dict[str, object] = {}
+    if answer is not _MISSING:
+        source.update(answer)
+    for key in _ISSUE_SOURCE_FIELDS:
+        if key in row:
+            source[key] = row.get(key)
+    return source if source else _MISSING
+
+
+def _lookup_live_issue_data(
+    live_issue_data: Optional[Mapping[object, object]], job: Dict,
+) -> object:
+    """Find pre-read live issue data by run, target, or kind/target key."""
+    if live_issue_data is None:
+        return _MISSING
+    if not isinstance(live_issue_data, Mapping):
+        return _COMPARISON_UNREADABLE
+    key = job.get("key")
+    candidates = [job.get("run"), key]
+    if key is not None:
+        candidates.append((job.get("kind"), key))
+    seen = set()
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            marker = repr(candidate)
+            if marker in seen or candidate not in live_issue_data:
+                continue
+            seen.add(marker)
+            return live_issue_data[candidate]
+        except (TypeError, AttributeError):
+            continue
+    return _MISSING
+
+
+def _question_value(source: Mapping[str, object], *, required: bool = False) -> object:
+    """Read a structured needs-decision question or explicit null."""
+    for key in ("needs_decision", "needs_decision_question", "question"):
+        if key not in source:
+            continue
+        value = source.get(key)
+        if value is None:
+            return None
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return _COMPARISON_UNREADABLE
+    return _COMPARISON_UNREADABLE if required else _MISSING
+
+
+def _question_from_note(note: str) -> object:
+    """Read a live finish's question, retaining unknown-present state."""
+    if not isinstance(note, str) or not note.strip():
+        return _MISSING
+    match = _NEEDS_QUESTION_VALUE_RE.search(note)
+    if match:
+        question = match.group("question").strip()
+        return question or _UNKNOWN_QUESTION
+    if _NEEDS_QUESTION_MARKER_RE.search(note):
+        return _UNKNOWN_QUESTION
+    return _MISSING
+
+
+def _collection_count(value: object) -> object:
+    """Count an already-read collection or an explicit non-negative count."""
+    if isinstance(value, bool):
+        return _COMPARISON_UNREADABLE
+    if isinstance(value, int):
+        return value if value >= 0 else _COMPARISON_UNREADABLE
+    if isinstance(value, (list, tuple, set)):
+        return len(value)
+    return _COMPARISON_UNREADABLE
+
+
+def _source_ticket_count(source: Mapping[str, object]) -> object:
+    """Read a live created-sub-issue count from structured data."""
+    for key in (
+        "created", "created_tickets", "created_issues", "sub_issues",
+        "subissues", "issues", "ticket_numbers", "tickets",
+    ):
+        if key in source:
+            return _collection_count(source.get(key))
+    for key in ("created_count", "ticket_count", "sub_issue_count", "count"):
+        if key in source:
+            return _collection_count(source.get(key))
+    # A validated needs-decision answer creates no tickets.  This also lets a
+    # pre-read map carry only the question for that branch.
+    if any(key in source for key in (
+        "needs_decision", "needs_decision_question", "question",
+    )):
+        return 0
+    return _MISSING
+
+
+def _live_ticket_count_from_note(note: str) -> object:
+    """Read the created-sub-issue count from the live finish note."""
+    if not isinstance(note, str) or not note.strip():
+        return _MISSING
+    if _NEEDS_QUESTION_MARKER_RE.search(note):
+        return 0
+    match = _LIVE_CREATED_COUNT_RE.search(note)
+    if match:
+        return int(match.group("count"))
+    if _LIVE_CREATED_ZERO_RE.search(note):
+        return 0
+    if _LIVE_CREATED_ONE_RE.search(note):
+        return 1
+    for marker in re.finditer(r"\b(?:created|into)\b", note,
+                              re.IGNORECASE):
+        tail = note[marker.end():].splitlines()[0]
+        if not re.search(r"\b(?:tickets?|sub[- ]issues?)\b", tail,
+                         re.IGNORECASE):
+            continue
+        refs = _LIVE_TICKET_REF_RE.findall(tail)
+        return len(refs) if refs else _COMPARISON_UNREADABLE
+    return _MISSING
+
+
+def _shadow_breakdown_observation(job: Dict) -> object:
+    """Read the validated shadow breakdown payload for one job."""
+    if job.get("malformed"):
+        return _COMPARISON_UNREADABLE
+    finish = job.get("finish")
+    source = _structured_issue_source(finish)
+    if source is _MISSING:
+        source = _note_answer(_note(finish) if isinstance(finish, dict) else "")
+    if not isinstance(source, Mapping):
+        return _COMPARISON_UNREADABLE
+    tickets = source.get("tickets")
+    if not isinstance(tickets, list):
+        return _COMPARISON_UNREADABLE
+    if "needs_decision" not in source:
+        return _COMPARISON_UNREADABLE
+    question = _question_value(source, required=True)
+    if question is _COMPARISON_UNREADABLE:
+        return _COMPARISON_UNREADABLE
+    return {"ticket_count": len(tickets), "needs_decision": question}
+
+
+def _live_breakdown_observation(
+    job: Dict, live_issue_data: Optional[Mapping[object, object]] = None,
+) -> object:
+    """Read a live breakdown's created set and needs-decision outcome."""
+    if job.get("malformed"):
+        return _COMPARISON_UNREADABLE
+    finish = job.get("finish")
+    note = _note(finish) if isinstance(finish, dict) else ""
+    mapped = _lookup_live_issue_data(live_issue_data, job)
+    data_supplied = live_issue_data is not None
+    if mapped is _COMPARISON_UNREADABLE:
+        return _COMPARISON_UNREADABLE
+    if data_supplied and mapped is _MISSING:
+        # A supplied pre-read map is authoritative.  Its omission means that
+        # the live issue set could not be read, not that it was empty.
+        return _COMPARISON_UNREADABLE
+
+    note_source = _note_answer(note)
+    structured = _structured_issue_source(finish)
+    if structured is _COMPARISON_UNREADABLE:
+        return _COMPARISON_UNREADABLE
+
+    source: Dict[str, object] = {}
+    if mapped is not _MISSING:
+        if isinstance(mapped, Mapping):
+            mapped_source = _structured_issue_source(mapped)
+        elif isinstance(mapped, (list, tuple, set)):
+            mapped_source = {"created": mapped}
+        elif isinstance(mapped, int) and not isinstance(mapped, bool):
+            mapped_source = {"created_count": mapped}
+        else:
+            mapped_source = _COMPARISON_UNREADABLE
+        if not isinstance(mapped_source, Mapping):
+            return _COMPARISON_UNREADABLE
+        source.update(mapped_source)
+    elif note_source is not _COMPARISON_UNREADABLE:
+        if isinstance(note_source, Mapping):
+            source.update(note_source)
+    if isinstance(structured, Mapping):
+        source.update(structured)
+
+    count = _source_ticket_count(source)
+    if count is _MISSING:
+        if data_supplied:
+            return _COMPARISON_UNREADABLE
+        count = _live_ticket_count_from_note(note)
+    if count in (_MISSING, _COMPARISON_UNREADABLE):
+        return _COMPARISON_UNREADABLE
+
+    question = _question_value(source)
+    if question is _COMPARISON_UNREADABLE:
+        return _COMPARISON_UNREADABLE
+    if question is _MISSING:
+        question = _question_from_note(note)
+        if question is _MISSING:
+            question = None
+        elif question is _COMPARISON_UNREADABLE:
+            return _COMPARISON_UNREADABLE
+    return {"ticket_count": count, "needs_decision": question}
+
+
+def _breakdown_pair_agrees(left: object, right: object) -> object:
+    """Compare the two #813 breakdown predicates, fail-closed."""
+    if (not isinstance(left, Mapping) or not isinstance(right, Mapping)
+            or left.get("ticket_count") is _COMPARISON_UNREADABLE
+            or right.get("ticket_count") is _COMPARISON_UNREADABLE):
+        return _COMPARISON_UNREADABLE
+    left_count = left.get("ticket_count")
+    right_count = right.get("ticket_count")
+    if (isinstance(left_count, bool) or not isinstance(left_count, int)
+            or isinstance(right_count, bool)
+            or not isinstance(right_count, int)):
+        return _COMPARISON_UNREADABLE
+    left_question = left.get("needs_decision")
+    right_question = right.get("needs_decision")
+    if left_question is _UNKNOWN_QUESTION or right_question is _UNKNOWN_QUESTION:
+        if ((left_question is _UNKNOWN_QUESTION and right_question is None)
+                or (right_question is _UNKNOWN_QUESTION and left_question is None)):
+            question_agrees = False
+        else:
+            return _COMPARISON_UNREADABLE
+    elif left_question is None or right_question is None:
+        question_agrees = left_question is None and right_question is None
+    elif isinstance(left_question, str) and isinstance(right_question, str):
+        question_agrees = (
+            left_question.strip().casefold()
+            == right_question.strip().casefold()
+        )
+    else:
+        return _COMPARISON_UNREADABLE
+    return abs(left_count - right_count) <= 1 and question_agrees
+
+
+def _issue_malformed_count(
+    jobs: Sequence[Dict], observations: Mapping[int, object],
+) -> int:
+    """Count explicit or comparison-unreadable issue jobs once each."""
+    return sum(
+        bool(job.get("malformed"))
+        or (
+            job.get("kind") == "breakdown"
+            and observations.get(id(job)) is _COMPARISON_UNREADABLE
+        )
+        for job in jobs
+    )
 
 
 def _lookup_live_verdict(
@@ -697,16 +1025,19 @@ def build_breakdown_shape_report(
     shadow_records: Sequence[Dict],
     live_records: Optional[Sequence[Dict]] = None,
     *,
+    live_issue_data: Optional[Mapping[object, object]] = None,
     now: Optional[float] = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
     since: Optional[float] = None,
     until: Optional[float] = None,
 ) -> Dict[str, object]:
-    """Build the breakdown/shape report skeleton from heartbeat rows.
+    """Build the breakdown/shape report from heartbeat rows.
 
-    This first mode only establishes the population that a later comparison
-    can measure.  It deliberately leaves ``compared`` at zero: no breakdown
-    or shape outcomes are compared in this slice.
+    Breakdown pairs compare their ticket count and ``needs_decision`` answer.
+    ``live_issue_data`` is an optional fixture-pure pre-read map keyed by live
+    run or target; when supplied, a missing key is unreadable rather than an
+    empty issue set.  Shape pairs remain population-only until their dependent
+    comparison slice lands.
     """
     start, end = window_bounds(
         now=now, window_seconds=window_seconds, since=since, until=until
@@ -719,6 +1050,30 @@ def build_breakdown_shape_report(
     live = issue_jobs_from_records(live_rows, since=start, until=end)
     data_since = _oldest_timestamp(shadow_records, live_records)
     pairs = _pair_issue_jobs(shadow, live)
+    shadow_observations = {
+        id(job): _shadow_breakdown_observation(job)
+        if job.get("kind") == "breakdown" else None
+        for job in shadow
+    }
+    live_observations = {
+        id(job): _live_breakdown_observation(job, live_issue_data)
+        if job.get("kind") == "breakdown" else None
+        for job in live
+    }
+    comparable = []
+    for left, right in pairs:
+        if left.get("kind") != "breakdown":
+            continue
+        result = _breakdown_pair_agrees(
+            shadow_observations.get(id(left)),
+            live_observations.get(id(right)),
+        )
+        if result is not _COMPARISON_UNREADABLE:
+            comparable.append(result)
+    agree = sum(comparable)
+    compared = len(comparable)
+    shadow_malformed = _issue_malformed_count(shadow, shadow_observations)
+    live_malformed = _issue_malformed_count(live, live_observations)
 
     return {
         "window": {
@@ -729,26 +1084,23 @@ def build_breakdown_shape_report(
             "truncated": data_since is not None and data_since > start,
         },
         "breakdown_shape_agreement": {
+            "agree": agree,
+            "disagree": compared - agree,
+            "rate": _rate(agree, compared),
             "jobs": {
                 "shadow": len(shadow),
                 "live": len(live),
                 "matched": len(pairs),
-                "compared": 0,
+                "compared": compared,
             },
             "malformed_output": {
                 "shadow": {
-                    "count": sum(bool(job.get("malformed")) for job in shadow),
-                    "rate": _rate(
-                        sum(bool(job.get("malformed")) for job in shadow),
-                        len(shadow),
-                    ),
+                    "count": shadow_malformed,
+                    "rate": _rate(shadow_malformed, len(shadow)),
                 },
                 "live": {
-                    "count": sum(bool(job.get("malformed")) for job in live),
-                    "rate": _rate(
-                        sum(bool(job.get("malformed")) for job in live),
-                        len(live),
-                    ),
+                    "count": live_malformed,
+                    "rate": _rate(live_malformed, len(live)),
                 },
             },
             "time_per_job": {
@@ -765,6 +1117,7 @@ def build_report(
     *,
     mode: str = "review",
     live_verdicts: Optional[Mapping[object, object]] = None,
+    live_issue_data: Optional[Mapping[object, object]] = None,
     now: Optional[float] = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
     since: Optional[float] = None,
@@ -779,11 +1132,15 @@ def build_report(
     the recorded PR verdict. It is applied only when its head matches a head
     recorded on the job; an absent or mismatched value leaves the heartbeat
     decision as the fallback.
+    ``live_issue_data`` is the corresponding optional pre-read map for live
+    breakdown issue sets and questions; it is used only by breakdown-shape
+    mode.
     """
     if mode == "breakdown-shape":
         return build_breakdown_shape_report(
             shadow_records,
             live_records,
+            live_issue_data=live_issue_data,
             now=now,
             window_seconds=window_seconds,
             since=since,
@@ -940,6 +1297,7 @@ def load_report(
     *,
     mode: str = "review",
     live_verdicts: Optional[Mapping[object, object]] = None,
+    live_issue_data: Optional[Mapping[object, object]] = None,
     now: Optional[float] = None,
     window_seconds: int = DEFAULT_WINDOW_SECONDS,
     since: Optional[float] = None,
@@ -971,6 +1329,7 @@ def load_report(
         live_rows,
         mode=mode,
         live_verdicts=live_verdicts,
+        live_issue_data=live_issue_data,
         now=now,
         window_seconds=window_seconds,
         since=since,

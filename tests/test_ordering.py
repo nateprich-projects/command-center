@@ -39,6 +39,9 @@ def _next_reads_no_live_heartbeat(monkeypatch):
     """`cmd_next` now consults the heartbeat for tickets finished by comments
     (#498); the fixtures here describe the queue, not the spool."""
     monkeypatch.setattr(funnel, "finished_by_comments", lambda items: set())
+    monkeypatch.setattr(
+        funnel, "ticket_pr_facts", lambda items: funnel.TicketPRFacts()
+    )
 
 
 NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)

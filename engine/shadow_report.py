@@ -488,6 +488,21 @@ def window_bounds(
     return start, end
 
 
+def _oldest_timestamp(*record_sets: Optional[Sequence[Dict]]) -> Optional[float]:
+    """Return the oldest parseable heartbeat timestamp in the input streams."""
+    timestamps = []
+    for records in record_sets:
+        if records is None:
+            continue
+        for row in records:
+            if not isinstance(row, dict):
+                continue
+            timestamp = _timestamp(row.get("ts"))
+            if timestamp is not None:
+                timestamps.append(timestamp)
+    return min(timestamps) if timestamps else None
+
+
 def build_report(
     shadow_records: Sequence[Dict],
     live_records: Optional[Sequence[Dict]] = None,
@@ -518,6 +533,7 @@ def build_report(
     shadow = jobs_from_records(shadow_rows, since=start, until=end)
     live = jobs_from_records(live_rows, since=start, until=end)
     _apply_live_verdicts(live, live_verdicts)
+    data_since = _oldest_timestamp(shadow_records, live_records)
     pairs = _pair_jobs(shadow, live)
     comparable = [
         (left, right)
@@ -542,6 +558,8 @@ def build_report(
             "since": start,
             "until": end,
             "seconds": end - start,
+            "data_since": data_since,
+            "truncated": data_since is not None and data_since > start,
         },
         "jobs": {
             "shadow": len(shadow),

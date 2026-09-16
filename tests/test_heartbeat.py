@@ -588,3 +588,7 @@ def test_the_reserve_decline_is_in_the_skipped_family():
     healthy classification. A name outside that family would alarm."""
     assert "skipped-api-reserve" in heartbeat.OUTCOMES
     assert "skipped-api-reserve".startswith("skipped-")
+
+
+def test_heartbeat_retains_enough_records_for_a_48_hour_shadow_window():
+    assert heartbeat.KEEP == 10000

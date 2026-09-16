@@ -396,7 +396,14 @@ def tick(repo: Path, remote: str, branch: str, env_file: Path,
          state_file: Path, api_base: str) -> int:
     token, account = load_credentials(env_file)
     secrets = [token]
-    fetch = _git(repo, ["fetch", remote, branch])
+    # An explicit refspec, not a bare `fetch origin main`: a heartbeat run
+    # fetching its own branch in this clone at the same moment makes git
+    # refuse, and the tick is lost until the next poll. That cost five minutes
+    # of deploy latency at 05:00Z on 2026-09-16 (#902).
+    fetch = _git(repo, [
+        "fetch", remote,
+        "+refs/heads/{0}:refs/remotes/{1}/{0}".format(branch, remote),
+    ])
     if fetch.returncode != 0:
         raise DeployError("git fetch {} {} failed: {}".format(
             remote, branch, _tail(fetch.stderr, [])))

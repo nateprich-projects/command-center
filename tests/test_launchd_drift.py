@@ -350,23 +350,22 @@ def test_the_deploy_runs_the_run_clone_copy():
     assert not any(a.startswith("/Volumes/") for a in args), args
 
 
-def test_the_deploy_fires_every_five_minutes():
-    """The plan deploys merged dashboard/ changes without a keyboard; the
-    keeper's five-minute calendar grid bounds that wait."""
+def test_the_deploy_polls_every_minute():
+    """A merged dashboard/ change goes live about a minute later.
+
+    Nate, 2026-09-16: nine minutes from merge to live was too long, and five
+    of those were the old calendar grid (the other four were a lost tick).
+    A fixed interval is right for a poll: drift of seconds does not matter,
+    launchd starts no second instance while one runs, and the script's own
+    lock remains the real guard.
+    """
     import plistlib
 
     with (ROOT / "launchd" / DEPLOY_NAME).open("rb") as handle:
         plist = plistlib.load(handle)
 
-    schedule = plist["StartCalendarInterval"]
-    if isinstance(schedule, dict):
-        schedule = [schedule]
-    minutes = sorted(entry["Minute"] for entry in schedule)
-    gaps = [right - left for left, right in zip(minutes, minutes[1:])]
-    gaps.append(minutes[0] + 60 - minutes[-1])
-
-    assert max(gaps) == 5
-    assert "StartInterval" not in plist
+    assert plist["StartInterval"] == 60
+    assert "StartCalendarInterval" not in plist
 
 
 def test_the_deploy_logs_to_its_own_files():

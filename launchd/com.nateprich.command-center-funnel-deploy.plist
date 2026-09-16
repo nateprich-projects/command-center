@@ -15,9 +15,9 @@
   (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the
   installed file is a copy and `tests/test_launchd_drift.py` compares them.
 
-  The five-minute calendar grid is the run-keeper mould: a deploy lands no
-  later than five minutes after its merge, and a calendar schedule avoids
-  interval drift. Overlap between a slow tick and the next is handled inside
+  A one-minute interval: a deploy lands about a minute after its merge, and
+  a tick that finds main unmoved costs one local git fetch. Overlap between a
+  slow tick and the next is handled inside
   dashboard_deploy.py with a lockfile, not by the schedule.
 
   The interpreter is pinned to /usr/bin/python3 (3.9, verified to run
@@ -45,25 +45,14 @@
     </array>
 
     <!--
-      Every five minutes, in the run-keeper mould. A calendar schedule avoids
-      interval drift and gives every merged dashboard/ change a deploy no
+      Every minute (Nate, 2026-09-16: nine minutes from merge to live was too
+      long). A fixed interval, not a calendar grid: seconds of drift do not
+      matter for a poll, and launchd starts no second instance while one runs.
+      The lock inside the script remains the real guard. This gives
       later than its next fire.
     -->
-    <key>StartCalendarInterval</key>
-    <array>
-        <dict><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Minute</key><integer>5</integer></dict>
-        <dict><key>Minute</key><integer>10</integer></dict>
-        <dict><key>Minute</key><integer>15</integer></dict>
-        <dict><key>Minute</key><integer>20</integer></dict>
-        <dict><key>Minute</key><integer>25</integer></dict>
-        <dict><key>Minute</key><integer>30</integer></dict>
-        <dict><key>Minute</key><integer>35</integer></dict>
-        <dict><key>Minute</key><integer>40</integer></dict>
-        <dict><key>Minute</key><integer>45</integer></dict>
-        <dict><key>Minute</key><integer>50</integer></dict>
-        <dict><key>Minute</key><integer>55</integer></dict>
-    </array>
+    <key>StartInterval</key>
+    <integer>60</integer>
 
     <key>RunAtLoad</key>
     <true/>

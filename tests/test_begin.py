@@ -139,6 +139,7 @@ def _implementing_begin(monkeypatch, capsys, items, *, agent="codex",
 def test_begin_prints_a_transient_json_envelope_when_project_load_is_truncated(
     monkeypatch, capsys
 ):
+    _allow_begin(monkeypatch)
     funnel.reset_route_state()
     funnel.reset_api_usage()
     calls = []
@@ -291,6 +292,7 @@ def test_main_loads_the_project_after_begin_gates_pass(
 def test_begin_records_a_named_finish_for_a_structured_exhaustion(
     monkeypatch, capsys
 ):
+    _allow_begin(monkeypatch)
     funnel.reset_route_state()
     funnel.reset_api_usage()
     reset_at = "2026-09-16T05:30:32Z"
@@ -1357,6 +1359,7 @@ def test_codex_begin_reports_repo_readiness_when_work_is_withheld(
 def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
     monkeypatch, agent
 ):
+    _allow_begin(monkeypatch)
     project, ticket = _ticket(74, 75)
     rows = [project, ticket]
     readiness = {

@@ -379,7 +379,29 @@ def test_refresh_with_stale_snapshot_runs_one_brief_and_clears(
     assert "refresh-requested" not in kv.values
 
 
-def test_refresh_with_fresh_snapshot_clears_without_running(
+def test_refresh_within_the_floor_waits_and_keeps_the_flag(
+    tmp_path, kv, monkeypatch, capsys
+):
+    """A second event moments after a brief must not run another (#914).
+
+    The flag stays so the next tick honours it once the floor has passed;
+    clearing it here would drop a change that arrived during the brief.
+    """
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    write_spool_entry(spool, "entry.json", seconds_ago=30)
+    kv.values["refresh-requested"] = iso().encode()
+    argv, fake_brief = base_argv(tmp_path, kv, spool)
+
+    code, _, _ = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 0
+    assert brief_run_count(fake_brief) == 0
+    assert kv.deletes_of("refresh-requested") == []
+    assert "refresh-requested" in kv.values
+
+
+def test_a_webhook_refresh_past_the_floor_runs_one_brief(
     tmp_path, kv, monkeypatch, capsys
 ):
     spool = tmp_path / "spool"
@@ -391,17 +413,16 @@ def test_refresh_with_fresh_snapshot_clears_without_running(
     code, _, _ = run_publisher(argv, monkeypatch, capsys)
 
     assert code == 0
-    assert brief_run_count(fake_brief) == 0
+    assert brief_run_count(fake_brief) == 1
     assert len(kv.deletes_of("refresh-requested")) == 1
-    assert "refresh-requested" not in kv.values
 
 
-def test_no_flag_runs_no_brief_and_deletes_nothing(
+def test_no_flag_and_a_recent_snapshot_runs_no_brief(
     tmp_path, kv, monkeypatch, capsys
 ):
     spool = tmp_path / "spool"
     spool.mkdir()
-    write_spool_entry(spool, "entry.json", seconds_ago=60 * 60)
+    write_spool_entry(spool, "entry.json", seconds_ago=10 * 60)
     argv, fake_brief = base_argv(tmp_path, kv, spool)
 
     code, _, _ = run_publisher(argv, monkeypatch, capsys)
@@ -409,6 +430,23 @@ def test_no_flag_runs_no_brief_and_deletes_nothing(
     assert code == 0
     assert brief_run_count(fake_brief) == 0
     assert kv.deletes_of("refresh-requested") == []
+
+
+def test_an_old_snapshot_runs_a_scheduled_brief_without_any_flag(
+    tmp_path, kv, monkeypatch, capsys
+):
+    """The backstop for a webhook that is broken or never configured (#914)."""
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    write_spool_entry(spool, "entry.json", seconds_ago=60 * 60)
+    argv, fake_brief = base_argv(tmp_path, kv, spool)
+
+    code, _, err = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 0
+    assert brief_run_count(fake_brief) == 1
+    assert kv.deletes_of("refresh-requested") == []
+    assert "scheduled bound" in err
 
 
 def test_failed_brief_still_clears_the_flag_and_exits_zero(

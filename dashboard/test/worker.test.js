@@ -118,3 +118,87 @@ test("refresh records one KV flag after authorization", async () => {
   assert.equal(writes[0][0], REFRESH_KEY);
   assert.equal(typeof writes[0][1], "string");
 });
+
+async function signed(body, secret) {
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"],
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+  return "sha256=" + Array.from(new Uint8Array(signature))
+    .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function webhookEnv(store = new Map()) {
+  return {
+    GITHUB_WEBHOOK_SECRET: "shhh",
+    FUNNEL_SNAPSHOT: {
+      get: async (key) => (store.has(key) ? store.get(key) : null),
+      put: async (key, value) => { store.set(key, value); },
+    },
+    store,
+  };
+}
+
+function webhookRequest(body, { event = "issues", signature } = {}) {
+  const headers = { "X-GitHub-Event": event };
+  if (signature) headers["X-Hub-Signature-256"] = signature;
+  return new Request("https://funnel.nateprich.com/api/github-webhook", {
+    method: "POST", body, headers,
+  });
+}
+
+test("a signed funnel event sets the refresh flag without Access", async () => {
+  const body = JSON.stringify({ action: "closed" });
+  const env = webhookEnv();
+  const response = await worker.fetch(
+    webhookRequest(body, { signature: await signed(body, "shhh") }), env,
+  );
+  assert.equal(response.status, 202);
+  assert.ok(env.store.get("refresh-requested"));
+});
+
+test("an unsigned or wrongly signed webhook is refused and writes nothing", async () => {
+  const body = JSON.stringify({ action: "closed" });
+  const env = webhookEnv();
+  assert.equal((await worker.fetch(webhookRequest(body), env)).status, 401);
+  const wrong = await signed(body, "other");
+  assert.equal(
+    (await worker.fetch(webhookRequest(body, { signature: wrong }), env)).status, 401,
+  );
+  assert.equal(env.store.size, 0);
+});
+
+test("a body that does not match its signature is refused", async () => {
+  const env = webhookEnv();
+  const signature = await signed(JSON.stringify({ action: "closed" }), "shhh");
+  const response = await worker.fetch(
+    webhookRequest(JSON.stringify({ action: "opened" }), { signature }), env,
+  );
+  assert.equal(response.status, 401);
+  assert.equal(env.store.size, 0);
+});
+
+test("ping is answered and an uninteresting event costs no refresh", async () => {
+  const body = JSON.stringify({ zen: "keep it logically awesome" });
+  const env = webhookEnv();
+  const ping = await worker.fetch(
+    webhookRequest(body, { event: "ping", signature: await signed(body, "shhh") }), env,
+  );
+  assert.equal(ping.status, 200);
+  const push = await worker.fetch(
+    webhookRequest(body, { event: "push", signature: await signed(body, "shhh") }), env,
+  );
+  assert.equal(push.status, 202);
+  assert.equal(env.store.size, 0);
+});
+
+test("without a configured secret every webhook is refused", async () => {
+  const body = JSON.stringify({ action: "closed" });
+  const env = webhookEnv();
+  env.GITHUB_WEBHOOK_SECRET = "";
+  const response = await worker.fetch(
+    webhookRequest(body, { signature: await signed(body, "shhh") }), env,
+  );
+  assert.equal(response.status, 401);
+});

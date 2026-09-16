@@ -76,6 +76,16 @@ SNAPSHOT_KEY = "snapshot"
 REFRESH_KEY = "refresh-requested"
 KV_BINDING = "FUNNEL_SNAPSHOT"
 STALE_AFTER_SECONDS = 600
+
+#: A refresh flag set by GitHub's webhook (#914) means the board actually
+#: changed, so the ten-minute staleness rule would hold the page back for no
+#: reason. This floor is what stops an event storm from running a brief every
+#: tick: one brief per this many seconds, at most.
+REFRESH_FLOOR_SECONDS = 90
+
+#: With webhooks delivering, a scheduled brief exists only so a broken or
+#: unconfigured webhook cannot leave the page indefinitely old.
+SCHEDULED_AFTER_SECONDS = 1800
 KV_TIMEOUT_SECONDS = 30.0
 DEFAULT_BRIEF_TIMEOUT_SECONDS = 600.0
 DEFAULT_API_BASE = "https://api.cloudflare.com/client/v4"
@@ -252,11 +262,31 @@ def parse_generated_at(value: object) -> Optional[float]:
         return None
 
 
-def is_stale(entry_epoch: Optional[float], now: float) -> bool:
-    """A missing snapshot is infinitely stale; otherwise older than 10 min."""
+def is_stale(entry_epoch: Optional[float], now: float,
+             after: float = STALE_AFTER_SECONDS) -> bool:
+    """A missing snapshot is infinitely stale; otherwise older than ``after``."""
     if entry_epoch is None:
         return True
-    return (now - entry_epoch) > STALE_AFTER_SECONDS
+    return (now - entry_epoch) > after
+
+
+def brief_reason(entry_epoch: Optional[float], now: float,
+                 flagged: bool) -> Optional[str]:
+    """Why this tick should run a brief, or None to publish and stop.
+
+    A refresh — the page's button or GitHub's webhook — runs one as soon as the
+    newest snapshot is older than the floor, so a real change reaches the page
+    in about a minute. Without a refresh, a brief runs only when the snapshot
+    has aged past the scheduled bound, which exists for the case where webhook
+    delivery is broken or was never configured.
+    """
+    if flagged:
+        if is_stale(entry_epoch, now, REFRESH_FLOOR_SECONDS):
+            return "refresh"
+        return None
+    if is_stale(entry_epoch, now, SCHEDULED_AFTER_SECONDS):
+        return "scheduled"
+    return None
 
 
 def newest_spool_entry(
@@ -547,37 +577,44 @@ def tick(spool_dir: Path, env_file: Path, wrangler_toml: Path,
                     entry.name, len(entry.data)))
 
     flag = kv.get(REFRESH_KEY)
-    if flag is None:
-        return 0
-    requested = flag.decode("utf-8", errors="replace")[:64] or "(empty)"
+    requested = (
+        flag.decode("utf-8", errors="replace")[:64] or "(empty)"
+        if flag is not None else None
+    )
     entry_epoch = entry.epoch if entry is not None else None
-    if is_stale(entry_epoch, now):
-        if entry_epoch is None:
-            age = "no snapshot yet"
-        else:
-            age = "snapshot age {}s".format(int(now - entry_epoch))
+    reason = brief_reason(entry_epoch, now, flag is not None)
+    if reason is None:
+        if flag is not None:
+            log("refresh requested at {} but a brief ran within the last {}s; "
+                "leaving the flag for the next tick".format(
+                    requested, REFRESH_FLOOR_SECONDS))
+        return 0
+
+    age = ("no snapshot yet" if entry_epoch is None
+           else "snapshot age {}s".format(int(now - entry_epoch)))
+    if reason == "refresh":
         log("refresh requested at {}; {}; running one brief".format(
             requested, age))
-        result = run_brief(funnel_py, brief_timeout)
-        if result.timed_out:
-            log("brief timed out after {}s and was killed "
-                "(stdout {} bytes, stderr {} bytes)".format(
-                    brief_timeout, len(result.stdout),
-                    len(result.stderr)))
-        else:
-            log("brief finished: exit {} (stdout {} bytes, stderr {} "
-                "bytes)".format(result.returncode, len(result.stdout),
-                                len(result.stderr)))
-            if result.returncode != 0:
-                tail = (result.stderr or result.stdout)[-2000:].decode(
-                    "utf-8", errors="replace")
-                log("brief output tail: {}".format(tail))
+    else:
+        log("{}; past the {}s scheduled bound; running one brief".format(
+            age, SCHEDULED_AFTER_SECONDS))
+
+    result = run_brief(funnel_py, brief_timeout)
+    if result.timed_out:
+        log("brief timed out after {}s and was killed "
+            "(stdout {} bytes, stderr {} bytes)".format(
+                brief_timeout, len(result.stdout), len(result.stderr)))
+    else:
+        log("brief finished: exit {} (stdout {} bytes, stderr {} "
+            "bytes)".format(result.returncode, len(result.stdout),
+                            len(result.stderr)))
+        if result.returncode != 0:
+            tail = (result.stderr or result.stdout)[-2000:].decode(
+                "utf-8", errors="replace")
+            log("brief output tail: {}".format(tail))
+    if flag is not None:
         kv.delete(REFRESH_KEY)
         log("refresh flag cleared")
-    else:
-        kv.delete(REFRESH_KEY)
-        log("refresh requested at {} but the snapshot is fresh; "
-            "flag cleared without running".format(requested))
     return 0
 
 

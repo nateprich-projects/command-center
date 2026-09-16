@@ -29,6 +29,12 @@ def test_every_read_query_requests_rate_limit():
         funnel.ITEM_DETAILS_QUERY,
         funnel.SUB_ISSUES,
     ]
+    batch_query, _ = funnel._batched_pr_query(
+        ["owner/repo"], {"owner/repo": 100}, ("OPEN",),
+        include_comments=True, include_reviews=True,
+        include_closing_refs=True, include_refs=True,
+    )
+    queries.append(batch_query)
 
     assert all(RATE_LIMIT in compact(query) for query in queries)
 

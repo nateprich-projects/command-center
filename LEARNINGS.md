@@ -8,6 +8,18 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Per-PR fan-out is one measured GraphQL batch
+
+**2026-09-16 · GitHub GraphQL · measured in fixture coverage**
+
+The #655 before number was **42 API calls and 47 measured GraphQL points**. The
+per-PR reads in the funnel now use one repository-batched GraphQL document with
+its own `rateLimit { cost }` field. On a 30-open-PR fixture, the old shape would
+make 31 reads (one PR list plus one comment read per PR); the new shape made one,
+a saving of 30 fixture calls. That is a bounded call-count measurement, not a
+live point attribution; the query's returned cost is the source for its own
+GraphQL spend.
+
 ### Begin Project reads keep history to the candidate set
 
 **2026-09-16 · GitHub GraphQL · measured in fixture coverage**

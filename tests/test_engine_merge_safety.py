@@ -65,11 +65,13 @@ def pr(**kw):
 
 
 def wire(monkeypatch, pr_json, comments):
-    def fake(*args):
-        if "comments" in args:
-            return {"comments": [{"body": b} for b in comments]}
-        return pr_json
-    monkeypatch.setattr(funnel, "_gh_json", fake)
+    fact = dict(pr_json)
+    fact["number"] = 5
+    fact["comments"] = [{"body": body} for body in comments]
+    fact["verdict"] = funnel._latest_verdict_from_comments(fact["comments"])
+    monkeypatch.setattr(
+        funnel, "_pr_fact_for_number", lambda repo, number, **kwargs: dict(fact)
+    )
 
 
 def sabotage_reporting(monkeypatch):

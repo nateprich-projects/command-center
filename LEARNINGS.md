@@ -23,6 +23,18 @@ The fixture cache replay made two identical advisory reads with one live CLI att
 a **50% reduction in live REST calls**. This is a repeated-read measurement, not a
 claim about GraphQL points: the CLI does not expose a per-query cost for these reads.
 
+### Per-PR fan-out is one measured GraphQL batch
+
+**2026-09-16 · GitHub GraphQL · measured in fixture coverage**
+
+The #655 before number was **42 API calls and 47 measured GraphQL points**. The
+per-PR reads in the funnel now use one repository-batched GraphQL document with
+its own `rateLimit { cost }` field. On a 30-open-PR fixture, the old shape would
+make 31 reads (one PR list plus one comment read per PR); the new shape made one,
+a saving of 30 fixture calls. That is a bounded call-count measurement, not a
+live point attribution; the query's returned cost is the source for its own
+GraphQL spend.
+
 ### Begin Project reads keep history to the candidate set
 
 **2026-09-16 · GitHub GraphQL · measured in fixture coverage**

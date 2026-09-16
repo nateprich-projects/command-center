@@ -462,10 +462,21 @@ def test_begin_error_after_heartbeat_start_does_not_start_a_second_run(
 
 def _reconcile_begin(monkeypatch, capsys, items, rows, verdicts, merge_result=0):
     _allow_begin(monkeypatch)
-    monkeypatch.setattr(funnel, "_gh_json", lambda *args: rows)
-    monkeypatch.setattr(
-        funnel, "latest_verdict", lambda repo, pr: verdicts.get(pr)
-    )
+    def facts():
+        by_ref = {}
+        for raw in rows:
+            row = dict(raw)
+            row.setdefault("state", "OPEN")
+            row["verdict"] = verdicts.get(row.get("number"))
+            ref = funnel.ticket_ref_from_branch(
+                row.get("repo", items[0].repo), row.get("headRefName") or ""
+            )
+            if ref:
+                by_ref.setdefault(ref, []).append(row)
+        primary = {ref: values[0] for ref, values in by_ref.items()}
+        return funnel.TicketPRFacts(primary, rows_by_ref=by_ref)
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda _items: facts())
     calls = []
 
     def merge(rows, now, repo, pr, confirmed):
@@ -615,12 +626,18 @@ def test_begin_reconcile_is_idempotent_when_the_pr_is_no_longer_open(
     ]
     calls = []
     _allow_begin(monkeypatch)
-    monkeypatch.setattr(funnel, "_gh_json", lambda *args: rows)
-    monkeypatch.setattr(
-        funnel, "latest_verdict", lambda repo, pr: {
+
+    def facts(_items):
+        current = [dict(row, state="OPEN", verdict={
             "verdict": "approved", "head_sha": "head"
-        }
-    )
+        }) for row in rows]
+        by_ref = {ticket.ref: current} if current else {}
+        return funnel.TicketPRFacts(
+            {ref: values[0] for ref, values in by_ref.items()},
+            rows_by_ref=by_ref,
+        )
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", facts)
 
     def merge(items, now, repo, pr, confirmed):
         calls.append(pr)
@@ -707,6 +724,7 @@ def _begin_with_reconcile_wired(monkeypatch, capsys, items):
     monkeypatch.setattr(funnel, "gh_graphql", lambda query, **variables: (
         graphql_calls.append((query, variables)) or {}
     ))
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda rows: funnel.TicketPRFacts())
     monkeypatch.setattr(funnel, "_option_id", lambda *args: "done-option")
     monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
     monkeypatch.setattr(funnel, "next_ticket_for_tier", lambda *args, **kwargs: None)
@@ -1840,10 +1858,24 @@ def _selecting_reconcile_begin(monkeypatch, capsys, items, rows, verdicts,
                                merge):
     """Begin with a live merge reconcile and live ticket selection."""
     _allow_begin(monkeypatch)
-    monkeypatch.setattr(funnel, "_gh_json", lambda *args: rows)
-    monkeypatch.setattr(
-        funnel, "latest_verdict", lambda repo, pr: verdicts.get(pr)
-    )
+
+    def facts(_items):
+        by_ref = {}
+        for raw in rows:
+            row = dict(raw)
+            row.setdefault("state", "OPEN")
+            row["verdict"] = verdicts.get(row.get("number"))
+            ref = funnel.ticket_ref_from_branch(
+                row.get("repo", items[0].repo), row.get("headRefName") or ""
+            )
+            if ref:
+                by_ref.setdefault(ref, []).append(row)
+        return funnel.TicketPRFacts(
+            {ref: values[0] for ref, values in by_ref.items()},
+            rows_by_ref=by_ref,
+        )
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", facts)
     monkeypatch.setattr(funnel, "cmd_merge", merge)
     monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
     bodies = {item.number: item.body for item in items}

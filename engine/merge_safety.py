@@ -40,8 +40,8 @@ def read(repo: str, pr: int, items: Sequence[funnel.Item],
     """Every merge prerequisite for one PR, fresh. Nothing else.
 
     ``items`` is the already-loaded Project board — the same read the gate's
-    binding and counter checks use — so this performs exactly two GitHub
-    reads (the PR, its comments) and loads no reporting section.
+    binding and counter checks use — so this performs one bounded GraphQL batch
+    carrying the PR row and its comment tail, and loads no reporting section.
     """
     blockers: List[str] = funnel.merge_blockers(
         repo, pr, list(items), now)

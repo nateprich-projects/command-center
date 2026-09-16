@@ -23,10 +23,16 @@ def _ticket(number):
 
 
 def _wire(monkeypatch, rows, verdicts=None):
-    monkeypatch.setattr(funnel, "_gh_json", lambda *args: rows)
-    monkeypatch.setattr(funnel, "latest_verdict",
-                        lambda repo, pr: (verdicts or {}).get(pr))
-    monkeypatch.setattr(funnel, "_ticket_body", lambda repo, n: "Risk: standard")
+    by_ref = {}
+    for row in rows:
+        row = dict(row)
+        row["verdict"] = (verdicts or {}).get(row.get("number"))
+        branch = row.get("headRefName") or ""
+        ref = funnel.ticket_ref_from_branch(REPO, branch)
+        if ref:
+            by_ref.setdefault(ref, []).append(row)
+    facts = funnel.TicketPRFacts(rows_by_ref=by_ref)
+    monkeypatch.setattr(funnel, "ticket_pr_facts", lambda items: facts)
 
 
 def _row(pr, ticket, opened, head="abc"):

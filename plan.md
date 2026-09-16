@@ -174,11 +174,16 @@ Within one decision gate, the same ladder breaks class ties; gate depth still wi
 
 **Investigate is first because an unanswered "is this broken?" can gate a possible
 `Broken`: answering it is cheap, while letting a silent defect sit behind known work is
-expensive.** An investigation is ordinary startable work. If it establishes a defect,
-file the resulting tickets under the investigation project before closing the question;
-if it establishes no defect, record the evidence on the ticket or project and use the
-existing `funnel accept --no-tickets` path when there are no follow-up tickets. This is
-an ending, not a new gate or close mechanic.
+expensive.** An investigation is ordinary startable work, and **its only deliverable is the
+evidence.** When the evidence is posted the investigation ends and its project closes
+through the ordinary accept path. Any work the evidence calls for is captured as **new
+project ideas in `Ideas`, each carrying the class that fits the work** (usually `Broken`
+or `Improve`) and linking back to the investigation, so it is shaped, gated and ranked
+like any other project. If the evidence shows no defect, it is recorded and the project
+closes the same way, with `funnel accept --no-tickets` when there were no tickets. This
+is an ending, not a new gate or close mechanic. _(Nate, 2026-09-16, on #945: "once an
+investigation ends, it should be closed and any follow-up work should be captured in
+new project ideas.")_
 
 **Broken and Maintenance preempt in-flight work** — and this is only safe because both
 are finite. `Investigate` is deliberately first in start order but does not preempt or
@@ -210,6 +215,13 @@ changed._
 _Rejected: placing `Investigate` below `Broken`. A known defect would always outrank the
 question that decides whether another defect is real, leaving the unanswered diagnosis
 to wait while the silent failure continues._
+
+_Rejected: filing the fix tickets as sub-issues of the investigation. Tried on #945,
+2026-09-16: the fixes inherited `Investigate`, so defect and improvement work ran at the
+top of the ladder under a question that had already been answered, skipped the shaping
+and "is the plan good?" gate their own size called for, and kept a finished
+investigation open. One of them also duplicated a ticket already on a parked project
+(#518), which a fresh idea would have met at the overlap check._
 
 _Rejected: landing the ladder mechanics without the workflow. Putting `Investigate` at
 the top makes the class reachable, so shipping only the sort order would expose work

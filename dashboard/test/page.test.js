@@ -176,6 +176,16 @@ test("a blocked ticket always says what it waits on", async () => {
   assert.match(source, /blocked, no reason recorded/);
 });
 
+test("a blocked project says so on its own row, wide and narrow", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const project = source.slice(source.indexOf("function projectRow("));
+  assert.match(project, /if \(item\.blocked\) title\.append\(blockedChip\(item\)\)/);
+  const phone = source.slice(
+    source.indexOf("function phoneDetails("), source.indexOf("function phoneRow("),
+  );
+  assert.equal((phone.match(/phoneField\("Blocked", blockedChip\(item\)\)/g) || []).length, 2);
+});
+
 test("actions show how long they have waited, like decisions do", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(source, /step\.waited/);

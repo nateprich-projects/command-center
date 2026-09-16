@@ -310,6 +310,7 @@ function phoneDetails(item, inheritedClass, children) {
     fields.append(phoneField("PR", prCell(rowPrState(children))));
     fields.append(phoneField("Tier", tierCell(rowTier(children))));
     fields.append(phoneField("Next step", ownerCell(nextOwner(item))));
+    if (item.blocked) fields.append(phoneField("Blocked", blockedChip(item)));
     fields.append(phoneField("Progress", phoneProgress(item, children)));
     fields.append(phoneField("Updated", element("span", "age", item.waited || "—")));
   } else {
@@ -411,6 +412,7 @@ function projectRow(item) {
   const title = element("div", "cell cell-title");
   title.append(link(item.title || item.ref || "Untitled", item.url, "row-title"));
   if (item.pinned) title.append(chip("pinned", "chip-pin"));
+  if (item.blocked) title.append(blockedChip(item));
   row.append(title);
 
   row.append(cell("cell-repo", element("span", "repo", shortRepo(item.repo || item.repository) || "")));

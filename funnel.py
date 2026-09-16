@@ -6078,6 +6078,7 @@ def _dashboard_ticket(
     queue_rank: Optional[int] = None,
     blockers: Sequence[str] = (),
     pr_known: bool = True,
+    parent_block: Optional[str] = None,
 ) -> Dict[str, object]:
     """One ticket row for the dashboard, with its PR, tier and owner flags.
 
@@ -6085,7 +6086,23 @@ def _dashboard_ticket(
     shared scan, so this adds no per-ticket read. ``verdict`` is looked up by
     the caller for open PRs only, which bounds the cost by open pull requests
     rather than by board size.
+
+    A ticket reads as blocked for any block the funnel honours, not only its
+    own label: an open native blocker, or a blocked parent (``parent_block``
+    is that parent's reason, "" when it has none). Showing only the label left
+    #807 and #702 looking like work an engineer could take (#966).
     """
+    blocked = bool(
+        item.is_blocked or item.open_blockers or parent_block is not None
+    )
+    block_reason = _dashboard_block_reason(item)
+    if block_reason is None and parent_block is not None:
+        if not parent_block:
+            block_reason = "project blocked"
+        elif parent_block.startswith("by "):
+            block_reason = "project blocked " + parent_block
+        else:
+            block_reason = "project blocked: " + parent_block
     body = item.body or ""
     reason = parse_human_step(body)
     tier = "escalated" if escalation_reasons(item.title, body) else "standard"
@@ -6110,7 +6127,7 @@ def _dashboard_ticket(
 
     if item.state != "OPEN":
         owner: Optional[str] = None
-    elif item.is_blocked:
+    elif blocked:
         owner = None
     elif reason == MACHINE_LOCAL_REASON:
         owner = OWNER_CLAUDE
@@ -6139,12 +6156,12 @@ def _dashboard_ticket(
         "blocked_until": (
             item.blocked_until.isoformat() if item.blocked_until else None
         ),
-        "block_reason": _dashboard_block_reason(item),
+        "block_reason": block_reason,
         "pr": pr,
         "pr_number": pr_number if isinstance(pr_number, int) else None,
         "tier": tier,
         "owner": owner,
-        "blocked": bool(item.is_blocked),
+        "blocked": blocked,
         "human_step": reason,
     }
 
@@ -6169,6 +6186,11 @@ def _dashboard_item(
         # The owner of the next step in the chain, not every owner on the
         # project: Nate, 2026-09-15, "only the assignment for the next step".
         "next_owner": _dashboard_next_owner(tickets or ()),
+        "blocked": bool(item.is_blocked),
+        "blockers": list(item.block_references) if item.is_blocked else [],
+        "block_reason": (
+            _dashboard_block_reason(item) if item.is_blocked else None
+        ),
         "pips": _dashboard_pips(tickets or ()),
         "tickets": list(tickets or ()),
     }
@@ -6326,6 +6348,18 @@ def dashboard_board(
         return (0, rank, child.number)
 
     def ticket_rows(parent: Item) -> List[Dict[str, object]]:
+        # `startable()` withholds every ticket of a blocked parent, so the
+        # rows say so too, with the parent's reason.
+        parent_block: Optional[str] = None
+        if parent.is_blocked:
+            refs = ", ".join(
+                "#" + str(ref).rsplit("#", 1)[-1]
+                for ref in parent.block_references
+            )
+            parent_block = (
+                "by " + refs if refs
+                else (_dashboard_block_reason(parent) or "")
+            )
         return [
             _dashboard_ticket(
                 child,
@@ -6336,6 +6370,7 @@ def dashboard_board(
                 # the block comment, so "blocked" always says by what.
                 list(child.open_blockers or child.block_references),
                 known,
+                parent_block if child.state == "OPEN" else None,
             )
             for child in sorted(children.get(parent.ref, ()), key=ticket_key)
         ]

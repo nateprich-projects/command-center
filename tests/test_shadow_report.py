@@ -177,6 +177,63 @@ def test_missing_or_wrong_head_live_verdict_stays_out_of_denominator():
     assert report["agreement"]["rate"] is None
 
 
+def test_decided_pr_stops_are_excluded_from_agreement_denominator():
+    records = [
+        {"run": "shadow-agree", "phase": "start", "ts": 800},
+        {"run": "shadow-agree", "phase": "bind", "ts": 801,
+         "do": "review", "work": "42"},
+        {"run": "shadow-agree", "phase": "finish", "ts": 810,
+         "note": "shadow review of PR #42 in owner/repo at abc: approved",
+         "review_result": "approved", "outcome": "done"},
+        {"run": "live-agree", "phase": "start", "ts": 802},
+        {"run": "live-agree", "phase": "bind", "ts": 803,
+         "do": "review", "work": "42"},
+        {"run": "live-agree", "phase": "finish", "ts": 812,
+         "note": "reviewed PR #42: approved", "review_result": "approved",
+         "outcome": "done"},
+        {"run": "shadow-disagree", "phase": "start", "ts": 820},
+        {"run": "shadow-disagree", "phase": "bind", "ts": 821,
+         "do": "review", "work": "43"},
+        {"run": "shadow-disagree", "phase": "finish", "ts": 830,
+         "note": "shadow review of PR #43 in owner/repo at def: approved",
+         "review_result": "approved", "outcome": "done"},
+        {"run": "live-disagree", "phase": "start", "ts": 822},
+        {"run": "live-disagree", "phase": "bind", "ts": 823,
+         "do": "review", "work": "43"},
+        {"run": "live-disagree", "phase": "finish", "ts": 832,
+         "note": "reviewed PR #43: rejected", "review_result": "rejected",
+         "outcome": "done"},
+        {"run": "shadow-decided", "phase": "start", "ts": 840},
+        {"run": "shadow-decided", "phase": "bind", "ts": 841,
+         "do": "review", "work": "44"},
+        {"run": "shadow-decided", "phase": "finish", "ts": 850,
+         "note": "shadow review of PR #44 in owner/repo at ghi: rejected; "
+                 "precheck: pr_not_open state=MERGED merged_at=2026-09-16T03:46:42Z",
+         "review_result": "rejected", "outcome": "done"},
+        {"run": "live-decided", "phase": "start", "ts": 842},
+        {"run": "live-decided", "phase": "bind", "ts": 843,
+         "do": "review", "work": "44"},
+        {"run": "live-decided", "phase": "finish", "ts": 852,
+         "note": "review skipped PR #44 in owner/repo at ghi: "
+                 "pr_not_open state=MERGED merged_at=2026-09-16T03:46:42Z; "
+                 "no verdict recorded",
+         "review_result": "rejected", "outcome": "done"},
+    ]
+
+    report = shadow_report.build_report(records, now=900, window_seconds=200)
+
+    assert report["jobs"] == {
+        "shadow": 3, "live": 3, "matched": 3, "compared": 2,
+    }
+    assert report["agreement"] == {
+        "agree": 1,
+        "disagree": 1,
+        "rate": 0.5,
+        "approved": {"shadow": 2, "live": 1},
+        "rejected": {"shadow": 1, "live": 2},
+    }
+
+
 def test_fetch_live_verdicts_requires_a_verdict_at_the_current_head():
     jobs = [{"run": "live", "key": "pr#42", "repo": "owner/repo",
              "pr": 42}]

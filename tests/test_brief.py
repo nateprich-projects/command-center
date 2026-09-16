@@ -1002,6 +1002,9 @@ def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
         "title": "Create the account",
         "url": "https://example.invalid/40",
         "reason": "an account or billing setting",
+        # Every row says how long it has waited, as the decision rows do; a
+        # fixture with no creation time reads "unknown" rather than guessing.
+        "waited": "unknown",
     }]
     assert brief["machine_local_steps"] == [{
         "ref": "nateprich/beta#42",

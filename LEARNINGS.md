@@ -8,6 +8,23 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### The PR fan-out is one measured GraphQL batch
+
+**2026-09-16 · GitHub GraphQL · measured**
+
+The #655 before number was **42 API calls and 47 measured GraphQL points** for
+`funnel doctor`. The #658 fixture's old fan-out shape—one PR list plus one
+comment read for each of 30 open ticket PRs—was **31 calls**; the replacement
+is **one** GraphQL request carrying `rateLimit { cost remaining resetAt }`, the
+PR rows, comment tails, CI contexts, and ticket branches. That is a 96.8%
+reduction in the fixture's fan-out calls, not a claim about the whole command.
+
+On the live five-repository board, the same batch returned 284 PR nodes and 11
+ticket branches in one request at **15 measured GraphQL points**. The complete
+doctor run is not a controlled before/after against #655 because the board and
+the Project-read implementation changed between the two heads; keep the
+fixture and the per-query `rateLimit.cost` as the comparable evidence.
+
 ### Begin Project reads keep history to the candidate set
 
 **2026-09-16 · GitHub GraphQL · measured in fixture coverage**

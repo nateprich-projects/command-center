@@ -52,7 +52,37 @@ def wire(monkeypatch, pr_json, comments):
         if "comments" in args:
             return {"comments": [{"body": b} for b in comments]}
         return pr_json
+
+    node = dict(pr_json)
+    node.update({"number": 5, "title": "PR 5", "url": "https://example.invalid/5"})
+    node["comments"] = {"nodes": [{"body": b} for b in comments]}
+    node["commits"] = {
+        "nodes": [{
+            "commit": {
+                "statusCheckRollup": {
+                    "contexts": {"nodes": list(pr_json.get("statusCheckRollup") or [])}
+                }
+            }
+        }]
+    }
+
+    def graphql(query, **variables):
+        return {
+            "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},
+            "repo0": {
+                "pullRequests": {
+                    "nodes": [node],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+                "refs": {
+                    "nodes": [{"name": "ticket/9"}],
+                    "pageInfo": {"hasNextPage": False},
+                },
+            },
+        }
+
     monkeypatch.setattr(funnel, "_gh_json", fake)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
 
 
 def pr(**kw):
@@ -179,6 +209,37 @@ def test_every_failure_is_reported_not_just_the_first(monkeypatch):
 def _gate_rejection_wired(monkeypatch, pr_json, comments):
     posted = []
 
+    def graphql(query, **variables):
+        node = dict(pr_json)
+        node.update({"number": 5, "title": "PR 5", "url": "https://example.invalid/5"})
+        node["comments"] = {
+            "nodes": [{"body": body} for body in comments + posted]
+        }
+        node["commits"] = {
+            "nodes": [{
+                "commit": {
+                    "statusCheckRollup": {
+                        "contexts": {
+                            "nodes": list(pr_json.get("statusCheckRollup") or [])
+                        }
+                    }
+                }
+            }]
+        }
+        return {
+            "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},
+            "repo0": {
+                "pullRequests": {
+                    "nodes": [node],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                },
+                "refs": {
+                    "nodes": [{"name": "ticket/9"}],
+                    "pageInfo": {"hasNextPage": False},
+                },
+            },
+        }
+
     def fake_gh_json(*args):
         if "list" in args:
             # The gate rejection is written at SHA, which is still the head:
@@ -197,6 +258,7 @@ def _gate_rejection_wired(monkeypatch, pr_json, comments):
 
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
     monkeypatch.setattr(funnel.subprocess, "run", fake_run)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
     return posted
 
 
@@ -338,7 +400,30 @@ def _merge_wired(monkeypatch, issue_state="OPEN", close_rc=0, close_err="",
 
     def fake_graphql(query, **variables):
         graphql_calls.append((query, variables))
-        return {}
+        data = pr(**(pr_fields or {}))
+        data.setdefault("number", 7)
+        data.setdefault("url", "https://example.invalid/7")
+        data["comments"] = {"nodes": [{"body": verdict()}]}
+        data["commits"] = {
+            "nodes": [{
+                "commit": {
+                    "statusCheckRollup": {
+                        "contexts": {
+                            "nodes": list(data.get("statusCheckRollup") or [])
+                        }
+                    }
+                }
+            }]
+        }
+        return {
+            "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},
+            "repo0": {
+                "pullRequests": {
+                    "nodes": [data],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            },
+        }
 
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
     monkeypatch.setattr(funnel.subprocess, "run", fake_run)

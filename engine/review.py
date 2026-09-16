@@ -331,8 +331,33 @@ def ticket_prior_prs(branch: Optional[str],
     return prior
 
 
+def precheck_pr_open(packet: dict) -> List[str]:
+    """Row 1: only an open PR can receive a review verdict.
+
+    A merged or closed PR has no live judgement left to make. Keep the
+    reason stable and distinguishable from a model rejection so downstream
+    shadow reporting can omit this scheduling race from agreement.
+    """
+    state = str(packet.get("state") or "").upper()
+    if state == "OPEN":
+        return []
+    if not state:
+        state = "UNKNOWN"
+    merged_at = packet.get("merged_at") or packet.get("mergedAt")
+    if merged_at:
+        timestamp_name = "merged_at"
+        timestamp = merged_at
+    else:
+        timestamp_name = "closed_at"
+        timestamp = (
+            packet.get("closed_at") or packet.get("closedAt") or "unknown"
+        )
+    return ["pr_not_open state={} {}={}".format(
+        state, timestamp_name, timestamp)]
+
+
 def precheck_freeze(packet: dict) -> List[str]:
-    """Row 1: frozen ground needs a ticket under #794."""
+    """Row 2: frozen ground needs a ticket under #794."""
     touches = freeze_touches(packet.get("changed_files"), packet.get("diff"))
     frozen = touches["paths"] + touches["parsers"]
     if not frozen:
@@ -353,7 +378,7 @@ def precheck_freeze(packet: dict) -> List[str]:
 
 
 def precheck_ci(packet: dict) -> List[str]:
-    """Row 2: CI must be green — pending or absent checks fail, not pass."""
+    """Row 3: CI must be green — pending or absent checks fail, not pass."""
     ci = packet.get("ci") or {}
     if ci.get("state") == "green":
         return []
@@ -366,7 +391,7 @@ def precheck_ci(packet: dict) -> List[str]:
 
 
 def precheck_verdict(packet: dict) -> List[str]:
-    """Row 3: a verdict already covering this head needs no new review."""
+    """Row 4: a verdict already covering this head needs no new review."""
     if packet.get("verdict") is None:
         return []
     if packet.get("verdict_head_sha") != packet.get("head_sha"):
@@ -376,7 +401,7 @@ def precheck_verdict(packet: dict) -> List[str]:
 
 
 def precheck_merged_overlap(packet: dict) -> List[str]:
-    """Row 4: a merge since the head may have made this PR stale."""
+    """Row 5: a merge since the head may have made this PR stale."""
     return ["merged-overlap: PR #{} merged at {} touches {}".format(
                 entry.get("pr"), entry.get("merged_at"),
                 ", ".join(entry.get("files") or []))
@@ -384,7 +409,7 @@ def precheck_merged_overlap(packet: dict) -> List[str]:
 
 
 def precheck_protected(packet: dict) -> List[str]:
-    """Row 5: protected paths need the ticket to ask for them.
+    """Row 6: protected paths need the ticket to ask for them.
 
     The resolved-path spelling the packet flags stays out of this row: the
     plan's pre-check table lists only touched paths, and the spelling stays
@@ -402,7 +427,7 @@ def precheck_protected(packet: dict) -> List[str]:
 
 
 def precheck_stop(packet: dict) -> List[str]:
-    """Row 6: the rejected-merges bar stops every review while set."""
+    """Row 7: the rejected-merges bar stops every review while set."""
     counter = packet.get("stop_auto_merging") or {}
     if not counter.get("stop_auto_merging"):
         return []
@@ -413,7 +438,7 @@ def precheck_stop(packet: dict) -> List[str]:
 
 
 def precheck_repo_rules(packet: dict) -> List[str]:
-    """Row 7: per-repo path rules that outrank the ticket's Risk marker."""
+    """Row 8: per-repo path rules that outrank the ticket's Risk marker."""
     repo = packet.get("repo")
     changed = packet.get("changed_files") or []
     ticket = packet.get("ticket") or {}
@@ -438,9 +463,10 @@ def precheck_repo_rules(packet: dict) -> List[str]:
 
 
 def precheck(packet: dict) -> Dict[str, object]:
-    """All seven rows in ticket order. Any reason fails the packet."""
+    """All eight rows in ticket order. Any reason fails the packet."""
     reasons: List[str] = []
-    for row in (precheck_freeze, precheck_ci, precheck_verdict,
+    for row in (precheck_pr_open, precheck_freeze, precheck_ci,
+                precheck_verdict,
                 precheck_merged_overlap, precheck_protected, precheck_stop,
                 precheck_repo_rules):
         reasons.extend(row(packet or {}))
@@ -491,6 +517,8 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "branch": pr_view.get("headRefName"),
         "base": pr_view.get("baseRefName"),
         "state": pr_view.get("state"),
+        "merged_at": pr_view.get("mergedAt") or pr_view.get("merged_at"),
+        "closed_at": pr_view.get("closedAt") or pr_view.get("closed_at"),
         "mergeable": pr_view.get("mergeable"),
         "head_sha": pr_view.get("headRefOid"),
         "head_date": head,
@@ -521,6 +549,7 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
     data = funnel._gh_json(
         "gh", "pr", "view", str(pr_number), "--repo", repo, "--json",
         "number,title,headRefName,headRefOid,baseRefName,state,mergeable,"
+        "mergedAt,closedAt,"
         "statusCheckRollup,commits,files")
     if not data:
         raise funnel.GitHubError(

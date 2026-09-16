@@ -12,8 +12,9 @@
 # Phase 1 of #794: the runner executes the protocol and the model answers one
 # question. begin offers the work, the packet command assembles the evidence,
 # and a failing review precheck is applied as rejected with no model call at
-# all. Otherwise the runner shows the model the job's routine with the packet
-# inline — judgement text only — parses the one JSON answer, retries once on a
+# all, except a non-OPEN PR stop, which records no verdict. Otherwise the
+# runner shows the model the job's routine with the packet inline — judgement
+# text only — parses the one JSON answer, retries once on a
 # parse error, and hands it to the apply command, which performs every side
 # effect. Breakdown rides the standard tier only; shape follows wherever
 # begin offers it.
@@ -672,6 +673,14 @@ elif field == "head":
     print(packet.get("head_sha") or "")
 elif field == "reason_count":
     print(len(packet.get("precheck", {}).get("reasons", [])))
+elif field == "pr_not_open":
+    print(any(str(reason).startswith("pr_not_open ")
+              for reason in packet.get("precheck", {}).get("reasons", [])))
+elif field == "pr_not_open_reason":
+    for reason in packet.get("precheck", {}).get("reasons", []):
+        if str(reason).startswith("pr_not_open "):
+            print(reason)
+            break
 elif field == "rejected_answer":
     print(json.dumps({
         "verdict": "rejected",
@@ -683,7 +692,8 @@ elif field == "rejected_answer":
 
 if ! PACKET_PASS="$(packet_field precheck_pass)" \
   || ! PACKET_CI="$(packet_field ci)" \
-  || ! PACKET_HEAD="$(packet_field head)"; then
+  || ! PACKET_HEAD="$(packet_field head)" \
+  || ! PACKET_PR_NOT_OPEN="$(packet_field pr_not_open)"; then
   echo "muse-review-engine: the packet for PR #$BEGIN_PR is not valid JSON" >&2
   failure "review-packet for PR #$BEGIN_PR in $BEGIN_REPO printed invalid JSON" || true
   exit 1
@@ -720,7 +730,40 @@ record_shadow() {
   finish_done "shadow review of PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $verdict; answer: $answer_note" "$verdict"
 }
 
+record_shadow_no_decision() {
+  local reason="$1"
+  {
+    printf '%s\n' "$SHADOW_MARKER"
+    printf '**Shadow review (not applied)** — run `%s`, packet head `%s`\n' \
+      "$BEGIN_RUN" "$HEAD_SHORT"
+    printf '\nNo model was called: the packet precheck stopped before judgement.\n'
+    printf '\nPrecheck: `%s`\n\nNo verdict was recorded.\n' "$reason"
+  } >"$COMMENT_FILE"
+  if ! "$GH_BIN" pr comment "$BEGIN_PR" --repo "$BEGIN_REPO" \
+      --body-file "$COMMENT_FILE" 2>"$DIAG_FILE"; then
+    gh_err="$(cat "$DIAG_FILE")"
+    echo "muse-review-engine: shadow comment failed: $gh_err" >&2
+    failure "shadow review of PR #$BEGIN_PR in $BEGIN_REPO recorded no verdict (gh pr comment failed: $gh_err); precheck: $reason" || true
+    exit 1
+  fi
+  finish_done "shadow review of PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: no decision; precheck: $reason"
+}
+
 if [[ "$PACKET_PASS" != "True" ]]; then
+  if [[ "$PACKET_PR_NOT_OPEN" == "True" ]]; then
+    if ! packet_field pr_not_open_reason >"$DECISION_FILE"; then
+      echo "muse-review-engine: could not read the non-OPEN precheck reason" >&2
+      failure "could not read the non-OPEN precheck reason for PR #$BEGIN_PR in $BEGIN_REPO" || true
+      exit 1
+    fi
+    PR_NOT_OPEN_REASON="$(cat "$DECISION_FILE")"
+    if (( SHADOW )); then
+      record_shadow_no_decision "$PR_NOT_OPEN_REASON"
+      exit 0
+    fi
+    finish_done "review skipped PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $PR_NOT_OPEN_REASON; no verdict recorded"
+    exit 0
+  fi
   # A failing precheck is applied as rejected with no model call at all. The
   # reasons become the blocking list through the same review-apply path a
   # model rejection takes, so the verdict shape never depends on who judged.

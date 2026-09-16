@@ -1,4 +1,4 @@
-"""The seven deterministic pre-check rows (#799, Phase 1 of #794).
+"""The eight deterministic pre-check rows (#799, Phase 1 of #794).
 
 Each row gets a passing and a failing fixture here. The rows run in ticket
 order before any model is called; any reason fails the packet. Builders
@@ -24,6 +24,8 @@ OTHER_SHA = "7890fedcba98"
 HEAD_DATE = "2026-09-13T12:00:00Z"
 NEWER = "2026-09-13T13:00:00Z"
 OLDER = "2026-09-13T11:00:00Z"
+MERGED_AT = "2026-09-13T14:00:00Z"
+CLOSED_AT = "2026-09-13T15:00:00Z"
 
 
 def pr_view(**kw):
@@ -34,6 +36,8 @@ def pr_view(**kw):
         "headRefOid": SHA,
         "baseRefName": "main",
         "state": "OPEN",
+        "mergedAt": None,
+        "closedAt": None,
         "mergeable": "MERGEABLE",
         "statusCheckRollup": [
             {"name": "tests", "conclusion": "SUCCESS", "status": "COMPLETED"},
@@ -94,7 +98,30 @@ def packet(**kw):
     return review.build_packet(**args)
 
 
-# -- row 1: the freeze ------------------------------------------------------
+# -- row 1: PR state ---------------------------------------------------------
+
+def test_pr_open_row_rejects_a_merged_pr_with_its_merge_time():
+    view = pr_view(state="CLOSED", mergedAt=MERGED_AT, closedAt=MERGED_AT)
+    found = packet(pr_view=view, verdict=None)
+    assert found["merged_at"] == MERGED_AT
+    assert found["precheck"]["reasons"] == [
+        "pr_not_open state=CLOSED merged_at={}".format(MERGED_AT)]
+
+
+def test_pr_open_row_rejects_a_closed_unmerged_pr_with_its_close_time():
+    view = pr_view(state="CLOSED", closedAt=CLOSED_AT)
+    found = packet(pr_view=view, verdict=None)
+    assert found["precheck"]["reasons"] == [
+        "pr_not_open state=CLOSED closed_at={}".format(CLOSED_AT)]
+
+
+def test_pr_open_row_leaves_an_open_pr_unchanged():
+    view = pr_view(state="OPEN", mergedAt=MERGED_AT, closedAt=CLOSED_AT)
+    assert packet(pr_view=view, verdict=None)["precheck"] == {
+        "pass": True, "reasons": []}
+
+
+# -- row 2: the freeze ------------------------------------------------------
 
 def test_freeze_rejects_a_routines_diff_under_another_parent():
     view = pr_view(files=[{"path": "routines/muse.md"}])
@@ -155,7 +182,7 @@ def test_freeze_rejects_frozen_ground_with_no_ticket():
                for r in reasons)
 
 
-# -- row 2: CI ---------------------------------------------------------------
+# -- row 3: CI ---------------------------------------------------------------
 
 def test_ci_row_fails_a_red_rollup_and_names_the_check():
     view = pr_view(statusCheckRollup=[
@@ -178,7 +205,7 @@ def test_ci_row_passes_a_green_rollup():
     assert packet()["precheck"] == {"pass": True, "reasons": []}
 
 
-# -- row 3: verdict coverage --------------------------------------------------
+# -- row 4: verdict coverage --------------------------------------------------
 
 def test_verdict_row_fails_when_a_verdict_covers_this_head():
     found = packet(verdict=verdict())
@@ -195,7 +222,7 @@ def test_verdict_row_passes_with_no_verdict():
     assert packet(verdict=None)["precheck"] == {"pass": True, "reasons": []}
 
 
-# -- row 4: merged since the head ----------------------------------------------
+# -- row 5: merged since the head ----------------------------------------------
 
 def test_merged_row_fails_on_a_newer_merge_sharing_a_file():
     rows = [merged(5, NEWER, "funnel.py"),
@@ -247,7 +274,7 @@ def test_head_date_prefers_the_head_sha_then_the_newest():
     assert review.head_date(pr_view(commits=[])) is None
 
 
-# -- row 5: protected paths ----------------------------------------------------
+# -- row 6: protected paths ----------------------------------------------------
 
 def test_protected_row_fails_an_unasked_touch():
     view = pr_view(files=[{"path": "AGENTS.md"}])
@@ -281,7 +308,7 @@ def test_protected_row_fails_without_a_ticket():
                        "not ask for it"]
 
 
-# -- row 6: the stop bar -------------------------------------------------------
+# -- row 7: the stop bar -------------------------------------------------------
 
 def test_stop_row_fails_while_the_bar_is_set():
     counter = {"window_days": 7, "count": 3, "refs": ["a#1", "a#2", "a#3"],
@@ -295,7 +322,7 @@ def test_stop_row_passes_while_the_bar_is_clear():
     assert packet()["precheck"] == {"pass": True, "reasons": []}
 
 
-# -- row 7: repo rules ----------------------------------------------------------
+# -- row 8: repo rules ----------------------------------------------------------
 
 CONNECTOR = "chatgpt-messages-connector/sender.py"
 

@@ -3,6 +3,13 @@
 // the same board drift apart. Nate, 2026-09-15: the page carries the board and
 // human steps, and no other brief section.
 
+const PIP_LIMIT = 8;
+const OWNER_LIMIT = 2;
+
+// Stages that open collapsed: finished and stopped work is reference, not
+// the working board.
+const COLLAPSED_STAGES = ["Parked", "Done"];
+
 const STAGES = ["Ideas", "Shaped", "Ready", "Building", "Parked", "Done"];
 
 const OWNER_CLASS = {
@@ -119,11 +126,25 @@ function chip(text, className, title) {
   return node;
 }
 
+function cell(className, node) {
+  const wrap = element("div", `cell ${className}`);
+  if (node) wrap.append(node);
+  return wrap;
+}
+
+// One grid row, so every column lines up across groups and nesting depths.
+function gridRow(tag, className) {
+  return element(tag, `grid-row ${className}`);
+}
+
 function pips(tickets, closed, total) {
   const wrap = element("div", "pips");
   const rows = Array.isArray(tickets) ? tickets : [];
   if (rows.length) {
-    for (const ticket of rows) {
+    // Long ticket lists overflow the column, so show the first PIP_LIMIT and
+    // count the rest; the expanded rows below carry the detail either way.
+    const shown = rows.length > PIP_LIMIT ? rows.slice(0, PIP_LIMIT) : rows;
+    for (const ticket of shown) {
       const state = pipState(ticket);
       const pip = element("i", `pip pip-${state}`);
       pip.title = `#${ticket.number} ${ticket.title || ""} — ${state}`;
@@ -140,80 +161,169 @@ function pips(tickets, closed, total) {
   return wrap;
 }
 
-function ticketRow(ticket) {
-  const row = element("li", `ticket ticket-${pipState(ticket)}`);
-  row.append(element("i", `pip pip-${pipState(ticket)}`));
-  row.append(link(`#${ticket.number} ${ticket.title || ""}`, ticket.url, "ticket-title"));
-  const flags = element("span", "ticket-flags");
-  if (ticket.pr) {
-    flags.append(chip(ticket.pr, `chip-pr chip-pr-${ticket.pr}`,
-      ticket.pr_number ? `PR #${ticket.pr_number}` : null));
+function prCell(state, number) {
+  if (!state) return element("span", "muted", "—");
+  return chip(state, `chip-pr chip-pr-${state}`, number ? `PR #${number}` : null);
+}
+
+// Escalated is the exception worth a chip; standard stays quiet text so a
+// board of ordinary work does not read as a wall of badges.
+function tierCell(tier) {
+  if (!tier) return element("span", "muted", "—");
+  if (tier === "standard") return element("span", "tier-standard", "standard");
+  return chip(tier, `chip-tier chip-tier-${tier}`);
+}
+
+function ownerCell(owners) {
+  const list = Array.isArray(owners) ? owners : owners ? [owners] : [];
+  if (!list.length) return element("span", "muted", "—");
+  const wrap = element("span", "owners");
+  const shown = list.length > OWNER_LIMIT ? list.slice(0, OWNER_LIMIT) : list;
+  for (const owner of shown) {
+    wrap.append(chip(owner, `chip-owner ${OWNER_CLASS[owner] || ""}`));
   }
-  if (ticket.state === "OPEN" && ticket.tier === "escalated") {
-    flags.append(chip("escalated", "chip-tier"));
+  if (list.length > OWNER_LIMIT) {
+    wrap.append(element("span", "owner-more", `+${list.length - OWNER_LIMIT}`));
+    wrap.title = list.join(", ");
   }
-  if (ticket.blocked) flags.append(chip("blocked", "chip-blocked"));
-  if (ticket.owner) {
-    flags.append(chip(ticket.owner, `chip-owner ${OWNER_CLASS[ticket.owner] || ""}`));
+  return wrap;
+}
+
+function headerRow() {
+  const row = gridRow("div", "thead");
+  row.append(element("div", "cell cell-twisty"));
+  for (const [className, label] of [
+    ["cell-title", "Title"],
+    ["cell-repo", "Repository"],
+    ["cell-pr", "PR"],
+    ["cell-tier", "Tier"],
+    ["cell-owner", "Next step"],
+    ["cell-pips", "Sub-issues"],
+    ["cell-class", "Class"],
+    ["cell-age", "Updated"],
+  ]) {
+    row.append(element("div", `cell ${className}`, label));
   }
-  row.append(flags);
   return row;
 }
 
-function projectRow(item) {
-  const row = element("details", "row");
-  const head = element("summary", "row-head");
+function ticketRow(ticket) {
+  const row = gridRow("div", `ticket ticket-${pipState(ticket)}`);
+  row.append(cell("cell-twisty", element("i", `pip pip-${pipState(ticket)}`)));
 
-  const title = element("span", "cell cell-title");
+  const title = element("div", "cell cell-title cell-child");
+  title.append(element("span", "child-rule"));
+  title.append(link(`#${ticket.number} ${ticket.title || ""}`, ticket.url, "ticket-title"));
+  if (ticket.blocked) title.append(chip("blocked", "chip-blocked"));
+  row.append(title);
+
+  row.append(cell("cell-repo", element("span", "muted", "")));
+  row.append(cell("cell-pr", prCell(ticket.pr, ticket.pr_number)));
+  row.append(cell("cell-tier", tierCell(ticket.state === "OPEN" ? ticket.tier : null)));
+  row.append(cell("cell-owner", ownerCell(ticket.owner)));
+  row.append(cell("cell-pips", element("span", "muted", "")));
+  row.append(cell("cell-class", element("span", "muted", "")));
+  row.append(cell("cell-age", element("span", "muted", "")));
+  return row;
+}
+
+// `?expand` opens every project's tickets on load: useful for a wide screen,
+// and it is how this view is checked in a headless render.
+function expandAll() {
+  if (typeof window === "undefined" || !window.location) return false;
+  return new URLSearchParams(window.location.search).has("expand");
+}
+
+function projectRow(item) {
+  const tickets = Array.isArray(item.tickets) ? item.tickets : [];
+  const wrap = element("div", "row-wrap");
+  const row = gridRow("div", "row");
+
+  const twisty = element("button", "twisty");
+  twisty.type = "button";
+  twisty.setAttribute("aria-expanded", String(expandAll()));
+  twisty.setAttribute("aria-label", `Show tickets for ${item.title || item.ref || "project"}`);
+  twisty.textContent = tickets.length ? "\u25B8" : "";
+  twisty.disabled = tickets.length === 0;
+  row.append(cell("cell-twisty", twisty));
+
+  const title = element("div", "cell cell-title");
   title.append(link(item.title || item.ref || "Untitled", item.url, "row-title"));
   if (item.pinned) title.append(chip("pinned", "chip-pin"));
-  head.append(title);
+  row.append(title);
 
-  head.append(element("span", "cell cell-repo", shortRepo(item.repo || item.repository) || ""));
+  row.append(cell("cell-repo", element("span", "repo", shortRepo(item.repo || item.repository) || "")));
+  row.append(cell("cell-pr", prCell(rowPrState(tickets))));
+  row.append(cell("cell-tier", tierCell(rowTier(tickets))));
+  row.append(cell("cell-owner", ownerCell(rowOwners(tickets))));
+  row.append(cell("cell-pips", pips(tickets, item.tickets_closed, item.tickets_total)));
+  row.append(cell("cell-class", item.class
+    ? chip(item.class, `chip-class chip-class-${String(item.class).toLowerCase()}`)
+    : element("span", "muted", "—")));
+  row.append(cell("cell-age", element("span", "age", item.waited || "")));
+  wrap.append(row);
 
-  const flags = element("span", "cell cell-flags");
-  const pr = rowPrState(item.tickets);
-  if (pr) flags.append(chip(pr, `chip-pr chip-pr-${pr}`));
-  const tier = rowTier(item.tickets);
-  if (tier === "escalated") flags.append(chip("escalated", "chip-tier"));
-  for (const owner of rowOwners(item.tickets)) {
-    flags.append(chip(owner, `chip-owner ${OWNER_CLASS[owner] || ""}`));
-  }
-  head.append(flags);
-
-  head.append(pips(item.tickets, item.tickets_closed, item.tickets_total));
-  if (item.class) head.append(chip(item.class, `chip-class chip-class-${item.class.toLowerCase()}`));
-  head.append(element("span", "cell cell-age", item.waited || ""));
-  row.append(head);
-
-  const tickets = Array.isArray(item.tickets) ? item.tickets : [];
   if (tickets.length) {
-    const list = element("ul", "tickets");
-    for (const ticket of tickets) list.append(ticketRow(ticket));
-    row.append(list);
-  } else {
-    row.append(element("p", "tickets-empty", "No tickets yet."));
+    const children = element("div", "children");
+    children.hidden = !expandAll();
+    for (const ticket of tickets) children.append(ticketRow(ticket));
+    wrap.append(children);
+    const toggle = () => {
+      const open = children.hidden;
+      children.hidden = !open;
+      twisty.setAttribute("aria-expanded", String(open));
+      twisty.textContent = open ? "\u25BE" : "\u25B8";
+      row.classList.toggle("expanded", open);
+    };
+    twisty.addEventListener("click", toggle);
+    row.addEventListener("click", (event) => {
+      if (event.target.closest("a")) return;
+      toggle();
+    });
   }
-  return row;
+  return wrap;
 }
 
 function renderBoard(board) {
   const container = document.querySelector("#board");
   container.replaceChildren();
+  const table = element("div", "table");
+  table.append(headerRow());
+  let rendered = 0;
   for (const column of boardColumns(board)) {
     const items = Array.isArray(column.items) ? column.items : [];
     if (!items.length) continue;
-    const group = element("section", "group");
-    group.dataset.stage = column.stage;
-    const head = element("div", "group-head");
-    head.append(element("span", `dot dot-${column.stage.toLowerCase()}`));
-    head.append(element("h3", null, column.stage));
-    head.append(element("span", "count", items.length));
-    group.append(head);
-    for (const item of items) group.append(projectRow(item));
-    container.append(group);
+    const collapsed = COLLAPSED_STAGES.includes(column.stage);
+    const head = gridRow("button", "group-head");
+    head.type = "button";
+    head.setAttribute("aria-expanded", String(!collapsed));
+    const label = element("div", "cell cell-group");
+    label.append(element("span", "group-twisty", collapsed ? "\u25B8" : "\u25BE"));
+    label.append(element("span", `dot dot-${column.stage.toLowerCase()}`));
+    label.append(element("span", "group-name", column.stage));
+    label.append(element("span", "count", items.length));
+    head.append(label);
+    table.append(head);
+
+    const body = element("div", "group-body");
+    body.hidden = collapsed;
+    for (const item of items) {
+      body.append(projectRow(item));
+      rendered += 1;
+    }
+    table.append(body);
+    head.addEventListener("click", () => {
+      const open = body.hidden;
+      body.hidden = !open;
+      head.setAttribute("aria-expanded", String(open));
+      label.firstChild.textContent = open ? "\u25BE" : "\u25B8";
+    });
   }
-  if (!container.childElementCount) container.append(element("p", "empty", "The board is empty."));
+  if (!rendered) {
+    container.append(element("p", "empty", "The board is empty."));
+    return;
+  }
+  container.append(table);
 }
 
 function decisionCard(item) {

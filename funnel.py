@@ -1711,8 +1711,14 @@ def _startable_without_repo_readiness(
     # `Ready` or `Building`. `plan.md`: "Codex draws tickets from any
     # `Ready` or `Building` parent, so it stalls only if every parent lacks
     # tickets." `Building` is not a precondition for work but the record that
-    # work began — `cmd_claim` writes it on the first claim.
-    return parent.status in ("Ready", "Building") and not parent.is_blocked
+    # work began — `cmd_claim` writes it on the first claim. A parent without a
+    # valid Class is the plan.md-invalid, not-startable case; do not let its
+    # residual ticket silently promote it to Building.
+    return (
+        parent.status in ("Ready", "Building")
+        and parent.klass in LADDER
+        and not parent.is_blocked
+    )
 
 
 def _repo_blocking_reasons(

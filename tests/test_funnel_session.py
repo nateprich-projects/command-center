@@ -146,6 +146,58 @@ def test_the_first_command_keeps_the_lazy_load_cost(monkeypatch):
     funnel.reset_api_usage()
 
 
+def test_a_session_attributes_the_lazy_load_and_later_commands_to_its_run(
+    monkeypatch,
+):
+    reports = []
+
+    def set_cost(points):
+        funnel._API_USAGE.update({"graphql_calls": 1, "cli_calls": 0})
+        funnel._GRAPHQL_COST_READS = 1
+        funnel._GRAPHQL_SPEND.update({
+            "calls": 1,
+            "cost": points,
+            "remaining": 4_988,
+            "reset_at": None,
+        })
+
+    def loader():
+        set_cost(12)
+        return []
+
+    def fake_main(argv, *, _items=None, _items_loader=None, _reset_api_usage=True):
+        if argv[0] == "begin":
+            _items_loader()
+            funnel._ACTIVE_HEARTBEAT_RUN = "run-a"
+            funnel._ACTIVE_HEARTBEAT_AGENT = "muse"
+        else:
+            # This is what the real main() does for a command without --run.
+            funnel._ACTIVE_HEARTBEAT_RUN = None
+            funnel._ACTIVE_HEARTBEAT_AGENT = None
+            set_cost(3)
+        return 0
+
+    monkeypatch.setattr(funnel, "main", fake_main)
+    monkeypatch.setattr(
+        funnel,
+        "report_api_cost",
+        lambda run=None, agent=None: reports.append((
+            run, agent, funnel.api_cost()
+        )),
+    )
+    monkeypatch.setattr(funnel, "report_graphql_spend", lambda: None)
+
+    session = funnel.FunnelSession(loader=loader)
+    assert session.dispatch(["begin", "--agent", "muse"])[0] == 0
+    assert session.dispatch(["brief"])[0] == 0
+
+    assert reports == [
+        ("run-a", "muse", {"graphql_points": 12, "gh_calls": 1}),
+        ("run-a", "muse", {"graphql_points": 3, "gh_calls": 1}),
+    ]
+    funnel.reset_api_usage()
+
+
 def test_a_session_reuses_brief_auxiliary_reads_until_a_mutation(monkeypatch):
     import heartbeat
 

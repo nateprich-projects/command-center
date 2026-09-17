@@ -6403,3 +6403,4 @@
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/The-League", "run": "04b8e94171de", "ts": 1789675884, "work": "215"}
 {"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 76}, "phase": "api_cost", "run": "04b8e94171de", "ts": 1789675888}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/The-League", "run": "3ebe2aa2d84d", "ts": 1789675894, "work": "215"}
+{"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": null}, "phase": "api_cost", "run": "3ebe2aa2d84d", "ts": 1789675898}

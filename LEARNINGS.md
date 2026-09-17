@@ -8,6 +8,28 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### `funnel doctor` after measurement misses the planned whole-run saving
+
+**2026-09-17 · GitHub GraphQL · measured**
+
+After #655–#660 landed, `PYTHONDONTWRITEBYTECODE=1 python3 funnel.py doctor` on
+`origin/main` commit `ae9300846cbda33d128bd60f63141f0f5d64e101` reported **50 API
+calls** (24 GraphQL and 26 `gh` CLI) and **54 measured GraphQL points**.
+
+| measurement | #655 before | #661 after | saving |
+| --- | ---: | ---: | ---: |
+| API calls | 42 | 50 | **-19.0%** (8 more calls) |
+| GraphQL points | 47 | 54 | **-14.9%** (7 more points) |
+
+The requested 60–70% whole-run saving is therefore a measured shortfall, and
+this doctor comparison cannot confirm that most storm exposure is removed. The
+`first:100` sub-measurement still reduced the 720-row Project page scan from 15
+old-size requests to 8, or 46.7% fewer page requests, but that local reduction
+did not translate into the target aggregate doctor saving. GraphQL points come
+from each response's `rateLimit.cost`; `gh` CLI point cost remains unknown. The
+doctor exited 1 only because this sandbox cannot read `kern.maxprocperuid`; its
+API usage and pagination measurements were emitted.
+
 ### Project item pagination uses the maximum bounded page
 
 **2026-09-17 · GitHub GraphQL · measured**

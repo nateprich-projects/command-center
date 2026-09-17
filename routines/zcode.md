@@ -75,6 +75,7 @@ what your work is. It always prints JSON:
   investigate why, do not look around. Most runs end here and that is the design.
   - `"gate": "over"` → `--outcome skipped-over-pace`
   - `"gate": "unknown"` → `--outcome skipped-usage-unknown`
+  - `"gate": "reserve"` → `--outcome skipped-api-reserve`
   - otherwise → `--outcome nothing-to-do`
 - `"do": "review"` — go to step 3. `work` names the PR.
 - `"do": "breakdown"` — skip to step 6. `work` names the project.

@@ -108,6 +108,7 @@ you.
   investigate, do not look around. Most runs end here and that is the design.
   - `"gate": "over"` → `--outcome skipped-over-pace`
   - `"gate": "unknown"` → `--outcome skipped-usage-unknown`
+  - `"gate": "reserve"` → `--outcome skipped-api-reserve`
   - otherwise → `--outcome nothing-to-do`
 - `"do": "review"` — go to step 2. `work` names the PR.
 - `"do": "breakdown"` — skip to the breakdown section below. `work` names the

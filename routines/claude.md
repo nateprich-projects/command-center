@@ -39,6 +39,7 @@ your work. It always prints JSON.
   and there usually are none.
   - `"gate": "over"` → `--outcome skipped-over-pace`
   - `"gate": "unknown"` → `--outcome skipped-usage-unknown`
+  - `"gate": "reserve"` → `--outcome skipped-api-reserve`
   - otherwise → `--outcome nothing-to-do`
 - `"do": "review"` — go on. `work` names the PR.
 - `"do": "shape"` — go to the third job below. `work` names one escalated idea.

@@ -47,10 +47,30 @@ def _bindings_never_touch_the_real_spool(monkeypatch):
 
 
 def _allow_begin(monkeypatch):
+    funnel.reset_api_usage()
+
+    def run(argv, **kwargs):
+        if argv[:3] == ["gh", "api", "graphql"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({
+                    "data": {
+                        "rateLimit": {
+                            "cost": 1,
+                            "remaining": 5_000,
+                            "resetAt": "later",
+                        },
+                    },
+                }),
+                stderr="",
+            )
+        return SimpleNamespace(
+            returncode=0, stdout="run-id\n", stderr=""
+        )
+
     monkeypatch.setattr(
         funnel.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(stdout="run-id\n"),
+        "run", run,
     )
     monkeypatch.setattr(
         usage,
@@ -267,6 +287,17 @@ def test_main_loads_the_project_after_begin_gates_pass(
     )
     monkeypatch.setattr(
         funnel,
+        "gh_graphql",
+        lambda query, **variables: events.append("api") or {
+            "rateLimit": {
+                "cost": 1,
+                "remaining": 5_000,
+                "resetAt": "later",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        funnel,
         "load_items",
         lambda include_details=True: events.append("load") or [],
     )
@@ -284,10 +315,138 @@ def test_main_loads_the_project_after_begin_gates_pass(
     assert funnel.main(["begin", "--agent", "codex", "--tier", "standard"]) == 0
     capsys.readouterr()
     assert [event for event in events if isinstance(event, str)] == [
-        "heartbeat", "usage", "pace", "load",
+        "heartbeat", "usage", "pace", "api", "load",
     ]
     assert events[-1][0] == "begin"
     assert events[-1][2][0]["gate"] == "ok"
+
+
+def test_main_stands_down_before_loading_the_project_when_reserve_is_low(
+    monkeypatch, capsys
+):
+    """A low window is a clean stop before the expensive Project read."""
+    import heartbeat
+
+    events = []
+    reserve_events = []
+    monkeypatch.setattr(
+        funnel,
+        "_start_begin_heartbeat",
+        lambda agent: events.append("heartbeat") or "run-id",
+    )
+    monkeypatch.setattr(
+        usage,
+        "read_agent",
+        lambda agent, timestamp: events.append("usage") or {"windows": {}},
+    )
+    monkeypatch.setattr(
+        usage,
+        "pace",
+        lambda reading, timestamp, provider: events.append("pace") or {
+            "over_pace": False,
+        },
+    )
+
+    def rate_limit_only(query, **variables):
+        events.append(("api", query))
+        return {
+            "rateLimit": {
+                "cost": 1,
+                "remaining": funnel.ENGINEERING_RESERVE_LOADS
+                * funnel.BEGIN_PROJECT_LOAD_COST - 1,
+                "resetAt": "later",
+            },
+        }
+
+    monkeypatch.setattr(funnel, "gh_graphql", rate_limit_only)
+    monkeypatch.setattr(
+        funnel,
+        "load_items",
+        lambda *args, **kwargs: pytest.fail("reserve stop must not load Project"),
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "record_event",
+        lambda agent, run, outcome, **kwargs: reserve_events.append(
+            (agent, run, outcome, kwargs)
+        ) or "spooled",
+    )
+
+    assert funnel.main(["begin", "--agent", "codex", "--tier", "standard"]) == 0
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["gate"] == "reserve"
+    assert result["do"] == "stop"
+    assert events[:3] == ["heartbeat", "usage", "pace"]
+    assert events[3][0] == "api"
+    assert "rateLimit" in events[3][1]
+    assert "projectV2" not in events[3][1]
+    assert reserve_events == [
+        ("codex", "run-id", "skipped-api-reserve", {"note": result["why"]}),
+    ]
+    assert "funnel: skipped-api-reserve:" in captured.err
+
+
+def test_main_treats_a_structured_empty_window_as_a_clean_reserve_stop(
+    monkeypatch, capsys
+):
+    """GitHub's partial zero-budget response must not load the Project."""
+    import heartbeat
+
+    reset_at = "2026-09-16T05:30:32Z"
+    events = []
+    reserve_events = []
+    monkeypatch.setattr(
+        funnel,
+        "_start_begin_heartbeat",
+        lambda agent: events.append("heartbeat") or "run-id",
+    )
+    monkeypatch.setattr(
+        usage,
+        "read_agent",
+        lambda agent, timestamp: events.append("usage") or {"windows": {}},
+    )
+    monkeypatch.setattr(
+        usage,
+        "pace",
+        lambda reading, timestamp, provider: events.append("pace") or {
+            "over_pace": False,
+        },
+    )
+
+    def empty_window(query, **variables):
+        events.append(("api", query))
+        funnel._GRAPHQL_SPEND.update(
+            {"calls": 1, "cost": 0, "remaining": 0, "reset_at": reset_at}
+        )
+        raise funnel.GitHubError("API rate limit already exceeded")
+
+    monkeypatch.setattr(funnel, "gh_graphql", empty_window)
+    monkeypatch.setattr(
+        funnel,
+        "load_items",
+        lambda *args, **kwargs: pytest.fail("empty window must not load Project"),
+    )
+    monkeypatch.setattr(
+        heartbeat,
+        "record_event",
+        lambda agent, run, outcome, **kwargs: reserve_events.append(
+            (agent, run, outcome, kwargs)
+        ) or "spooled",
+    )
+
+    assert funnel.main(["begin", "--agent", "codex", "--tier", "standard"]) == 0
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["gate"] == "reserve"
+    assert result["do"] == "stop"
+    assert events[3][0] == "api"
+    assert reserve_events == [
+        ("codex", "run-id", "skipped-api-reserve", {"note": result["why"]}),
+    ]
+    assert "funnel: skipped-api-reserve:" in captured.err
 
 
 def test_begin_records_a_named_finish_for_a_structured_exhaustion(
@@ -298,22 +457,34 @@ def test_begin_records_a_named_finish_for_a_structured_exhaustion(
     funnel.reset_api_usage()
     reset_at = "2026-09-16T05:30:32Z"
     calls = []
+    responses = [
+        {
+            "data": {
+                "rateLimit": {
+                    "cost": 1,
+                    "remaining": 5_000,
+                    "resetAt": reset_at,
+                },
+            },
+        },
+        {
+            "data": {
+                "rateLimit": {
+                    "cost": 0,
+                    "remaining": 0,
+                    "resetAt": reset_at,
+                },
+            },
+            "errors": [{"message": "API rate limit already exceeded"}],
+        },
+    ]
 
     def run(argv, **kwargs):
         calls.append(argv)
         if argv[:3] == ["gh", "api", "graphql"]:
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps({
-                    "data": {
-                        "rateLimit": {
-                            "cost": 0,
-                            "remaining": 0,
-                            "resetAt": reset_at,
-                        },
-                    },
-                    "errors": [{"message": "API rate limit already exceeded"}],
-                }),
+                stdout=json.dumps(responses.pop(0)),
                 stderr="",
             )
         if any("heartbeat.py" in str(part) for part in argv):
@@ -420,6 +591,20 @@ def test_begin_error_after_heartbeat_start_does_not_start_a_second_run(
 
     def run(argv, **kwargs):
         calls.append(argv)
+        if argv[:3] == ["gh", "api", "graphql"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({
+                    "data": {
+                        "rateLimit": {
+                            "cost": 1,
+                            "remaining": 5_000,
+                            "resetAt": "later",
+                        },
+                    },
+                }),
+                stderr="",
+            )
         if any("heartbeat.py" in str(part) for part in argv):
             return SimpleNamespace(
                 returncode=0, stdout="already-started\n", stderr=""

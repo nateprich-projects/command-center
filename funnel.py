@@ -360,6 +360,12 @@ GH_API_CACHE_DURATION = "5m"
 ENGINEERING_RESERVE_LOADS = 20
 REVIEW_RESERVE_LOADS = 5
 
+# #1047 measured the direct GraphQL cost of one disposable begin session's
+# Project load at 42 points, including the member-repository and paged item
+# reads.  The rate-limit-only pre-read below must reserve that known load before
+# it happens; using the pre-read's own cost would reserve only one cheap query.
+BEGIN_PROJECT_LOAD_COST = 42
+
 #: Regression issues opened by `funnel reject`. The issues themselves are the
 #: counter — GitHub is the state, so there is nothing else to keep in step.
 REGRESSION_PREFIX = "Regression from PR #"
@@ -11025,6 +11031,89 @@ def _begin_preflight(
     return out, reading
 
 
+BEGIN_RATE_LIMIT_QUERY = """
+query {
+  rateLimit { cost remaining resetAt }
+}
+"""
+
+
+def _begin_api_reserve_preflight(
+    agent: str, tier: Optional[str], caller_role: Optional[str]
+) -> Optional[Dict[str, object]]:
+    """Read the GraphQL budget before ``begin`` loads the Project.
+
+    The Project load is the expensive part of an empty poll.  A rate-limit-only
+    query gives the caller one authoritative reading without paying for the
+    Project first.  Its own cost is not the cost being reserved: #1047 measured
+    the next begin load at ``BEGIN_PROJECT_LOAD_COST`` points.
+
+    A structured zero-budget response can carry both ``rateLimit`` and GraphQL
+    errors.  ``gh_graphql`` raises for the latter after preserving the former,
+    so treat that specific empty-window shape as the same clean reserve stop as
+    a successful below-floor response. Other failures remain real begin
+    errors and are handled by the existing error envelope.
+    """
+    response = None
+    try:
+        response = gh_graphql(BEGIN_RATE_LIMIT_QUERY)
+    except GitHubError:
+        if _budget_exhaustion_signal() is None:
+            raise
+
+    remaining = None
+    if isinstance(response, Mapping):
+        block = response.get("rateLimit")
+        if isinstance(block, Mapping):
+            remaining = block.get("remaining")
+    if remaining is None:
+        # The production GraphQL helper records the same block centrally. This
+        # fallback also keeps the decision correct for partial/error responses.
+        remaining = graphql_spend().get("remaining")
+
+    lane = "engineering" if begin_uses_ticket_path(
+        agent, tier, caller_role
+    ) else "review"
+    loads = (
+        ENGINEERING_RESERVE_LOADS
+        if lane == "engineering" else REVIEW_RESERVE_LOADS
+    )
+    if not isinstance(remaining, int) or isinstance(remaining, bool):
+        return {
+            "gate": "reserve",
+            "do": "stop",
+            "why": "GraphQL budget could not be read; a run that cannot "
+                   "read its budget does not work",
+        }
+
+    floor = loads * BEGIN_PROJECT_LOAD_COST
+    if remaining < floor:
+        return {
+            "gate": "reserve",
+            "do": "stop",
+            "why": "GraphQL budget {} is below the {} floor of {} "
+                   "({} loads at {} points)".format(
+                       remaining, lane, floor, loads,
+                       BEGIN_PROJECT_LOAD_COST),
+        }
+    return None
+
+
+def _record_begin_reserve(agent: str, run: Optional[str], why: object) -> None:
+    """Record and log a clean reserve stand-down without closing the run.
+
+    The wrapper owns the terminal heartbeat finish for a stopped begin.  The
+    event is still recorded here so a direct or session-backed begin leaves a
+    durable, machine-readable reason, and the stderr line stays visibly
+    distinct from a begin fault.
+    """
+    import heartbeat
+
+    note = str(why)
+    heartbeat.record_event(agent, run, "skipped-api-reserve", note=note)
+    print("funnel: skipped-api-reserve: {}".format(note), file=sys.stderr)
+
+
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
               repo_readiness: Optional[
@@ -11336,8 +11425,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     reserve = _reserve_verdict(out.get("do"))
     if reserve is not None:
         out.update(reserve)
-        heartbeat.record_event(agent, out["run"], "skipped-api-reserve",
-                               note=out["why"])
+        _record_begin_reserve(agent, out.get("run"), out["why"])
     _bind_run(agent, out)
     print(json.dumps(out, indent=2))
     return 0
@@ -11454,33 +11542,48 @@ def _reserve_verdict(do: object) -> Optional[Dict[str, object]]:
         return None
 
     spend = graphql_spend()
-    remaining = spend.get("remaining")
-    load_cost = spend.get("cost") or 0
 
     if not spend.get("calls"):
         # No GraphQL call was made, so there is no budget question to answer —
         # distinct from a call whose rate-limit block was unreadable. In a real
-        # run this cannot happen: `load_items` queries before `begin` is
-        # dispatched, and an unreachable GitHub raises there first. Failing
+        # CLI begin, the rate-limit preflight asks before `load_items`; this can
+        # still happen for a direct or embedded `cmd_begin` caller. Failing
         # closed here would refuse on the absence of a question rather than on
         # the absence of an answer.
         return None
-    if remaining is None:
+    return _reserve_verdict_for_remaining(
+        do, spend.get("remaining"), spend.get("cost") or 0
+    )
+
+
+def _reserve_verdict_for_remaining(
+    do: object, remaining: object, load_cost: object
+) -> Optional[Dict[str, object]]:
+    """Apply a reserve floor to one already-read remaining-points value."""
+    if do not in ("review", "breakdown", "shape"):
+        return None
+    if not isinstance(remaining, int) or isinstance(remaining, bool):
         # A call was made and its block could not be read. Fail closed,
         # matching the unreadable-usage branch above.
-        return {"gate": "reserve", "do": "stop",
-                "why": "GraphQL budget could not be read; a run that cannot "
-                       "read its budget does not work"}
+        return {
+            "gate": "reserve",
+            "do": "stop",
+            "why": "GraphQL budget could not be read; a run that cannot "
+                   "read its budget does not work",
+        }
 
     loads = (REVIEW_RESERVE_LOADS if do == "review"
              else ENGINEERING_RESERVE_LOADS)
     floor = loads * int(load_cost)
-    if int(remaining) < floor:
-        return {"gate": "reserve", "do": "stop",
-                "why": "GraphQL budget {} is below the {} floor of {} "
-                       "({} loads at {} points)".format(
-                           remaining, "review" if do == "review"
-                           else "engineering", floor, loads, load_cost)}
+    if remaining < floor:
+        return {
+            "gate": "reserve",
+            "do": "stop",
+            "why": "GraphQL budget {} is below the {} floor of {} "
+                   "({} loads at {} points)".format(
+                       remaining, "review" if do == "review"
+                       else "engineering", floor, loads, load_cost),
+        }
     return None
 
 
@@ -12596,6 +12699,22 @@ def main(argv: Optional[Sequence[str]] = None, *,
     if args.command == "begin":
         begin_preflight = _begin_preflight(now, args.agent, args.idle)
         if begin_preflight[1] is None:
+            print(json.dumps(begin_preflight[0], indent=2))
+            return 0
+        try:
+            begin_reserve = _begin_api_reserve_preflight(
+                args.agent, args.tier, args.caller_role
+            )
+        except GitHubError as exc:
+            _begin_error_envelope(args.agent, exc)
+            return 2
+        if begin_reserve is not None:
+            begin_preflight[0].update(begin_reserve)
+            _record_begin_reserve(
+                args.agent,
+                begin_preflight[0].get("run"),
+                begin_preflight[0]["why"],
+            )
             print(json.dumps(begin_preflight[0], indent=2))
             return 0
 

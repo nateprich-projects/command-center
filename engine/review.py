@@ -2,12 +2,12 @@
 """Assemble one read-only review packet for a PR (Phase 1 of #794).
 
 The review runner shows the model this packet and nothing else: the ticket
-body, plan.md, the diff, CI state, the newest verdict and its head, the
-changed-file overlap with every other open PR, protected-path touches, the
-stop-auto-merging counter, and the pull_request CI runs on the head.
-#798 assembled the evidence; #799 adds the deterministic pre-check rows
-the runner evaluates before any model is called. The model call itself
-comes later.
+body and its comments, plan.md, the diff, CI state, the newest verdict and
+its head, the changed-file overlap with every other open PR,
+protected-path touches, the stop-auto-merging counter, and the
+pull_request CI runs on the head. #798 assembled the evidence; #799 adds
+the deterministic pre-check rows the runner evaluates before any model is
+called. The model call itself comes later.
 
 Read-only by construction: every GitHub call here is a view, list, diff, or
 content read. Anything that changes remote state belongs in a later
@@ -92,6 +92,15 @@ REPO_PATH_RULES = (
 #: scan bound: a head older than this window may hide an overlap.
 MERGED_PR_SCAN_LIMIT = 100
 
+#: How many of the ticket's comments the packet carries, and how much of
+#: each. The newest comments win: a decision recorded late in a long ticket
+#: (#821 retiring the drift checks, which the shadow review of #985 missed
+#: in #806) is exactly what the reviewer must see. Bodies past the cap are
+#: cut with the same ``…[truncated N chars]`` mark review-apply uses, so a
+#: long ticket cannot flood the prompt.
+TICKET_COMMENT_LIMIT = 30
+TICKET_COMMENT_BODY_LIMIT = 4000
+
 #: How many pull_request runs the merged-overlap row can see. Newest first,
 #: so a head whose runs fall outside this window reads as uncovered — the
 #: fail-closed direction.
@@ -128,6 +137,49 @@ def summarize_checks(rollup: Sequence[dict]) -> List[Dict[str, Optional[str]]]:
             "status": check.get("status"),
         })
     return summarized
+
+
+def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
+    """The ticket's comments as the reviewer reads them, oldest first.
+
+    Each row keeps ``author``, ``created_at``, ``voice`` and ``body``.
+    ``voice`` is the ``command-center-provenance`` voice
+    (``nate-direct``, ``nate-relayed``, ``agent``), or ``unknown`` when
+    the comment carries no parseable marker — the GitHub login cannot
+    establish it, since agents comment under Nate's account. The marker
+    block is stripped from ``body``: it is machine text the reviewer must
+    not re-read as prose. Only the newest TICKET_COMMENT_LIMIT rows are
+    kept, and each body is capped at TICKET_COMMENT_BODY_LIMIT characters
+    with the cut marked, so a long ticket cannot flood the prompt.
+    """
+    shaped = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        author = row.get("author")
+        if isinstance(author, dict):
+            author = author.get("login")
+        elif not isinstance(author, str):
+            author = None
+        body = row.get("body") or ""
+        provenance = funnel.parse_provenance(body)
+        voice = provenance.get("voice") if provenance else "unknown"
+        for _, block in funnel._marked_json_blocks(
+                body, funnel.PROVENANCE_MARKER):
+            body = body.replace(block, "")
+        body = body.strip()
+        if len(body) > TICKET_COMMENT_BODY_LIMIT:
+            body = body[:TICKET_COMMENT_BODY_LIMIT] + (
+                "\n…[truncated {} chars]".format(
+                    len(body) - TICKET_COMMENT_BODY_LIMIT))
+        shaped.append({
+            "author": author,
+            "created_at": row.get("createdAt") or row.get("created_at"),
+            "voice": voice,
+            "body": body,
+        })
+    shaped.sort(key=lambda entry: entry.get("created_at") or "")
+    return shaped[-TICKET_COMMENT_LIMIT:]
 
 
 def parse_ci_time(value: Optional[str]) -> Optional[datetime]:
@@ -738,6 +790,11 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     number, title, mergedAt, headRefName and files [{path}]; None reads as
     no merges scanned. Rows on the candidate's own head branch become
     ``ticket_prior_prs``: the slices of this ticket that already merged.
+    ``ticket.comments`` carries the ticket's newest comments with their
+    recorded voices, shaped by ``ticket_comments``; a ticketless branch
+    gets an empty list. The PR description stays out on purpose: it is the
+    author's own claims, and a reviewer that trusts it can be argued into
+    approving.
     ``ci_runs`` rows are ``gh run list`` JSON; None reads as no runs
     scanned, which fails closed — an overlap then rejects as stale, as
     before #1019.
@@ -753,7 +810,7 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     if ticket is None:
         ticket_packet: Dict[str, Optional[object]] = {
             "ref": None, "number": None, "title": None, "url": None,
-            "body": None, "parent": None,
+            "body": None, "parent": None, "comments": [],
         }
     else:
         ticket_packet = {
@@ -763,6 +820,7 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
             "url": ticket.get("url"),
             "body": ticket.get("body"),
             "parent": ticket.get("parent"),
+            "comments": ticket_comments(ticket.get("comments")),
         }
     head = head_date(pr_view)
     assembled = {
@@ -835,10 +893,14 @@ def fetch_diff(repo: str, pr_number: int) -> str:
 
 
 def fetch_ticket(repo: str, number: int) -> dict:
-    """The ticket body behind a ticket/<n> branch, with identity and parent."""
+    """The ticket behind a ticket/<n> branch: body, identity, parent, comments.
+
+    Comments ride the ticket read, so the reviewer sees decisions recorded
+    there at no extra GitHub call.
+    """
     data = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo, "--json",
-        "number,title,url,body,parent")
+        "number,title,url,body,parent,comments")
     if not data:
         raise funnel.GitHubError(
             "could not read ticket {}#{}".format(repo, number))

@@ -4622,3 +4622,4 @@
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/career-toolset", "run": "44e390926217", "ts": 1789629369, "work": "182"}
 {"agent": "muse", "api_cost": {"gh_calls": 24, "graphql_points": 65}, "phase": "api_cost", "run": "44e390926217", "ts": 1789629372}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/career-toolset", "run": "d7c3fb8a86b4", "ts": 1789629387, "work": "182"}
+{"agent": "muse", "api_cost": {"gh_calls": 25, "graphql_points": null}, "phase": "api_cost", "run": "d7c3fb8a86b4", "ts": 1789629391}

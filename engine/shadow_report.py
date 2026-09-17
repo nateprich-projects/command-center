@@ -10,9 +10,11 @@ are separated later.
 The optional ``breakdown-shape`` mode reads the corresponding issue jobs from
 the same streams and reports the three-part outcome agreement defined by the
 breakdown/shape cutover plan.  Breakdown jobs compare ticket count and
-``needs_decision``; live shape outcomes are read from the Project Status field
-at report time and accepted only when the status transition falls inside the
-live shape job, so an old read cannot become false agreement.
+``needs_decision``; live breakdown and shape outcomes prefer the structured
+fields recorded on the finish, with the older Project Status and note reads
+remaining as fallbacks.  A fallback live shape status is accepted only when
+the status transition falls inside the live shape job, so an old read cannot
+become false agreement.
 
 Only completed review jobs inside the requested window count.  A missing or
 ambiguous verdict is not silently treated as a rejection: it is excluded from
@@ -699,6 +701,25 @@ def _shadow_shape_status(finish: Dict) -> Optional[str]:
     return _shape_status(match.group("status")) if match else None
 
 
+def _live_shape_status(finish: Dict) -> Optional[str]:
+    """Read the status shape-apply recorded, before any late Project read."""
+    for key in (
+        "shape_status", "shape_result", "shape_outcome", "project_status",
+        "status",
+    ):
+        status = _shape_status(finish.get(key))
+        if status:
+            return status
+
+    payload = _answer_payload(finish)
+    if isinstance(payload, dict):
+        for key in ("shape_status", "shape_result", "shape_outcome", "status"):
+            status = _shape_status(payload.get(key))
+            if status:
+                return status
+    return None
+
+
 def _normalized_question(value: object) -> Optional[str]:
     """Normalise a needs-decision question exactly as the plan specifies."""
     if value is None:
@@ -1187,15 +1208,23 @@ def _live_breakdown_observation(
     data_supplied = live_issue_data is not None
     if mapped is _COMPARISON_UNREADABLE:
         return _COMPARISON_UNREADABLE
-    if data_supplied and mapped is _MISSING:
-        # A supplied pre-read map is authoritative.  Its omission means that
-        # the live issue set could not be read, not that it was empty.
-        return _COMPARISON_UNREADABLE
-
     note_source = _note_answer(note)
     structured = _structured_issue_source(finish)
     if structured is _COMPARISON_UNREADABLE:
         return _COMPARISON_UNREADABLE
+    if data_supplied and mapped is _MISSING:
+        # A supplied pre-read map remains authoritative for older records, but
+        # a complete outcome written on the finish is durable enough to use
+        # when the later issue read has no entry.
+        if not isinstance(structured, Mapping):
+            return _COMPARISON_UNREADABLE
+        structured_count = _source_ticket_count(structured)
+        structured_question = _question_value(structured)
+        if (
+            structured_count in (_MISSING, _COMPARISON_UNREADABLE)
+            or structured_question in (_MISSING, _COMPARISON_UNREADABLE)
+        ):
+            return _COMPARISON_UNREADABLE
 
     source: Dict[str, object] = {}
     if mapped is not _MISSING:
@@ -1404,11 +1433,11 @@ def build_breakdown_shape_report(
     """Build the breakdown/shape report from already-read observations.
 
     The builder is fixture-pure.  ``live_issue_data`` and
-    ``live_shape_statuses`` are optional caller-supplied reads for the live
-    breakdown issue set and Project status.  A supplied map is authoritative:
-    missing data is unreadable rather than an empty result.  Shape statuses
-    are accepted only when their transition falls between the live shape
-    job's start and finish.
+    ``live_shape_statuses`` are optional caller-supplied reads for older live
+    records.  Complete structured outcomes on a finish take precedence; a
+    supplied map remains authoritative when those fields are absent.  Shape
+    statuses from the fallback map are accepted only when their transition
+    falls between the live shape job's start and finish.
     """
     start, end = window_bounds(
         now=now, window_seconds=window_seconds, since=since, until=until
@@ -1430,13 +1459,21 @@ def build_breakdown_shape_report(
               if job.get("kind") == "shape" else None)
         for job in shadow
     }
-    live_observations = {
-        id(job): _live_breakdown_observation(job, live_issue_data)
-        if job.get("kind") == "breakdown"
-        else (job.get("shape_status")
-              if job.get("kind") == "shape" else None)
-        for job in live
-    }
+    live_observations = {}
+    for job in live:
+        if job.get("kind") == "breakdown":
+            live_observations[id(job)] = _live_breakdown_observation(
+                job, live_issue_data
+            )
+        elif job.get("kind") == "shape":
+            # A finish field is the outcome at the time of the mutation.  The
+            # current Project read is only for older heartbeat records.
+            live_observations[id(job)] = (
+                _live_shape_status(job.get("finish") or {})
+                or job.get("shape_status")
+            )
+        else:
+            live_observations[id(job)] = None
 
     comparison_pairs = _comparison_pairs(pairs)
     comparable = []
@@ -1535,9 +1572,9 @@ def build_report(
     recorded on the job; an absent or mismatched value leaves the heartbeat
     decision as the fallback.
     ``live_issue_data`` and ``live_shape_statuses`` are the corresponding
-    caller-supplied maps for breakdown issue sets and live shape jobs.  Shape
-    observations must include a transition timestamp so stale reads are
-    rejected.
+    caller-supplied maps for older breakdown issue sets and live shape jobs.
+    Complete finish fields take precedence; fallback shape observations must
+    include a transition timestamp so stale reads are rejected.
     """
     if mode == "breakdown-shape":
         return build_breakdown_shape_report(

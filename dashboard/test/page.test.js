@@ -107,6 +107,16 @@ test("the sub-issue bar fills its column rather than capping its pips", async ()
   assert.match(css, /\.pip-bar \.pip \{ flex: 1 1 0;/);
 });
 
+test("the phone progress shows its count once (#994)", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const progress = source.slice(
+    source.indexOf("function phoneProgress("), source.indexOf("function phoneDetails("),
+  );
+  assert.match(progress, /pips\(item, children, closed, total\)/);
+  assert.doesNotMatch(progress, /`\$\{closed\}\/\$\{total\}`\)\);/);
+  assert.match(source, /element\("span", "pip-count", `\$\{closed\}\/\$\{total\}`\)/);
+});
+
 test("the page polls its own snapshot and re-renders only on a new timestamp", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(source, /setInterval/);

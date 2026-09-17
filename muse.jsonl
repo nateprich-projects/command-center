@@ -4195,3 +4195,4 @@
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/jeffy-finance-agent", "run": "d0a73d6d3c81", "ts": 1789618258, "work": "127"}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/jeffy-finance-agent", "run": "d0a73d6d3c81", "ts": 1789618258, "work": "127"}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/jeffy-finance-agent", "run": "e5067f8d958d", "ts": 1789618261, "work": "127"}
+{"agent": "muse", "api_cost": {"gh_calls": 25, "graphql_points": 62}, "phase": "api_cost", "run": "e5067f8d958d", "ts": 1789618264}

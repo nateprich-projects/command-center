@@ -6404,3 +6404,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 76}, "phase": "api_cost", "run": "04b8e94171de", "ts": 1789675888}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/The-League", "run": "3ebe2aa2d84d", "ts": 1789675894, "work": "215"}
 {"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": null}, "phase": "api_cost", "run": "3ebe2aa2d84d", "ts": 1789675898}
+{"agent": "muse", "attempt": null, "escalated_from": null, "harness": "muse-code", "model": "muse-spark-1.3", "model_source": "detected", "phase": "start", "provider": "meta", "reasoning_effort": null, "repo": {"dirty": 0, "head": "6d24632eaa78"}, "run": "7c4efe40c14e", "runtime": {"head": "6d24632eaa78", "root": "/Users/nateprich/.claude/command-center-run"}, "session_id": null, "ticket": null, "ts": 1789675921, "usage": {"source": "meta", "unmetered": true}}

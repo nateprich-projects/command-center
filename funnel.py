@@ -311,6 +311,11 @@ MAINTENANCE_WINDOW = timedelta(days=30)
 # funnel state. Keep the board order separate from the funnel's decision order:
 # the dashboard puts Parked before the recent Done column.
 DASHBOARD_SPOOL_ENV = "COMMAND_CENTER_DASHBOARD_SPOOL"
+#: Entries kept in the dashboard spool after each write. Readers only want the
+#: newest, but each one parses every entry to find it, and a brief is about
+#: 500 KB, so an unpruned spool grew by 72 MB a day (#979).
+DASHBOARD_SPOOL_KEEP = 50
+_DASHBOARD_SPOOL_ENTRY = re.compile(r"^brief-(\d+)-[0-9a-f]+\.json$")
 DASHBOARD_BOARD_STAGES = ("Ideas", "Shaped", "Ready", "Building", "Parked", "Done")
 DASHBOARD_DONE_WINDOW = timedelta(days=7)
 
@@ -6601,7 +6606,34 @@ def write_dashboard_snapshot(
         except OSError:
             pass
         raise
+    _prune_dashboard_spool(spool_dir, keep=target.name)
     return target
+
+
+def _prune_dashboard_spool(spool_dir: pathlib.Path, keep: str) -> None:
+    """Delete all but the newest ``DASHBOARD_SPOOL_KEEP`` spool entries.
+
+    Best effort: the snapshot is already written, so a failure here is
+    reported and never raised. Only ``brief-<time_ns>-<hex>.json`` names are
+    touched, ordered by their write time, and ``keep`` always survives.
+    """
+    try:
+        entries = []
+        for name in os.listdir(spool_dir):
+            match = _DASHBOARD_SPOOL_ENTRY.match(name)
+            if match:
+                entries.append((int(match.group(1)), name))
+        entries.sort(reverse=True)
+        for _, name in entries[DASHBOARD_SPOOL_KEEP:]:
+            if name == keep:
+                continue
+            try:
+                (spool_dir / name).unlink()
+            except FileNotFoundError:
+                pass
+    except OSError as exc:
+        print("funnel: could not prune dashboard spool: {}".format(exc),
+              file=sys.stderr)
 
 
 def _snapshot_generated_at(value: object) -> Optional[float]:

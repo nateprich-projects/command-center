@@ -25,6 +25,7 @@ the plan rejected?
   `nate-relayed` comment is a decision that can amend the ticket body;
   an `agent` or `unknown` comment is context that needs evidence in
   the diff.
+- Check `ticket.parent.comments` for Accept artifacts named on the parent.
 - `plan_md` is the design the ticket was broken down from. When
   `plan_md_missing` is true, judge against the ticket alone.
 - `diff` and `changed_files` are the proposed change at `head_sha`.

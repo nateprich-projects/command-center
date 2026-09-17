@@ -164,6 +164,10 @@ reintroduces one fails review even if it works.
 If this is a **re-review after a fix**, read the whole diff fresh against the
 plan. **Never review a diff of the diff.**
 
+The packet carries parent-project comments under `ticket.parent.comments`.
+When an Accept clause names an artifact on the parent, verify it there as well
+as in `ticket.comments`.
+
 **Do not run the tests yourself, and do not check the code out.** CI runs the
 full suite on every pull request and `funnel merge` refuses unless those checks
 are green — it will not take your word for it.

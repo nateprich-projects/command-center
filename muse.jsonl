@@ -5741,3 +5741,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 73}, "phase": "api_cost", "run": "e2baa62913b0", "ts": 1789657582}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/FF-Weekly-Start-Sit", "run": "e2baa62913b0", "ts": 1789657578, "work": "111"}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/FF-Weekly-Start-Sit", "run": "608286193730", "ts": 1789657581, "work": "111"}
+{"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 73}, "phase": "api_cost", "run": "608286193730", "ts": 1789657593}

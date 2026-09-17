@@ -5480,3 +5480,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 27, "graphql_points": 76}, "phase": "api_cost", "run": "9bbc5043e150", "ts": 1789650682}
 {"agent": "muse", "do": "shape", "phase": "bind", "run": "9bbc5043e150", "ts": 1789650678, "work": "nateprich-projects/command-center#1028"}
 {"agent": "muse", "do": "shape", "phase": "bind", "run": "bf951c8b72ee", "ts": 1789650681, "work": "nateprich-projects/command-center#1028"}
+{"agent": "muse", "api_cost": {"gh_calls": 28, "graphql_points": null}, "phase": "api_cost", "run": "bf951c8b72ee", "ts": 1789650692}

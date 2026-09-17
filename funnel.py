@@ -11899,14 +11899,15 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
             item.children_done, item.children_total))
         # One scan per repo rather than one lookup per child: a project with
         # twenty tickets cost twenty requests here.
-        indexes: Dict[str, Dict[str, Dict]] = {}
+        indexes: Dict[str, Tuple[Dict[str, Dict], bool]] = {}
         for child in children:
             mark = "x" if child["state"] == "CLOSED" else " "
             print("  [{}] #{} {}".format(mark, child["number"], child["title"]))
             child_repo = child["repository"]["nameWithOwner"]
             if child_repo not in indexes:
-                indexes[child_repo] = ticket_pr_index(child_repo)[0]
-            pr = indexes[child_repo].get(
+                indexes[child_repo] = ticket_pr_index(child_repo)
+            index, truncated = indexes[child_repo]
+            pr = index.get(
                 "{}#{}".format(child_repo, child["number"]))
             if pr:
                 print("        PR #{} {}{}".format(
@@ -11917,7 +11918,11 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
                     if text:
                         print("        review: {}".format(text[:200]))
             elif child["state"] == "CLOSED":
-                print("        closed with no ticket/* PR -- check why")
+                if truncated:
+                    print("        PR state unknown -- ticket-PR scan truncated "
+                          "at {} rows".format(MERGED_PR_SCAN_LIMIT))
+                else:
+                    print("        closed with no ticket/* PR -- check why")
         print("")
 
     comments = (_gh_json("gh", "issue", "view", str(item.number), "--repo",

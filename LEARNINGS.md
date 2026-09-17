@@ -8,6 +8,20 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Sol's schedules are retired; Luna now fires every 10 minutes
+
+**2026-09-17 · Codex app automations · measured**
+
+With Muse merging escalated tickets since PR #851 (2026-09-14 15:45Z), #722 retired the
+four time-of-day Codex Sol lanes. Nate paused them in the app, and all four
+`~/.codex/automations/command-center-tickets-*/automation.toml` files now read
+`status = "PAUSED"`. The all-day Luna lane moved from `BYMINUTE=0,20,40` to
+`BYMINUTE=0,10,20,30,40,50`. The Luna schedule was edited on disk with the app fully
+quit, and the value was still there after relaunch. Nate could not set a 10-minute
+interval from the app's schedule editor, so that is the way to set it. The 20-minute figures in the
+older entries below are the cadence as it was when they were measured. Plan #529's
+one-week self-review clock started on or before 2026-09-14.
+
 ### `funnel doctor` after measurement misses the planned whole-run saving
 
 **2026-09-17 · GitHub GraphQL · measured**

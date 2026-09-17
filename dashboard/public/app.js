@@ -59,11 +59,13 @@ function shortRepo(value) {
 }
 
 // A ticket's pip state, which is also its row flag: closed work is solid, a PR
-// waiting on the reviewer is light blue, an approved PR light purple.
+// waiting on the reviewer is light blue, a rejected current head is danger
+// red, and an approved PR is light purple.
 function pipState(ticket) {
   if (!ticket || typeof ticket !== "object") return "open";
   if (ticket.state !== "OPEN") return "closed";
   if (ticket.pr === "approved") return "approved";
+  if (ticket.pr === "changes requested") return "changes-requested";
   if (ticket.pr === "submitted" || ticket.pr === "merged") return "submitted";
   if (ticket.blocked) return "blocked";
   return "open";
@@ -75,7 +77,8 @@ function rowPrState(tickets) {
   let found = null;
   for (const ticket of tickets || []) {
     if (ticket.pr === "approved") return "approved";
-    if (ticket.pr === "submitted") found = "submitted";
+    if (ticket.pr === "changes requested") found = "changes requested";
+    if (ticket.pr === "submitted" && !found) found = "submitted";
   }
   return found;
 }
@@ -173,7 +176,8 @@ function prCell(state, number) {
     // The scan failed, so this is not "no PR": say so rather than implying it.
     return chip("?", "chip-pr chip-pr-unknown", "PR state could not be read");
   }
-  return chip(state, `chip-pr chip-pr-${state}`, number ? `PR #${number}` : null);
+  const classState = state === "changes requested" ? "changes-requested" : state;
+  return chip(state, `chip-pr chip-pr-${classState}`, number ? `PR #${number}` : null);
 }
 
 // Escalated is the exception worth a chip; standard stays quiet text so a

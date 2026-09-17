@@ -447,6 +447,11 @@ REJECTED_MERGE_WINDOW = timedelta(days=7)
 #: Nate could reasonably see it.
 CLOSED_ITSELF_WINDOW = timedelta(days=7)
 
+# The approve gate may adopt exactly one explicit class proposal. Keep the
+# human override visible in the durable record rather than treating the write
+# as an inferred classification.
+CLASS_ADOPTION_OVERRIDE_NOTE = "Nate may override it at any time."
+
 # The auto-close writer appends its marker when it closes a project. Reading a
 # bounded tail is enough to retain that write while preventing one unusually
 # noisy issue from expanding a gate read without limit.
@@ -2409,6 +2414,21 @@ def self_approval_comment(basis: str, at: Optional[datetime] = None,
         SELF_APPROVED_PREFIX + basis.strip(), "agent",
         at=at, run=run, agent=agent,
     )
+
+
+def class_adoption_comment(
+    klass: str, source_line: str, at: Optional[datetime] = None,
+) -> str:
+    """Build the durable record for a class adopted at Nate's approve gate."""
+    if klass not in LADDER:
+        raise ValueError("unknown adopted class {!r}".format(klass))
+    if not isinstance(source_line, str) or not source_line.strip():
+        raise ValueError("class adoption source line must not be empty")
+    body = (
+        "**Class adopted:** {}\n\n"
+        "Source line: `{}`\n\n{}"
+    ).format(klass, source_line.strip(), CLASS_ADOPTION_OVERRIDE_NOTE)
+    return append_provenance(body, "nate-relayed", at=at)
 
 
 def origin_block(voice: str, at: Optional[datetime] = None,
@@ -6990,6 +7010,10 @@ PROPOSED_CLASS_RE = re.compile(
     r"^[ \t]*Proposed[ \t]+class:[ \t]*\S.*$",
     re.IGNORECASE | re.MULTILINE,
 )
+PROPOSED_CLASS_LINE_RE = re.compile(
+    r"^[ \t]*Proposed[ \t]+class:[ \t]*(?P<value>.*?)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _prose_dependency_sentences(body: str) -> Iterable[Tuple[str, List[str]]]:
@@ -7096,6 +7120,32 @@ def check_prose_dependencies(items: Iterable[Item]) -> Check:
 def has_proposed_class(plan: str) -> bool:
     """Whether a plan gives Nate a non-empty ``Proposed class:`` line."""
     return isinstance(plan, str) and PROPOSED_CLASS_RE.search(plan) is not None
+
+
+def proposed_class_for_approval(
+    plan: object,
+) -> Optional[Tuple[str, str]]:
+    """Return one exact class proposal and its source line, or ``None``.
+
+    Approval may fill an unset Project Class only from an explicit, whole-line
+    proposal. A malformed proposal, a fuzzy value, or more than one proposal
+    is ambiguous and therefore stays with Nate instead of becoming an
+    inference from plan prose.
+    """
+    if not isinstance(plan, str):
+        return None
+
+    matches: List[Tuple[str, str]] = []
+    for raw_line in plan.splitlines():
+        match = PROPOSED_CLASS_LINE_RE.fullmatch(raw_line)
+        if match is None:
+            continue
+        value = match.group("value").strip()
+        if value not in LADDER:
+            return None
+        matches.append((value, raw_line.strip()))
+
+    return matches[0] if len(matches) == 1 else None
 
 
 def capture_origin(item: Item) -> str:
@@ -11978,6 +12028,12 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
     if not item.item_id:
         raise GitHubError("{} is not in the Project".format(item.ref))
 
+    adoption = (
+        proposed_class_for_approval(item.body)
+        if verb == "approve" and item.klass not in LADDER
+        else None
+    )
+
     if verb == "accept" and not item.children_all_closed:
         if item.children_total == 0 and no_tickets:
             # Deliberate escape hatch, and narrow. A project with *open* tickets
@@ -12013,6 +12069,13 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
             print("  {}".format(signal))
 
     if not confirmed:
+        if adoption is not None:
+            adopted_class, source_line = adoption
+            print(
+                "would adopt Class {} from source line `{}`; {}".format(
+                    adopted_class, source_line, CLASS_ADOPTION_OVERRIDE_NOTE
+                )
+            )
         print("would move {} from {} to {} ({})".format(
             item.ref, expected, nxt, meaning))
         if no_tickets:
@@ -12023,8 +12086,43 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
         print("\nNothing was changed. Re-run with --yes to answer the gate.")
         return 1
 
+    if adoption is not None:
+        adopted_class, source_line = adoption
+        gh_graphql(
+            SET_FIELD,
+            project=PROJECT_ID,
+            item=item.item_id,
+            field=CLASS_FIELD_ID,
+            option=_option_id(CLASS_FIELD_ID, adopted_class),
+        )
+        item.klass = adopted_class
+        print(
+            "adopted Class {} from source line `{}`; {}".format(
+                adopted_class, source_line, CLASS_ADOPTION_OVERRIDE_NOTE
+            )
+        )
+
     gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
                field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, nxt))
+
+    if adoption is not None:
+        adopted_class, source_line = adoption
+        comment = _run_gh(
+            [
+                "gh", "issue", "comment", str(item.number), "--repo", item.repo,
+                "--body", class_adoption_comment(
+                    adopted_class, source_line, at=now
+                ),
+            ],
+            capture_output=True, text=True,
+        )
+        if comment.returncode != 0:
+            raise GitHubError(
+                "moved {} to Ready and adopted Class {}, but could not record "
+                "the class adoption comment: {}".format(
+                    item.ref, adopted_class, comment.stderr.strip()
+                )
+            )
 
     if verb == "accept":
         # Done and Parked must stay distinguishable: `completed` here,

@@ -606,6 +606,35 @@ def test_ready_and_building_parents_are_both_startable():
         [project(1, "Building", "New"), ticket(2, 1)])] == [2]
 
 
+def test_an_unclassed_parent_is_not_startable():
+    """plan.md: an unset Class is invalid and must not enter Building."""
+    for status in ("Ready", "Building"):
+        rows = [project(1, status, None), ticket(2, 1)]
+        assert startable(rows) == [], status
+
+
+def test_a_classed_parent_remains_startable():
+    rows = [project(1, "Ready", "Improve"), ticket(2, 1)]
+
+    assert [candidate.number for candidate in startable(rows)] == [2]
+
+
+def test_a_ready_unclassed_no_proposal_parent_stays_with_nate():
+    """The no-Proposed-class residual cannot hand its ticket to an agent."""
+    parent = item(
+        1,
+        "Ready",
+        None,
+        body="# Plan\n\n## Needs you\n\nChoose a direction.\n",
+        children_total=1,
+    )
+    child = ticket(2, 1)
+
+    assert needs_class(parent)
+    assert startable([parent, child]) == []
+    assert parent.status == "Ready"
+
+
 def test_startable_withholds_only_repos_missing_blocking_readiness():
     no_ci = "owner/no-ci"
     advisory = "owner/advisory"

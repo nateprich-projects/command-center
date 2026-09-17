@@ -96,6 +96,115 @@ def test_show_carries_the_breakdown_question(monkeypatch, capsys):
     assert "NEEDS DECISION: Where should this connector live?" in output
 
 
+def test_show_marks_missing_closed_tickets_unknown_on_truncated_scan(
+    monkeypatch, capsys
+):
+    item = Item(
+        repo="nateprich/beta",
+        number=10,
+        title="A project with old tickets",
+        url="https://github.com/nateprich/beta/issues/10",
+        state="OPEN",
+        status="Ready",
+        status_since=NOW,
+        children_total=2,
+        children_done=2,
+    )
+    children = [
+        {
+            "number": 101,
+            "title": "An older merged ticket",
+            "state": "CLOSED",
+            "repository": {"nameWithOwner": "nateprich/beta"},
+        },
+        {
+            "number": 102,
+            "title": "Another older merged ticket",
+            "state": "CLOSED",
+            "repository": {"nameWithOwner": "nateprich/beta"},
+        },
+    ]
+
+    monkeypatch.setattr(
+        funnel,
+        "gh_graphql",
+        lambda *args, **kwargs: {
+            "repository": {"issue": {"subIssues": {"nodes": children}}}
+        },
+    )
+    monkeypatch.setattr(
+        funnel, "ticket_pr_index", lambda repo: ({}, True)
+    )
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: {"comments": []})
+
+    assert funnel.cmd_show([item], NOW, item.ref) == 0
+
+    output = capsys.readouterr().out
+    assert output.count(
+        "PR state unknown -- ticket-PR scan truncated at 100 rows"
+    ) == 2
+    assert "closed with no ticket/* PR -- check why" not in output
+
+
+def test_show_keeps_exact_complete_scan_paths(monkeypatch, capsys):
+    item = Item(
+        repo="nateprich/beta",
+        number=11,
+        title="A project with current tickets",
+        url="https://github.com/nateprich/beta/issues/11",
+        state="OPEN",
+        status="Ready",
+        status_since=NOW,
+        children_total=2,
+        children_done=2,
+    )
+    children = [
+        {
+            "number": 201,
+            "title": "A ticket with its PR",
+            "state": "CLOSED",
+            "repository": {"nameWithOwner": "nateprich/beta"},
+        },
+        {
+            "number": 202,
+            "title": "A ticket without a ticket branch",
+            "state": "CLOSED",
+            "repository": {"nameWithOwner": "nateprich/beta"},
+        },
+    ]
+
+    monkeypatch.setattr(
+        funnel,
+        "gh_graphql",
+        lambda *args, **kwargs: {
+            "repository": {"issue": {"subIssues": {"nodes": children}}}
+        },
+    )
+    monkeypatch.setattr(
+        funnel,
+        "ticket_pr_index",
+        lambda repo: (
+            {
+                "nateprich/beta#201": {
+                    "number": 301,
+                    "state": "MERGED",
+                    "mergedAt": "2026-09-01T00:00:00Z",
+                    "reviews": [],
+                }
+            },
+            False,
+        ),
+    )
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: {"comments": []})
+
+    assert funnel.cmd_show([item], NOW, item.ref) == 0
+
+    output = capsys.readouterr().out
+    assert "PR #301 merged (merged)" in output
+    assert "closed with no ticket/* PR -- check why" in output
+    assert "PR state unknown -- ticket-PR scan truncated" not in output
+
+
 def test_start_command_is_rejected_by_argument_parsing(monkeypatch, capsys):
     monkeypatch.setattr(
         funnel, "load_items", lambda: pytest.fail("GitHub should not be loaded")

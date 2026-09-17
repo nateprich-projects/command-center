@@ -308,6 +308,16 @@ week means stop auto-merging and fix the review prompt. One action from the brie
 reopens the ticket, returns the parent to Building, files the regression against the
 merged PR, and increments a visible counter.
 
+**A PR that overlaps a newer merge is stale only when it cannot prove otherwise.**
+When another PR touching the same files merges after the candidate's head, the
+candidate passes review without merging `main` first when (a) GitHub reports the
+branch `MERGEABLE` and (b) a green `pull_request` CI run on the head started after
+that merge, so the merge commit it tested was built against a `main` containing the
+overlap. When the branch is clean but no green run yet covers the merge, the review
+runner re-runs the PR's CI once and waits for the result, so the engineer needs no
+rebase. A conflicting branch rejects as stale, as before. **Confirmed by Nate,
+2026-09-17 (#1019).**
+
 ### Execution rules
 
 - **In-app scheduling only** — Claude Code Routines and Codex Scheduled. Both require
@@ -643,8 +653,29 @@ invalid, not startable, and surfaces in the brief as a one-word fix.
 **Unset must never default to `Broken`** — a forgotten field must not silently
 acquire preemption rights.
 
-The one case where `Class` is written by code rather than by Nate: the rejected-merge
-flow sets `Class: Broken` mechanically.
+**An explicit proposal may be adopted at approval.** Nate confirmed on 2026-09-16
+that when he leaves `Class` unset, the plan's recommendation should be adopted.
+This supersedes #477's earlier rule on this point — that Nate-origin ideas stay
+unclassed for him and that no Class is inferred from proposal text — while leaving
+#477's history intact. _(confirmed by Nate 2026-09-16)_
+
+During an explicit `funnel approve --yes`, when `Class` is unset and the plan
+contains exactly one non-empty whole line of the form `Proposed class: <one ladder
+class>`, the funnel adopts the named class before the normal `Status` write and
+records that source line in its output and the issue comment. The name must exactly
+match one of `Investigate`, `Broken`, `Maintenance`, `Improve`, `New`, or `Replace`.
+A missing, blank, malformed, fuzzy, or multiple proposal stays unset for Nate;
+titles, body prose, and other proposal text never supply the value. Nate may
+override it at any time.
+
+Adoption fills a field; it is not itself a gate decision. It never satisfies the
+`Shaped` plan-good gate or auto-advances a Nate-origin item to `Ready`. If Nate
+explicitly authorises the `approve` gate, that command's normal Status transition
+may still occur — the transition comes from his gate answer, not from adoption.
+This preserves the #59 no-auto-advance brake.
+
+Outside approval-time adoption, the rejected-merge flow is a separate mechanical
+exception: it sets `Class: Broken`.
 
 _Rejected: six labels (`investigate`, `broken`, `maintenance`, `improve`, `new`,
 `replace`). A single-select cannot be self-contradictory; six labels permit `broken` +

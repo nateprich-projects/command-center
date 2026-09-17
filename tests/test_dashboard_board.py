@@ -70,6 +70,65 @@ def test_an_open_pr_reads_submitted_and_an_approved_head_reads_approved():
     assert pr == {11: "submitted", 12: "approved", 13: "submitted"}
 
 
+def test_a_current_rejection_requests_changes_and_hands_work_to_the_implementer():
+    facts = {
+        REPO + "#11": {
+            "state": "OPEN", "number": 7, "headRefOid": "abc",
+            "verdict": {"verdict": "rejected", "head_sha": "abc"},
+        },
+        REPO + "#12": {
+            "state": "OPEN", "number": 8, "headRefOid": "def",
+            "verdict": {"verdict": "rejected", "head_sha": "def"},
+            "body": "Generated with [Claude Code](https://claude.com/claude-code)",
+        },
+        REPO + "#13": {
+            "state": "OPEN", "number": 9, "headRefOid": "ghi",
+            "verdict": {"verdict": "rejected", "head_sha": "ghi"},
+        },
+        REPO + "#14": {
+            "state": "OPEN", "number": 10, "headRefOid": "jkl",
+            "verdict": {"verdict": "rejected", "head_sha": "older"},
+        },
+        REPO + "#15": {
+            "state": "OPEN", "number": 11, "headRefOid": "mno",
+        },
+    }
+    found = rows([
+        project(),
+        ticket(11), ticket(12), ticket(13, body="Risk: escalated — concurrency"),
+        ticket(14), ticket(15),
+    ], facts)
+    by_number = {t["number"]: t for t in found[0]["tickets"]}
+    assert by_number[11]["pr"] == "changes requested"
+    assert by_number[11]["owner"] == "Codex"
+    assert by_number[11]["queue_rank"] == 0
+    assert by_number[12]["pr"] == "changes requested"
+    assert by_number[12]["owner"] == "Claude"
+    assert by_number[13]["pr"] == "changes requested"
+    assert by_number[13]["owner"] == "Muse"
+    assert by_number[14]["pr"] == "submitted"
+    assert by_number[14]["owner"] == "Muse"
+    assert by_number[15]["pr"] == "submitted"
+    assert by_number[15]["owner"] == "Muse"
+
+
+def test_runner_attribution_hands_rejected_work_back_to_the_authoring_agent():
+    facts = {
+        REPO + "#11": {
+            "state": "OPEN", "number": 7, "headRefOid": "abc",
+            "verdict": {"verdict": "rejected", "head_sha": "abc"},
+        },
+    }
+    found = funnel.dashboard_board(
+        [project(), ticket(11)], NOW, pr_facts=facts,
+        authoring_pr_agents={"7": {"claude"}},
+    )
+    column = next(c for c in found["columns"] if c["stage"] == "Building")
+    ticket_row = column["items"][0]["tickets"][0]
+    assert ticket_row["pr"] == "changes requested"
+    assert ticket_row["owner"] == "Claude"
+
+
 def test_a_merged_pr_and_no_pr_are_distinct():
     facts = {REPO + "#11": {"state": "MERGED", "number": 7}}
     found = rows([project(), ticket(11, state="CLOSED"), ticket(12)], facts)
@@ -240,13 +299,14 @@ def test_bar_segments_rank_by_how_far_the_work_has_travelled():
     assert row["pips"] == ["approved", "submitted", "open"]
 
 
-def bar_for(closed=0, approved=0, submitted=0, blocked=0, open_=0):
+def bar_for(closed=0, approved=0, changes_requested=0, submitted=0,
+            blocked=0, open_=0):
     rows = []
     number = 10
     for _ in range(closed):
         number += 1
         rows.append(ticket(number, state="CLOSED"))
-    for _ in range(approved + submitted + blocked + open_):
+    for _ in range(approved + changes_requested + submitted + blocked + open_):
         number += 1
         rows.append(ticket(number))
     facts = {}
@@ -256,6 +316,12 @@ def bar_for(closed=0, approved=0, submitted=0, blocked=0, open_=0):
         facts[rows[index].ref] = {
             "state": "OPEN", "number": index, "headRefOid": "a",
             "verdict": {"verdict": "approved", "head_sha": "a"},
+        }
+    for _ in range(changes_requested):
+        index += 1
+        facts[rows[index].ref] = {
+            "state": "OPEN", "number": index, "headRefOid": "a",
+            "verdict": {"verdict": "rejected", "head_sha": "a"},
         }
     for _ in range(submitted):
         index += 1
@@ -277,9 +343,10 @@ def test_a_large_project_gets_a_proportional_bar_not_one_pip_per_ticket():
 
 
 def test_in_flight_work_keeps_a_segment_and_sits_at_the_end_of_the_colour():
-    bar = bar_for(closed=30, approved=2, submitted=3, open_=9)
+    bar = bar_for(closed=30, approved=2, changes_requested=2, submitted=3, open_=7)
     assert len(bar) == funnel.PIP_SEGMENTS
-    assert bar.count("approved") >= 1 and bar.count("submitted") >= 1
+    assert bar.count("approved") >= 1
+    assert bar.count("changes-requested") >= 1 and bar.count("submitted") >= 1
     # The coloured run ends with the work in flight, then the open remainder.
     assert bar.index("approved") > bar.index("closed")
     assert bar.index("submitted") > bar.index("approved")

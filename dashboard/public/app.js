@@ -59,11 +59,13 @@ function shortRepo(value) {
 }
 
 // A ticket's pip state, which is also its row flag: closed work is solid, a PR
-// waiting on the reviewer is light blue, an approved PR light purple.
+// waiting on the reviewer is light blue, a rejected current head is danger
+// red, and an approved PR is light purple.
 function pipState(ticket) {
   if (!ticket || typeof ticket !== "object") return "open";
   if (ticket.state !== "OPEN") return "closed";
   if (ticket.pr === "approved") return "approved";
+  if (ticket.pr === "changes requested") return "changes-requested";
   if (ticket.pr === "submitted" || ticket.pr === "merged") return "submitted";
   if (ticket.blocked) return "blocked";
   return "open";
@@ -75,7 +77,8 @@ function rowPrState(tickets) {
   let found = null;
   for (const ticket of tickets || []) {
     if (ticket.pr === "approved") return "approved";
-    if (ticket.pr === "submitted") found = "submitted";
+    if (ticket.pr === "changes requested") found = "changes requested";
+    if (ticket.pr === "submitted" && !found) found = "submitted";
   }
   return found;
 }
@@ -173,7 +176,8 @@ function prCell(state, number) {
     // The scan failed, so this is not "no PR": say so rather than implying it.
     return chip("?", "chip-pr chip-pr-unknown", "PR state could not be read");
   }
-  return chip(state, `chip-pr chip-pr-${state}`, number ? `PR #${number}` : null);
+  const classState = state === "changes requested" ? "changes-requested" : state;
+  return chip(state, `chip-pr chip-pr-${classState}`, number ? `PR #${number}` : null);
 }
 
 // Escalated is the exception worth a chip; standard stays quiet text so a
@@ -291,6 +295,20 @@ function phoneField(label, value) {
   return field;
 }
 
+// Several short facts on one row, each with its label above its value.
+function phoneMeta(pairs) {
+  const row = element("div", "phone-meta");
+  for (const [label, value] of pairs) {
+    const field = element("div", "phone-meta-field");
+    field.append(element("dt", "phone-label", label));
+    const content = element("dd", "phone-value");
+    content.append(value || element("span", "muted", "—"));
+    field.append(content);
+    row.append(field);
+  }
+  return row;
+}
+
 function phoneProgress(item, children) {
   const { closed, total } = phoneCounterParts(item, children);
   const value = pips(item, children, closed, total);
@@ -307,19 +325,20 @@ function phoneDetails(item, inheritedClass, children) {
   const project = !Number.isFinite(item && item.number);
   const className = item && item.class || inheritedClass;
 
+  // No PR field, and the short facts share one row (Nate, 2026-09-17, #990).
   if (project) {
-    fields.append(phoneField("PR", prCell(rowPrState(children))));
-    fields.append(phoneField("Tier", tierCell(rowTier(children))));
-    fields.append(phoneField("Next step", ownerCell(nextOwner(item))));
+    fields.append(phoneMeta([
+      ["Tier", tierCell(rowTier(children))],
+      ["Next step", ownerCell(nextOwner(item))],
+      ["Updated", element("span", "age", item.waited || "—")],
+    ]));
     if (item.blocked) fields.append(phoneField("Blocked", blockedChip(item)));
     fields.append(phoneField("Progress", phoneProgress(item, children)));
-    fields.append(phoneField("Updated", element("span", "age", item.waited || "—")));
   } else {
-    fields.append(phoneField("PR", prCell(item.pr, item.pr_number)));
-    fields.append(phoneField(
-      "Tier", tierCell(item.state === "OPEN" ? item.tier : null),
-    ));
-    fields.append(phoneField("Next step", ownerCell(item.owner)));
+    fields.append(phoneMeta([
+      ["Tier", tierCell(item.state === "OPEN" ? item.tier : null)],
+      ["Next step", ownerCell(item.owner)],
+    ]));
     if (item.blocked) fields.append(phoneField("Blocked", blockedChip(item)));
     if (children.length || Number.isFinite(item.tickets_total)) {
       fields.append(phoneField("Progress", phoneProgress(item, children)));
@@ -623,4 +642,7 @@ if (typeof document !== "undefined") {
     });
 }
 
-export { STAGES, age, boardColumns, failureState, nextOwner, pipState, rowPrState, rowTier, shortRepo };
+export {
+  STAGES, age, boardColumns, failureState, nextOwner, pipState, renderPhoneBoard,
+  rowPrState, rowTier, shortRepo,
+};

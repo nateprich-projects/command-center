@@ -1,7 +1,7 @@
 ---
 title: Command Center — Design Record
 tags: [command-center, funnel, design-record, plan]
-last_updated: 2026-09-09
+last_updated: 2026-09-17
 status: Design settled. v0 in progress.
 ---
 
@@ -43,7 +43,7 @@ gate unless an agent is actively working it.
 | Ideas | Captured, undecided. Unbounded and guilt-free. | No |
 | Shaped | Grilled; a plan exists | **Only if the plan holds an open question** |
 | Ready | Broken into issues | No |
-| Building | Codex is working it | Only when all children close |
+| Building | Codex is working it | Only when all children close and the project is not self-closing |
 | Done | Shipped and accepted (`state_reason: completed`) | No |
 | Parked | Stopped, **written reason required** (`state_reason: not_planned`). Means *later*: the reason is what makes re-encountering it a 30-second decision | No |
 | *(archived)* | Disposed for good — a duplicate, a superseded item, or one whose condition can no longer arise. Closed and Parked first, then the Project item is archived, so it leaves every funnel view and the default board views while the issue and its reason remain; one click to reverse. Nate's call, 2026-09-09, so that `Parked` holds only what he might revisit | No |
@@ -70,8 +70,27 @@ consistently:
   gave — approving it is the same room with a different sign. It waits for him **only when
   its "Needs you" section holds a question he has not yet answered**; otherwise `Shaped`
   advances to `Ready` on its own.
-- **"Accept it?" is untouched**, and is now the only unconditional gate. Whether the thing
-  is worth keeping is not checkable, and no agent may decide it.
+- **"Accept it?" remains the human gate** for work whose class and origin make its
+  completion a Nate decision. Whether the thing is worth keeping is not checkable,
+  and no agent may decide it.
+
+### Building completion and automatic acceptance
+
+The following rules were **confirmed by Nate on 2026-09-17**. They replace the
+older human-step exception for the four upkeep classes and use one class/origin
+predicate for both the `Accept it?` gate and unattended close:
+
+1. **Broken, Investigate and Maintenance projects close themselves** once every
+   ticket is closed, whoever asked for them and whether or not they carried a
+   human step. **Confirmed by Nate, 2026-09-17.**
+2. **Improve projects close themselves only when agents created them.** An
+   Improve project Nate asked for, or whose origin cannot be read, waits at
+   `Accept it?` and never closes itself. **Confirmed by Nate, 2026-09-17.**
+3. **New and Replace are unchanged:** they always wait at `Accept it?` after
+   their tickets close. **Confirmed by Nate, 2026-09-17.**
+4. **The #145 amendment is superseded for upkeep classes.** A project that
+   carried a human-step ticket does not thereby return to the accept gate;
+   the class/origin rule above decides. **Confirmed by Nate, 2026-09-17.**
 
 _Rejected: a hold state — a flag or priority that keeps a good plan out of Building
 without parking it. That is "yes, but not now", which this document already rejected as a

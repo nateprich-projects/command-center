@@ -3,8 +3,76 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
-  STAGES, age, boardColumns, failureState, nextOwner, pipState, rowPrState, rowTier, shortRepo,
+  STAGES, age, boardColumns, failureState, nextOwner, pipState, renderPhoneBoard,
+  rowPrState, rowTier, shortRepo,
 } from "../public/app.js";
+
+class TestNode {
+  constructor(tagName) {
+    this.tagName = tagName;
+    this.children = [];
+    this.attributes = new Map();
+    this.className = "";
+    this.classList = {
+      add: (...names) => {
+        const classes = new Set(this.className.split(/\s+/).filter(Boolean));
+        for (const name of names) classes.add(name);
+        this.className = [...classes].join(" ");
+      },
+    };
+  }
+
+  append(...children) {
+    for (const child of children) {
+      if (child === undefined || child === null) continue;
+      this.children.push(child);
+    }
+  }
+
+  set textContent(value) {
+    this.children = [String(value)];
+  }
+
+  get textContent() {
+    return this.children.map((child) => (
+      child instanceof TestNode ? child.textContent : String(child)
+    )).join("");
+  }
+
+  get childElementCount() {
+    return this.children.filter((child) => child instanceof TestNode).length;
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  addEventListener() {}
+
+  *walk() {
+    yield this;
+    for (const child of this.children) {
+      if (child instanceof TestNode) yield* child.walk();
+    }
+  }
+
+  querySelectorAll(selector) {
+    const className = selector.startsWith(".") ? selector.slice(1) : null;
+    return [...this.walk()].filter((node) => (
+      className && node.className.split(/\s+/).includes(className)
+    ));
+  }
+
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] || null;
+  }
+}
+
+class TestDocument {
+  createElement(tagName) {
+    return new TestNode(tagName);
+  }
+}
 
 test("the board uses payload order within the fixed plan stages", () => {
   const input = [
@@ -107,12 +175,31 @@ test("the sub-issue bar fills its column rather than capping its pips", async ()
   assert.match(css, /\.pip-bar \.pip \{ flex: 1 1 0;/);
 });
 
+test("the phone progress shows its count once (#994)", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const progress = source.slice(
+    source.indexOf("function phoneProgress("), source.indexOf("function phoneDetails("),
+  );
+  assert.match(progress, /pips\(item, children, closed, total\)/);
+  assert.doesNotMatch(progress, /`\$\{closed\}\/\$\{total\}`\)\);/);
+  assert.match(source, /element\("span", "pip-count", `\$\{closed\}\/\$\{total\}`\)/);
+});
+
 test("the page polls its own snapshot and re-renders only on a new timestamp", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(source, /setInterval/);
   assert.match(source, /generatedAt === lastGeneratedAt/);
   // A hidden tab is not read, so it should not poll.
   assert.match(source, /visibilityState === "hidden"/);
+});
+
+test("the wide board has no PR column, and every grid template matches its visible cells (#997)", async () => {
+  const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.doesNotMatch(app, /"cell-pr"/);
+  const tracks = [...css.matchAll(/--cols: ([^;]+);/g)].map((m) => m[1].match(/minmax\([^)]*\)|\S+/g).length);
+  // 8 wide cells; 7 with repository hidden; 4 with repository, tier, class and age hidden.
+  assert.deepEqual(tracks, [8, 7, 4]);
 });
 
 test("expanded projects survive a re-render", async () => {
@@ -144,7 +231,12 @@ test("the narrow brief stays ordered, single-column, and legend-visible", async 
   );
   assert.match(css, /@media \(max-width: 900px\) \{[\s\S]*\.legend \{[\s\S]*display: flex;/);
   assert.match(css, /@media \(max-width: 600px\) \{[\s\S]*\.brief-sections \{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
-  assert.match(css, /\.waiting-row \{[\s\S]*display: grid;/);
+  // Chips keep their natural width and share a line (#989).
+  const narrow = css.slice(css.indexOf("@media (max-width: 600px)"));
+  assert.match(narrow, /\.waiting-row \{\s+flex-wrap: wrap;/);
+  assert.match(narrow, /\.waiting-title \{ flex: 1 0 100%;/);
+  assert.match(narrow, /\.waiting-row \.chip \{\s+flex: 0 1 auto;/);
+  assert.doesNotMatch(narrow, /\.waiting-row \{[^}]*display: grid;/);
 });
 
 
@@ -206,4 +298,34 @@ test("actions show how long they have waited, like decisions do", async () => {
 test("an action row names the repository without its ticket number", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(source, /String\(step\.ref \|\| ""\)\.split\("#"\)\[0\]/);
+});
+
+test("the phone Class chip is appended as a node, never stringified (#988)", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /element\([^)]*phoneClass\(/);
+  assert.match(source, /classCell\.append\(phoneClass\(className\)\)/);
+  assert.match(source, /text instanceof Node\) node\.append\(text\)/);
+});
+
+test("the rendered phone board has no object text and every row has a title (#1004)", async () => {
+  const snapshot = JSON.parse(await readFile(
+    new URL("../fixtures/snapshot.json", import.meta.url), "utf8",
+  ));
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const board = renderPhoneBoard(boardColumns(snapshot.board));
+    const rows = board.querySelectorAll(".phone-row");
+
+    assert.ok(rows.length > 0, "fixture should render at least one phone row");
+    for (const node of board.walk()) {
+      assert.doesNotMatch(node.textContent, /\[object/);
+    }
+    for (const row of rows) {
+      assert.ok(row.querySelector(".phone-title-link")?.textContent.trim());
+    }
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
 });

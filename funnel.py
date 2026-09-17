@@ -447,6 +447,11 @@ REJECTED_MERGE_WINDOW = timedelta(days=7)
 #: Nate could reasonably see it.
 CLOSED_ITSELF_WINDOW = timedelta(days=7)
 
+# The approve gate may adopt exactly one explicit class proposal. Keep the
+# human override visible in the durable record rather than treating the write
+# as an inferred classification.
+CLASS_ADOPTION_OVERRIDE_NOTE = "Nate may override it at any time."
+
 # The auto-close writer appends its marker when it closes a project. Reading a
 # bounded tail is enough to retain that write while preventing one unusually
 # noisy issue from expanding a gate read without limit.
@@ -770,15 +775,12 @@ def gate_question(item: Item) -> Optional[str]:
             return "Answer the breakdown's question?"
         return "Unblock?" if item.parent else "Unblock or park?"
     if item.status == "Building":
-        # New work and replacements always stop for acceptance. Upkeep closes
-        # itself once #55 lands, except where Nate performed part of the work:
-        # a project that ever carried a human-step ticket must still reach him.
+        # New work, replacements, and Nate-owned improvements stop for
+        # acceptance. The same class/origin predicate drives the unattended
+        # close path below, so the gate cannot drift from the writer.
         if not item.children_all_closed:
             return None
-        # Keep this tied to the same existing-work class set used by the
-        # unattended shaping rule. An unset or unknown Class fails closed into
-        # the accept queue; it must never inherit the permissive path.
-        if item.klass in SELF_APPROVABLE_CLASSES and not item.carried_human_step:
+        if _can_close_itself(item):
             return None
         return GATES["Building"]
     if item.status == "Shaped":
@@ -2412,6 +2414,21 @@ def self_approval_comment(basis: str, at: Optional[datetime] = None,
         SELF_APPROVED_PREFIX + basis.strip(), "agent",
         at=at, run=run, agent=agent,
     )
+
+
+def class_adoption_comment(
+    klass: str, source_line: str, at: Optional[datetime] = None,
+) -> str:
+    """Build the durable record for a class adopted at Nate's approve gate."""
+    if klass not in LADDER:
+        raise ValueError("unknown adopted class {!r}".format(klass))
+    if not isinstance(source_line, str) or not source_line.strip():
+        raise ValueError("class adoption source line must not be empty")
+    body = (
+        "**Class adopted:** {}\n\n"
+        "Source line: `{}`\n\n{}"
+    ).format(klass, source_line.strip(), CLASS_ADOPTION_OVERRIDE_NOTE)
+    return append_provenance(body, "nate-relayed", at=at)
 
 
 def origin_block(voice: str, at: Optional[datetime] = None,
@@ -6802,16 +6819,38 @@ def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
     )
 
 
+def _can_close_itself(item: Item) -> bool:
+    """Whether a finished project may close without Nate's acceptance.
+
+    The upkeep classes are safe to close regardless of who raised them. An
+    ``Improve`` project is safe only when its effective shape owner is the
+    agents, using the same origin and authorised override reading as the
+    unattended shaping predicate. Missing or malformed origin therefore
+    resolves to Nate and fails closed.
+    """
+    if item.klass in {"Investigate", "Broken", "Maintenance"}:
+        return True
+    if item.klass != "Improve":
+        return False
+
+    body = item.body if isinstance(item.body, str) else ""
+    origin = parse_origin(body)
+    override = parse_origin_override(body)
+    return effective_shape_owner(
+        origin.get("voice") if origin is not None else None,
+        override.get("target") if override is not None else None,
+    ) == "agents"
+
+
 def _could_carry_closed_itself_marker(
     item: Item, *, children_done: Optional[int] = None
 ) -> bool:
-    """Mirror the auto-close writer's durable eligibility signal."""
+    """Whether completed children may carry the funnel-close marker."""
     completed = item.children_done if children_done is None else children_done
     return (
-        item.klass in SELF_APPROVABLE_CLASSES
+        _can_close_itself(item)
         and item.children_total > 0
         and completed == item.children_total
-        and not item.carried_human_step
     )
 
 
@@ -6971,6 +7010,10 @@ PROPOSED_CLASS_RE = re.compile(
     r"^[ \t]*Proposed[ \t]+class:[ \t]*\S.*$",
     re.IGNORECASE | re.MULTILINE,
 )
+PROPOSED_CLASS_LINE_RE = re.compile(
+    r"^[ \t]*Proposed[ \t]+class:[ \t]*(?P<value>.*?)\s*$",
+    re.IGNORECASE,
+)
 
 
 def _prose_dependency_sentences(body: str) -> Iterable[Tuple[str, List[str]]]:
@@ -7077,6 +7120,32 @@ def check_prose_dependencies(items: Iterable[Item]) -> Check:
 def has_proposed_class(plan: str) -> bool:
     """Whether a plan gives Nate a non-empty ``Proposed class:`` line."""
     return isinstance(plan, str) and PROPOSED_CLASS_RE.search(plan) is not None
+
+
+def proposed_class_for_approval(
+    plan: object,
+) -> Optional[Tuple[str, str]]:
+    """Return one exact class proposal and its source line, or ``None``.
+
+    Approval may fill an unset Project Class only from an explicit, whole-line
+    proposal. A malformed proposal, a fuzzy value, or more than one proposal
+    is ambiguous and therefore stays with Nate instead of becoming an
+    inference from plan prose.
+    """
+    if not isinstance(plan, str):
+        return None
+
+    matches: List[Tuple[str, str]] = []
+    for raw_line in plan.splitlines():
+        match = PROPOSED_CLASS_LINE_RE.fullmatch(raw_line)
+        if match is None:
+            continue
+        value = match.group("value").strip()
+        if value not in LADDER:
+            return None
+        matches.append((value, raw_line.strip()))
+
+    return matches[0] if len(matches) == 1 else None
 
 
 def capture_origin(item: Item) -> str:
@@ -7726,7 +7795,7 @@ def stranded_items(
     This is deliberately a diagnostic, not a queue. The first release only
     uses facts the funnel already knows how to read: an approved current-head
     verdict on a conflicting PR, a stale claim with no PR, a childless
-    ``Building`` project, a self-approvable ``Building`` project whose upkeep
+    ``Building`` project, an auto-closeable ``Building`` project whose upkeep
     children all closed but the project itself did not, a native or named
     dependency closed as ``not_planned``, plus cycles formed by native or
     parsed block edges, and two PR-side strands when PR facts were requested:
@@ -7792,13 +7861,7 @@ def stranded_items(
         if item.parent is None and item.status == "Building" and not item.children_total:
             reasons.append("Building project has no tickets")
 
-        if (
-            item.parent is None
-            and item.status == "Building"
-            and item.klass in SELF_APPROVABLE_CLASSES
-            and item.children_all_closed
-            and not item.carried_human_step
-        ):
+        if _auto_closeable_project(item):
             reasons.append("finished upkeep project not closed")
 
         dead = _dead_dependency_refs(item, by_ref)
@@ -11886,14 +11949,15 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
             item.children_done, item.children_total))
         # One scan per repo rather than one lookup per child: a project with
         # twenty tickets cost twenty requests here.
-        indexes: Dict[str, Dict[str, Dict]] = {}
+        indexes: Dict[str, Tuple[Dict[str, Dict], bool]] = {}
         for child in children:
             mark = "x" if child["state"] == "CLOSED" else " "
             print("  [{}] #{} {}".format(mark, child["number"], child["title"]))
             child_repo = child["repository"]["nameWithOwner"]
             if child_repo not in indexes:
-                indexes[child_repo] = ticket_pr_index(child_repo)[0]
-            pr = indexes[child_repo].get(
+                indexes[child_repo] = ticket_pr_index(child_repo)
+            index, truncated = indexes[child_repo]
+            pr = index.get(
                 "{}#{}".format(child_repo, child["number"]))
             if pr:
                 print("        PR #{} {}{}".format(
@@ -11904,7 +11968,11 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
                     if text:
                         print("        review: {}".format(text[:200]))
             elif child["state"] == "CLOSED":
-                print("        closed with no ticket/* PR -- check why")
+                if truncated:
+                    print("        PR state unknown -- ticket-PR scan truncated "
+                          "at {} rows".format(MERGED_PR_SCAN_LIMIT))
+                else:
+                    print("        closed with no ticket/* PR -- check why")
         print("")
 
     comments = (_gh_json("gh", "issue", "view", str(item.number), "--repo",
@@ -11960,6 +12028,12 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
     if not item.item_id:
         raise GitHubError("{} is not in the Project".format(item.ref))
 
+    adoption = (
+        proposed_class_for_approval(item.body)
+        if verb == "approve" and item.klass not in LADDER
+        else None
+    )
+
     if verb == "accept" and not item.children_all_closed:
         if item.children_total == 0 and no_tickets:
             # Deliberate escape hatch, and narrow. A project with *open* tickets
@@ -11995,6 +12069,13 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
             print("  {}".format(signal))
 
     if not confirmed:
+        if adoption is not None:
+            adopted_class, source_line = adoption
+            print(
+                "would adopt Class {} from source line `{}`; {}".format(
+                    adopted_class, source_line, CLASS_ADOPTION_OVERRIDE_NOTE
+                )
+            )
         print("would move {} from {} to {} ({})".format(
             item.ref, expected, nxt, meaning))
         if no_tickets:
@@ -12005,8 +12086,43 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
         print("\nNothing was changed. Re-run with --yes to answer the gate.")
         return 1
 
+    if adoption is not None:
+        adopted_class, source_line = adoption
+        gh_graphql(
+            SET_FIELD,
+            project=PROJECT_ID,
+            item=item.item_id,
+            field=CLASS_FIELD_ID,
+            option=_option_id(CLASS_FIELD_ID, adopted_class),
+        )
+        item.klass = adopted_class
+        print(
+            "adopted Class {} from source line `{}`; {}".format(
+                adopted_class, source_line, CLASS_ADOPTION_OVERRIDE_NOTE
+            )
+        )
+
     gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
                field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, nxt))
+
+    if adoption is not None:
+        adopted_class, source_line = adoption
+        comment = _run_gh(
+            [
+                "gh", "issue", "comment", str(item.number), "--repo", item.repo,
+                "--body", class_adoption_comment(
+                    adopted_class, source_line, at=now
+                ),
+            ],
+            capture_output=True, text=True,
+        )
+        if comment.returncode != 0:
+            raise GitHubError(
+                "moved {} to Ready and adopted Class {}, but could not record "
+                "the class adoption comment: {}".format(
+                    item.ref, adopted_class, comment.stderr.strip()
+                )
+            )
 
     if verb == "accept":
         # Done and Parked must stay distinguishable: `completed` here,

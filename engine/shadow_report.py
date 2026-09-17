@@ -513,6 +513,7 @@ def jobs_from_records(
             "repo": _review_repo(binding, finish),
             "pr": _review_number(binding, finish),
             "head_sha": _review_head(finish) or _review_head(binding),
+            "started_at": started_at,
             "finished_at": finished_at,
             "decision": decision(finish),
             "malformed": is_malformed(finish),
@@ -1363,22 +1364,46 @@ def _verdict_value(value: object) -> Optional[str]:
     return None
 
 
+def _verdict_matches_live_job(job: Dict, candidate: object) -> bool:
+    """Accept a current verdict only when it belongs to this live review.
+
+    A recorded review head is the strongest identity.  Older live heartbeat
+    finishes do not always carry one, so their only safe fallback is the
+    verdict's own ``reviewed_at`` timestamp inside this job's start/finish
+    interval.  Without either fact, retaining the heartbeat decision is safer
+    than applying a later verdict from the same PR.
+    """
+    if not isinstance(candidate, dict):
+        return False
+    recorded_head = job.get("head_sha")
+    if recorded_head:
+        return _heads_match(candidate.get("head_sha"), recorded_head)
+
+    reviewed_at = _timestamp(candidate.get("reviewed_at"))
+    started_at = _timestamp(job.get("started_at"))
+    finished_at = _timestamp(job.get("finished_at"))
+    if reviewed_at is None or started_at is None or finished_at is None:
+        return False
+    return started_at <= reviewed_at <= finished_at
+
+
 def _apply_live_verdicts(
     live: Sequence[Dict], live_verdicts: Optional[Mapping[object, object]],
 ) -> None:
-    """Overlay validated recorded verdicts while retaining note fallbacks."""
+    """Overlay only same-review verdicts while retaining note fallbacks."""
     if not live_verdicts:
         return
     for job in live:
+        if _is_decided_pr_stop(job):
+            continue
         candidate = _lookup_live_verdict(live_verdicts, job)
         if candidate is _MISSING:
             continue
         value = _verdict_value(candidate)
         if value is None:
             continue
-        if isinstance(candidate, dict) and job.get("head_sha"):
-            if not _heads_match(candidate.get("head_sha"), job.get("head_sha")):
-                continue
+        if not _verdict_matches_live_job(job, candidate):
+            continue
         job["decision"] = value
 
 
@@ -1569,8 +1594,9 @@ def build_report(
     Passing two streams treats the first as shadow and the second as live.
     ``live_verdicts`` is an optional caller-supplied mapping of job identity to
     the recorded PR verdict. It is applied only when its head matches a head
-    recorded on the job; an absent or mismatched value leaves the heartbeat
-    decision as the fallback.
+    recorded on the job, or its ``reviewed_at`` falls within the live job's
+    start/finish interval; an absent or mismatched value leaves the heartbeat
+    decision as the fallback. Decided-PR stops are never overlaid.
     ``live_issue_data`` and ``live_shape_statuses`` are the corresponding
     caller-supplied maps for older breakdown issue sets and live shape jobs.
     Complete finish fields take precedence; fallback shape observations must
@@ -1698,12 +1724,13 @@ def fetch_live_verdicts(
     latest_verdict: Optional[Callable[[str, int], Optional[Dict]]] = None,
     current_head: Optional[Callable[[str, int], Optional[str]]] = None,
 ) -> Dict[str, Dict]:
-    """Fetch current-head PR verdicts for live jobs, best effort.
+    """Fetch current-head PR verdicts for same-review live jobs, best effort.
 
     This is the stateful caller-side boundary. The report builder remains
     fixture-pure: it receives the already-read verdicts and keeps heartbeat
-    prose as a fallback. A missing PR, verdict, or head is intentionally
-    omitted so it cannot inflate agreement.
+    prose as a fallback. A missing PR, verdict, head, or same-review identity
+    is intentionally omitted so it cannot inflate agreement. Decided-PR stops
+    are not live reviews and are never overlaid.
     """
     import funnel
 
@@ -1711,6 +1738,8 @@ def fetch_live_verdicts(
     read_head = current_head or _current_pr_head
     found: Dict[str, Dict] = {}
     for job in live_jobs:
+        if _is_decided_pr_stop(job):
+            continue
         repo = job.get("repo")
         pr = _positive_pr_number(job.get("pr"))
         run = job.get("run")
@@ -1728,8 +1757,9 @@ def fetch_live_verdicts(
         recorded_head = job.get("head_sha")
         if recorded_head and not _heads_match(recorded_head, head):
             continue
-        if isinstance(verdict, dict):
-            found[str(run)] = verdict
+        if not _verdict_matches_live_job(job, verdict):
+            continue
+        found[str(run)] = verdict
     return found
 
 

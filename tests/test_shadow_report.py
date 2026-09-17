@@ -135,7 +135,8 @@ def test_recorded_live_verdict_recovers_a_finish_without_note_prose():
     report = shadow_report.build_report(
         shadow, live, now=40, window_seconds=40,
         live_verdicts={"live": {"verdict": "approved",
-                                "head_sha": "abc123"}},
+                                "head_sha": "abc123",
+                                "reviewed_at": 20}},
     )
 
     assert report["jobs"] == {
@@ -175,6 +176,65 @@ def test_missing_or_wrong_head_live_verdict_stays_out_of_denominator():
     assert report["jobs"]["matched"] == 1
     assert report["jobs"]["compared"] == 0
     assert report["agreement"]["rate"] is None
+
+
+def test_late_current_approval_does_not_overwrite_head_a_rejections():
+    records = []
+    verdicts = {}
+    for index in range(5):
+        offset = index * 40
+        records += [
+            {"run": "shadow-a-{}".format(index), "phase": "start",
+             "ts": 10 + offset},
+            {"run": "shadow-a-{}".format(index), "phase": "bind",
+             "ts": 11 + offset, "do": "review", "work": "42",
+             "repo": "owner/repo"},
+            {"run": "shadow-a-{}".format(index), "phase": "finish",
+             "ts": 20 + offset,
+             "note": "shadow review of PR #42 in owner/repo at head-a: "
+                     "rejected", "review_result": "rejected",
+             "outcome": "done"},
+            {"run": "live-a-{}".format(index), "phase": "start",
+             "ts": 12 + offset},
+            {"run": "live-a-{}".format(index), "phase": "bind",
+             "ts": 13 + offset, "do": "review", "work": "42",
+             "repo": "owner/repo"},
+            {"run": "live-a-{}".format(index), "phase": "finish",
+             "ts": 22 + offset,
+             "note": "reviewed PR #42 in owner/repo at head-a: rejected",
+             "review_result": "rejected", "outcome": "done"},
+        ]
+        verdicts["live-a-{}".format(index)] = {
+            "verdict": "approved", "head_sha": "head-b",
+            "reviewed_at": 255,
+        }
+
+    records += [
+        {"run": "shadow-b", "phase": "start", "ts": 250},
+        {"run": "shadow-b", "phase": "bind", "ts": 251,
+         "do": "review", "work": "42", "repo": "owner/repo"},
+        {"run": "shadow-b", "phase": "finish", "ts": 260,
+         "note": "shadow review of PR #42 in owner/repo at head-b: approved",
+         "review_result": "approved", "outcome": "done"},
+        {"run": "live-b", "phase": "start", "ts": 252},
+        {"run": "live-b", "phase": "bind", "ts": 253,
+         "do": "review", "work": "42", "repo": "owner/repo"},
+        {"run": "live-b", "phase": "finish", "ts": 262,
+         "note": "merged PR #42", "outcome": "done"},
+    ]
+    verdicts["live-b"] = {
+        "verdict": "approved", "head_sha": "head-b", "reviewed_at": 255,
+    }
+
+    report = shadow_report.build_report(
+        records, now=300, window_seconds=300, live_verdicts=verdicts,
+    )
+
+    assert report["jobs"] == {
+        "shadow": 6, "live": 6, "matched": 6, "compared": 6,
+    }
+    assert report["agreement"]["agree"] == 6
+    assert report["agreement"]["rejected"]["live"] >= 5
 
 
 def test_decided_pr_stops_are_excluded_from_agreement_denominator():
@@ -236,12 +296,13 @@ def test_decided_pr_stops_are_excluded_from_agreement_denominator():
 
 def test_fetch_live_verdicts_requires_a_verdict_at_the_current_head():
     jobs = [{"run": "live", "key": "pr#42", "repo": "owner/repo",
-             "pr": 42}]
+             "pr": 42, "started_at": 10, "finished_at": 30}]
     seen = []
 
     def read_verdict(repo, pr):
         seen.append(("verdict", repo, pr))
-        return {"verdict": "rejected", "head_sha": "full-head"}
+        return {"verdict": "rejected", "head_sha": "full-head",
+                "reviewed_at": 20}
 
     def read_head(repo, pr):
         seen.append(("head", repo, pr))
@@ -252,11 +313,27 @@ def test_fetch_live_verdicts_requires_a_verdict_at_the_current_head():
     )
 
     assert found == {
-        "live": {"verdict": "rejected", "head_sha": "full-head"},
+        "live": {"verdict": "rejected", "head_sha": "full-head",
+                  "reviewed_at": 20},
     }
     assert seen == [
         ("verdict", "owner/repo", 42), ("head", "owner/repo", 42),
     ]
+
+
+def test_fetch_live_verdicts_rejects_a_later_verdict_for_an_older_job():
+    jobs = [{"run": "old", "key": "pr#42", "repo": "owner/repo",
+             "pr": 42, "started_at": 10, "finished_at": 30}]
+
+    found = shadow_report.fetch_live_verdicts(
+        jobs,
+        latest_verdict=lambda repo, pr: {
+            "verdict": "approved", "head_sha": "head-b", "reviewed_at": 40,
+        },
+        current_head=lambda repo, pr: "head-b",
+    )
+
+    assert found == {}
 
 
 def test_window_bounds_are_inclusive_and_inverted_windows_fail():

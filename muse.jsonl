@@ -6719,3 +6719,4 @@
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/command-center", "run": "8eceb8c4ab34", "ts": 1789684276, "work": "1050"}
 {"agent": "muse", "api_cost": {"gh_calls": 36, "graphql_points": 73}, "phase": "api_cost", "run": "8eceb8c4ab34", "ts": 1789684279}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/command-center", "run": "3ad960220774", "ts": 1789684285, "work": "1050"}
+{"agent": "muse", "api_cost": {"gh_calls": 36, "graphql_points": 73}, "phase": "api_cost", "run": "3ad960220774", "ts": 1789684289}

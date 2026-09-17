@@ -1786,6 +1786,62 @@ def test_shape_offers_only_the_first_idea_matching_the_run_tier(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("state", ["review", "idea", "breakdown", "empty"])
+def test_escalated_reviewer_is_never_offered_shape_or_breakdown(
+    monkeypatch, capsys, state
+):
+    """#1026: run d9de03bb1229 (escalated, review) was offered `shape` for an
+    escalated-tier idea; the escalated schedule is review-only."""
+    project, ticket = _ticket(120, 121, body="Risk: escalated")
+    review = _review_job(ticket, pr=122)
+    pending = funnel.Item(
+        repo="nateprich/example",
+        number=123,
+        title="Project 123",
+        url="https://github.com/nateprich/example/issues/123",
+        state="OPEN",
+        status="Ready",
+        klass="Broken",
+        children_total=0,
+    )
+    idea = _idea(124, "Escalated idea", "Risk: escalated", klass="Broken")
+
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+    monkeypatch.setattr(
+        funnel, "review_queue",
+        lambda rows, tier: [review] if state == "review" else [])
+    monkeypatch.setattr(
+        funnel, "awaiting_breakdown",
+        lambda rows: [pending] if state == "breakdown" else [])
+    monkeypatch.setattr(
+        funnel, "ideas", lambda rows: [idea] if state == "idea" else [])
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+    monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: "")
+
+    assert funnel.cmd_begin(
+        [project, ticket], NOW, "muse", "escalated", False,
+        caller_role="review",
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] not in ("shape", "breakdown")
+    if state == "review":
+        assert result["do"] == "review"
+        assert result["work"] == review
+    else:
+        assert result["do"] == "stop"
+
+
+def test_standard_reviewer_is_still_offered_a_standard_idea(monkeypatch):
+    idea = _idea(125, "Standard idea", "Risk: standard")
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+    monkeypatch.setattr(funnel, "ideas", lambda items: [idea])
+
+    assert funnel.shapeable_idea([], "standard", {}) is idea
+    assert funnel.shapeable_idea([], "escalated", {}) is None
+
+
 def test_shapeable_idea_requires_the_needs_shaping_label(monkeypatch):
     unflagged = _idea(
         38, "Unflagged idea", "Risk: standard", labels=[]

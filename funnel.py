@@ -10513,9 +10513,15 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     Shaping starts new work, so it is the last optional job after review and
     breakdown. The ordering itself stays in ``ideas()``; this function only
     filters that shared order through the existing tier and headroom rules.
+
+    The escalated schedule is review-only (routines/muse.md §7): an
+    escalated-tier idea is never offered to that run to shape
+    (#1026).
     """
     import usage
 
+    if tier == "escalated":
+        return None
     if not usage.shaping_allowed(reading):
         return None
 

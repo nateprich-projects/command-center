@@ -6363,3 +6363,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 73}, "phase": "api_cost", "run": "a51da6c9698f", "ts": 1789674684}
 {"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 73}, "phase": "api_cost", "run": "a51da6c9698f", "ts": 1789674684}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/The-League", "run": "9acc5e260600", "ts": 1789674687, "work": "213"}
+{"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": null}, "phase": "api_cost", "run": "9acc5e260600", "ts": 1789674693}

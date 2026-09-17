@@ -8,6 +8,19 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Shadow-shape questions cluster in order, technical defaults, and real Nate choices
+
+**2026-09-17 · Command Center #1036 · measured**
+
+The complete scan of 32 command-center-shadow-shape comments across the eight active
+repositories, from the first marker at 2026-09-15T13:46:27Z through
+2026-09-17T17:53:53Z, found 22 comments with 46 non-null needs_nate questions. The
+published [#1036 audit comment](https://github.com/nateprich-projects/command-center/issues/1036#issuecomment-5719106079)
+classifies each question as Nate-owned, settled by written precedent, or a reversible
+engineering default. The practical finding is that named-ticket ordering, documented
+runtime paths, internal API placement, and existing policy should leave the open-question
+record; exposure, authorization, product scope, and user preference should remain there.
+
 ### Sol's schedules are retired; Luna now fires every 10 minutes
 
 **2026-09-17 · Codex app automations · measured**

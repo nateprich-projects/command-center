@@ -1723,6 +1723,34 @@ def _issue_malformed_count(
     )
 
 
+def _breakdown_shape_disagreement_entry(
+    shadow_breakdown: Dict,
+    live_breakdown: Dict,
+    shadow_shape: Dict,
+    live_shape: Dict,
+    shadow_observation: Mapping[str, object],
+    live_observation: Mapping[str, object],
+    shadow_shape_status: str,
+    live_shape_status: str,
+) -> Dict[str, object]:
+    """Render the evidence for one disagreeing breakdown/shape pair."""
+    return {
+        "key": shadow_breakdown.get("key") or live_breakdown.get("key"),
+        "shadow": {
+            "run": shadow_breakdown.get("run"),
+            "ticket_count": shadow_observation.get("ticket_count"),
+            "needs_decision": shadow_observation.get("needs_decision"),
+            "shape_status": shadow_shape_status,
+        },
+        "live": {
+            "run": live_breakdown.get("run"),
+            "ticket_count": live_observation.get("ticket_count"),
+            "needs_decision": live_observation.get("needs_decision"),
+            "shape_status": live_shape_status,
+        },
+    }
+
+
 def _unreadable_issue_job(job: Dict, *, shadow: bool) -> bool:
     """Whether a job's model output cannot participate in a comparison."""
     if bool(job.get("malformed")):
@@ -1972,12 +2000,17 @@ def build_breakdown_shape_report(
 
     comparison_pairs = _comparison_pairs(pairs)
     comparable = []
+    disagreements = []
     for breakdown_pair, shape_pair in comparison_pairs:
         shadow_breakdown, live_breakdown = breakdown_pair
         shadow_shape, live_shape = shape_pair
+        shadow_breakdown_observation = shadow_observations.get(
+            id(shadow_breakdown)
+        )
+        live_breakdown_observation = live_observations.get(id(live_breakdown))
         breakdown_agrees = _breakdown_pair_agrees(
-            shadow_observations.get(id(shadow_breakdown)),
-            live_observations.get(id(live_breakdown)),
+            shadow_breakdown_observation,
+            live_breakdown_observation,
         )
         shadow_shape_status = shadow_observations.get(id(shadow_shape))
         live_shape_status = live_observations.get(id(live_shape))
@@ -1995,9 +2028,21 @@ def build_breakdown_shape_report(
             or live_shape_status not in {"Shaped", "Ready"}
         ):
             continue
-        comparable.append(
-            bool(breakdown_agrees and shadow_shape_status == live_shape_status)
-        )
+        agrees = bool(breakdown_agrees and shadow_shape_status == live_shape_status)
+        comparable.append(agrees)
+        if not agrees:
+            disagreements.append(
+                _breakdown_shape_disagreement_entry(
+                    shadow_breakdown,
+                    live_breakdown,
+                    shadow_shape,
+                    live_shape,
+                    shadow_breakdown_observation,
+                    live_breakdown_observation,
+                    shadow_shape_status,
+                    live_shape_status,
+                )
+            )
 
     agree = sum(comparable)
     compared = len(comparable)
@@ -2020,6 +2065,7 @@ def build_breakdown_shape_report(
             "agree": agree,
             "disagree": compared - agree,
             "rate": _rate(agree, compared),
+            "disagreements": disagreements,
             "jobs": {
                 "shadow": len(shadow),
                 "live": len(live),
@@ -2213,6 +2259,31 @@ def format_disagreements(disagreements: Sequence[Mapping[str, object]]) -> str:
                 )
             )
     return "\n".join(lines) if lines else "No review disagreements."
+
+
+def format_breakdown_shape_disagreements(
+    disagreements: Sequence[Mapping[str, object]],
+) -> str:
+    """Render breakdown/shape disagreement evidence for a check-in."""
+    lines: List[str] = []
+    for entry in disagreements:
+        key = entry.get("key") or "unknown-key"
+        lines.append(str(key))
+        for side in ("shadow", "live"):
+            evidence = entry.get(side)
+            if not isinstance(evidence, Mapping):
+                continue
+            lines.append(
+                "  {}: run {}, tickets {}, needs_decision={!r}, "
+                "shape_status {}".format(
+                    side,
+                    evidence.get("run") or "unknown",
+                    evidence.get("ticket_count"),
+                    evidence.get("needs_decision"),
+                    evidence.get("shape_status") or "unknown",
+                )
+            )
+    return "\n".join(lines) if lines else "No breakdown-shape disagreements."
 
 
 def _current_pr_head(repo: str, pr: int) -> Optional[str]:
@@ -2443,7 +2514,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     parser.add_argument(
         "--disagreements-only", action="store_true",
-        help="print only the review disagreement evidence in pasteable text",
+        help="print only the disagreement evidence in pasteable text",
     )
     args = parser.parse_args(argv)
     if len(args.agents) > 2:
@@ -2470,7 +2541,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("shadow-report: {}".format(exc), file=sys.stderr)
         return 1
     if args.disagreements_only:
-        print(format_disagreements(report_data.get("disagreements", [])))
+        if args.mode == "breakdown-shape":
+            agreement = report_data.get("breakdown_shape_agreement", {})
+            disagreements = (
+                agreement.get("disagreements", [])
+                if isinstance(agreement, Mapping) else []
+            )
+            print(format_breakdown_shape_disagreements(disagreements))
+        else:
+            print(format_disagreements(report_data.get("disagreements", [])))
     else:
         print(json.dumps(report_data, indent=2, sort_keys=True))
     return 0

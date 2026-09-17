@@ -34,9 +34,14 @@ def verdict(**kw):
 
 
 def items(klass="Improve", children_total=1, children_done=0,
-          other_ticket=False):
+          other_ticket=False, origin="agent"):
+    body = (
+        funnel.origin_block(origin, at=NOW, run="merge-run", agent="codex")
+        if origin in funnel.ORIGIN_VOICES else None
+    )
     project = Item(repo=REPO, number=1, title="p", url="", state="OPEN",
-                   status="Building", klass=klass, item_id="project-id",
+                   body=body, status="Building", klass=klass,
+                   item_id="project-id",
                    children_total=children_total, children_done=children_done)
     ticket = Item(repo=REPO, number=9, title="t", url="", state="OPEN",
                   parent=REPO + "#1")
@@ -512,20 +517,42 @@ def test_last_upkeep_ticket_auto_closes_parent_and_records_drift(monkeypatch):
     }
 
 
-@pytest.mark.parametrize("klass", ["Broken", "Maintenance", "Improve"])
-def test_each_self_approvable_class_auto_closes_on_its_last_merge(
-        monkeypatch, klass):
-    rc, calls, _ = _merge_wired(monkeypatch, rows=items(klass=klass))
+@pytest.mark.parametrize(
+    ("klass", "origin"),
+    [
+        ("Investigate", None),
+        ("Broken", "nate-relayed"),
+        ("Maintenance", None),
+        ("Improve", "agent"),
+    ],
+)
+def test_each_auto_close_class_closes_on_its_last_merge(
+        monkeypatch, klass, origin):
+    rc, calls, _ = _merge_wired(
+        monkeypatch, rows=items(klass=klass, origin=origin)
+    )
 
     assert rc == 0
     assert ["gh", "issue", "close", "1", "--repo", REPO,
             "--reason", "completed"] in calls
 
 
-@pytest.mark.parametrize("klass", [None, "New", "Replace"])
-def test_unset_and_human_gate_classes_never_auto_close(monkeypatch, klass):
+@pytest.mark.parametrize(
+    ("klass", "origin"),
+    [
+        (None, "agent"),
+        ("New", "agent"),
+        ("Replace", "agent"),
+        ("Improve", "nate-relayed"),
+        ("Improve", None),
+    ],
+)
+def test_acceptance_gate_classes_and_nate_owned_improve_never_auto_close(
+        monkeypatch, klass, origin):
     rc, calls, graphql_calls = _merge_wired(
-        monkeypatch, rows=items(klass=klass), drift=[funnel.DRIFT_PLAN_EDIT]
+        monkeypatch,
+        rows=items(klass=klass, origin=origin),
+        drift=[funnel.DRIFT_PLAN_EDIT],
     )
 
     assert rc == 0

@@ -476,6 +476,7 @@ def test_brief_comment_tail_cache_is_shared_between_sections(monkeypatch):
     item = funnel.Item(
         repo="nateprich/beta", number=85, title="Both markers",
         url="https://example.invalid/85", state="CLOSED", status="Done",
+        body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
         klass="Improve", children_total=1, children_done=1,
         closed_at=NOW - timedelta(hours=1),
         status_events=[{
@@ -517,6 +518,7 @@ def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
             repo="nateprich/beta", number=number, title=title,
             url="https://example.invalid/{}".format(number), state="CLOSED",
             state_reason="COMPLETED", status="Done", klass="Improve",
+            body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
             children_total=1, children_done=1, closed_at=at,
         )
 
@@ -591,6 +593,7 @@ def test_closed_itself_batch_is_bounded_and_cached_for_one_run(monkeypatch):
             repo=repo, number=number, title="Upkeep {}".format(number),
             url="https://example.invalid/{}".format(number), state="CLOSED",
             state_reason="COMPLETED", status="Done", klass="Improve",
+            body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
             children_total=1, children_done=1, closed_at=at,
         )
 
@@ -643,7 +646,11 @@ def test_closed_itself_candidates_follow_auto_close_eligibility_signal():
         )
 
     plausible = closed(
-        110, klass="Improve", children_total=1, children_done=1
+        110,
+        klass="Improve",
+        body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
+        children_total=1,
+        children_done=1,
     )
     no_children = closed(
         111, klass="Improve", children_total=0, children_done=0
@@ -653,12 +660,13 @@ def test_closed_itself_candidates_follow_auto_close_eligibility_signal():
     )
     carried_human_step = closed(
         113, klass="Improve", children_total=1, children_done=1,
+        body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
         carried_human_step=True,
     )
 
     assert funnel.closed_itself_items(
         [no_children, wrong_class, carried_human_step, plausible], NOW
-    ) == [plausible]
+    ) == [plausible, carried_human_step]
 
 
 def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):

@@ -27,7 +27,8 @@ def item(number, status=None, klass=None, days=1.0, **kw):
 
 def test_queue_renders_classes_in_each_section(capsys):
     waiting = item(
-        1, "Building", "Broken", children_total=1, children_done=1,
+        1, "Building", "Improve", children_total=1, children_done=1,
+        body=funnel.origin_block("nate-relayed", at=NOW, run="render-run", agent="codex"),
         carried_human_step=True,
     )
     unclassed = item(2, "Building", None, children_total=1, children_done=1)
@@ -40,7 +41,7 @@ def test_queue_renders_classes_in_each_section(capsys):
     ) == 0
     output = capsys.readouterr().out
 
-    assert "Broken" in output
+    assert "Improve" in output
     assert "Maintenance" in output
     assert "New (inherited)" in output
     assert "no class" in output
@@ -109,7 +110,8 @@ def test_queue_groups_each_section_in_existing_rank_order(capsys):
 
 def test_queue_keeps_single_repo_output_unchanged(capsys):
     waiting = item(
-        1, "Building", "Broken", children_total=1, children_done=1,
+        1, "Building", "Improve", children_total=1, children_done=1,
+        body=funnel.origin_block("nate-relayed", at=NOW, run="render-run", agent="codex"),
         carried_human_step=True,
     )
     parent = item(2, "Ready", "New", children_total=1)
@@ -121,7 +123,7 @@ def test_queue_keeps_single_repo_output_unchanged(capsys):
 
     assert output == (
         "Waiting on Nate (1), bottom-up:\n"
-        "  Building   Broken                   nateprich/beta#1                   1 day              Accept it?\n"
+        "  Building   Improve                  nateprich/beta#1                   1 day              Accept it?\n"
         "\n"
         "Startable by Codex (1), ladder order:\n"
         "  New (inherited)          nateprich/beta#3                   issue 3\n"

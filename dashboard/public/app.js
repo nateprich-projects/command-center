@@ -195,7 +195,6 @@ function headerRow() {
   for (const [className, label] of [
     ["cell-title", "Title"],
     ["cell-repo", "Repository"],
-    ["cell-pr", "PR"],
     ["cell-tier", "Tier"],
     ["cell-owner", "Next step"],
     ["cell-pips", "Sub-issues"],
@@ -239,7 +238,6 @@ function ticketRow(ticket) {
   row.append(title);
 
   row.append(cell("cell-repo", element("span", "muted", "")));
-  row.append(cell("cell-pr", prCell(ticket.pr, ticket.pr_number)));
   row.append(cell("cell-tier", tierCell(ticket.state === "OPEN" ? ticket.tier : null)));
   row.append(cell("cell-owner", ownerCell(ticket.owner)));
   row.append(cell("cell-pips", element("span", "muted", "")));
@@ -300,7 +298,7 @@ function phoneProgress(item, children) {
   value.classList.add("phone-progress");
   value.setAttribute("role", "img");
   value.setAttribute("aria-label", `Sub-issue progress: ${closed}/${total}`);
-  value.append(element("span", "phone-progress-copy", `${closed}/${total}`));
+  // pips() already shows closed/total; a second copy printed it twice (#994).
   return value;
 }
 
@@ -421,7 +419,6 @@ function projectRow(item) {
   row.append(title);
 
   row.append(cell("cell-repo", element("span", "repo", shortRepo(item.repo || item.repository) || "")));
-  row.append(cell("cell-pr", prCell(rowPrState(tickets))));
   row.append(cell("cell-tier", tierCell(rowTier(tickets))));
   row.append(cell("cell-owner", ownerCell(nextOwner(item))));
   row.append(cell("cell-pips", pips(item, tickets, item.tickets_closed, item.tickets_total)));
@@ -626,4 +623,7 @@ if (typeof document !== "undefined") {
     });
 }
 
-export { STAGES, age, boardColumns, failureState, nextOwner, pipState, rowPrState, rowTier, shortRepo };
+export {
+  STAGES, age, boardColumns, failureState, nextOwner, pipState, renderPhoneBoard,
+  rowPrState, rowTier, shortRepo,
+};

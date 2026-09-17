@@ -69,17 +69,6 @@ function pipState(ticket) {
   return "open";
 }
 
-// The row's PR flag is the furthest any of its tickets has travelled, so the
-// board answers "is anything of this project in review" at a glance.
-function rowPrState(tickets) {
-  let found = null;
-  for (const ticket of tickets || []) {
-    if (ticket.pr === "approved") return "approved";
-    if (ticket.pr === "submitted") found = "submitted";
-  }
-  return found;
-}
-
 function rowTier(tickets) {
   for (const ticket of tickets || []) {
     if (ticket.state === "OPEN" && ticket.tier === "escalated") return "escalated";
@@ -165,15 +154,6 @@ function pips(item, tickets, closed, total) {
     wrap.append(element("span", "pip-count", `${closed}/${total}`));
   }
   return wrap;
-}
-
-function prCell(state, number) {
-  if (!state) return element("span", "muted", "—");
-  if (state === "unknown") {
-    // The scan failed, so this is not "no PR": say so rather than implying it.
-    return chip("?", "chip-pr chip-pr-unknown", "PR state could not be read");
-  }
-  return chip(state, `chip-pr chip-pr-${state}`, number ? `PR #${number}` : null);
 }
 
 // Escalated is the exception worth a chip; standard stays quiet text so a
@@ -640,5 +620,5 @@ if (typeof document !== "undefined") {
 
 export {
   STAGES, age, boardColumns, failureState, nextOwner, pipState, renderPhoneBoard,
-  rowPrState, rowTier, shortRepo,
+  rowTier, shortRepo,
 };

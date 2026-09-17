@@ -4,7 +4,7 @@ import test from "node:test";
 
 import {
   STAGES, age, boardColumns, failureState, nextOwner, pipState, renderPhoneBoard,
-  rowPrState, rowTier, shortRepo,
+  rowTier, shortRepo,
 } from "../public/app.js";
 
 class TestNode {
@@ -103,12 +103,6 @@ test("a pip carries the ticket's furthest state", () => {
   assert.equal(pipState({ state: "OPEN", pr: "submitted" }), "submitted");
   assert.equal(pipState({ state: "OPEN", blocked: true }), "blocked");
   assert.equal(pipState({ state: "OPEN" }), "open");
-});
-
-test("a row's PR flag is the furthest of its tickets, and closed work is not a flag", () => {
-  assert.equal(rowPrState([{ state: "OPEN", pr: "submitted" }, { state: "OPEN", pr: "approved" }]), "approved");
-  assert.equal(rowPrState([{ state: "CLOSED" }, { state: "OPEN", pr: "submitted" }]), "submitted");
-  assert.equal(rowPrState([{ state: "CLOSED" }]), null);
 });
 
 test("tier describes open tickets only", () => {

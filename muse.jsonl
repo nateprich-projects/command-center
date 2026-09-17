@@ -6754,3 +6754,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 37, "graphql_points": 74}, "phase": "api_cost", "run": "03863814264d", "ts": 1789685176}
 {"agent": "muse", "api_cost": {"gh_calls": 37, "graphql_points": 74}, "phase": "api_cost", "run": "03863814264d", "ts": 1789685176}
 {"agent": "muse", "note": "GraphQL budget 396 is below the engineering floor of 840 (20 loads at 42 points)", "outcome": "skipped-api-reserve", "phase": "event", "run": "b78cb8e72ce4", "ts": 1789685178}
+{"agent": "muse", "api_cost": {"gh_calls": 1, "graphql_points": 1}, "phase": "api_cost", "run": "b78cb8e72ce4", "ts": 1789685188}

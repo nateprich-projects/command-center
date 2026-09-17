@@ -15,6 +15,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import funnel  # noqa: E402
 from engine import review  # noqa: E402
 
 REPO = "owner/repo"
@@ -192,6 +193,105 @@ def test_overlap_reports_every_shared_file_sorted():
     found = review.file_overlap(["a.py", "b.py", "c.py"], open_prs, 7)
     assert found == [{"pr": 8, "branch": "ticket/10",
                       "files": ["a.py", "b.py"]}]
+
+
+# -- CI runs: the merged-overlap row's coverage evidence (#1019) ---------------
+
+RUN_BRANCH = "ticket/9"
+RUN_AT = "2026-09-13T13:30:00Z"
+OLD_RUN_AT = "2026-09-13T11:00:00Z"
+
+
+def gh_run(run_id=11, started_at=RUN_AT, conclusion="success",
+           status="completed", event="pull_request", head=SHA):
+    """One ``gh run list`` row: the wire shape the fetcher returns."""
+    return {"databaseId": run_id, "event": event, "headSha": head,
+            "headBranch": RUN_BRANCH, "conclusion": conclusion,
+            "status": status, "createdAt": started_at,
+            "startedAt": started_at, "updatedAt": started_at}
+
+
+def test_fetch_ci_runs_lists_pull_request_runs_on_the_branch(monkeypatch):
+    seen = []
+
+    def fake_gh_json(*args):
+        seen.append(args)
+        return [gh_run()]
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    assert review.fetch_ci_runs(REPO, RUN_BRANCH) == [gh_run()]
+    command = seen[0]
+    assert command[:5] == ("gh", "run", "list", "--repo", REPO)
+    assert command[command.index("--branch") + 1] == RUN_BRANCH
+    assert command[command.index("--event") + 1] == "pull_request"
+    fields = command[command.index("--json") + 1].split(",")
+    for field in ("databaseId", "event", "headSha", "conclusion", "status",
+                  "startedAt"):
+        assert field in fields
+
+
+def test_fetch_ci_runs_reads_no_runs_without_actions(monkeypatch):
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: None)
+    assert review.fetch_ci_runs(REPO, RUN_BRANCH) == []
+
+
+def test_fetch_ci_runs_skips_an_empty_branch_without_calling(monkeypatch):
+    def fail(*args):
+        raise AssertionError("no branch, no runs call")
+
+    monkeypatch.setattr(funnel, "_gh_json", fail)
+    assert review.fetch_ci_runs(REPO, "") == []
+
+
+def test_fetch_ci_runs_drops_rubbish_rows(monkeypatch):
+    monkeypatch.setattr(funnel, "_gh_json",
+                        lambda *args: [None, "nonsense", gh_run()])
+    assert review.fetch_ci_runs(REPO, RUN_BRANCH) == [gh_run()]
+
+
+def test_packet_carries_the_ci_runs_newest_first():
+    runs = [gh_run(11, OLD_RUN_AT),
+            gh_run(12, RUN_AT, status="in_progress", conclusion=None)]
+    found = packet(ci_runs=runs)
+    assert found["ci"]["runs"] == [
+        {"id": 12, "conclusion": None, "status": "in_progress",
+         "started_at": RUN_AT},
+        {"id": 11, "conclusion": "success", "status": "completed",
+         "started_at": OLD_RUN_AT},
+    ]
+    assert found["ci"]["green_run_at"] == OLD_RUN_AT
+    assert found["ci"]["latest_run_id"] == 11
+
+
+def test_packet_without_ci_runs_carries_no_coverage():
+    found = packet()
+    assert found["ci"]["runs"] == []
+    assert found["ci"]["green_run_at"] is None
+    assert found["ci"]["latest_run_id"] is None
+    assert found["ci_rerun"] is None
+
+
+def test_collect_fetches_runs_for_the_pr_branch(monkeypatch):
+    monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: pr_view())
+    monkeypatch.setattr(review, "fetch_diff", lambda repo, pr: "diff text")
+    monkeypatch.setattr(
+        review, "fetch_ticket", lambda repo, number: ticket())
+    monkeypatch.setattr(
+        review, "fetch_plan_md", lambda repo: ("# design record", False))
+    monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
+    seen = {}
+
+    def fake_runs(repo, branch):
+        seen["repo"] = repo
+        seen["branch"] = branch
+        return [gh_run()]
+
+    monkeypatch.setattr(review, "fetch_ci_runs", fake_runs)
+    found = review.collect(REPO, 7, items_loader=lambda: [])
+    assert seen == {"repo": REPO, "branch": "ticket/9"}
+    assert found["ci"]["green_run_at"] == RUN_AT
 
 
 # -- the assembled packet ---------------------------------------------------
@@ -388,6 +488,7 @@ def test_cli_prints_valid_json_with_every_field(monkeypatch, capsys):
         review, "fetch_plan_md", lambda repo: ("# design record", False))
     monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
     monkeypatch.setattr(
         review, "fetch_verdict", lambda repo, pr: verdict())
     monkeypatch.setattr(
@@ -415,6 +516,7 @@ def test_cli_leaves_a_non_ticket_branch_without_a_ticket(monkeypatch, capsys):
     monkeypatch.setattr(review, "fetch_plan_md", lambda repo: ("", True))
     monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
     monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
     monkeypatch.setattr(
         review, "fetch_stop_counter",

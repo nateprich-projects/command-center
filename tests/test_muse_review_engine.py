@@ -761,6 +761,129 @@ def test_a_shadow_non_open_precheck_records_no_verdict(tmp_path):
     assert "--review-result" not in heartbeat
 
 
+# -- passing precheck with a CI re-run outstanding (#1019) ----------------------
+#
+# The branch is clean but no green run yet covers the merged overlap: live
+# re-runs CI once and waits for the result, shadow records what live would
+# do. No model call, no verdict, and a failing precheck rejects first and
+# never reaches here.
+
+def _rerun_packet():
+    return _packet(ci_rerun={"action": "rerun", "run_id": 123,
+                             "overlaps": [5]})
+
+
+def _wait_packet():
+    return _packet(ci_rerun={"action": "wait", "run_id": 124,
+                             "overlaps": [5]})
+
+
+def test_a_rerun_packet_reruns_ci_and_waits_without_a_model_call(tmp_path):
+    proc, repo = _stubbed_runner(tmp_path, _begin(), _rerun_packet())
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    assert (repo / "gh.log").read_text().strip() == \
+        "run rerun 123 --repo owner/repo"
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run engine-run --outcome done "
+        "--note review of PR #7 in owner/repo at {} re-ran CI (run 123) "
+        "to cover merged overlap (#5); waiting for the result\n".format(HEAD)
+    )
+
+
+def test_a_failed_rerun_finishes_errored_and_records_nothing(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _rerun_packet(), extra_env={"GH_STATUS": "1"})
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "gh run rerun 123 failed" in heartbeat
+    assert "recorded nothing" in heartbeat
+    assert "--review-result" not in heartbeat
+
+
+def test_a_wait_packet_finishes_without_calling_anything(tmp_path):
+    proc, repo = _stubbed_runner(tmp_path, _begin(), _wait_packet())
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    assert not (repo / "gh.log").exists()
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run engine-run --outcome done "
+        "--note review of PR #7 in owner/repo at {} waits for CI run 124 "
+        "covering merged overlap (#5)\n".format(HEAD)
+    )
+
+
+def test_a_shadow_rerun_records_but_never_reruns(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _rerun_packet(), args=("--shadow",))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    gh_log = (repo / "gh.log").read_text()
+    assert "run rerun" not in gh_log
+    assert "pr comment 7 --repo owner/repo --body-file" in gh_log
+    body = (repo / "gh.body").read_text()
+    assert "<!-- command-center-shadow-review -->" in body
+    assert "No model was called" in body
+    assert "gh run rerun 123" in body
+    assert "No verdict was recorded" in body
+    heartbeat = _heartbeat(repo)
+    assert "no decision; ci_rerun: rerun" in heartbeat
+    assert "--review-result" not in heartbeat
+
+
+def test_a_shadow_wait_records_no_decision(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _wait_packet(), args=("--shadow",))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    body = (repo / "gh.body").read_text()
+    assert "wait for CI run 124" in body
+    heartbeat = _heartbeat(repo)
+    assert "no decision; ci_rerun: wait" in heartbeat
+    assert "--review-result" not in heartbeat
+
+
+def test_a_failing_precheck_rejects_first_and_never_reruns(tmp_path):
+    failing = _failing_packet()
+    failing["ci_rerun"] = {"action": "rerun", "run_id": 123, "overlaps": [5]}
+    proc, repo = _stubbed_runner(tmp_path, _begin(), failing)
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert len(_apply_calls(repo)) == 1
+    assert (repo / "applied.marker").exists()
+    assert not (repo / "gh.log").exists()
+    assert _heartbeat(repo).endswith("--review-result rejected\n")
+
+
+def test_an_unknown_rerun_action_finishes_errored(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(ci_rerun={"action": "rebase"}))
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "unknown ci_rerun action" in heartbeat
+
+
 # -- live review: one question, one answer -------------------------------------
 
 def test_an_approval_is_applied_and_finished_done(tmp_path):

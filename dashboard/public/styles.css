@@ -1,7 +1,7 @@
 /* Board styling. The dark colours are chosen for contrast on the near-black
    surface: the pip scale runs muted grey (open) → light blue (PR submitted) →
-   light purple (PR approved) → solid purple (closed), which is the order work
-   actually travels. Nate chose the two PR colours, 2026-09-15. */
+   light purple (PR approved) → solid purple (closed), with danger red for a
+   current-head rejection. Nate chose the two PR colours, 2026-09-15. */
 /* Every colour is a token. The dark values are the original palette; the
    light palette under prefers-color-scheme keeps the pip scale's order and
    meaning, so the page follows the system setting (#996). */
@@ -33,6 +33,7 @@
   --pip-open: #39404a;
   --pip-unknown-stripe: #4b535f;
   --pip-submitted: #7cc7ff;
+  --pip-changes-requested: #ff7b72;
   --pip-approved: #c2a8ff;
   --pip-closed: #8957e5;
   --pip-blocked: #f0883e;
@@ -67,6 +68,7 @@
     --pip-open: #cdd2d9;
     --pip-unknown-stripe: #aeb5bf;
     --pip-submitted: #2f81f7;
+    --pip-changes-requested: #cf222e;
     --pip-approved: #a47cf0;
     --pip-closed: #6639ba;
     --pip-blocked: #c9510c;
@@ -301,6 +303,7 @@ main {
    the legend keeps its square. */
 .pip-bar .pip { flex: 1 1 0; width: auto; min-width: 2px; }
 .pip-submitted { background: var(--pip-submitted); }
+.pip-changes-requested { background: var(--pip-changes-requested); }
 .pip-approved { background: var(--pip-approved); }
 .pip-closed { background: var(--pip-closed); }
 .pip-blocked { background: var(--pip-blocked); }
@@ -327,13 +330,15 @@ main {
 }
 /* A coloured chip's border is its own text colour, softened, so it works in
    both themes without a second set of literals. */
-.chip-pr-submitted, .chip-pr-approved, .chip-pr-merged, .chip-tier-escalated,
+.chip-pr-submitted, .chip-pr-changes-requested, .chip-pr-approved,
+.chip-pr-merged, .chip-tier-escalated,
 .chip-blocked, .chip-pin, .chip-gate, .owner-nate, .owner-claude, .owner-muse,
 .owner-codex, .chip-class-broken, .chip-class-maintenance, .chip-class-improve,
 .chip-class-new, .chip-class-replace, .chip-class-investigate {
   border-color: color-mix(in srgb, currentColor 48%, transparent);
 }
 .chip-pr-submitted { color: var(--pip-submitted); }
+.chip-pr-changes-requested { color: var(--pip-changes-requested); }
 .chip-pr-approved { color: var(--pip-approved); }
 .pip-unknown { background: repeating-linear-gradient(135deg, var(--pip-open) 0 3px, var(--pip-unknown-stripe) 3px 6px); }
 .chip-pr-unknown { border-color: var(--ink-muted); color: var(--ink-faint); }

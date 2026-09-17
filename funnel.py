@@ -2931,6 +2931,31 @@ def _authoring_pr_agents(rows: Iterable[Dict[str, object]]) -> Dict[str, Set[str
     return found
 
 
+def _dashboard_authoring_pr_agents() -> Dict[str, Set[str]]:
+    """Collect runner attribution for PRs shown on the dashboard.
+
+    The dashboard already runs alongside the brief's heartbeat reads. Reuse
+    those per-run reads so a standard PR opened by an interactive or
+    funnel-watch Claude session can hand current-head rework back to Claude;
+    the pure board builder still accepts an explicit mapping for fixtures and
+    callers that already have the evidence.
+    """
+    try:
+        import heartbeat
+    except Exception:
+        return {}
+
+    authored_by: Dict[str, Set[str]] = {}
+    for agent in sorted(heartbeat.PROVIDERS):
+        try:
+            rows = _brief_heartbeat_rows(agent)
+        except Exception:
+            continue
+        for pr, agents in _authoring_pr_agents(rows).items():
+            authored_by.setdefault(pr, set()).update(agents)
+    return authored_by
+
+
 def unattended_merges(now: datetime) -> List[Dict[str, object]]:
     """Merges a reviewer made without Nate, read from every live agent's heartbeat.
 
@@ -6203,6 +6228,13 @@ OWNER_CLAUDE = "Claude"
 OWNER_MUSE = "Muse"
 OWNER_CODEX = "Codex"
 
+# Claude's interactive and funnel-watch PRs carry this standard footer. The
+# runner-created PRs are attributed from heartbeat finish records instead; a
+# missing or ambiguous attribution deliberately falls back to Codex below.
+CLAUDE_CODE_PR_RE = re.compile(
+    r"Generated with\s+\[Claude Code\]", re.IGNORECASE
+)
+
 
 def _dashboard_block_reason(item: Item) -> Optional[str]:
     """One short phrase saying why a ticket is blocked, or None.
@@ -6220,6 +6252,41 @@ def _dashboard_block_reason(item: Item) -> Optional[str]:
     return None
 
 
+def _dashboard_rework_owner(
+    tier: str,
+    pr_fact: Optional[Mapping[str, object]],
+    authoring_agents: Iterable[str] = (),
+) -> str:
+    """Return the implementer who owns a rejected current PR head.
+
+    Escalated work follows the same implementation registry used by
+    ``begin``: Muse is the only non-Codex implementation lane at that tier.
+    Standard work that was authored by Claude stays with Claude, whether its
+    provenance came from a heartbeat-bound funnel run or the Claude Code PR
+    footer used by interactive and funnel-watch sessions. Everything else is
+    Codex-owned, including unreadable or conflicting attribution.
+    """
+    if tier == "escalated" and begin_uses_ticket_path("muse", tier):
+        return OWNER_MUSE
+
+    agents = {
+        str(agent).strip().casefold()
+        for agent in authoring_agents
+        if str(agent).strip()
+    }
+    if "claude" in agents:
+        return OWNER_CLAUDE
+
+    body = (pr_fact or {}).get("body")
+    if isinstance(body, str) and CLAUDE_CODE_PR_RE.search(body):
+        return OWNER_CLAUDE
+
+    # ``begin``'s standard implementation lane is Codex. Keep this fallback
+    # explicit so a missing heartbeat or PR description cannot hand work to a
+    # reviewer by accident.
+    return OWNER_CODEX
+
+
 def _dashboard_ticket(
     item: Item,
     pr_fact: Optional[Mapping[str, object]],
@@ -6228,6 +6295,7 @@ def _dashboard_ticket(
     blockers: Sequence[str] = (),
     pr_known: bool = True,
     parent_block: Optional[str] = None,
+    authoring_agents: Iterable[str] = (),
 ) -> Dict[str, object]:
     """One ticket row for the dashboard, with its PR, tier and owner flags.
 
@@ -6272,7 +6340,13 @@ def _dashboard_ticket(
             and verdict.get("verdict") == "approved"
             and verdict_covers_head(verdict, head)
         )
-        pr = "approved" if approved else "submitted"
+        rejected = rejected_at_current_head(
+            verdict if isinstance(verdict, dict) else None, head
+        )
+        if rejected:
+            pr = "changes requested"
+        else:
+            pr = "approved" if approved else "submitted"
 
     if item.state != "OPEN":
         owner: Optional[str] = None
@@ -6282,6 +6356,10 @@ def _dashboard_ticket(
         owner = OWNER_CLAUDE
     elif reason is not None:
         owner = OWNER_NATE
+    elif pr == "changes requested":
+        owner = _dashboard_rework_owner(
+            tier, pr_fact, authoring_agents=authoring_agents
+        )
     elif pr == "submitted" or pr == "approved":
         # An open PR is the reviewer's move, whichever engine wrote it.
         owner = OWNER_MUSE
@@ -6348,7 +6426,8 @@ def _dashboard_item(
 #: Progress order for the sub-issue bar: finished work fills from the left,
 #: the way a progress bar reads, whatever order the tickets are queued in.
 PIP_PROGRESS_ORDER = (
-    "closed", "approved", "submitted", "unknown", "blocked", "open",
+    "closed", "approved", "changes-requested", "submitted", "unknown",
+    "blocked", "open",
 )
 
 
@@ -6359,6 +6438,8 @@ def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
     pr = ticket.get("pr")
     if pr == "approved":
         return "approved"
+    if pr == "changes requested":
+        return "changes-requested"
     if pr in ("submitted", "merged"):
         return "submitted"
     if pr == "unknown":
@@ -6427,6 +6508,7 @@ def dashboard_board(
     now: datetime,
     pr_facts: Optional[Mapping[str, Optional[Mapping[str, object]]]] = None,
     pr_facts_known: Optional[bool] = None,
+    authoring_pr_agents: Optional[Mapping[str, Iterable[str]]] = None,
 ) -> Dict[str, List[Dict[str, object]]]:
     """Build the ordered parent-project board for one already-loaded brief.
 
@@ -6443,16 +6525,29 @@ def dashboard_board(
     max_time = datetime.max.replace(tzinfo=timezone.utc)
 
     facts = dict(pr_facts or {})
+    authoring = authoring_pr_agents or {}
     # The brief returns an empty mapping both when nothing has a PR and when
     # the scan failed, so it says which through ``pr_facts_known``. A caller
     # that says nothing is not claiming a failure: fixture-pure callers pass no
     # facts at all and expect the old "no PR recorded" reading.
     known = True if pr_facts_known is None else bool(pr_facts_known)
-    in_review = {
-        ref for ref, fact in facts.items()
-        if isinstance(fact, Mapping)
-        and str(fact.get("state") or "").upper() == "OPEN"
-    }
+    in_review: Set[str] = set()
+    for ref, fact in facts.items():
+        if (
+            not isinstance(fact, Mapping)
+            or str(fact.get("state") or "").upper() != "OPEN"
+        ):
+            continue
+        verdict = fact.get("verdict")
+        if rejected_at_current_head(
+            verdict if isinstance(verdict, dict) else None,
+            fact.get("headRefOid"),
+        ):
+            # This is implementation work again, matching ``begin``'s
+            # rejected-current-head predicate; a pushed head falls through
+            # to the reviewer-owned in-review set.
+            continue
+        in_review.add(ref)
     try:
         # Match what `cmd_next` withholds, so the rank shown is the rank the
         # engineers actually use: work already in review, and work finished by
@@ -6487,6 +6582,14 @@ def dashboard_board(
         verdicts[ticket.ref] = found
         return found
 
+    def authoring_for(fact: Optional[Mapping[str, object]]) -> Iterable[str]:
+        """Return durable authoring agents for one PR number, if known."""
+        number = (fact or {}).get("number")
+        if number is None:
+            return ()
+        found = authoring.get(str(number))
+        return found if found is not None else ()
+
     def ticket_key(child: Item):
         """Next-to-be-taken first, then other open work, then closed."""
         rank = queue_rank.get(child.ref)
@@ -6520,6 +6623,7 @@ def dashboard_board(
                 list(child.open_blockers or child.block_references),
                 known,
                 parent_block if child.state == "OPEN" else None,
+                authoring_for(facts.get(child.ref)),
             )
             for child in sorted(children.get(parent.ref, ()), key=ticket_key)
         ]
@@ -9785,6 +9889,7 @@ def _batched_pr_query(
     include_reviews: bool,
     include_closing_refs: bool,
     include_refs: bool,
+    include_body: bool = False,
 ) -> Tuple[str, Dict[str, str]]:
     """Build one GraphQL document for the active repository PR pages.
 
@@ -9832,6 +9937,8 @@ def _batched_pr_query(
             "        number title state url headRefName headRefOid "
             "mergeable mergedAt createdAt closedAt"
         )
+        if include_body:
+            lines.append("        body")
         lines.append("        author { login }")
         lines.append("        mergedBy { login }")
         if include_reviews:
@@ -9899,6 +10006,8 @@ def _normalise_pr_node(node: object) -> Optional[Dict[str, object]]:
             "headRefOid", "mergeable", "mergedAt", "createdAt", "closedAt",
         )
     }
+    if "body" in node:
+        row["body"] = node.get("body")
     for name in ("author", "mergedBy"):
         value = node.get(name)
         row[name] = value if isinstance(value, dict) else None
@@ -9946,6 +10055,7 @@ def _read_batched_pr_snapshots(
     include_reviews: bool = False,
     include_closing_refs: bool = False,
     include_refs: bool = False,
+    include_body: bool = False,
 ) -> BatchedPRRead:
     """Read bounded PR and ticket-branch facts in repository-wide batches.
 
@@ -10002,6 +10112,7 @@ def _read_batched_pr_snapshots(
             include_reviews=include_reviews,
             include_closing_refs=include_closing_refs,
             include_refs=include_refs and page_number == 0,
+            include_body=include_body,
         )
         variables = {
             "cursor{}".format(index): cursors[repo]
@@ -10264,6 +10375,7 @@ def ticket_pr_facts(
         include_reviews=False,
         include_closing_refs=False,
         include_refs=True,
+        include_body=True,
     )
     rows_by_ref: Dict[str, List[Dict[str, object]]] = {}
     for repo in repos:
@@ -12604,6 +12716,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
             degraded: List[Dict[str, object]] = []
             deadline = time.perf_counter() + BRIEF_TOTAL_BUDGET_SECONDS
             cache = _ACTIVE_BRIEF_CACHE.get() or BriefCache()
+            cache_token = _ACTIVE_BRIEF_CACHE.set(cache)
             brief_timing_token = _ACTIVE_BRIEF_TIMINGS.set(timings)
 
             try:
@@ -12693,11 +12806,19 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     generated_at = brief_payload.get("generated_at")
                     if not isinstance(generated_at, str) or not generated_at:
                         generated_at = now.isoformat()
+                    authoring_pr_agents = {}
+                    if any(
+                        isinstance(fact, Mapping)
+                        and str(fact.get("state") or "").upper() == "OPEN"
+                        for fact in pr_facts.values()
+                    ):
+                        authoring_pr_agents = _dashboard_authoring_pr_agents()
                     write_dashboard_snapshot(
                         brief_payload,
                         dashboard_board(
                             items, now, pr_facts=pr_facts,
                             pr_facts_known=not pr_facts_missing,
+                            authoring_pr_agents=authoring_pr_agents,
                         ),
                         generated_at,
                     )
@@ -12711,6 +12832,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 return brief_code
             finally:
                 _ACTIVE_BRIEF_TIMINGS.reset(brief_timing_token)
+                _ACTIVE_BRIEF_CACHE.reset(cache_token)
         if args.command == "queue":
             return cmd_queue(items, now, repo_readiness=repo_readiness)
         return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))

@@ -21,7 +21,68 @@
 
 set -uo pipefail
 
+# launchd appends this runner's stdout to a tier-specific file. Keep the
+# newest 100 MB before the runner emits anything, so the file being written is
+# bounded without changing the plist or introducing a second rotation job.
+# Tests may lower the byte cap without creating a 100 MB fixture.
+MUSE_LOG_CAP_BYTES="${MUSE_LOG_CAP_BYTES:-104857600}"
+if [[ ! "$MUSE_LOG_CAP_BYTES" =~ ^[1-9][0-9]*$ ]]; then
+  MUSE_LOG_CAP_BYTES=104857600
+fi
+MUSE_LOG_TRIMMED=0
+
+muse_log_size_bytes() {
+  if [[ "$(uname -s 2>/dev/null)" == "Darwin" ]]; then
+    stat -f '%z' "$1"
+  else
+    stat -c '%s' "$1"
+  fi
+}
+
+trim_muse_log() {
+  local log_path="$1"
+  local size_bytes
+  local temp_path
+
+  [[ -f "$log_path" ]] || return 0
+  if ! size_bytes="$(muse_log_size_bytes "$log_path" 2>/dev/null)"; then
+    return 0
+  fi
+  [[ "$size_bytes" =~ ^[0-9]+$ ]] || return 0
+  (( size_bytes > MUSE_LOG_CAP_BYTES )) || return 0
+
+  if ! temp_path="$(mktemp "${log_path}.trim.XXXXXX" 2>/dev/null)"; then
+    return 0
+  fi
+  if ! tail -c "$MUSE_LOG_CAP_BYTES" "$log_path" >"$temp_path" 2>/dev/null; then
+    rm -f "$temp_path"
+    return 0
+  fi
+  if ! mv -f "$temp_path" "$log_path" 2>/dev/null; then
+    rm -f "$temp_path"
+    return 0
+  fi
+  MUSE_LOG_TRIMMED=1
+  return 0
+}
+
 TIER="${1:-escalated}"
+case "$TIER" in
+  standard)
+    MUSE_LOG_PATH="${MUSE_REVIEW_LOG_PATH:-${HOME:-}/Library/Logs/command-center-muse-review-standard.log}"
+    ;;
+  escalated)
+    MUSE_LOG_PATH="${MUSE_REVIEW_LOG_PATH:-${HOME:-}/Library/Logs/command-center-muse-review.log}"
+    ;;
+  *)
+    MUSE_LOG_PATH=""
+    ;;
+esac
+trim_muse_log "$MUSE_LOG_PATH"
+if (( MUSE_LOG_TRIMMED )); then
+  exec >>"$MUSE_LOG_PATH"
+fi
+
 EFFORT="${2:-max}"
 case "$TIER" in
   escalated|standard) ;;

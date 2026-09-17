@@ -196,7 +196,7 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
 
     assert args(NAMES[0]) == ["escalated", "max"]
     assert args(NAMES[1]) == ["standard", "high"]
-    assert args(SHADOW_REVIEWER_NAME) == ["--shadow", "standard"]
+    assert args(SHADOW_REVIEWER_NAME) == ["--shadow", "standard", "high"]
     assert args(IMPLEMENTER_NAME) == ["escalated", "max"]
 
 
@@ -211,6 +211,22 @@ def test_the_shadow_reviewer_runs_beside_standard_on_the_same_cadence():
 
     assert shadow["StartCalendarInterval"] == standard["StartCalendarInterval"]
     assert "StartInterval" not in shadow
+
+
+def test_the_shadow_reviewer_matches_the_live_standard_effort():
+    """#806 measures agreement between the two, so effort must not differ.
+
+    The engine defaults to `max`; a shadow plist that names no effort compared
+    `max` against the live reviewer's `high` (#976).
+    """
+    import plistlib
+
+    def args(name):
+        with (ROOT / "launchd" / name).open("rb") as handle:
+            return plistlib.load(handle)["ProgramArguments"][2:]
+
+    shadow = [a for a in args(SHADOW_REVIEWER_NAME) if a != "--shadow"]
+    assert shadow == args(REVIEWER_NAMES[1])
 
 
 def test_the_shadow_reviewer_header_documents_non_applying_side_by_side_run():

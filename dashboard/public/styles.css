@@ -1,23 +1,79 @@
-/* Dark board styling. Colours are chosen for contrast on the near-black
+/* Board styling. The dark colours are chosen for contrast on the near-black
    surface: the pip scale runs muted grey (open) → light blue (PR submitted) →
-   light purple (PR approved) → solid purple (closed), which is the order work
-   actually travels. Nate chose the two PR colours, 2026-09-15. */
+   light purple (PR approved) → solid purple (closed), with danger red for a
+   current-head rejection. Nate chose the two PR colours, 2026-09-15. */
+/* Every colour is a token. The dark values are the original palette; the
+   light palette under prefers-color-scheme keeps the pip scale's order and
+   meaning, so the page follows the system setting (#996). */
 :root {
-  color-scheme: dark;
+  color-scheme: light dark;
   --bg: #0b0d10;
   --surface: #14171c;
   --surface-2: #1b1f26;
   --line: #262b33;
+  --row-line: #1d222a;
+  --row-hover: #171c23;
+  --row-open: #12171e;
+  --group-hover: #232932;
+  --twisty-hover: #222831;
+  --children-bg: #0e1218;
+  --ticket-hover: #141a21;
+  --child-rule: #2c333d;
   --ink: #e8ebf0;
   --ink-dim: #9aa4b2;
   --ink-faint: #6b7580;
+  --ink-muted: #3c434d;
+  --tier-standard: #5b636e;
+  --blocked-title: #8a6a52;
   --accent: #c6f24e;
+  --accent-ink: #c6f24e;
+  --green: #3fb950;
+  --lavender: #d2a8ff;
+  --merged: #b392f0;
   --pip-open: #39404a;
+  --pip-unknown-stripe: #4b535f;
   --pip-submitted: #7cc7ff;
+  --pip-changes-requested: #ff7b72;
   --pip-approved: #c2a8ff;
   --pip-closed: #8957e5;
   --pip-blocked: #f0883e;
   --danger: #ff7b72;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --surface-2: #eef0f3;
+    --line: #d9dde3;
+    --row-line: #e6e9ed;
+    --row-hover: #f3f5f8;
+    --row-open: #eef2f7;
+    --group-hover: #e5e8ed;
+    --twisty-hover: #e3e7ec;
+    --children-bg: #f8f9fb;
+    --ticket-hover: #eef1f5;
+    --child-rule: #c5cbd3;
+    --ink: #1b1f24;
+    --ink-dim: #4d5662;
+    --ink-faint: #6e7781;
+    --ink-muted: #aab1ba;
+    --tier-standard: #6e7781;
+    --blocked-title: #9a5b2a;
+    --accent: #9bc53d;
+    --accent-ink: #4f6f00;
+    --green: #1a7f37;
+    --lavender: #8250df;
+    --merged: #6e40c9;
+    --pip-open: #cdd2d9;
+    --pip-unknown-stripe: #aeb5bf;
+    --pip-submitted: #2f81f7;
+    --pip-changes-requested: #cf222e;
+    --pip-approved: #a47cf0;
+    --pip-closed: #6639ba;
+    --pip-blocked: #c9510c;
+    --danger: #cf222e;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -63,7 +119,7 @@ a:hover { text-decoration: underline; }
   font-size: 13px;
   cursor: pointer;
 }
-#refresh:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+#refresh:hover:not(:disabled) { border-color: var(--accent-ink); color: var(--accent-ink); }
 #refresh:disabled { opacity: 0.5; cursor: default; }
 
 main {
@@ -182,23 +238,23 @@ main {
 }
 .cell-group { grid-column: 1 / -1; display: flex; align-items: center; gap: 9px; }
 .group-twisty { color: var(--ink-faint); width: 10px; font-size: 13px; line-height: 1; }
-.group-head:hover { background: #232932; }
+.group-head:hover { background: var(--group-hover); }
 .group-name { font-size: 12.5px; font-weight: 600; letter-spacing: 0.02em; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ink-faint); }
-.dot-shaped { background: #d2a8ff; }
-.dot-ready { background: #7cc7ff; }
+.dot-shaped { background: var(--lavender); }
+.dot-ready { background: var(--pip-submitted); }
 .dot-building { background: var(--accent); }
-.dot-done { background: #3fb950; }
+.dot-done { background: var(--green); }
 .dot-parked { background: var(--ink-faint); }
-.dot-ideas { background: #6b7580; }
+.dot-ideas { background: var(--ink-faint); }
 
-.row { border-bottom: 1px solid #1d222a; cursor: pointer; }
-.row:hover { background: #171c23; }
-.row.expanded { background: #12171e; }
+.row { border-bottom: 1px solid var(--row-line); cursor: pointer; }
+.row:hover { background: var(--row-hover); }
+.row.expanded { background: var(--row-open); }
 .row-title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; }
 .repo { color: var(--ink-dim); font-size: 12.5px; }
 .age { color: var(--ink-faint); font-size: 12px; }
-.muted { color: #3c434d; font-size: 12px; }
+.muted { color: var(--ink-muted); font-size: 12px; }
 
 .twisty {
   border: 0;
@@ -210,12 +266,12 @@ main {
   cursor: pointer;
   border-radius: 4px;
 }
-.twisty:hover:not(:disabled) { color: var(--ink); background: #222831; }
+.twisty:hover:not(:disabled) { color: var(--ink); background: var(--twisty-hover); }
 .twisty:disabled { cursor: default; opacity: 0; }
 
-.children { background: #0e1218; border-bottom: 1px solid #1d222a; }
+.children { background: var(--children-bg); border-bottom: 1px solid var(--row-line); }
 .ticket { min-height: 34px; }
-.ticket:hover { background: #141a21; }
+.ticket:hover { background: var(--ticket-hover); }
 .cell-child { position: relative; padding-left: 16px; }
 .child-rule {
   position: absolute;
@@ -223,11 +279,11 @@ main {
   top: 50%;
   width: 9px;
   height: 1px;
-  background: #2c333d;
+  background: var(--child-rule);
 }
-.ticket-blocked .ticket-title { color: #8a6a52; }
+.ticket-blocked .ticket-title { color: var(--blocked-title); }
 .ticket-title { color: var(--ink-dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
-.ticket-closed .ticket-title { color: var(--ink-faint); text-decoration: line-through; text-decoration-color: #3c434d; }
+.ticket-closed .ticket-title { color: var(--ink-faint); text-decoration: line-through; text-decoration-color: var(--ink-muted); }
 .owners { display: inline-flex; gap: 5px; }
 
 /* The sub-issue bar fills its column and the segments share the width, the
@@ -247,11 +303,12 @@ main {
    the legend keeps its square. */
 .pip-bar .pip { flex: 1 1 0; width: auto; min-width: 2px; }
 .pip-submitted { background: var(--pip-submitted); }
+.pip-changes-requested { background: var(--pip-changes-requested); }
 .pip-approved { background: var(--pip-approved); }
 .pip-closed { background: var(--pip-closed); }
 .pip-blocked { background: var(--pip-blocked); }
 .owner-more { margin-left: 4px; font-size: 11px; color: var(--ink-faint); }
-.tier-standard { color: #5b636e; font-size: 11.5px; }
+.tier-standard { color: var(--tier-standard); font-size: 11.5px; }
 .pip-count {
   flex: 0 0 46px;
   text-align: right;
@@ -271,25 +328,33 @@ main {
   color: var(--ink-dim);
   white-space: nowrap;
 }
-.pip-unknown { background: repeating-linear-gradient(135deg, #39404a 0 3px, #4b535f 3px 6px); }
-.chip-tier-escalated { border-color: rgba(240, 136, 62, 0.5); color: var(--pip-blocked); }
+/* A coloured chip's border is its own text colour, softened, so it works in
+   both themes without a second set of literals. */
+.chip-tier-escalated,
+.chip-blocked, .chip-pin, .chip-gate, .owner-nate, .owner-claude, .owner-muse,
+.owner-codex, .chip-class-broken, .chip-class-maintenance, .chip-class-improve,
+.chip-class-new, .chip-class-replace, .chip-class-investigate {
+  border-color: color-mix(in srgb, currentColor 48%, transparent);
+}
+.pip-unknown { background: repeating-linear-gradient(135deg, var(--pip-open) 0 3px, var(--pip-unknown-stripe) 3px 6px); }
+.chip-tier-escalated { color: var(--pip-blocked); }
 .chip-tier-standard { color: var(--ink-faint); }
-.chip-blocked { border-color: rgba(255, 123, 114, 0.5); color: var(--danger); }
-.chip-pin { border-color: rgba(198, 242, 78, 0.5); color: var(--accent); }
-.chip-gate { border-color: rgba(198, 242, 78, 0.5); color: var(--accent); }
+.chip-blocked { color: var(--danger); }
+.chip-pin { color: var(--accent-ink); }
+.chip-gate { color: var(--accent-ink); }
 .chip-reason { color: var(--ink-faint); }
 .chip-owner { background: var(--surface-2); }
-.owner-nate { border-color: rgba(198, 242, 78, 0.55); color: var(--accent); }
-.owner-claude { border-color: rgba(210, 168, 255, 0.5); color: #d2a8ff; }
-.owner-muse { border-color: rgba(124, 199, 255, 0.5); color: var(--pip-submitted); }
-.owner-codex { border-color: rgba(63, 185, 80, 0.5); color: #3fb950; }
+.owner-nate { color: var(--accent-ink); }
+.owner-claude { color: var(--lavender); }
+.owner-muse { color: var(--pip-submitted); }
+.owner-codex { color: var(--green); }
 .chip-class { color: var(--ink-dim); }
-.chip-class-broken { border-color: rgba(255, 123, 114, 0.45); color: var(--danger); }
-.chip-class-maintenance { border-color: rgba(240, 136, 62, 0.45); color: var(--pip-blocked); }
-.chip-class-improve { border-color: rgba(124, 199, 255, 0.4); color: var(--pip-submitted); }
-.chip-class-new { border-color: rgba(63, 185, 80, 0.45); color: #3fb950; }
-.chip-class-replace { border-color: rgba(210, 168, 255, 0.45); color: #d2a8ff; }
-.chip-class-investigate { border-color: rgba(198, 242, 78, 0.45); color: var(--accent); }
+.chip-class-broken { color: var(--danger); }
+.chip-class-maintenance { color: var(--pip-blocked); }
+.chip-class-improve { color: var(--pip-submitted); }
+.chip-class-new { color: var(--green); }
+.chip-class-replace { color: var(--lavender); }
+.chip-class-investigate { color: var(--accent-ink); }
 
 /* The phone board is a separate presentation of the same ordered payload. It
    stays out of the wide DOM view so the desktop grid remains unchanged. */
@@ -361,7 +426,7 @@ main {
     cursor: pointer;
     list-style: none;
   }
-  .phone-group-head:hover { background: #232932; }
+  .phone-group-head:hover { background: var(--group-hover); }
   .phone-group-head .group-twisty {
     display: inline-block;
     transition: transform 120ms ease;
@@ -375,7 +440,7 @@ main {
   .phone-row {
     display: block;
     min-width: 0;
-    border-bottom: 1px solid #1d222a;
+    border-bottom: 1px solid var(--row-line);
   }
   .phone-summary {
     display: grid;
@@ -388,13 +453,13 @@ main {
     cursor: pointer;
     list-style: none;
   }
-  .phone-summary:hover { background: #171c23; }
+  .phone-summary:hover { background: var(--row-hover); }
   .phone-summary:focus-visible,
   .phone-group-head:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: -2px;
   }
-  .phone-row[open] > .phone-summary { background: #12171e; }
+  .phone-row[open] > .phone-summary { background: var(--row-open); }
   .phone-arrow {
     color: var(--ink-faint);
     font-size: 15px;
@@ -424,8 +489,8 @@ main {
   .phone-details {
     min-width: 0;
     padding: 12px 14px 14px 43px;
-    border-top: 1px solid #1d222a;
-    background: #0e1218;
+    border-top: 1px solid var(--row-line);
+    background: var(--children-bg);
   }
   .phone-fields {
     display: grid;

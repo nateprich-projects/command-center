@@ -61,6 +61,15 @@ MAX_RAW_NOTE = 4000
 #: malformed answer. Printed on stdout, where runner diagnostics live.
 ERRORED_OUTCOME = "run outcome: errored"
 
+#: The review contract uses the participles, but these two exact lowercase
+#: verbs are unambiguous synonyms the model has already emitted in practice.
+#: Keep the map deliberately narrow: case and whitespace changes still need
+#: the retry path so malformed answers remain visible.
+NORMALISED_VERDICTS = {
+    "approve": "approved",
+    "reject": "rejected",
+}
+
 
 class AnswerError(ValueError):
     """The model's answer failed schema validation. Fail-closed."""
@@ -100,11 +109,18 @@ def parse_answer(raw: str) -> Dict[str, object]:
         raise AnswerError(
             "answer must be a JSON object, got {}".format(
                 type(answer).__name__))
-    verdict = answer.get("verdict")
+    original_verdict = answer.get("verdict")
+    verdict = original_verdict
+    normalised_from = None
+    if isinstance(original_verdict, str):
+        normalised_verdict = NORMALISED_VERDICTS.get(original_verdict)
+        if normalised_verdict is not None:
+            verdict = normalised_verdict
+            normalised_from = original_verdict
     if verdict not in funnel.VERDICTS:
         raise AnswerError(
-            "verdict must be one of {}, got {!r}".format(
-                list(funnel.VERDICTS), verdict))
+            "field 'verdict' must be one of {}; received value {!r}".format(
+                list(funnel.VERDICTS), original_verdict))
     blocking = _string_list(answer, "blocking")
     unsure = _string_list(answer, "unsure")
     if verdict == "approved" and blocking:
@@ -114,7 +130,10 @@ def parse_answer(raw: str) -> Dict[str, object]:
         # the confusion as malformed so the runner retries once.
         raise AnswerError(
             "approved verdict must not carry blocking items")
-    return {"verdict": verdict, "blocking": blocking, "unsure": unsure}
+    parsed = {"verdict": verdict, "blocking": blocking, "unsure": unsure}
+    if normalised_from is not None:
+        parsed["normalised_from"] = normalised_from
+    return parsed
 
 
 def decide(answer: Dict[str, object]) -> Tuple[str, List[str], Optional[str]]:
@@ -128,14 +147,19 @@ def decide(answer: Dict[str, object]) -> Tuple[str, List[str], Optional[str]]:
     verdict = str(answer["verdict"])
     blocking = list(answer["blocking"])  # type: ignore[arg-type]
     unsure = list(answer["unsure"])  # type: ignore[arg-type]
+    notes = []
+    normalised_from = answer.get("normalised_from")
+    if isinstance(normalised_from, str):
+        notes.append(
+            "normalised verdict {!r} to {!r}".format(
+                normalised_from, verdict))
     if unsure:
-        return (
-            "rejected",
-            blocking + ["unsure: " + item for item in unsure],
+        notes.append(
             "recorded as rejected because unsure was non-empty; "
-            "the model said {!r}".format(verdict),
-        )
-    return verdict, blocking, None
+            "the model said {!r}".format(verdict))
+        verdict = "rejected"
+        blocking = blocking + ["unsure: " + item for item in unsure]
+    return verdict, blocking, "; ".join(notes) or None
 
 
 def truncate_raw(raw: str) -> str:

@@ -23,6 +23,7 @@ import os
 import pathlib
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -626,6 +627,52 @@ def default_test_commands(root: pathlib.Path) -> List[List[str]]:
     return commands
 
 
+#: Where a pinned interpreter is looked for when PATH does not name it.
+#: Codex's sandbox PATH can miss Homebrew while the binaries are there.
+PINNED_PYTHON_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
+
+
+def _python_minor(executable: str) -> Optional[str]:
+    """The ``M.m`` version an interpreter reports, or None if it won't run."""
+    try:
+        result = subprocess.run(
+            [executable, "-c",
+             "import sys; print('%d.%d' % sys.version_info[:2])"],
+            capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def pinned_interpreter(root: pathlib.Path) -> str:
+    """The interpreter the checkout's tests should run under.
+
+    A repo that pins ``.python-version`` (The-League pins 3.12 and its
+    Makefile refuses anything else) gets a matching interpreter even when
+    finish-ticket itself was started by Apple's 3.9 ``python3`` (#1024).
+    Without a pin, or when no matching interpreter exists, this is
+    ``sys.executable``, so the repo's own check still names a mismatch.
+    """
+    try:
+        lines = (root / ".python-version").read_text().splitlines()
+    except OSError:
+        return sys.executable
+    parts = lines[0].strip().split(".") if lines else []
+    if len(parts) < 2 or not all(part.isdigit() for part in parts[:2]):
+        return sys.executable
+    wanted = "{}.{}".format(parts[0], parts[1])
+    if "{}.{}".format(*sys.version_info[:2]) == wanted:
+        return sys.executable
+    name = "python" + wanted
+    candidates = [shutil.which(name)] + [
+        os.path.join(directory, name) for directory in PINNED_PYTHON_DIRS]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and \
+                _python_minor(candidate) == wanted:
+            return candidate
+    return sys.executable
+
+
 def run_tests(root: pathlib.Path,
               commands: Optional[Sequence[Sequence[str]]] = None
               ) -> Tuple[List[str], Optional[str]]:
@@ -642,8 +689,10 @@ def run_tests(root: pathlib.Path,
         selected, source = default_test_plan(root)
     # PYTHON reaches a resolved `make` whose Makefile says `PYTHON ?= python3`.
     # In Codex's sandbox that bare name is Apple's /usr/bin/python3, whose
-    # compileall cannot write its cache (#953); run this interpreter instead.
-    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHON=sys.executable)
+    # compileall cannot write its cache (#953); run a chosen interpreter
+    # instead, honouring the checkout's .python-version pin (#1024).
+    python = pinned_interpreter(root)
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", PYTHON=python)
     # Whatever ultimately invokes pytest inherits the no-cache guard, so a
     # resolved `make test` cannot leave .pytest_cache/ for the explicit stage.
     extra = env.get("PYTEST_ADDOPTS", "").strip()
@@ -655,18 +704,33 @@ def run_tests(root: pathlib.Path,
     for command in selected:
         argv = list(command)
         # A command resolved from CI names `python` or `python3`; the schedule
-        # Mac has no bare `python` on PATH (#890), so run this interpreter.
+        # Mac has no bare `python` on PATH (#890), so run the chosen one.
         if argv and argv[0] in ("python", "python3"):
-            argv[0] = sys.executable
+            argv[0] = python
         _run(argv, cwd=root, env=env)
         rendered.append(shlex.join(argv))
     return rendered, source
 
 
+_GITHUB_REMOTE_RE = re.compile(
+    r"^(?:https://(?:[^@/]+@)?github\.com/|ssh://git@github\.com/|git@github\.com:)"
+    r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
+
+
 def resolve_checkout_repo(root: pathlib.Path, explicit: Optional[str]) -> str:
-    """Resolve owner/name from an explicit value or the checkout's gh context."""
+    """Resolve owner/name from an explicit value, origin, or gh's context.
+
+    The origin remote answers locally. Asking `gh repo view` first cost a
+    GraphQL call and stranded a finished ticket on one GitHub 504 (#1030).
+    """
     if explicit:
         return explicit
+    remote = _run(["git", "remote", "get-url", "origin"], cwd=root,
+                  check=False).stdout.strip()
+    match = _GITHUB_REMOTE_RE.match(remote)
+    if match:
+        return match.group(1)
     data = funnel._gh_json("gh", "repo", "view", "--json", "nameWithOwner")
     repo = (data or {}).get("nameWithOwner")
     if not isinstance(repo, str) or "/" not in repo:

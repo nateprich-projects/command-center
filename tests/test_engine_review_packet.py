@@ -15,6 +15,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import funnel  # noqa: E402
 from engine import review  # noqa: E402
 
 REPO = "owner/repo"
@@ -194,6 +195,105 @@ def test_overlap_reports_every_shared_file_sorted():
                       "files": ["a.py", "b.py"]}]
 
 
+# -- CI runs: the merged-overlap row's coverage evidence (#1019) ---------------
+
+RUN_BRANCH = "ticket/9"
+RUN_AT = "2026-09-13T13:30:00Z"
+OLD_RUN_AT = "2026-09-13T11:00:00Z"
+
+
+def gh_run(run_id=11, started_at=RUN_AT, conclusion="success",
+           status="completed", event="pull_request", head=SHA):
+    """One ``gh run list`` row: the wire shape the fetcher returns."""
+    return {"databaseId": run_id, "event": event, "headSha": head,
+            "headBranch": RUN_BRANCH, "conclusion": conclusion,
+            "status": status, "createdAt": started_at,
+            "startedAt": started_at, "updatedAt": started_at}
+
+
+def test_fetch_ci_runs_lists_pull_request_runs_on_the_branch(monkeypatch):
+    seen = []
+
+    def fake_gh_json(*args):
+        seen.append(args)
+        return [gh_run()]
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    assert review.fetch_ci_runs(REPO, RUN_BRANCH) == [gh_run()]
+    command = seen[0]
+    assert command[:5] == ("gh", "run", "list", "--repo", REPO)
+    assert command[command.index("--branch") + 1] == RUN_BRANCH
+    assert command[command.index("--event") + 1] == "pull_request"
+    fields = command[command.index("--json") + 1].split(",")
+    for field in ("databaseId", "event", "headSha", "conclusion", "status",
+                  "startedAt"):
+        assert field in fields
+
+
+def test_fetch_ci_runs_reads_no_runs_without_actions(monkeypatch):
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: None)
+    assert review.fetch_ci_runs(REPO, RUN_BRANCH) == []
+
+
+def test_fetch_ci_runs_skips_an_empty_branch_without_calling(monkeypatch):
+    def fail(*args):
+        raise AssertionError("no branch, no runs call")
+
+    monkeypatch.setattr(funnel, "_gh_json", fail)
+    assert review.fetch_ci_runs(REPO, "") == []
+
+
+def test_fetch_ci_runs_drops_rubbish_rows(monkeypatch):
+    monkeypatch.setattr(funnel, "_gh_json",
+                        lambda *args: [None, "nonsense", gh_run()])
+    assert review.fetch_ci_runs(REPO, RUN_BRANCH) == [gh_run()]
+
+
+def test_packet_carries_the_ci_runs_newest_first():
+    runs = [gh_run(11, OLD_RUN_AT),
+            gh_run(12, RUN_AT, status="in_progress", conclusion=None)]
+    found = packet(ci_runs=runs)
+    assert found["ci"]["runs"] == [
+        {"id": 12, "conclusion": None, "status": "in_progress",
+         "started_at": RUN_AT},
+        {"id": 11, "conclusion": "success", "status": "completed",
+         "started_at": OLD_RUN_AT},
+    ]
+    assert found["ci"]["green_run_at"] == OLD_RUN_AT
+    assert found["ci"]["latest_run_id"] == 11
+
+
+def test_packet_without_ci_runs_carries_no_coverage():
+    found = packet()
+    assert found["ci"]["runs"] == []
+    assert found["ci"]["green_run_at"] is None
+    assert found["ci"]["latest_run_id"] is None
+    assert found["ci_rerun"] is None
+
+
+def test_collect_fetches_runs_for_the_pr_branch(monkeypatch):
+    monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: pr_view())
+    monkeypatch.setattr(review, "fetch_diff", lambda repo, pr: "diff text")
+    monkeypatch.setattr(
+        review, "fetch_ticket", lambda repo, number: ticket())
+    monkeypatch.setattr(
+        review, "fetch_plan_md", lambda repo: ("# design record", False))
+    monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
+    seen = {}
+
+    def fake_runs(repo, branch):
+        seen["repo"] = repo
+        seen["branch"] = branch
+        return [gh_run()]
+
+    monkeypatch.setattr(review, "fetch_ci_runs", fake_runs)
+    found = review.collect(REPO, 7, items_loader=lambda: [])
+    assert seen == {"repo": REPO, "branch": "ticket/9"}
+    assert found["ci"]["green_run_at"] == RUN_AT
+
+
 # -- the assembled packet ---------------------------------------------------
 
 def test_packet_carries_every_field():
@@ -321,7 +421,7 @@ def test_packet_without_a_ticket_branch_has_no_ticket_body():
     found = packet(pr_view=view, ticket=None)
     assert found["ticket"] == {
         "ref": None, "number": None, "title": None, "url": None,
-        "body": None, "parent": None}
+        "body": None, "parent": None, "comments": []}
 
 
 def test_packet_marks_a_missing_plan():
@@ -388,6 +488,7 @@ def test_cli_prints_valid_json_with_every_field(monkeypatch, capsys):
         review, "fetch_plan_md", lambda repo: ("# design record", False))
     monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
     monkeypatch.setattr(
         review, "fetch_verdict", lambda repo, pr: verdict())
     monkeypatch.setattr(
@@ -415,6 +516,7 @@ def test_cli_leaves_a_non_ticket_branch_without_a_ticket(monkeypatch, capsys):
     monkeypatch.setattr(review, "fetch_plan_md", lambda repo: ("", True))
     monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
     monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
     monkeypatch.setattr(
         review, "fetch_stop_counter",
@@ -442,3 +544,148 @@ def test_a_pending_status_shape_is_unknown_not_red():
     assert review.ci_state(
         [{"context": "ci", "state": "PENDING"},
          {"context": "lint", "state": "FAILURE"}]) == "red"
+
+
+# -- ticket comments (#1005) -------------------------------------------------
+
+def comment(body, voice=None, author="nateprich",
+            created_at="2026-09-13T00:00:00Z"):
+    if voice is not None:
+        body = funnel.append_provenance(
+            body, voice, run="fixture-run", agent="muse")
+    return {"author": {"login": author}, "body": body,
+            "createdAt": created_at}
+
+
+def test_each_provenance_voice_is_read_from_its_comment():
+    rows = [comment("direct words", "nate-direct",
+                    created_at="2026-09-13T00:00:00Z"),
+            comment("relayed words", "nate-relayed",
+                    created_at="2026-09-14T00:00:00Z"),
+            comment("agent words", "agent",
+                    created_at="2026-09-15T00:00:00Z")]
+    assert [entry["voice"] for entry in review.ticket_comments(rows)] == [
+        "nate-direct", "nate-relayed", "agent"]
+
+
+def test_a_comment_without_a_marker_has_unknown_voice():
+    (found,) = review.ticket_comments([comment("just words")])
+    assert found == {"author": "nateprich",
+                     "created_at": "2026-09-13T00:00:00Z",
+                     "voice": "unknown", "body": "just words"}
+
+
+def test_the_marker_block_is_stripped_from_the_body():
+    (found,) = review.ticket_comments(
+        [comment("Retire the drift checks.", "nate-direct")])
+    assert found["voice"] == "nate-direct"
+    assert found["body"] == "Retire the drift checks."
+    assert "command-center" not in found["body"]
+
+
+def test_comments_arrive_in_time_order_oldest_first():
+    rows = [comment("second", created_at="2026-09-14T00:00:00Z"),
+            comment("first", created_at="2026-09-13T00:00:00Z")]
+    assert [entry["body"] for entry in review.ticket_comments(rows)] == [
+        "first", "second"]
+
+
+def test_only_the_newest_thirty_comments_are_kept():
+    rows = [comment("note {}".format(day),
+                    created_at="2026-09-{:02d}T00:00:00Z".format(day))
+            for day in range(1, 36)]
+    found = review.ticket_comments(rows)
+    assert len(found) == 30
+    assert found[0]["body"] == "note 6"
+    assert found[-1]["body"] == "note 35"
+
+
+def test_a_long_body_is_capped_with_its_cut_marked():
+    (found,) = review.ticket_comments([comment("x" * 4100)])
+    assert found["body"] == "x" * 4000 + "\n…[truncated 100 chars]"
+
+
+def test_a_body_at_the_cap_is_left_alone():
+    (found,) = review.ticket_comments([comment("y" * 4000)])
+    assert found["body"] == "y" * 4000
+
+
+def test_rubbish_rows_and_missing_fields_do_not_break_shaping():
+    rows = [None, "nonsense", {},
+            {"author": "bare-login", "body": "plain"},
+            {"author": {"login": "who"},
+             "created_at": "2026-09-13T00:00:00Z"}]
+    found = review.ticket_comments(rows)
+    assert [(entry["author"], entry["created_at"], entry["voice"],
+             entry["body"]) for entry in found] == [
+        (None, None, "unknown", ""),
+        ("bare-login", None, "unknown", "plain"),
+        ("who", "2026-09-13T00:00:00Z", "unknown", ""),
+    ]
+
+
+def test_packet_carries_the_ticket_comments_with_voices():
+    rows = [comment("Retire the drift checks.", "nate-direct",
+                    created_at="2026-09-14T00:00:00Z"),
+            comment("noted", created_at="2026-09-15T00:00:00Z")]
+    found = packet(ticket=ticket(comments=rows))
+    assert found["ticket"]["comments"] == [
+        {"author": "nateprich", "created_at": "2026-09-14T00:00:00Z",
+         "voice": "nate-direct", "body": "Retire the drift checks."},
+        {"author": "nateprich", "created_at": "2026-09-15T00:00:00Z",
+         "voice": "unknown", "body": "noted"},
+    ]
+    json.dumps(found)  # the packet is JSON by contract
+
+
+def test_a_ticket_without_a_comments_list_gets_an_empty_one():
+    assert packet()["ticket"]["comments"] == []
+
+
+def test_a_ticketless_branch_carries_no_comments():
+    view = pr_view(headRefName="docs/meta-terms-read")
+    assert packet(pr_view=view, ticket=None)["ticket"]["comments"] == []
+
+
+def test_fetch_ticket_reads_comments_with_the_ticket(monkeypatch):
+    seen = {}
+
+    def fake_gh_json(*args):
+        seen["args"] = args
+        return {"number": 9, "title": "t", "url": "u", "body": "b",
+                "parent": None, "comments": []}
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    assert review.fetch_ticket(REPO, 9)["comments"] == []
+    assert "comments" in seen["args"][-1].split(",")
+
+
+def test_the_review_question_treats_nate_comments_as_amending_decisions():
+    text = (ROOT / "routines" / "muse-review.md").read_text()
+    assert "ticket.comments" in text
+    assert "nate-direct" in text and "nate-relayed" in text
+    assert "amend" in text
+    assert "unknown" in text
+
+
+def test_cli_shows_the_ticket_comments_with_voices(monkeypatch, capsys):
+    rows = [comment("Retire the drift checks.", "nate-direct")]
+    monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: pr_view())
+    monkeypatch.setattr(review, "fetch_diff", lambda repo, pr: "diff text")
+    monkeypatch.setattr(
+        review, "fetch_ticket",
+        lambda repo, number: ticket(comments=rows))
+    monkeypatch.setattr(
+        review, "fetch_plan_md", lambda repo: ("# design record", False))
+    monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    monkeypatch.setattr(
+        review, "fetch_verdict", lambda repo, pr: verdict())
+    monkeypatch.setattr(
+        review, "fetch_stop_counter",
+        lambda items_loader=None, now=None: dict(STOP_COUNTER))
+    assert review.main(["7", "--repo", REPO]) == 0
+    found = json.loads(capsys.readouterr().out)
+    assert found["ticket"]["comments"] == [
+        {"author": "nateprich", "created_at": "2026-09-13T00:00:00Z",
+         "voice": "nate-direct", "body": "Retire the drift checks."}]

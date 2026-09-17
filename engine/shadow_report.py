@@ -16,6 +16,14 @@ Breakdown reads sub-issue creation and Needs-a-decision comments inside the
 live job window.  Shape reads the ``Self-approved:`` comment inside that
 window, so a later Project-status move cannot erase the observed outcome.
 
+Breakdown/shape agreement is directional: ticket counts agree when they are
+within one, or when the shadow recorded a ``needs_decision`` and live did not;
+``needs_decision`` agrees when the outcomes match, or only the shadow asked;
+shape statuses agree when they match, or when shadow is ``Shaped`` and live is
+``Ready``.  A shadow ``Ready`` against live ``Shaped``, or a live question the
+shadow did not ask, remains a disagreement.  Each reported disagreement names
+the failed arm(s).
+
 Only completed review jobs inside the requested window count.  A missing or
 ambiguous verdict is not silently treated as a rejection: it is excluded from
 the agreement denominator and is surfaced through the malformed-output count
@@ -1672,8 +1680,8 @@ def _live_breakdown_observation(
     return {"ticket_count": count, "needs_decision": question}
 
 
-def _breakdown_pair_agrees(left: object, right: object) -> object:
-    """Compare the two #813 breakdown predicates, fail-closed."""
+def _breakdown_pair_checks(left: object, right: object) -> object:
+    """Return the directional result of each breakdown comparison arm."""
     if (not isinstance(left, Mapping) or not isinstance(right, Mapping)
             or left.get("ticket_count") is _COMPARISON_UNREADABLE
             or right.get("ticket_count") is _COMPARISON_UNREADABLE):
@@ -1701,7 +1709,55 @@ def _breakdown_pair_agrees(left: object, right: object) -> object:
         )
     else:
         return _COMPARISON_UNREADABLE
-    return abs(left_count - right_count) <= 1 and question_agrees
+
+    shadow_asked = (
+        isinstance(left_question, str) and bool(left_question.strip())
+    )
+    live_asked = (
+        isinstance(right_question, str) and bool(right_question.strip())
+    )
+    shadow_holds = shadow_asked and not live_asked
+    return {
+        "ticket_count": abs(left_count - right_count) <= 1 or shadow_holds,
+        "needs_decision": question_agrees or shadow_holds,
+    }
+
+
+def _breakdown_pair_agrees(left: object, right: object) -> object:
+    """Compare the two #813 breakdown predicates, fail-closed."""
+    checks = _breakdown_pair_checks(left, right)
+    if checks is _COMPARISON_UNREADABLE:
+        return checks
+    return all(checks.values())
+
+
+def _breakdown_shape_pair_checks(
+    breakdown_left: object,
+    breakdown_right: object,
+    shadow_shape_status: object,
+    live_shape_status: object,
+) -> object:
+    """Return named directional checks for one breakdown/shape pair."""
+    breakdown_checks = _breakdown_pair_checks(
+        breakdown_left, breakdown_right
+    )
+    if breakdown_checks is _COMPARISON_UNREADABLE:
+        return breakdown_checks
+    if (
+        shadow_shape_status not in {"Shaped", "Ready"}
+        or live_shape_status not in {"Shaped", "Ready"}
+    ):
+        return _COMPARISON_UNREADABLE
+    return {
+        **breakdown_checks,
+        "shape_status": (
+            shadow_shape_status == live_shape_status
+            or (
+                shadow_shape_status == "Shaped"
+                and live_shape_status == "Ready"
+            )
+        ),
+    }
 
 
 def _issue_malformed_count(
@@ -1732,10 +1788,12 @@ def _breakdown_shape_disagreement_entry(
     live_observation: Mapping[str, object],
     shadow_shape_status: str,
     live_shape_status: str,
+    failed_arms: Sequence[str],
 ) -> Dict[str, object]:
     """Render the evidence for one disagreeing breakdown/shape pair."""
     return {
         "key": shadow_breakdown.get("key") or live_breakdown.get("key"),
+        "failed_arms": list(failed_arms),
         "shadow": {
             "run": shadow_breakdown.get("run"),
             "ticket_count": shadow_observation.get("ticket_count"),
@@ -2008,9 +2066,11 @@ def build_breakdown_shape_report(
             id(shadow_breakdown)
         )
         live_breakdown_observation = live_observations.get(id(live_breakdown))
-        breakdown_agrees = _breakdown_pair_agrees(
+        pair_checks = _breakdown_shape_pair_checks(
             shadow_breakdown_observation,
             live_breakdown_observation,
+            shadow_observations.get(id(shadow_shape)),
+            live_observations.get(id(live_shape)),
         )
         shadow_shape_status = shadow_observations.get(id(shadow_shape))
         live_shape_status = live_observations.get(id(live_shape))
@@ -2022,13 +2082,14 @@ def build_breakdown_shape_report(
                     shadow_shape, live_shape,
                 )
             )
-            or
-            breakdown_agrees is _COMPARISON_UNREADABLE
-            or shadow_shape_status not in {"Shaped", "Ready"}
-            or live_shape_status not in {"Shaped", "Ready"}
+            or pair_checks is _COMPARISON_UNREADABLE
         ):
             continue
-        agrees = bool(breakdown_agrees and shadow_shape_status == live_shape_status)
+        failed_arms = [
+            arm for arm, arm_agrees in pair_checks.items()
+            if not arm_agrees
+        ]
+        agrees = not failed_arms
         comparable.append(agrees)
         if not agrees:
             disagreements.append(
@@ -2041,6 +2102,7 @@ def build_breakdown_shape_report(
                     live_breakdown_observation,
                     shadow_shape_status,
                     live_shape_status,
+                    failed_arms,
                 )
             )
 
@@ -2269,6 +2331,11 @@ def format_breakdown_shape_disagreements(
     for entry in disagreements:
         key = entry.get("key") or "unknown-key"
         lines.append(str(key))
+        failed_arms = entry.get("failed_arms")
+        if isinstance(failed_arms, (list, tuple)):
+            named = [str(arm) for arm in failed_arms if arm]
+            if named:
+                lines.append("  failed arms: {}".format(", ".join(named)))
         for side in ("shadow", "live"):
             evidence = entry.get(side)
             if not isinstance(evidence, Mapping):

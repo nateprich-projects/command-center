@@ -189,6 +189,61 @@ def test_truncated_graphql_response_retries_then_succeeds(
     assert funnel.graphql_spend()["calls"] == 2
 
 
+@pytest.mark.parametrize("stderr", [
+    "gh: HTTP 502",
+    "gh: We couldn't respond to your request in time. Sorry about that. "
+    "Please try resubmitting your request and contact us if the problem "
+    "persists. (HTTP 504)",
+])
+def test_gateway_error_retries_then_succeeds(monkeypatch, stderr):
+    """One GitHub 502/504 failed begin closed on 2026-09-17 (#1030)."""
+    funnel.reset_route_state()
+    funnel.reset_api_usage()
+    attempts = []
+    sleeps = []
+    responses = [
+        SimpleNamespace(returncode=1, stdout="", stderr=stderr),
+        SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"data": {"viewer": {"login": "n"}}}),
+            stderr="",
+        ),
+    ]
+
+    def run(args, **kwargs):
+        attempts.append(args)
+        return responses.pop(0)
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel.time, "sleep", sleeps.append)
+
+    assert funnel.gh_graphql("{viewer{login}}") == {
+        "viewer": {"login": "n"}
+    }
+    assert len(attempts) == 2
+    assert sleeps == [funnel.GRAPHQL_GATEWAY_RETRY_DELAY_SECONDS]
+    assert funnel.graphql_spend()["calls"] == 2
+
+
+def test_persistent_gateway_error_stops_after_the_attempt_bound(monkeypatch):
+    funnel.reset_route_state()
+    funnel.reset_api_usage()
+    attempts = []
+
+    def run(args, **kwargs):
+        attempts.append(args)
+        return SimpleNamespace(returncode=1, stdout="", stderr="gh: HTTP 504")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(funnel.time, "sleep", lambda seconds: None)
+
+    with pytest.raises(funnel.GitHubError, match="HTTP 504") as raised:
+        funnel.gh_graphql("{viewer{login}}")
+
+    assert raised.value.transient
+    assert len(attempts) == funnel.GRAPHQL_MAX_ATTEMPTS
+
+
 def test_non_transient_graphql_failure_does_not_retry(monkeypatch):
     funnel.reset_route_state()
     funnel.reset_api_usage()

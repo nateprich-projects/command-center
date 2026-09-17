@@ -1120,6 +1120,92 @@ def test_a_resolved_make_command_gets_this_interpreter_as_python(
     assert env["PYTHONDONTWRITEBYTECODE"] == "1"
 
 
+def _spy_run(monkeypatch):
+    seen = []
+    real_run = implement._run
+
+    def spy(argv, **kwargs):
+        seen.append((list(argv), kwargs.get("env") or {}))
+        return real_run([sys.executable, "-c", "pass"], **kwargs)
+
+    monkeypatch.setattr(implement, "_run", spy)
+    return seen
+
+
+def _fake_python(directory, version):
+    """An executable named python<version> that reports that version."""
+    path = directory / "python{}".format(version)
+    path.write_text("#!/bin/sh\necho {}\n".format(version))
+    path.chmod(0o755)
+    return path
+
+
+def test_an_unpinned_checkout_runs_under_this_interpreter(tmp_path, monkeypatch):
+    """#1024: with no .python-version, #953's choice stands."""
+    _, clone = make_clone(tmp_path)
+    seen = _spy_run(monkeypatch)
+    implement.run_tests(clone, [["make", "test"], ["python3", "-m", "pytest"]])
+    assert seen[0][1]["PYTHON"] == sys.executable
+    assert seen[1][0][0] == sys.executable
+
+
+def test_a_pin_this_interpreter_meets_keeps_it(tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    (clone / ".python-version").write_text(
+        "{}.{}.9\n".format(*sys.version_info[:2]))
+    monkeypatch.setattr(implement, "PINNED_PYTHON_DIRS", ())
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    seen = _spy_run(monkeypatch)
+    implement.run_tests(clone, [["make", "test"]])
+    assert seen[0][1]["PYTHON"] == sys.executable
+
+
+def test_a_pin_this_interpreter_misses_picks_a_matching_one(
+        tmp_path, monkeypatch):
+    """The-League pins 3.12; Codex started finish-ticket under Apple's 3.9."""
+    _, clone = make_clone(tmp_path)
+    (clone / ".python-version").write_text("7.4\n")
+    on_path = tmp_path / "bin"
+    on_path.mkdir()
+    fake = _fake_python(on_path, "7.4")
+    monkeypatch.setattr(implement, "PINNED_PYTHON_DIRS", ())
+    monkeypatch.setenv("PATH", str(on_path))
+    seen = _spy_run(monkeypatch)
+    implement.run_tests(clone, [["make", "test"], ["python", "-m", "pytest"]])
+    assert seen[0][1]["PYTHON"] == str(fake)
+    assert seen[1][0] == [str(fake), "-m", "pytest"]
+
+
+def test_a_pinned_interpreter_off_path_is_found_in_homebrew_dirs(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    (clone / ".python-version").write_text("7.4.1\n")
+    brew = tmp_path / "brew"
+    brew.mkdir()
+    fake = _fake_python(brew, "7.4")
+    monkeypatch.setattr(implement, "PINNED_PYTHON_DIRS", (str(brew),))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    assert implement.pinned_interpreter(clone) == str(fake)
+
+
+def test_an_unsatisfiable_pin_falls_back_to_this_interpreter(
+        tmp_path, monkeypatch):
+    """No match: keep sys.executable so the repo's own check names it."""
+    _, clone = make_clone(tmp_path)
+    (clone / ".python-version").write_text("7.4\n")
+    liar = tmp_path / "bin"
+    liar.mkdir()
+    # Named python7.4 but reports another version: not a match.
+    path = liar / "python7.4"
+    path.write_text("#!/bin/sh\necho 7.5\n")
+    path.chmod(0o755)
+    monkeypatch.setattr(implement, "PINNED_PYTHON_DIRS", ())
+    monkeypatch.setenv("PATH", str(liar))
+    seen = _spy_run(monkeypatch)
+    implement.run_tests(clone, [["make", "test"]])
+    assert seen[0][1]["PYTHON"] == sys.executable
+
+
 def test_a_failed_command_reports_stdout_as_well_as_stderr(tmp_path):
     """compileall prints on stdout; make's stderr said only "Error 1"."""
     # Joined at run time, so the error's echo of the command cannot match.
@@ -1129,3 +1215,33 @@ def test_a_failed_command_reports_stdout_as_well_as_stderr(tmp_path):
         implement._run([sys.executable, "-c", script], cwd=tmp_path)
     assert "PermissionError: cache" in str(caught.value)
     assert "[check] Error 1" in str(caught.value)
+
+
+@pytest.mark.parametrize("url", [
+    "https://github.com/nateprich-projects/The-League.git",
+    "https://github.com/nateprich-projects/The-League",
+    "git@github.com:nateprich-projects/The-League.git",
+    "ssh://git@github.com/nateprich-projects/The-League.git",
+])
+def test_checkout_repo_resolves_from_origin_without_gh(tmp_path, monkeypatch, url):
+    """A GitHub 504 on `gh repo view` stranded a finished ticket (#1030)."""
+    run_git("init", "-q", str(tmp_path))
+    run_git("remote", "add", "origin", url, cwd=tmp_path)
+
+    def gh_down(*args):
+        raise AssertionError("origin names the repo; gh must not be asked")
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_down)
+    assert implement.resolve_checkout_repo(tmp_path, None) == (
+        "nateprich-projects/The-League"
+    )
+
+
+def test_checkout_repo_falls_back_to_gh_for_a_non_github_origin(
+        tmp_path, monkeypatch):
+    run_git("init", "-q", str(tmp_path))
+    run_git("remote", "add", "origin", str(tmp_path / "origin.git"),
+            cwd=tmp_path)
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args: {"nameWithOwner": REPO})
+    assert implement.resolve_checkout_repo(tmp_path, None) == REPO

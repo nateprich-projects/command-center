@@ -100,6 +100,7 @@ test("a pre-grouped board is rendered exactly in producer order", () => {
 test("a pip carries the ticket's furthest state", () => {
   assert.equal(pipState({ state: "CLOSED", pr: "merged" }), "closed");
   assert.equal(pipState({ state: "OPEN", pr: "approved" }), "approved");
+  assert.equal(pipState({ state: "OPEN", pr: "changes requested" }), "changes-requested");
   assert.equal(pipState({ state: "OPEN", pr: "submitted" }), "submitted");
   assert.equal(pipState({ state: "OPEN", blocked: true }), "blocked");
   assert.equal(pipState({ state: "OPEN" }), "open");
@@ -167,6 +168,27 @@ test("the sub-issue bar fills its column rather than capping its pips", async ()
   const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
   assert.doesNotMatch(app, /PIP_LIMIT/);
   assert.match(css, /\.pip-bar \.pip \{ flex: 1 1 0;/);
+});
+
+test("the page follows the system light/dark setting (#996)", async () => {
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.match(html, /<meta name="color-scheme" content="light dark">/);
+  assert.match(css, /color-scheme: light dark;/);
+  assert.match(css, /@media \(prefers-color-scheme: light\) \{\s+:root \{/);
+  // Outside the two token blocks, no rule carries a colour literal.
+  const rules = css
+    .replace(/:root \{[^}]*\}/g, "")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  assert.doesNotMatch(rules, /#[0-9a-fA-F]{3,8}\b|rgba?\(/);
+});
+
+test("changes requested has a themed pip and legend entry", async () => {
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.match(css, /--pip-changes-requested:/);
+  assert.match(css, /\.pip-changes-requested \{ background: var\(--pip-changes-requested\); \}/);
+  assert.match(html, /pip pip-changes-requested[^<]*<\/i>\s*changes requested/);
 });
 
 test("the phone progress shows its count once (#994)", async () => {

@@ -692,6 +692,7 @@ def test_breakdown_shape_disagreements_include_both_sides_and_runs():
 
     assert report["breakdown_shape_agreement"]["disagreements"] == [{
         "key": "owner/repo#102",
+        "failed_arms": ["ticket_count"],
         "shadow": {
             "run": "shadow-breakdown-2",
             "ticket_count": 2,
@@ -717,6 +718,7 @@ def test_breakdown_shape_disagreements_only_output_names_the_mode(
             "breakdown_shape_agreement": {
                 "disagreements": [{
                     "key": "owner/repo#102",
+                    "failed_arms": ["ticket_count"],
                     "shadow": {
                         "run": "shadow-run", "ticket_count": 2,
                         "needs_decision": None, "shape_status": "Ready",
@@ -738,6 +740,7 @@ def test_breakdown_shape_disagreements_only_output_names_the_mode(
     assert "shadow-run" in output
     assert "live-run" in output
     assert "tickets 4" in output
+    assert "failed arms: ticket_count" in output
     assert "review disagreements" not in output
 
 
@@ -908,7 +911,7 @@ def test_recorded_live_outcomes_survive_late_state_reads():
     assert agreement["rate"] == 1.0
 
 
-def test_shape_disagreement_is_counted_after_reading_live_status():
+def test_shadow_shaped_live_ready_counts_as_directional_agreement():
     report = shadow_report.build_report(
         _shape_comparison_records(shadow_status="Shaped"),
         now=1000,
@@ -919,9 +922,63 @@ def test_shape_disagreement_is_counted_after_reading_live_status():
         },
     )
 
-    assert report["breakdown_shape_agreement"]["agree"] == 0
-    assert report["breakdown_shape_agreement"]["disagree"] == 1
-    assert report["breakdown_shape_agreement"]["rate"] == 0.0
+    assert report["breakdown_shape_agreement"]["agree"] == 1
+    assert report["breakdown_shape_agreement"]["disagree"] == 0
+    assert report["breakdown_shape_agreement"]["rate"] == 1.0
+
+
+def test_directional_breakdown_shape_arms_name_shadow_holds_and_failures():
+    cases = (
+        (
+            0, "Which repo?", 2, None, "Shaped", "Ready", None,
+        ),
+        (4, None, 2, None, "Ready", "Ready", "ticket_count"),
+        (2, None, 2, "Which repo?", "Ready", "Ready", "needs_decision"),
+        (2, None, 2, None, "Ready", "Shaped", "shape_status"),
+    )
+
+    records = []
+    live_shape_statuses = {}
+    for index, (
+        shadow_count, shadow_question, live_count, live_question,
+        shadow_status, live_status, failed_arm,
+    ) in enumerate(cases, 1):
+        target = "owner/repo#{}".format(400 + index)
+        records += _breakdown_shadow_job(
+            "shadow-breakdown-{}".format(index), 810 + index,
+            shadow_count, shadow_question, target=target,
+        )
+        records += _breakdown_live_job(
+            "live-breakdown-{}".format(index), 820 + index,
+            live_count, live_question, target=target, structured=True,
+        )
+        records += _issue_job(
+            "shadow-shape-{}".format(index), "shape", 830 + index,
+            "shadow shape of {}: {}".format(target, shadow_status),
+            target=target,
+        )
+        live_shape_run = "live-shape-{}".format(index)
+        records += _issue_job(
+            live_shape_run, "shape", 840 + index,
+            "shaped {}: {}".format(target, live_status), target=target,
+        )
+        live_shape_statuses[live_shape_run] = {
+            "status": live_status, "status_since": 835 + index,
+        }
+
+    report = shadow_report.build_report(
+        records, now=900, window_seconds=200, mode="breakdown-shape",
+        live_shape_statuses=live_shape_statuses,
+    )
+    agreement = report["breakdown_shape_agreement"]
+
+    assert agreement["jobs"]["compared"] == len(cases)
+    assert agreement["agree"] == 1
+    assert agreement["disagree"] == 3
+    assert agreement["rate"] == 0.25
+    assert [entry["failed_arms"] for entry in agreement["disagreements"]] == [
+        ["ticket_count"], ["needs_decision"], ["shape_status"],
+    ]
 
 
 def test_stale_live_shape_status_is_excluded_from_the_denominator():

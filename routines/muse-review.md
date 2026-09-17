@@ -20,6 +20,11 @@ Does this diff do what the ticket and the plan say, and does it avoid what
 the plan rejected?
 
 - The ticket (`ticket.title`, `ticket.body`) says what was asked for.
+- `ticket.comments` carries the ticket's newest 30 comments in time
+  order, each tagged with its recorded `voice`. A `nate-direct` or
+  `nate-relayed` comment is a decision that can amend the ticket body;
+  an `agent` or `unknown` comment is context that needs evidence in
+  the diff.
 - `plan_md` is the design the ticket was broken down from. When
   `plan_md_missing` is true, judge against the ticket alone.
 - `diff` and `changed_files` are the proposed change at `head_sha`.

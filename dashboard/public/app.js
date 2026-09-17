@@ -59,11 +59,13 @@ function shortRepo(value) {
 }
 
 // A ticket's pip state, which is also its row flag: closed work is solid, a PR
-// waiting on the reviewer is light blue, an approved PR light purple.
+// waiting on the reviewer is light blue, a rejected current head is danger
+// red, and an approved PR is light purple.
 function pipState(ticket) {
   if (!ticket || typeof ticket !== "object") return "open";
   if (ticket.state !== "OPEN") return "closed";
   if (ticket.pr === "approved") return "approved";
+  if (ticket.pr === "changes requested") return "changes-requested";
   if (ticket.pr === "submitted" || ticket.pr === "merged") return "submitted";
   if (ticket.blocked) return "blocked";
   return "open";

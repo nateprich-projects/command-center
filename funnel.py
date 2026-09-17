@@ -5043,6 +5043,66 @@ def check_api_usage(command: str = "funnel doctor") -> Check:
     return Check("API usage", True, found, "")
 
 
+def check_project_pagination(
+    project_item_count: Optional[int], project_item_pages: Optional[int],
+) -> Check:
+    """Report the observed Project page count against the old page size.
+
+    The comparison is derived from the rows and requests in this doctor run,
+    so it describes the saving for the same board rather than comparing two
+    different snapshots. The historical #655 API number remains a fixed
+    baseline from the parent plan and is quoted for continuity.
+    """
+    if (
+        project_item_count is None
+        or project_item_pages is None
+        or project_item_pages == 0
+    ):
+        return Check("Project pagination", True, "", "")
+    if (
+        isinstance(project_item_count, bool)
+        or not isinstance(project_item_count, int)
+        or isinstance(project_item_pages, bool)
+        or not isinstance(project_item_pages, int)
+        or project_item_count < 0
+        or project_item_pages < 0
+    ):
+        return Check(
+            "Project pagination", False,
+            "Project page measurement is malformed", "rerun funnel doctor",
+        )
+
+    previous_pages = max(
+        1,
+        (project_item_count + PROJECT_ITEM_PREVIOUS_PAGE_SIZE - 1)
+        // PROJECT_ITEM_PREVIOUS_PAGE_SIZE,
+    )
+    difference = previous_pages - project_item_pages
+    if difference > 0:
+        saving = "{} fewer, {:.1f}% fewer".format(
+            difference, difference * 100.0 / previous_pages
+        )
+    elif difference < 0:
+        saving = "{} more, {:.1f}% more".format(
+            -difference, -difference * 100.0 / previous_pages
+        )
+    else:
+        saving = "no reduction, 0.0% fewer"
+    found = (
+        "{} Project row(s) used {} page request(s) at first:{}; first:{} "
+        "would require {} page request(s) for the same count ({}); "
+        "#655 before: 42 API calls and 47 GraphQL points"
+    ).format(
+        project_item_count,
+        project_item_pages,
+        PROJECT_ITEM_PAGE_SIZE,
+        PROJECT_ITEM_PREVIOUS_PAGE_SIZE,
+        previous_pages,
+        saving,
+    )
+    return Check("Project pagination", True, found, "")
+
+
 def render_checks(checks: Iterable[Check]) -> None:
     """Render one stable, actionable line for each doctor check."""
     for check in checks:
@@ -5056,8 +5116,11 @@ def render_checks(checks: Iterable[Check]) -> None:
 
 
 def cmd_doctor() -> int:
+    project_item_pages = None
+    project_item_count = None
     try:
         items = load_items()
+        project_item_pages, project_item_count = project_item_load_measurement()
     except Exception as exc:
         checks = doctor_checks()
         checks.append(Check(
@@ -5098,6 +5161,9 @@ def cmd_doctor() -> int:
             checks = doctor_checks(
                 items=items, merged_pr_facts=merged_facts
             )
+    checks.append(check_project_pagination(
+        project_item_count, project_item_pages
+    ))
     checks.append(check_api_usage())
     render_checks(checks)
     return 0 if all(check.ok for check in checks) else 1
@@ -5126,9 +5192,11 @@ query($cursor: String) {
 
 # GitHub permits up to 100 Project items per connection page. The brief reads
 # the same Project view on every run, so use the largest bounded page to avoid
-# paying the per-request latency for eleven 50-item pages on the current board
-# (#757). The cursor still makes this safe for a board larger than one page.
+# paying the per-request latency for multiple 50-item pages. The doctor reports
+# the same-item-count comparison for #660, and the cursor still makes this safe
+# for a board larger than one page.
 PROJECT_ITEM_PAGE_SIZE = 100
+PROJECT_ITEM_PREVIOUS_PAGE_SIZE = 50
 
 ITEM_QUERY = """
 query($login: String!, $number: Int!, $cursor: String) {
@@ -5260,6 +5328,11 @@ GRAPHQL_REQUEST_ID_RE = re.compile(
 _GRAPHQL_SPEND: Dict[str, object] = {
     "calls": 0, "cost": 0, "remaining": None, "reset_at": None,
 }
+
+#: Number of Project item list requests and rows in this command. These are
+#: per-process measurements for doctor output, not funnel state.
+_PROJECT_ITEM_PAGE_COUNT = 0
+_PROJECT_ITEM_ROW_COUNT = 0
 
 #: Number of GraphQL responses whose own rate-limit block exposed a usable
 #: integer `cost`.  A zero cost is a real measurement; a missing block is not.
@@ -5462,12 +5535,20 @@ def _budget_exhaustion_signal() -> Optional[Tuple[int, str]]:
 
 def reset_api_usage() -> None:
     """Start a fresh per-command API measurement."""
-    global _GRAPHQL_COST_READS
+    global _GRAPHQL_COST_READS, _PROJECT_ITEM_PAGE_COUNT
+    global _PROJECT_ITEM_ROW_COUNT
     _API_USAGE.update({"graphql_calls": 0, "cli_calls": 0, "refused_exhausted": 0})
     _GRAPHQL_SPEND.update(
         {"calls": 0, "cost": 0, "remaining": None, "reset_at": None}
     )
     _GRAPHQL_COST_READS = 0
+    _PROJECT_ITEM_PAGE_COUNT = 0
+    _PROJECT_ITEM_ROW_COUNT = 0
+
+
+def project_item_load_measurement() -> Tuple[int, int]:
+    """Return this process's Project-page and raw-row counts."""
+    return _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
 
 
 def api_usage() -> Dict[str, object]:
@@ -5939,6 +6020,7 @@ def hydrate_item_details(
 
 
 def load_items(include_details: bool = True) -> List[Item]:
+    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     members = set(member_repos())
     items: List[Item] = []
     cursor = None
@@ -5946,6 +6028,7 @@ def load_items(include_details: bool = True) -> List[Item]:
         variables = {"login": PROJECT_OWNER, "number": PROJECT_NUMBER}
         if cursor:
             variables["cursor"] = cursor
+        _PROJECT_ITEM_PAGE_COUNT += 1
         project = gh_graphql(ITEM_QUERY, **variables)["user"]["projectV2"]
         if project is None:
             raise GitHubError(
@@ -5954,7 +6037,9 @@ def load_items(include_details: bool = True) -> List[Item]:
                 )
             )
         page = project["items"]
-        for node in page["nodes"]:
+        nodes = page["nodes"]
+        _PROJECT_ITEM_ROW_COUNT += len(nodes)
+        for node in nodes:
             item = _from_node(node)
             # Membership is the topic. An item whose repo has not opted in is
             # outside the funnel even though it sits in the Project.

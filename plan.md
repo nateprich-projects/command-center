@@ -643,8 +643,29 @@ invalid, not startable, and surfaces in the brief as a one-word fix.
 **Unset must never default to `Broken`** — a forgotten field must not silently
 acquire preemption rights.
 
-The one case where `Class` is written by code rather than by Nate: the rejected-merge
-flow sets `Class: Broken` mechanically.
+**An explicit proposal may be adopted at approval.** Nate confirmed on 2026-09-16
+that when he leaves `Class` unset, the plan's recommendation should be adopted.
+This supersedes #477's earlier rule on this point — that Nate-origin ideas stay
+unclassed for him and that no Class is inferred from proposal text — while leaving
+#477's history intact. _(confirmed by Nate 2026-09-16)_
+
+During an explicit `funnel approve --yes`, when `Class` is unset and the plan
+contains exactly one non-empty whole line of the form `Proposed class: <one ladder
+class>`, the funnel adopts the named class before the normal `Status` write and
+records that source line in its output and the issue comment. The name must exactly
+match one of `Investigate`, `Broken`, `Maintenance`, `Improve`, `New`, or `Replace`.
+A missing, blank, malformed, fuzzy, or multiple proposal stays unset for Nate;
+titles, body prose, and other proposal text never supply the value. Nate may
+override it at any time.
+
+Adoption fills a field; it is not itself a gate decision. It never satisfies the
+`Shaped` plan-good gate or auto-advances a Nate-origin item to `Ready`. If Nate
+explicitly authorises the `approve` gate, that command's normal Status transition
+may still occur — the transition comes from his gate answer, not from adoption.
+This preserves the #59 no-auto-advance brake.
+
+Outside approval-time adoption, the rejected-merge flow is a separate mechanical
+exception: it sets `Class: Broken`.
 
 _Rejected: six labels (`investigate`, `broken`, `maintenance`, `improve`, `new`,
 `replace`). A single-select cannot be self-contradictory; six labels permit `broken` +

@@ -198,6 +198,25 @@ is exactly what he should know before saying yes.
 `funnel approve` / `accept` answer the two gates. They are **dry runs
 unless `--yes` is passed**.
 
+### Adopt an explicit Proposed class at approval
+
+When Nate explicitly authorises `funnel approve --yes` for a project whose `Class`
+is unset, the command may adopt the plan's recommendation. It does so only when the
+plan contains exactly one non-empty whole line of the form
+`Proposed class: <one ladder class>`, with an exact match for `Investigate`,
+`Broken`, `Maintenance`, `Improve`, `New`, or `Replace`. The funnel writes `Class`
+before the normal `Status` write and records the source line in its output and issue
+comment. Missing, blank, malformed, fuzzy, or multiple proposals remain unset;
+never infer a class from titles, body prose, or other proposal text. Nate may
+override the adopted value at any time.
+
+This is Nate's rule confirmed on 2026-09-16. It supersedes #477 on this point — its
+earlier no-inference rule for Nate-origin ideas remains historical, not current.
+Adoption fills a field; it never satisfies the `Shaped` plan-good gate or
+auto-advances a Nate-origin item to `Ready`. An explicit approval may still perform
+its normal Status transition, but that move is the gate answer, not the adoption;
+this preserves the #59 no-auto-advance brake.
+
 An investigation that records evidence and produces no follow-up tickets uses the
 existing explicit escape hatch: `funnel accept <ref> --no-tickets --yes`. That flag is
 only for work that happened outside the ticket path; it is not a new gate or a way to
@@ -264,6 +283,8 @@ and `net_open_growth` context. Do not attach a target, colour, or warning to it.
 - Do not add TODOs to TickTick. TickTick is the do-list; funnel items there would compete
   with real tasks and erode its trustworthiness. It receives operational failure alerts
   only.
-- Do not change `Status` or `Class` unless he asks. Those are his gates.
+- Do not change `Status` or `Class` unless he asks. Those are his gates. An explicit
+  `approve` may also trigger the narrow, exact-line Class adoption described above;
+  record its source and preserve the #59 brake.
   _(confirmed by Nate 2026-09-05)_
 - Do not open, close, or comment on issues as part of rendering a brief.

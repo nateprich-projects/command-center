@@ -105,7 +105,10 @@ function nextOwner(item) {
 function element(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
-  if (text !== undefined && text !== null) node.textContent = String(text);
+  // A node passed as text is appended, never stringified: that is how the
+  // phone board came to print "[object HTMLSpanElement]" (#988).
+  if (typeof Node !== "undefined" && text instanceof Node) node.append(text);
+  else if (text !== undefined && text !== null) node.textContent = String(text);
   return node;
 }
 
@@ -351,7 +354,9 @@ function phoneRow(item, inheritedClass) {
   summary.append(title);
   summary.append(element("span", "phone-repo", phoneRepo(item) || "—"));
   summary.append(element("span", "phone-counter", `${closed}/${total}`));
-  summary.append(element("span", "phone-class", phoneClass(className)));
+  const classCell = element("span", "phone-class");
+  classCell.append(phoneClass(className));
+  summary.append(classCell);
   row.append(summary);
   row.append(phoneDetails(item, className, children));
 

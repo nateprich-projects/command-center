@@ -195,3 +195,10 @@ test("an action row names the repository without its ticket number", async () =>
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(source, /String\(step\.ref \|\| ""\)\.split\("#"\)\[0\]/);
 });
+
+test("the phone Class chip is appended as a node, never stringified (#988)", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /element\([^)]*phoneClass\(/);
+  assert.match(source, /classCell\.append\(phoneClass\(className\)\)/);
+  assert.match(source, /text instanceof Node\) node\.append\(text\)/);
+});

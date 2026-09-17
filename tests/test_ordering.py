@@ -115,16 +115,63 @@ def test_building_waits_only_once_every_child_has_closed():
     assert gate_question(item(2, "Building", "New", children_total=3, children_done=3)) == "Accept it?"
 
 
-def test_upkeep_that_carried_a_human_step_still_waits_for_acceptance():
-    for number, klass in enumerate(("Broken", "Maintenance", "Improve"), start=1):
-        carried = project(
-            number, "Building", klass, children=2, done=2,
-            carried_human_step=True,
+def _completion_policy_body(origin, override=None):
+    parts = []
+    if origin in funnel.ORIGIN_VOICES:
+        parts.append(
+            funnel.origin_block(origin, at=NOW, run="gate-run", agent="codex")
         )
-        ordinary = project(number + 10, "Building", klass, children=2, done=2)
+    if override is not None:
+        parts.append(
+            funnel.ORIGIN_OVERRIDE_MARKER
+            + "\n\n```json\n"
+            + json.dumps({"target": override})
+            + "\n```"
+        )
+        if override == "agents":
+            parts.append(
+                funnel.provenance_block(
+                    "nate-relayed", at=NOW, run="override-run", agent="claude"
+                )
+            )
+    return "\n\n".join(parts) or None
 
-        assert gate_question(carried) == "Accept it?"
-        assert gate_question(ordinary) is None
+
+@_pytest.mark.parametrize(
+    ("klass", "origin", "override", "can_close"),
+    [
+        ("Investigate", None, None, True),
+        ("Investigate", "nate-relayed", None, True),
+        ("Broken", None, None, True),
+        ("Broken", "nate-relayed", None, True),
+        ("Maintenance", None, None, True),
+        ("Maintenance", "nate-relayed", None, True),
+        ("Improve", "agent", None, True),
+        ("Improve", "nate-relayed", None, False),
+        ("Improve", None, None, False),
+        ("Improve", "nate-relayed", "agents", True),
+        ("Improve", "agent", "nate", False),
+        ("New", "agent", None, False),
+        ("Replace", "agent", None, False),
+        (None, "agent", None, False),
+    ],
+)
+def test_building_gate_and_close_share_class_origin_policy(
+    klass, origin, override, can_close
+):
+    finished = project(
+        1,
+        "Building",
+        klass,
+        children=2,
+        done=2,
+        carried_human_step=True,
+        body=_completion_policy_body(origin, override),
+    )
+
+    assert (gate_question(finished) is None) is can_close
+    assert funnel._could_carry_closed_itself_marker(finished) is can_close
+    assert funnel._auto_closeable_project(finished) is can_close
 
 
 def test_new_replace_and_unset_class_still_wait_for_acceptance():

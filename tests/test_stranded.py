@@ -296,6 +296,7 @@ def test_stranded_reports_finished_upkeep_projects_without_acceptance():
         title="Finished upkeep",
         status="Building",
         klass="Improve",
+        body=funnel.origin_block("agent", at=NOW, run="stranded-run", agent="codex"),
         children_total=5,
         children_done=5,
     )
@@ -304,6 +305,7 @@ def test_stranded_reports_finished_upkeep_projects_without_acceptance():
         title="Upkeep with human step",
         status="Building",
         klass="Improve",
+        body=funnel.origin_block("agent", at=NOW, run="stranded-run", agent="codex"),
         children_total=5,
         children_done=5,
         carried_human_step=True,
@@ -327,10 +329,18 @@ def test_stranded_reports_finished_upkeep_projects_without_acceptance():
 
     assert funnel.stranded_json(
         [finished, carried_human_step, new_project, incomplete], NOW
-    ) == [{
-        "ref": finished.ref,
-        "title": finished.title,
-        "url": finished.url,
-        "reason": "finished upkeep project not closed",
-    }]
-    assert funnel.gate_question(carried_human_step) == "Accept it?"
+    ) == [
+        {
+            "ref": finished.ref,
+            "title": finished.title,
+            "url": finished.url,
+            "reason": "finished upkeep project not closed",
+        },
+        {
+            "ref": carried_human_step.ref,
+            "title": carried_human_step.title,
+            "url": carried_human_step.url,
+            "reason": "finished upkeep project not closed",
+        },
+    ]
+    assert funnel.gate_question(carried_human_step) is None

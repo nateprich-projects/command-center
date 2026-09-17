@@ -770,15 +770,12 @@ def gate_question(item: Item) -> Optional[str]:
             return "Answer the breakdown's question?"
         return "Unblock?" if item.parent else "Unblock or park?"
     if item.status == "Building":
-        # New work and replacements always stop for acceptance. Upkeep closes
-        # itself once #55 lands, except where Nate performed part of the work:
-        # a project that ever carried a human-step ticket must still reach him.
+        # New work, replacements, and Nate-owned improvements stop for
+        # acceptance. The same class/origin predicate drives the unattended
+        # close path below, so the gate cannot drift from the writer.
         if not item.children_all_closed:
             return None
-        # Keep this tied to the same existing-work class set used by the
-        # unattended shaping rule. An unset or unknown Class fails closed into
-        # the accept queue; it must never inherit the permissive path.
-        if item.klass in SELF_APPROVABLE_CLASSES and not item.carried_human_step:
+        if _can_close_itself(item):
             return None
         return GATES["Building"]
     if item.status == "Shaped":
@@ -6802,16 +6799,38 @@ def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
     )
 
 
+def _can_close_itself(item: Item) -> bool:
+    """Whether a finished project may close without Nate's acceptance.
+
+    The upkeep classes are safe to close regardless of who raised them. An
+    ``Improve`` project is safe only when its effective shape owner is the
+    agents, using the same origin and authorised override reading as the
+    unattended shaping predicate. Missing or malformed origin therefore
+    resolves to Nate and fails closed.
+    """
+    if item.klass in {"Investigate", "Broken", "Maintenance"}:
+        return True
+    if item.klass != "Improve":
+        return False
+
+    body = item.body if isinstance(item.body, str) else ""
+    origin = parse_origin(body)
+    override = parse_origin_override(body)
+    return effective_shape_owner(
+        origin.get("voice") if origin is not None else None,
+        override.get("target") if override is not None else None,
+    ) == "agents"
+
+
 def _could_carry_closed_itself_marker(
     item: Item, *, children_done: Optional[int] = None
 ) -> bool:
-    """Mirror the auto-close writer's durable eligibility signal."""
+    """Whether completed children may carry the funnel-close marker."""
     completed = item.children_done if children_done is None else children_done
     return (
-        item.klass in SELF_APPROVABLE_CLASSES
+        _can_close_itself(item)
         and item.children_total > 0
         and completed == item.children_total
-        and not item.carried_human_step
     )
 
 
@@ -7726,7 +7745,7 @@ def stranded_items(
     This is deliberately a diagnostic, not a queue. The first release only
     uses facts the funnel already knows how to read: an approved current-head
     verdict on a conflicting PR, a stale claim with no PR, a childless
-    ``Building`` project, a self-approvable ``Building`` project whose upkeep
+    ``Building`` project, an auto-closeable ``Building`` project whose upkeep
     children all closed but the project itself did not, a native or named
     dependency closed as ``not_planned``, plus cycles formed by native or
     parsed block edges, and two PR-side strands when PR facts were requested:
@@ -7792,13 +7811,7 @@ def stranded_items(
         if item.parent is None and item.status == "Building" and not item.children_total:
             reasons.append("Building project has no tickets")
 
-        if (
-            item.parent is None
-            and item.status == "Building"
-            and item.klass in SELF_APPROVABLE_CLASSES
-            and item.children_all_closed
-            and not item.carried_human_step
-        ):
+        if _auto_closeable_project(item):
             reasons.append("finished upkeep project not closed")
 
         dead = _dead_dependency_refs(item, by_ref)

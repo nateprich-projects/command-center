@@ -1138,6 +1138,35 @@ def test_main_doctor_loads_project_items_for_consistency(monkeypatch):
     assert funnel.main(["doctor"]) == 0
 
 
+def test_main_doctor_reports_project_page_measurement(monkeypatch, capsys):
+    def load_items():
+        funnel._PROJECT_ITEM_PAGE_COUNT = 4
+        funnel._PROJECT_ITEM_ROW_COUNT = 319
+        funnel._API_USAGE["graphql_calls"] = 4
+        funnel._GRAPHQL_SPEND.update({
+            "calls": 4, "cost": 20, "remaining": 4980,
+        })
+        return [object()] * 319
+
+    monkeypatch.setattr(funnel, "load_items", load_items)
+    monkeypatch.setattr(funnel, "merged_pr_facts", lambda items: None)
+    monkeypatch.setattr(
+        funnel, "doctor_checks",
+        lambda items=None, merged_pr_facts=None: [
+            funnel.Check("local", True, "ok", "")
+        ],
+    )
+
+    assert funnel.main(["doctor"]) == 0
+    output = capsys.readouterr().out
+    assert (
+        "Project pagination: 319 Project row(s) used 4 page request(s) "
+        "at first:100; first:50 would require 7 page request(s) for the "
+        "same count (3 fewer, 42.9% fewer); #655 before: 42 API calls and "
+        "47 GraphQL points"
+    ) in output
+
+
 def test_main_doctor_reports_consistency_load_failure(monkeypatch, capsys):
     monkeypatch.setattr(
         funnel, "doctor_checks",

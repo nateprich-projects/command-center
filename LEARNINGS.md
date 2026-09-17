@@ -8,6 +8,17 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Project item pagination uses the maximum bounded page
+
+**2026-09-17 · GitHub GraphQL · measured**
+
+The #655 before number remains **42 API calls and 47 measured GraphQL points** for
+`funnel doctor`. On the live board, the doctor read **720 Project rows in 8
+`first:100` page requests**. The same 720 rows at the previous `first:50` size
+would require 15 requests: **7 fewer requests, or 46.7% fewer page requests**.
+The doctor prints this same-count comparison on every successful Project load;
+cursor pagination remains in place for boards larger than 100 rows per page.
+
 ### Non-gating REST reads use the GitHub CLI response cache
 
 **2026-09-16 · GitHub CLI · measured in fixture coverage**

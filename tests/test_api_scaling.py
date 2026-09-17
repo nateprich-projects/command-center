@@ -157,6 +157,20 @@ def test_project_item_query_uses_maximum_bounded_page():
     assert funnel.PROJECT_ITEM_PAGE_SIZE == 100
 
 
+def test_doctor_reports_same_count_pagination_saving():
+    """The doctor quotes #655 and measures the first:100 reduction."""
+    result = funnel.check_project_pagination(319, 4)
+
+    assert result == funnel.Check(
+        "Project pagination", True,
+        "319 Project row(s) used 4 page request(s) at first:100; first:50 "
+        "would require 7 page request(s) for the same count "
+        "(3 fewer, 42.9% fewer); #655 before: 42 API calls and 47 "
+        "GraphQL points",
+        "",
+    )
+
+
 def test_project_item_list_is_compact_and_detail_read_is_candidate_bounded(
     monkeypatch,
 ):
@@ -235,6 +249,7 @@ def test_project_item_list_is_compact_and_detail_read_is_candidate_bounded(
 
 def test_load_items_follows_the_cursor_after_a_full_page(monkeypatch):
     """The larger page does not drop items when the Project still continues."""
+    funnel.reset_api_usage()
     pages = [
         [_node(number) for number in range(1, 101)],
         [_node(101)],
@@ -264,6 +279,7 @@ def test_load_items_follows_the_cursor_after_a_full_page(monkeypatch):
     items = funnel.load_items()
 
     assert [item.number for item in items] == list(range(1, 102))
+    assert funnel.project_item_load_measurement() == (2, 101)
     assert calls == [
         {"login": funnel.PROJECT_OWNER, "number": funnel.PROJECT_NUMBER},
         {

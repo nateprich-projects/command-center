@@ -290,6 +290,20 @@ function phoneField(label, value) {
   return field;
 }
 
+// Several short facts on one row, each with its label above its value.
+function phoneMeta(pairs) {
+  const row = element("div", "phone-meta");
+  for (const [label, value] of pairs) {
+    const field = element("div", "phone-meta-field");
+    field.append(element("dt", "phone-label", label));
+    const content = element("dd", "phone-value");
+    content.append(value || element("span", "muted", "—"));
+    field.append(content);
+    row.append(field);
+  }
+  return row;
+}
+
 function phoneProgress(item, children) {
   const { closed, total } = phoneCounterParts(item, children);
   const value = pips(item, children, closed, total);
@@ -306,19 +320,20 @@ function phoneDetails(item, inheritedClass, children) {
   const project = !Number.isFinite(item && item.number);
   const className = item && item.class || inheritedClass;
 
+  // No PR field, and the short facts share one row (Nate, 2026-09-17, #990).
   if (project) {
-    fields.append(phoneField("PR", prCell(rowPrState(children))));
-    fields.append(phoneField("Tier", tierCell(rowTier(children))));
-    fields.append(phoneField("Next step", ownerCell(nextOwner(item))));
+    fields.append(phoneMeta([
+      ["Tier", tierCell(rowTier(children))],
+      ["Next step", ownerCell(nextOwner(item))],
+      ["Updated", element("span", "age", item.waited || "—")],
+    ]));
     if (item.blocked) fields.append(phoneField("Blocked", blockedChip(item)));
     fields.append(phoneField("Progress", phoneProgress(item, children)));
-    fields.append(phoneField("Updated", element("span", "age", item.waited || "—")));
   } else {
-    fields.append(phoneField("PR", prCell(item.pr, item.pr_number)));
-    fields.append(phoneField(
-      "Tier", tierCell(item.state === "OPEN" ? item.tier : null),
-    ));
-    fields.append(phoneField("Next step", ownerCell(item.owner)));
+    fields.append(phoneMeta([
+      ["Tier", tierCell(item.state === "OPEN" ? item.tier : null)],
+      ["Next step", ownerCell(item.owner)],
+    ]));
     if (item.blocked) fields.append(phoneField("Blocked", blockedChip(item)));
     if (children.length || Number.isFinite(item.tickets_total)) {
       fields.append(phoneField("Progress", phoneProgress(item, children)));

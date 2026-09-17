@@ -186,6 +186,18 @@ test("a blocked project says so on its own row, wide and narrow", async () => {
   assert.equal((phone.match(/phoneField\("Blocked", blockedChip\(item\)\)/g) || []).length, 2);
 });
 
+test("the phone detail view has no PR field and puts the short facts on one row (#990)", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  const phone = source.slice(
+    source.indexOf("function phoneDetails("), source.indexOf("function phoneRow("),
+  );
+  assert.doesNotMatch(phone, /"PR"/);
+  assert.equal((phone.match(/phoneMeta\(\[/g) || []).length, 2);
+  assert.match(phone, /\["Tier", [\s\S]*\["Next step", [\s\S]*\["Updated", /);
+  assert.match(css, /\.phone-meta \{\s+display: flex;\s+flex-wrap: wrap;/);
+});
+
 test("actions show how long they have waited, like decisions do", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(source, /step\.waited/);

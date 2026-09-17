@@ -297,7 +297,7 @@ function phoneProgress(item, children) {
   value.classList.add("phone-progress");
   value.setAttribute("role", "img");
   value.setAttribute("aria-label", `Sub-issue progress: ${closed}/${total}`);
-  value.append(element("span", "phone-progress-copy", `${closed}/${total}`));
+  // pips() already shows closed/total; a second copy printed it twice (#994).
   return value;
 }
 

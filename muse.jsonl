@@ -5846,3 +5846,5 @@
 {"agent": "muse", "attempt": null, "escalated_from": null, "harness": "muse-code", "model": "muse-spark-1.3", "model_source": "detected", "phase": "start", "provider": "meta", "reasoning_effort": null, "repo": {"dirty": 0, "head": "136749b54528"}, "run": "ba1d1c67a5aa", "runtime": {"head": "136749b54528", "root": "/Users/nateprich/.claude/command-center-run"}, "session_id": null, "ticket": null, "ts": 1789660216, "usage": {"source": "meta", "unmetered": true}}
 {"agent": "muse", "do": "breakdown", "phase": "bind", "run": "45a3f232aaad", "ts": 1789660271, "work": "nateprich-projects/FF-Weekly-Start-Sit#112"}
 {"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": 73}, "phase": "api_cost", "run": "45a3f232aaad", "ts": 1789660275}
+{"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": 73}, "phase": "api_cost", "run": "45a3f232aaad", "ts": 1789660275}
+{"agent": "muse", "do": "breakdown", "phase": "bind", "run": "ba1d1c67a5aa", "ts": 1789660278, "work": "nateprich-projects/FF-Weekly-Start-Sit#112"}

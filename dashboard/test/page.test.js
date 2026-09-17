@@ -3,8 +3,76 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
-  STAGES, age, boardColumns, failureState, nextOwner, pipState, rowPrState, rowTier, shortRepo,
+  STAGES, age, boardColumns, failureState, nextOwner, pipState, renderPhoneBoard,
+  rowPrState, rowTier, shortRepo,
 } from "../public/app.js";
+
+class TestNode {
+  constructor(tagName) {
+    this.tagName = tagName;
+    this.children = [];
+    this.attributes = new Map();
+    this.className = "";
+    this.classList = {
+      add: (...names) => {
+        const classes = new Set(this.className.split(/\s+/).filter(Boolean));
+        for (const name of names) classes.add(name);
+        this.className = [...classes].join(" ");
+      },
+    };
+  }
+
+  append(...children) {
+    for (const child of children) {
+      if (child === undefined || child === null) continue;
+      this.children.push(child);
+    }
+  }
+
+  set textContent(value) {
+    this.children = [String(value)];
+  }
+
+  get textContent() {
+    return this.children.map((child) => (
+      child instanceof TestNode ? child.textContent : String(child)
+    )).join("");
+  }
+
+  get childElementCount() {
+    return this.children.filter((child) => child instanceof TestNode).length;
+  }
+
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  addEventListener() {}
+
+  *walk() {
+    yield this;
+    for (const child of this.children) {
+      if (child instanceof TestNode) yield* child.walk();
+    }
+  }
+
+  querySelectorAll(selector) {
+    const className = selector.startsWith(".") ? selector.slice(1) : null;
+    return [...this.walk()].filter((node) => (
+      className && node.className.split(/\s+/).includes(className)
+    ));
+  }
+
+  querySelector(selector) {
+    return this.querySelectorAll(selector)[0] || null;
+  }
+}
+
+class TestDocument {
+  createElement(tagName) {
+    return new TestNode(tagName);
+  }
+}
 
 test("the board uses payload order within the fixed plan stages", () => {
   const input = [
@@ -225,4 +293,27 @@ test("the phone Class chip is appended as a node, never stringified (#988)", asy
   assert.doesNotMatch(source, /element\([^)]*phoneClass\(/);
   assert.match(source, /classCell\.append\(phoneClass\(className\)\)/);
   assert.match(source, /text instanceof Node\) node\.append\(text\)/);
+});
+
+test("the rendered phone board has no object text and every row has a title (#1004)", async () => {
+  const snapshot = JSON.parse(await readFile(
+    new URL("../fixtures/snapshot.json", import.meta.url), "utf8",
+  ));
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const board = renderPhoneBoard(boardColumns(snapshot.board));
+    const rows = board.querySelectorAll(".phone-row");
+
+    assert.ok(rows.length > 0, "fixture should render at least one phone row");
+    for (const node of board.walk()) {
+      assert.doesNotMatch(node.textContent, /\[object/);
+    }
+    for (const row of rows) {
+      assert.ok(row.querySelector(".phone-title-link")?.textContent.trim());
+    }
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
 });

@@ -93,6 +93,22 @@ OUTCOMES = [
 API_COST_FIELDS = ("graphql_points", "gh_calls")
 
 
+def _non_negative_int(value: str) -> int:
+    """Parse a structured count without admitting booleans or negatives."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
+
+
+def _optional_text(value: str) -> Optional[str]:
+    """Treat the empty CLI value as the explicit JSON null it represents."""
+    return value if value else None
+
+
 #: Which pool an agent spends. Deliberately separate from the model: routing will
 #: put more than one model on a pool, and the budget is per pool.
 PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
@@ -1170,6 +1186,18 @@ def main(argv=None) -> int:
                         default=None)
     finish.add_argument("--review-result",
                         choices=["approved", "rejected", "none"], default=None)
+    finish.add_argument(
+        "--shape-status", choices=["Shaped", "Ready"], default=None,
+        help="structured outcome written by shape-apply",
+    )
+    finish.add_argument(
+        "--ticket-count", type=_non_negative_int, default=None,
+        help="structured number of tickets created by breakdown-apply",
+    )
+    finish.add_argument(
+        "--needs-decision", type=_optional_text, default=None,
+        help="structured breakdown question; an empty value means none",
+    )
     finish.add_argument("--human-intervention", action="store_true",
                         help="Nate had to step in for this run to progress")
     finish.add_argument("--note", default=None)
@@ -1282,6 +1310,11 @@ def main(argv=None) -> int:
             "api_cost": api_cost_for_run(records, run_id),
             **detect_model(args.agent),
         }
+        if args.shape_status is not None:
+            record["shape_status"] = args.shape_status
+        if args.ticket_count is not None:
+            record["ticket_count"] = args.ticket_count
+            record["needs_decision"] = args.needs_decision
         metric = input_usage(args.agent)
         if metric is not None:
             record["input_usage"] = metric

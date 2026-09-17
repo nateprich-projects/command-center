@@ -528,6 +528,33 @@ def test_breakdown_shape_mode_compares_count_question_and_shape_outcome():
     assert report["breakdown_shape_agreement"]["jobs"]["compared"] == 1
 
 
+def test_recorded_live_outcomes_survive_late_state_reads():
+    records = list(_shape_comparison_records())
+    for row in records:
+        if row.get("run") == "live-breakdown" and row.get("phase") == "finish":
+            row["note"] = "broke down owner/repo#103: apply completed"
+            row["ticket_count"] = 3
+            row["needs_decision"] = "where?"
+        elif row.get("run") == "live-shape" and row.get("phase") == "finish":
+            row["note"] = "shaped owner/repo#103: now Building"
+            row["shape_status"] = "Ready"
+
+    report = shadow_report.build_report(
+        records,
+        now=1000,
+        window_seconds=200,
+        mode="breakdown-shape",
+        live_issue_data={},
+        live_shape_statuses={
+            "live-shape": {"status": "Shaped", "status_since": 845},
+        },
+    )
+    agreement = report["breakdown_shape_agreement"]
+    assert agreement["jobs"]["compared"] == 1
+    assert agreement["agree"] == 1
+    assert agreement["rate"] == 1.0
+
+
 def test_shape_disagreement_is_counted_after_reading_live_status():
     report = shadow_report.build_report(
         _shape_comparison_records(shadow_status="Shaped"),

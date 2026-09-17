@@ -1108,7 +1108,8 @@ def test_standard_tier_asks_begin_for_breakdown(tmp_path):
     assert "begin --agent muse --tier standard --breakdown --role review" \
         in calls
     assert _heartbeat(repo).endswith(
-        "broke down {}: created 2 tickets\n".format(BREAKDOWN_REF))
+        "broke down {}: created 2 tickets --ticket-count 2 "
+        "--needs-decision \n".format(BREAKDOWN_REF))
 
 
 def test_escalated_tier_reviews_without_breakdown(tmp_path):
@@ -1148,7 +1149,8 @@ def test_a_breakdown_is_applied_and_finished_done(tmp_path):
         ["First slice", "Second slice"]
     assert _heartbeat(repo) == (
         "finish --agent muse --run engine-run --outcome done "
-        "--note broke down {}: created 2 tickets\n".format(BREAKDOWN_REF)
+        "--note broke down {}: created 2 tickets "
+        "--ticket-count 2 --needs-decision \n".format(BREAKDOWN_REF)
     )
 
 
@@ -1176,7 +1178,7 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     assert _heartbeat(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note shaped {}: Ready (self-approved: agent idea, finite "
-        "class, no open questions)\n".format(SHAPE_REF)
+        "class, no open questions) --shape-status Ready\n".format(SHAPE_REF)
     )
 
 
@@ -1192,7 +1194,8 @@ def test_a_breakdown_question_is_asked_not_created(tmp_path):
     assert _heartbeat(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note broke down {}: asked a needs-decision "
-        "question\n".format(BREAKDOWN_REF)
+        "question --ticket-count 0 --needs-decision Which repo owns the "
+        "schedule?\n".format(BREAKDOWN_REF)
     )
 
 
@@ -1207,7 +1210,7 @@ def test_a_shape_with_open_questions_holds_at_shaped(tmp_path):
     assert _heartbeat(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note shaped {}: Shaped (open questions for Nate: "
-        "exposure)\n".format(SHAPE_REF)
+        "exposure) --shape-status Shaped\n".format(SHAPE_REF)
     )
 
 

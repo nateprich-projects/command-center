@@ -183,16 +183,76 @@ failure() {
 finish_done() {
   local note="$1"
   local review_result="${2:-}"
-  if [[ "$review_result" == "approved" || "$review_result" == "rejected" ]]; then
-    if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
-        --outcome done --note "$note" --review-result "$review_result"; then
-      echo "muse-review-engine: could not finish the run" >&2
+  local result_path="${3:-}"
+  local -a finish_args=(
+    finish --agent muse --run "$BEGIN_RUN" --outcome done --note "$note"
+  )
+  if [[ -n "$result_path" && "$JOB" == "breakdown" ]]; then
+    local ticket_count
+    local needs_decision
+    if ! ticket_count="$(python3 - "$result_path" <<'PY'
+import json
+import sys
+
+result = json.load(open(sys.argv[1]))
+question = result.get("needs_decision")
+if question is not None:
+    if not isinstance(question, str) or not question.strip():
+        raise SystemExit("breakdown result has an invalid needs_decision")
+    count = 0
+else:
+    created = result.get("created")
+    if not isinstance(created, list):
+        raise SystemExit("breakdown result has no created ticket list")
+    count = len(created)
+print(count)
+PY
+)"; then
+      echo "muse-review-engine: could not read the live breakdown result" >&2
       exit 1
     fi
-    return 0
+    if ! needs_decision="$(python3 - "$result_path" <<'PY'
+import json
+import sys
+
+question = json.load(open(sys.argv[1])).get("needs_decision")
+if question is None:
+    print("")
+elif isinstance(question, str) and question.strip():
+    print(question)
+else:
+    raise SystemExit("breakdown result has an invalid needs_decision")
+PY
+)"; then
+      echo "muse-review-engine: could not read the live breakdown question" >&2
+      exit 1
+    fi
+    finish_args+=(--ticket-count "$ticket_count" --needs-decision "$needs_decision")
+  elif [[ -n "$result_path" && "$JOB" == "shape" ]]; then
+    local shape_status
+    if ! shape_status="$(python3 - "$result_path" <<'PY'
+import sys
+
+status = ""
+for line in open(sys.argv[1]).read().splitlines():
+    if line.startswith("advanced to Ready: "):
+        status = "Ready"
+    elif line.startswith("held at Shaped: "):
+        status = "Shaped"
+if status not in {"Shaped", "Ready"}:
+    raise SystemExit("shape result has no Shaped or Ready status")
+print(status)
+PY
+)"; then
+      echo "muse-review-engine: could not read the live shape result" >&2
+      exit 1
+    fi
+    finish_args+=(--shape-status "$shape_status")
   fi
-  if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
-      --outcome done --note "$note"; then
+  if [[ "$review_result" == "approved" || "$review_result" == "rejected" ]]; then
+    finish_args+=(--review-result "$review_result")
+  fi
+  if ! python3 "$REPO/heartbeat.py" "${finish_args[@]}"; then
     echo "muse-review-engine: could not finish the run" >&2
     exit 1
   fi
@@ -510,7 +570,7 @@ run_issue_job() {
       if ! NOTE="$(issue_live_note)"; then
         NOTE="$JOB_PAST $BEGIN_REF: applied"
       fi
-      finish_done "$NOTE"
+      finish_done "$NOTE" "" "$RESULT_FILE"
       exit 0
     fi
     if (( apply_status == 3 && ATTEMPT == 1 )); then

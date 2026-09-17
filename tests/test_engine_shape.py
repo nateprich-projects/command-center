@@ -48,6 +48,7 @@ def answer(**kw):
         },
         "proposed_class": "Improve",
         "plan_markdown": "# Plan\n\nDo the thing.\n",
+        "escalated_risk": [],
     }
     data.update(kw)
     return data
@@ -212,6 +213,50 @@ def test_plan_markdown_must_be_non_empty():
         shape.validate_answer(answer(plan_markdown="  \n "))
 
 
+def test_an_answer_missing_escalated_risk_is_malformed():
+    # #1034: the declaration is required, even when the plan carries no
+    # risk — an empty list says so honestly.
+    bad = answer()
+    del bad["escalated_risk"]
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(bad)
+
+
+def test_escalated_risk_must_be_a_list_of_reason_and_why():
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(escalated_risk="data-migration"))
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(escalated_risk=[
+            {"reason": "data-migration"}]))
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(escalated_risk=[
+            {"reason": "data-migration", "why": "  "}]))
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(escalated_risk=[
+            {"reason": "data-migration", "why": "backfills",
+             "extra": "x"}]))
+
+
+def test_escalated_risk_reasons_come_from_the_scan_vocabulary():
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(escalated_risk=[
+            {"reason": "standard", "why": "nothing risky"}]))
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(escalated_risk=[
+            {"reason": "Data-Migration", "why": "backfills"}]))
+    found = shape.validate_answer(answer(escalated_risk=[
+        {"reason": "  data-migration  ",
+         "why": "backfills\nthe ledger  table"}]))
+    assert found["escalated_risk"] == [
+        {"reason": "data-migration",
+         "why": "backfills the ledger table"}]
+
+
+def test_an_empty_escalated_risk_list_is_honest():
+    found = shape.validate_answer(answer(escalated_risk=[]))
+    assert found["escalated_risk"] == []
+
+
 # -- rendering -------------------------------------------------------------
 
 def test_render_carries_the_plan_and_every_field():
@@ -352,6 +397,52 @@ def test_escalated_risk_holds():
         escalation_reasons=["credentials"])
     assert (status, reason) == (
         "Shaped", "escalated risk (credentials)")
+
+
+def test_a_declared_risk_holds_with_a_clean_scan():
+    # #1034: the model judges the plan, not its wording — a declared
+    # data-migration with no scan hit still holds.
+    status, reason = shape.decide(
+        shape.validate_answer(answer(escalated_risk=[
+            {"reason": "data-migration",
+             "why": "backfills the ledger table"}])),
+        klass="Improve", origin_voice="agent",
+        escalation_reasons=[])
+    assert (status, reason) == (
+        "Shaped", "escalated risk (data-migration)")
+
+
+def test_a_scan_hit_holds_with_an_empty_declaration():
+    # #1034: there is no standard override — an empty declaration never
+    # clears what the wording scan found.
+    status, reason = shape.decide(
+        shape.validate_answer(answer(escalated_risk=[])),
+        klass="Improve", origin_voice="agent",
+        escalation_reasons=["credentials"])
+    assert (status, reason) == (
+        "Shaped", "escalated risk (credentials)")
+
+
+def test_a_clear_declaration_with_a_clear_scan_is_ready():
+    status, reason = shape.decide(
+        shape.validate_answer(answer(escalated_risk=[])),
+        klass="Improve", origin_voice="agent",
+        escalation_reasons=[])
+    assert status == "Ready"
+    assert reason == ("needs_nate all null; class Improve self-approvable; "
+                      "origin agent")
+
+
+def test_declaration_and_scan_union_without_duplicates():
+    status, reason = shape.decide(
+        shape.validate_answer(answer(escalated_risk=[
+            {"reason": "credentials", "why": "rotates the api-key"},
+            {"reason": "data-migration",
+             "why": "backfills the ledger"}])),
+        klass="Improve", origin_voice="agent",
+        escalation_reasons=["credentials"])
+    assert (status, reason) == (
+        "Shaped", "escalated risk (credentials, data-migration)")
 
 
 # -- the assembled packet ----------------------------------------------------
@@ -662,6 +753,22 @@ def test_apply_holds_an_escalated_plan_at_shaped(monkeypatch, capsys):
         run="shape-run", agent="muse") == 0
     assert item.status == "Shaped"
     assert "escalated risk (credentials)" in capsys.readouterr().out
+
+
+def test_apply_holds_a_declared_risk_with_a_clean_scan(
+        monkeypatch, capsys):
+    # #1034: the declaration reaches the live path through preview_decision,
+    # so a clean-worded plan the model flags still holds at Shaped.
+    item = idea(42)
+    stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(escalated_risk=[
+            {"reason": "data-migration",
+             "why": "backfills the ledger table"}]),
+        run="shape-run", agent="muse") == 0
+    assert item.status == "Shaped"
+    assert "escalated risk (data-migration)" in capsys.readouterr().out
 
 
 # -- structural guarantees --------------------------------------------------

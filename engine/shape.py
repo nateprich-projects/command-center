@@ -61,13 +61,15 @@ def validation_exit(attempt: Optional[int]) -> int:
 
 
 #: The answer keys shape-apply accepts — exactly these, no extras. From
-#: the Shape row of #794.
+#: the Shape row of #794, plus the model-declared escalated-risk list
+#: (#1034) that the decision unions with the wording scan.
 ANSWER_KEYS = frozenset({
     "decided_from_precedent",
     "decided_by_agent",
     "needs_nate",
     "proposed_class",
     "plan_markdown",
+    "escalated_risk",
 })
 
 #: The needs_nate fields, each mapped to the Needs-section category it
@@ -181,6 +183,36 @@ def _validate_needs_nate(needs: object) -> Dict[str, Optional[str]]:
     return validated
 
 
+def _validate_escalated_risk(entries: object) -> List[Dict[str, str]]:
+    """Validate the model-declared escalated-risk list (#1034).
+
+    A list of ``{"reason", "why"}`` objects, possibly empty. Each reason
+    names one of ``funnel.ESCALATION_PATTERNS`` exactly; each why is one
+    non-empty line saying what in the plan carries that risk. The model
+    judges the plan itself here, not its wording: the decision holds on
+    this list or the wording scan, whichever fires, so the declaration
+    can only hold, never release.
+    """
+    if not isinstance(entries, list):
+        raise ShapeError("escalated_risk must be a list")
+    validated = []
+    for index, entry in enumerate(entries):
+        where = "escalated_risk[{}]".format(index)
+        _check_keys(entry, ("reason", "why"), where)
+        reason = _require_line(entry["reason"], where + ".reason")
+        if reason not in funnel.ESCALATION_PATTERNS:
+            raise ShapeError(
+                "{} is not an escalation reason; choose one of "
+                "{}".format(where + ".reason",
+                             ", ".join(sorted(
+                                 funnel.ESCALATION_PATTERNS))))
+        validated.append({
+            "reason": reason,
+            "why": _require_line(entry["why"], where + ".why"),
+        })
+    return validated
+
+
 def validate_answer(data: object) -> Dict:
     """Validate a shape answer against the plan schema.
 
@@ -205,6 +237,8 @@ def validate_answer(data: object) -> Dict:
         "proposed_class": proposed,
         "plan_markdown": _require_text(
             data["plan_markdown"], "plan_markdown"),
+        "escalated_risk": _validate_escalated_risk(
+            data["escalated_risk"]),
     }
 
 
@@ -276,8 +310,18 @@ def decide(answer: Dict, *,
     The rule itself is the shared ``self_approval_eligible`` predicate,
     so the packet path cannot drift from the shaping path; only the
     needs_nate input comes from the fields instead of the parser.
+
+    Escalated risk is the union of the model's ``escalated_risk``
+    declaration and the wording scan passed as ``escalation_reasons``
+    (#1034): either one holding is enough, so a plan-worded risk the
+    scan misses still holds, and a scan hit the model omitted still
+    holds. There is no standard override: an empty declaration never
+    clears a scan hit.
     """
-    reasons = list(escalation_reasons or [])
+    declared = [entry["reason"] for entry in answer.get("escalated_risk", [])
+                if isinstance(entry, dict)
+                and isinstance(entry.get("reason"), str)]
+    reasons = sorted(set(escalation_reasons or ()) | set(declared))
     open_categories = open_need_categories(answer)
     if funnel.self_approval_eligible(
             klass, origin_voice, override_target,
@@ -308,8 +352,9 @@ def preview_decision(items: list, item, answer: Dict) -> Tuple[str, str]:
     """The status one validated answer would record, without writing.
 
     The same inputs the live path decides from — the effective class
-    with the class-missing recovery, the origin voice and override, and
-    the escalated-risk scan of the rendered plan — so ``--validate-only``
+    with the class-missing recovery, the origin voice and override, the
+    model's escalated-risk declaration inside the answer, and the
+    escalated-risk scan of the rendered plan — so ``--validate-only``
     reports the status the live path would write. Pure apart from its
     arguments; takes a validated answer.
     """

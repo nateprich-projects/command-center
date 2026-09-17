@@ -115,6 +115,15 @@ test("the page polls its own snapshot and re-renders only on a new timestamp", a
   assert.match(source, /visibilityState === "hidden"/);
 });
 
+test("the wide board has no PR column, and every grid template matches its visible cells (#997)", async () => {
+  const app = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  assert.doesNotMatch(app, /"cell-pr"/);
+  const tracks = [...css.matchAll(/--cols: ([^;]+);/g)].map((m) => m[1].match(/minmax\([^)]*\)|\S+/g).length);
+  // 8 wide cells; 7 with repository hidden; 4 with repository, tier, class and age hidden.
+  assert.deepEqual(tracks, [8, 7, 4]);
+});
+
 test("expanded projects survive a re-render", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(source, /const expanded = new Set\(\)/);

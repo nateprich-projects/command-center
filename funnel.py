@@ -5363,6 +5363,12 @@ GRAPHQL_TRUNCATED_RESPONSE_SIGNALS = (
     "unexpected end of input",
     "unexpected eof",
 )
+# A gateway error is GitHub's server timing out, not an answer. The batched PR
+# scan runs close to that ~10 s limit, so one 502 or 504 used to fail a whole
+# begin closed: three of four Codex ticks on 2026-09-17 (#1030). It gets the
+# same bounded retry, after a longer pause than a truncated response.
+GRAPHQL_GATEWAY_RETRY_DELAY_SECONDS = 2.0
+GRAPHQL_GATEWAY_ERROR_RE = re.compile(r"\bHTTP 50[234]\b")
 GRAPHQL_REQUEST_ID_RE = re.compile(
     r"(?:graphql\s+request\s+id|x-github-request-id|request[-\s]+id)"
     r"\s*:?\s*([A-Za-z0-9][A-Za-z0-9:._-]*)",
@@ -5536,6 +5542,11 @@ def _is_truncated_graphql_text(text: object) -> bool:
     """Whether CLI text identifies the known partial-response failure."""
     lowered = _graphql_text(text).lower()
     return any(signal in lowered for signal in GRAPHQL_TRUNCATED_RESPONSE_SIGNALS)
+
+
+def _is_gateway_error_text(text: object) -> bool:
+    """Whether CLI text reports a GitHub 502, 503 or 504."""
+    return bool(GRAPHQL_GATEWAY_ERROR_RE.search(_graphql_text(text)))
 
 
 def _record_graphql_attempt() -> None:
@@ -5760,14 +5771,18 @@ def gh_graphql(query: str, **variables) -> dict:
                 # if a CLI diagnostic happens to include another transport phrase.
                 if _is_exhausted_signal(detail):
                     raise GitHubError(detail, request_id=request_id)
+                gateway = _is_gateway_error_text(detail)
                 error = GitHubError(
                     detail,
-                    transient=_is_truncated_graphql_text(stderr),
+                    transient=gateway or _is_truncated_graphql_text(stderr),
                     request_id=request_id or last_request_id,
                 )
                 if not error.transient or attempt + 1 >= GRAPHQL_MAX_ATTEMPTS:
                     raise error
-                time.sleep(GRAPHQL_RETRY_DELAY_SECONDS)
+                time.sleep(
+                    GRAPHQL_GATEWAY_RETRY_DELAY_SECONDS if gateway
+                    else GRAPHQL_RETRY_DELAY_SECONDS
+                )
                 continue
 
             try:

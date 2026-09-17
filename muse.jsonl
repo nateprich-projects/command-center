@@ -3672,3 +3672,4 @@
 {"agent": "muse", "attempt": null, "escalated_from": null, "harness": "muse-code", "model": "muse-spark-1.3", "model_source": "detected", "phase": "start", "provider": "meta", "reasoning_effort": null, "repo": {"dirty": 0, "head": "e1adb406ceeb"}, "run": "a6379dc4693d", "runtime": {"head": "e1adb406ceeb", "root": "/Users/nateprich/.claude/command-center-run"}, "session_id": null, "ticket": null, "ts": 1789604407, "usage": {"source": "meta", "unmetered": true}}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/command-center", "run": "d4862ccc200e", "ts": 1789604462, "work": "972"}
 {"agent": "muse", "api_cost": {"gh_calls": 27, "graphql_points": 62}, "phase": "api_cost", "run": "d4862ccc200e", "ts": 1789604465}
+{"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/command-center", "run": "a6379dc4693d", "ts": 1789604471, "work": "972"}

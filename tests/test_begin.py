@@ -659,14 +659,19 @@ def test_begin_reconcile_is_idempotent_when_the_pr_is_no_longer_open(
 
 
 def _completed_project(number, *, klass="Improve", children_done=2,
-                      carried_human_step=False):
+                      carried_human_step=False, origin="agent"):
     repo = "nateprich/example"
+    body = (
+        funnel.origin_block(origin, at=NOW, run="reconcile-run", agent="codex")
+        if origin in funnel.ORIGIN_VOICES else None
+    )
     project = funnel.Item(
         repo=repo,
         number=number,
         title="Project {}".format(number),
         url="https://github.com/{}/issues/{}".format(repo, number),
         state="OPEN",
+        body=body,
         status="Building",
         klass=klass,
         item_id="project-{}".format(number),
@@ -775,21 +780,22 @@ def test_begin_reconciles_a_completed_upkeep_project_and_records_marker(
 
 
 @pytest.mark.parametrize(
-    "klass,carried_human_step,children_done",
+    "klass,carried_human_step,children_done,origin",
     [
-        ("New", False, 2),
-        ("Broken", True, 2),
-        ("Improve", False, 1),
+        ("New", False, 2, "agent"),
+        ("Improve", True, 2, "nate-relayed"),
+        ("Improve", False, 1, "agent"),
     ],
 )
 def test_begin_leaves_non_reconcilable_projects_untouched(
-    monkeypatch, capsys, klass, carried_human_step, children_done
+    monkeypatch, capsys, klass, carried_human_step, children_done, origin
 ):
     items = _completed_project(
         210,
         klass=klass,
         carried_human_step=carried_human_step,
         children_done=children_done,
+        origin=origin,
     )
 
     result, calls, graphql_calls = _begin_with_reconcile_wired(
@@ -807,6 +813,28 @@ def test_begin_leaves_non_reconcilable_projects_untouched(
         call for call in graphql_calls
         if call[1].get("item") == "project-210"
     ]
+
+
+def test_begin_reconciles_broken_project_with_human_step_and_nate_origin(
+    monkeypatch, capsys
+):
+    items = _completed_project(
+        211,
+        klass="Broken",
+        carried_human_step=True,
+        origin="nate-relayed",
+    )
+
+    result, calls, _graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert result["auto_closed"] == [items[0].ref]
+    assert items[0].state == "CLOSED"
+    assert [
+        "gh", "issue", "close", "211", "--repo", "nateprich/example",
+        "--reason", "completed",
+    ] in calls
 
 
 def test_begin_reconcile_is_idempotent(monkeypatch, capsys):

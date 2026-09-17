@@ -280,9 +280,19 @@ or `Replace`) and pass it so the recovery write happens before the Status write:
 python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --class <Broken|Maintenance|Improve|New|Replace> --plan <file>
 ```
 
-For a `nate-relayed` idea, or one with no readable origin marker, do not pass
-`--class` and do not infer one. Include a non-empty `Proposed class: <one-word proposal>`
-line in the plan so Nate can make the one-word correction after it reaches `Shaped`.
+For a `nate-relayed` idea, or one with no readable origin marker, leave `Class`
+unset during shaping and do not pass `--class`. Include a non-empty
+`Proposed class: <one ladder name>` line in the plan so the recommendation remains
+visible for the later approval gate. When Nate explicitly authorises `approve` while
+the Class is still unset, the command adopts that line only when it is one whole-line
+exact ladder name, writes the Class before the normal Status write, and records the
+source. A missing, blank, malformed, fuzzy, or multiple proposal stays unset for
+Nate; titles, body prose, and other text do not choose a class.
+
+Adoption fills the field but is not the plan-good decision: it never satisfies the
+`Shaped` gate or auto-advances a Nate-origin item to `Ready`. An explicitly authorised
+`approve` command may still perform its normal Status transition; that transition is
+the gate answer, not the adoption. Nate may override the adopted Class.
 
 ```bash
 python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --plan <file>
@@ -290,8 +300,9 @@ python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --pla
 
 Moving the item to `Shaped` records that a plan exists; **Shaped is not approval**.
 Do not set `Ready`, answer the Shaped gate, or use `--class` for a Nate-origin idea or
-an already-classed item. The only Class write in this step is the recovery path for an
-explicitly agent-origin, unclassed idea.
+an already-classed item while shaping. The only Class write in this shaping step is
+the recovery path for an explicitly agent-origin, unclassed idea; approval-time
+adoption is the separate gate behavior described above.
 
 ## Capture observed defects before finishing
 

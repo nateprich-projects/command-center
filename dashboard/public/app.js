@@ -623,4 +623,7 @@ if (typeof document !== "undefined") {
     });
 }
 
-export { STAGES, age, boardColumns, failureState, nextOwner, pipState, rowPrState, rowTier, shortRepo };
+export {
+  STAGES, age, boardColumns, failureState, nextOwner, pipState, renderPhoneBoard,
+  rowPrState, rowTier, shortRepo,
+};

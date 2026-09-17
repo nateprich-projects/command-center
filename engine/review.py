@@ -3,10 +3,11 @@
 
 The review runner shows the model this packet and nothing else: the ticket
 body, plan.md, the diff, CI state, the newest verdict and its head, the
-changed-file overlap with every other open PR, protected-path touches, and
-the stop-auto-merging counter. #798 assembled the evidence; #799 adds the
-deterministic pre-check rows the runner evaluates before any model is
-called. The model call itself comes later.
+changed-file overlap with every other open PR, protected-path touches, the
+stop-auto-merging counter, and the pull_request CI runs on the head.
+#798 assembled the evidence; #799 adds the deterministic pre-check rows
+the runner evaluates before any model is called. The model call itself
+comes later.
 
 Read-only by construction: every GitHub call here is a view, list, diff, or
 content read. Anything that changes remote state belongs in a later
@@ -91,6 +92,16 @@ REPO_PATH_RULES = (
 #: scan bound: a head older than this window may hide an overlap.
 MERGED_PR_SCAN_LIMIT = 100
 
+#: How many pull_request runs the merged-overlap row can see. Newest first,
+#: so a head whose runs fall outside this window reads as uncovered — the
+#: fail-closed direction.
+CI_RUN_SCAN_LIMIT = 20
+
+#: The workflow event whose runs test the merge commit GitHub built for the
+#: run rather than the branch head. Only these runs can cover an overlap:
+#: a push run on the head never saw main at all.
+CI_COVERING_EVENT = "pull_request"
+
 
 def ci_state(checks: Sequence[dict]) -> str:
     """Derive green/red/unknown from a statusCheckRollup list.
@@ -117,6 +128,233 @@ def summarize_checks(rollup: Sequence[dict]) -> List[Dict[str, Optional[str]]]:
             "status": check.get("status"),
         })
     return summarized
+
+
+def parse_ci_time(value: Optional[str]) -> Optional[datetime]:
+    """Parse a workflow-run timestamp, tolerantly. None when unreadable.
+
+    ``funnel.parse_time`` reads only whole-second ``Z`` stamps, which is
+    all ``mergedAt`` ever carries. Run timestamps may carry fractional
+    seconds, so this accepts those (and numeric offsets) rather than
+    failing closed on a well-formed time. Unparseable still reads as
+    missing, and a run with no readable start takes no part in coverage.
+    """
+    if not value or not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def summarize_runs(
+        ci_runs: Sequence[dict],
+        head_sha: Optional[str]) -> List[Dict[str, Optional[object]]]:
+    """The pull_request runs on this head, newest first, in a stable shape.
+
+    ``id`` is the workflow-run database id a re-run targets; ``started_at``
+    is the latest attempt's start, which is what orders a run against a
+    merge: GitHub builds the run's merge commit against then-current main,
+    so a start after the merge means the tested base contains it. Runs on
+    other heads, other events, and rubbish rows are dropped — a green push
+    run never saw main, and another head's runs say nothing about this one.
+    A packet without a head keeps no runs: unattributable runs must never
+    cover an overlap.
+    """
+    if not head_sha:
+        return []
+    summarized = []
+    for run in ci_runs or []:
+        if not isinstance(run, dict):
+            continue
+        if str(run.get("event") or "").lower() != CI_COVERING_EVENT:
+            continue
+        if run.get("headSha") != head_sha:
+            continue
+        summarized.append({
+            "id": run.get("databaseId"),
+            "conclusion": run.get("conclusion"),
+            "status": run.get("status"),
+            "started_at": run.get("startedAt"),
+        })
+
+    def _started(entry: Dict[str, Optional[object]]) -> datetime:
+        raw = entry.get("started_at")
+        return (parse_ci_time(raw)  # type: ignore[arg-type]
+                or datetime.min.replace(tzinfo=timezone.utc))
+
+    summarized.sort(key=_started, reverse=True)
+    return summarized
+
+
+def green_run_at(runs: Sequence[dict]) -> Optional[str]:
+    """The newest green run's start, or None. The coverage fact row 5 reads.
+
+    Only completed success runs count, and only with a readable start: an
+    unreadable start cannot be ordered against a merge, so the run takes no
+    part rather than covering by assertion.
+    """
+    best: Optional[str] = None
+    best_dt: Optional[datetime] = None
+    for run in runs or []:
+        if not isinstance(run, dict):
+            continue
+        if str(run.get("status") or "").upper() != "COMPLETED":
+            continue
+        if str(run.get("conclusion") or "").upper() != "SUCCESS":
+            continue
+        started = parse_ci_time(run.get("started_at"))
+        if started is None:
+            continue
+        if best_dt is None or started > best_dt:
+            best_dt = started
+            best = run.get("started_at")
+    return best
+
+
+def latest_completed_run_id(runs: Sequence[dict]) -> Optional[int]:
+    """The newest completed run's id: the seed a CI re-run targets.
+
+    Any conclusion seeds a re-run — ``gh run rerun`` rebuilds the whole
+    run — but the run must be finished and its start must read, so the
+    wait path can see the new attempt next time. None when no run
+    qualifies; row 5 then rejects rather than queuing blind.
+    """
+    best_id: Optional[int] = None
+    best_dt: Optional[datetime] = None
+    for run in runs or []:
+        if not isinstance(run, dict):
+            continue
+        if str(run.get("status") or "").upper() != "COMPLETED":
+            continue
+        started = parse_ci_time(run.get("started_at"))
+        if started is None:
+            continue
+        run_id = run.get("id")
+        if isinstance(run_id, bool) or not isinstance(run_id, int):
+            continue
+        if best_dt is None or started > best_dt:
+            best_dt = started
+            best_id = run_id
+    return best_id
+
+
+def _run_newer_and_open(run: dict, merged_dt: datetime) -> bool:
+    """A covering attempt already in flight: started after the merge,
+    unfinished. The review waits for it instead of queuing another
+    re-run — which is what keeps the re-run to once."""
+    if not run.get("status"):
+        return False
+    if str(run.get("status")).upper() == "COMPLETED":
+        return False
+    started = parse_ci_time(run.get("started_at"))
+    return started is not None and started > merged_dt
+
+
+def _newest_open_run_id(runs: Sequence[dict]) -> Optional[int]:
+    """The in-flight run to name in the wait note: newest start wins, an
+    unorderable but identifiable run beats silence."""
+    open_runs = [run for run in runs or []
+                 if isinstance(run, dict)
+                 and run.get("status")
+                 and str(run.get("status")).upper() != "COMPLETED"
+                 and isinstance(run.get("id"), int)
+                 and not isinstance(run.get("id"), bool)]
+    if not open_runs:
+        return None
+
+    def _started(run: dict) -> datetime:
+        return (parse_ci_time(run.get("started_at"))
+                or datetime.min.replace(tzinfo=timezone.utc))
+
+    return max(open_runs, key=_started).get("id")
+
+
+def _overlap_facts(packet: dict) -> Dict[str, object]:
+    """The shared inputs row 5 and the re-run decision both read."""
+    ci = packet.get("ci") or {}
+    seed = ci.get("latest_run_id")
+    return {
+        "clean": str(packet.get("mergeable") or "").upper() == "MERGEABLE",
+        "green_dt": parse_ci_time(ci.get("green_run_at")),
+        "runs": [run for run in (ci.get("runs") or [])
+                 if isinstance(run, dict)],
+        "seed": (seed if isinstance(seed, int)
+                 and not isinstance(seed, bool) else None),
+    }
+
+
+def _overlap_hold(entry: dict, facts: Dict[str, object]) -> str:
+    """One overlap's standing: covered, rerun, wait, or blocked.
+
+    Covered needs a green run newer than the merge. A clean branch with
+    older green runs is rerun when a finished run seeds it, wait when a
+    newer attempt is already in flight. Everything else blocks: a
+    conflicting or uncomputed branch, an unorderable merge, and an
+    uncovered overlap with no run to re-run all reject as stale.
+    """
+    if not facts["clean"]:
+        return "blocked"
+    merged_dt = parse_ci_time(entry.get("merged_at"))
+    if merged_dt is None:
+        return "blocked"
+    green_dt = facts["green_dt"]
+    assert green_dt is None or isinstance(green_dt, datetime)
+    if green_dt is not None and green_dt > merged_dt:
+        return "covered"
+    runs = facts["runs"]
+    assert isinstance(runs, list)
+    if any(_run_newer_and_open(run, merged_dt) for run in runs):
+        return "wait"
+    if facts["seed"] is not None:
+        return "rerun"
+    return "blocked"
+
+
+def _stale_reason(entry: dict) -> str:
+    return "merged-overlap: PR #{} merged at {} touches {}".format(
+        entry.get("pr"), entry.get("merged_at"),
+        ", ".join(entry.get("files") or []))
+
+
+def decide_ci_rerun(packet: dict) -> Optional[Dict[str, object]]:
+    """The CI re-run the merged-overlap row asks for, if any. Pure.
+
+    Set only when no overlap blocks yet some overlap is uncovered: every
+    merge is either covered by a green run newer than it or clean with a
+    re-runnable or in-flight run. ``rerun`` names the finished run to
+    rebuild; ``wait`` names the attempt already in flight. ``overlaps``
+    names the uncovered PRs either way. None covers the rest: no overlap,
+    all covered, or any overlap stale — the last is a rejection, not a
+    re-run. The runner acts on this only when the whole precheck passes;
+    a failing row rejects first and no re-run is requested.
+    """
+    overlaps = [entry for entry in (packet.get("merged_overlap") or [])
+                if isinstance(entry, dict)]
+    if not overlaps:
+        return None
+    facts = _overlap_facts(packet)
+    holds = [(entry, _overlap_hold(entry, facts)) for entry in overlaps]
+    if any(hold == "blocked" for _, hold in holds):
+        return None
+    uncovered = [(entry, hold) for entry, hold in holds if hold != "covered"]
+    if not uncovered:
+        return None
+    prs = [entry.get("pr") for entry, _ in uncovered]
+    if any(hold == "rerun" for _, hold in uncovered):
+        return {"action": "rerun", "run_id": facts["seed"], "overlaps": prs}
+    runs = facts["runs"]
+    assert isinstance(runs, list)
+    return {"action": "wait", "run_id": _newest_open_run_id(runs),
+            "overlaps": prs}
 
 
 def protected_touches(changed_files: Sequence[str], diff: str) -> Dict:
@@ -401,11 +639,22 @@ def precheck_verdict(packet: dict) -> List[str]:
 
 
 def precheck_merged_overlap(packet: dict) -> List[str]:
-    """Row 5: a merge since the head may have made this PR stale."""
-    return ["merged-overlap: PR #{} merged at {} touches {}".format(
-                entry.get("pr"), entry.get("merged_at"),
-                ", ".join(entry.get("files") or []))
-            for entry in packet.get("merged_overlap") or []]
+    """Row 5: a merge since the head may have made this PR stale.
+
+    A newer overlapping merge blocks unless the PR proves it harmless:
+    GitHub reports the branch MERGEABLE and a green pull_request run
+    started after the merge, so its tested merge commit was built against
+    a main containing the overlap (#1019, Nate 2026-09-17). A clean branch
+    whose green runs all predate the merge is not rejected here: the
+    runner re-runs CI once and waits (see ``decide_ci_rerun``), so the
+    engineer needs no rebase. Anything else — conflicting, uncomputed, or
+    uncovered with no run to re-run — rejects as stale, as before.
+    """
+    overlaps = [entry for entry in (packet.get("merged_overlap") or [])
+                if isinstance(entry, dict)]
+    facts = _overlap_facts(packet)
+    return [_stale_reason(entry) for entry in overlaps
+            if _overlap_hold(entry, facts) == "blocked"]
 
 
 def precheck_protected(packet: dict) -> List[str]:
@@ -478,7 +727,8 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
                  plan_md_missing: bool, open_prs: Sequence[dict],
                  verdict: Optional[dict], stop_counter: dict,
                  collected_at: str,
-                 merged_prs: Optional[Sequence[dict]] = None) -> Dict:
+                 merged_prs: Optional[Sequence[dict]] = None,
+                 ci_runs: Optional[Sequence[dict]] = None) -> Dict:
     """Assemble the packet from already-fetched pieces. Pure: no IO.
 
     Every field the review question needs, in one JSON-serialisable dict.
@@ -488,6 +738,9 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     number, title, mergedAt, headRefName and files [{path}]; None reads as
     no merges scanned. Rows on the candidate's own head branch become
     ``ticket_prior_prs``: the slices of this ticket that already merged.
+    ``ci_runs`` rows are ``gh run list`` JSON; None reads as no runs
+    scanned, which fails closed — an overlap then rejects as stale, as
+    before #1019.
     """
     pr_view = pr_view or {}
     changed_files = sorted({
@@ -495,6 +748,8 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         if isinstance(entry, dict) and entry.get("path")
     })
     checks = summarize_checks(pr_view.get("statusCheckRollup") or [])
+    runs = summarize_runs(ci_runs or [], pr_view.get("headRefOid"))
+    green_at = green_run_at(runs)
     if ticket is None:
         ticket_packet: Dict[str, Optional[object]] = {
             "ref": None, "number": None, "title": None, "url": None,
@@ -528,7 +783,10 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "diff": diff,
         "changed_files": changed_files,
         "ci": {"state": ci_state(pr_view.get("statusCheckRollup") or []),
-               "checks": checks},
+               "checks": checks,
+               "runs": runs,
+               "green_run_at": green_at,
+               "latest_run_id": latest_completed_run_id(runs)},
         "verdict": verdict,
         "verdict_head_sha": (verdict or {}).get("head_sha"),
         "overlap": file_overlap(changed_files, open_prs, pr_number),
@@ -541,6 +799,13 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "collected_at": collected_at,
     }
     assembled["precheck"] = precheck(assembled)
+    # The re-run is the runner's next action, not a fact about the overlap:
+    # it is set only when the whole precheck passes, so a failing row
+    # rejects first and no re-run is requested for a doomed packet.
+    if assembled["precheck"]["pass"]:
+        assembled["ci_rerun"] = decide_ci_rerun(assembled)
+    else:
+        assembled["ci_rerun"] = None
     return assembled
 
 
@@ -630,6 +895,31 @@ def fetch_merged_prs(repo: str,
     return [row for row in rows if isinstance(row, dict)]
 
 
+def fetch_ci_runs(repo: str, branch: str,
+                limit: int = CI_RUN_SCAN_LIMIT) -> List[dict]:
+    """Newest pull_request runs on this branch: id, head, verdict, times.
+
+    The merged-overlap row's coverage evidence: a green run on this head
+    that started after an overlapping merge tested a merge commit built
+    against a main containing it. An unreadable answer — Actions off, a
+    transient API failure — reads as no runs, which fails closed: an
+    overlap then rejects as stale exactly as before #1019, and a PR with
+    no overlap is unaffected. Event and head are filtered again in
+    ``summarize_runs`` so a surprising server answer cannot smuggle a push
+    run, or another head's runs, into coverage.
+    """
+    if not branch:
+        return []
+    rows = funnel._gh_json(
+        "gh", "run", "list", "--repo", repo, "--branch", branch,
+        "--event", CI_COVERING_EVENT, "--limit", str(limit),
+        "--json", "databaseId,event,headSha,headBranch,conclusion,status,"
+                  "createdAt,startedAt,updatedAt")
+    if rows is None or not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
 def fetch_verdict(repo: str, pr_number: int) -> Optional[dict]:
     """The newest review verdict on the PR, or None. Newest wins."""
     return funnel.latest_verdict(repo, pr_number)
@@ -661,6 +951,7 @@ def collect(repo: Optional[str], pr_number: int, *,
     else:
         ticket = None
     plan_md, plan_md_missing = fetch_plan_md(resolved)
+    branch = pr_view.get("headRefName") or ""
     return build_packet(
         repo=resolved,
         pr_number=pr_number,
@@ -671,6 +962,7 @@ def collect(repo: Optional[str], pr_number: int, *,
         plan_md_missing=plan_md_missing,
         open_prs=fetch_open_prs(resolved),
         merged_prs=fetch_merged_prs(resolved),
+        ci_runs=fetch_ci_runs(resolved, branch) if branch else [],
         verdict=fetch_verdict(resolved, pr_number),
         stop_counter=fetch_stop_counter(items_loader, now),
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),

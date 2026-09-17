@@ -308,6 +308,16 @@ week means stop auto-merging and fix the review prompt. One action from the brie
 reopens the ticket, returns the parent to Building, files the regression against the
 merged PR, and increments a visible counter.
 
+**A PR that overlaps a newer merge is stale only when it cannot prove otherwise.**
+When another PR touching the same files merges after the candidate's head, the
+candidate passes review without merging `main` first when (a) GitHub reports the
+branch `MERGEABLE` and (b) a green `pull_request` CI run on the head started after
+that merge, so the merge commit it tested was built against a `main` containing the
+overlap. When the branch is clean but no green run yet covers the merge, the review
+runner re-runs the PR's CI once and waits for the result, so the engineer needs no
+rebase. A conflicting branch rejects as stale, as before. **Confirmed by Nate,
+2026-09-17 (#1019).**
+
 ### Execution rules
 
 - **In-app scheduling only** — Claude Code Routines and Codex Scheduled. Both require

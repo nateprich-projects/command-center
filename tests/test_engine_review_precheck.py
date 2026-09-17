@@ -274,6 +274,181 @@ def test_head_date_prefers_the_head_sha_then_the_newest():
     assert review.head_date(pr_view(commits=[])) is None
 
 
+# -- row 5: clean and green on the newer base (#1019) ---------------------------
+#
+# An overlapping merge newer than the head does not block when the branch is
+# MERGEABLE and a green pull_request run on the head started after the merge.
+# Clean but uncovered overlaps are not rejected: the packet asks the runner
+# to re-run CI once and wait, so the engineer needs no rebase.
+
+COVERING = "2026-09-13T13:30:00Z"
+LATER = "2026-09-13T13:45:00Z"
+RUN_ID = 123456789
+
+
+def ci_run(started_at, run_id=RUN_ID, conclusion="success", status="completed",
+           event="pull_request", head=SHA):
+    """One ``gh run list`` row: the wire shape ``build_packet`` takes."""
+    return {"databaseId": run_id, "event": event, "headSha": head,
+            "headBranch": "ticket/9", "conclusion": conclusion,
+            "status": status, "createdAt": started_at,
+            "startedAt": started_at, "updatedAt": started_at}
+
+
+def test_merged_row_passes_when_clean_and_green_on_the_newer_base():
+    rows = [merged(5, NEWER, "funnel.py")]
+    found = packet(merged_prs=rows, ci_runs=[ci_run(COVERING)])
+    assert found["merged_overlap"] == [
+        {"pr": 5, "merged_at": NEWER, "files": ["funnel.py"]}]
+    assert found["ci"]["green_run_at"] == COVERING
+    assert found["ci_rerun"] is None
+    assert found["precheck"] == {"pass": True, "reasons": []}
+
+
+def test_merged_row_requests_a_rerun_when_clean_but_green_only_on_old_base():
+    rows = [merged(5, NEWER, "funnel.py")]
+    found = packet(merged_prs=rows, ci_runs=[ci_run(OLDER)])
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert found["ci_rerun"] == {"action": "rerun", "run_id": RUN_ID,
+                                 "overlaps": [5]}
+
+
+def test_merged_row_rejects_a_conflicting_overlap_despite_a_new_green_run():
+    view = pr_view(mergeable="CONFLICTING")
+    rows = [merged(5, NEWER, "funnel.py")]
+    found = packet(pr_view=view, merged_prs=rows, ci_runs=[ci_run(COVERING)])
+    assert found["precheck"]["reasons"] == [
+        "merged-overlap: PR #5 merged at {} touches funnel.py".format(NEWER)]
+    assert found["ci_rerun"] is None
+
+
+def test_merged_row_passes_with_no_overlap_and_requests_no_rerun():
+    found = packet(merged_prs=[], ci_runs=[ci_run(OLDER)])
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert found["ci_rerun"] is None
+
+
+def test_merged_row_rejects_when_mergeability_is_unknown():
+    view = pr_view(mergeable="UNKNOWN")
+    rows = [merged(5, NEWER, "funnel.py")]
+    found = packet(pr_view=view, merged_prs=rows, ci_runs=[ci_run(COVERING)])
+    assert len(found["precheck"]["reasons"]) == 1
+    assert found["precheck"]["reasons"][0].startswith("merged-overlap:")
+    assert found["ci_rerun"] is None
+
+
+def test_merged_row_waits_when_a_newer_attempt_is_already_in_flight():
+    rows = [merged(5, NEWER, "funnel.py")]
+    runs = [ci_run(COVERING, run_id=RUN_ID + 1, conclusion=None,
+                   status="in_progress"),
+            ci_run(OLDER)]
+    found = packet(merged_prs=rows, ci_runs=runs)
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert found["ci_rerun"] == {"action": "wait", "run_id": RUN_ID + 1,
+                                 "overlaps": [5]}
+
+
+def test_merged_row_rejects_when_clean_but_no_runs_exist_to_rerun():
+    rows = [merged(5, NEWER, "funnel.py")]
+    found = packet(merged_prs=rows, ci_runs=[])
+    assert found["precheck"]["reasons"] == [
+        "merged-overlap: PR #5 merged at {} touches funnel.py".format(NEWER)]
+    assert found["ci_rerun"] is None
+
+
+def test_merged_row_rejects_an_unorderable_merge_even_when_clean():
+    rows = [merged(5, None, "funnel.py")]
+    found = packet(merged_prs=rows, ci_runs=[ci_run(COVERING)])
+    assert found["merged_overlap"] == [
+        {"pr": 5, "merged_at": None, "files": ["funnel.py"]}]
+    assert found["precheck"]["reasons"] == [
+        "merged-overlap: PR #5 merged at None touches funnel.py"]
+    assert found["ci_rerun"] is None
+
+
+def test_merged_row_ignores_green_push_runs():
+    rows = [merged(5, NEWER, "funnel.py")]
+    found = packet(merged_prs=rows, ci_runs=[ci_run(COVERING, event="push")])
+    assert found["ci"]["runs"] == []
+    assert found["ci"]["green_run_at"] is None
+    assert found["precheck"]["reasons"] == [
+        "merged-overlap: PR #5 merged at {} touches funnel.py".format(NEWER)]
+
+
+def test_merged_row_ignores_runs_on_other_heads():
+    rows = [merged(5, NEWER, "funnel.py")]
+    found = packet(merged_prs=rows, ci_runs=[ci_run(COVERING, head=OTHER_SHA)])
+    assert found["ci"]["runs"] == []
+    assert len(found["precheck"]["reasons"]) == 1
+    assert found["ci_rerun"] is None
+
+
+def test_merged_row_ignores_runs_with_an_unreadable_start():
+    rows = [merged(5, NEWER, "funnel.py")]
+    found = packet(merged_prs=rows, ci_runs=[ci_run("not a time")])
+    assert found["ci"]["green_run_at"] is None
+    assert found["ci"]["latest_run_id"] is None
+    assert len(found["precheck"]["reasons"]) == 1
+    assert found["ci_rerun"] is None
+
+
+def test_a_failed_run_does_not_cover_but_seeds_the_rerun():
+    # The fixture isolates row 5: in production a failed run reddens the
+    # rollup and row 3 rejects first, so the runner never acts on this.
+    rows = [merged(5, NEWER, "funnel.py")]
+    found = packet(merged_prs=rows,
+                   ci_runs=[ci_run(COVERING, conclusion="failure")])
+    assert found["ci"]["green_run_at"] is None
+    assert found["ci"]["latest_run_id"] == RUN_ID
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert found["ci_rerun"] == {"action": "rerun", "run_id": RUN_ID,
+                                 "overlaps": [5]}
+
+
+def test_merged_row_needs_a_run_strictly_newer_than_the_merge():
+    rows = [merged(5, NEWER, "funnel.py")]
+    found = packet(merged_prs=rows, ci_runs=[ci_run(NEWER)])
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert found["ci_rerun"] == {"action": "rerun", "run_id": RUN_ID,
+                                 "overlaps": [5]}
+
+
+def test_merged_row_reads_fractional_run_timestamps():
+    rows = [merged(5, NEWER, "funnel.py")]
+    found = packet(merged_prs=rows,
+                   ci_runs=[ci_run("2026-09-13T13:30:00.123456Z")])
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert found["ci_rerun"] is None
+
+
+def test_merged_row_covers_one_overlap_and_reruns_for_the_other():
+    rows = [merged(5, NEWER, "funnel.py"),
+            merged(6, LATER, "funnel.py")]
+    found = packet(merged_prs=rows, ci_runs=[ci_run(COVERING)])
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert found["ci_rerun"] == {"action": "rerun", "run_id": RUN_ID,
+                                 "overlaps": [6]}
+
+
+def test_a_failing_row_suppresses_the_rerun_for_a_rerunnable_overlap():
+    view = pr_view(files=[{"path": "AGENTS.md"}])
+    rows = [merged(5, NEWER, "AGENTS.md")]
+    found = packet(pr_view=view, merged_prs=rows, ci_runs=[ci_run(OLDER)])
+    assert found["precheck"]["pass"] is False
+    assert found["precheck"]["reasons"] == [
+        "protected: AGENTS.md touched but the ticket does not ask for it"]
+    assert found["ci_rerun"] is None
+
+
+def test_parse_ci_time_reads_whole_fractional_and_offset_stamps():
+    assert review.parse_ci_time("2026-09-13T13:30:00Z") is not None
+    assert review.parse_ci_time("2026-09-13T13:30:00.123456Z") is not None
+    assert review.parse_ci_time("2026-09-13T13:30:00+00:00") is not None
+    assert review.parse_ci_time(None) is None
+    assert review.parse_ci_time("") is None
+    assert review.parse_ci_time("not a time") is None
+
+
 # -- row 6: protected paths ----------------------------------------------------
 
 def test_protected_row_fails_an_unasked_touch():
@@ -416,6 +591,7 @@ def test_cli_packet_carries_a_failing_precheck(monkeypatch, capsys):
         review, "fetch_plan_md", lambda repo: ("# design record", False))
     monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
     monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
     monkeypatch.setattr(
         review, "fetch_stop_counter",

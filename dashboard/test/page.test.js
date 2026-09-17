@@ -144,7 +144,12 @@ test("the narrow brief stays ordered, single-column, and legend-visible", async 
   );
   assert.match(css, /@media \(max-width: 900px\) \{[\s\S]*\.legend \{[\s\S]*display: flex;/);
   assert.match(css, /@media \(max-width: 600px\) \{[\s\S]*\.brief-sections \{[\s\S]*grid-template-columns: minmax\(0, 1fr\);/);
-  assert.match(css, /\.waiting-row \{[\s\S]*display: grid;/);
+  // Chips keep their natural width and share a line (#989).
+  const narrow = css.slice(css.indexOf("@media (max-width: 600px)"));
+  assert.match(narrow, /\.waiting-row \{\s+flex-wrap: wrap;/);
+  assert.match(narrow, /\.waiting-title \{ flex: 1 0 100%;/);
+  assert.match(narrow, /\.waiting-row \.chip \{\s+flex: 0 1 auto;/);
+  assert.doesNotMatch(narrow, /\.waiting-row \{[^}]*display: grid;/);
 });
 
 

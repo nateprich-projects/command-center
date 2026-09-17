@@ -578,6 +578,7 @@ def test_breakdown_shape_mode_requires_a_complete_breakdown_shape_pair():
         "agree": 0,
         "disagree": 0,
         "rate": None,
+        "disagreements": [],
         "jobs": {"shadow": 2, "live": 2, "matched": 2, "compared": 0},
         "malformed_output": {
             "shadow": {"count": 0, "rate": 0.0},
@@ -656,6 +657,107 @@ def test_breakdown_ticket_counts_allow_one_and_disagree_past_one():
     assert report["breakdown_shape_agreement"]["agree"] == 2
     assert report["breakdown_shape_agreement"]["disagree"] == 1
     assert report["breakdown_shape_agreement"]["rate"] == 2 / 3
+
+
+def test_breakdown_shape_disagreements_include_both_sides_and_runs():
+    records = []
+    live_shape_statuses = {}
+    for index, live_count in enumerate((2, 4), 1):
+        target = "owner/repo#{}".format(100 + index)
+        records += _breakdown_shadow_job(
+            "shadow-breakdown-{}".format(index), 810 + index, 2,
+            target=target,
+        )
+        records += _breakdown_live_job(
+            "live-breakdown-{}".format(index), 820 + index, live_count,
+            target=target,
+        )
+        records += _issue_job(
+            "shadow-shape-{}".format(index), "shape", 830 + index,
+            "shadow shape of {}: Ready".format(target), target=target,
+        )
+        live_shape_run = "live-shape-{}".format(index)
+        records += _issue_job(
+            live_shape_run, "shape", 840 + index,
+            "shaped {}: Ready".format(target), target=target,
+        )
+        live_shape_statuses[live_shape_run] = {
+            "status": "Ready", "status_since": 835 + index,
+        }
+
+    report = shadow_report.build_report(
+        records, now=900, window_seconds=200, mode="breakdown-shape",
+        live_shape_statuses=live_shape_statuses,
+    )
+
+    assert report["breakdown_shape_agreement"]["disagreements"] == [{
+        "key": "owner/repo#102",
+        "shadow": {
+            "run": "shadow-breakdown-2",
+            "ticket_count": 2,
+            "needs_decision": None,
+            "shape_status": "Ready",
+        },
+        "live": {
+            "run": "live-breakdown-2",
+            "ticket_count": 4,
+            "needs_decision": None,
+            "shape_status": "Ready",
+        },
+    }]
+
+
+def test_breakdown_shape_disagreements_only_output_names_the_mode(
+    capsys, monkeypatch,
+):
+    monkeypatch.setattr(
+        shadow_report,
+        "load_report",
+        lambda *args, **kwargs: {
+            "breakdown_shape_agreement": {
+                "disagreements": [{
+                    "key": "owner/repo#102",
+                    "shadow": {
+                        "run": "shadow-run", "ticket_count": 2,
+                        "needs_decision": None, "shape_status": "Ready",
+                    },
+                    "live": {
+                        "run": "live-run", "ticket_count": 4,
+                        "needs_decision": None, "shape_status": "Ready",
+                    },
+                }],
+            },
+        },
+    )
+
+    assert shadow_report.main([
+        "--disagreements-only", "--mode", "breakdown-shape",
+    ]) == 0
+    output = capsys.readouterr().out
+    assert "owner/repo#102" in output
+    assert "shadow-run" in output
+    assert "live-run" in output
+    assert "tickets 4" in output
+    assert "review disagreements" not in output
+
+
+def test_breakdown_shape_disagreements_only_empty_output_names_the_mode(
+    capsys, monkeypatch,
+):
+    monkeypatch.setattr(
+        shadow_report,
+        "load_report",
+        lambda *args, **kwargs: {"breakdown_shape_agreement": {
+            "disagreements": [],
+        }},
+    )
+
+    assert shadow_report.main([
+        "--disagreements-only", "--mode", "breakdown-shape",
+    ]) == 0
+    assert capsys.readouterr().out.strip() == (
+        "No breakdown-shape disagreements."
+    )
 
 
 def test_breakdown_needs_decision_matches_normalized_text_and_presence():

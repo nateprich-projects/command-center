@@ -76,6 +76,21 @@ def test_a_clean_approval_parses():
     assert found == {"verdict": "approved", "blocking": [], "unsure": []}
 
 
+def test_exact_approve_synonym_is_canonicalised_before_validation():
+    found = review_apply.parse_answer(
+        answer(verdict="approve", approved=True, decision="approve"))
+    assert found["verdict"] == "approved"
+    assert found["blocking"] == []
+    assert found["unsure"] == []
+    assert found["normalised_from"] == "approve"
+
+
+def test_exact_reject_synonym_is_canonicalised_before_validation():
+    found = review_apply.parse_answer(answer(verdict="reject"))
+    assert found["verdict"] == "rejected"
+    assert found["normalised_from"] == "reject"
+
+
 def test_a_rejection_with_blocking_parses():
     found = review_apply.parse_answer(
         answer(verdict="rejected", blocking=["the diff ignores the plan"]))
@@ -105,9 +120,19 @@ def test_invalid_json_carries_the_parse_error():
 
 
 def test_a_wrong_verdict_names_the_allowed_words():
-    with pytest.raises(AnswerError, match="approved.*rejected"):
+    with pytest.raises(AnswerError, match="approved.*rejected.*maybe"):
         review_apply.parse_answer(
             answer(verdict="maybe"))
+
+
+@pytest.mark.parametrize("verdict", ["Approve", " approve", "approve "])
+def test_near_miss_verdicts_keep_the_full_validation_message(verdict):
+    with pytest.raises(AnswerError) as raised:
+        review_apply.parse_answer(answer(verdict=verdict))
+    message = str(raised.value)
+    assert "field 'verdict'" in message
+    assert "approved" in message and "rejected" in message
+    assert repr(verdict) in message
 
 
 def test_an_approved_verdict_must_not_carry_blocking():
@@ -122,6 +147,24 @@ def test_a_clean_approval_decides_approved_without_a_note():
     verdict, blocking, note = review_apply.decide(
         {"verdict": "approved", "blocking": [], "unsure": []})
     assert (verdict, blocking, note) == ("approved", [], None)
+
+
+def test_a_normalised_approval_decides_with_an_auditable_note():
+    verdict, blocking, note = review_apply.decide(
+        {"verdict": "approved", "blocking": [], "unsure": [],
+         "normalised_from": "approve"})
+    assert verdict == "approved"
+    assert blocking == []
+    assert note == "normalised verdict 'approve' to 'approved'"
+
+
+def test_a_normalised_rejection_decides_with_an_auditable_note():
+    verdict, blocking, note = review_apply.decide(
+        {"verdict": "rejected", "blocking": [], "unsure": [],
+         "normalised_from": "reject"})
+    assert verdict == "rejected"
+    assert blocking == []
+    assert note == "normalised verdict 'reject' to 'rejected'"
 
 
 def test_a_rejection_keeps_its_blocking_list():
@@ -217,6 +260,32 @@ def test_approved_records_then_merges_and_closes(monkeypatch, capsys):
     # Confirmed: the gate merges and cmd_merge closes the ticket.
     assert wiring.merges == [{"items": ["items"], "repo": REPO, "pr": 7,
                               "confirmed": True}]
+
+
+def test_exact_approve_synonym_records_canonical_approval_and_note(
+        monkeypatch, capsys):
+    wiring = Wiring(monkeypatch)
+    code = run_cli(monkeypatch, capsys,
+                   ["7", "--repo", REPO, "--answer", "-"],
+                   stdin=answer(verdict="approve"))
+    assert code == 0
+    assert wiring.reviews[0]["verdict"] == "approved"
+    assert wiring.reviews[0]["note"] == (
+        "normalised verdict 'approve' to 'approved'")
+    assert wiring.merges[0]["confirmed"] is True
+
+
+def test_exact_reject_synonym_records_canonical_rejection_and_note(
+        monkeypatch, capsys):
+    wiring = Wiring(monkeypatch)
+    code = run_cli(monkeypatch, capsys,
+                   ["7", "--repo", REPO, "--answer", "-"],
+                   stdin=answer(verdict="reject"))
+    assert code == 0
+    assert wiring.reviews[0]["verdict"] == "rejected"
+    assert wiring.reviews[0]["note"] == (
+        "normalised verdict 'reject' to 'rejected'")
+    assert wiring.merges == []
 
 
 def test_approved_carries_the_packet_ci_state(monkeypatch, capsys):

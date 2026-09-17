@@ -444,6 +444,17 @@ main {
     gap: 10px;
     min-width: 0;
   }
+  .phone-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 22px;
+    min-width: 0;
+  }
+  .phone-meta-field {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
   .phone-label {
     color: var(--ink-faint);
     font-size: 11px;

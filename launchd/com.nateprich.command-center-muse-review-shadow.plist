@@ -8,6 +8,9 @@
   the shadow period required before the #794 cutover. The engine records its
   answer on the PR and in the finish note; the live review path remains
   unchanged.
+  It runs at `high` effort, the same as the live standard reviewer it is
+  measured against, so the agreement rate compares the engine rather than the
+  effort level. The engine's own default is `max` (#976).
 
   The canonical copy lives here in the repo. launchd refuses a symlinked plist
   (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the
@@ -38,6 +41,7 @@
         <string>/Users/nateprich/.claude/command-center-run/scripts/muse-review-engine</string>
         <string>--shadow</string>
         <string>standard</string>
+        <string>high</string>
     </array>
 
     <!--

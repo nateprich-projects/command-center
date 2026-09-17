@@ -1,4 +1,4 @@
-"""The accept gate's completion output, refusal guard, and drift report."""
+"""The project gates' output, refusal guards, and durable records."""
 
 from __future__ import annotations
 
@@ -42,6 +42,44 @@ def project(*, children_total=1, children_done=1, klass="New"):
         children_total=children_total,
         children_done=children_done,
     )
+
+
+def shaped_project(body, *, klass=None):
+    return Item(
+        repo=REPO,
+        number=2,
+        title="Shaped project",
+        url="https://example.invalid/2",
+        state="OPEN",
+        body=body,
+        status="Shaped",
+        klass=klass,
+        item_id="shaped-project-id",
+    )
+
+
+def stub_approve_writes(monkeypatch, item):
+    calls = []
+
+    def option_id(field, name):
+        calls.append(("option", field, name))
+        return "option-{}".format(name)
+
+    def graphql(query, **variables):
+        calls.append(("graphql", query, dict(variables)))
+        if variables.get("field") == funnel.STATUS_FIELD_ID:
+            item.status = variables["option"].removeprefix("option-")
+        return {}
+
+    def run(args, capture_output, text=True):
+        calls.append(("run", list(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "_option_id", option_id)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel, "_heartbeat_context", lambda run, agent: (run, agent))
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    return calls
 
 
 def test_parking_candidates_are_oldest_open_projects_before_building():
@@ -108,6 +146,83 @@ def test_accept_still_refuses_while_children_are_open(monkeypatch):
 
     with pytest.raises(funnel.GitHubError, match="still has open tickets"):
         funnel.cmd_answer(items, NOW, "accept", target.ref, True)
+
+
+def test_approve_adopts_one_exact_class_before_status_and_records_source(
+    monkeypatch, capsys
+):
+    item = shaped_project("# Plan\n\nProposed class: Improve\n\nDo the work.\n")
+    calls = stub_approve_writes(monkeypatch, item)
+
+    assert funnel.cmd_answer([item], NOW, "approve", item.ref, True) == 0
+
+    writes = [
+        call[2] for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+    ]
+    assert [variables["field"] for variables in writes] == [
+        funnel.CLASS_FIELD_ID, funnel.STATUS_FIELD_ID,
+    ]
+    assert item.klass == "Improve"
+    assert item.status == "Ready"
+
+    comment = next(
+        call[1] for call in calls
+        if call[0] == "run" and call[1][1:3] == ["issue", "comment"]
+    )
+    body = comment[comment.index("--body") + 1]
+    assert "**Class adopted:** Improve" in body
+    assert "Source line: `Proposed class: Improve`" in body
+    assert funnel.CLASS_ADOPTION_OVERRIDE_NOTE in body
+
+    output = capsys.readouterr().out
+    assert "adopted Class Improve" in output
+    assert "Proposed class: Improve" in output
+    assert funnel.CLASS_ADOPTION_OVERRIDE_NOTE in output
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "# Plan\n\nNo proposal.\n",
+        "# Plan\n\nProposed class:\n",
+        "# Plan\n\nProposed class: choose a class.\n",
+        "# Plan\n\nProposed class: Improve or New\n",
+        "# Plan\n\nThe proposed class is Improve.\n",
+    ],
+)
+def test_approve_does_not_infer_class_from_missing_fuzzy_or_ambiguous_text(
+    monkeypatch, body
+):
+    item = shaped_project(body)
+    calls = stub_approve_writes(monkeypatch, item)
+
+    assert funnel.cmd_answer([item], NOW, "approve", item.ref, True) == 0
+
+    writes = [
+        call[2] for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+    ]
+    assert [variables["field"] for variables in writes] == [funnel.STATUS_FIELD_ID]
+    assert item.klass is None
+    assert not any(
+        call[0] == "run" and call[1][1:3] == ["issue", "comment"]
+        for call in calls
+    )
+
+
+def test_class_adoption_dry_run_does_not_advance_the_shaped_gate(monkeypatch, capsys):
+    item = shaped_project("Proposed class: Improve\n")
+    calls = stub_approve_writes(monkeypatch, item)
+
+    assert funnel.cmd_answer([item], NOW, "approve", item.ref, False) == 1
+
+    assert item.klass is None
+    assert item.status == "Shaped"
+    assert not any(kind == "graphql" for kind, *_ in calls)
+    output = capsys.readouterr().out
+    assert "would adopt Class Improve" in output
+    assert "Nothing was changed" in output
 
 
 def test_accept_dry_run_reports_each_drift_signal(monkeypatch, capsys):

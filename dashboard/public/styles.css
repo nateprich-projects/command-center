@@ -321,21 +321,25 @@ main {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
   }
+  /* Title on its own line, then the chips at their natural width side by
+     side, then the repository and wait. A one-column grid stretched every
+     chip to the full row and stacked them (#989). */
   .waiting-row {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    align-items: start;
-    gap: 4px;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 6px;
   }
-  .waiting-title { min-width: 0; }
+  .waiting-title { flex: 1 0 100%; min-width: 0; }
   .waiting-meta {
     margin-left: 0;
     white-space: normal;
   }
   .waiting-row .chip {
+    flex: 0 1 auto;
     max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .table { display: none; }

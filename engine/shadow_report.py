@@ -11,10 +11,10 @@ The optional ``breakdown-shape`` mode reads the corresponding issue jobs from
 the same streams and reports the three-part outcome agreement defined by the
 breakdown/shape cutover plan.  Breakdown jobs compare ticket count and
 ``needs_decision``; live breakdown and shape outcomes prefer the structured
-fields recorded on the finish, with the older Project Status and note reads
-remaining as fallbacks.  A fallback live shape status is accepted only when
-the status transition falls inside the live shape job, so an old read cannot
-become false agreement.
+fields recorded on the finish, with stable issue events as the fallback.
+Breakdown reads sub-issue creation and Needs-a-decision comments inside the
+live job window.  Shape reads the ``Self-approved:`` comment inside that
+window, so a later Project-status move cannot erase the observed outcome.
 
 Only completed review jobs inside the requested window count.  A missing or
 ambiguous verdict is not silently treated as a rejection: it is excluded from
@@ -106,6 +106,7 @@ ISSUE_SHAPE_NOTE_RE = re.compile(
 )
 ISSUE_KINDS = {"breakdown", "shape"}
 REPORT_MODES = {"review", "breakdown-shape"}
+LIVE_ISSUE_EVENT_PAGE_SIZE = 100
 SHAPE_STATUS_RE = re.compile(r"\b(?P<status>shaped|ready)\b", re.IGNORECASE)
 SHADOW_SHAPE_STATUS_RE = re.compile(
     r"\bshadow\s+shape\b[^:\n]*:\s*(?P<status>shaped|ready)\b",
@@ -812,6 +813,290 @@ def _issue_key_parts(key: object) -> Optional[Tuple[str, int]]:
     return match.group("repo"), int(match.group("number"))
 
 
+def _event_timestamp(value: object) -> Optional[float]:
+    """Read a GitHub event's REST or GraphQL creation timestamp."""
+    if not isinstance(value, Mapping):
+        return None
+    for key in ("created_at", "createdAt"):
+        if key in value:
+            return _timestamp(value.get(key))
+    return None
+
+
+def _live_issue_event_endpoint(
+    repo: str, number: int, kind: str,
+) -> str:
+    """Build the uncached REST endpoint for one immutable issue history."""
+    suffix = "sub_issues" if kind == "sub_issues" else "comments"
+    return "repos/{}/issues/{}/{}?per_page={}".format(
+        repo, number, suffix, LIVE_ISSUE_EVENT_PAGE_SIZE
+    )
+
+
+def _read_live_subissues(repo: str, number: int) -> object:
+    """Read the parent's sub-issue events from GitHub's REST API."""
+    import funnel
+
+    return funnel._gh_api_json(
+        _live_issue_event_endpoint(repo, number, "sub_issues")
+    )
+
+
+def _read_live_comments(repo: str, number: int) -> object:
+    """Read issue comments whose creation times survive later state changes."""
+    import funnel
+
+    return funnel._gh_api_json(
+        _live_issue_event_endpoint(repo, number, "comments")
+    )
+
+
+def _valid_event_rows(value: object) -> Optional[List[Dict]]:
+    """Validate an event collection before deriving a historical outcome."""
+    if not isinstance(value, list):
+        return None
+    rows: List[Dict] = []
+    for row in value:
+        if not isinstance(row, Mapping) or _event_timestamp(row) is None:
+            return None
+        rows.append(dict(row))
+    return rows
+
+
+def _live_issue_targets(live_jobs: Sequence[Dict]) -> List[Tuple[str, str, int]]:
+    """Return unique canonical issue targets in stable order."""
+    found: Dict[str, Tuple[str, str, int]] = {}
+    for job in live_jobs:
+        if _issue_is_shadow(job.get("finish")):
+            continue
+        parts = _issue_key_parts(job.get("key"))
+        if parts is None:
+            continue
+        repo, number = parts
+        canonical = "{}#{}".format(repo.lower(), number)
+        found.setdefault(canonical, (canonical, repo, number))
+    return [found[key] for key in sorted(found)]
+
+
+def fetch_live_issue_events(
+    live_jobs: Sequence[Dict],
+    *,
+    read_subissues: Optional[Callable[[str, int], object]] = None,
+    read_comments: Optional[Callable[[str, int], object]] = None,
+    include_subissues: bool = True,
+    include_comments: bool = True,
+) -> Dict[str, Dict[str, List[Dict]]]:
+    """Fetch stable issue events for the live jobs in one report.
+
+    The live routine's finish note is not durable outcome state.  Sub-issue
+    creation and issue-comment creation are: both remain on GitHub after the
+    parent moves to another Project status.  A failed or malformed read is
+    omitted so the caller's supplied map remains fail-closed for that target.
+    Each target is fetched once even when it has both a breakdown and a shape
+    job in the paired population.
+    """
+    read_subissues = read_subissues or _read_live_subissues
+    read_comments = read_comments or _read_live_comments
+    found: Dict[str, Dict[str, List[Dict]]] = {}
+    for canonical, repo, number in _live_issue_targets(live_jobs):
+        try:
+            subissues = (
+                _valid_event_rows(read_subissues(repo, number))
+                if include_subissues else []
+            )
+            comments = (
+                _valid_event_rows(read_comments(repo, number))
+                if include_comments else []
+            )
+        except Exception:
+            continue
+        if subissues is None or comments is None:
+            continue
+        found[canonical] = {
+            "sub_issues": subissues,
+            "comments": comments,
+        }
+    return found
+
+
+def _live_issue_events_for_job(
+    events: Mapping[object, object], job: Dict,
+) -> object:
+    """Find one target's event collection without guessing across issues."""
+    key = job.get("key")
+    if not isinstance(key, str):
+        return _MISSING
+    candidates = [key, key.lower()]
+    for candidate in candidates:
+        if candidate is None or candidate not in events:
+            continue
+        value = events[candidate]
+        return value if isinstance(value, Mapping) else _COMPARISON_UNREADABLE
+    return _MISSING
+
+
+def _in_live_job_window(job: Dict, at: object) -> bool:
+    """Whether an immutable event timestamp belongs to this live job."""
+    timestamp = _timestamp(at)
+    started_at = _timestamp(job.get("started_at"))
+    finished_at = _timestamp(job.get("finished_at"))
+    return (
+        timestamp is not None
+        and started_at is not None
+        and finished_at is not None
+        and started_at <= timestamp <= finished_at
+    )
+
+
+def _needs_decision_event(
+    comments: Sequence[Dict], job: Dict,
+) -> object:
+    """Read the newest Needs-a-decision comment created by this job."""
+    in_window: List[Tuple[float, str]] = []
+    for comment in comments:
+        at = _event_timestamp(comment)
+        if at is None:
+            return _COMPARISON_UNREADABLE
+        if not _in_live_job_window(job, at):
+            continue
+        body = comment.get("body")
+        if not isinstance(body, str):
+            return _COMPARISON_UNREADABLE
+        in_window.append((at, body))
+    in_window.sort(key=lambda entry: entry[0])
+    import funnel
+
+    return funnel.parse_needs_decision_comment(
+        [body for _, body in in_window]
+    )
+
+
+def _live_breakdown_from_events(job: Dict, events: object) -> object:
+    """Derive a live breakdown from sub-issue and comment creation events."""
+    if not isinstance(events, Mapping):
+        return _COMPARISON_UNREADABLE
+    subissues = _valid_event_rows(events.get("sub_issues"))
+    comments = _valid_event_rows(events.get("comments"))
+    if subissues is None or comments is None:
+        return _COMPARISON_UNREADABLE
+    if (
+        _timestamp(job.get("started_at")) is None
+        or _timestamp(job.get("finished_at")) is None
+    ):
+        return _COMPARISON_UNREADABLE
+    created = [
+        row for row in subissues
+        if _in_live_job_window(job, _event_timestamp(row))
+    ]
+    question = _needs_decision_event(comments, job)
+    if question is _COMPARISON_UNREADABLE:
+        return question
+    return {"created": created, "needs_decision": question}
+
+
+def _live_shape_from_events(job: Dict, events: object) -> object:
+    """Derive Ready/Shaped from a self-approval comment in the job window."""
+    if not isinstance(events, Mapping):
+        return _COMPARISON_UNREADABLE
+    comments = _valid_event_rows(events.get("comments"))
+    if comments is None:
+        return _COMPARISON_UNREADABLE
+    if (
+        _timestamp(job.get("started_at")) is None
+        or _timestamp(job.get("finished_at")) is None
+    ):
+        return _COMPARISON_UNREADABLE
+    import funnel
+
+    ready_at: Optional[float] = None
+    for comment in comments:
+        at = _event_timestamp(comment)
+        if not _in_live_job_window(job, at):
+            continue
+        body = comment.get("body")
+        if not isinstance(body, str):
+            return _COMPARISON_UNREADABLE
+        if funnel.parse_self_approval(body) is not None:
+            ready_at = max(ready_at or at, at)
+    return {
+        "status": "Ready" if ready_at is not None else "Shaped",
+        # A self-approval comment is the Ready event.  For a Shaped result,
+        # the successful completion of this live shape job is the event that
+        # establishes the fallback status; neither value is a late Project
+        # read.
+        "event_at": ready_at if ready_at is not None else job["finished_at"],
+    }
+
+
+def live_issue_data_from_events(
+    live_jobs: Sequence[Dict], events: Mapping[object, object],
+) -> Dict[str, Dict[str, object]]:
+    """Build the breakdown fallback map consumed by the pure report builder."""
+    found: Dict[str, Dict[str, object]] = {}
+    for job in live_jobs:
+        if (
+            job.get("kind") != "breakdown"
+            or not job.get("run")
+            or _issue_is_shadow(job.get("finish"))
+        ):
+            continue
+        event_data = _live_issue_events_for_job(events, job)
+        if event_data is _MISSING:
+            continue
+        observation = _live_breakdown_from_events(job, event_data)
+        if isinstance(observation, Mapping):
+            found[str(job["run"])] = dict(observation)
+    return found
+
+
+def live_shape_statuses_from_events(
+    live_jobs: Sequence[Dict], events: Mapping[object, object],
+) -> Dict[str, Dict[str, object]]:
+    """Build the shape fallback map consumed by the pure report builder."""
+    found: Dict[str, Dict[str, object]] = {}
+    for job in live_jobs:
+        if (
+            job.get("kind") != "shape"
+            or not job.get("run")
+            or _issue_is_shadow(job.get("finish"))
+        ):
+            continue
+        event_data = _live_issue_events_for_job(events, job)
+        if event_data is _MISSING:
+            continue
+        observation = _live_shape_from_events(job, event_data)
+        if isinstance(observation, Mapping):
+            found[str(job["run"])] = dict(observation)
+    return found
+
+
+def fetch_live_issue_data(
+    live_jobs: Sequence[Dict],
+    *,
+    issue_events: Optional[Mapping[object, object]] = None,
+    read_subissues: Optional[Callable[[str, int], object]] = None,
+    read_comments: Optional[Callable[[str, int], object]] = None,
+) -> Dict[str, Dict[str, object]]:
+    """Fetch and derive live breakdown outcomes from stable GitHub events."""
+    breakdown_jobs = [
+        job for job in live_jobs
+        if job.get("kind") == "breakdown"
+        and not _issue_is_shadow(job.get("finish"))
+    ]
+    if not breakdown_jobs:
+        return {}
+    events = (
+        issue_events
+        if issue_events is not None
+        else fetch_live_issue_events(
+            breakdown_jobs,
+            read_subissues=read_subissues,
+            read_comments=read_comments,
+        )
+    )
+    return live_issue_data_from_events(breakdown_jobs, events)
+
+
 def _shape_status_observation(value: object) -> Dict[str, object]:
     """Make callback and Project-item status reads share one shape."""
     if isinstance(value, (tuple, list)) and len(value) >= 2:
@@ -824,7 +1109,10 @@ def _shape_status_observation(value: object) -> Dict[str, object]:
         if status_value is None:
             status_value = value.get("name")
         status_at = None
-        for key in ("status_since", "status_at", "changed_at", "updated_at", "ts"):
+        for key in (
+            "status_since", "status_at", "changed_at", "updated_at",
+            "event_at", "observed_at", "ts",
+        ):
             if key in value:
                 status_at = value.get(key)
                 break
@@ -877,7 +1165,7 @@ def _apply_live_shape_statuses(
     live: Sequence[Dict],
     live_shape_statuses: Optional[Mapping[object, object]],
 ) -> None:
-    """Overlay only current, transition-matched live Project statuses."""
+    """Overlay only event-matched live shape outcomes."""
     if not live_shape_statuses:
         return
     for job in live:
@@ -891,63 +1179,53 @@ def _apply_live_shape_statuses(
             job["shape_status"] = status
 
 
-def _read_current_issue_statuses() -> Dict[str, Dict[str, object]]:
-    """Read current Project statuses once for the matched live shape jobs."""
-    import funnel
-
-    try:
-        items = funnel.load_items()
-    except Exception:
-        # Reporting is diagnostic. A status read failure must remove shape
-        # observations from the denominator, not stop review telemetry.
-        return {}
-    found: Dict[str, Dict[str, object]] = {}
-    for item in items:
-        key = getattr(item, "ref", None)
-        if not isinstance(key, str):
-            continue
-        found[key.lower()] = {
-            "status": getattr(item, "status", None),
-            "status_since": getattr(item, "status_since", None),
-        }
-    return found
-
-
 def fetch_live_shape_statuses(
     live_jobs: Sequence[Dict],
     *,
     current_status: Optional[Callable[[str, int], object]] = None,
+    issue_events: Optional[Mapping[object, object]] = None,
+    read_subissues: Optional[Callable[[str, int], object]] = None,
+    read_comments: Optional[Callable[[str, int], object]] = None,
 ) -> Dict[str, Dict[str, object]]:
-    """Fetch live shape statuses and keep only transition-fresh observations.
+    """Fetch live shape outcomes from immutable issue events.
 
-    The default reader makes one Project read for all jobs. Tests and other
-    callers can inject a per-issue reader returning ``status`` plus
-    ``status_since``. A status without a transition timestamp is deliberately
-    unusable: a report must never turn an old Project read into agreement.
+    The default reader checks for a ``Self-approved:`` comment created during
+    each live shape job, which survives a later move to Done. ``current_status``
+    remains as a compatibility seam for callers that explicitly provide the
+    old Project-status observation; it is never used by the report loader.
     """
-    shape_jobs = [job for job in live_jobs if job.get("kind") == "shape"]
+    shape_jobs = [
+        job for job in live_jobs
+        if job.get("kind") == "shape"
+        and not _issue_is_shadow(job.get("finish"))
+    ]
     if not shape_jobs:
         return {}
-    by_key = _read_current_issue_statuses() if current_status is None else None
-    found: Dict[str, Dict[str, object]] = {}
-    for job in shape_jobs:
-        candidate: object = _MISSING
-        if current_status is not None:
+    if current_status is not None:
+        found: Dict[str, Dict[str, object]] = {}
+        for job in shape_jobs:
             parts = _issue_key_parts(job.get("key"))
-            if parts is not None:
-                try:
-                    candidate = current_status(parts[0], parts[1])
-                except Exception:
-                    candidate = _MISSING
-        else:
-            key = job.get("key")
-            if isinstance(key, str):
-                candidate = by_key.get(key.lower(), _MISSING)
-        if candidate is _MISSING:
-            continue
-        if _fresh_shape_status(job, candidate):
-            found[str(job.get("run"))] = _shape_status_observation(candidate)
-    return found
+            if parts is None:
+                continue
+            try:
+                candidate = current_status(parts[0], parts[1])
+            except Exception:
+                continue
+            if _fresh_shape_status(job, candidate):
+                found[str(job.get("run"))] = _shape_status_observation(candidate)
+        return found
+
+    events = (
+        issue_events
+        if issue_events is not None
+        else fetch_live_issue_events(
+            shape_jobs,
+            read_subissues=read_subissues,
+            read_comments=read_comments,
+            include_subissues=False,
+        )
+    )
+    return live_shape_statuses_from_events(shape_jobs, events)
 
 
 def _comparison_pairs(
@@ -1461,8 +1739,8 @@ def build_breakdown_shape_report(
     ``live_shape_statuses`` are optional caller-supplied reads for older live
     records.  Complete structured outcomes on a finish take precedence; a
     supplied map remains authoritative when those fields are absent.  Shape
-    statuses from the fallback map are accepted only when their transition
-    falls between the live shape job's start and finish.
+    event observations are accepted only when their event falls between the
+    live shape job's start and finish.
     """
     start, end = window_bounds(
         now=now, window_seconds=window_seconds, since=since, until=until
@@ -1492,7 +1770,7 @@ def build_breakdown_shape_report(
             )
         elif job.get("kind") == "shape":
             # A finish field is the outcome at the time of the mutation.  The
-            # current Project read is only for older heartbeat records.
+            # issue-event read is only for older heartbeat records.
             live_observations[id(job)] = (
                 _live_shape_status(job.get("finish") or {})
                 or job.get("shape_status")
@@ -1600,7 +1878,7 @@ def build_report(
     ``live_issue_data`` and ``live_shape_statuses`` are the corresponding
     caller-supplied maps for older breakdown issue sets and live shape jobs.
     Complete finish fields take precedence; fallback shape observations must
-    include a transition timestamp so stale reads are rejected.
+    include an event timestamp so stale reads are rejected.
     """
     if mode == "breakdown-shape":
         return build_breakdown_shape_report(
@@ -1797,18 +2075,39 @@ def load_report(
         live_jobs = jobs_from_records(live_rows, since=start, until=end)
         matched_live = [right for _, right in _pair_jobs(shadow_jobs, live_jobs)]
         live_verdicts = fetch_live_verdicts(matched_live)
-    if mode == "breakdown-shape" and live_shape_statuses is None:
+    if mode == "breakdown-shape" and (
+        live_issue_data is None or live_shape_statuses is None
+    ):
         start, end = window_bounds(
             now=now, window_seconds=window_seconds, since=since, until=until
         )
         shadow_jobs = issue_jobs_from_records(shadow_rows, since=start, until=end)
         live_jobs = issue_jobs_from_records(live_rows, since=start, until=end)
         matched_live = [
-            right
-            for _, right in _pair_issue_jobs(shadow_jobs, live_jobs)
-            if right.get("kind") == "shape"
+            right for _, right in _pair_issue_jobs(shadow_jobs, live_jobs)
         ]
-        live_shape_statuses = fetch_live_shape_statuses(matched_live)
+        event_jobs = [
+            job for job in matched_live
+            if (
+                live_issue_data is None and job.get("kind") == "breakdown"
+            ) or (
+                live_shape_statuses is None and job.get("kind") == "shape"
+            )
+        ]
+        issue_events = fetch_live_issue_events(
+            event_jobs,
+            include_subissues=any(
+                job.get("kind") == "breakdown" for job in event_jobs
+            ),
+        )
+        if live_issue_data is None:
+            live_issue_data = live_issue_data_from_events(
+                matched_live, issue_events
+            )
+        if live_shape_statuses is None:
+            live_shape_statuses = live_shape_statuses_from_events(
+                matched_live, issue_events
+            )
     return build_report(
         shadow_rows,
         live_rows,

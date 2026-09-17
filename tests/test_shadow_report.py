@@ -731,3 +731,122 @@ def test_issue_mode_falls_back_to_narrow_finish_markers_without_bindings():
         ("breakdown", "owner/repo#7"),
         ("shape", "owner/repo#8"),
     ]
+
+
+def test_live_shape_event_stays_ready_after_project_moves_to_done():
+    records = list(_shape_comparison_records())
+    for row in records:
+        if row.get("run") == "live-shape" and row.get("phase") == "finish":
+            row["note"] = "shaped owner/repo#103: now Done"
+
+    live_jobs = shadow_report.issue_jobs_from_records(records)
+    events = {
+        "owner/repo#103": {
+            "comments": [{
+                "created_at": 845,
+                "body": "Self-approved: all signals are clear",
+            }],
+        },
+    }
+    live_shape_statuses = shadow_report.live_shape_statuses_from_events(
+        live_jobs, events
+    )
+
+    assert live_shape_statuses == {
+        "live-shape": {"status": "Ready", "event_at": 845},
+    }
+    report = shadow_report.build_report(
+        records,
+        now=1000,
+        window_seconds=200,
+        mode="breakdown-shape",
+        live_shape_statuses=live_shape_statuses,
+    )
+
+    assert report["breakdown_shape_agreement"]["jobs"]["compared"] == 1
+    assert report["breakdown_shape_agreement"]["agree"] == 1
+
+
+def test_live_breakdown_event_counts_subissues_when_finish_note_is_unparseable():
+    records = list(_shape_comparison_records())
+    for row in records:
+        if row.get("run") == "live-breakdown" and row.get("phase") == "finish":
+            row["note"] = "broke down owner/repo#103: apply completed"
+
+    live_jobs = shadow_report.issue_jobs_from_records(records)
+    events = {
+        "owner/repo#103": {
+            "sub_issues": [
+                {"created_at": 815},
+                {"created_at": 816},
+                {"created_at": 700},
+            ],
+            "comments": [{
+                "created_at": 825,
+                "body": "**Needs a decision:** Where?",
+            }],
+        },
+    }
+    live_issue_data = shadow_report.live_issue_data_from_events(
+        live_jobs, events
+    )
+
+    assert live_issue_data == {
+        "live-breakdown": {
+            "created": [{"created_at": 815}, {"created_at": 816}],
+            "needs_decision": "Where?",
+        },
+    }
+    report = shadow_report.build_report(
+        records,
+        now=1000,
+        window_seconds=200,
+        mode="breakdown-shape",
+        live_issue_data=live_issue_data,
+        live_shape_statuses={
+            "live-shape": {"status": "Ready", "status_since": 845},
+        },
+    )
+
+    assert report["breakdown_shape_agreement"]["jobs"]["compared"] == 1
+    assert report["breakdown_shape_agreement"]["agree"] == 1
+
+
+def test_load_report_reads_legacy_live_outcomes_from_issue_events(monkeypatch):
+    records = list(_shape_comparison_records())
+    for row in records:
+        if row.get("run") == "live-breakdown" and row.get("phase") == "finish":
+            row["note"] = "broke down owner/repo#103: apply completed"
+        elif row.get("run") == "live-shape" and row.get("phase") == "finish":
+            row["note"] = "shaped owner/repo#103: now Done"
+
+    calls = []
+
+    def read_subissues(repo, number):
+        calls.append(("sub_issues", repo, number))
+        return [{"created_at": 815}, {"created_at": 816}]
+
+    def read_comments(repo, number):
+        calls.append(("comments", repo, number))
+        return [
+            {"created_at": 825, "body": "**Needs a decision:** Where?"},
+            {"created_at": 845, "body": "Self-approved: all signals are clear"},
+        ]
+
+    monkeypatch.setattr(shadow_report.heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(shadow_report, "_read_live_subissues", read_subissues)
+    monkeypatch.setattr(shadow_report, "_read_live_comments", read_comments)
+
+    report = shadow_report.load_report(
+        mode="breakdown-shape", now=1000, window_seconds=200
+    )
+
+    agreement = report["breakdown_shape_agreement"]
+    assert agreement["jobs"] == {
+        "shadow": 2, "live": 2, "matched": 2, "compared": 1,
+    }
+    assert agreement["agree"] == 1
+    assert calls == [
+        ("sub_issues", "owner/repo", 103),
+        ("comments", "owner/repo", 103),
+    ]

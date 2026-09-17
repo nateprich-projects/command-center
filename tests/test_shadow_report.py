@@ -16,6 +16,17 @@ def _records():
     return json.loads(FIXTURE.read_text())["records"]
 
 
+def _review_job(run, finished, verdict, head, note, *, pr=42):
+    return [
+        {"run": run, "phase": "start", "ts": finished - 10},
+        {"run": run, "phase": "bind", "ts": finished - 9,
+         "do": "review", "work": str(pr), "repo": "owner/repo"},
+        {"run": run, "phase": "finish", "ts": finished,
+         "head_sha": head, "review_result": verdict, "note": note,
+         "outcome": "done"},
+    ]
+
+
 def test_same_muse_stream_splits_shadow_and_live_and_pairs_prs():
     report = shadow_report.build_report(_records(), now=1000, window_seconds=200)
 
@@ -235,6 +246,169 @@ def test_late_current_approval_does_not_overwrite_head_a_rejections():
     }
     assert report["agreement"]["agree"] == 6
     assert report["agreement"]["rejected"]["live"] >= 5
+
+
+def test_disagreements_list_both_sides_and_marks_missing_reasons():
+    shadow = (
+        _review_job(
+            "shadow-agree", 810, "approved", "shadow-agree-head",
+            "shadow review of PR #1 in owner/repo at shadow-agree-head: approved",
+            pr=1,
+        )
+        + _review_job(
+            "shadow-reject", 820, "rejected", "shadow-reject-head",
+            "shadow review of PR #2 in owner/repo at shadow-reject-head: "
+            "rejected; reason: shadow found a blocking mismatch",
+            pr=2,
+        )
+        + _review_job(
+            "shadow-approve", 830, "approved", "shadow-approve-head",
+            "shadow review of PR #3 in owner/repo at shadow-approve-head: "
+            "approved; answer: {\"verdict\": \"approved\", "
+            "\"blocking\": [], \"unsure\": []}",
+            pr=3,
+        )
+    )
+    live = (
+        _review_job(
+            "live-agree", 815, "approved", "live-agree-head",
+            "reviewed PR #1: approved", pr=1,
+        )
+        + _review_job(
+            "live-approve", 825, "approved", "live-approve-head",
+            "reviewed PR #2: approved", pr=2,
+        )
+        + _review_job(
+            "live-reject", 835, "rejected", "live-reject-head",
+            "reviewed PR #3: rejected", pr=3,
+        )
+    )
+    live_verdicts = {
+        "live-agree": {
+            "verdict": "approved", "head_sha": "live-agree-head",
+        },
+        "live-approve": {
+            "verdict": "approved", "head_sha": "live-approve-head",
+            "note": "live approved because the diff matches the plan",
+        },
+        "live-reject": {
+            "verdict": "rejected", "head_sha": "live-reject-head",
+            "blocking": [],
+        },
+    }
+
+    report = shadow_report.build_report(
+        shadow, live, now=900, window_seconds=200,
+        live_verdicts=live_verdicts,
+    )
+
+    assert report["agreement"]["agree"] == 1
+    assert report["agreement"]["disagree"] == 2
+    assert report["disagreements"] == [
+        {
+            "repo": "owner/repo",
+            "pr": 2,
+            "shadow": {
+                "run": "shadow-reject",
+                "head_sha": "shadow-reject-head",
+                "verdict": "rejected",
+                "reason": (
+                    "shadow review of PR #2 in owner/repo at "
+                    "shadow-reject-head: rejected; reason: "
+                    "shadow found a blocking mismatch"
+                ),
+            },
+            "live": {
+                "run": "live-approve",
+                "head_sha": "live-approve-head",
+                "verdict": "approved",
+                "reason": "live approved because the diff matches the plan",
+            },
+        },
+        {
+            "repo": "owner/repo",
+            "pr": 3,
+            "shadow": {
+                "run": "shadow-approve",
+                "head_sha": "shadow-approve-head",
+                "verdict": "approved",
+                "reason": shadow_report.MISSING_REASON,
+            },
+            "live": {
+                "run": "live-reject",
+                "head_sha": "live-reject-head",
+                "verdict": "rejected",
+                "reason": shadow_report.MISSING_REASON,
+            },
+        },
+    ]
+
+
+def test_shadow_comment_reason_fills_a_generic_finish_note():
+    shadow = _review_job(
+        "shadow-comment", 820, "rejected", "shadow-head",
+        "shadow review of PR #42 in owner/repo at shadow-head: rejected",
+    )
+    live = _review_job(
+        "live-comment", 830, "approved", "live-head",
+        "reviewed PR #42: approved",
+    )
+    shadow_jobs = shadow_report.jobs_from_records(shadow)
+    reasons = shadow_report.fetch_shadow_reasons(
+        shadow_jobs,
+        comments=lambda repo, pr: [{
+            "body": (
+                shadow_report.SHADOW_REVIEW_MARKER
+                + "\nShadow review run `shadow-comment`.\n\n"
+                + "```json\n"
+                + json.dumps({"verdict": "rejected",
+                              "blocking": ["shadow comment reason"]})
+                + "\n```"
+            ),
+        }],
+    )
+
+    report = shadow_report.build_report(
+        shadow, live, now=900, window_seconds=200,
+        live_verdicts={
+            "live-comment": {
+                "verdict": "approved", "head_sha": "live-head",
+            },
+        },
+        shadow_reasons=reasons,
+    )
+
+    disagreement = report["disagreements"][0]
+    assert disagreement["shadow"]["reason"] == "blocking: shadow comment reason"
+    assert disagreement["live"]["reason"] == shadow_report.MISSING_REASON
+
+
+def test_disagreements_only_output_is_pasteable(capsys, monkeypatch):
+    monkeypatch.setattr(
+        shadow_report,
+        "load_report",
+        lambda *args, **kwargs: {
+            "disagreements": [{
+                "repo": "owner/repo",
+                "pr": 7,
+                "shadow": {
+                    "run": "shadow", "head_sha": "abc",
+                    "verdict": "rejected", "reason": "shadow reason",
+                },
+                "live": {
+                    "run": "live", "head_sha": "def",
+                    "verdict": "approved", "reason": "live reason",
+                },
+            }],
+        },
+    )
+
+    assert shadow_report.main(["--disagreements-only"]) == 0
+    output = capsys.readouterr().out
+    assert "owner/repo#7" in output
+    assert "shadow: rejected" in output
+    assert "live: approved" in output
+    assert "shadow reason" in output
 
 
 def test_decided_pr_stops_are_excluded_from_agreement_denominator():

@@ -49,6 +49,8 @@ DEFAULT_AGENT = "muse"
 SHADOW_NOTE_RE = re.compile(
     r"(?:command-center-shadow-review|shadow\s+review)", re.IGNORECASE
 )
+SHADOW_REVIEW_MARKER = "<!-- command-center-shadow-review -->"
+MISSING_REASON = "[missing reason]"
 REVIEW_NOTE_RE = re.compile(
     r"(?:reviewed\s+PR|review\s+of\s+PR|shadow\s+review|pull\s+request\s+#)",
     re.IGNORECASE,
@@ -436,6 +438,132 @@ def _is_decided_pr_stop(job: Dict) -> bool:
     """Whether a review finish records the deterministic non-OPEN stop."""
     finish = job.get("finish")
     return isinstance(finish, dict) and bool(PR_NOT_OPEN_RE.search(_note(finish)))
+
+
+def _reason_text(value: object) -> Optional[str]:
+    """Turn a reason-shaped value into one concise human-readable string."""
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+    if isinstance(value, (list, tuple)):
+        parts = [
+            item.strip() for item in value
+            if isinstance(item, str) and item.strip()
+        ]
+        return "; ".join(parts) if parts else None
+    return None
+
+
+def _structured_reason(value: object) -> Optional[str]:
+    """Read the reason fields used by review answers and verdict comments."""
+    if not isinstance(value, Mapping):
+        return _reason_text(value)
+    for key in ("reason", "review_reason", "comment_reason", "note"):
+        reason = _reason_text(value.get(key))
+        if reason:
+            return reason
+    for key in ("blocking", "unsure", "reasons"):
+        reason = _reason_text(value.get(key))
+        if reason:
+            return "{}: {}".format(key, reason)
+    return None
+
+
+def _comment_reason(body: object) -> Optional[str]:
+    """Extract a stated reason from a structured review/shadow comment."""
+    if not isinstance(body, str) or not body.strip():
+        return None
+    for match in re.finditer(
+        r"```json[ \t]*\r?\n(.*?)\r?\n```", body, flags=re.DOTALL
+    ):
+        try:
+            payload = json.loads(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        reason = _structured_reason(payload)
+        if reason:
+            return reason
+    for line in body.splitlines():
+        text = line.strip()
+        if re.match(r"^(?:blocking|precheck|reason)\s*:", text, re.IGNORECASE):
+            return text
+    return None
+
+
+def _finish_reason(job: Dict) -> Optional[str]:
+    """Return a finish's reason, ignoring standard verdict-only boilerplate."""
+    finish = job.get("finish")
+    if not isinstance(finish, dict):
+        return None
+    for key in ("reason", "review_reason", "comment_reason"):
+        reason = _reason_text(finish.get(key))
+        if reason:
+            return reason
+    structured = _structured_reason(finish)
+    if structured and any(key in finish for key in (
+        "blocking", "unsure", "reasons"
+    )):
+        return structured
+
+    note = _note(finish).strip()
+    if not note:
+        return None
+    lowered = note.casefold()
+    if "answer:" in lowered:
+        answer = _note_answer(note)
+        if isinstance(answer, Mapping) and _structured_reason(answer) is None:
+            return None
+        if answer is not _MISSING and answer is not _COMPARISON_UNREADABLE:
+            return note
+        # An old or malformed answer is still the only finish evidence we
+        # have; retain it rather than silently replacing it with a guess.
+        return note
+    if any(marker in lowered for marker in ("blocking:", "precheck:", "reason:")):
+        return note
+    if "without a model call" in lowered or "no decision" in lowered:
+        return None
+    if lowered.startswith("merged pr ") or lowered.startswith("review skipped "):
+        return None
+    if re.search(r"\b(?:approved|rejected)\s*$", lowered):
+        return None
+    return note
+
+
+def _verdict_reason(value: object) -> Optional[str]:
+    """Read a reason from a caller-supplied verdict or raw comment body."""
+    if isinstance(value, Mapping):
+        for key in ("comment_body", "body", "comment"):
+            reason = _comment_reason(value.get(key))
+            if reason:
+                return reason
+        return _structured_reason(value)
+    return _reason_text(value)
+
+
+def _lookup_reason(
+    reasons: Optional[Mapping[object, object]], job: Dict,
+) -> object:
+    """Find a side-specific reason using the same identities as a verdict."""
+    if not reasons:
+        return _MISSING
+    repo = job.get("repo")
+    pr = job.get("pr")
+    candidates = [job.get("run"), job.get("key")]
+    if repo and pr is not None:
+        candidates.extend([(repo, pr), "{}#{}".format(repo, pr)])
+    if pr is not None:
+        candidates.extend(["pr#{}".format(pr), pr, str(pr)])
+    seen = set()
+    for candidate in candidates:
+        try:
+            marker = repr(candidate)
+            if marker in seen or candidate not in reasons:
+                continue
+            seen.add(marker)
+            return reasons[candidate]
+        except (TypeError, AttributeError):
+            continue
+    return _MISSING
 
 
 def _heads_match(actual: object, expected: object) -> bool:
@@ -1394,17 +1522,81 @@ def _apply_live_verdicts(
     if not live_verdicts:
         return
     for job in live:
-        if _is_decided_pr_stop(job):
-            continue
-        candidate = _lookup_live_verdict(live_verdicts, job)
+        candidate = _validated_live_verdict(job, live_verdicts)
         if candidate is _MISSING:
             continue
-        value = _verdict_value(candidate)
-        if value is None:
-            continue
-        if not _verdict_matches_live_job(job, candidate):
-            continue
-        job["decision"] = value
+        job["decision"] = _verdict_value(candidate)
+
+
+def _validated_live_verdict(
+    job: Dict, live_verdicts: Optional[Mapping[object, object]],
+) -> object:
+    """Return the same-review verdict that may safely describe a live job."""
+    if not live_verdicts or _is_decided_pr_stop(job):
+        return _MISSING
+    candidate = _lookup_live_verdict(live_verdicts, job)
+    if candidate is _MISSING:
+        return _MISSING
+    if _verdict_value(candidate) is None:
+        return _MISSING
+    if not _verdict_matches_live_job(job, candidate):
+        return _MISSING
+    return candidate
+
+
+def _review_side(
+    job: Dict,
+    *,
+    fallback_reason: object = _MISSING,
+    fallback_verdict: object = _MISSING,
+) -> Dict[str, object]:
+    """Render the evidence for one side of a review disagreement."""
+    reason = _finish_reason(job)
+    if reason is None and fallback_reason is not _MISSING:
+        reason = _verdict_reason(fallback_reason)
+    if reason is None:
+        reason = MISSING_REASON
+    verdict = job.get("decision")
+    if verdict is None and fallback_verdict is not _MISSING:
+        verdict = _verdict_value(fallback_verdict)
+    head_sha = job.get("head_sha")
+    if not head_sha and isinstance(fallback_verdict, Mapping):
+        candidate_head = fallback_verdict.get("head_sha")
+        if isinstance(candidate_head, str) and candidate_head.strip():
+            head_sha = candidate_head.strip()
+    if not head_sha and isinstance(fallback_reason, Mapping):
+        candidate_head = fallback_reason.get("head_sha")
+        if isinstance(candidate_head, str) and candidate_head.strip():
+            head_sha = candidate_head.strip()
+    return {
+        "run": job.get("run"),
+        "head_sha": head_sha,
+        "verdict": verdict,
+        "reason": reason,
+    }
+
+
+def _disagreement_entry(
+    shadow: Dict,
+    live: Dict,
+    *,
+    live_verdict: object = _MISSING,
+    shadow_reason: object = _MISSING,
+) -> Dict[str, object]:
+    """Build one stable, pasteable disagreement record."""
+    repo = shadow.get("repo") or live.get("repo")
+    pr = shadow.get("pr") or live.get("pr")
+    return {
+        "repo": repo,
+        "pr": pr,
+        "shadow": _review_side(
+            shadow, fallback_reason=shadow_reason,
+        ),
+        "live": _review_side(
+            live, fallback_reason=live_verdict,
+            fallback_verdict=live_verdict,
+        ),
+    }
 
 
 def _rate(count: int, total: int) -> Optional[float]:
@@ -1580,6 +1772,7 @@ def build_report(
     *,
     mode: str = "review",
     live_verdicts: Optional[Mapping[object, object]] = None,
+    shadow_reasons: Optional[Mapping[object, object]] = None,
     live_issue_data: Optional[Mapping[object, object]] = None,
     live_shape_statuses: Optional[Mapping[object, object]] = None,
     now: Optional[float] = None,
@@ -1597,6 +1790,9 @@ def build_report(
     recorded on the job, or its ``reviewed_at`` falls within the live job's
     start/finish interval; an absent or mismatched value leaves the heartbeat
     decision as the fallback. Decided-PR stops are never overlaid.
+    ``shadow_reasons`` supplies optional PR shadow-comment reasons keyed by
+    run, for older finishes whose note has no reason. Review disagreements are
+    included as side-by-side evidence without changing the agreement block.
     ``live_issue_data`` and ``live_shape_statuses`` are the corresponding
     caller-supplied maps for older breakdown issue sets and live shape jobs.
     Complete finish fields take precedence; fallback shape observations must
@@ -1645,6 +1841,16 @@ def build_report(
     live_rejected = sum(job.get("decision") == "rejected" for job in live)
     shadow_malformed = sum(bool(job.get("malformed")) for job in shadow)
     live_malformed = sum(bool(job.get("malformed")) for job in live)
+    disagreements = [
+        _disagreement_entry(
+            left,
+            right,
+            live_verdict=_validated_live_verdict(right, live_verdicts),
+            shadow_reason=_lookup_reason(shadow_reasons, left),
+        )
+        for left, right in comparable
+        if left.get("decision") != right.get("decision")
+    ]
 
     return {
         "window": {
@@ -1673,6 +1879,7 @@ def build_report(
                 "live": live_rejected,
             },
         },
+        "disagreements": disagreements,
         "malformed_output": {
             "shadow": {
                 "count": shadow_malformed,
@@ -1703,6 +1910,31 @@ def _parse_cli_timestamp(value: Optional[str]) -> Optional[float]:
     if parsed is None:
         raise ValueError("invalid timestamp {!r}".format(value))
     return parsed
+
+
+def format_disagreements(disagreements: Sequence[Mapping[str, object]]) -> str:
+    """Render disagreement evidence as short lines suitable for a check-in."""
+    lines: List[str] = []
+    for entry in disagreements:
+        repo = entry.get("repo") or "unknown-repo"
+        pr = entry.get("pr")
+        target = "{}#{}".format(repo, pr) if pr is not None else str(repo)
+        lines.append(target)
+        for side in ("shadow", "live"):
+            evidence = entry.get(side)
+            if not isinstance(evidence, Mapping):
+                continue
+            reason = re.sub(r"\s+", " ", str(evidence.get("reason") or "")).strip()
+            lines.append(
+                "  {}: {} (run {}, head {}) — {}".format(
+                    side,
+                    evidence.get("verdict") or "unknown",
+                    evidence.get("run") or "unknown",
+                    evidence.get("head_sha") or "unknown",
+                    reason or MISSING_REASON,
+                )
+            )
+    return "\n".join(lines) if lines else "No review disagreements."
 
 
 def _current_pr_head(repo: str, pr: int) -> Optional[str]:
@@ -1763,12 +1995,68 @@ def fetch_live_verdicts(
     return found
 
 
+def _read_pr_comments(repo: str, pr: int) -> Sequence[Dict]:
+    """Read a PR's comments for the shadow-reason fallback."""
+    import funnel
+
+    data = funnel._gh_json(
+        "gh", "pr", "view", str(pr), "--repo", repo, "--json", "comments"
+    )
+    if not isinstance(data, dict) or not isinstance(data.get("comments"), list):
+        return ()
+    return [row for row in data["comments"] if isinstance(row, dict)]
+
+
+def fetch_shadow_reasons(
+    shadow_jobs: Sequence[Dict],
+    *,
+    comments: Optional[Callable[[str, int], Sequence[Dict]]] = None,
+) -> Dict[str, str]:
+    """Find reasons in marker-bearing shadow comments for older finish notes.
+
+    Current shadow finishes carry their answer in the finish note, so this
+    reader is normally a no-op.  The comment fallback is deliberately keyed by
+    the shadow run id and fetched once per PR; a comment from another shadow
+    run or another head cannot become evidence for this job.
+    """
+    read_comments = comments or _read_pr_comments
+    found: Dict[str, str] = {}
+    cache: Dict[Tuple[str, int], Sequence[Dict]] = {}
+    for job in shadow_jobs:
+        run = job.get("run")
+        if not run or _finish_reason(job) is not None:
+            continue
+        repo = job.get("repo")
+        pr = _positive_pr_number(job.get("pr"))
+        if not isinstance(repo, str) or not repo.strip() or pr is None:
+            continue
+        cache_key = (repo.strip(), pr)
+        if cache_key not in cache:
+            try:
+                cache[cache_key] = read_comments(*cache_key)
+            except Exception:
+                cache[cache_key] = ()
+        for row in cache[cache_key]:
+            body = row if isinstance(row, str) else row.get("body")
+            if not isinstance(body, str) or SHADOW_REVIEW_MARKER not in body:
+                continue
+            match = re.search(r"\brun\s+`(?P<run>[^`]+)`", body)
+            if not match or match.group("run") != str(run):
+                continue
+            reason = _comment_reason(body)
+            if reason:
+                found[str(run)] = reason
+                break
+    return found
+
+
 def load_report(
     shadow_agent: str = DEFAULT_AGENT,
     live_agent: str = DEFAULT_AGENT,
     *,
     mode: str = "review",
     live_verdicts: Optional[Mapping[object, object]] = None,
+    shadow_reasons: Optional[Mapping[object, object]] = None,
     live_issue_data: Optional[Mapping[object, object]] = None,
     live_shape_statuses: Optional[Mapping[object, object]] = None,
     now: Optional[float] = None,
@@ -1797,6 +2085,12 @@ def load_report(
         live_jobs = jobs_from_records(live_rows, since=start, until=end)
         matched_live = [right for _, right in _pair_jobs(shadow_jobs, live_jobs)]
         live_verdicts = fetch_live_verdicts(matched_live)
+    if mode == "review" and shadow_reasons is None:
+        start, end = window_bounds(
+            now=now, window_seconds=window_seconds, since=since, until=until
+        )
+        shadow_jobs = jobs_from_records(shadow_rows, since=start, until=end)
+        shadow_reasons = fetch_shadow_reasons(shadow_jobs)
     if mode == "breakdown-shape" and live_shape_statuses is None:
         start, end = window_bounds(
             now=now, window_seconds=window_seconds, since=since, until=until
@@ -1814,6 +2108,7 @@ def load_report(
         live_rows,
         mode=mode,
         live_verdicts=live_verdicts,
+        shadow_reasons=shadow_reasons,
         live_issue_data=live_issue_data,
         live_shape_statuses=live_shape_statuses,
         now=now,
@@ -1847,6 +2142,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--now", default=None,
         help="testable clock value; defaults to the current epoch",
     )
+    parser.add_argument(
+        "--disagreements-only", action="store_true",
+        help="print only the review disagreement evidence in pasteable text",
+    )
     args = parser.parse_args(argv)
     if len(args.agents) > 2:
         parser.error("at most two positional agents are accepted")
@@ -1871,7 +2170,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except (ValueError, OSError, heartbeat.HeartbeatError) as exc:
         print("shadow-report: {}".format(exc), file=sys.stderr)
         return 1
-    print(json.dumps(report_data, indent=2, sort_keys=True))
+    if args.disagreements_only:
+        print(format_disagreements(report_data.get("disagreements", [])))
+    else:
+        print(json.dumps(report_data, indent=2, sort_keys=True))
     return 0
 
 

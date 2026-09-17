@@ -13149,6 +13149,12 @@ class FunnelSession:
         self._loader = load_items if loader is None else loader
         self.items: Optional[List[Item]] = None
         self._brief_cache = BriefCache()
+        # ``main`` refreshes the process-level provenance for every forwarded
+        # command.  A session is the durable boundary for one Muse run, so
+        # remember the run created by its first begin instead of trying to
+        # infer it again after overlapping sessions have opened.
+        self._heartbeat_run: Optional[str] = None
+        self._heartbeat_agent: Optional[str] = None
 
     def _load_items(self) -> List[Item]:
         if self.items is None:
@@ -13170,6 +13176,14 @@ class FunnelSession:
                 self._brief_cache.clear()
             cache_token = _ACTIVE_BRIEF_CACHE.set(self._brief_cache)
             try:
+                # Session servers are created before begin, but tests and
+                # embedded callers can reuse this module after another main()
+                # invocation.  Do not let that stale process-level value look
+                # like the run this session is about to start.
+                if self._heartbeat_run is None and argv and argv[0] == "begin":
+                    global _ACTIVE_HEARTBEAT_RUN, _ACTIVE_HEARTBEAT_AGENT
+                    _ACTIVE_HEARTBEAT_RUN = None
+                    _ACTIVE_HEARTBEAT_AGENT = None
                 # Reset before the lazy load so its GraphQL work is measured as
                 # part of the first command rather than erased by ``main``.
                 reset_api_usage()
@@ -13218,7 +13232,16 @@ class FunnelSession:
                 # A session has one process but several commands. Keep the
                 # existing per-command heartbeat measurements, while the
                 # in-memory Project read is shared across them.
-                report_api_cost()
+                if self._heartbeat_run is None and argv and argv[0] == "begin":
+                    self._heartbeat_run = _ACTIVE_HEARTBEAT_RUN
+                    self._heartbeat_agent = _ACTIVE_HEARTBEAT_AGENT
+                if self._heartbeat_run:
+                    report_api_cost(
+                        run=self._heartbeat_run,
+                        agent=self._heartbeat_agent,
+                    )
+                else:
+                    report_api_cost()
                 report_graphql_spend()
                 _ACTIVE_BRIEF_CACHE.reset(cache_token)
         return int(code), stdout.getvalue(), stderr.getvalue()

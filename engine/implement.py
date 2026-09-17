@@ -712,10 +712,25 @@ def run_tests(root: pathlib.Path,
     return rendered, source
 
 
+_GITHUB_REMOTE_RE = re.compile(
+    r"^(?:https://(?:[^@/]+@)?github\.com/|ssh://git@github\.com/|git@github\.com:)"
+    r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?)(?:\.git)?/?$"
+)
+
+
 def resolve_checkout_repo(root: pathlib.Path, explicit: Optional[str]) -> str:
-    """Resolve owner/name from an explicit value or the checkout's gh context."""
+    """Resolve owner/name from an explicit value, origin, or gh's context.
+
+    The origin remote answers locally. Asking `gh repo view` first cost a
+    GraphQL call and stranded a finished ticket on one GitHub 504 (#1030).
+    """
     if explicit:
         return explicit
+    remote = _run(["git", "remote", "get-url", "origin"], cwd=root,
+                  check=False).stdout.strip()
+    match = _GITHUB_REMOTE_RE.match(remote)
+    if match:
+        return match.group(1)
     data = funnel._gh_json("gh", "repo", "view", "--json", "nameWithOwner")
     repo = (data or {}).get("nameWithOwner")
     if not isinstance(repo, str) or "/" not in repo:

@@ -1215,3 +1215,33 @@ def test_a_failed_command_reports_stdout_as_well_as_stderr(tmp_path):
         implement._run([sys.executable, "-c", script], cwd=tmp_path)
     assert "PermissionError: cache" in str(caught.value)
     assert "[check] Error 1" in str(caught.value)
+
+
+@pytest.mark.parametrize("url", [
+    "https://github.com/nateprich-projects/The-League.git",
+    "https://github.com/nateprich-projects/The-League",
+    "git@github.com:nateprich-projects/The-League.git",
+    "ssh://git@github.com/nateprich-projects/The-League.git",
+])
+def test_checkout_repo_resolves_from_origin_without_gh(tmp_path, monkeypatch, url):
+    """A GitHub 504 on `gh repo view` stranded a finished ticket (#1030)."""
+    run_git("init", "-q", str(tmp_path))
+    run_git("remote", "add", "origin", url, cwd=tmp_path)
+
+    def gh_down(*args):
+        raise AssertionError("origin names the repo; gh must not be asked")
+
+    monkeypatch.setattr(funnel, "_gh_json", gh_down)
+    assert implement.resolve_checkout_repo(tmp_path, None) == (
+        "nateprich-projects/The-League"
+    )
+
+
+def test_checkout_repo_falls_back_to_gh_for_a_non_github_origin(
+        tmp_path, monkeypatch):
+    run_git("init", "-q", str(tmp_path))
+    run_git("remote", "add", "origin", str(tmp_path / "origin.git"),
+            cwd=tmp_path)
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args: {"nameWithOwner": REPO})
+    assert implement.resolve_checkout_repo(tmp_path, None) == REPO

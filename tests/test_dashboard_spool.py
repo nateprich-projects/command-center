@@ -207,3 +207,72 @@ def test_unreadable_project_brief_is_not_spooled(monkeypatch, tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["missing"][0]["error"] == "Project offline"
     assert not spool.exists()
+
+
+def _write_snapshots(count):
+    return [
+        funnel.write_dashboard_snapshot(
+            {"n": index}, {"columns": []}, "2026-09-13T12:00:00+00:00")
+        for index in range(count)
+    ]
+
+
+def test_spool_keeps_only_the_newest_entries(monkeypatch, tmp_path):
+    """Every reader parses every entry, so the spool is bounded (#979)."""
+    spool = tmp_path / "spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    monkeypatch.setattr(funnel, "DASHBOARD_SPOOL_KEEP", 3)
+
+    written = _write_snapshots(5)
+
+    assert sorted(p.name for p in spool.glob("*.json")) == sorted(
+        p.name for p in written[-3:])
+    data, _ = funnel._newest_snapshot_entry(spool)
+    assert json.loads(data)["brief"] == {"n": 4}
+
+
+def test_spool_prune_leaves_unrelated_files(monkeypatch, tmp_path):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    (spool / "notes.json").write_text("{}")
+    (spool / ".brief-1-ab.json.tmp").write_text("")
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    monkeypatch.setattr(funnel, "DASHBOARD_SPOOL_KEEP", 1)
+
+    _write_snapshots(2)
+
+    names = sorted(p.name for p in spool.iterdir())
+    assert "notes.json" in names
+    assert ".brief-1-ab.json.tmp" in names
+    assert len([n for n in names if n.startswith("brief-")]) == 1
+
+
+def test_spool_prune_failure_keeps_the_brief_and_the_snapshot(
+    monkeypatch, tmp_path, capsys
+):
+    spool = tmp_path / "spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    expected = _brief_output()
+    monkeypatch.setattr(funnel, "load_items", lambda: [])
+
+    def fake_cmd_brief(items, now, **kwargs):
+        print(expected)
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
+    real_listdir = funnel.os.listdir
+
+    def failing_listdir(path):
+        if pathlib.Path(path) == spool:
+            raise PermissionError("denied")
+        return real_listdir(path)
+
+    monkeypatch.setattr(funnel.os, "listdir", failing_listdir)
+
+    assert funnel.main(["brief"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == expected + "\n"
+    assert "could not prune dashboard spool: denied" in captured.err
+    assert "could not spool" not in captured.err
+    monkeypatch.setattr(funnel.os, "listdir", real_listdir)
+    assert _spooled(spool)["brief"] == json.loads(expected)

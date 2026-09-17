@@ -5169,3 +5169,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 4, "graphql_points": null}, "phase": "api_cost", "run": "e285f833fcca", "ts": 1789642833}
 {"agent": "muse", "api_cost": {"gh_calls": 5, "graphql_points": null}, "phase": "api_cost", "run": "e285f833fcca", "ts": 1789642865}
 {"agent": "muse", "do": "shape", "phase": "bind", "run": "54818f14a8cf", "ts": 1789642869, "work": "nateprich-projects/The-League#176"}
+{"agent": "muse", "api_cost": {"gh_calls": 27, "graphql_points": 73}, "phase": "api_cost", "run": "54818f14a8cf", "ts": 1789642872}

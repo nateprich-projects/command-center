@@ -358,6 +358,7 @@ def test_the_runner_reads_the_routine_at_run_time():
     (
         ("over", "skipped-over-pace"),
         ("unknown", "skipped-usage-unknown"),
+        ("reserve", "skipped-api-reserve"),
         ("ok", "nothing-to-do"),
     ),
 )

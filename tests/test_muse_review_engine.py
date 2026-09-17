@@ -611,6 +611,7 @@ def test_a_routine_without_the_packet_placeholder_is_refused(tmp_path):
     ("gate", "outcome"),
     (("over", "skipped-over-pace"),
      ("unknown", "skipped-usage-unknown"),
+     ("reserve", "skipped-api-reserve"),
      ("ok", "nothing-to-do")),
 )
 def test_a_stop_finishes_without_launching_anything(tmp_path, gate, outcome):

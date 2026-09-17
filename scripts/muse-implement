@@ -219,6 +219,7 @@ if [[ "$BEGIN_DO" == "stop" ]]; then
   case "$BEGIN_GATE" in
     over) STOP_OUTCOME="skipped-over-pace" ;;
     unknown) STOP_OUTCOME="skipped-usage-unknown" ;;
+    reserve) STOP_OUTCOME="skipped-api-reserve" ;;
     *) STOP_OUTCOME="nothing-to-do" ;;
   esac
   if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \

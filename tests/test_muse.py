@@ -204,6 +204,7 @@ def test_the_runner_substitutes_the_tier_and_refuses_a_bad_one():
     ("gate", "outcome"),
     (("over", "skipped-over-pace"),
      ("unknown", "skipped-usage-unknown"),
+     ("reserve", "skipped-api-reserve"),
      ("ok", "nothing-to-do")),
 )
 def test_the_runner_finishes_a_stop_without_launching_muse(tmp_path, gate, outcome):

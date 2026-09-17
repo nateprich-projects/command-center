@@ -1460,3 +1460,4 @@
 {"agent": "codex", "note": "reconciled: PR #196 for nateprich-projects/The-League#169 merged under run 91395dbab0be (muse); this start never recorded its finish", "outcome": "done", "phase": "finish", "reconciled_from": "91395dbab0be", "run": "69b28a33f8af", "ts": 1789643405}
 {"agent": "codex", "note": "reconciled: PR #196 for nateprich-projects/The-League#169 merged under run 91395dbab0be (muse); this start never recorded its finish", "outcome": "done", "phase": "finish", "reconciled_from": "91395dbab0be", "run": "69b28a33f8af", "ts": 1789643405}
 {"agent": "codex", "note": "reconciled: released nateprich-projects/The-League#181 after no ticket branch activity within 30 minutes", "outcome": "errored", "phase": "finish", "reconciled_claim": "nateprich-projects/The-League#181", "run": "bb3372c4c054", "ts": 1789643444}
+{"agent": "codex", "do": "ticket", "phase": "bind", "run": "23b777cbbcf0", "ts": 1789643499, "work": "nateprich-projects/The-League#181"}

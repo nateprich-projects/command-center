@@ -8369,3 +8369,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 1, "graphql_points": 0}, "phase": "api_cost", "run": "78b914807b98", "ts": 1789727510}
 {"agent": "muse", "note": "reconciled: released nateprich-projects/The-League#225 after no ticket branch activity within 30 minutes", "outcome": "errored", "phase": "finish", "reconciled_claim": "nateprich-projects/The-League#225", "run": "e9fbce27d45d", "ts": 1789727475}
 {"agent": "muse", "api_cost": {"gh_calls": 23, "graphql_points": null}, "phase": "api_cost", "run": "78b914807b98", "ts": 1789727564}
+{"agent": "muse", "api_cost": {"gh_calls": 4, "graphql_points": null}, "phase": "api_cost", "run": "78b914807b98", "ts": 1789727609}

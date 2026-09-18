@@ -203,6 +203,32 @@ def test_a_ticket_whose_project_is_not_building_blocks(monkeypatch):
     assert any("not Building" in w for w in funnel.merge_blockers(REPO, 5, rows, NOW))
 
 
+def test_a_ticket_with_a_non_building_parent_keeps_the_old_message(monkeypatch):
+    """The ticket case of the split keeps the exact old wording (#1042)."""
+    rows = items()
+    rows[0].status = "Ready"
+    wire(monkeypatch, pr(), [verdict()])
+    why = funnel.merge_blockers(REPO, 5, rows, NOW)
+    assert (REPO + "#9's project is not Building") in why
+    assert not any("no parent" in w for w in why)
+
+
+def test_a_parent_less_building_project_branch_merges(monkeypatch):
+    """#1042: a parent-less branch item is its own parent for the gate."""
+    wire(monkeypatch, pr(headRefName="ticket/1"), [verdict()])
+    assert funnel.merge_blockers(REPO, 5, items(), NOW) == []
+
+
+def test_a_parent_less_non_building_project_branch_refuses(monkeypatch):
+    rows = items()
+    rows[0].status = "Ready"
+    wire(monkeypatch, pr(headRefName="ticket/1"), [verdict()])
+    why = funnel.merge_blockers(REPO, 5, rows, NOW)
+    assert any("no parent" in w and "Building" in w for w in why)
+    assert any("ticket/<n>" in w for w in why)
+    assert (REPO + "#1's project is not Building") not in why
+
+
 def test_every_failure_is_reported_not_just_the_first(monkeypatch):
     """A gate that says only 'no' makes the reviewer guess which one to fix."""
     wire(monkeypatch, pr(headRefName="nope", statusCheckRollup=[]), [])

@@ -7462,3 +7462,4 @@
 {"agent": "muse", "do": "breakdown", "phase": "bind", "run": "f151b9fd6ba1", "ts": 1789704382, "work": "nateprich-projects/FF-Weekly-Start-Sit#89"}
 {"agent": "muse", "api_cost": {"gh_calls": 39, "graphql_points": 77}, "phase": "api_cost", "run": "f151b9fd6ba1", "ts": 1789704385}
 {"agent": "muse", "do": "breakdown", "phase": "bind", "run": "b8cd473fc804", "ts": 1789704408, "work": "nateprich-projects/FF-Weekly-Start-Sit#89"}
+{"agent": "muse", "api_cost": {"gh_calls": 41, "graphql_points": null}, "phase": "api_cost", "run": "b8cd473fc804", "ts": 1789704411}

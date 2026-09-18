@@ -119,7 +119,7 @@ CI_COVERING_EVENT = "pull_request"
 
 
 def ci_state(checks: Sequence[dict]) -> str:
-    """Derive green/red/unknown from a statusCheckRollup list.
+    """Derive the shared CI state from a statusCheckRollup list.
 
     The reading itself lives in ``funnel.ci_rollup_state``, so the packet, the
     merge gate and the review queue cannot disagree about what CI said. The
@@ -130,18 +130,66 @@ def ci_state(checks: Sequence[dict]) -> str:
     return funnel.ci_rollup_state(checks)
 
 
-def summarize_checks(rollup: Sequence[dict]) -> List[Dict[str, Optional[str]]]:
+def _rollup_with_actions_evidence(
+        rollup: Sequence[dict], ci_runs: Sequence[dict],
+        head_sha: Optional[str]) -> List[dict]:
+    """Attach newest-run startup evidence to the PR's failed checks."""
+    shaped = [dict(check) for check in rollup if isinstance(check, dict)]
+    for run in ci_runs or []:
+        if not isinstance(run, dict) or run.get("headSha") != head_sha:
+            continue
+        if funnel.ci_could_not_run_reason([run]) is None:
+            continue
+        evidence = {
+            key: run[key]
+            for key in ("annotations", "annotation", "completed_steps",
+                        "completedSteps", "steps", "jobs")
+            if key in run
+        }
+        if not evidence:
+            continue
+        attached = False
+        for index, check in enumerate(shaped):
+            result = check.get("conclusion") or check.get("state")
+            if str(result or "").upper() in (
+                "FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"
+            ):
+                updated = dict(check)
+                updated.update(evidence)
+                shaped[index] = updated
+                attached = True
+        if not attached:
+            shaped.append({
+                "name": run.get("name") or "Actions",
+                "conclusion": run.get("conclusion"),
+                "status": run.get("status"),
+                **evidence,
+            })
+        break
+    return shaped
+
+
+def summarize_checks(rollup: Sequence[dict]) -> List[Dict[str, object]]:
     """Keep the per-check fields a reviewer needs, in a stable shape."""
     summarized = []
     for check in rollup or []:
         if not isinstance(check, dict):
             continue
-        summarized.append({
+        row = {
             "name": check.get("name") or check.get("context"),
             "conclusion": check.get("conclusion"),
             "state": check.get("state"),
             "status": check.get("status"),
-        })
+        }
+        # The normal PR view has only the four stable fields above.  Preserve
+        # optional Actions evidence when a read adapter supplies it so the
+        # shared funnel classifier can distinguish a startup stop from red
+        # test output without changing the ordinary packet shape.
+        for key in ("annotations", "annotation", "completed_steps",
+                    "completedSteps", "steps", "jobs"):
+            if key in check:
+                row[key] = check[key]
+        summarized.append(row)
     return summarized
 
 
@@ -675,9 +723,12 @@ def precheck_freeze(packet: dict) -> List[str]:
 
 
 def precheck_ci(packet: dict) -> List[str]:
-    """Row 3: CI must be green — pending or absent checks fail, not pass."""
+    """Row 3: green passes; pending/red fail; startup stops stand down."""
     ci = packet.get("ci") or {}
-    if ci.get("state") == "green":
+    if ci.get("state") in ("green", funnel.CI_COULD_NOT_RUN):
+        # ``could-not-run`` is not approval evidence, but it is also not a
+        # review judgement.  The runner sees the state and stands down without
+        # recording a rejection, so the account/startup cause can recover.
         return []
     failed = [check.get("name") for check in ci.get("checks") or []
               if isinstance(check, dict) and
@@ -815,9 +866,14 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         entry.get("path") for entry in (pr_view.get("files") or [])
         if isinstance(entry, dict) and entry.get("path")
     })
-    checks = summarize_checks(pr_view.get("statusCheckRollup") or [])
+    raw_rollup = pr_view.get("statusCheckRollup") or []
+    rollup = _rollup_with_actions_evidence(
+        raw_rollup, ci_runs or [], pr_view.get("headRefOid")
+    )
+    checks = summarize_checks(rollup)
     runs = summarize_runs(ci_runs or [], pr_view.get("headRefOid"))
     green_at = green_run_at(runs)
+    could_not_run = funnel.ci_could_not_run_reasons(rollup)
     ticket_packet = shape_ticket(ticket)
     if tickets is None:
         ticket_rows: List[Optional[dict]] = [ticket] if ticket is not None else []
@@ -844,8 +900,10 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "plan_md_missing": plan_md_missing,
         "diff": diff,
         "changed_files": changed_files,
-        "ci": {"state": ci_state(pr_view.get("statusCheckRollup") or []),
+        "ci": {"state": ci_state(rollup),
                "checks": checks,
+               "annotation": could_not_run[0] if could_not_run else None,
+               "annotations": could_not_run,
                "runs": runs,
                "green_run_at": green_at,
                "latest_run_id": latest_completed_run_id(runs)},
@@ -1187,7 +1245,21 @@ def fetch_ci_runs(repo: str, branch: str,
                   "createdAt,startedAt,updatedAt")
     if rows is None or not isinstance(rows, list):
         return []
-    return [row for row in rows if isinstance(row, dict)]
+    shaped = []
+    newest = True
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            if newest and str(row.get("conclusion") or "").upper() == "FAILURE":
+                row = funnel.enrich_actions_run(repo, row)
+        except (funnel.GitHubError, OSError, TypeError, ValueError):
+            # The run list remains useful for overlap coverage even when the
+            # optional startup annotation read is unavailable.
+            pass
+        shaped.append(row)
+        newest = False
+    return shaped
 
 
 def fetch_verdict(repo: str, pr_number: int) -> Optional[dict]:

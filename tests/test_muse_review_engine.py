@@ -692,6 +692,21 @@ def _non_open_packet():
     )
 
 
+def _could_not_run_packet():
+    return _packet(
+        ci={
+            "state": "could-not-run",
+            "annotation": "Recent account payments have failed",
+            "checks": [{
+                "name": "tests",
+                "conclusion": "FAILURE",
+                "status": "COMPLETED",
+            }],
+        },
+        precheck={"pass": True, "reasons": []},
+    )
+
+
 def test_a_failing_precheck_applies_rejected_without_calling_muse(tmp_path):
     proc, repo = _stubbed_runner(tmp_path, _begin(), _failing_packet())
 
@@ -743,6 +758,34 @@ def test_a_non_open_precheck_stops_without_a_verdict_or_blocking_note(tmp_path):
     assert "no verdict recorded" in heartbeat
     assert "--review-result" not in heartbeat
     assert not (repo / "gh.log").exists()
+
+
+def test_a_could_not_run_ci_stands_down_without_a_verdict_or_rejection(tmp_path):
+    proc, repo = _stubbed_runner(tmp_path, _begin(), _could_not_run_packet())
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat(repo)
+    assert "CI could not run: Recent account payments have failed" in heartbeat
+    assert "no verdict recorded" in heartbeat
+    assert "--review-result" not in heartbeat
+
+
+def test_a_shadow_could_not_run_ci_records_no_verdict(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _could_not_run_packet(), args=("--shadow",))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    body = (repo / "gh.body").read_text()
+    assert "No model was called" in body
+    assert "CI could not run: Recent account payments have failed" in body
+    assert "No verdict was recorded" in body
+    assert "--review-result" not in _heartbeat(repo)
 
 
 def test_a_shadow_non_open_precheck_records_no_verdict(tmp_path):

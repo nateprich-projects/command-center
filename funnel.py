@@ -34,7 +34,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Set, Tuple)
@@ -126,6 +126,11 @@ class MemberRepoReadiness:
     ci_workflow: bool
     stock_labels: Tuple[str, ...]
     dependabot: bool
+    # ``None`` means the live Actions probe was not requested.  Keeping that
+    # distinct from ``unknown`` lets the doctor retain its existing contract
+    # while ``begin`` can add a fresh per-repository signal to queue reads.
+    ci_state: Optional[str] = None
+    ci_annotation: Optional[str] = None
 
     @property
     def blocking_reasons(self) -> Tuple[str, ...]:
@@ -135,6 +140,12 @@ class MemberRepoReadiness:
             reasons.append("missing command-center topic")
         if not self.ci_workflow:
             reasons.append("no CI workflow")
+        if self.ci_state == CI_COULD_NOT_RUN:
+            reasons.append(
+                "CI could not run: {}".format(
+                    self.ci_annotation or "startup or account failure"
+                )
+            )
         return tuple(reasons)
 
 # `funnel doctor` only needs to know which ticket branches have merged. Keep
@@ -2004,7 +2015,8 @@ UNMERGEABLE_REJECTION_BLOCKING = "branch could not merge at this head"
 #: check. That is how a merge became something a model simply decided to do, and
 #: how a PR with requested changes ended up owned by nobody (#39).
 VERDICTS = ("approved", "rejected")
-CI_STATES = ("green", "red", "unknown")
+CI_COULD_NOT_RUN = "could-not-run"
+CI_STATES = ("green", "red", "unknown", CI_COULD_NOT_RUN)
 
 #: Conclusions GitHub reports for a check that passed or was excused.
 CI_SUCCESS_CONCLUSIONS = ("SUCCESS", "NEUTRAL", "SKIPPED")
@@ -2013,9 +2025,159 @@ CI_SUCCESS_CONCLUSIONS = ("SUCCESS", "NEUTRAL", "SKIPPED")
 CI_PENDING_STATES = ("PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING",
                      "REQUESTED", "STALE")
 
+# GitHub has used more than one spelling for the same Actions startup stop.
+# Match the stable meaning, not one complete annotation sentence: the account
+# notice has changed between "payments have failed" and "spending limit".
+CI_STARTUP_MARKERS = (
+    "startup failure",
+    "startup failed",
+)
+CI_BILLING_MARKERS = (
+    "billing",
+    "payment failed",
+    "payments failed",
+    "spending limit",
+    "spend limit",
+)
+
+
+def _ci_result(check: Mapping[str, object]) -> Optional[str]:
+    """Return a rollup result in the case-insensitive wire vocabulary."""
+    value = check.get("conclusion") or check.get("state")
+    if value in (None, ""):
+        return None
+    return str(value).upper()
+
+
+def _ci_annotation_texts(value: object) -> List[str]:
+    """Extract human-readable annotation text from common GitHub shapes."""
+    found: List[str] = []
+
+    def add(text: object) -> None:
+        if not isinstance(text, str):
+            return
+        text = text.strip()
+        if text and text not in found:
+            found.append(text)
+
+    def visit(node: object) -> None:
+        if isinstance(node, str):
+            add(node)
+            return
+        if isinstance(node, (list, tuple)):
+            for child in node:
+                visit(child)
+            return
+        if not isinstance(node, Mapping):
+            return
+        for key in (
+            "message", "title", "raw_details", "rawDetails",
+            "description", "text",
+        ):
+            if key in node:
+                visit(node[key])
+        for key in ("annotation", "annotations", "check_run", "checkRun"):
+            if key in node:
+                visit(node[key])
+        if "nodes" in node:
+            visit(node["nodes"])
+
+    visit(value)
+    return found
+
+
+def _ci_annotation_is_startup_or_billing(text: str) -> bool:
+    normalized = re.sub(r"[-_]+", " ", text.casefold())
+    return (
+        any(marker in normalized for marker in CI_STARTUP_MARKERS)
+        or any(marker in normalized for marker in CI_BILLING_MARKERS)
+        or ("payment" in normalized and "fail" in normalized)
+    )
+
+
+def _ci_completed_steps(value: Mapping[str, object]) -> Optional[int]:
+    """Read an explicit or nested completed-step count, if one is present."""
+    for key in ("completed_steps", "completedSteps"):
+        count = value.get(key)
+        if isinstance(count, int) and not isinstance(count, bool):
+            return count
+        if isinstance(count, str) and count.strip().isdigit():
+            return int(count.strip())
+
+    def completed(step: object) -> bool:
+        if not isinstance(step, Mapping):
+            return False
+        status = str(step.get("status") or "").upper()
+        conclusion = step.get("conclusion")
+        return (
+            status == "COMPLETED"
+            or conclusion not in (None, "")
+            or step.get("completedAt") not in (None, "")
+            or step.get("completed_at") not in (None, "")
+        )
+
+    if "steps" in value:
+        steps = value.get("steps")
+        if isinstance(steps, list):
+            return sum(1 for step in steps if completed(step))
+        return None
+
+    if "jobs" in value:
+        jobs = value.get("jobs")
+        if not isinstance(jobs, list):
+            return None
+        if not jobs:
+            return 0
+        saw_steps = False
+        count = 0
+        for job in jobs:
+            if not isinstance(job, Mapping) or "steps" not in job:
+                continue
+            steps = job.get("steps")
+            if not isinstance(steps, list):
+                continue
+            saw_steps = True
+            count += sum(1 for step in steps if completed(step))
+        return count if saw_steps else None
+    return None
+
+
+def ci_could_not_run_reasons(checks: Sequence[dict]) -> List[str]:
+    """Return startup/account-stop evidence from a check or run rollup.
+
+    A failure with an explicitly empty step set is the stable no-start shape.
+    An annotation naming startup or billing is independently sufficient because
+    GitHub has changed which fields it populates when Actions never starts.
+    """
+    reasons: List[str] = []
+    for check in checks or []:
+        if not isinstance(check, Mapping):
+            continue
+        annotations = [
+            text for text in _ci_annotation_texts(check)
+            if _ci_annotation_is_startup_or_billing(text)
+        ]
+        result = _ci_result(check)
+        if annotations:
+            candidates = annotations
+        elif result == "FAILURE" and _ci_completed_steps(check) == 0:
+            candidates = ["failure with zero completed steps"]
+        else:
+            candidates = []
+        for reason in candidates:
+            if reason not in reasons:
+                reasons.append(reason)
+    return reasons
+
+
+def ci_could_not_run_reason(checks: Sequence[dict]) -> Optional[str]:
+    """The first startup/account explanation, or ``None``."""
+    reasons = ci_could_not_run_reasons(checks)
+    return reasons[0] if reasons else None
+
 
 def ci_rollup_state(checks: Sequence[dict]) -> str:
-    """Classify a ``statusCheckRollup`` as ``green``, ``red`` or ``unknown``.
+    """Classify a rollup as green, red, unknown, or ``could-not-run``.
 
     The one place that reads a rollup, so the review packet, the merge gate and
     the review queue cannot drift apart about what CI said. Any reported
@@ -2027,29 +2189,44 @@ def ci_rollup_state(checks: Sequence[dict]) -> str:
     if not checks:
         return "unknown"
     pending = False
+    could_not_run = False
     for check in checks:
-        if not isinstance(check, dict):
+        if not isinstance(check, Mapping):
             continue
-        result = check.get("conclusion") or check.get("state")
+        result = _ci_result(check)
+        could_reason = ci_could_not_run_reason([check])
+        if could_reason is not None:
+            could_not_run = True
         # A pending state is read before the red rule, or it would fall into
         # it: "PENDING" is not in the success set either. The engine's reader
         # had this the other way round, so a Status-shaped rollup that had not
         # reported yet came back red while the CheckRun shape came back
         # unknown. Both now say unknown, which is what both docstrings claimed.
-        if result not in (None, "") and str(result).upper() in CI_PENDING_STATES:
+        if result is not None and result in CI_PENDING_STATES:
             pending = True
+            continue
+        if result in CI_SUCCESS_CONCLUSIONS or result is None:
+            if result is None:
+                status = str(check.get("status") or "").upper()
+                if status and status != "COMPLETED":
+                    pending = True
+                elif not status:
+                    # A bare entry with neither conclusion nor status carries
+                    # no signal yet.
+                    pending = True
+            continue
+        if could_reason is not None:
+            # An explicit startup/account annotation is stronger than the
+            # generic red conclusion.  A genuine failure without that evidence
+            # still takes the ordinary red path below.
             continue
         if result not in CI_SUCCESS_CONCLUSIONS + (None, ""):
             return "red"
-        if result in (None, ""):
-            status = str(check.get("status") or "").upper()
-            if status and status != "COMPLETED":
-                pending = True
-            elif not status:
-                # A bare entry with neither conclusion nor status carries
-                # no signal yet.
-                pending = True
-    return "unknown" if pending else "green"
+    if pending:
+        return "unknown"
+    if could_not_run:
+        return CI_COULD_NOT_RUN
+    return "green"
 
 
 def checks_still_running(checks: Sequence[dict]) -> bool:
@@ -4681,6 +4858,122 @@ def _ci_workflow_present(payload: object) -> bool:
     return False
 
 
+def _actions_runs(payload: object) -> List[dict]:
+    """Normalise the REST newest-run response."""
+    if isinstance(payload, dict):
+        payload = payload.get("workflow_runs")
+    if not isinstance(payload, list):
+        return []
+    return [row for row in payload if isinstance(row, dict)]
+
+
+def _actions_jobs(payload: object) -> Optional[List[dict]]:
+    """Normalise an Actions jobs response while preserving unreadable state."""
+    if isinstance(payload, dict):
+        payload = payload.get("jobs")
+    if not isinstance(payload, list):
+        return None
+    return [row for row in payload if isinstance(row, dict)]
+
+
+def _actions_annotations(payload: object) -> Optional[List[object]]:
+    """Normalise check-run annotations while preserving an absent response."""
+    if isinstance(payload, dict):
+        payload = payload.get("annotations", payload.get("nodes"))
+    if not isinstance(payload, list):
+        return None
+    return list(payload)
+
+
+def enrich_actions_run(repo: str, source: Mapping[str, object]) -> Dict[str, object]:
+    """Attach bounded jobs/annotation evidence to one Actions run row."""
+    run = dict(source)
+    result = _ci_result(run)
+
+    # Some fixtures and API adapters already include this evidence. Avoid
+    # paying any follow-up read when the newest-run payload is complete.
+    jobs_known = "jobs" in run
+    annotations_known = "annotations" in run
+    jobs = _actions_jobs(run.get("jobs")) if jobs_known else None
+    if result == "FAILURE" and not jobs_known:
+        jobs = _actions_jobs(_gh_api_json(
+            "repos/{}/actions/runs/{}/jobs?per_page=100".format(
+                repo, run.get("id") or run.get("databaseId")
+            ),
+            cache=False,
+        )) if run.get("id") or run.get("databaseId") else None
+        if jobs is not None:
+            run["jobs"] = jobs
+            jobs_known = True
+
+    annotations: Optional[List[object]] = None
+    if annotations_known:
+        annotations = _actions_annotations(run.get("annotations"))
+    elif isinstance(run.get("check_runs"), list):
+        annotations = []
+        for check_run in run["check_runs"]:
+            if isinstance(check_run, Mapping):
+                annotations.extend(
+                    _actions_annotations(check_run.get("annotations"))
+                    or []
+                )
+        run["annotations"] = annotations
+        annotations_known = True
+    elif result == "FAILURE" and jobs:
+        # REST exposes annotations on check runs (the same records that the
+        # Actions jobs endpoint returns IDs for), not on the workflow run
+        # itself. Query only failed/unknown jobs in this run.
+        annotations = []
+        for job in jobs:
+            if not isinstance(job, Mapping):
+                continue
+            job_result = _ci_result(job)
+            if job_result in CI_SUCCESS_CONCLUSIONS:
+                continue
+            check_run_id = job.get("id") or job.get("databaseId")
+            if check_run_id is None:
+                continue
+            found = _actions_annotations(_gh_api_json(
+                "repos/{}/check-runs/{}/annotations?per_page=100".format(
+                    repo, check_run_id
+                ),
+                cache=False,
+            ))
+            if found:
+                annotations.extend(found)
+        if annotations:
+            run["annotations"] = annotations
+    return run
+
+
+def latest_actions_run_probe(repo: str) -> Tuple[Optional[str], Optional[str]]:
+    """Read the newest Actions run once and classify a startup/account stop.
+
+    The queue only needs a per-repository hold signal, not a history of runs.
+    The newest run endpoint is therefore the probe boundary.  When a failed
+    run does not carry its jobs or annotations inline, the bounded follow-up
+    reads only fill the evidence needed to distinguish "never started" from a
+    real test failure; they are never used as a second queue or cache.
+    """
+    try:
+        payload = _gh_api_json(
+            "repos/{}/actions/runs?per_page=1".format(repo), cache=False
+        )
+        runs = _actions_runs(payload)
+        if not runs:
+            return None, None
+        run = enrich_actions_run(repo, runs[0])
+        reason = ci_could_not_run_reason([run])
+        if reason is None:
+            return ci_rollup_state([run]), None
+        return CI_COULD_NOT_RUN, reason
+    except (GitHubError, OSError, subprocess.SubprocessError, TypeError, ValueError):
+        # This is a diagnostic hold, not a replacement for the merge gate. If
+        # the optional probe cannot be read, leave queue readiness unchanged;
+        # the PR gate still fails closed on its own live CI read.
+        return None, None
+
+
 def _repo_label_names(payload: object) -> Tuple[str, ...]:
     """Return label names from a repository-label REST response."""
     if not isinstance(payload, list):
@@ -4739,11 +5032,16 @@ def member_repo_readiness(repo: str) -> MemberRepoReadiness:
 
 def _member_repo_found(readiness: MemberRepoReadiness) -> str:
     """Render every onboarding fact, including advisory findings."""
-    ci = (
-        "CI workflow present"
-        if readiness.ci_workflow
-        else "CI workflow missing (blocking)"
-    )
+    if readiness.ci_state == CI_COULD_NOT_RUN:
+        ci = "CI could not run (blocking): {}".format(
+            readiness.ci_annotation or "startup or account failure"
+        )
+    else:
+        ci = (
+            "CI workflow present"
+            if readiness.ci_workflow
+            else "CI workflow missing (blocking)"
+        )
     topic = (
         "command-center topic applied"
         if readiness.topic
@@ -4814,11 +5112,19 @@ def check_member_repos(repos: Optional[Iterable[str]] = None) -> List[Check]:
 def repo_readiness_for_items(
     items: Iterable[Item],
 ) -> Dict[str, MemberRepoReadiness]:
-    """Read onboarding facts once for each repository in the loaded funnel."""
-    return {
-        repo: member_repo_readiness(repo)
-        for repo in sorted({item.repo for item in items})
-    }
+    """Read onboarding and newest-run facts once per loaded repository."""
+    readiness: Dict[str, MemberRepoReadiness] = {}
+    for repo in sorted({item.repo for item in items}):
+        base = member_repo_readiness(repo)
+        state, annotation = latest_actions_run_probe(repo)
+        if state is not None:
+            base = replace(
+                base,
+                ci_state=state,
+                ci_annotation=annotation,
+            )
+        readiness[repo] = base
+    return readiness
 
 
 def _status_for_consistency(item: Item) -> str:
@@ -12042,14 +12348,24 @@ def merge_blockers(
                 if parent is None or parent.status != "Building":
                     why.append("{}'s project is not Building".format(ref))
 
-    checks = data.get("statusCheckRollup") or []
-    failed = [c.get("name") or c.get("context") for c in checks
-              if (c.get("conclusion") or c.get("state")) not in
-              CI_SUCCESS_CONCLUSIONS + (None,)]
-    if failed:
-        why.append("CI not green: " + ", ".join(str(f) for f in failed))
-    elif not checks:
-        why.append("no CI checks reported — refusing to merge unverified work")
+    checks = [check for check in (data.get("statusCheckRollup") or [])
+              if isinstance(check, Mapping)]
+    ci_state = ci_rollup_state(checks)
+    if ci_state == CI_COULD_NOT_RUN:
+        why.append(
+            "CI could not run: {}".format(
+                ci_could_not_run_reason(checks)
+                or "startup or account failure"
+            )
+        )
+    else:
+        failed = [c.get("name") or c.get("context") for c in checks
+                  if (c.get("conclusion") or c.get("state")) not in
+                  CI_SUCCESS_CONCLUSIONS + (None,)]
+        if failed:
+            why.append("CI not green: " + ", ".join(str(f) for f in failed))
+        elif not checks:
+            why.append("no CI checks reported — refusing to merge unverified work")
 
     verdict = _row_verdict(data, repo)
     if verdict is None:

@@ -782,7 +782,8 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
                  verdict: Optional[dict], stop_counter: dict,
                  collected_at: str,
                  merged_prs: Optional[Sequence[dict]] = None,
-                 ci_runs: Optional[Sequence[dict]] = None) -> Dict:
+                 ci_runs: Optional[Sequence[dict]] = None,
+                 tickets: Optional[Sequence[Optional[dict]]] = None) -> Dict:
     """Assemble the packet from already-fetched pieces. Pure: no IO.
 
     Every field the review question needs, in one JSON-serialisable dict.
@@ -794,9 +795,12 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     ``ticket_prior_prs``: the slices of this ticket that already merged.
     ``ticket.comments`` carries the ticket's newest comments with their
     recorded voices, shaped by ``ticket_comments``; a ticketless branch
-    gets an empty list. The PR description stays out on purpose: it is the
-    author's own claims, and a reviewer that trusts it can be argued into
-    approving.
+    gets an empty list. ``tickets`` is every ticket the PR closes —
+    the branch ticket plus the closing references (#1088) — each shaped
+    like ``ticket``; None reads as the branch ticket alone, so a
+    single-ticket PR's packet keeps its shape. The PR description stays
+    out on purpose: it is the author's own claims, and a reviewer that
+    trusts it can be argued into approving.
     ``ci_runs`` rows are ``gh run list`` JSON; None reads as no runs
     scanned, which fails closed — an overlap then rejects as stale, as
     before #1019.
@@ -809,25 +813,13 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     checks = summarize_checks(pr_view.get("statusCheckRollup") or [])
     runs = summarize_runs(ci_runs or [], pr_view.get("headRefOid"))
     green_at = green_run_at(runs)
-    if ticket is None:
-        ticket_packet: Dict[str, Optional[object]] = {
-            "ref": None, "number": None, "title": None, "url": None,
-            "body": None, "parent": None, "comments": [],
-        }
+    ticket_packet = shape_ticket(ticket)
+    if tickets is None:
+        ticket_rows: List[Optional[dict]] = [ticket] if ticket is not None else []
     else:
-        parent = ticket.get("parent")
-        if isinstance(parent, dict):
-            parent = dict(parent)
-            parent["comments"] = ticket_comments(parent.get("comments"))
-        ticket_packet = {
-            "ref": ticket.get("ref"),
-            "number": ticket.get("number"),
-            "title": ticket.get("title"),
-            "url": ticket.get("url"),
-            "body": ticket.get("body"),
-            "parent": parent,
-            "comments": ticket_comments(ticket.get("comments")),
-        }
+        ticket_rows = list(tickets)
+    tickets_packet = [shape_ticket(row) for row in ticket_rows
+                      if isinstance(row, dict)]
     head = head_date(pr_view)
     assembled = {
         "repo": repo,
@@ -842,6 +834,7 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "head_sha": pr_view.get("headRefOid"),
         "head_date": head,
         "ticket": ticket_packet,
+        "tickets": tickets_packet,
         "plan_md": plan_md,
         "plan_md_missing": plan_md_missing,
         "diff": diff,
@@ -874,12 +867,16 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
 
 
 def fetch_pr(repo: str, pr_number: int) -> dict:
-    """One PR view: identity, head, CI rollup, commits, changed files."""
+    """One PR view: identity, head, CI rollup, commits, changed files.
+
+    ``closingIssuesReferences`` rides the same read so the packet can
+    carry every ticket the PR closes (#1088); it costs no extra call.
+    """
     data = funnel._gh_json(
         "gh", "pr", "view", str(pr_number), "--repo", repo, "--json",
         "number,title,headRefName,headRefOid,baseRefName,state,mergeable,"
         "mergedAt,closedAt,"
-        "statusCheckRollup,commits,files")
+        "statusCheckRollup,commits,files,closingIssuesReferences")
     if not data:
         raise funnel.GitHubError(
             "could not read PR #{} in {}".format(pr_number, repo))
@@ -899,6 +896,89 @@ def fetch_diff(repo: str, pr_number: int) -> str:
 
 
 _ISSUE_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/issues/\d+")
+_ISSUE_NUMBER = re.compile(r"/issues/(\d+)")
+
+
+def closing_ticket_refs(pr_view: dict,
+                       default_repo: str) -> List[Tuple[str, int]]:
+    """Every ticket the PR closes, as (repo, number) pairs, deduplicated.
+
+    Read from the PR view's ``closingIssuesReferences`` (#1088): a PR
+    closing several tickets is judged against the union, not the branch
+    ticket alone — jeffy PR #132 was rejected for the change jeffy#129
+    asked for because the packet showed only #131. Each entry keeps its
+    own repository (GraphQL ``nameWithOwner``, REST ``full_name``, or
+    the issue URL); entries without a readable number are dropped, and
+    entries without a repository read as the PR's own. Rubbish rows
+    never break the parse: an unreadable closing list reads as empty,
+    and the branch ticket still carries the spec.
+    """
+    raw = (pr_view or {}).get("closingIssuesReferences")
+    if isinstance(raw, dict) and isinstance(raw.get("nodes"), list):
+        raw = raw["nodes"]
+    if not isinstance(raw, list):
+        return []
+    refs: List[Tuple[str, int]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        number = entry.get("number")
+        if isinstance(number, bool) or not isinstance(number, int):
+            match = _ISSUE_NUMBER.search(str(entry.get("url") or ""))
+            if not match:
+                continue
+            number = int(match.group(1))
+        if number <= 0:
+            continue
+        repo = default_repo
+        repository = entry.get("repository")
+        if isinstance(repository, dict):
+            for key in ("nameWithOwner", "full_name"):
+                full = repository.get(key)
+                if isinstance(full, str) and "/" in full:
+                    repo = full
+                    break
+        if repo == default_repo:
+            match = _ISSUE_URL.search(str(entry.get("url") or ""))
+            if match:
+                repo = match.group(1)
+        ref = entry.get("ref")
+        if isinstance(ref, str) and "#" in ref:
+            owner_repo = ref.split("#", 1)[0]
+            if "/" in owner_repo:
+                repo = owner_repo
+        pair = (repo, number)
+        if pair not in refs:
+            refs.append(pair)
+    return refs
+
+
+def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
+    """One ticket as the reviewer reads it: identity, body, parent, comments.
+
+    Shared by the single branch ``ticket`` and every entry of the
+    ``tickets`` list, so both carry the same fields: the parent with its
+    comments shaped, and the ticket's newest comments with their recorded
+    voices. None reads as the empty ticket a ticketless branch gets.
+    """
+    if ticket is None:
+        return {
+            "ref": None, "number": None, "title": None, "url": None,
+            "body": None, "parent": None, "comments": [],
+        }
+    parent = ticket.get("parent")
+    if isinstance(parent, dict):
+        parent = dict(parent)
+        parent["comments"] = ticket_comments(parent.get("comments"))
+    return {
+        "ref": ticket.get("ref"),
+        "number": ticket.get("number"),
+        "title": ticket.get("title"),
+        "url": ticket.get("url"),
+        "body": ticket.get("body"),
+        "parent": parent,
+        "comments": ticket_comments(ticket.get("comments")),
+    }
 
 
 def parent_repo_from_row(parent: dict) -> Optional[str]:
@@ -1126,7 +1206,12 @@ def fetch_stop_counter(
 def collect(repo: Optional[str], pr_number: int, *,
             items_loader: Optional[Callable[[], list]] = None,
             now: Optional[datetime] = None) -> Dict:
-    """Fetch every piece and build the packet. Reads only, no writes."""
+    """Fetch every piece and build the packet. Reads only, no writes.
+
+    The ``tickets`` list is the branch ticket plus every closing
+    reference (#1088), deduplicated with the branch ticket first; the
+    read budget is bounded by the PR's own closing list, never a scan.
+    """
     resolved = funnel.resolve_repo(repo)
     pr_view = fetch_pr(resolved, pr_number)
     ref = funnel.ticket_ref_from_branch(
@@ -1135,6 +1220,17 @@ def collect(repo: Optional[str], pr_number: int, *,
         ticket = fetch_ticket(resolved, int(ref.split("#", 1)[1]))
     else:
         ticket = None
+    tickets: List[dict] = []
+    seen = set()
+    if ticket is not None:
+        tickets.append(ticket)
+        seen.add((resolved, ticket.get("number")))
+    for closing_repo, closing_number in closing_ticket_refs(
+            pr_view, resolved):
+        if (closing_repo, closing_number) in seen:
+            continue
+        seen.add((closing_repo, closing_number))
+        tickets.append(fetch_ticket(closing_repo, closing_number))
     plan_md, plan_md_missing = fetch_plan_md(resolved)
     branch = pr_view.get("headRefName") or ""
     return build_packet(
@@ -1143,6 +1239,7 @@ def collect(repo: Optional[str], pr_number: int, *,
         pr_view=pr_view,
         diff=fetch_diff(resolved, pr_number),
         ticket=ticket,
+        tickets=tickets,
         plan_md=plan_md,
         plan_md_missing=plan_md_missing,
         open_prs=fetch_open_prs(resolved),

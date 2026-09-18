@@ -899,3 +899,147 @@ def test_cli_shows_the_ticket_comments_with_voices(monkeypatch, capsys):
     assert found["ticket"]["comments"] == [
         {"author": "nateprich", "created_at": "2026-09-13T00:00:00Z",
          "voice": "nate-direct", "body": "Retire the drift checks."}]
+
+
+# -- every ticket the PR closes (#1088) ---------------------------------------
+#
+# jeffy PR #132 closed #131 and #129 but the packet showed only the branch
+# ticket #131, so the engine rejected the hobby-linux change #129 asked
+# for. The packet now carries the union under `tickets` while `ticket`
+# stays the branch ticket for the pre-check rows.
+
+def test_closing_refs_parse_numbers_in_the_pr_repo():
+    view = pr_view(closingIssuesReferences=[
+        {"number": 131}, {"number": 129}])
+    assert review.closing_ticket_refs(view, REPO) == [
+        (REPO, 131), (REPO, 129)]
+
+
+def test_closing_refs_keep_each_entry_own_repo():
+    other = "owner/other"
+    view = pr_view(closingIssuesReferences=[
+        {"number": 1, "repository": {"nameWithOwner": other}},
+        {"number": 2, "url": "https://github.com/{}/issues/2".format(other)},
+        {"number": 3, "ref": "{}#3".format(other)},
+        {"number": 9},
+    ])
+    assert review.closing_ticket_refs(view, REPO) == [
+        (other, 1), (other, 2), (other, 3), (REPO, 9)]
+
+
+def test_closing_refs_deduplicate_and_drop_rubbish():
+    view = pr_view(closingIssuesReferences=[
+        {"number": 9}, {"number": 9},
+        None, "nonsense", {}, {"number": True}, {"number": 0},
+    ])
+    assert review.closing_ticket_refs(view, REPO) == [(REPO, 9)]
+
+
+def test_closing_refs_read_a_graphql_nodes_connection():
+    view = pr_view(closingIssuesReferences={
+        "nodes": [{"number": 129,
+                   "repository": {"nameWithOwner": REPO}}]})
+    assert review.closing_ticket_refs(view, REPO) == [(REPO, 129)]
+
+
+def test_closing_refs_without_a_list_read_as_empty():
+    assert review.closing_ticket_refs(pr_view(), REPO) == []
+    assert review.closing_ticket_refs(
+        pr_view(closingIssuesReferences=None), REPO) == []
+
+
+def test_packet_carries_each_closing_ticket_shaped_like_the_branch_one():
+    first = ticket(number=131, ref=REPO + "#131",
+                   body="The workflow and the runner are unchanged.")
+    second = ticket(number=129, ref=REPO + "#129",
+                    body="Run the tests workflow on hobby-linux.",
+                    comments=[comment("ship it", "nate-direct")])
+    found = packet(ticket=first, tickets=[first, second])
+    assert found["ticket"]["number"] == 131
+    assert [entry["number"] for entry in found["tickets"]] == [131, 129]
+    assert found["tickets"][1]["body"].startswith("Run the tests workflow")
+    assert found["tickets"][1]["comments"][0]["voice"] == "nate-direct"
+    json.dumps(found)
+
+
+def test_a_two_ticket_pr_is_not_rejected_for_the_second_ticket_change():
+    """The #1088 accept fixture: the first ticket calls the workflow
+    unchanged, the second asks for exactly the hobby-linux change."""
+    first = ticket(number=131, ref=REPO + "#131",
+                   body="The Python 3.9 pin, the workflow and the runner "
+                        "are unchanged. Carry LD_LIBRARY_PATH.")
+    second = ticket(number=129, ref=REPO + "#129",
+                    body="Run the tests workflow on the self-hosted "
+                         "hobby-linux runner.")
+    view = pr_view(headRefName="ticket/131",
+                   files=[{"path": ".github/workflows/tests.yml"}])
+    found = packet(pr_view=view, ticket=first, tickets=[first, second],
+                   verdict=None)
+    assert [entry["number"] for entry in found["tickets"]] == [131, 129]
+    assert found["ticket"]["ref"] == REPO + "#131"
+    assert found["precheck"]["pass"] is True, found["precheck"]
+
+
+def test_a_single_ticket_packet_defaults_to_the_branch_ticket_alone():
+    found = packet()
+    assert [entry["number"] for entry in found["tickets"]] == [9]
+    assert found["tickets"][0]["ref"] == found["ticket"]["ref"]
+    assert found["tickets"][0]["body"] == found["ticket"]["body"]
+
+
+def test_a_ticketless_branch_carries_an_empty_tickets_list():
+    view = pr_view(headRefName="docs/meta-terms-read")
+    found = packet(pr_view=view, ticket=None)
+    assert found["tickets"] == []
+    assert found["ticket"]["body"] is None
+
+
+def test_collect_fetches_each_closing_ticket_once(monkeypatch):
+    view = pr_view(headRefName="ticket/131",
+                   closingIssuesReferences=[{"number": 131},
+                                            {"number": 129}])
+    monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: view)
+    monkeypatch.setattr(review, "fetch_diff", lambda repo, pr: "diff text")
+    seen = []
+
+    def fake_ticket(repo, number):
+        seen.append((repo, number))
+        return ticket(number=number, ref=repo + "#" + str(number))
+
+    monkeypatch.setattr(review, "fetch_ticket", fake_ticket)
+    monkeypatch.setattr(
+        review, "fetch_plan_md", lambda repo: ("# design record", False))
+    monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
+    monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
+    found = review.collect(REPO, 132, items_loader=lambda: [])
+    assert seen == [(REPO, 131), (REPO, 129)]
+    assert [entry["number"] for entry in found["tickets"]] == [131, 129]
+    assert found["ticket"]["number"] == 131
+
+
+def test_collect_without_closing_refs_fetches_only_the_branch_ticket(
+        monkeypatch):
+    monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: pr_view())
+    monkeypatch.setattr(review, "fetch_diff", lambda repo, pr: "diff text")
+    seen = []
+    monkeypatch.setattr(
+        review, "fetch_ticket",
+        lambda repo, number: seen.append(number) or ticket())
+    monkeypatch.setattr(
+        review, "fetch_plan_md", lambda repo: ("# design record", False))
+    monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
+    monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
+    found = review.collect(REPO, 7, items_loader=lambda: [])
+    assert seen == [9]
+    assert [entry["number"] for entry in found["tickets"]] == [9]
+
+
+def test_the_review_question_names_the_tickets_union_as_the_spec():
+    text = (ROOT / "routines" / "muse-review.md").read_text()
+    assert "tickets" in text and "union" in text
+    assert "authorised" in text
+    assert "branch ticket" in text

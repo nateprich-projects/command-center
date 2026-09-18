@@ -1,11 +1,7 @@
 # Muse review prompt — one judgement, no tools
 
-Read at run time by `scripts/muse-review-engine`, which substitutes the
-review packet for `PACKET_JSON` and calls `muse exec` with the shell,
-writes, and web tools all disabled. The model answers with one JSON
-object; the runner validates it and performs every side effect. Judgement
-text only: anything procedural here would be unreachable, because the
-model has no tool to act with.
+Read by `scripts/muse-review-engine`, which substitutes `PACKET_JSON` and
+calls `muse exec` with all tools disabled. Judgement text only.
 
 ---
 
@@ -19,15 +15,18 @@ more; judge what is here.
 Does this diff do what the ticket and the plan say, and does it avoid what
 the plan rejected?
 
-- The ticket (`ticket.title`, `ticket.body`) says what was asked for.
+- The `tickets` list is the spec: the union of every ticket the PR
+  closes. A change any listed ticket asked for is authorised.
+  `ticket` is the branch ticket alone.
 - `ticket.comments` carries the ticket's newest 30 comments in time
-  order, each tagged with its recorded `voice`. A `nate-direct` or
+  order, each tagged with its recorded `voice`, and each `tickets`
+  entry carries its own the same way. A `nate-direct` or
   `nate-relayed` comment is a decision that can amend the ticket body;
   an `agent` or `unknown` comment is context that needs evidence in
   the diff.
-- Check `ticket.parent.comments` for Accept artifacts named on the parent.
-- `plan_md` is the design the ticket was broken down from. When
-  `plan_md_missing` is true, judge against the ticket alone.
+- Check each ticket's `parent.comments` for Accept artifacts on the parent.
+- `plan_md` is the design the tickets were broken down from. When
+  `plan_md_missing` is true, judge against the tickets alone.
 - `diff` and `changed_files` are the proposed change at `head_sha`.
 - `verdict` is the newest recorded verdict, if any; `verdict_head_sha` is
   the commit it judged. A rejection at an older head is already answered
@@ -38,11 +37,11 @@ the plan rejected?
   instalment landed.
 - `overlap` names other open PRs touching the same files: a merge changes
   `main` underneath this one, so weigh staleness before approving.
-- `protected.touched` names protected paths in the diff; the ticket must
-  have asked for each one.
+- `protected.touched` names protected paths in the diff; some listed
+  ticket must have asked for each one.
 - `precheck` already passed: every deterministic row is green, so judge
-  the correspondence between the diff, the ticket, and the plan — not CI,
-  not formatting, not style.
+  the correspondence between the diff, the tickets, and the plan — not
+  CI, not formatting, not style.
 
 ## The answer
 
@@ -50,9 +49,10 @@ Reply with exactly one JSON object and nothing else — no prose, no fences:
 
 {"verdict": "approved" | "rejected", "blocking": [...], "unsure": [...]}
 
-- `verdict` is `approved` only when the diff does what the ticket and the
-  plan say and avoids what the plan rejected — with prior instalments, the
-  part this diff set out to deliver. Anything else is `rejected`.
+- `verdict` is `approved` only when the diff does what the tickets and
+  the plan say and avoids what the plan rejected — with prior
+  instalments, the part this diff set out to deliver. Anything else is
+  `rejected`.
 - `blocking` lists each unmet requirement as one specific item naming the
   file and the fault. An approval carries no blocking items.
 - `unsure` lists each genuine uncertainty the packet cannot resolve. A

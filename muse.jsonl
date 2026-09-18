@@ -8110,3 +8110,4 @@
 {"agent": "muse", "attempt": null, "escalated_from": null, "harness": "muse-code", "model": "muse-spark-1.3", "model_source": "detected", "phase": "start", "provider": "meta", "reasoning_effort": null, "repo": {"dirty": 0, "head": "7614339a925d"}, "run": "ba040be5bd45", "runtime": {"head": "7614339a925d", "root": "/Users/nateprich/.claude/command-center-run"}, "session_id": null, "ticket": null, "ts": 1789720508, "usage": {"source": "meta", "unmetered": true}}
 {"agent": "muse", "api_cost": {"gh_calls": 2, "graphql_points": 2}, "phase": "api_cost", "run": "cb9758f9b2a9", "ts": 1789720517}
 {"agent": "muse", "api_cost": {"gh_calls": 2, "graphql_points": 0}, "phase": "api_cost", "run": "cb9758f9b2a9", "ts": 1789720528}
+{"agent": "muse", "api_cost": {"gh_calls": 5, "graphql_points": 3}, "phase": "api_cost", "run": "cb9758f9b2a9", "ts": 1789720544}

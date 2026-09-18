@@ -137,6 +137,13 @@ wrong.
   be versioned and drift-checked, unlike zcode's prompt, which lives in an app UI where
   nothing can see it (#52).
 
+  **Muse implements both tiers since 2026-09-18** (Nate's instruction). Codex's weekly
+  usage was nearly spent and competing with his own, while Muse had ample headroom. The
+  standard tier runs as its own job, `command-center-muse-implement-standard`, every ten
+  minutes beside the escalated `command-center-muse-implement`. The Codex app automation
+  `command-center-tickets-hourly` is paused, not deleted, and Codex keeps both tiers in
+  `AGENTS_BY_ROLE`, so switching back is a status flip in the Codex app.
+
   **`--approval-mode never` is not a guard.** Measured 2026-09-07: it does **not** fail
   closed. It means *never ask*, and it auto-approved a shell command with no prompt.
 

@@ -938,15 +938,19 @@ def awaiting_breakdown(items: Iterable[Item]) -> List[Item]:
 #: its own tier in its prompt.
 TIERS = ("standard", "escalated")
 
-#: Capabilities belong to roles, not harness names. The tier membership keeps
-#: Muse on the escalated implementation lane without turning its standard
-#: review/breakdown/shaping schedule into the rejected standard overflow lane.
-#: Keeping both agent names in this one registry prevents a second inline
-#: literal from drifting.
+#: Capabilities belong to roles, not harness names. Keeping both agent names in
+#: this one registry prevents a second inline literal from drifting.
+#:
+#: Muse implements at both tiers since 2026-09-18, by Nate's instruction: Codex's
+#: weekly usage was nearly spent and competing with his own, while Muse had ample
+#: headroom. The standard tier runs as its own launchd job
+#: (`com.nateprich.command-center-muse-implement-standard`), separate from the
+#: escalated one, so the two queues never wait on each other. Codex keeps both
+#: tiers here so re-enabling its automation needs no code change.
 AGENTS_BY_ROLE = {
     "implement": {
         "codex": frozenset(TIERS),
-        "muse": frozenset({"escalated"}),
+        "muse": frozenset(TIERS),
     },
 }
 
@@ -974,6 +978,12 @@ def begin_uses_ticket_path(
     source of routing in that case rather than the agent name.
     """
     if caller_role is None:
+        # Muse's standard review schedule opens without a role in older
+        # callers. Implementing at standard therefore needs the explicit
+        # `--role implement`, so a reviewer that omits its role can never
+        # become a writer (2026-09-18, when Muse gained the standard tier).
+        if agent == "muse" and tier != "escalated":
+            return False
         return agent_has_role(agent, "implement", tier)
     try:
         role = BEGIN_CALLER_ROLE_ALIASES[caller_role.casefold()]
@@ -6303,6 +6313,8 @@ def _dashboard_rework_owner(
     }
     if "claude" in agents:
         return OWNER_CLAUDE
+    if agents == {"muse"}:
+        return OWNER_MUSE
 
     body = (pr_fact or {}).get("body")
     if isinstance(body, str) and CLAUDE_CODE_PR_RE.search(body):

@@ -707,14 +707,125 @@ def test_fetch_ticket_reads_parent_comments_with_one_parent_view(monkeypatch):
         if len(calls) == 1:
             return {"number": 9, "title": "t", "url": "u", "body": "b",
                     "parent": {"number": 1}, "comments": []}
+        if len(calls) == 2:
+            return {"number": 1,
+                    "repository": {"full_name": REPO}}
+        return {"comments": rows}
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    found = review.fetch_ticket(REPO, 9)
+    assert len(calls) == 3
+    assert calls[1] == (
+        "gh", "api", "repos/{}/issues/9/parent".format(REPO))
+    assert calls[2] == (
+        "gh", "issue", "view", "1", "--repo", REPO, "--json", "comments")
+    assert found["parent"]["comments"] == rows
+    assert found["parent"]["ref"] == "{}#1".format(REPO)
+
+
+def test_fetch_ticket_resolves_a_cross_repo_parent_to_its_own_repo(monkeypatch):
+    """#1066: a member-repo ticket's parent lives in command-center."""
+    member = "nateprich-projects/The-League"
+    home = "nateprich-projects/command-center"
+    rows = [comment("ship the runners.", "nate-direct")]
+    calls = []
+
+    def fake_gh_json(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            return {"number": 221, "title": "t", "url": "u", "body": "b",
+                    "parent": {"number": 1054}, "comments": []}
+        if len(calls) == 2:
+            return {"number": 1054,
+                    "repository": {"full_name": home}}
+        return {"comments": rows}
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    found = review.fetch_ticket(member, 221)
+    assert calls[1] == (
+        "gh", "api", "repos/{}/issues/221/parent".format(member))
+    assert calls[2] == (
+        "gh", "issue", "view", "1054", "--repo", home,
+        "--json", "comments")
+    assert found["parent"]["ref"] == "{}#1054".format(home)
+    built = packet(repo=member, ticket=found)
+    assert built["ticket"]["parent"]["ref"] == "{}#1054".format(home)
+    assert built["ticket"]["parent"]["comments"] == [
+        {"author": "nateprich", "created_at": "2026-09-13T00:00:00Z",
+         "voice": "nate-direct", "body": "ship the runners."}]
+    json.dumps(built)
+
+
+def test_fetch_ticket_skips_the_relationship_read_when_the_row_names_the_repo(
+        monkeypatch):
+    calls = []
+    rows = [comment("on the plan")]
+
+    def fake_gh_json(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            return {"number": 9, "title": "t", "url": "u", "body": "b",
+                    "parent": {"number": 1,
+                               "repository": {"full_name": REPO}},
+                    "comments": []}
         return {"comments": rows}
 
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
     found = review.fetch_ticket(REPO, 9)
     assert len(calls) == 2
-    assert calls[1] == (
-        "gh", "issue", "view", "1", "--repo", REPO, "--json", "comments")
     assert found["parent"]["comments"] == rows
+    assert found["parent"]["ref"] == "{}#1".format(REPO)
+
+
+def test_a_404_parent_view_degrades_to_a_packet_without_parent_comments(
+        monkeypatch):
+    """#1066: an unreadable parent must not block a review."""
+    member = "nateprich-projects/The-League"
+    home = "nateprich-projects/command-center"
+    calls = []
+
+    def fake_gh_json(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            return {"number": 221, "title": "t", "url": "u", "body": "b",
+                    "parent": {"number": 1054}, "comments": []}
+        if len(calls) == 2:
+            return {"number": 1054,
+                    "repository": {"full_name": home}}
+        return None  # `gh` 404s surface as None from `_gh_json`
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    found = review.fetch_ticket(member, 221)  # must not raise
+    assert found["parent"]["comments"] == []
+    assert found["parent"]["comments_unavailable"] is True
+    assert found["parent"]["ref"] == "{}#1054".format(home)
+    built = packet(repo=member, ticket=found)
+    assert built["ticket"]["parent"]["comments"] == []
+    assert built["ticket"]["parent"]["comments_unavailable"] is True
+    json.dumps(built)
+
+
+def test_a_404_parent_relationship_degrades_without_naming_a_repo(
+        monkeypatch):
+    """#1066: an unresolvable parent degrades rather than guessing a repo."""
+    calls = []
+
+    def fake_gh_json(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            return {"number": 9, "title": "t", "url": "u", "body": "b",
+                    "parent": {"number": 1}, "comments": []}
+        return None
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    found = review.fetch_ticket(REPO, 9)  # must not raise
+    assert len(calls) == 2
+    assert found["parent"]["comments"] == []
+    assert found["parent"]["comments_unavailable"] is True
+    assert "ref" not in found["parent"]
+    built = packet(ticket=found)
+    assert built["ticket"]["parent"]["comments_unavailable"] is True
+    json.dumps(built)
 
 
 def test_fetch_ticket_reads_a_cross_repo_parent_from_its_own_repo(monkeypatch):
@@ -732,12 +843,15 @@ def test_fetch_ticket_reads_a_cross_repo_parent_from_its_own_repo(monkeypatch):
 
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
     review.fetch_ticket("nateprich-projects/The-League", 220)
+    assert len(calls) == 2  # the URL resolves the repo: no relationship read
     assert calls[1] == (
         "gh", "issue", "view", "1054", "--repo",
         "nateprich-projects/command-center", "--json", "comments")
 
 
-def test_a_failed_cross_repo_parent_read_names_the_parent_repo(monkeypatch):
+def test_a_failed_cross_repo_parent_read_degrades_and_names_the_parent_repo(
+        monkeypatch):
+    """#1066: a 404 parent view degrades; the URL-resolved repo is named."""
     def fake_gh_json(*args):
         if "--json" in args and args[-1] == "comments":
             return None
@@ -748,12 +862,12 @@ def test_a_failed_cross_repo_parent_read_names_the_parent_repo(monkeypatch):
                 "comments": []}
 
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
-    try:
-        review.fetch_ticket("nateprich-projects/The-League", 220)
-    except funnel.GitHubError as exc:
-        assert "nateprich-projects/command-center#1054" in str(exc)
-    else:
-        raise AssertionError("expected GitHubError")
+    found = review.fetch_ticket(
+        "nateprich-projects/The-League", 220)  # must not raise
+    assert found["parent"]["comments"] == []
+    assert found["parent"]["comments_unavailable"] is True
+    assert found["parent"]["ref"] == \
+        "nateprich-projects/command-center#1054"
 
 
 def test_the_review_question_treats_nate_comments_as_amending_decisions():

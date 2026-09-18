@@ -8513,3 +8513,4 @@
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/The-League", "run": "852617d584ae", "ts": 1789731683, "work": "228"}
 {"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 78}, "phase": "api_cost", "run": "852617d584ae", "ts": 1789731687}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/The-League", "run": "1ae7639a1cc8", "ts": 1789731691, "work": "228"}
+{"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": null}, "phase": "api_cost", "run": "1ae7639a1cc8", "ts": 1789731696}

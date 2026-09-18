@@ -144,6 +144,22 @@ def test_freeze_passes_the_same_diff_under_794():
         "pass": True, "reasons": []}
 
 
+def test_freeze_passes_the_same_diff_under_1044():
+    view = pr_view(files=[{"path": "routines/muse.md"}])
+    mine = ticket(body="Parent: #1044.\n\nWhat: record the live verdict in "
+                       "routines/muse.md.\n\nRisk: escalated",
+                  parent={"number": 1044, "title": "measure the cutover"})
+    assert packet(pr_view=view, ticket=mine)["precheck"] == {
+        "pass": True, "reasons": []}
+
+
+def test_freeze_rejection_names_both_exempt_parents():
+    view = pr_view(files=[{"path": "routines/muse.md"}])
+    reason = packet(pr_view=view)["precheck"]["reasons"][0]
+    assert reason.startswith("freeze:")
+    assert "#794" in reason and "#1044" in reason
+
+
 def test_freeze_rejects_a_skills_diff():
     view = pr_view(files=[{"path": "skills/shape/SKILL.md"}])
     reasons = packet(pr_view=view)["precheck"]["reasons"]

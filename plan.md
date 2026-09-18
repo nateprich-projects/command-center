@@ -610,6 +610,21 @@ bootstrap reserves above. Actions is the right home precisely because the
 watchdog cannot live inside the thing it watches: an app that quit is invisible to
 every other signal on a machine that is otherwise fine.
 
+**Routine freeze while #794 lands.** `routines/`, `skills/`, and the parser
+constants #794 deletes are frozen ground: a diff touching them fails the review
+runner's freeze row unless its ticket sits under #794. The freeze exists because
+#794 replaces the prose those files hold with runner code; a concurrent
+behaviour change to the same files would be built on text about to be deleted,
+and a run on the stale copy would re-trigger the defect.
+
+Exemption, Nate 2026-09-18 (#1090): tickets under #1044 may also touch frozen
+ground. #1044 exists only to measure #794's cutover, and its routine edits are
+recording instructions for the shadow comparison — such as the live reviewer
+recording its verdict — rather than behaviour changes, so holding them to the
+freeze would block the measurement of the freeze's own project. This is not a
+general second lane: any other parent still fails, and the freeze row's message
+names both exempt parents.
+
 ## Sequencing
 
 1. New private repo `nateprich-projects/command-center`.

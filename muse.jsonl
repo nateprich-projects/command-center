@@ -7196,3 +7196,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 40, "graphql_points": null}, "phase": "api_cost", "run": "0d9d06cb8f28", "ts": 1789696904}
 {"agent": "muse", "api_cost": {"gh_calls": 1, "graphql_points": 0}, "phase": "api_cost", "run": "0d9d06cb8f28", "ts": 1789696958}
 {"agent": "muse", "attempt": null, "escalated_from": null, "harness": "muse-code", "model": null, "model_source": "detected", "phase": "start", "provider": "meta", "reasoning_effort": null, "repo": {"dirty": 0, "head": "5b40abca5173"}, "run": "a0d12e054e09", "runtime": {"head": "089db4d720fa", "root": "/Users/nateprich/.claude/command-center-run"}, "session_id": null, "ticket": null, "ts": 1789696967, "usage": {"source": "meta", "unmetered": true}}
+{"agent": "muse", "api_cost": {"gh_calls": 18, "graphql_points": 23}, "phase": "api_cost", "run": "0d9d06cb8f28", "ts": 1789696994}

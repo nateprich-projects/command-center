@@ -197,10 +197,11 @@ def write_wrangler_toml(path, namespace=FAKE_NAMESPACE):
     return path
 
 
-def write_fake_brief(path, exit_code=0, sleep=0, write_spool_to=None):
+def write_fake_brief(path, exit_code=0, sleep=0, write_spool_to=None,
+                     missing=None):
     """A stand-in for funnel.py that records runs instead of reading GitHub."""
     path.write_text(
-        "import sys, time\n"
+        "import json, sys, time\n"
         "from pathlib import Path\n"
         "here = Path(__file__).parent\n"
         'with (here / "brief-runs.log").open("a") as fh:\n'
@@ -216,6 +217,9 @@ def write_fake_brief(path, exit_code=0, sleep=0, write_spool_to=None):
             if write_spool_to is not None
             else ""
         )
+        + "print(json.dumps({\"generated_at\": time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime()), \"missing\": "
+        + repr(missing if missing is not None else [])
+        + "}))\n"
         + "sys.exit({})\n".format(exit_code)
     )
     return path
@@ -377,6 +381,29 @@ def test_refresh_with_stale_snapshot_runs_one_brief_and_clears(
     assert brief_run_count(fake_brief) == 1
     assert len(kv.deletes_of("refresh-requested")) == 1
     assert "refresh-requested" not in kv.values
+
+
+def test_exit_zero_missing_items_envelope_keeps_refresh_flag(
+    tmp_path, kv, monkeypatch, capsys
+):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    entry_path, _ = write_spool_entry(spool, "entry.json", seconds_ago=11 * 60)
+    kv.values["snapshot"] = entry_path.read_bytes()
+    kv.values["refresh-requested"] = iso().encode()
+    argv, fake_brief = base_argv(tmp_path, kv, spool)
+    write_fake_brief(
+        fake_brief,
+        missing=[{"section": "items", "error": "Project unavailable"}],
+    )
+
+    code, _, err = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 0
+    assert brief_run_count(fake_brief) == 1
+    assert kv.deletes_of("refresh-requested") == []
+    assert "refresh-requested" in kv.values
+    assert "did not produce a publishable snapshot" in err
 
 
 def test_refresh_within_the_floor_waits_and_keeps_the_flag(

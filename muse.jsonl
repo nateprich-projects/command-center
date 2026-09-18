@@ -8511,3 +8511,4 @@
 {"agent": "muse", "do": "ticket", "phase": "bind", "run": "f605fd074fd7", "ts": 1789731638, "work": "nateprich-projects/command-center#1080"}
 {"agent": "muse", "api_cost": {"gh_calls": 58, "graphql_points": null}, "phase": "api_cost", "run": "f605fd074fd7", "ts": 1789731641}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/The-League", "run": "852617d584ae", "ts": 1789731683, "work": "228"}
+{"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 78}, "phase": "api_cost", "run": "852617d584ae", "ts": 1789731687}

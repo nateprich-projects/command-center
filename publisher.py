@@ -8,10 +8,11 @@ every minute on the Mac that holds the only Cloudflare credential:
    key; this script is its only writer.
 2. Read the ``refresh-requested`` flag the page's refresh button sets. When the
    flag is set and the newest snapshot is older than 10 minutes, run
-   ``funnel.py brief`` from the run clone once, then clear the flag. A set flag
-   on a fresh snapshot is cleared without running: the plan says a tap on a
-   fresh snapshot "does nothing", and leaving the flag set would fire a delayed
-   brief for a tap Nate has forgotten about.
+   ``funnel.py brief`` from the run clone once, then clear the flag when it
+   produces a publishable JSON snapshot. A set flag on a fresh snapshot is
+   cleared without running: the plan says a tap on a fresh snapshot "does
+   nothing", and leaving the flag set would fire a delayed brief for a tap Nate
+   has forgotten about.
 
 Spool contract (shared with the #650 writer): ``COMMAND_CENTER_DASHBOARD_SPOOL``
 holds one JSON object per brief with at least ``generated_at`` (ISO-8601);
@@ -458,6 +459,33 @@ def run_brief(funnel_py: Path, timeout: float) -> BriefResult:
                        stdout=completed.stdout, stderr=completed.stderr)
 
 
+def brief_is_publishable(result: BriefResult) -> bool:
+    """Whether a successful brief produced a snapshot safe to publish.
+
+    ``funnel.py brief`` returns exit 0 for a degraded read of the Project and
+    emits a small ``missing: [{"section": "items", "error": ...}]`` JSON
+    envelope instead of a full brief. That envelope must keep the refresh flag
+    set so the next tick can retry; other missing sections remain publishable.
+    """
+    if result.timed_out or result.returncode != 0:
+        return False
+    try:
+        payload = json.loads(result.stdout)
+    except (UnicodeDecodeError, TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    missing = payload.get("missing", [])
+    if not isinstance(missing, list):
+        return False
+    return not any(
+        isinstance(entry, dict)
+        and entry.get("section") == "items"
+        and "error" in entry
+        for entry in missing
+    )
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent
 
@@ -613,8 +641,19 @@ def tick(spool_dir: Path, env_file: Path, wrangler_toml: Path,
                 "utf-8", errors="replace")
             log("brief output tail: {}".format(tail))
     if flag is not None:
-        kv.delete(REFRESH_KEY)
-        log("refresh flag cleared")
+        if result.returncode == 0 and not result.timed_out:
+            if brief_is_publishable(result):
+                kv.delete(REFRESH_KEY)
+                log("refresh flag cleared")
+            else:
+                log("refresh flag kept; brief did not produce a publishable "
+                    "snapshot")
+        else:
+            # Preserve the existing nonzero/timeout handling. The exit-0
+            # missing-items envelope is the special degraded result that must
+            # remain eligible for the next tick.
+            kv.delete(REFRESH_KEY)
+            log("refresh flag cleared")
     return 0
 
 

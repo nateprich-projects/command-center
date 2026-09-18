@@ -89,10 +89,9 @@ def test_openai_five_hour_gate_is_suspended_by_policy():
 
 
 def test_shaping_is_allowed_for_an_unmetered_provider():
-    """Muse exposes no usage to a scheduled run (AGENTS.md); begin honours that
-    for the pace gate, and #86's 2026-09-09 revision has the shaping gate honour
-    it too. A metered reading keeps the idle-window rule, and a missing metered
-    reading still refuses closed."""
+    """The generic unmetered branch remains safe for future providers. A metered
+    reading keeps the idle-window rule, and a missing metered reading refuses
+    closed."""
     assert usage.shaping_allowed({"unmetered": True, "windows": {}})
     assert not usage.shaping_allowed({"windows": {}})
     assert usage.shaping_allowed({"windows": {"five_hour": {"used_percent": 5.0}}})

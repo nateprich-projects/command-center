@@ -36,6 +36,8 @@ from typing import Dict, List, Optional
 CLAUDE_CACHE = os.path.expanduser("~/.claude/command-center-usage.json")
 CLAUDE_TRANSCRIPTS = os.path.expanduser("~/.claude/projects/*/*.jsonl")
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions/*/*/*/*.jsonl")
+MUSE_SESSIONS = os.path.expanduser(
+    "~/.local/share/muse/sessions/*/*/*/*/session.jsonl")
 
 # -- The local token estimate -------------------------------------------------
 #
@@ -264,6 +266,22 @@ IDLE_RESET_TOLERANCE = 120.0
 FIVE_HOUR = 300 * 60
 SEVEN_DAY = 10080 * 60
 
+# Muse's pay-per-use contributor pricing, per million tokens. The local session
+# journal records total input, its cached subset, and output in each
+# `goal_usage_attribution` provider event, so the reader can price the calls
+# without depending on heartbeat session-id binding (#790).
+MUSE_INPUT_RATE = 0.10 / 1_000_000
+MUSE_CACHED_INPUT_RATE = 0.002 / 1_000_000
+MUSE_OUTPUT_RATE = 0.20 / 1_000_000
+MUSE_WEEKLY_CAP_DOLLARS = 20.0
+
+# The largest measured contributor-rate session was about eleven cents. Keep
+# that worst case below the flat weekly cap before admitting another session.
+MUSE_SESSION_RESERVE_DOLLARS = 0.11
+MUSE_WEEKLY_RESERVE = round(
+    100.0 * MUSE_SESSION_RESERVE_DOLLARS / MUSE_WEEKLY_CAP_DOLLARS, 2
+)
+
 
 def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
     """Estimate Claude usage from Claude Code's own transcripts.
@@ -418,6 +436,127 @@ def read_codex() -> Optional[Dict]:
         "captured_at": _epoch(stamp),
         "windows": windows,
     } if windows else None
+
+
+def _muse_epoch(record: Dict) -> Optional[float]:
+    """Return a Muse envelope's recorded time in epoch seconds."""
+    stamp = record.get("recorded_at")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        return None
+    stamp = float(stamp)
+    if stamp < 0:
+        return None
+    # Muse currently writes microseconds. Accept milliseconds and seconds too
+    # so fixture readers stay tied to the timestamp's scale, not one encoding.
+    if stamp >= 1e14:
+        return stamp / 1_000_000.0
+    if stamp >= 1e11:
+        return stamp / 1_000.0
+    return stamp
+
+
+def _muse_cost(quantity: object) -> Optional[float]:
+    """Price one complete provider attribution quantity, or report unknown."""
+    if not isinstance(quantity, dict):
+        return None
+    if quantity.get("reported") is False:
+        return None
+    values = []
+    for name in ("input_tokens", "cached_tokens", "output_tokens"):
+        value = quantity.get(name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if value < 0 or value != value or value == float("inf"):
+            return None
+        values.append(float(value))
+    if values[1] > values[0]:
+        return None
+    return (
+        (values[0] - values[1]) * MUSE_INPUT_RATE
+        + values[1] * MUSE_CACHED_INPUT_RATE
+        + values[2] * MUSE_OUTPUT_RATE
+    )
+
+
+def read_muse(now: float) -> Optional[Dict]:
+    """Price Muse provider calls in the trailing seven-day window.
+
+    Muse does not expose a scheduled-run quota endpoint. Its session journal is
+    the available source of truth: each provider ``goal_usage_attribution``
+    event carries the token quantities needed for contributor-rate pricing.
+    Tool, reminder, and compaction attribution events are deliberately excluded
+    because they are not provider calls. A provider event with an unreadable
+    timestamp or quantity fails closed rather than silently undercounting.
+    """
+    cutoff = now - SEVEN_DAY
+    spent = 0.0
+    calls = 0
+    seen_usage_ids = set()
+
+    for path in glob.glob(MUSE_SESSIONS):
+        try:
+            if os.path.getmtime(path) < cutoff:
+                continue
+            with open(path, errors="replace") as handle:
+                for line in handle:
+                    if "goal_usage_attribution" not in line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    payload = record.get("payload")
+                    event = payload.get("event") if isinstance(payload, dict) else None
+                    if not isinstance(event, dict) or event.get("kind") != (
+                            "goal_usage_attribution"):
+                        continue
+                    attribution = event.get("record")
+                    if not isinstance(attribution, dict):
+                        return None
+                    if attribution.get("usage_family") != "provider":
+                        continue
+                    recorded_at = _muse_epoch(record)
+                    if recorded_at is None:
+                        return None
+                    if recorded_at < cutoff or recorded_at > now:
+                        continue
+                    cost = _muse_cost(attribution.get("quantity"))
+                    if cost is None:
+                        return None
+                    usage_id = attribution.get("usage_id")
+                    if isinstance(usage_id, str) and usage_id:
+                        if usage_id in seen_usage_ids:
+                            continue
+                        seen_usage_ids.add(usage_id)
+                    spent += cost
+                    calls += 1
+        except OSError:
+            continue
+
+    if not calls:
+        return None
+
+    spent = round(spent, 6)
+    return {
+        "source": "muse",
+        "captured_at": now,
+        "spent_dollars": spent,
+        "cap_dollars": MUSE_WEEKLY_CAP_DOLLARS,
+        "windows": {
+            "seven_day": {
+                "used_percent": round(
+                    100.0 * spent / MUSE_WEEKLY_CAP_DOLLARS, 2
+                ),
+                "resets_at": now + SEVEN_DAY,
+                "rolling": True,
+                "spent_dollars": spent,
+                "cap_dollars": MUSE_WEEKLY_CAP_DOLLARS,
+                "calls": calls,
+            }
+        },
+    }
 
 
 def _find_rate_limits(node):
@@ -576,12 +715,10 @@ def shaping_allowed(reading: Dict) -> bool:
     threshold. Missing or malformed usage is not evidence of headroom, so it
     refuses closed.
 
-    An **unmetered** provider is the one exception, and it is the same one
-    `funnel begin` already applies to the pace gate: Muse exposes no usage to a
-    scheduled run, and Nate accepted that pool as ungated (AGENTS.md). Refusing
-    shaping on the same absence turned the exception into "never shape", which
-    is not what #86 decided — revised by Nate on 2026-09-09 to route
-    standard-tier ideas to Muse's standard schedule as well as to zcode.
+    An **unmetered** provider is the one exception, when one exists. Refusing
+    shaping on the same absence would turn that exception into "never shape";
+    the branch is retained for future providers, while Muse now has a local
+    rolling cost reader.
     """
     if isinstance(reading, dict) and reading.get("unmetered"):
         return True
@@ -675,14 +812,10 @@ PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
              "muse": "meta"}
 
 #: Providers that expose no usage anywhere, so there is nothing to gate on.
-#: **This is a standing exception, not a design** — `AGENTS.md` says missing
-#: usage data fails closed, and that rule would otherwise refuse Muse for ever.
-#: Nate's call, 2026-09-07: Muse's limits are generous, it takes only escalated
-#: work, and he reviews consumption through Meta's web portal. The distinction
-#: that matters is between *could not read* the budget, which still fails closed,
-#: and *there is no budget to read*, which proceeds knowingly. If Muse ever
-#: exposes usage, remove it from here rather than grandfathering the exception.
-UNMETERED_PROVIDERS = {"meta"}
+#: Keep this separate from a provider whose reader failed: missing usage still
+#: fails closed. Muse used to be the only member, but its local attribution
+#: reader now supplies a rolling dollar window.
+UNMETERED_PROVIDERS = set()
 
 #: z.ai reports quota directly, so nothing here is estimated. Found by reading
 #: z.ai's own `glm-plan-usage` plugin rather than guessing endpoints; the token
@@ -765,6 +898,13 @@ PROVIDER_POLICY = {
     # to 15 once #93 settles the model** — the measured reasoning for 15 is
     # unchanged and is recorded below.
     "zai": {"weekly_floor": 22.0, "weekly_reserve": 0.5},
+
+    # Muse's contributor-rate pool is metered from local session attribution.
+    # A rolling total uses the flat path in `pace`; 100% is the decided $20
+    # cap, and the measured $0.11 worst-case session reserve admits another
+    # session without crossing it.
+    "meta": {"weekly_target": 100.0,
+             "weekly_reserve": MUSE_WEEKLY_RESERVE},
 
     # Nate uses ChatGPT personally, so this pool is shared. Raised to 60 on
     # 2026-09-06, lowered to 30 the same day on review, and **raised to 90 on
@@ -921,6 +1061,8 @@ def read_agent(agent: str, now: float) -> Optional[Dict]:
         return read_codex()
     if provider == "zai":
         return read_zai(now)
+    if provider == "meta":
+        return read_muse(now)
     if provider in UNMETERED_PROVIDERS:
         # Not a failure to read — there is nothing to read. Returned explicitly
         # so callers can tell this apart from a reader that broke, and so the

@@ -2044,18 +2044,21 @@ def test_shapeable_idea_requires_the_needs_shaping_label(monkeypatch):
     assert funnel.shapeable_idea([], "standard", {}) is None
 
 
-def test_muse_standard_schedule_is_offered_a_standard_idea_on_an_unmetered_reading(
+def test_muse_standard_schedule_is_offered_a_standard_idea_on_a_metered_reading(
     monkeypatch, capsys
 ):
-    """#86, revised by Nate 2026-09-09: Muse's standard schedule shapes too.
-    The real headroom gate must admit an unmetered reading, not a patched one."""
+    """Muse's standard schedule may shape while its metered pool has headroom."""
     monkeypatch.setattr(
         funnel.subprocess, "run",
         lambda *args, **kwargs: SimpleNamespace(stdout="run-id\n"),
     )
     monkeypatch.setattr(
         usage, "read_agent",
-        lambda agent, timestamp: {"unmetered": True, "windows": {}},
+        lambda agent, timestamp: {"windows": {
+            "five_hour": {"used_percent": 0.0},
+            "seven_day": {"used_percent": 0.0, "rolling": True,
+                           "resets_at": 1},
+        }},
     )
     monkeypatch.setattr(
         funnel, "ideas",
@@ -2065,7 +2068,7 @@ def test_muse_standard_schedule_is_offered_a_standard_idea_on_an_unmetered_readi
     assert funnel.cmd_begin([], NOW, "muse", "standard", False, True) == 0
     result = json.loads(capsys.readouterr().out)
 
-    assert result["unmetered"] is True
+    assert "unmetered" not in result
     assert result["do"] == "shape"
     assert result["work"]["ref"] == "nateprich-projects/command-center#36"
 
@@ -2079,7 +2082,11 @@ def test_muse_escalated_schedule_is_never_offered_shaping(monkeypatch, capsys):
     )
     monkeypatch.setattr(
         usage, "read_agent",
-        lambda agent, timestamp: {"unmetered": True, "windows": {}},
+        lambda agent, timestamp: {"windows": {
+            "five_hour": {"used_percent": 0.0},
+            "seven_day": {"used_percent": 0.0, "rolling": True,
+                           "resets_at": 1},
+        }},
     )
     monkeypatch.setattr(
         funnel, "ideas",

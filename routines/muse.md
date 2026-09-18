@@ -116,9 +116,10 @@ you.
 - `"do": "shape"` — skip to the shaping section below. `work` names one
   standard-tier idea. Only the standard schedule ever sees this.
 
-**`"unmetered": true` is expected here and is not a problem.** Meta exposes no
-usage, so nothing was gated. It is a standing exception recorded in `AGENTS.md`,
-not a failure to read a budget.
+The opening result is already budget-gated from the local Muse session journal.
+It may stop with `"gate": "over"` when the rolling seven-day total plus the
+measured session reserve reaches the $20 cap, or with `"gate": "unknown"` when
+the attribution records cannot be read. Treat either stop as authoritative.
 
 **Keep `run`.** Every exit path finishes it: a start with no finish is read by the
 watchdog as a run that died. Pass the run id printed by this run's `begin` output

@@ -220,9 +220,22 @@ def test_usage_snapshot_reads_the_agent_own_provider(monkeypatch):
     assert str(now + 22) not in str(zcode)
 
 
-def test_usage_snapshot_records_an_unmetered_provider(monkeypatch):
+def test_usage_snapshot_records_the_muse_cost_window(monkeypatch):
+    import usage
+
+    now = 1_700_000_000.0
+    reading = {
+        "source": "muse", "captured_at": now,
+        "windows": {"seven_day": {
+            "used_percent": 12.5, "resets_at": now + usage.SEVEN_DAY,
+            "rolling": True,
+        }},
+    }
+    monkeypatch.setattr(heartbeat.time, "time", lambda: now)
+    monkeypatch.setattr(usage, "read_muse", lambda timestamp: reading)
+
     assert heartbeat.usage_snapshot("muse") == {
-        "source": "meta", "unmetered": True
+        "seven_day": {"used_percent": 12.5, "resets_at": now + usage.SEVEN_DAY}
     }
 
 

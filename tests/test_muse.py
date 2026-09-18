@@ -1,15 +1,4 @@
-"""Muse is the first pool with no budget to read, and the first run headlessly.
-
-Both are exceptions to rules written as absolutes, so both need a test that
-fails if someone later "tidies" them away.
-
-`AGENTS.md` says missing usage data fails closed — a run that cannot read its
-budget does not work. Meta exposes no usage at all, so that rule would refuse
-Muse for ever. The distinction the code has to keep is between **could not
-read** the budget, which still fails closed, and **there is no budget to read**,
-which proceeds knowingly. Collapse those two and either Muse never runs, or a
-genuinely broken reader silently waves work through.
-"""
+"""Muse's local cost reader and first headless-run harness."""
 
 from __future__ import annotations
 
@@ -29,6 +18,38 @@ import heartbeat  # noqa: E402
 import usage  # noqa: E402
 
 NOW = 1_788_800_000.0
+
+
+def _muse_record(at, *, input_tokens=0, cached_tokens=0, output_tokens=0,
+                 family="provider", usage_id=None):
+    record = {
+        "recorded_at": int(at * 1_000_000),
+        "payload": {"event": {
+            "kind": "goal_usage_attribution",
+            "record": {
+                "usage_family": family,
+                "quantity": {
+                    "input_tokens": input_tokens,
+                    "cached_tokens": cached_tokens,
+                    "output_tokens": output_tokens,
+                    "reported": True,
+                },
+            },
+        }},
+    }
+    if usage_id is not None:
+        record["payload"]["event"]["record"]["usage_id"] = usage_id
+    return record
+
+
+def _muse_fixture(tmp_path, monkeypatch, records):
+    session = tmp_path / "2026" / "09" / "18" / "session"
+    session.mkdir(parents=True)
+    (session / "session.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records))
+    monkeypatch.setattr(
+        usage, "MUSE_SESSIONS", str(tmp_path / "*/*/*/*/session.jsonl")
+    )
 
 
 def _stubbed_runner(tmp_path, begin, *, muse_stderr="", muse_status=0):
@@ -100,37 +121,80 @@ def test_the_two_registries_agree_about_muse():
     assert heartbeat.HARNESSES["muse"] == "muse-code"
 
 
-def test_an_unmetered_pool_is_not_the_same_as_an_unreadable_one():
-    """The whole exception rests on this distinction. `read_agent` returns a
-    reading for Muse — so the run proceeds — and `None` for an agent whose
-    provider has no reader, which still fails closed."""
+def test_muse_reader_prices_provider_calls(tmp_path, monkeypatch):
+    """Provider attribution is priced; non-provider events are not."""
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_record(
+            NOW - 3600, input_tokens=3_000_000, cached_tokens=2_000_000,
+            output_tokens=3_000_000, usage_id="provider-1"
+        ),
+        _muse_record(
+            NOW - 3600, input_tokens=9_000_000, output_tokens=9_000_000,
+            family="tool", usage_id="tool-1"
+        ),
+        _muse_record(
+            NOW - usage.SEVEN_DAY - 1, input_tokens=9_000_000,
+            output_tokens=9_000_000, usage_id="old-1"
+        ),
+    ])
     reading = usage.read_agent("muse", NOW)
-    assert reading is not None
-    assert reading["unmetered"] is True
-    assert reading["windows"] == {}
+    assert reading["source"] == "muse"
+    assert reading["spent_dollars"] == pytest.approx(0.704)
+    assert reading["cap_dollars"] == 20.0
+    window = reading["windows"]["seven_day"]
+    assert window["spent_dollars"] == pytest.approx(0.704)
+    assert window["used_percent"] == pytest.approx(3.52)
+    assert window["rolling"] is True
+    assert window["calls"] == 1
 
     # An agent nobody registered has no pool: a configuration error, not an
     # empty budget.
     assert usage.read_agent("nonesuch", NOW) is None
 
 
-def test_an_unmetered_reading_is_never_over_pace():
-    """There are no windows, so there is nothing to be over. If this ever
-    returns True the reviewer stops for ever and the failure looks like a
-    budget problem rather than a code one."""
-    verdict = usage.pace(usage.read_agent("muse", NOW), NOW, provider="meta")
-    assert verdict["over_pace"] is False
-    assert verdict["windows"] == []
+def test_muse_reader_uses_the_flat_cap_path(tmp_path, monkeypatch):
+    """A rolling total uses the flat cap rather than the proportional line."""
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_record(
+            NOW - 3600, input_tokens=190_000_000, output_tokens=1_000_000,
+            usage_id="provider-1"
+        )
+    ])
+    reading = usage.read_agent("muse", NOW)
+    verdict = usage.pace(reading, NOW, provider="meta")
+    assert verdict["windows"][0]["elapsed_fraction"] is None
+    assert verdict["windows"][0]["allowed_percent"] == 100.0
+    assert not verdict["over_pace"]
+    over = dict(reading)
+    over["windows"] = {
+        "seven_day": dict(reading["windows"]["seven_day"]),
+    }
+    over["windows"]["seven_day"]["used_percent"] = 100.0
+    assert usage.pace(over, NOW, provider="meta")["over_pace"]
 
 
-def test_a_registered_provider_without_a_reader_still_fails_closed():
-    """The exception is scoped to providers that expose nothing, not to every
-    provider that has not been wired up yet. Adding a name to `PROVIDERS`
-    must not quietly buy an exemption from the budget gate."""
-    assert "meta" in usage.UNMETERED_PROVIDERS
+def test_muse_reader_reports_spend_over_the_weekly_cap(tmp_path, monkeypatch):
+    """The rolling reader leaves an over-cap percentage visible to the gate."""
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_record(
+            NOW - 3600, input_tokens=202_000_000, usage_id="provider-1"
+        )
+    ])
+    reading = usage.read_agent("muse", NOW)
+    window = reading["windows"]["seven_day"]
+    assert reading["spent_dollars"] == pytest.approx(20.2)
+    assert window["used_percent"] == pytest.approx(101.0)
+    assert usage.pace(reading, NOW, provider="meta")["over_pace"]
+
+
+def test_muse_is_metered_with_a_measured_session_reserve():
+    """Muse uses the measured worst-case session reserve under the cap."""
+    assert "meta" not in usage.UNMETERED_PROVIDERS
     assert "anthropic" not in usage.UNMETERED_PROVIDERS
     assert "openai" not in usage.UNMETERED_PROVIDERS
     assert "zai" not in usage.UNMETERED_PROVIDERS
+    assert usage.PROVIDER_POLICY["meta"]["weekly_target"] == 100.0
+    assert usage.PROVIDER_POLICY["meta"]["weekly_reserve"] == pytest.approx(0.55)
 
 
 def test_muse_model_detection_reads_snapshots_not_jsonl():

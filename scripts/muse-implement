@@ -1,8 +1,8 @@
 #!/bin/bash
-# A Muse implementer: one escalated ticket, then stop.
+# A Muse implementer: one ticket at the given tier, then stop.
 #
 # Usage: muse-implement [tier] [reasoning-effort]
-#   tier   -- escalated (default and only accepted tier)
+#   tier   -- escalated (default) or standard; each tier has its own launchd job
 #   effort -- max (default and only accepted effort)
 #
 # This is deliberately a separate runner from muse-review. The reviewer has
@@ -76,6 +76,9 @@ case "$TIER" in
   escalated)
     MUSE_LOG_PATH="${MUSE_IMPLEMENT_LOG_PATH:-${HOME:-}/Library/Logs/command-center-muse-implement.log}"
     ;;
+  standard)
+    MUSE_LOG_PATH="${MUSE_IMPLEMENT_LOG_PATH:-${HOME:-}/Library/Logs/command-center-muse-implement-standard.log}"
+    ;;
   *)
     MUSE_LOG_PATH=""
     ;;
@@ -86,8 +89,8 @@ if (( MUSE_LOG_TRIMMED )); then
 fi
 
 EFFORT="${2:-max}"
-if [[ "$TIER" != "escalated" ]]; then
-  echo "muse-implement: tier must be escalated, got '$TIER'" >&2
+if [[ "$TIER" != "escalated" && "$TIER" != "standard" ]]; then
+  echo "muse-implement: tier must be escalated or standard, got '$TIER'" >&2
   exit 1
 fi
 if [[ "$EFFORT" != "max" ]]; then
@@ -169,7 +172,7 @@ cleanup() {
 trap cleanup EXIT
 
 # Own the opening poll. Empty polls never clone a repository or launch a model.
-BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent muse --tier escalated --role implement)"
+BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent muse --tier "$TIER" --role implement)"
 begin_status=$?
 if (( begin_status != 0 )); then
   echo "muse-implement: funnel begin failed (exit $begin_status)" >&2

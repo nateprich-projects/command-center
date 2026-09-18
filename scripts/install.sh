@@ -92,6 +92,7 @@ LAUNCHD_PLISTS=(
   com.nateprich.command-center-muse-review-standard.plist
   com.nateprich.command-center-muse-review-shadow.plist
   com.nateprich.command-center-muse-implement.plist
+  com.nateprich.command-center-muse-implement-standard.plist
   com.nateprich.command-center-run-keeper.plist
   com.nateprich.command-center-funnel-publisher.plist
   com.nateprich.command-center-funnel-deploy.plist

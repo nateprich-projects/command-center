@@ -29,7 +29,9 @@ REVIEWER_NAMES = [
 ]
 SHADOW_REVIEWER_NAME = "com.nateprich.command-center-muse-review-shadow.plist"
 IMPLEMENTER_NAME = "com.nateprich.command-center-muse-implement.plist"
-MUSE_SCHEDULE_NAMES = REVIEWER_NAMES + [SHADOW_REVIEWER_NAME, IMPLEMENTER_NAME]
+STANDARD_IMPLEMENTER_NAME = "com.nateprich.command-center-muse-implement-standard.plist"
+IMPLEMENTER_NAMES = [IMPLEMENTER_NAME, STANDARD_IMPLEMENTER_NAME]
+MUSE_SCHEDULE_NAMES = REVIEWER_NAMES + [SHADOW_REVIEWER_NAME] + IMPLEMENTER_NAMES
 KEEPER_NAME = "com.nateprich.command-center-run-keeper.plist"
 #: The Remote Control listener. Not a schedule; see the carve-out in `AGENTS.md`.
 REMOTE_CONTROL_NAME = "com.nateprich.command-center-remote-control.plist"
@@ -137,7 +139,7 @@ def test_the_plist_points_at_the_stable_path(name):
         plist = plistlib.load(handle)
     args = plist["ProgramArguments"]
     assert args[0] == "/bin/bash"
-    if name == IMPLEMENTER_NAME:
+    if name in IMPLEMENTER_NAMES:
         script = "muse-implement"
     elif name == SHADOW_REVIEWER_NAME:
         script = "muse-review-engine"
@@ -198,6 +200,7 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
     assert args(NAMES[1]) == ["standard", "high"]
     assert args(SHADOW_REVIEWER_NAME) == ["--shadow", "standard", "high"]
     assert args(IMPLEMENTER_NAME) == ["escalated", "max"]
+    assert args(STANDARD_IMPLEMENTER_NAME) == ["standard", "max"]
 
 
 def test_the_shadow_reviewer_runs_beside_standard_on_the_same_cadence():
@@ -248,6 +251,18 @@ def test_the_implementer_polls_every_fifteen_minutes_while_794_clears():
         plist = plistlib.load(handle)
 
     assert plist["StartInterval"] == 900
+    assert "StartCalendarInterval" not in plist
+
+
+def test_the_standard_implementer_polls_every_ten_minutes():
+    """Muse took over the standard lane from Codex on 2026-09-18 (Nate), at the
+    ten-minute cadence of the Codex automation it replaced."""
+    import plistlib
+
+    with (ROOT / "launchd" / STANDARD_IMPLEMENTER_NAME).open("rb") as handle:
+        plist = plistlib.load(handle)
+
+    assert plist["StartInterval"] == 600
     assert "StartCalendarInterval" not in plist
 
 

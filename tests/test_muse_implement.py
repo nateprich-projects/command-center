@@ -378,9 +378,9 @@ def test_a_stop_finishes_without_a_clone_or_model(tmp_path, gate, outcome):
     )
 
 
-def test_the_runner_refuses_any_lane_other_than_escalated_max():
+def test_the_runner_refuses_any_lane_other_than_escalated_or_standard_max():
     bad_tier = subprocess.run(
-        ["/bin/bash", str(SCRIPT), "standard", "max"],
+        ["/bin/bash", str(SCRIPT), "urgent", "max"],
         capture_output=True,
         text=True,
     )
@@ -391,7 +391,7 @@ def test_the_runner_refuses_any_lane_other_than_escalated_max():
     )
 
     assert bad_tier.returncode == 1
-    assert "tier must be escalated" in bad_tier.stderr
+    assert "tier must be escalated or standard" in bad_tier.stderr
     assert bad_effort.returncode == 1
     assert "reasoning effort must be max" in bad_effort.stderr
 

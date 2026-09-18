@@ -7044,10 +7044,61 @@ def dashboard_board(
     }
 
 
+def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:
+    """Return the compact Muse spend row for the dashboard snapshot.
+
+    Rolling seven-day dollars against the cap only; the 2026-09-18 decision
+    declined a 24-hour companion line. Best effort like the rest of the
+    snapshot: an unreadable reader yields None and the page hides the row,
+    never a failed brief.
+    """
+    try:
+        import usage
+    except Exception:
+        return None
+    try:
+        reading = usage.read_muse(now_epoch)
+    except Exception:
+        return None
+    if not isinstance(reading, dict):
+        return None
+    windows = reading.get("windows")
+    window = windows.get("seven_day") if isinstance(windows, dict) else None
+    if not isinstance(window, dict):
+        return None
+    spent = reading.get("spent_dollars")
+    cap = reading.get("cap_dollars")
+    percent = window.get("used_percent")
+    calls = window.get("calls")
+    for value in (spent, cap, percent):
+        if (
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or value != value
+            or value in (float("inf"), float("-inf"))
+        ):
+            return None
+    if cap <= 0 or spent < 0:
+        return None
+    if (
+        not isinstance(calls, int)
+        or isinstance(calls, bool)
+        or calls < 0
+    ):
+        return None
+    return {
+        "spent_dollars": float(spent),
+        "cap_dollars": float(cap),
+        "used_percent": float(percent),
+        "calls": calls,
+    }
+
+
 def write_dashboard_snapshot(
     brief: Mapping[str, object],
     board: Mapping[str, object],
     generated_at: str,
+    usage: Optional[Mapping[str, object]] = None,
 ) -> pathlib.Path:
     """Atomically append one display snapshot to the local dashboard spool."""
     spool_dir = _dashboard_spool_dir()
@@ -7055,6 +7106,7 @@ def write_dashboard_snapshot(
         "brief": brief,
         "board": board,
         "generated_at": generated_at,
+        "usage": dict(usage) if isinstance(usage, Mapping) else None,
     }
     text = json.dumps(payload, indent=2) + "\n"
     name = "brief-{}-{}.json".format(
@@ -13309,6 +13361,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             authoring_pr_agents=authoring_pr_agents,
                         ),
                         generated_at,
+                        usage={
+                            "muse": _dashboard_muse_usage(
+                                now.timestamp()
+                            ),
+                        },
                     )
                 except Exception as exc:
                     # The dashboard is downstream instrumentation. A missing

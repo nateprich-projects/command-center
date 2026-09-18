@@ -566,6 +566,45 @@ function failureState(snapshot) {
   return snapshot.last_brief_failed ?? snapshot.status?.last_brief_failed ?? false;
 }
 
+// Rolling seven-day Muse spend against the decided cap, read from the
+// snapshot root rather than the brief. The one usage line Nate chose for the
+// test week, with no companion line for a shorter window (2026-09-18). An
+// unreadable row renders nothing, so a missing reader never blocks the board.
+function museUsage(muse) {
+  if (!muse || typeof muse !== "object") return null;
+  const spent = muse.spent_dollars;
+  const cap = muse.cap_dollars;
+  const percent = muse.used_percent;
+  for (const value of [spent, cap, percent]) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  }
+  if (cap <= 0 || spent < 0) return null;
+  return { spent, cap, percent };
+}
+
+function museUsageText(muse) {
+  const parsed = museUsage(muse);
+  if (!parsed) return null;
+  return `Muse 7-day spend $${parsed.spent.toFixed(2)} of $${parsed.cap.toFixed(2)} (${parsed.percent.toFixed(1)}%)`;
+}
+
+function renderUsage(usage) {
+  const container = document.querySelector("#usage");
+  container.replaceChildren();
+  const parsed = museUsage(usage && usage.muse);
+  if (!parsed) return;
+  const wrap = element("div", "usage");
+  wrap.append(element("span", "usage-label",
+    `Muse 7-day spend $${parsed.spent.toFixed(2)} of $${parsed.cap.toFixed(2)}`));
+  const bar = element("div", "usage-bar");
+  const fill = element("i", `usage-fill${parsed.percent >= 100 ? " over" : ""}`);
+  fill.setAttribute("style", `width: ${Math.min(100, parsed.percent).toFixed(1)}%`);
+  bar.append(fill);
+  wrap.append(bar);
+  wrap.append(element("span", "usage-percent", `${parsed.percent.toFixed(1)}%`));
+  container.append(wrap);
+}
+
 let lastGeneratedAt = null;
 let loading = false;
 
@@ -591,6 +630,7 @@ async function loadSnapshot({ force = false } = {}) {
     if (!force && generatedAt && generatedAt === lastGeneratedAt) return;
     lastGeneratedAt = generatedAt || null;
     renderWaiting(snapshot.brief || {});
+    renderUsage(snapshot.usage || {});
     renderBoard(snapshot.board || {});
   } finally {
     loading = false;
@@ -621,6 +661,6 @@ if (typeof document !== "undefined") {
 }
 
 export {
-  STAGES, age, boardColumns, failureState, nextOwner, pipState, renderPhoneBoard,
-  rowTier, shortRepo,
+  STAGES, age, boardColumns, failureState, museUsageText, nextOwner, pipState,
+  renderPhoneBoard, rowTier, shortRepo,
 };

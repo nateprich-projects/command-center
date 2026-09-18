@@ -247,6 +247,95 @@ def test_spool_prune_leaves_unrelated_files(monkeypatch, tmp_path):
     assert len([n for n in names if n.startswith("brief-")]) == 1
 
 
+def _muse_reading(**overrides):
+    reading = {
+        "source": "muse",
+        "captured_at": 1_788_000_000.0,
+        "spent_dollars": 0.704,
+        "cap_dollars": 20.0,
+        "windows": {
+            "seven_day": {
+                "used_percent": 3.52,
+                "resets_at": 1_788_604_800.0,
+                "rolling": True,
+                "spent_dollars": 0.704,
+                "cap_dollars": 20.0,
+                "calls": 42,
+            }
+        },
+    }
+    reading.update(overrides)
+    return reading
+
+
+def test_dashboard_muse_usage_maps_the_seven_day_window(monkeypatch):
+    import usage
+
+    monkeypatch.setattr(usage, "read_muse", lambda now: _muse_reading())
+
+    assert funnel._dashboard_muse_usage(1_788_000_000.0) == {
+        "spent_dollars": 0.704,
+        "cap_dollars": 20.0,
+        "used_percent": 3.52,
+        "calls": 42,
+    }
+
+
+def test_dashboard_muse_usage_is_none_when_unreadable(monkeypatch):
+    import usage
+
+    monkeypatch.setattr(usage, "read_muse", lambda now: None)
+    assert funnel._dashboard_muse_usage(1_788_000_000.0) is None
+
+    def fail(now):
+        raise OSError("journal locked")
+
+    monkeypatch.setattr(usage, "read_muse", fail)
+    assert funnel._dashboard_muse_usage(1_788_000_000.0) is None
+
+    monkeypatch.setattr(
+        usage, "read_muse", lambda now: _muse_reading(windows={})
+    )
+    assert funnel._dashboard_muse_usage(1_788_000_000.0) is None
+
+
+def test_write_dashboard_snapshot_defaults_usage_to_none(tmp_path, monkeypatch):
+    spool = tmp_path / "spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+
+    target = funnel.write_dashboard_snapshot(
+        {"n": 1}, {"columns": []}, "2026-09-13T12:00:00+00:00"
+    )
+
+    assert json.loads(target.read_text())["usage"] is None
+
+
+def test_successful_brief_spools_muse_usage(monkeypatch, tmp_path, capsys):
+    spool = tmp_path / "dashboard-spool"
+    monkeypatch.setenv(funnel.DASHBOARD_SPOOL_ENV, str(spool))
+    expected = _brief_output()
+    monkeypatch.setattr(funnel, "load_items", lambda: [])
+
+    def fake_cmd_brief(items, now, **kwargs):
+        print(expected)
+        return 0
+
+    monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
+    row = {
+        "spent_dollars": 0.704,
+        "cap_dollars": 20.0,
+        "used_percent": 3.52,
+        "calls": 42,
+    }
+    monkeypatch.setattr(
+        funnel, "_dashboard_muse_usage", lambda now_epoch: dict(row)
+    )
+
+    assert funnel.main(["brief"]) == 0
+    assert capsys.readouterr().out == expected + "\n"
+    assert _spooled(spool)["usage"] == {"muse": row}
+
+
 def test_spool_prune_failure_keeps_the_brief_and_the_snapshot(
     monkeypatch, tmp_path, capsys
 ):

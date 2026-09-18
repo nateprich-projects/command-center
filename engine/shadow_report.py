@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import statistics
@@ -2000,6 +2001,116 @@ def _oldest_timestamp(*record_sets: Optional[Sequence[Dict]]) -> Optional[float]
     return min(timestamps) if timestamps else None
 
 
+def _comparison_finish_time(*jobs: Dict) -> Optional[float]:
+    """Return when a comparison became complete, using its finish rows."""
+    timestamps = [
+        _timestamp(job.get("finished_at"))
+        for job in jobs
+        if isinstance(job, Mapping)
+    ]
+    parsed = [timestamp for timestamp in timestamps if timestamp is not None]
+    return max(parsed) if parsed else None
+
+
+def _comparison_rate_per_hour(finish_times: Sequence[float]) -> float:
+    """Measure comparison accrual from the first and last completed pair.
+
+    A single completion, or several completions at the same timestamp, does
+    not establish an accrual rate.  Returning zero makes the resulting
+    projection fail closed instead of treating an instantaneous sample as a
+    sustainable rate.
+    """
+    parsed = sorted(
+        float(timestamp)
+        for timestamp in finish_times
+        if isinstance(timestamp, (int, float))
+        and not isinstance(timestamp, bool)
+        and math.isfinite(float(timestamp))
+    )
+    if len(parsed) < 2:
+        return 0.0
+    elapsed = parsed[-1] - parsed[0]
+    if elapsed <= 0:
+        return 0.0
+    return len(parsed) * 3600.0 / elapsed
+
+
+def _clean_jobs_needed(compared: int, misses: int, threshold: float) -> int:
+    """Return the minimum number of clean jobs needed to reach a bar."""
+    if compared <= 0:
+        # One clean comparison is the smallest sample that can establish a
+        # rate and a threshold result from an empty window.
+        return 1
+    agree = compared - misses
+    shortfall = threshold * compared - agree
+    if shortfall <= 0:
+        return 0
+    return int(math.ceil(shortfall / (1.0 - threshold) - 1e-12))
+
+
+def _projection(
+    *,
+    compared: int,
+    misses: int,
+    hard_fail: Optional[int],
+    finish_times: Sequence[float],
+    upper_bound_field: bool,
+    threshold: float = 0.95,
+) -> Dict[str, object]:
+    """Project whether a shadow window can still reach its cutover bar.
+
+    Review misses are deliberately exposed as
+    ``engine_wrong_upper_bound``: a shadow rejection that live approved may
+    be an old-reviewer error or a judgement call, so this report cannot label
+    it engine-wrong.  Breakdown/shape misses are directional disagreements
+    under that mode's settled predicate.
+    """
+    clean_jobs_needed = _clean_jobs_needed(compared, misses, threshold)
+    rate_per_hour = _comparison_rate_per_hour(finish_times)
+    if clean_jobs_needed == 0:
+        hours_to_threshold = 0.0
+    elif rate_per_hour == 0.0:
+        hours_to_threshold = float("inf")
+    else:
+        hours_to_threshold = clean_jobs_needed / rate_per_hour
+
+    if hard_fail:
+        reason = (
+            "restart recommended: {} hard-fail comparison{}"
+            .format(hard_fail, "" if hard_fail == 1 else "s")
+        )
+        restart_recommended = True
+    elif math.isinf(hours_to_threshold):
+        reason = (
+            "restart recommended: comparison rate is zero, so threshold "
+            "recovery is unbounded"
+        )
+        restart_recommended = True
+    elif hours_to_threshold > 24:
+        reason = (
+            "restart recommended: threshold recovery takes more than 24 "
+            "hours at the observed rate"
+        )
+        restart_recommended = True
+    elif clean_jobs_needed == 0:
+        reason = "continue: threshold is met"
+        restart_recommended = False
+    else:
+        reason = "continue: threshold is reachable within 24 hours"
+        restart_recommended = False
+
+    field = "engine_wrong_upper_bound" if upper_bound_field else "misses"
+    return {
+        field: misses,
+        "hard_fail": None if hard_fail is None else bool(hard_fail),
+        "rate_per_hour": rate_per_hour,
+        "clean_jobs_needed": clean_jobs_needed,
+        "hours_to_threshold": hours_to_threshold,
+        "restart_recommended": restart_recommended,
+        "reason": reason,
+    }
+
+
 def build_breakdown_shape_report(
     shadow_records: Sequence[Dict],
     live_records: Optional[Sequence[Dict]] = None,
@@ -2059,6 +2170,7 @@ def build_breakdown_shape_report(
     comparison_pairs = _comparison_pairs(pairs)
     comparable = []
     disagreements = []
+    comparison_finish_times: List[float] = []
     for breakdown_pair, shape_pair in comparison_pairs:
         shadow_breakdown, live_breakdown = breakdown_pair
         shadow_shape, live_shape = shape_pair
@@ -2091,6 +2203,14 @@ def build_breakdown_shape_report(
         ]
         agrees = not failed_arms
         comparable.append(agrees)
+        finish_time = _comparison_finish_time(
+            shadow_breakdown,
+            live_breakdown,
+            shadow_shape,
+            live_shape,
+        )
+        if finish_time is not None:
+            comparison_finish_times.append(finish_time)
         if not agrees:
             disagreements.append(
                 _breakdown_shape_disagreement_entry(
@@ -2113,6 +2233,13 @@ def build_breakdown_shape_report(
     )
     live_malformed = _issue_malformed_count(
         live, live_observations, shadow=False
+    )
+    projection = _projection(
+        compared=compared,
+        misses=compared - agree,
+        hard_fail=None,
+        finish_times=comparison_finish_times,
+        upper_bound_field=False,
     )
 
     return {
@@ -2149,6 +2276,7 @@ def build_breakdown_shape_report(
                 "live": _time_stats(live),
             },
         },
+        "projection": projection,
     }
 
 
@@ -2237,6 +2365,29 @@ def build_report(
         for left, right in comparable
         if left.get("decision") != right.get("decision")
     ]
+    comparison_finish_times = [
+        finish_time
+        for left, right in comparable
+        for finish_time in [_comparison_finish_time(left, right)]
+        if finish_time is not None
+    ]
+    engine_wrong_upper_bound = sum(
+        left.get("decision") == "rejected"
+        and right.get("decision") == "approved"
+        for left, right in comparable
+    )
+    hard_fail = sum(
+        left.get("decision") == "approved"
+        and right.get("decision") == "rejected"
+        for left, right in comparable
+    )
+    projection = _projection(
+        compared=len(comparable),
+        misses=engine_wrong_upper_bound,
+        hard_fail=hard_fail,
+        finish_times=comparison_finish_times,
+        upper_bound_field=True,
+    )
 
     return {
         "window": {
@@ -2280,6 +2431,7 @@ def build_report(
             "shadow": _time_stats(shadow),
             "live": _time_stats(live),
         },
+        "projection": projection,
     }
 
 

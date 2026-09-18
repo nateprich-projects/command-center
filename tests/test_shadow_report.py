@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import pathlib
 
 from engine import shadow_report
@@ -1183,3 +1184,141 @@ def test_load_report_reads_legacy_live_outcomes_from_issue_events(monkeypatch):
         ("sub_issues", "owner/repo", 103),
         ("comments", "owner/repo", 103),
     ]
+
+
+def _review_projection_streams(*, finish_times, shadow_misses=()):
+    shadow = []
+    live = []
+    misses = set(shadow_misses)
+    for index, finished in enumerate(finish_times, 1):
+        shadow_verdict = "rejected" if index in misses else "approved"
+        live_verdict = "approved"
+        shadow += _review_job(
+            "projection-shadow-{}".format(index), finished,
+            shadow_verdict, "shadow-head-{}".format(index),
+            "shadow review of PR #{}: {}".format(index, shadow_verdict),
+            pr=index,
+        )
+        live += _review_job(
+            "projection-live-{}".format(index), finished + 10,
+            live_verdict, "live-head-{}".format(index),
+            "reviewed PR #{}: {}".format(index, live_verdict),
+            pr=index,
+        )
+    return shadow, live
+
+
+def test_review_projection_recovers_within_a_day_from_finish_rate():
+    shadow, live = _review_projection_streams(
+        finish_times=[100 + index * 400 for index in range(10)],
+        shadow_misses={1},
+    )
+
+    projection = shadow_report.build_report(
+        shadow, live, now=4000, window_seconds=4000,
+    )["projection"]
+
+    assert projection["engine_wrong_upper_bound"] == 1
+    assert projection["hard_fail"] is False
+    assert projection["rate_per_hour"] == 10.0
+    assert projection["clean_jobs_needed"] == 10
+    assert projection["hours_to_threshold"] == 1.0
+    assert projection["restart_recommended"] is False
+
+
+def test_review_projection_recommends_restart_when_recovery_exceeds_a_day():
+    shadow, live = _review_projection_streams(
+        finish_times=[100 + index * 13_333.333333333334
+                      for index in range(10)],
+        shadow_misses={1},
+    )
+
+    projection = shadow_report.build_report(
+        shadow, live, now=130000, window_seconds=130000,
+    )["projection"]
+
+    assert projection["clean_jobs_needed"] == 10
+    assert projection["rate_per_hour"] <= 0.3
+    assert projection["hours_to_threshold"] > 24
+    assert projection["restart_recommended"] is True
+    assert "more than 24 hours" in projection["reason"]
+
+
+def test_zero_comparison_rate_projects_unbounded_recovery():
+    shadow, live = _review_projection_streams(
+        finish_times=[100],
+        shadow_misses={1},
+    )
+
+    projection = shadow_report.build_report(
+        shadow, live, now=200, window_seconds=200,
+    )["projection"]
+
+    assert projection["rate_per_hour"] == 0.0
+    assert math.isinf(projection["hours_to_threshold"])
+    assert projection["restart_recommended"] is True
+    assert "rate is zero" in projection["reason"]
+
+
+def test_review_wrong_approval_is_a_hard_fail_even_when_bar_is_met():
+    shadow = _review_job(
+        "hard-fail-shadow", 100, "approved", "shadow-head",
+        "shadow review of PR #42: approved", pr=42,
+    )
+    live = _review_job(
+        "hard-fail-live", 110, "rejected", "live-head",
+        "reviewed PR #42: rejected", pr=42,
+    )
+
+    projection = shadow_report.build_report(
+        shadow, live, now=200, window_seconds=200,
+    )["projection"]
+
+    assert projection["engine_wrong_upper_bound"] == 0
+    assert projection["hard_fail"] is True
+    assert projection["clean_jobs_needed"] == 0
+    assert projection["restart_recommended"] is True
+    assert "hard-fail" in projection["reason"]
+
+
+def test_breakdown_shape_projection_uses_directional_misses():
+    records = []
+    live_shape_statuses = {}
+    for index in range(10):
+        target = "owner/repo#{}".format(500 + index)
+        finished = 100 + index * 400
+        records += _breakdown_shadow_job(
+            "projection-shadow-breakdown-{}".format(index),
+            finished, 2, target=target,
+        )
+        records += _breakdown_live_job(
+            "projection-live-breakdown-{}".format(index),
+            finished + 10, 4 if index == 0 else 2, target=target,
+            structured=True,
+        )
+        records += _issue_job(
+            "projection-shadow-shape-{}".format(index), "shape",
+            finished + 20,
+            "shadow shape of {}: Ready".format(target), target=target,
+        )
+        live_shape_run = "projection-live-shape-{}".format(index)
+        records += _issue_job(
+            live_shape_run, "shape", finished + 30,
+            "shaped {}: Ready".format(target), target=target,
+        )
+        live_shape_statuses[live_shape_run] = {
+            "status": "Ready", "status_since": finished + 25,
+        }
+
+    report = shadow_report.build_report(
+        records, now=4000, window_seconds=4000,
+        mode="breakdown-shape", live_shape_statuses=live_shape_statuses,
+    )
+    projection = report["projection"]
+
+    assert projection["misses"] == 1
+    assert projection["hard_fail"] is None
+    assert projection["rate_per_hour"] == 10.0
+    assert projection["clean_jobs_needed"] == 10
+    assert projection["hours_to_threshold"] == 1.0
+    assert projection["restart_recommended"] is False

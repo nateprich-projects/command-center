@@ -8070,3 +8070,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": 77}, "phase": "api_cost", "run": "1ee28ead536b", "ts": 1789719387}
 {"agent": "muse", "do": "breakdown", "phase": "bind", "run": "1ee28ead536b", "ts": 1789719383, "work": "nateprich-projects/FF-Weekly-Start-Sit#90"}
 {"agent": "muse", "do": "breakdown", "phase": "bind", "run": "e56877185304", "ts": 1789719386, "work": "nateprich-projects/FF-Weekly-Start-Sit#90"}
+{"agent": "muse", "api_cost": {"gh_calls": 31, "graphql_points": null}, "phase": "api_cost", "run": "e56877185304", "ts": 1789719398}

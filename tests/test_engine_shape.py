@@ -49,6 +49,7 @@ def answer(**kw):
         "proposed_class": "Improve",
         "plan_markdown": "# Plan\n\nDo the thing.\n",
         "escalated_risk": [],
+        "depends_on": [],
     }
     data.update(kw)
     return data
@@ -125,11 +126,13 @@ def test_validation_strips_surrounding_whitespace():
     found = shape.validate_answer(answer(
         proposed_class="  Improve  ",
         plan_markdown="\n# Plan\n",
-        needs_nate={"exposure": None, "gates": "  Who decides?  ",
-                    "scope": None, "preference": None}))
+        needs_nate={"exposure": None, "gates": ["  Who decides?  "],
+                    "scope": None, "preference": None},
+        depends_on=["  owner/repo#165  "]))
     assert found["proposed_class"] == "Improve"
     assert found["plan_markdown"] == "# Plan"
-    assert found["needs_nate"]["gates"] == "Who decides?"
+    assert found["needs_nate"]["gates"] == ["Who decides?"]
+    assert found["depends_on"] == ["owner/repo#165"]
 
 
 def test_the_answer_must_be_an_object():
@@ -257,6 +260,66 @@ def test_an_empty_escalated_risk_list_is_honest():
     assert found["escalated_risk"] == []
 
 
+def test_an_answer_missing_depends_on_is_malformed():
+    # #1053: the sequencing list is required, even when the plan waits
+    # on nothing — an empty list says so honestly.
+    bad = answer()
+    del bad["depends_on"]
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(bad)
+
+
+def test_depends_on_must_be_a_list_of_owner_repo_refs():
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(depends_on="owner/repo#165"))
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(depends_on=[165]))
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(depends_on=["#165"]))
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(depends_on=["owner/repo#0"]))
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(depends_on=["not a ref"]))
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(depends_on=[""]))
+    found = shape.validate_answer(answer(depends_on=[
+        "owner/repo#165", "other/repo#7"]))
+    assert found["depends_on"] == ["owner/repo#165", "other/repo#7"]
+
+
+def test_needs_nate_accepts_atomic_lists():
+    # #1053: each category carries null or a small list of single
+    # questions; inner whitespace collapses per question.
+    found = shape.validate_answer(answer(needs_nate={
+        "exposure": None, "gates": None,
+        "scope": ["Should we build it at all?",
+                  "Which  milestone\nowns the work?"],
+        "preference": None}))
+    assert found["needs_nate"]["scope"] == [
+        "Should we build it at all?",
+        "Which milestone owns the work?"]
+
+
+def test_needs_nate_rejects_a_bare_string():
+    # #1053: the old single-question shape is malformed now that each
+    # category carries a list — the runner retries once with this error
+    # fed back, and the model answers again with a list.
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(needs_nate={
+            "exposure": None, "gates": "Who may write Ready?",
+            "scope": None, "preference": None}))
+
+
+@pytest.mark.parametrize("bad", [[""], ["  "], [123], [None], ["ok", ""],
+                                 [{"question": "q"}]])
+def test_needs_nate_rejects_bad_list_entries(bad):
+    needs = {"exposure": None, "gates": None, "scope": None,
+             "preference": None}
+    needs["scope"] = bad
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(needs_nate=needs))
+
+
 # -- rendering -------------------------------------------------------------
 
 def test_render_carries_the_plan_and_every_field():
@@ -286,7 +349,7 @@ def test_render_uses_the_stable_all_clear_lines():
 
 def test_render_records_open_questions_verbatim():
     body = shape.render_plan(shape.validate_answer(answer(needs_nate={
-        "exposure": None, "gates": "Who may write Ready?",
+        "exposure": None, "gates": ["Who may write Ready?"],
         "scope": None, "preference": None})))
     assert "- Gates: Who may write Ready?" in body
     assert "- Exposure: nothing outstanding." in body
@@ -312,7 +375,7 @@ def test_an_all_clear_render_passes_the_old_parser():
 
 def test_an_open_render_holds_under_the_old_parser():
     body = shape.render_plan(shape.validate_answer(answer(needs_nate={
-        "exposure": None, "gates": "Who may write Ready?",
+        "exposure": None, "gates": ["Who may write Ready?"],
         "scope": None, "preference": None})))
     assert funnel.shaped_plan_status(body) == (
         "Shaped", "open question under Gates")
@@ -321,6 +384,41 @@ def test_an_open_render_holds_under_the_old_parser():
 def test_the_all_clear_render_carries_no_authority_signals():
     body = shape.render_plan(shape.validate_answer(answer()))
     assert funnel.needs_nate_signals(body) == []
+
+
+def test_render_joins_atomic_questions_on_one_category_line():
+    body = shape.render_plan(shape.validate_answer(answer(needs_nate={
+        "exposure": None, "gates": None,
+        "scope": ["Should we build it at all?",
+                  "Which milestone owns the work?"],
+        "preference": None})))
+    assert ("- Scope and priority: Should we build it at all?; "
+            "Which milestone owns the work?") in body
+
+
+def test_render_records_sequencing_dependencies():
+    body = shape.render_plan(shape.validate_answer(answer(
+        depends_on=["owner/repo#165", "other/repo#7"])))
+    assert "## Sequencing" in body
+    assert "Depends on: owner/repo#165, other/repo#7" in body
+    # Needs stays last for the readers that still parse it.
+    assert body.index("## Sequencing") < body.index("## Needs Nate")
+
+
+def test_render_omits_sequencing_when_nothing_waits():
+    body = shape.render_plan(shape.validate_answer(answer()))
+    assert "## Sequencing" not in body
+    assert "Depends on" not in body
+
+
+def test_a_listed_render_holds_under_the_old_parser():
+    body = shape.render_plan(shape.validate_answer(answer(needs_nate={
+        "exposure": None, "gates": None,
+        "scope": ["Should we build it at all?",
+                  "Which milestone owns the work?"],
+        "preference": None})))
+    assert funnel.shaped_plan_status(body) == (
+        "Shaped", "open question under Scope and priority")
 
 
 # -- the mechanical rule -----------------------------------------------------
@@ -337,7 +435,7 @@ def test_an_all_clear_agent_plan_is_ready():
 def test_one_open_need_holds_at_shaped():
     status, reason = shape.decide(
         shape.validate_answer(answer(needs_nate={
-            "exposure": None, "gates": "Who may write Ready?",
+            "exposure": None, "gates": ["Who may write Ready?"],
             "scope": None, "preference": None})),
         klass="Improve", origin_voice="agent")
     assert status == "Shaped"
@@ -347,8 +445,8 @@ def test_one_open_need_holds_at_shaped():
 def test_every_open_need_is_named():
     status, reason = shape.decide(
         shape.validate_answer(answer(needs_nate={
-            "exposure": "New surface?", "gates": None,
-            "scope": None, "preference": "Which default?"})),
+            "exposure": ["New surface?"], "gates": None,
+            "scope": None, "preference": ["Which default?"]})),
         klass="Improve", origin_voice="agent")
     assert status == "Shaped"
     assert reason == ("open question under Exposure; "
@@ -443,6 +541,74 @@ def test_declaration_and_scan_union_without_duplicates():
         escalation_reasons=["credentials"])
     assert (status, reason) == (
         "Shaped", "escalated risk (credentials, data-migration)")
+
+
+def test_a_sequencing_only_plan_self_approves():
+    # #1053: "wait for #165 or start now" is a dependency, not a
+    # question — with needs_nate all null the plan is Ready.
+    status, reason = shape.decide(
+        shape.validate_answer(answer(depends_on=["owner/repo#165"])),
+        klass="Improve", origin_voice="agent")
+    assert status == "Ready"
+    assert reason == ("needs_nate all null; class Improve self-approvable; "
+                      "origin agent")
+
+
+def test_a_compound_scope_splits_so_only_the_kind_a_half_stays_open():
+    # #1053: the sequencing half moves to depends_on; the Kind A half —
+    # whether to build the capability at all — stays the one open
+    # question, and the reason names only its category.
+    status, reason = shape.decide(
+        shape.validate_answer(answer(
+            needs_nate={"exposure": None, "gates": None,
+                        "scope": ["Should we build the capability at all?"],
+                        "preference": None},
+            depends_on=["owner/repo#165"])),
+        klass="Improve", origin_voice="agent")
+    assert status == "Shaped"
+    assert reason == "open question under Scope and priority"
+
+
+def test_a_documented_runtime_root_keeps_a_path_question_out_of_needs_nate():
+    # #1053: a machine-local path under the repo's documented runtime
+    # root is precedent (or a recorded reversible default), never a
+    # Needs Nate entry — with the record all null the plan is Ready.
+    status, _ = shape.decide(
+        shape.validate_answer(answer(decided_from_precedent=[
+            {"claim": "machine-local state lives under the documented "
+                      "runtime root; the exact path stays out of Git",
+             "source": "AGENTS.md runtime root"}])),
+        klass="Improve", origin_voice="agent")
+    assert status == "Ready"
+
+
+def test_exposure_still_holds_alongside_a_recorded_dependency():
+    # #1053: Kind A questions stay his — a sequencing edge never
+    # releases an exposure hold.
+    status, reason = shape.decide(
+        shape.validate_answer(answer(
+            needs_nate={"exposure": ["Does this open a new reachable "
+                                     "surface?"],
+                        "gates": None, "scope": None,
+                        "preference": None},
+            depends_on=["owner/repo#165"])),
+        klass="Improve", origin_voice="agent")
+    assert status == "Shaped"
+    assert reason == "open question under Exposure"
+
+
+def test_an_authorisation_risk_still_holds_alongside_a_recorded_dependency():
+    # #1053: same for the escalated hold — the dependency is recorded
+    # and the risk still holds the plan at Shaped.
+    status, reason = shape.decide(
+        shape.validate_answer(answer(
+            escalated_risk=[{"reason": "authorisation",
+                             "why": "grants a new permission model"}],
+            depends_on=["owner/repo#165"])),
+        klass="Improve", origin_voice="agent",
+        escalation_reasons=[])
+    assert (status, reason) == (
+        "Shaped", "escalated risk (authorisation)")
 
 
 # -- the assembled packet ----------------------------------------------------
@@ -610,7 +776,7 @@ def test_apply_holds_a_plan_with_one_open_need_at_shaped(
     calls = stub_gh(monkeypatch, item)
     assert shape.apply_shape(
         [item], NOW, item.ref, answer(needs_nate={
-            "exposure": None, "gates": "Who may write Ready?",
+            "exposure": None, "gates": ["Who may write Ready?"],
             "scope": None, "preference": None}),
         run="shape-run", agent="muse") == 0
     assert item.status == "Shaped"
@@ -658,7 +824,7 @@ def test_a_clear_section_in_prose_does_not_release_an_open_answer(
     assert shape.apply_shape(
         [item], NOW, item.ref, answer(
             plan_markdown="# Plan\n\n## Needs you\n\nNothing.\n",
-            needs_nate={"exposure": None, "gates": "Who decides?",
+            needs_nate={"exposure": None, "gates": ["Who decides?"],
                         "scope": None, "preference": None}),
         run="shape-run", agent="muse") == 0
     assert item.status == "Shaped"
@@ -769,6 +935,62 @@ def test_apply_holds_a_declared_risk_with_a_clean_scan(
         run="shape-run", agent="muse") == 0
     assert item.status == "Shaped"
     assert "escalated risk (data-migration)" in capsys.readouterr().out
+
+
+def test_apply_records_sequencing_edges_with_the_body_write(
+        monkeypatch, capsys):
+    # #1053: the "wait for #165" plan self-approves and its dependency
+    # lands as a native blocked-by edge on the same gh issue edit that
+    # writes the plan — one mutation, never a plan without its edge.
+    item = idea(42)
+    calls = stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(depends_on=["owner/repo#165"]),
+        run="shape-run", agent="muse") == 0
+    assert item.status == "Ready"
+    edits = gh_calls(calls, "gh", "issue", "edit")
+    assert len(edits) == 2
+    body_write = edits[0][1]
+    assert "--add-blocked-by" in body_write
+    assert body_write[body_write.index("--add-blocked-by") + 1] == "165"
+    written = body_write[body_write.index("--body") + 1]
+    assert "Depends on: owner/repo#165" in written
+    assert "advanced to Ready: needs_nate all null" in \
+        capsys.readouterr().out
+
+
+def test_apply_renders_cross_repo_dependencies_as_urls(monkeypatch):
+    item = idea(42)
+    calls = stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(depends_on=["other/repo#7"]),
+        run="shape-run", agent="muse") == 0
+    body_write = gh_calls(calls, "gh", "issue", "edit")[0][1]
+    assert body_write[body_write.index("--add-blocked-by") + 1] == \
+        "https://github.com/other/repo/issues/7"
+
+
+def test_apply_writes_no_edge_flag_when_nothing_waits(monkeypatch):
+    item = idea(42)
+    calls = stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref, answer(),
+        run="shape-run", agent="muse") == 0
+    for edit in gh_calls(calls, "gh", "issue", "edit"):
+        assert "--add-blocked-by" not in edit[1]
+
+
+def test_blocked_by_values_render_numbers_and_urls():
+    assert shape.blocked_by_values([], "owner/repo") == []
+    assert shape.blocked_by_values(["owner/repo#165"], "owner/repo") == \
+        ["165"]
+    assert shape.blocked_by_values(
+        ["owner/repo#165", "other/repo#7"], "owner/repo") == [
+            "165", "https://github.com/other/repo/issues/7"]
+    with pytest.raises(shape.ShapeError):
+        shape.blocked_by_values(["#165"], "owner/repo")
 
 
 # -- structural guarantees --------------------------------------------------
@@ -993,7 +1215,7 @@ def test_apply_cli_validate_only_previews_a_shaped_decision(
 
     monkeypatch.setattr(funnel, "gh_graphql", fail)
     monkeypatch.setattr(funnel.subprocess, "run", fail)
-    held = answer(needs_nate={"exposure": "May this ship in September?",
+    held = answer(needs_nate={"exposure": ["May this ship in September?"],
                               "gates": None, "scope": None,
                               "preference": None})
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(held)))

@@ -8100,3 +8100,4 @@
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/command-center", "run": "cb9758f9b2a9", "ts": 1789720231, "work": "1068"}
 {"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": 78}, "phase": "api_cost", "run": "cb9758f9b2a9", "ts": 1789720235}
 {"agent": "muse", "note": "GraphQL budget 945 is below the engineering floor of 1560 (20 loads at 78 points)", "outcome": "skipped-api-reserve", "phase": "event", "run": "cd96bc2e6f09", "ts": 1789720287}
+{"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": 78}, "phase": "api_cost", "run": "cd96bc2e6f09", "ts": 1789720291}

@@ -8722,11 +8722,10 @@ def claim_ticket(
     """Write a ticket claim, or return the reason it must be refused."""
     running = in_motion(items, now, pr_facts=pr_facts)
 
-    taken = next((i for i in running if i.ref == target.ref), None)
-    if taken is not None and taken.in_motion_since != target.in_motion_since:
+    if target.ref in {i.ref for i in running}:
         return "refused — {} is already claimed".format(target.ref)
 
-    if taken is None and len(running) >= WIP_LIMIT:
+    if len(running) >= WIP_LIMIT:
         by_ref = {i.ref: i for i in items}
         preempts = (
             effective_class(target, by_ref) == "Broken"

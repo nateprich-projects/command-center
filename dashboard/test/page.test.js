@@ -187,8 +187,22 @@ test("changes requested has a themed pip and legend entry", async () => {
   const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
   assert.match(css, /--pip-changes-requested:/);
-  assert.match(css, /\.pip-changes-requested \{ background: var\(--pip-changes-requested\); \}/);
+  assert.match(css, /\.pip-changes-requested \{ background: var\(--pip-changes-requested-pip\); \}/);
   assert.match(html, /pip pip-changes-requested[^<]*<\/i>\s*changes requested/);
+});
+
+test("pip collisions use scoped colours and a textured blocked state", async () => {
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.match(css, /--pip-changes-requested-pip:/);
+  assert.match(css, /--pip-blocked-pip:/);
+  assert.match(css, /--pip-blocked-pip-stripe:/);
+  assert.match(css, /\.pip-changes-requested \{ background: var\(--pip-changes-requested-pip\); \}/);
+  assert.match(css, /\.pip-blocked \{[\s\S]*repeating-linear-gradient\(\s*135deg,/);
+  assert.match(css, /\.chip-tier-escalated \{ color: var\(--pip-blocked\); \}/);
+  assert.match(css, /\.chip-class-maintenance \{ color: var\(--pip-blocked\); \}/);
+  assert.match(css, /\.chip-class-broken \{ color: var\(--danger\); \}/);
+  assert.match(html, /pip pip-blocked[^<]*<\/i>\s*blocked \(striped\)/);
 });
 
 test("the phone progress shows its count once (#994)", async () => {

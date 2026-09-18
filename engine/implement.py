@@ -56,12 +56,25 @@ def fetch_ticket(repo: str, number: int) -> dict:
     return data
 
 
+def parent_repo(repo: str, ticket: dict) -> str:
+    """Return the repository that holds the ticket's parent.
+
+    A parent may live in another repository — command-center#1054 parents a
+    ticket in every member repo — so the parent's own URL decides, and the
+    ticket's repository is only the fallback when that URL is absent.
+    """
+    url = (ticket.get("parent") or {}).get("url")
+    match = re.match(r"https://github\.com/([^/]+/[^/]+)/issues/\d+", url or "")
+    return match.group(1) if match else repo
+
+
 def fetch_plan(repo: str, ticket: dict) -> Optional[dict]:
     """Read the project issue whose body is this ticket's settled plan."""
     parent = ticket.get("parent") or {}
     number = parent.get("number")
     if not isinstance(number, int):
         return None
+    repo = parent_repo(repo, ticket)
     data = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo, "--json",
         "number,title,url,body,state",
@@ -746,7 +759,10 @@ def render_pr_body(ticket: dict, answer: dict, *, continued: bool,
     parent_number = parent.get("number")
     lines = []
     if isinstance(parent_number, int):
-        lines.append("Part of #{}.".format(parent_number))
+        own = str(ticket.get("ref") or "").split("#")[0]
+        home = parent_repo(own, ticket)
+        lines.append("Part of {}#{}.".format(
+            "" if home == own else home, parent_number))
         lines.append("")
     lines.extend([
         "Implements #{}.".format(ticket["number"]),

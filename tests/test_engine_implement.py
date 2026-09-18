@@ -131,6 +131,37 @@ def test_collect_fetches_the_parent_plan_and_open_pr_verdict(monkeypatch):
     assert found["prior_run"] == {"ok": True}
 
 
+def cross_repo_ticket():
+    found = ticket()
+    found["parent"] = {
+        "number": 1054,
+        "title": "point every member repo at the runners",
+        "url": "https://github.com/owner/hub/issues/1054",
+    }
+    return found
+
+
+def test_fetch_plan_reads_a_parent_in_another_repository(monkeypatch):
+    # command-center#1054 parents tickets in every member repo. Reading it
+    # from the ticket's repo failed every packet and looped Codex on #129.
+    seen = []
+
+    def fake_json(*args):
+        seen.append(args)
+        return {"number": 1054, "title": "plan", "body": "# Plan"}
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_json)
+    found = implement.fetch_plan(REPO, cross_repo_ticket())
+    assert seen[0][5] == "owner/hub"
+    assert found["ref"] == "owner/hub#1054"
+
+
+def test_pr_body_names_a_parent_in_another_repository():
+    found = implement.render_pr_body(
+        cross_repo_ticket(), answer(), continued=False, tests=[])
+    assert "Part of owner/hub#1054." in found
+
+
 @pytest.mark.parametrize(
     ("argv", "agent"),
     (

@@ -8420,3 +8420,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 78}, "phase": "api_cost", "run": "c413f125fc51", "ts": 1789728991}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/command-center", "run": "17b1b1170ad6", "ts": 1789728993, "work": "1082"}
 {"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": null}, "phase": "api_cost", "run": "17b1b1170ad6", "ts": 1789729000}
+{"agent": "muse", "api_cost": {"gh_calls": 1, "graphql_points": 0}, "phase": "api_cost", "run": "c413f125fc51", "ts": 1789729019}

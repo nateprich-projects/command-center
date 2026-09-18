@@ -1043,3 +1043,108 @@ def test_the_review_question_names_the_tickets_union_as_the_spec():
     assert "tickets" in text and "union" in text
     assert "authorised" in text
     assert "branch ticket" in text
+
+
+# -- diffs over GitHub's line cap (#1114) -----------------------------------
+
+TOO_LARGE = ("could not find pull request diff: HTTP 406: Sorry, the diff "
+             "exceeded the maximum number of lines (20000)\n"
+             "PullRequest.diff too_large")
+
+
+def _proc(args, returncode=0, stdout="", stderr=""):
+    import subprocess
+    return subprocess.CompletedProcess(args, returncode, stdout, stderr)
+
+
+def _files_page(start, count, missing=()):
+    rows = []
+    for index in range(start, start + count):
+        row = {"filename": "f{}.py".format(index)}
+        if index not in missing:
+            row["patch"] = "@@ -0,0 +1 @@\n+line {}".format(index)
+        rows.append(row)
+    return rows
+
+
+def _stub_gh(monkeypatch, diff_proc, pages):
+    calls = []
+
+    def fake(args, **kwargs):
+        calls.append(list(args))
+        if args[:3] == ["gh", "pr", "diff"]:
+            return diff_proc(args)
+        page = int(args[2].rsplit("page=", 1)[1])
+        return _proc(args, stdout=json.dumps(pages[page - 1]))
+
+    monkeypatch.setattr(funnel, "_run_gh", fake)
+    return calls
+
+
+def _collect_with_diff(monkeypatch):
+    monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: pr_view())
+    monkeypatch.setattr(
+        review, "fetch_ticket", lambda repo, number: ticket())
+    monkeypatch.setattr(
+        review, "fetch_plan_md", lambda repo: ("# design record", False))
+    monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
+    monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
+    return review.collect(REPO, 7, items_loader=lambda: [])
+
+
+def test_too_large_diff_falls_back_to_the_files_api(monkeypatch):
+    pages = [_files_page(0, 100, missing={3}), _files_page(100, 2,
+                                                          missing={101})]
+    calls = _stub_gh(
+        monkeypatch, lambda args: _proc(args, 1, stderr=TOO_LARGE), pages)
+    found = _collect_with_diff(monkeypatch)
+    assert found["diff_truncated"] is True
+    assert found["diff_omitted_files"] == 2
+    assert "diff --git a/f0.py b/f0.py\n" in found["diff"]
+    assert "diff --git a/f100.py b/f100.py\n" in found["diff"]
+    assert "f3.py" not in found["diff"]
+    assert "f101.py" not in found["diff"]
+    assert found["diff"].index("f99.py") < found["diff"].index("f100.py")
+    file_calls = [c for c in calls if c[:2] == ["gh", "api"]]
+    assert [c[2] for c in file_calls] == [
+        "repos/owner/repo/pulls/7/files?per_page=100&page=1",
+        "repos/owner/repo/pulls/7/files?per_page=100&page=2",
+    ]
+    json.dumps(found)
+
+
+def test_normal_diff_takes_gh_pr_diff_with_no_flag(monkeypatch):
+    calls = _stub_gh(
+        monkeypatch,
+        lambda args: _proc(args, stdout="diff --git a/x b/x\n"), [])
+    found = _collect_with_diff(monkeypatch)
+    assert found["diff"] == "diff --git a/x b/x\n"
+    assert "diff_truncated" not in found
+    assert "diff_omitted_files" not in found
+    assert not [c for c in calls if c[:2] == ["gh", "api"]]
+
+
+def test_other_diff_failures_still_raise(monkeypatch):
+    import pytest
+    for stderr in ("HTTP 401: Bad credentials",
+                   "API rate limit exceeded for user ID 1",
+                   "no pull requests found for branch"):
+        _stub_gh(monkeypatch,
+                 lambda args, e=stderr: _proc(args, 1, stderr=e), [])
+        with pytest.raises(funnel.GitHubError):
+            review.fetch_diff(REPO, 7)
+
+
+def test_files_api_failure_raises(monkeypatch):
+    import pytest
+
+    def fake(args, **kwargs):
+        if args[:3] == ["gh", "pr", "diff"]:
+            return _proc(args, 1, stderr=TOO_LARGE)
+        return _proc(args, 1, stderr="HTTP 404: Not Found")
+
+    monkeypatch.setattr(funnel, "_run_gh", fake)
+    with pytest.raises(funnel.GitHubError):
+        review.fetch_diff(REPO, 7)

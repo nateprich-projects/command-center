@@ -860,6 +860,9 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     ``ci_runs`` rows are ``gh run list`` JSON; None reads as no runs
     scanned, which fails closed — an overlap then rejects as stale, as
     before #1019.
+    A ``diff`` rebuilt from the files API (an ``AssembledDiff``, #1114) adds
+    ``diff_truncated: true`` and ``diff_omitted_files``, the count of files
+    GitHub listed without a patch; an ordinary diff adds neither key.
     """
     pr_view = pr_view or {}
     changed_files = sorted({
@@ -918,6 +921,9 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "stop_auto_merging": stop_counter,
         "collected_at": collected_at,
     }
+    if isinstance(diff, AssembledDiff):
+        assembled["diff_truncated"] = True
+        assembled["diff_omitted_files"] = diff.omitted_patches
     assembled["precheck"] = precheck(assembled)
     # The re-run is the runner's next action, not a fact about the overlap:
     # it is set only when the whole precheck passes, so a failing row
@@ -946,15 +952,88 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
     return data
 
 
+class AssembledDiff(str):
+    """A diff rebuilt from the PR files API because ``gh pr diff`` refused.
+
+    ``omitted_patches`` counts the files GitHub listed without a ``patch``
+    (large or binary entries): they are in the PR but not in this text.
+    """
+
+    omitted_patches = 0
+
+
+#: GitHub serves at most 3,000 files per PR, so 30 pages of 100 is the end.
+_FILES_PAGE_SIZE = 100
+_FILES_MAX_PAGES = 30
+
+
+def _diff_too_large(stderr: str) -> bool:
+    """Whether ``gh pr diff`` failed only because the diff is over the cap."""
+    return "too_large" in stderr or "HTTP 406" in stderr
+
+
+def fetch_files_diff(repo: str, pr_number: int) -> AssembledDiff:
+    """Rebuild a unified diff from ``pulls/<n>/files``, page by page (#1114).
+
+    Each entry's ``patch`` goes under a ``diff --git a/<path> b/<path>``
+    header, in API order. Entries without a patch add nothing to the text
+    and are counted in ``omitted_patches``.
+    """
+    entries: List[dict] = []
+    for page in range(1, _FILES_MAX_PAGES + 1):
+        endpoint = "repos/{}/pulls/{}/files?per_page={}&page={}".format(
+            repo, pr_number, _FILES_PAGE_SIZE, page)
+        proc = funnel._run_gh(["gh", "api", endpoint],
+                              capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            raise funnel.GitHubError(
+                "could not read files for PR #{} in {}: {}".format(
+                    pr_number, repo, (proc.stderr or "").strip()))
+        try:
+            rows = json.loads(proc.stdout or "[]")
+        except ValueError:
+            raise funnel.GitHubError(
+                "unreadable files page {} for PR #{} in {}".format(
+                    page, pr_number, repo))
+        if not isinstance(rows, list):
+            raise funnel.GitHubError(
+                "unexpected files page {} for PR #{} in {}".format(
+                    page, pr_number, repo))
+        entries.extend(row for row in rows if isinstance(row, dict))
+        if len(rows) < _FILES_PAGE_SIZE:
+            break
+    parts: List[str] = []
+    omitted = 0
+    for entry in entries:
+        path = entry.get("filename") or ""
+        patch = entry.get("patch")
+        if not isinstance(patch, str) or not patch:
+            omitted += 1
+            continue
+        old_path = entry.get("previous_filename") or path
+        parts.append("diff --git a/{} b/{}\n--- a/{}\n+++ b/{}\n{}\n".format(
+            old_path, path, old_path, path, patch.rstrip("\n")))
+    diff = AssembledDiff("".join(parts))
+    diff.omitted_patches = omitted
+    return diff
+
+
 def fetch_diff(repo: str, pr_number: int) -> str:
-    """The unified diff of the PR."""
+    """The unified diff of the PR.
+
+    A diff over GitHub's 20,000-line cap (HTTP 406 ``too_large``) is rebuilt
+    from the files API instead (#1114); every other failure still raises.
+    """
     proc = funnel._run_gh(
         ["gh", "pr", "diff", str(pr_number), "--repo", repo],
         capture_output=True, text=True, timeout=120)
     if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        if _diff_too_large(stderr):
+            return fetch_files_diff(repo, pr_number)
         raise funnel.GitHubError(
             "could not read diff for PR #{} in {}: {}".format(
-                pr_number, repo, (proc.stderr or "").strip()))
+                pr_number, repo, stderr))
     return proc.stdout or ""
 
 

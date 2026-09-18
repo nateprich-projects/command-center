@@ -8125,3 +8125,4 @@
 {"agent": "muse", "note": "GraphQL budget 196 is below the review floor of 210 (5 loads at 42 points)", "outcome": "skipped-api-reserve", "phase": "event", "run": "86871ff485c0", "ts": 1789720817}
 {"agent": "muse", "api_cost": {"gh_calls": 1, "graphql_points": 1}, "phase": "api_cost", "run": "86871ff485c0", "ts": 1789720820}
 {"agent": "muse", "note": "GraphQL budget 197 is below the review floor of 210 (5 loads at 42 points)", "outcome": "skipped-api-reserve", "phase": "event", "run": "5ddb5fbd10f2", "ts": 1789720813}
+{"agent": "muse", "api_cost": {"gh_calls": 1, "graphql_points": 1}, "phase": "api_cost", "run": "5ddb5fbd10f2", "ts": 1789720828}

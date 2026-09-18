@@ -53,7 +53,7 @@ CI_SUCCESS = funnel.CI_SUCCESS_CONCLUSIONS
 CI_PENDING = funnel.CI_PENDING_STATES
 
 #: Path prefixes the #794 freeze covers. A diff touching these fails the
-#: freeze row unless the ticket's parent is #794.
+#: freeze row unless the ticket's parent is #794 or #1044.
 FROZEN_PATHS = ("routines/", "skills/")
 
 #: Parser constants scheduled for deletion by the #794 project: the union of
@@ -61,7 +61,7 @@ FROZEN_PATHS = ("routines/", "skills/")
 #: #814 explicitly keeps (RISK_LINE stays as a code-read of a code-written
 #: line; HUMAN_STEP_LINE stays as the dual-read fallback until Phase 6). A
 #: diff that adds or removes a line naming one of these fails the freeze row
-#: unless the ticket's parent is #794.
+#: unless the ticket's parent is #794 or #1044.
 FROZEN_PARSERS = (
     "SELF_APPROVED_LINE",
     "NEEDS_NATE_CLAUSE_END",
@@ -75,8 +75,12 @@ FROZEN_PARSERS = (
     "PROPOSED_CLASS_RE",
 )
 
-#: The plan whose own tickets may touch frozen ground.
-FREEZE_PARENT_NUMBER = 794
+#: The plans whose own tickets may touch frozen ground: #794, which owns
+#: the freeze, and #1044, which exists only to measure #794's cutover (Nate,
+#: 2026-09-18: #1044's routine edits record shadow-comparison instructions,
+#: not behaviour changes, so holding them to the freeze would block the
+#: measurement of the freeze's own project).
+FREEZE_PARENT_NUMBERS = (794, 1044)
 
 #: Per-repo path rules that outrank the ticket's own Risk marker (#724,
 #: enforced as a pre-check row per #794's disposition table, which superseded
@@ -649,24 +653,25 @@ def precheck_pr_open(packet: dict) -> List[str]:
 
 
 def precheck_freeze(packet: dict) -> List[str]:
-    """Row 2: frozen ground needs a ticket under #794."""
+    """Row 2: frozen ground needs a ticket under #794 or #1044."""
     touches = freeze_touches(packet.get("changed_files"), packet.get("diff"))
     frozen = touches["paths"] + touches["parsers"]
     if not frozen:
         return []
     ticket = packet.get("ticket") or {}
     parent = ticket.get("parent") or {}
-    if parent.get("number") == FREEZE_PARENT_NUMBER:
+    if parent.get("number") in FREEZE_PARENT_NUMBERS:
         return []
     if ticket.get("number") is None:
         where = "the PR has no ticket"
     elif parent.get("number") is None:
         where = "ticket {} has no parent".format(ticket.get("ref"))
     else:
-        where = "ticket {} is under #{}, not #{}".format(
-            ticket.get("ref"), parent.get("number"), FREEZE_PARENT_NUMBER)
-    return ["freeze: {} touched but {}; frozen while #794 lands".format(
-        ", ".join(frozen), where)]
+        where = "ticket {} is under #{}".format(
+            ticket.get("ref"), parent.get("number"))
+    allowed = ", ".join("#{}".format(n) for n in FREEZE_PARENT_NUMBERS)
+    return ["freeze: {} touched but {}; frozen while #794 lands "
+            "(exempt parents: {})".format(", ".join(frozen), where, allowed)]
 
 
 def precheck_ci(packet: dict) -> List[str]:

@@ -62,7 +62,9 @@ def validation_exit(attempt: Optional[int]) -> int:
 
 #: The answer keys shape-apply accepts — exactly these, no extras. From
 #: the Shape row of #794, plus the model-declared escalated-risk list
-#: (#1034) that the decision unions with the wording scan.
+#: (#1034) that the decision unions with the wording scan, plus the
+#: sequencing-dependency list (#1053) that sequencing questions become
+#: instead of Needs Nate entries.
 ANSWER_KEYS = frozenset({
     "decided_from_precedent",
     "decided_by_agent",
@@ -70,7 +72,16 @@ ANSWER_KEYS = frozenset({
     "proposed_class",
     "plan_markdown",
     "escalated_risk",
+    "depends_on",
 })
+
+#: A sequencing dependency: owner/repo#n, the only shape accepted
+#: (#1053). The packet's sibling plans carry full refs, so the model
+#: copies them verbatim; a bare #n is a confused-model shape and fails.
+REF_RE = re.compile(
+    r"\A(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)"
+    r"#(?P<number>[1-9][0-9]*)\Z"
+)
 
 #: The needs_nate fields, each mapped to the Needs-section category it
 #: renders as. The category spellings are the stable headings the skill
@@ -163,23 +174,55 @@ def _validate_agent_decisions(entries: object) -> List[Dict[str, str]]:
     return validated
 
 
-def _validate_needs_nate(needs: object) -> Dict[str, Optional[str]]:
+def _validate_needs_nate(needs: object) -> Dict[str, Optional[List[str]]]:
     """Validate the open-question record: the four fields, each null or
-    a question. An empty string is neither — it fails closed."""
+    a non-empty list of single questions (#1053).
+
+    Atomic questions per category: a compound splits before it is asked,
+    so a settled half cannot drag its genuine half to Nate. A bare
+    string is the old single-question shape and fails — the runner
+    retries once with the error fed back, and the model answers again
+    with a list.
+    """
     fields = [field for field, _ in NEEDS_FIELDS]
     _check_keys(needs, fields, "needs_nate")
     assert isinstance(needs, dict)
-    validated: Dict[str, Optional[str]] = {}
+    validated: Dict[str, Optional[List[str]]] = {}
     for field, _ in NEEDS_FIELDS:
         value = needs[field]
         if value is None:
             validated[field] = None
-        elif not isinstance(value, str) or not value.strip():
+        elif not isinstance(value, list) or not value:
             raise ShapeError(
-                "needs_nate.{} must be null or a non-empty "
-                "question".format(field))
+                "needs_nate.{} must be null or a non-empty list of "
+                "questions".format(field))
         else:
-            validated[field] = re.sub(r"\s+", " ", value.strip())
+            questions = []
+            for index, entry in enumerate(value):
+                where = "needs_nate.{}.{}".format(field, index)
+                questions.append(_require_line(entry, where))
+            validated[field] = questions
+    return validated
+
+
+def _validate_depends_on(entries: object) -> List[str]:
+    """Validate the sequencing-dependency list (#1053).
+
+    Sequencing is never a Needs Nate question: waiting on a named
+    sibling, priority against named tickets, or a separate pin or
+    activation is recorded here as owner/repo#n refs, and the apply
+    step writes the native blocked-by edges. Empty when the plan waits
+    on nothing — an empty list says so honestly.
+    """
+    if not isinstance(entries, list):
+        raise ShapeError("depends_on must be a list")
+    validated = []
+    for index, entry in enumerate(entries):
+        where = "depends_on[{}]".format(index)
+        if not isinstance(entry, str) or not REF_RE.match(entry.strip()):
+            raise ShapeError(
+                "{} must be an owner/repo#n ref".format(where))
+        validated.append(entry.strip())
     return validated
 
 
@@ -239,6 +282,7 @@ def validate_answer(data: object) -> Dict:
             data["plan_markdown"], "plan_markdown"),
         "escalated_risk": _validate_escalated_risk(
             data["escalated_risk"]),
+        "depends_on": _validate_depends_on(data["depends_on"]),
     }
 
 
@@ -247,11 +291,12 @@ def render_plan(answer: Dict) -> str:
 
     The plan narrative and its proposed class come first, then the
     runner-owned decision record: what precedent settled, what the
-    agent decided itself, and the four Needs Nate categories (a
-    question where one is open, the stable all-clear line where not).
-    Needs stays last so the section holds only its category lines for
-    the readers that still parse it. Takes a validated answer;
-    ``apply_shape`` validates before calling.
+    agent decided itself, the sequencing dependencies where any wait
+    (#1053), and the four Needs Nate categories (each open list joined
+    on one line, the stable all-clear line where null). Needs stays
+    last so the section holds only its category lines for the readers
+    that still parse it. Takes a validated answer; ``apply_shape``
+    validates before calling.
     """
     lines = [answer["plan_markdown"].rstrip(), "",
              "Proposed class: {}".format(answer["proposed_class"]), "",
@@ -271,13 +316,18 @@ def render_plan(answer: Dict) -> str:
                 entry["decision"], entry["alternative"], entry["why"]))
     else:
         lines.append("None recorded.")
+    depends = answer.get("depends_on", [])
+    if depends:
+        lines.extend(["", "## Sequencing", "",
+                      "Depends on: {}".format(", ".join(depends))])
     lines.extend(["", "## Needs Nate", ""])
     needs = answer["needs_nate"]
     for field, category in NEEDS_FIELDS:
-        question = needs[field]
+        questions = needs[field]
         lines.append("- {}: {}".format(
             category,
-            question if question is not None else ALL_CLEAR[category]))
+            "; ".join(questions)
+            if questions is not None else ALL_CLEAR[category]))
     lines.append("")
     return "\n".join(lines)
 
@@ -317,6 +367,10 @@ def decide(answer: Dict, *,
     scan misses still holds, and a scan hit the model omitted still
     holds. There is no standard override: an empty declaration never
     clears a scan hit.
+
+    Sequencing dependencies never hold (#1053): a plan that waits on
+    a named sibling but asks Nate nothing self-approves, and the
+    dependency is recorded as a native edge, not a question.
     """
     declared = [entry["reason"] for entry in answer.get("escalated_risk", [])
                 if isinstance(entry, dict)
@@ -374,6 +428,37 @@ def preview_decision(items: list, item, answer: Dict) -> Tuple[str, str]:
         override_target=override_target,
         escalation_reasons=funnel.plan_is_escalated(render_plan(answer)),
     )
+
+
+def issue_url(ref: str) -> str:
+    """Render an owner/repo#n ref as the issue URL `gh` takes for edges."""
+    match = REF_RE.match(ref.strip())
+    if not match:
+        raise ShapeError("not an owner/repo#n ref: {!r}".format(ref))
+    return "https://github.com/{}/{}/issues/{}".format(
+        match.group("owner"), match.group("repo"), match.group("number"))
+
+
+def blocked_by_values(depends_on: Sequence[str], repo: str) -> List[str]:
+    """Render sequencing deps as `gh --add-blocked-by` values (#1053).
+
+    Same-repo refs become bare numbers; cross-repo ones become issue
+    URLs, since a bare number would point at the wrong repository.
+    Answer order is preserved. Takes validated refs; anything else
+    fails closed rather than guessing an edge target.
+    """
+    values = []
+    for ref in depends_on or []:
+        match = REF_RE.match(ref.strip())
+        if not match:
+            raise ShapeError(
+                "not an owner/repo#n ref: {!r}".format(ref))
+        if "{}/{}".format(match.group("owner"),
+                          match.group("repo")) == repo:
+            values.append(match.group("number"))
+        else:
+            values.append(issue_url(ref))
+    return values
 
 
 def fetch_repo_text(repo: str, path: str) -> Tuple[str, bool]:
@@ -530,6 +615,11 @@ def apply_shape(items: list, now: datetime, ref: str,
     verbatim with the origin block — otherwise the override term of the
     rule could never fire on this path, and the packet would report an
     override the apply step ignores.
+
+    Sequencing dependencies ride the body write as native blocked-by
+    edges (#1053): one ``gh issue edit`` carries the rendered plan and
+    the edges together, so a ref GitHub cannot resolve fails the whole
+    write instead of recording a plan whose dependency is missing.
     """
     item = funnel.find(items, ref)
     answer = validate_answer(answer_data)
@@ -557,11 +647,12 @@ def apply_shape(items: list, now: datetime, ref: str,
         body = "{}\n\n{}".format(body, block)
     overlaps = funnel.shaping_plan_overlap_candidates(items, item, rendered)
 
-    out = funnel._run_gh(
-        ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
-         "--body", body],
-        capture_output=True, text=True,
-    )
+    command = ["gh", "issue", "edit", str(item.number), "--repo",
+               item.repo, "--body", body]
+    blocked_by = blocked_by_values(answer.get("depends_on", []), item.repo)
+    if blocked_by:
+        command += ["--add-blocked-by", ",".join(blocked_by)]
+    out = funnel._run_gh(command, capture_output=True, text=True)
     if out.returncode != 0:
         raise funnel.GitHubError(out.stderr.strip())
     # The session keeps this object after the issue-body write. Keep its

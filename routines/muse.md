@@ -416,8 +416,16 @@ given: capture records the observed defect; it does not act on the thing observe
 
 ## 8. Finish
 
+If this run reviewed a PR, always record the structured review result on the
+heartbeat finish. Pass `--review-result approved` when the verdict was approved
+(including a merge), or `--review-result rejected` when the verdict was
+rejected. It must match the verdict written by `funnel review`; the shadow
+comparison reads this field rather than guessing from the finish note. A
+non-review job, or a review skipped before a verdict was recorded, omits this
+option.
+
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent muse --run <id> --outcome done --merged <the PR number, e.g. 96> --note "merged PR #<n>"
+python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent muse --run <id> --outcome done --review-result approved --merged <the PR number, e.g. 96> --note "merged PR #<n>"
 ```
 
 `--merged` takes **the PR's number**, not a count of merges — `--merged 96`, never `--merged 1`. It is a field, not prose: unattended merges have to appear in the brief as

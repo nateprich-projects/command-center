@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -897,6 +898,20 @@ def fetch_diff(repo: str, pr_number: int) -> str:
     return proc.stdout or ""
 
 
+_ISSUE_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/issues/\d+")
+
+
+def parent_repo_of(repo: str, parent: dict) -> str:
+    """The repo the parent issue lives in, from its URL when it has one.
+
+    A ticket's parent can live in another repo (The-League#220's parent is
+    command-center#1054), so the ticket's own repo is only the fallback
+    (#1062).
+    """
+    match = _ISSUE_URL.search(str(parent.get("url") or ""))
+    return match.group(1) if match else repo
+
+
 def fetch_parent_comments(repo: str, parent: Optional[dict]) -> Optional[dict]:
     """Attach a parent's comments, using at most one additional read.
 
@@ -915,14 +930,15 @@ def fetch_parent_comments(repo: str, parent: Optional[dict]) -> Optional[dict]:
         enriched = dict(parent)
         enriched["comments"] = []
         return enriched
+    parent_repo = parent_repo_of(repo, parent)
     parent_view = funnel._gh_json(
-        "gh", "issue", "view", str(parent_number), "--repo", repo,
+        "gh", "issue", "view", str(parent_number), "--repo", parent_repo,
         "--json", "comments")
     if not isinstance(parent_view, dict) \
             or not isinstance(parent_view.get("comments"), list):
         raise funnel.GitHubError(
             "could not read comments for parent {}#{}".format(
-                repo, parent_number))
+                parent_repo, parent_number))
     enriched = dict(parent)
     enriched["comments"] = parent_view["comments"]
     return enriched

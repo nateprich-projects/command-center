@@ -255,7 +255,8 @@ BEGIN_CLAIM_COLLISION_WINDOW = timedelta(seconds=60)
 #: **Raised 2 -> 4 on 2026-09-08, on the condition this comment already set.**
 #: "Raise it when review stops being the constraint" — review has stopped being
 #: the constraint, and it is measured rather than assumed: Muse reviews on a
-#: five-minute standard schedule plus an hourly escalated one, is unmetered, and
+#: five-minute standard schedule plus an hourly escalated one, with cost metered
+#: from its local attribution journal, and
 #: finished 48 runs `nothing-to-do` in the six hours to 08:24 for want of a PR to
 #: look at. The premise that made two right — Codex outrunning a metered Claude
 #: reviewer — no longer holds.
@@ -320,7 +321,8 @@ DASHBOARD_BOARD_STAGES = ("Ideas", "Shaped", "Ready", "Building", "Parked", "Don
 DASHBOARD_DONE_WINDOW = timedelta(days=7)
 
 # Only these harnesses expose the complete pair of input-token counts used by
-# the re-send metric. Claude is unscheduled and Muse is unmetered, so their
+# the re-send metric. Claude is unscheduled, and Muse cost attribution is read
+# by the usage gate rather than from the heartbeat token binding, so their
 # absence from the brief is intentional rather than missing data.
 METERED_AGENTS = ("codex", "zcode")
 
@@ -11025,7 +11027,8 @@ def _begin_preflight(
     out["gate"] = "ok"
     if reading.get("unmetered"):
         # Say so rather than letting ``gate: ok`` imply a budget was checked.
-        # An unmetered provider is a standing exception recorded in AGENTS.md.
+        # Preserve the generic future-provider exception explicitly rather than
+        # implying that a successful budget reading was performed.
         out["unmetered"] = True
     return out, reading
 

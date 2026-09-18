@@ -120,7 +120,7 @@ PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
 #: not read their silence as a run that died. zcode was retired on 2026-09-09
 #: by Nate's decision: measured over 24h it did work in 18 of 93 runs and was
 #: refused on the z.ai pace line in 63, while Muse carried every job it had on
-#: an unmetered pool (#431).
+#: the separate Meta pool (#431).
 RETIRED_AGENTS = frozenset({"zcode"})
 
 #: Which application ran it. Distinct from provider and model: one provider can

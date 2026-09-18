@@ -901,25 +901,91 @@ def fetch_diff(repo: str, pr_number: int) -> str:
 _ISSUE_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/issues/\d+")
 
 
-def parent_repo_of(repo: str, parent: dict) -> str:
-    """The repo the parent issue lives in, from its URL when it has one.
+def parent_repo_from_row(parent: dict) -> Optional[str]:
+    """The parent's repository when the relationship row already names it.
 
-    A ticket's parent can live in another repo (The-League#220's parent is
-    command-center#1054), so the ticket's own repo is only the fallback
-    (#1062).
+    The ticket read's ``parent`` field usually carries only the parent's
+    number, but some rows name the repository too: a ``repository`` object
+    (REST ``full_name`` or GraphQL ``nameWithOwner``), a ``repo`` or ``ref``
+    field, or the issue ``url`` (#1062). Any of those resolves the parent
+    without spending a read; None means the caller must ask the API.
     """
+    repository = parent.get("repository")
+    if isinstance(repository, dict):
+        for key in ("full_name", "nameWithOwner"):
+            full = repository.get(key)
+            if isinstance(full, str) and "/" in full:
+                return full
+    direct = parent.get("repo")
+    if isinstance(direct, str) and "/" in direct:
+        return direct
+    ref = parent.get("ref")
+    if isinstance(ref, str) and "#" in ref:
+        owner_repo = ref.split("#", 1)[0]
+        if "/" in owner_repo:
+            return owner_repo
     match = _ISSUE_URL.search(str(parent.get("url") or ""))
-    return match.group(1) if match else repo
+    if match:
+        return match.group(1)
+    return None
 
 
-def fetch_parent_comments(repo: str, parent: Optional[dict]) -> Optional[dict]:
-    """Attach a parent's comments, using at most one additional read.
+def resolve_parent_repo(repo: str, ticket_number: int,
+                        parent: dict) -> Optional[str]:
+    """The parent's own repository, never assumed to be the ticket's.
+
+    A member-repo ticket's parent usually lives in command-center, so
+    reading the parent in the ticket's repo 404s (#1066). Prefer a
+    repository the relationship row already names; otherwise one
+    sub-issue relationship read supplies it. None means the parent is
+    unreadable and the caller degrades, rather than guessing the
+    ticket's repo and risking another issue's comments.
+    """
+    from_row = parent_repo_from_row(parent)
+    if from_row is not None:
+        return from_row
+    relationship = funnel._gh_json(
+        "gh", "api", "repos/{}/issues/{}/parent".format(repo, ticket_number))
+    if isinstance(relationship, dict):
+        repository = relationship.get("repository")
+        if isinstance(repository, dict):
+            full = repository.get("full_name")
+            if isinstance(full, str) and "/" in full:
+                return full
+    return None
+
+
+def degraded_parent(parent: dict, parent_number: object,
+                    parent_repo: Optional[str]) -> dict:
+    """A parent row without comments that says so, for an unreadable parent.
+
+    A 404 on either parent read degrades instead of raising: the review
+    proceeds without the parent comments and ``comments_unavailable``
+    tells the reviewer not to read the empty list as no parent decisions.
+    The ``ref`` names the parent only when its repository resolved, so a
+    degraded row never names the wrong repository.
+    """
+    enriched = dict(parent)
+    enriched["comments"] = []
+    enriched["comments_unavailable"] = True
+    if parent_repo is not None:
+        enriched["repo"] = parent_repo
+        enriched["ref"] = "{}#{}".format(parent_repo, parent_number)
+    return enriched
+
+
+def fetch_parent_comments(repo: str, ticket_number: int,
+                          parent: Optional[dict]) -> Optional[dict]:
+    """Attach a parent's comments, resolved against the parent's repository.
 
     GitHub CLI currently returns only the parent's identity in the ticket's
     ``parent`` field. Some fixtures and future CLI versions may include the
-    comments there already, so preserve that fast path. Otherwise one parent
-    issue view supplies the comments; a failed read is an incomplete packet,
-    not an empty comment list that could make a required artifact look absent.
+    comments there already, so preserve that fast path. Otherwise the
+    parent's repository resolves from the row or from one sub-issue
+    relationship read, and one parent issue view in that repository
+    supplies the comments. Either read failing degrades to a parent row
+    without comments that says so, never a raise: an unreadable parent
+    must not block a review.
     """
     if not isinstance(parent, dict):
         return parent
@@ -930,17 +996,19 @@ def fetch_parent_comments(repo: str, parent: Optional[dict]) -> Optional[dict]:
         enriched = dict(parent)
         enriched["comments"] = []
         return enriched
-    parent_repo = parent_repo_of(repo, parent)
+    parent_repo = resolve_parent_repo(repo, ticket_number, parent)
+    if parent_repo is None:
+        return degraded_parent(parent, parent_number, None)
     parent_view = funnel._gh_json(
         "gh", "issue", "view", str(parent_number), "--repo", parent_repo,
         "--json", "comments")
     if not isinstance(parent_view, dict) \
             or not isinstance(parent_view.get("comments"), list):
-        raise funnel.GitHubError(
-            "could not read comments for parent {}#{}".format(
-                parent_repo, parent_number))
+        return degraded_parent(parent, parent_number, parent_repo)
     enriched = dict(parent)
     enriched["comments"] = parent_view["comments"]
+    enriched["repo"] = parent_repo
+    enriched["ref"] = "{}#{}".format(parent_repo, parent_number)
     return enriched
 
 
@@ -948,8 +1016,9 @@ def fetch_ticket(repo: str, number: int) -> dict:
     """The ticket behind a ticket/<n> branch: body, identity, parent, comments.
 
     Comments ride the ticket read, so the reviewer sees decisions recorded
-    there at no extra GitHub call. The parent is enriched from one parent
-    issue view only when its comments were not already included.
+    there at no extra GitHub call. The parent is enriched from one sub-issue
+    relationship read for its repository and one parent issue view for its
+    comments, only when its comments were not already included.
     """
     data = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo, "--json",
@@ -957,7 +1026,7 @@ def fetch_ticket(repo: str, number: int) -> dict:
     if not data:
         raise funnel.GitHubError(
             "could not read ticket {}#{}".format(repo, number))
-    data["parent"] = fetch_parent_comments(repo, data.get("parent"))
+    data["parent"] = fetch_parent_comments(repo, number, data.get("parent"))
     data["ref"] = "{}#{}".format(repo, number)
     return data
 

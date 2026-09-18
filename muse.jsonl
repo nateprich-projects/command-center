@@ -8739,3 +8739,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": null}, "phase": "api_cost", "run": "e22a4eb9177c", "ts": 1789737398}
 {"agent": "muse", "api_cost": {"gh_calls": 1, "graphql_points": 0}, "phase": "api_cost", "run": "e22a4eb9177c", "ts": 1789737415}
 {"agent": "muse", "api_cost": {"gh_calls": 2, "graphql_points": 0}, "phase": "api_cost", "run": "e22a4eb9177c", "ts": 1789737464}
+{"agent": "muse", "api_cost": {"gh_calls": 6, "graphql_points": null}, "phase": "api_cost", "run": "e22a4eb9177c", "ts": 1789737478}

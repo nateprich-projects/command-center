@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import math
 import pathlib
 
 from engine import shadow_report
@@ -1244,7 +1243,36 @@ def test_review_projection_recommends_restart_when_recovery_exceeds_a_day():
     assert "more than 24 hours" in projection["reason"]
 
 
-def test_zero_comparison_rate_projects_unbounded_recovery():
+def test_review_projection_waits_for_a_minimum_sample_without_misses():
+    shadow, live = _review_projection_streams(
+        finish_times=[100],
+    )
+
+    projection = shadow_report.build_report(
+        shadow, live, now=200, window_seconds=200,
+    )["projection"]
+
+    assert projection["rate_per_hour"] == 0.0
+    assert projection["hours_to_threshold"] is None
+    assert projection["restart_recommended"] is False
+    assert "insufficient sample" in projection["reason"]
+
+
+def test_empty_comparison_window_does_not_recommend_restart():
+    shadow, live = _review_projection_streams(
+        finish_times=[],
+    )
+
+    projection = shadow_report.build_report(
+        shadow, live, now=200, window_seconds=200,
+    )["projection"]
+
+    assert projection["hours_to_threshold"] is None
+    assert projection["restart_recommended"] is False
+    assert "insufficient sample" in projection["reason"]
+
+
+def test_zero_comparison_rate_with_a_miss_below_sample_floor_does_not_restart():
     shadow, live = _review_projection_streams(
         finish_times=[100],
         shadow_misses={1},
@@ -1255,9 +1283,9 @@ def test_zero_comparison_rate_projects_unbounded_recovery():
     )["projection"]
 
     assert projection["rate_per_hour"] == 0.0
-    assert math.isinf(projection["hours_to_threshold"])
-    assert projection["restart_recommended"] is True
-    assert "rate is zero" in projection["reason"]
+    assert projection["hours_to_threshold"] is None
+    assert projection["restart_recommended"] is False
+    assert "insufficient sample" in projection["reason"]
 
 
 def test_review_wrong_approval_is_a_hard_fail_even_when_bar_is_met():

@@ -12026,9 +12026,21 @@ def merge_blockers(
         if ticket is None:
             why.append("no ticket {} in the funnel".format(ref))
         else:
-            parent = next((i for i in items if i.ref == ticket.parent), None)
-            if parent is None or parent.status != "Building":
-                why.append("{}'s project is not Building".format(ref))
+            if not ticket.parent:
+                # A parent-less branch item is its own parent: the project
+                # itself must be Building (#1042).
+                if ticket.status != "Building":
+                    why.append(
+                        "{} names a project with no parent, and the "
+                        "project itself is not Building — move the "
+                        "project to Building, or move the fix to a "
+                        "ticket/<n> branch under a filed "
+                        "ticket".format(ref))
+            else:
+                parent = next(
+                    (i for i in items if i.ref == ticket.parent), None)
+                if parent is None or parent.status != "Building":
+                    why.append("{}'s project is not Building".format(ref))
 
     checks = data.get("statusCheckRollup") or []
     failed = [c.get("name") or c.get("context") for c in checks

@@ -8047,3 +8047,4 @@
 {"agent": "muse", "do": "ticket", "phase": "bind", "run": "9f9be7ccd142", "ts": 1789718734, "work": "nateprich-projects/command-center#1066"}
 {"agent": "muse", "api_cost": {"gh_calls": 58, "graphql_points": null}, "phase": "api_cost", "run": "9f9be7ccd142", "ts": 1789718738}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/FF-Weekly-Start-Sit", "run": "952adbab17bf", "ts": 1789718774, "work": "126"}
+{"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": 77}, "phase": "api_cost", "run": "952adbab17bf", "ts": 1789718780}

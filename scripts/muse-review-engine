@@ -732,6 +732,9 @@ if field == "precheck_pass":
     print(packet.get("precheck", {}).get("pass", False))
 elif field == "ci":
     print((packet.get("ci") or {}).get("state") or "unknown")
+elif field == "ci_reason":
+    ci = packet.get("ci") or {}
+    print(ci.get("annotation") or "startup or account failure")
 elif field == "head":
     print(packet.get("head_sha") or "")
 elif field == "reason_count":
@@ -762,6 +765,7 @@ elif field == "ci_rerun_overlaps":
 
 if ! PACKET_PASS="$(packet_field precheck_pass)" \
   || ! PACKET_CI="$(packet_field ci)" \
+  || ! PACKET_CI_REASON="$(packet_field ci_reason)" \
   || ! PACKET_HEAD="$(packet_field head)" \
   || ! PACKET_PR_NOT_OPEN="$(packet_field pr_not_open)" \
   || ! CI_RERUN_ACTION="$(packet_field ci_rerun_action)" \
@@ -853,6 +857,18 @@ record_shadow_rerun() {
   fi
   finish_done "shadow review of PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: no decision; ci_rerun: $action"
 }
+
+# A startup or account stop is not a code-review verdict.  The run stays
+# healthy and quiet until Actions recovers; recording rejection here would
+# count the same untestable head against the auto-merge bar and hand the
+# engineer a branch-shaped problem that no branch can fix.
+if [[ "$PACKET_CI" == "could-not-run" ]]; then
+  if (( SHADOW )); then
+    record_shadow_no_decision "CI could not run: $PACKET_CI_REASON"
+  fi
+  finish_done "review skipped PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: CI could not run: $PACKET_CI_REASON; no verdict recorded"
+  exit 0
+fi
 
 if [[ "$PACKET_PASS" != "True" ]]; then
   if [[ "$PACKET_PR_NOT_OPEN" == "True" ]]; then

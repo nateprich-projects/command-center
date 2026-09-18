@@ -3,8 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
-  STAGES, age, boardColumns, failureState, nextOwner, pipState, renderPhoneBoard,
-  rowTier, shortRepo,
+  STAGES, age, boardColumns, failureState, museUsageText, nextOwner, pipState,
+  renderPhoneBoard, rowTier, shortRepo,
 } from "../public/app.js";
 
 class TestNode {
@@ -335,6 +335,38 @@ test("the phone Class chip is appended as a node, never stringified (#988)", asy
   assert.doesNotMatch(source, /element\([^)]*phoneClass\(/);
   assert.match(source, /classCell\.append\(phoneClass\(className\)\)/);
   assert.match(source, /text instanceof Node\) node\.append\(text\)/);
+});
+
+test("the usage line shows rolling 7-day Muse spend against the cap", () => {
+  assert.equal(
+    museUsageText({ spent_dollars: 0.704, cap_dollars: 20.0, used_percent: 3.52 }),
+    "Muse 7-day spend $0.70 of $20.00 (3.5%)",
+  );
+  assert.equal(museUsageText(null), null);
+  assert.equal(museUsageText({}), null);
+  assert.equal(
+    museUsageText({ spent_dollars: "0.70", cap_dollars: 20.0, used_percent: 3.5 }),
+    null,
+  );
+});
+
+test("the usage line renders from the snapshot root, with no 24-hour companion", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  assert.match(source, /renderUsage\(snapshot\.usage/);
+  assert.match(html, /<div id="usage"><\/div>/);
+  assert.doesNotMatch(source, /five_hour/);
+  assert.doesNotMatch(source, /24-hour/);
+});
+
+test("the fixture's usage row renders as the spend line", async () => {
+  const snapshot = JSON.parse(await readFile(
+    new URL("../fixtures/snapshot.json", import.meta.url), "utf8",
+  ));
+  assert.equal(
+    museUsageText(snapshot.usage.muse),
+    "Muse 7-day spend $0.70 of $20.00 (3.5%)",
+  );
 });
 
 test("the rendered phone board has no object text and every row has a title (#1004)", async () => {

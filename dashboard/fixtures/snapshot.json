@@ -1,6 +1,14 @@
 {
   "generated_at": "2026-09-13T08:00:00Z",
   "last_brief_failed": false,
+  "usage": {
+    "muse": {
+      "spent_dollars": 0.704,
+      "cap_dollars": 20.0,
+      "used_percent": 3.52,
+      "calls": 42
+    }
+  },
   "brief": {
     "total_needing_nate": 2,
     "counts_by_gate": { "Shaped": 1, "Building": 1 },

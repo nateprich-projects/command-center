@@ -35,6 +35,18 @@ def test_muse_step_one_uses_the_runner_opening_result():
     assert "if it says `\"do\": \"stop\"`, the runner has finished the heartbeat" in normalized
 
 
+def test_muse_review_finish_records_a_structured_verdict():
+    """The live plist path must leave comparison-readable review telemetry."""
+    body = (ROOT / "routines" / "muse.md").read_text(encoding="utf-8")
+    normalized = " ".join(body.split()).lower()
+
+    assert "if this run reviewed a pr" in normalized
+    assert "--review-result approved" in normalized
+    assert "--review-result rejected" in normalized
+    assert "must match the verdict written by `funnel review`" in normalized
+    assert "a non-review job" in normalized
+
+
 @pytest.mark.parametrize(
     ("routine", "tier_phrase"),
     (("zcode", "standard-tier idea"), ("claude", "escalated idea"),

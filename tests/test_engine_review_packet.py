@@ -717,6 +717,45 @@ def test_fetch_ticket_reads_parent_comments_with_one_parent_view(monkeypatch):
     assert found["parent"]["comments"] == rows
 
 
+def test_fetch_ticket_reads_a_cross_repo_parent_from_its_own_repo(monkeypatch):
+    calls = []
+
+    def fake_gh_json(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            return {"number": 220, "title": "t", "url": "u", "body": "b",
+                    "parent": {"number": 1054, "url": (
+                        "https://github.com/nateprich-projects/"
+                        "command-center/issues/1054")},
+                    "comments": []}
+        return {"comments": []}
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    review.fetch_ticket("nateprich-projects/The-League", 220)
+    assert calls[1] == (
+        "gh", "issue", "view", "1054", "--repo",
+        "nateprich-projects/command-center", "--json", "comments")
+
+
+def test_a_failed_cross_repo_parent_read_names_the_parent_repo(monkeypatch):
+    def fake_gh_json(*args):
+        if "--json" in args and args[-1] == "comments":
+            return None
+        return {"number": 220, "title": "t", "url": "u", "body": "b",
+                "parent": {"number": 1054, "url": (
+                    "https://github.com/nateprich-projects/"
+                    "command-center/issues/1054")},
+                "comments": []}
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    try:
+        review.fetch_ticket("nateprich-projects/The-League", 220)
+    except funnel.GitHubError as exc:
+        assert "nateprich-projects/command-center#1054" in str(exc)
+    else:
+        raise AssertionError("expected GitHubError")
+
+
 def test_the_review_question_treats_nate_comments_as_amending_decisions():
     text = (ROOT / "routines" / "muse-review.md").read_text()
     assert "ticket.comments" in text

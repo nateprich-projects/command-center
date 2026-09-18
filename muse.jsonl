@@ -8299,3 +8299,4 @@
 {"agent": "muse", "do": "ticket", "phase": "bind", "run": "e9fbce27d45d", "ts": 1789725691, "work": "nateprich-projects/The-League#225"}
 {"agent": "muse", "api_cost": {"gh_calls": 56, "graphql_points": null}, "phase": "api_cost", "run": "e9fbce27d45d", "ts": 1789725700}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/FF-Weekly-Start-Sit", "run": "596833a37627", "ts": 1789725712, "work": "135"}
+{"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": null}, "phase": "api_cost", "run": "596833a37627", "ts": 1789725716}

@@ -29,6 +29,11 @@ ambiguous verdict is not silently treated as a rejection: it is excluded from
 the agreement denominator and is surfaced through the malformed-output count
 when the record says that parsing failed.  This makes the cutover threshold
 fail closed when the telemetry is incomplete.
+
+Projection recovery is reported only after a minimum sample and a measured
+non-zero comparison rate are available.  A young or slow window is a
+throughput problem, not a restart trigger; only a hard fail or misses that
+take more than 24 hours to recover at the measured rate recommends a restart.
 """
 
 from __future__ import annotations
@@ -54,6 +59,7 @@ import heartbeat
 # the shadow plist is running.
 DEFAULT_WINDOW_SECONDS = 48 * 60 * 60
 DEFAULT_AGENT = "muse"
+MIN_COMPARISONS_FOR_PROJECTION = 5
 
 SHADOW_NOTE_RE = re.compile(
     r"(?:command-center-shadow-review|shadow\s+review)", re.IGNORECASE
@@ -2067,10 +2073,14 @@ def _projection(
     """
     clean_jobs_needed = _clean_jobs_needed(compared, misses, threshold)
     rate_per_hour = _comparison_rate_per_hour(finish_times)
-    if clean_jobs_needed == 0:
+    insufficient_sample = (
+        compared < MIN_COMPARISONS_FOR_PROJECTION
+        or rate_per_hour == 0.0
+    )
+    if insufficient_sample:
+        hours_to_threshold = None
+    elif clean_jobs_needed == 0:
         hours_to_threshold = 0.0
-    elif rate_per_hour == 0.0:
-        hours_to_threshold = float("inf")
     else:
         hours_to_threshold = clean_jobs_needed / rate_per_hour
 
@@ -2080,12 +2090,11 @@ def _projection(
             .format(hard_fail, "" if hard_fail == 1 else "s")
         )
         restart_recommended = True
-    elif math.isinf(hours_to_threshold):
+    elif insufficient_sample:
         reason = (
-            "restart recommended: comparison rate is zero, so threshold "
-            "recovery is unbounded"
+            "continue: insufficient sample for a measured recovery projection"
         )
-        restart_recommended = True
+        restart_recommended = False
     elif hours_to_threshold > 24:
         reason = (
             "restart recommended: threshold recovery takes more than 24 "

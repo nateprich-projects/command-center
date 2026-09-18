@@ -2,8 +2,9 @@
 """Assemble one read-only review packet for a PR (Phase 1 of #794).
 
 The review runner shows the model this packet and nothing else: the ticket
-body and its comments, plan.md, the diff, CI state, the newest verdict and
-its head, the changed-file overlap with every other open PR,
+body and its comments, the parent project's comments, plan.md, the diff, CI
+state, the newest verdict and its head, the changed-file overlap with every
+other open PR,
 protected-path touches, the stop-auto-merging counter, and the
 pull_request CI runs on the head. #798 assembled the evidence; #799 adds
 the deterministic pre-check rows the runner evaluates before any model is
@@ -813,13 +814,17 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
             "body": None, "parent": None, "comments": [],
         }
     else:
+        parent = ticket.get("parent")
+        if isinstance(parent, dict):
+            parent = dict(parent)
+            parent["comments"] = ticket_comments(parent.get("comments"))
         ticket_packet = {
             "ref": ticket.get("ref"),
             "number": ticket.get("number"),
             "title": ticket.get("title"),
             "url": ticket.get("url"),
             "body": ticket.get("body"),
-            "parent": ticket.get("parent"),
+            "parent": parent,
             "comments": ticket_comments(ticket.get("comments")),
         }
     head = head_date(pr_view)
@@ -892,11 +897,43 @@ def fetch_diff(repo: str, pr_number: int) -> str:
     return proc.stdout or ""
 
 
+def fetch_parent_comments(repo: str, parent: Optional[dict]) -> Optional[dict]:
+    """Attach a parent's comments, using at most one additional read.
+
+    GitHub CLI currently returns only the parent's identity in the ticket's
+    ``parent`` field. Some fixtures and future CLI versions may include the
+    comments there already, so preserve that fast path. Otherwise one parent
+    issue view supplies the comments; a failed read is an incomplete packet,
+    not an empty comment list that could make a required artifact look absent.
+    """
+    if not isinstance(parent, dict):
+        return parent
+    if isinstance(parent.get("comments"), list):
+        return parent
+    parent_number = parent.get("number")
+    if parent_number is None:
+        enriched = dict(parent)
+        enriched["comments"] = []
+        return enriched
+    parent_view = funnel._gh_json(
+        "gh", "issue", "view", str(parent_number), "--repo", repo,
+        "--json", "comments")
+    if not isinstance(parent_view, dict) \
+            or not isinstance(parent_view.get("comments"), list):
+        raise funnel.GitHubError(
+            "could not read comments for parent {}#{}".format(
+                repo, parent_number))
+    enriched = dict(parent)
+    enriched["comments"] = parent_view["comments"]
+    return enriched
+
+
 def fetch_ticket(repo: str, number: int) -> dict:
     """The ticket behind a ticket/<n> branch: body, identity, parent, comments.
 
     Comments ride the ticket read, so the reviewer sees decisions recorded
-    there at no extra GitHub call.
+    there at no extra GitHub call. The parent is enriched from one parent
+    issue view only when its comments were not already included.
     """
     data = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo, "--json",
@@ -904,6 +941,7 @@ def fetch_ticket(repo: str, number: int) -> dict:
     if not data:
         raise funnel.GitHubError(
             "could not read ticket {}#{}".format(repo, number))
+    data["parent"] = fetch_parent_comments(repo, data.get("parent"))
     data["ref"] = "{}#{}".format(repo, number)
     return data
 

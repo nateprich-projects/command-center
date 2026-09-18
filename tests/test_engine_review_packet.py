@@ -638,8 +638,30 @@ def test_packet_carries_the_ticket_comments_with_voices():
     json.dumps(found)  # the packet is JSON by contract
 
 
+def test_packet_carries_parent_comments_with_the_same_shape_and_caps():
+    rows = [comment("parent decision", "nate-direct",
+                    created_at="2026-09-14T00:00:00Z"),
+            comment("z" * 4100, created_at="2026-09-15T00:00:00Z")]
+    parent = {"number": 1, "title": "the plan", "comments": rows}
+    found = packet(ticket=ticket(parent=parent))
+    assert found["ticket"]["parent"]["comments"] == [
+        {"author": "nateprich", "created_at": "2026-09-14T00:00:00Z",
+         "voice": "nate-direct", "body": "parent decision"},
+        {"author": "nateprich", "created_at": "2026-09-15T00:00:00Z",
+         "voice": "unknown",
+         "body": "z" * 4000 + "\n…[truncated 100 chars]"},
+    ]
+    json.dumps(found)
+
+
 def test_a_ticket_without_a_comments_list_gets_an_empty_one():
     assert packet()["ticket"]["comments"] == []
+
+
+def test_a_parentless_ticket_still_builds_a_valid_packet():
+    found = packet(ticket=ticket(parent=None))
+    assert found["ticket"]["parent"] is None
+    json.dumps(found)
 
 
 def test_a_ticketless_branch_carries_no_comments():
@@ -658,6 +680,41 @@ def test_fetch_ticket_reads_comments_with_the_ticket(monkeypatch):
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
     assert review.fetch_ticket(REPO, 9)["comments"] == []
     assert "comments" in seen["args"][-1].split(",")
+
+
+def test_fetch_ticket_uses_parent_comments_already_in_the_parent_row(monkeypatch):
+    rows = [comment("already here")]
+    calls = []
+
+    def fake_gh_json(*args):
+        calls.append(args)
+        return {"number": 9, "title": "t", "url": "u", "body": "b",
+                "parent": {"number": 1, "comments": rows},
+                "comments": []}
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    found = review.fetch_ticket(REPO, 9)
+    assert len(calls) == 1
+    assert found["parent"]["comments"] == rows
+
+
+def test_fetch_ticket_reads_parent_comments_with_one_parent_view(monkeypatch):
+    rows = [comment("on the plan")]
+    calls = []
+
+    def fake_gh_json(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            return {"number": 9, "title": "t", "url": "u", "body": "b",
+                    "parent": {"number": 1}, "comments": []}
+        return {"comments": rows}
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
+    found = review.fetch_ticket(REPO, 9)
+    assert len(calls) == 2
+    assert calls[1] == (
+        "gh", "issue", "view", "1", "--repo", REPO, "--json", "comments")
+    assert found["parent"]["comments"] == rows
 
 
 def test_the_review_question_treats_nate_comments_as_amending_decisions():

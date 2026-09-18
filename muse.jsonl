@@ -9690,3 +9690,4 @@
 {"agent": "muse", "do": "breakdown", "phase": "bind", "run": "0e0d0030afc0", "ts": 1789762892, "work": "nateprich-projects/FF-Weekly-Start-Sit#165"}
 {"agent": "muse", "do": "breakdown", "phase": "bind", "run": "0e0d0030afc0", "ts": 1789762892, "work": "nateprich-projects/FF-Weekly-Start-Sit#165"}
 {"agent": "muse", "do": "breakdown", "phase": "bind", "run": "071f76778cbf", "ts": 1789762895, "work": "nateprich-projects/FF-Weekly-Start-Sit#165"}
+{"agent": "muse", "api_cost": {"gh_calls": 32, "graphql_points": 79}, "phase": "api_cost", "run": "071f76778cbf", "ts": 1789762900}

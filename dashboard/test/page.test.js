@@ -3,8 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
-  STAGES, age, boardColumns, failureState, museUsageText, nextOwner, pipState,
-  renderPhoneBoard, rowTier, shortRepo,
+  STAGES, age, boardColumns, failureState, museUsageText, nextOwner, phoneState,
+  pipState, renderPhoneBoard, rowTier, shortRepo,
 } from "../public/app.js";
 
 class TestNode {
@@ -401,6 +401,59 @@ test("the rendered phone board has no object text and every row has a title (#10
     for (const row of rows) {
       assert.ok(row.querySelector(".phone-title-link")?.textContent.trim());
     }
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("only a ticket has a phone state; a project row has no number and no state", () => {
+  assert.equal(phoneState({ number: 67, state: "OPEN" }), "open");
+  assert.equal(phoneState({ number: 65, state: "CLOSED" }), "closed");
+  assert.equal(phoneState({ number: 66, state: "OPEN", pr: "submitted" }), "submitted");
+  // A project row carries neither, and pipState() would read its missing
+  // state as closed and strike the whole project through.
+  assert.equal(phoneState({ ref: "command-center#643", title: "Dashboard" }), null);
+});
+
+test("phone ticket rows carry a coloured pip and read as finished when closed", async () => {
+  const css = await readFile(new URL("../public/styles.css", import.meta.url), "utf8");
+  const narrow = css.slice(css.indexOf("@media (max-width: 600px)"));
+  assert.match(narrow, /\.phone-title \{ display: flex;/);
+  assert.match(narrow, /\.phone-row-closed > \.phone-summary \.phone-title \{ font-weight: 400; \}/);
+  assert.match(narrow, /\.phone-row-closed > \.phone-summary \.phone-title-link \{[^}]*line-through/);
+  assert.match(narrow, /\.phone-row-blocked > \.phone-summary \.phone-title-link \{ color: var\(--blocked-title\); \}/);
+
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const board = renderPhoneBoard([{
+      stage: "Building",
+      items: [{
+        ref: "jeffy-finance-agent#62",
+        title: "Retire the cutover ceremony",
+        class: "Broken",
+        tickets_closed: 1,
+        tickets_total: 2,
+        tickets: [
+          { number: 65, title: "Retire cutover ceremony trees", state: "CLOSED" },
+          { number: 67, title: "Implement the silence watchdog", state: "OPEN" },
+        ],
+      }],
+    }]);
+    const rows = board.querySelectorAll(".phone-row");
+    assert.equal(rows.length, 3);
+    const [project, closed, open] = rows;
+
+    // The project row keeps its chevron and its progress bar; only tickets
+    // carry a single state pip, exactly as on the wide board.
+    assert.equal(project.querySelector(".phone-title").querySelector(".pip"), null);
+    assert.ok(!project.className.includes("phone-row-closed"));
+
+    assert.ok(closed.className.split(/\s+/).includes("phone-row-closed"));
+    assert.ok(closed.querySelector(".phone-title").querySelector(".pip-closed"));
+    assert.ok(open.className.split(/\s+/).includes("phone-row-open"));
+    assert.ok(open.querySelector(".phone-title").querySelector(".pip-open"));
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;

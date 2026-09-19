@@ -1339,7 +1339,7 @@ def test_breakdown_shape_projection_uses_directional_misses():
         }
 
     report = shadow_report.build_report(
-        records, now=4000, window_seconds=4000,
+        records, now=200000, window_seconds=200000,
         mode="breakdown-shape", live_shape_statuses=live_shape_statuses,
     )
     projection = report["projection"]
@@ -1349,4 +1349,129 @@ def test_breakdown_shape_projection_uses_directional_misses():
     assert projection["rate_per_hour"] == 10.0
     assert projection["clean_jobs_needed"] == 10
     assert projection["hours_to_threshold"] == 1.0
+    assert projection["restart_recommended"] is False
+    assert projection["window_minimum_met"] is True
+
+
+def _agreeing_breakdown_shape_records(*, count, start_finished, step,
+                                     first_issue, run_prefix):
+    records = []
+    live_shape_statuses = {}
+    for index in range(count):
+        target = "owner/repo#{}".format(first_issue + index)
+        finished = start_finished + index * step
+        records += _breakdown_shadow_job(
+            "{}-shadow-breakdown-{}".format(run_prefix, index),
+            finished, 2, target=target,
+        )
+        records += _breakdown_live_job(
+            "{}-live-breakdown-{}".format(run_prefix, index),
+            finished + 10, 2, target=target,
+            structured=True,
+        )
+        records += _issue_job(
+            "{}-shadow-shape-{}".format(run_prefix, index), "shape",
+            finished + 20,
+            "shadow shape of {}: Ready".format(target), target=target,
+        )
+        live_shape_run = "{}-live-shape-{}".format(run_prefix, index)
+        records += _issue_job(
+            live_shape_run, "shape", finished + 30,
+            "shaped {}: Ready".format(target), target=target,
+        )
+        live_shape_statuses[live_shape_run] = {
+            "status": "Ready", "status_since": finished + 25,
+        }
+    return records, live_shape_statuses
+
+
+def _unmatched_shadow_breakdown_records(*, count, start_finished, step,
+                                        first_issue, run_prefix):
+    records = []
+    for index in range(count):
+        target = "owner/repo#{}".format(first_issue + index)
+        records += _breakdown_shadow_job(
+            "{}-unmatched-{}".format(run_prefix, index),
+            start_finished + index * step, 2, target=target,
+        )
+    return records
+
+
+def test_breakdown_shape_projection_holds_threshold_met_until_window_minimum():
+    records, live_shape_statuses = _agreeing_breakdown_shape_records(
+        count=8, start_finished=20000, step=8000, first_issue=600,
+        run_prefix="young",
+    )
+    records += _unmatched_shadow_breakdown_records(
+        count=22, start_finished=21000, step=100, first_issue=900,
+        run_prefix="young",
+    )
+
+    report = shadow_report.build_report(
+        records, now=100000, window_seconds=84600,
+        mode="breakdown-shape", live_shape_statuses=live_shape_statuses,
+    )
+
+    agreement = report["breakdown_shape_agreement"]
+    assert agreement["jobs"] == {
+        "shadow": 38, "live": 16, "matched": 16, "compared": 8,
+    }
+    assert agreement["agree"] == 8
+    assert agreement["rate"] == 1.0
+    projection = report["projection"]
+    assert projection["window_minimum_met"] is False
+    assert projection["reason"] == (
+        "continue: minimum sample not reached (23.5 h, 38 jobs)"
+    )
+    assert projection["hours_to_threshold"] > 0
+    assert projection["hours_to_threshold"] == 24.5
+    assert projection["restart_recommended"] is False
+
+
+def test_breakdown_shape_projection_meets_minimum_at_exactly_48_hours():
+    records, live_shape_statuses = _agreeing_breakdown_shape_records(
+        count=6, start_finished=30000, step=8000, first_issue=700,
+        run_prefix="hours-boundary",
+    )
+
+    report = shadow_report.build_report(
+        records, now=200000, window_seconds=172800,
+        mode="breakdown-shape", live_shape_statuses=live_shape_statuses,
+    )
+
+    agreement = report["breakdown_shape_agreement"]
+    assert agreement["jobs"]["shadow"] == 12
+    assert agreement["jobs"]["compared"] == 6
+    assert agreement["rate"] == 1.0
+    projection = report["projection"]
+    assert projection["window_minimum_met"] is True
+    assert projection["reason"] == "continue: threshold is met"
+    assert projection["hours_to_threshold"] == 0.0
+    assert projection["restart_recommended"] is False
+
+
+def test_breakdown_shape_projection_meets_minimum_at_exactly_50_jobs():
+    records, live_shape_statuses = _agreeing_breakdown_shape_records(
+        count=8, start_finished=16500, step=100, first_issue=800,
+        run_prefix="jobs-boundary",
+    )
+    records += _unmatched_shadow_breakdown_records(
+        count=34, start_finished=16600, step=10, first_issue=1000,
+        run_prefix="jobs-boundary",
+    )
+
+    report = shadow_report.build_report(
+        records, now=20000, window_seconds=3600,
+        mode="breakdown-shape", live_shape_statuses=live_shape_statuses,
+    )
+
+    agreement = report["breakdown_shape_agreement"]
+    assert agreement["jobs"] == {
+        "shadow": 50, "live": 16, "matched": 16, "compared": 8,
+    }
+    assert agreement["rate"] == 1.0
+    projection = report["projection"]
+    assert projection["window_minimum_met"] is True
+    assert projection["reason"] == "continue: threshold is met"
+    assert projection["hours_to_threshold"] == 0.0
     assert projection["restart_recommended"] is False

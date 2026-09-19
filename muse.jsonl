@@ -1,5 +1,3 @@
-{"agent": "muse", "api_cost": {"gh_calls": 26, "graphql_points": 37}, "phase": "api_cost", "run": "6b7a2944da41", "ts": 1789540853}
-{"agent": "muse", "do": "shape", "phase": "bind", "run": "1aaa62d5981a", "ts": 1789540857, "work": "nateprich-projects/command-center#925"}
 {"agent": "muse", "api_cost": {"gh_calls": 26, "graphql_points": 37}, "phase": "api_cost", "run": "1aaa62d5981a", "ts": 1789540860}
 {"agent": "muse", "api_cost": {"gh_calls": 5, "graphql_points": null}, "phase": "api_cost", "run": "1aaa62d5981a", "ts": 1789541004}
 {"agent": "muse", "api_cost": {"gh_calls": 5, "graphql_points": null}, "phase": "api_cost", "run": "1aaa62d5981a", "ts": 1789541029}
@@ -9998,3 +9996,5 @@
 {"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": null}, "phase": "api_cost", "run": "89fcb4c76ab4", "ts": 1789806103}
 {"agent": "muse", "api_cost": {"gh_calls": 30, "graphql_points": null}, "phase": "api_cost", "run": "89fcb4c76ab4", "ts": 1789806103}
 {"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 79}, "phase": "api_cost", "run": "7fc6923bb109", "ts": 1789806104}
+{"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 79}, "phase": "api_cost", "run": "7fc6923bb109", "ts": 1789806104}
+{"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 79}, "phase": "api_cost", "run": "f76691224d7c", "ts": 1789806112}

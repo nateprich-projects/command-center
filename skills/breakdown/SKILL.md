@@ -274,6 +274,14 @@ leave the thing unusable. Before finishing:
   needs its own repo, say so in a comment and leave it for Nate.
 - **Do not change the parent's `Status`.** Nate's writing `Ready` was his gate;
   your breakdown is what makes `Ready` true.
+- **An analysis plan's last ticket posts the findings on the parent.** When the
+  plan changes no behaviour — a finding, measurement, review, comparison or
+  recommendation — the final ticket's `Accept` line must require the findings as
+  a comment on the parent issue, and must say the project waits for Nate's
+  review and does not close itself. If the implementing workspace cannot reach
+  GitHub, that is a capability gap: say so in the boundary checklist and give
+  the posting step its own ticket rather than letting the findings land in a
+  repo file. This is what #685 got wrong. _(confirmed by Nate 2026-09-19)_
 
 ## When the plan will not decompose
 

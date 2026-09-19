@@ -175,8 +175,10 @@ are green — it will not take your word for it.
 
 ```bash
 gh pr checks <pr> --repo <repo>
-gh pr diff <pr> --repo <repo>
+gh api repos/<repo>/compare/<base_ref>...<head_sha>
 ```
+
+A PR's own diff is computed against its recorded base, so it can overstate scope once the branch has merged its base.
 
 ### Check file overlap before approving
 

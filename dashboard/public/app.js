@@ -348,10 +348,10 @@ function phoneRow(item, inheritedClass) {
   title.append(link(phoneTitle(item), item && item.url, "phone-title-link"));
   summary.append(title);
   summary.append(element("span", "phone-repo", phoneRepo(item) || "—"));
-  summary.append(element("span", "phone-counter", `${closed}/${total}`));
   const classCell = element("span", "phone-class");
   classCell.append(phoneClass(className));
   summary.append(classCell);
+  summary.append(element("span", "phone-counter", `${closed}/${total}`));
   row.append(summary);
   row.append(phoneDetails(item, className, children));
 

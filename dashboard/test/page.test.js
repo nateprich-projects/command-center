@@ -249,7 +249,22 @@ test("the phone board keeps four summary fields and discloses details recursivel
   assert.match(css, /@media \(max-width: 600px\)/);
   assert.match(css, /\.table \{ display: none; \}/);
   assert.match(css, /\.phone-board \{ display: block; \}/);
-  assert.match(css, /grid-template-columns: 24px minmax\(0, 1fr\) minmax\(0, 76px\) auto auto;/);
+  // Two-row summary (#1065): row 1 is the disclosure arrow plus the title at
+  // the full summary width, and row 2 is the repository, class chip and
+  // progress counter trailing beneath it. This replaced the single-row
+  // 24px/minmax/76px/auto/auto pin, under which long titles squeezed the rest.
+  assert.match(css, /grid-template-columns: 24px minmax\(0, 1fr\) auto auto;/);
+  assert.match(css, /grid-template-rows: auto auto;/);
+  assert.match(css, /\.phone-title \{ grid-column: 2 \/ -1; grid-row: 1;/);
+  assert.match(css, /\.phone-repo \{ grid-column: 2; grid-row: 2;/);
+  assert.match(css, /\.phone-class \{ grid-column: 3; grid-row: 2;/);
+  assert.match(css, /\.phone-counter \{[^}]*grid-column: 4;[^}]*grid-row: 2;/);
+  // The title keeps its single-line ellipsis, now with the whole row to use.
+  assert.match(css, /\.phone-title-link \{ display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; \}/);
+  // DOM order matches the visual row 2: repository, class chip, counter last.
+  const phone = app.slice(app.indexOf("function phoneRow("), app.indexOf("function renderPhoneBoard("));
+  assert.ok(phone.indexOf('"phone-repo"') < phone.indexOf('"phone-class"'));
+  assert.ok(phone.indexOf('"phone-class"') < phone.indexOf('"phone-counter"'));
 });
 
 test("the narrow brief stays ordered, single-column, and legend-visible", async () => {

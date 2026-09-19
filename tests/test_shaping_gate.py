@@ -38,3 +38,41 @@ def test_shaping_denies_missing_or_malformed_usage():
     assert not usage.shaping_allowed(reading("not-a-number"))
     assert not usage.shaping_allowed(reading(float("nan")))
 
+
+
+def muse_reading(used, rolling=True):
+    """The shape `read_muse` returns: a rolling seven-day total, no five-hour window."""
+    return {
+        "source": "muse",
+        "windows": {
+            "seven_day": {
+                "used_percent": used,
+                "resets_at": 2_000_000_000.0,
+                "rolling": rolling,
+            }
+        },
+    }
+
+
+def test_shaping_allows_a_rolling_week_under_its_ceiling():
+    """#1129: Muse's reader has no five-hour window; its rolling week gates instead."""
+    assert usage.shaping_allowed(muse_reading(46.06))
+
+
+def test_shaping_denies_a_rolling_week_over_its_ceiling():
+    assert not usage.shaping_allowed(muse_reading(99.9))
+    assert not usage.shaping_allowed(muse_reading(120.0))
+
+
+def test_shaping_denies_a_malformed_or_non_rolling_week():
+    assert not usage.shaping_allowed(muse_reading(None))
+    assert not usage.shaping_allowed(muse_reading("not-a-number"))
+    assert not usage.shaping_allowed(muse_reading(float("nan")))
+    assert not usage.shaping_allowed(muse_reading(True))
+    assert not usage.shaping_allowed(muse_reading(10.0, rolling=False))
+
+
+def test_a_five_hour_window_still_takes_the_idle_rule():
+    tight = muse_reading(10.0)
+    tight["windows"]["five_hour"] = {"used_percent": usage.IDLE_WINDOW_CEILING + 1}
+    assert not usage.shaping_allowed(tight)

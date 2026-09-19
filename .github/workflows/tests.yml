@@ -24,6 +24,11 @@ jobs:
   pytest:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [self-hosted, linux, x64, hobby-linux]
+    # Cancel superseded runs on the same PR branch so they stop occupying the
+    # shared hobby-linux runner; main-branch runs never cancel (#1110).
+    concurrency:
+      group: pytest-${{ github.ref }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
     steps:
       - uses: actions/checkout@v4
 

@@ -60,6 +60,10 @@ import heartbeat
 DEFAULT_WINDOW_SECONDS = 48 * 60 * 60
 DEFAULT_AGENT = "muse"
 MIN_COMPARISONS_FOR_PROJECTION = 5
+# No cutover decision before the shadow window is 48 hours old or has seen
+# 50 shadow jobs.  The projection reports which gate is holding until then.
+WINDOW_MINIMUM_HOURS = 48
+WINDOW_MINIMUM_SHADOW_JOBS = 50
 
 SHADOW_NOTE_RE = re.compile(
     r"(?:command-center-shadow-review|shadow\s+review)", re.IGNORECASE
@@ -2062,6 +2066,8 @@ def _projection(
     finish_times: Sequence[float],
     upper_bound_field: bool,
     threshold: float = 0.95,
+    elapsed_hours: Optional[float] = None,
+    shadow_jobs: Optional[int] = None,
 ) -> Dict[str, object]:
     """Project whether a shadow window can still reach its cutover bar.
 
@@ -2070,6 +2076,11 @@ def _projection(
     be an old-reviewer error or a judgement call, so this report cannot label
     it engine-wrong.  Breakdown/shape misses are directional disagreements
     under that mode's settled predicate.
+
+    Callers with window context pass ``elapsed_hours`` and ``shadow_jobs`` so
+    the cutover minimum (48 hours old or 50 shadow jobs) gates every
+    threshold conclusion.  Callers without window context omit both and keep
+    the recovery-only behaviour.
     """
     clean_jobs_needed = _clean_jobs_needed(compared, misses, threshold)
     rate_per_hour = _comparison_rate_per_hour(finish_times)
@@ -2077,6 +2088,13 @@ def _projection(
         compared < MIN_COMPARISONS_FOR_PROJECTION
         or rate_per_hour == 0.0
     )
+    if elapsed_hours is None or shadow_jobs is None:
+        window_minimum_met = True
+    else:
+        window_minimum_met = (
+            elapsed_hours >= WINDOW_MINIMUM_HOURS
+            or shadow_jobs >= WINDOW_MINIMUM_SHADOW_JOBS
+        )
     if insufficient_sample:
         hours_to_threshold = None
     elif clean_jobs_needed == 0:
@@ -2090,6 +2108,13 @@ def _projection(
             .format(hard_fail, "" if hard_fail == 1 else "s")
         )
         restart_recommended = True
+    elif not window_minimum_met:
+        hours_to_threshold = WINDOW_MINIMUM_HOURS - elapsed_hours
+        reason = (
+            "continue: minimum sample not reached ({:.1f} h, {} jobs)"
+            .format(elapsed_hours, shadow_jobs)
+        )
+        restart_recommended = False
     elif insufficient_sample:
         reason = (
             "continue: insufficient sample for a measured recovery projection"
@@ -2117,6 +2142,7 @@ def _projection(
         "hours_to_threshold": hours_to_threshold,
         "restart_recommended": restart_recommended,
         "reason": reason,
+        "window_minimum_met": window_minimum_met,
     }
 
 
@@ -2249,6 +2275,8 @@ def build_breakdown_shape_report(
         hard_fail=None,
         finish_times=comparison_finish_times,
         upper_bound_field=False,
+        elapsed_hours=(end - start) / 3600.0,
+        shadow_jobs=len(shadow),
     )
 
     return {

@@ -257,6 +257,13 @@ function phoneClass(value) {
   return chip(value, `chip-class chip-class-${String(value).toLowerCase()}`);
 }
 
+// A phone row's ticket state, or null for a project row. Only tickets carry
+// a number and a state; a project row has neither, and pipState() would read
+// its missing state as closed and strike the whole project through.
+function phoneState(item) {
+  return Number.isFinite(item && item.number) ? pipState(item) : null;
+}
+
 function phoneTitle(item) {
   if (Number.isFinite(item && item.number)) {
     return `#${item.number} ${item.title || ""}`;
@@ -340,11 +347,17 @@ function phoneRow(item, inheritedClass) {
   const children = phoneChildren(item);
   const className = item && item.class || inheritedClass;
   const { closed, total } = phoneCounterParts(item, children);
+  const state = phoneState(item);
   const row = element("details", "phone-row");
+  // The state is both a coloured pip beside the title and a class on the row,
+  // exactly as the wide ticket rows carry it: on the phone a finished ticket
+  // read as one more queued one (Nate, 2026-09-18).
+  if (state) row.classList.add(`phone-row-${state}`);
   const summary = element("summary", "phone-summary");
   summary.append(element("span", "phone-arrow", "\u25B8"));
 
   const title = element("span", "phone-title");
+  if (state) title.append(element("i", `pip pip-${state}`));
   title.append(link(phoneTitle(item), item && item.url, "phone-title-link"));
   summary.append(title);
   summary.append(element("span", "phone-repo", phoneRepo(item) || "—"));
@@ -661,6 +674,6 @@ if (typeof document !== "undefined") {
 }
 
 export {
-  STAGES, age, boardColumns, failureState, museUsageText, nextOwner, pipState,
-  renderPhoneBoard, rowTier, shortRepo,
+  STAGES, age, boardColumns, failureState, museUsageText, nextOwner, phoneState,
+  pipState, renderPhoneBoard, rowTier, shortRepo,
 };

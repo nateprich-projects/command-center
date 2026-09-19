@@ -513,6 +513,20 @@ main {
     white-space: nowrap;
   }
   .phone-class { grid-column: 3; grid-row: 2; justify-self: start; }
+
+  /* A sub-issue's state, as the wide ticket rows show it: a coloured pip
+     before the title, and a finished ticket unbolded and struck through so
+     the phone board reads done work as done (Nate, 2026-09-18). */
+  .phone-title { display: flex; align-items: center; gap: 7px; }
+  .phone-title .pip { flex: 0 0 auto; }
+  .phone-title .phone-title-link { flex: 1 1 auto; min-width: 0; }
+  .phone-row-blocked > .phone-summary .phone-title-link { color: var(--blocked-title); }
+  .phone-row-closed > .phone-summary .phone-title { font-weight: 400; }
+  .phone-row-closed > .phone-summary .phone-title-link {
+    color: var(--ink-faint);
+    text-decoration: line-through;
+    text-decoration-color: var(--ink-muted);
+  }
   .phone-class .chip { max-width: 76px; overflow: hidden; text-overflow: ellipsis; }
 
   /* Expanded project/ticket fields come before the recursively rendered

@@ -142,7 +142,9 @@ wrong.
   standard tier runs as its own job, `command-center-muse-implement-standard`, every ten
   minutes beside the escalated `command-center-muse-implement`. The Codex app automation
   `command-center-tickets-hourly` is paused, not deleted, and Codex keeps both tiers in
-  `AGENTS_BY_ROLE`, so switching back is a status flip in the Codex app.
+  `AGENTS_BY_ROLE`, so switching back is a status flip in the Codex app. Reversing the
+  switch also removes `codex` from `RETIRED_AGENTS` in `heartbeat.py`, so its silence
+  alarms again.
 
   **`--approval-mode never` is not a guard.** Measured 2026-09-07: it does **not** fail
   closed. It means *never ask*, and it auto-approved a shell command with no prompt.

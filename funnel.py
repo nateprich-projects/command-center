@@ -10906,14 +10906,13 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     breakdown. The ordering itself stays in ``ideas()``; this function only
     filters that shared order through the existing tier and headroom rules.
 
-    The escalated schedule is review-only (routines/muse.md §7): an
-    escalated-tier idea is never offered to that run to shape
-    (#1026).
+    Each tier shapes its own ideas: an escalated run is offered the
+    first escalated-tier idea, a standard run the first standard-tier
+    one (#1135 reverses #1026's escalated suppression while the Claude
+    routine is off).
     """
     import usage
 
-    if tier == "escalated":
-        return None
     if not usage.shaping_allowed(reading):
         return None
 
@@ -11766,7 +11765,15 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         ))
 
     if candidates:
-        _, _, job, payload = min(candidates, key=lambda candidate: candidate[:2])
+        if tier == "escalated" and review is not None:
+            # #1135: the escalated schedule shapes escalated ideas while the
+            # Claude routine is off, but review still comes first — a Broken
+            # idea never preempts a waiting review there.
+            job, payload = "review", review
+        else:
+            _, _, job, payload = min(
+                candidates, key=lambda candidate: candidate[:2]
+            )
         if job == "review":
             out.update(do="review", work=payload)
         elif job == "breakdown":

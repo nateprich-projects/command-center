@@ -719,11 +719,19 @@ def shaping_allowed(reading: Dict) -> bool:
     shaping on the same absence would turn that exception into "never shape";
     the branch is retained for future providers, while Muse now has a local
     rolling cost reader.
+
+    A reader with no five-hour window at all, only a rolling seven-day total
+    (Muse's, #1098), is gated by that total's flat ceiling in ``pace``
+    instead. Refusing it for the missing five-hour window stopped every
+    unattended shape from 2026-09-18 (#1129).
     """
     if isinstance(reading, dict) and reading.get("unmetered"):
         return True
     try:
-        five = (reading.get("windows") or {}).get("five_hour") or {}
+        windows = reading.get("windows") or {}
+        five = windows.get("five_hour") or {}
+        if not five:
+            return _rolling_week_has_headroom(reading, windows)
         used = five.get("used_percent")
         if used is None or isinstance(used, bool):
             return False
@@ -731,6 +739,24 @@ def shaping_allowed(reading: Dict) -> bool:
     except (AttributeError, TypeError, ValueError):
         return False
     return IDLE_WINDOW_START <= used <= IDLE_WINDOW_CEILING
+
+
+def _rolling_week_has_headroom(reading: Dict, windows: Dict) -> bool:
+    """Shaping headroom for a reader whose only window is a rolling week."""
+    seven = windows.get("seven_day") or {}
+    if not seven.get("rolling"):
+        return False
+    used = seven.get("used_percent")
+    if used is None or isinstance(used, bool):
+        return False
+    try:
+        if float(used) != float(used):
+            return False
+    except (TypeError, ValueError):
+        return False
+    verdict = pace({"windows": {"seven_day": seven}}, time.time(),
+                   PROVIDERS.get(reading.get("source")))
+    return verdict["known"] and not verdict["over_pace"]
 
 
 def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:

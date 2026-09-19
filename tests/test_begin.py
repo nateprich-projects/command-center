@@ -1971,12 +1971,16 @@ def test_shape_offers_only_the_first_idea_matching_the_run_tier(
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("state", ["review", "idea", "breakdown", "empty"])
-def test_escalated_reviewer_is_never_offered_shape_or_breakdown(
+@pytest.mark.parametrize(
+    "state", ["review", "idea", "both", "breakdown", "empty"]
+)
+def test_escalated_reviewer_is_offered_shape_after_review(
     monkeypatch, capsys, state
 ):
-    """#1026: run d9de03bb1229 (escalated, review) was offered `shape` for an
-    escalated-tier idea; the escalated schedule is review-only."""
+    """#1135 reverses #1026: the escalated schedule shapes escalated ideas
+    while the Claude routine is off, after review. Run d9de03bb1229's
+    review-only suppression no longer applies; a Broken idea still never
+    preempts a waiting review there."""
     project, ticket = _ticket(120, 121, body="Risk: escalated")
     review = _review_job(ticket, pr=122)
     pending = funnel.Item(
@@ -1995,12 +1999,13 @@ def test_escalated_reviewer_is_never_offered_shape_or_breakdown(
     monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     monkeypatch.setattr(
         funnel, "review_queue",
-        lambda rows, tier: [review] if state == "review" else [])
+        lambda rows, tier: [review] if state in ("review", "both") else [])
     monkeypatch.setattr(
         funnel, "awaiting_breakdown",
         lambda rows: [pending] if state == "breakdown" else [])
     monkeypatch.setattr(
-        funnel, "ideas", lambda rows: [idea] if state == "idea" else [])
+        funnel, "ideas",
+        lambda rows: [idea] if state in ("idea", "both") else [])
     monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
     monkeypatch.setattr(funnel, "_ticket_body", lambda repo, number: "")
 
@@ -2010,10 +2015,13 @@ def test_escalated_reviewer_is_never_offered_shape_or_breakdown(
     ) == 0
     result = json.loads(capsys.readouterr().out)
 
-    assert result["do"] not in ("shape", "breakdown")
-    if state == "review":
+    assert result["do"] != "breakdown"
+    if state in ("review", "both"):
         assert result["do"] == "review"
         assert result["work"] == review
+    elif state == "idea":
+        assert result["do"] == "shape"
+        assert result["work"]["ref"] == idea.ref
     else:
         assert result["do"] == "stop"
 
@@ -2025,6 +2033,16 @@ def test_standard_reviewer_is_still_offered_a_standard_idea(monkeypatch):
 
     assert funnel.shapeable_idea([], "standard", {}) is idea
     assert funnel.shapeable_idea([], "escalated", {}) is None
+
+
+def test_escalated_reviewer_is_offered_an_escalated_idea(monkeypatch):
+    """#1135 reverses #1026's escalated suppression in `shapeable_idea`."""
+    idea = _idea(126, "Escalated idea", "Risk: escalated")
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+    monkeypatch.setattr(funnel, "ideas", lambda items: [idea])
+
+    assert funnel.shapeable_idea([], "escalated", {}) is idea
+    assert funnel.shapeable_idea([], "standard", {}) is None
 
 
 def test_shapeable_idea_requires_the_needs_shaping_label(monkeypatch):
@@ -2073,9 +2091,11 @@ def test_muse_standard_schedule_is_offered_a_standard_idea_on_a_metered_reading(
     assert result["work"]["ref"] == "nateprich-projects/command-center#36"
 
 
-def test_muse_escalated_schedule_is_never_offered_shaping(monkeypatch, capsys):
-    """The hourly escalated schedule is review-only: no --breakdown, and an
-    escalated idea is not offered either, so nothing routes shaping there."""
+def test_muse_escalated_schedule_is_never_offered_a_standard_idea(
+    monkeypatch, capsys
+):
+    """#1135: the escalated schedule shapes escalated ideas, never standard
+    ones. Tier isolation holds in both directions."""
     monkeypatch.setattr(
         funnel.subprocess, "run",
         lambda *args, **kwargs: SimpleNamespace(stdout="run-id\n"),
@@ -2093,10 +2113,43 @@ def test_muse_escalated_schedule_is_never_offered_shaping(monkeypatch, capsys):
         lambda items: [_idea(37, "A standard idea", "Risk: standard")],
     )
 
-    assert funnel.cmd_begin([], NOW, "muse", "escalated", False, False) == 0
+    assert funnel.cmd_begin(
+        [], NOW, "muse", "escalated", False, False, caller_role="review"
+    ) == 0
     result = json.loads(capsys.readouterr().out)
 
     assert result["do"] == "stop"
+
+
+def test_muse_escalated_schedule_is_offered_an_escalated_idea_on_a_metered_reading(
+    monkeypatch, capsys
+):
+    """#1135 reverses #1026: the hourly escalated schedule shapes an
+    escalated idea while the Claude routine is off."""
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(stdout="run-id\n"),
+    )
+    monkeypatch.setattr(
+        usage, "read_agent",
+        lambda agent, timestamp: {"windows": {
+            "five_hour": {"used_percent": 0.0},
+            "seven_day": {"used_percent": 0.0, "rolling": True,
+                           "resets_at": 1},
+        }},
+    )
+    monkeypatch.setattr(
+        funnel, "ideas",
+        lambda items: [_idea(40, "An escalated idea", "Risk: escalated")],
+    )
+
+    assert funnel.cmd_begin(
+        [], NOW, "muse", "escalated", False, False, caller_role="review"
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "shape"
+    assert result["work"]["ref"] == "nateprich-projects/command-center#40"
 
 
 def test_begin_binds_the_ticket_it_issues_to_the_run(monkeypatch, capsys):

@@ -179,6 +179,29 @@ wrong.
 - **Missing usage data fails closed.** A run that cannot read its budget does not work.
 
 
+## Analysis waits for Nate
+
+**A project whose tickets change no behaviour — the deliverable is a finding,
+measurement, review, comparison or recommendation — never closes itself, whatever its
+`Class`.** It waits at `Accept it?`, and it does not get there until its findings are
+posted as a comment on the parent issue. A report in a repo file, a PR description, or a
+ticket comment does not count: Nate reads parents.
+
+This overrides the class/origin self-close rule for these projects only. An analysis
+classed `Maintenance` waits; a `Maintenance` project that actually fixes something still
+closes itself. **The default is on** — assume any analysis waits unless Nate expressly
+says that one does not. See `plan.md`, "Building completion and automatic acceptance",
+rule 5. _(confirmed by Nate 2026-09-19)_
+
+Shapers and breakdown agents mark it at shaping so the predicate is machine-readable
+rather than inferred from prose; until that marker ships, say so in plain words in the
+plan's `Needs you` section and in the ticket's `Accept` line.
+
+The failure this guards against is #685: a cost review commissioned to put three priced
+options to Nate, which closed itself unread with the numbers stranded in
+`docs/funnel-watch-cost-711.md`. Analysis is the one output whose entire value is that he
+reads it.
+
 ## Repository hygiene is yours, not his
 
 _(Confirmed by Nate 2026-09-07 — "I'm not good at tracking drift and deciding when/how to

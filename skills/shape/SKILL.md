@@ -244,6 +244,24 @@ condition, but an agent may never set `Ready` directly or use it to bypass an
 open question. A plan held at `Shaped` waits on Nate's *is the plan good?* gate;
 say that plainly rather than implying the idea is greenlit.
 
+## Analysis plans wait for Nate
+
+If the plan's tickets change no behaviour — the deliverable is a finding,
+measurement, review, comparison or recommendation — the project **waits at
+`Accept it?` whatever its `Class`, and never closes itself**. Write two things
+into the plan so it is true downstream rather than remembered:
+
+- In `## Needs you`, under *Scope and priority*, state plainly that this is an
+  analysis project, that it waits for his review, and what decision the
+  findings are for.
+- In `## The work`, make the final step *post the findings as a comment on this
+  parent issue*. A repo file, a PR description or a ticket comment does not
+  reach him.
+
+The default is on. Only leave it off when Nate has expressly said so for that
+item, and quote him when you do. See `AGENTS.md`, "Analysis waits for Nate",
+and `plan.md` rule 5. _(confirmed by Nate 2026-09-19)_
+
 ## Do not
 
 - **Do not set `Ready` directly.** `funnel shaped` may write it only when the

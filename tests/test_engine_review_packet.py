@@ -62,6 +62,11 @@ def verdict(**kw):
     return body
 
 
+def _compare_unavailable(repo, base_ref, head_sha):
+    """A failing compare: collect() falls back to the PR reads (#1043)."""
+    raise funnel.GitHubError("compare unavailable")
+
+
 STOP_COUNTER = {"window_days": 7, "count": 0, "refs": [],
                 "stop_auto_merging": False}
 
@@ -273,6 +278,7 @@ def test_packet_without_ci_runs_carries_no_coverage():
 
 def test_collect_fetches_runs_for_the_pr_branch(monkeypatch):
     monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: pr_view())
+    monkeypatch.setattr(review, "fetch_scope", _compare_unavailable)
     monkeypatch.setattr(review, "fetch_diff", lambda repo, pr: "diff text")
     monkeypatch.setattr(
         review, "fetch_ticket", lambda repo, number: ticket())
@@ -481,6 +487,7 @@ def test_the_entry_point_is_executable():
 
 def test_cli_prints_valid_json_with_every_field(monkeypatch, capsys):
     monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: pr_view())
+    monkeypatch.setattr(review, "fetch_scope", _compare_unavailable)
     monkeypatch.setattr(review, "fetch_diff", lambda repo, pr: "diff text")
     monkeypatch.setattr(
         review, "fetch_ticket", lambda repo, number: ticket())
@@ -512,6 +519,7 @@ def test_cli_leaves_a_non_ticket_branch_without_a_ticket(monkeypatch, capsys):
     monkeypatch.setattr(
         review, "fetch_pr",
         lambda repo, pr: pr_view(headRefName="docs/meta-terms-read"))
+    monkeypatch.setattr(review, "fetch_scope", _compare_unavailable)
     monkeypatch.setattr(review, "fetch_diff", lambda repo, pr: "")
     monkeypatch.setattr(review, "fetch_plan_md", lambda repo: ("", True))
     monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
@@ -1083,6 +1091,7 @@ def _stub_gh(monkeypatch, diff_proc, pages):
 
 def _collect_with_diff(monkeypatch):
     monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: pr_view())
+    monkeypatch.setattr(review, "fetch_scope", _compare_unavailable)
     monkeypatch.setattr(
         review, "fetch_ticket", lambda repo, number: ticket())
     monkeypatch.setattr(
@@ -1148,3 +1157,196 @@ def test_files_api_failure_raises(monkeypatch):
     monkeypatch.setattr(funnel, "_run_gh", fake)
     with pytest.raises(funnel.GitHubError):
         review.fetch_diff(REPO, 7)
+
+
+# -- review scope from the live compare (#1043) -------------------------------
+
+PR_BASE_SHA = "prbase0000000000000000000000000000000001"
+MERGE_BASE_SHA = "merge0000000000000000000000000000000002"
+HEAD_SHA = "head000000000000000000000000000000000003"
+
+BRANCH_FILES = ["branch-{}.py".format(index) for index in range(6)]
+
+
+def compare_payload(filenames, merge_base=MERGE_BASE_SHA):
+    return {
+        "merge_base_commit": {"sha": merge_base},
+        "files": [
+            {"filename": name,
+             "patch": "@@ -0,0 +1 @@\n+line {}".format(name)}
+            for name in filenames
+        ],
+    }
+
+
+def pr_view_with_49_files():
+    """#194's shape: the PR files API lists 49 paths, compare lists 6."""
+    files = ([{"path": "main-{}.py".format(index)} for index in range(43)]
+             + [{"path": name} for name in BRANCH_FILES])
+    return pr_view(files=files, baseRefOid=PR_BASE_SHA, headRefOid=HEAD_SHA)
+
+
+def test_fetch_scope_reads_the_compare_endpoint(monkeypatch):
+    seen = {}
+
+    def fake(*args):
+        seen["args"] = list(args)
+        return compare_payload(BRANCH_FILES)
+
+    monkeypatch.setattr(funnel, "_gh_json", fake)
+    changed, diff, merge_base = review.fetch_scope(REPO, "main", HEAD_SHA)
+    assert seen["args"] == [
+        "gh", "api", "repos/{}/compare/main...{}".format(REPO, HEAD_SHA)]
+    assert changed == sorted(BRANCH_FILES)
+    assert "diff --git a/branch-0.py b/branch-0.py\n" in diff
+    assert "@@ -0,0 +1 @@\n+line branch-0.py" in diff
+    assert merge_base == MERGE_BASE_SHA
+
+
+def test_fetch_scope_raises_when_the_compare_call_fails(monkeypatch):
+    import pytest
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: None)
+    with pytest.raises(funnel.GitHubError):
+        review.fetch_scope(REPO, "main", HEAD_SHA)
+
+
+def test_fetch_scope_raises_on_an_unreadable_compare_answer(monkeypatch):
+    import pytest
+    for payload in ([], {"files": {}}, {"files": None}, "nonsense"):
+        monkeypatch.setattr(
+            funnel, "_gh_json", lambda *args, p=payload: p)
+        with pytest.raises(funnel.GitHubError):
+            review.fetch_scope(REPO, "main", HEAD_SHA)
+
+
+def test_fetch_scope_counts_patchless_entries_like_the_files_rebuild(
+        monkeypatch):
+    payload = compare_payload(["a.py"])
+    payload["files"].append({"filename": "big.bin"})  # binary: no patch
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: payload)
+    changed, diff, _ = review.fetch_scope(REPO, "main", HEAD_SHA)
+    assert changed == ["a.py", "big.bin"]
+    assert isinstance(diff, review.AssembledDiff)
+    assert diff.omitted_patches == 1
+    assert "big.bin" not in diff
+
+
+def test_fetch_scope_keeps_a_complete_diff_plain(monkeypatch):
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args: compare_payload(["a.py"]))
+    _, diff, _ = review.fetch_scope(REPO, "main", HEAD_SHA)
+    assert type(diff) is str
+
+
+def test_fetch_pr_reads_the_recorded_base_sha(monkeypatch):
+    seen = {}
+
+    def fake(*args):
+        seen["args"] = list(args)
+        return {"number": 7}
+
+    monkeypatch.setattr(funnel, "_gh_json", fake)
+    review.fetch_pr(REPO, 7)
+    fields = seen["args"][seen["args"].index("--json") + 1].split(",")
+    assert "baseRefOid" in fields
+
+
+def _stub_collect_prereqs(monkeypatch, view):
+    monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: view)
+    monkeypatch.setattr(
+        review, "fetch_ticket", lambda repo, number: ticket())
+    monkeypatch.setattr(
+        review, "fetch_plan_md", lambda repo: ("# design record", False))
+    monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
+    monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
+    monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
+
+
+def test_compare_scope_holds_only_the_branch_files(monkeypatch):
+    _stub_collect_prereqs(monkeypatch, pr_view_with_49_files())
+    monkeypatch.setattr(
+        review, "fetch_scope",
+        lambda repo, base, head: (
+            list(BRANCH_FILES), "compare diff text", MERGE_BASE_SHA))
+
+    def fail_if_called(repo, pr):
+        raise AssertionError("compare scope must not read the PR diff")
+
+    monkeypatch.setattr(review, "fetch_diff", fail_if_called)
+    found = review.collect(REPO, 7, items_loader=lambda: [])
+    assert found["changed_files"] == sorted(BRANCH_FILES)
+    assert len(found["changed_files"]) == 6
+    assert found["diff"] == "compare diff text"
+    assert found["merge_base"] == MERGE_BASE_SHA
+    assert found["pr_base_sha"] == PR_BASE_SHA
+    assert found["merge_base"] != found["pr_base_sha"]
+    assert found["scope_source"] == "compare"
+    json.dumps(found)
+
+
+def test_failing_compare_falls_back_to_the_pr_reads(monkeypatch):
+    _stub_collect_prereqs(
+        monkeypatch,
+        pr_view(files=[{"path": "funnel.py"}], baseRefOid=PR_BASE_SHA))
+    monkeypatch.setattr(review, "fetch_scope", _compare_unavailable)
+    monkeypatch.setattr(
+        review, "fetch_diff", lambda repo, pr: "pr diff text")
+    found = review.collect(REPO, 7, items_loader=lambda: [])
+    assert found["scope_source"] == "pr"
+    assert found["changed_files"] == ["funnel.py"]
+    assert found["diff"] == "pr diff text"
+    assert found["merge_base"] is None
+    assert found["pr_base_sha"] == PR_BASE_SHA
+
+
+def test_missing_base_skips_the_compare_call(monkeypatch):
+    _stub_collect_prereqs(
+        monkeypatch,
+        pr_view(files=[{"path": "funnel.py"}], baseRefName=""))
+
+    def fail_if_called(repo, base, head):
+        raise AssertionError("no base, no compare call")
+
+    monkeypatch.setattr(review, "fetch_scope", fail_if_called)
+    monkeypatch.setattr(
+        review, "fetch_diff", lambda repo, pr: "pr diff text")
+    found = review.collect(REPO, 7, items_loader=lambda: [])
+    assert found["scope_source"] == "pr"
+    assert found["changed_files"] == ["funnel.py"]
+
+
+def test_packet_defaults_to_the_pr_scope():
+    found = packet()
+    assert found["scope_source"] == "pr"
+    assert found["merge_base"] is None
+    assert found["pr_base_sha"] is None
+
+
+def test_packet_carries_the_compare_scope_and_both_bases():
+    view = pr_view(baseRefOid=PR_BASE_SHA)
+    found = packet(pr_view=view, changed_files=list(BRANCH_FILES),
+                   merge_base=MERGE_BASE_SHA, scope_source="compare")
+    assert found["changed_files"] == sorted(BRANCH_FILES)
+    assert found["merge_base"] == MERGE_BASE_SHA
+    assert found["pr_base_sha"] == PR_BASE_SHA
+    assert found["scope_source"] == "compare"
+
+
+def test_open_overlap_reads_the_compare_scope():
+    open_prs = [{"number": 8, "headRefName": "ticket/10",
+                 "files": [{"path": "branch-0.py"},
+                           {"path": "main-0.py"}]}]
+    found = packet(pr_view=pr_view_with_49_files(), open_prs=open_prs,
+                   changed_files=list(BRANCH_FILES),
+                   merge_base=MERGE_BASE_SHA, scope_source="compare")
+    assert found["overlap"] == [{"pr": 8, "branch": "ticket/10",
+                                 "files": ["branch-0.py"]}]
+
+
+def test_protected_row_ignores_main_only_files_outside_the_compare_scope():
+    view = pr_view(files=[{"path": "AGENTS.md"}, {"path": "funnel.py"}])
+    found = packet(pr_view=view, changed_files=["funnel.py"],
+                   merge_base=MERGE_BASE_SHA, scope_source="compare")
+    assert found["protected"]["touched"] == []
+    assert found["protected"]["rules"] == []

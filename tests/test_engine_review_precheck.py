@@ -15,6 +15,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import funnel  # noqa: E402
 from engine import review  # noqa: E402
 
 REPO = "owner/repo"
@@ -68,6 +69,11 @@ def verdict(**kw):
             "blocking": []}
     body.update(kw)
     return body
+
+
+def _compare_unavailable(repo, base_ref, head_sha):
+    """A failing compare: collect() falls back to the PR reads (#1043)."""
+    raise funnel.GitHubError("compare unavailable")
 
 
 def merged(number, at, *paths):
@@ -596,10 +602,33 @@ def test_packet_carries_the_new_precheck_fields():
     assert found["precheck"]["pass"] is False
 
 
+def test_merged_row_rejects_an_overlap_found_in_the_compare_scope():
+    """The overlap rows read the corrected scope with no separate change.
+
+    The PR view overstates the branch (#194: 49 files); the compare scope
+    holds only the branch's own file, and a newer merge touching it still
+    blocks.
+    """
+    pr_files = ([{"path": "main-{}.py".format(index)} for index in range(48)]
+                + [{"path": "branch-0.py"}])
+    view = pr_view(files=pr_files, baseRefOid="pr-base")
+    rows = [merged(5, NEWER, "branch-0.py")]
+    found = packet(pr_view=view, merged_prs=rows,
+                   changed_files=["branch-0.py"],
+                   merge_base="merge-base", scope_source="compare")
+    assert found["merged_overlap"] == [
+        {"pr": 5, "merged_at": NEWER, "files": ["branch-0.py"]}]
+    assert found["precheck"]["reasons"] == [
+        "merged-overlap: PR #5 merged at {} touches branch-0.py".format(
+            NEWER)]
+
+
 def test_cli_packet_carries_a_failing_precheck(monkeypatch, capsys):
     monkeypatch.setattr(
         review, "fetch_pr",
         lambda repo, pr: pr_view(files=[{"path": "routines/muse.md"}]))
+    monkeypatch.setattr(
+        review, "fetch_scope", _compare_unavailable)
     monkeypatch.setattr(review, "fetch_diff", lambda repo, pr: "diff text")
     monkeypatch.setattr(
         review, "fetch_ticket", lambda repo, number: ticket())

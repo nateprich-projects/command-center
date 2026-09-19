@@ -839,7 +839,10 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
                  collected_at: str,
                  merged_prs: Optional[Sequence[dict]] = None,
                  ci_runs: Optional[Sequence[dict]] = None,
-                 tickets: Optional[Sequence[Optional[dict]]] = None) -> Dict:
+                 tickets: Optional[Sequence[Optional[dict]]] = None,
+                 changed_files: Optional[Sequence[str]] = None,
+                 merge_base: Optional[str] = None,
+                 scope_source: str = "pr") -> Dict:
     """Assemble the packet from already-fetched pieces. Pure: no IO.
 
     Every field the review question needs, in one JSON-serialisable dict.
@@ -863,12 +866,22 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     A ``diff`` rebuilt from the files API (an ``AssembledDiff``, #1114) adds
     ``diff_truncated: true`` and ``diff_omitted_files``, the count of files
     GitHub listed without a patch; an ordinary diff adds neither key.
+    ``changed_files`` overrides the PR view's file list with the live
+    compare scope (#1043); None derives it from the view as before, and the
+    overlap and protected rows read whichever list the packet carries.
+    ``merge_base`` is the compare's ``merge_base_commit.sha`` (None on the
+    PR fallback), ``pr_base_sha`` is the PR's recorded base, and
+    ``scope_source`` names which scope the packet carries (``"compare"`` or
+    ``"pr"``), so a reviewer can see when the two bases differ.
     """
     pr_view = pr_view or {}
-    changed_files = sorted({
-        entry.get("path") for entry in (pr_view.get("files") or [])
-        if isinstance(entry, dict) and entry.get("path")
-    })
+    if changed_files is None:
+        changed_files = sorted({
+            entry.get("path") for entry in (pr_view.get("files") or [])
+            if isinstance(entry, dict) and entry.get("path")
+        })
+    else:
+        changed_files = sorted({path for path in changed_files if path})
     raw_rollup = pr_view.get("statusCheckRollup") or []
     rollup = _rollup_with_actions_evidence(
         raw_rollup, ci_runs or [], pr_view.get("headRefOid")
@@ -903,6 +916,9 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "plan_md_missing": plan_md_missing,
         "diff": diff,
         "changed_files": changed_files,
+        "merge_base": merge_base,
+        "pr_base_sha": pr_view.get("baseRefOid"),
+        "scope_source": scope_source,
         "ci": {"state": ci_state(rollup),
                "checks": checks,
                "annotation": could_not_run[0] if could_not_run else None,
@@ -936,14 +952,17 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
 
 
 def fetch_pr(repo: str, pr_number: int) -> dict:
-    """One PR view: identity, head, CI rollup, commits, changed files.
+    """One PR view: identity, head, base, CI rollup, commits, changed files.
 
     ``closingIssuesReferences`` rides the same read so the packet can
     carry every ticket the PR closes (#1088); it costs no extra call.
+    ``baseRefOid`` is the PR's recorded base, the ``pr_base_sha`` the
+    packet compares the live merge base against (#1043).
     """
     data = funnel._gh_json(
         "gh", "pr", "view", str(pr_number), "--repo", repo, "--json",
-        "number,title,headRefName,headRefOid,baseRefName,state,mergeable,"
+        "number,title,headRefName,headRefOid,baseRefName,baseRefOid,state,"
+        "mergeable,"
         "mergedAt,closedAt,"
         "statusCheckRollup,commits,files,closingIssuesReferences")
     if not data:
@@ -1035,6 +1054,53 @@ def fetch_diff(repo: str, pr_number: int) -> str:
             "could not read diff for PR #{} in {}: {}".format(
                 pr_number, repo, stderr))
     return proc.stdout or ""
+
+
+def fetch_scope(repo: str, base_ref: str,
+                head_sha: str) -> Tuple[List[str], str, Optional[str]]:
+    """Scope the branch against the live merge base (#1043).
+
+    Reads ``gh api repos/<repo>/compare/<base_ref>...<head_sha>``. The
+    three-dot compare diffs the merge base against the head, so files main
+    gained after the branch merged it are not reported as the branch's own
+    (#194: 49 PR files against 6 real). Returns the changed-file list, the
+    unified diff assembled from the entries' patches, and
+    ``merge_base_commit.sha`` (None when the answer omits it). Entries
+    without a patch (large or binary files) stay in the scope but out of
+    the text, counted exactly as the #1114 files-API rebuild counts them.
+    Raises ``funnel.GitHubError`` when the call fails or the answer is
+    unreadable; the caller falls back to the PR reads.
+    """
+    data = funnel._gh_json(
+        "gh", "api", "repos/{}/compare/{}...{}".format(
+            repo, base_ref, head_sha))
+    if not isinstance(data, dict) or not isinstance(data.get("files"), list):
+        raise funnel.GitHubError(
+            "could not read compare {}...{} in {}".format(
+                base_ref, head_sha, repo))
+    entries = [row for row in data["files"] if isinstance(row, dict)]
+    changed = sorted({row.get("filename") for row in entries
+                      if row.get("filename")})
+    parts: List[str] = []
+    omitted = 0
+    for row in entries:
+        path = row.get("filename") or ""
+        patch = row.get("patch")
+        if not isinstance(patch, str) or not patch:
+            omitted += 1
+            continue
+        old_path = row.get("previous_filename") or path
+        parts.append("diff --git a/{} b/{}\n--- a/{}\n+++ b/{}\n{}\n".format(
+            old_path, path, old_path, path, patch.rstrip("\n")))
+    diff: str = "".join(parts)
+    if omitted:
+        assembled = AssembledDiff(diff)
+        assembled.omitted_patches = omitted
+        diff = assembled
+    merge_base = data.get("merge_base_commit")
+    merge_sha = (merge_base.get("sha") if isinstance(merge_base, dict)
+                 else None)
+    return (changed, diff, merge_sha if isinstance(merge_sha, str) else None)
 
 
 _ISSUE_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/issues/\d+")
@@ -1367,6 +1433,9 @@ def collect(repo: Optional[str], pr_number: int, *,
     The ``tickets`` list is the branch ticket plus every closing
     reference (#1088), deduplicated with the branch ticket first; the
     read budget is bounded by the PR's own closing list, never a scan.
+    The changed-file scope comes from the live compare against the merge
+    base (#1043); when that call fails or the base and head are unknown,
+    the packet falls back to the PR reads with ``scope_source`` ``"pr"``.
     """
     resolved = funnel.resolve_repo(repo)
     pr_view = fetch_pr(resolved, pr_number)
@@ -1389,11 +1458,32 @@ def collect(repo: Optional[str], pr_number: int, *,
         tickets.append(fetch_ticket(closing_repo, closing_number))
     plan_md, plan_md_missing = fetch_plan_md(resolved)
     branch = pr_view.get("headRefName") or ""
+    base_ref = pr_view.get("baseRefName") or ""
+    head_sha = pr_view.get("headRefOid") or ""
+    scope_files: Optional[List[str]] = None
+    scope_diff: Optional[str] = None
+    merge_base: Optional[str] = None
+    scope_source = "pr"
+    if base_ref and head_sha:
+        try:
+            scope_files, scope_diff, merge_base = fetch_scope(
+                resolved, base_ref, head_sha)
+        except (funnel.GitHubError, OSError, TypeError, ValueError):
+            # The compare is advisory scope: any failure falls back to
+            # today's PR reads, which raise exactly as before.
+            scope_files, scope_diff, merge_base = None, None, None
+        else:
+            scope_source = "compare"
+    if scope_diff is None:
+        scope_diff = fetch_diff(resolved, pr_number)
     return build_packet(
         repo=resolved,
         pr_number=pr_number,
         pr_view=pr_view,
-        diff=fetch_diff(resolved, pr_number),
+        diff=scope_diff,
+        changed_files=scope_files,
+        merge_base=merge_base,
+        scope_source=scope_source,
         ticket=ticket,
         tickets=tickets,
         plan_md=plan_md,

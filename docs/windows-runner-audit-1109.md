@@ -61,3 +61,130 @@ change was made; extra hobby-linux processes are the simpler path**
 (Ticket #1108, pre-authorised to host headroom). The dedicated
 command-center label remains the measured fallback, decided by the
 post-capacity measurement in #1111.
+
+---
+
+# Member-repo audit (#1127, parent #1076)
+
+Date: 2026-09-19. Ticket: finish the audit #1109 left out — read each of
+the six member repos' `.github/workflows/*.yml` plus the test entry point
+each job runs, apply the same POSIX criteria, and classify every job as
+routable or not. No routing change in this ticket: a qualifying job is
+named here and a follow-up ticket in that repo does the routing.
+
+Method: each member repo has exactly one workflow file. Sources were read
+from shallow read-only clones of remote HEAD (the implementer cannot run
+`gh`, so `gh api .../contents/...` was replaced by clones of the same
+sources; nothing was retained). SHAs: The-League `814a0f8`,
+FF-Weekly-Start-Sit `b41819d`, workbench `48b97bc`, AFL `bee447f`,
+career-toolset `63ebe9e`, jeffy-finance-agent `b181cb2`.
+
+Same POSIX criteria as #1109: shebang/extensionless executables on `PATH`,
+`bash`/`sh` subprocesses, launchd/plutil/macOS paths, `os.symlink`,
+`sudo`/`apt`, and Unix-absolute tool paths.
+
+## The-League — `ci.yml` job `offline` (hobby-linux) — not routable
+
+`make check` is `ruff` (neutral) but `make test` runs
+`python3 -m unittest discover -s tests -v`, and the suite is POSIX-bound:
+
+- `tests/test_snapshot_schedule.py` drives `scripts/daily-snapshot.sh`
+  via `["/bin/bash", ...]` and builds fake `python`/`git` executables as
+  extensionless `#!/bin/sh` files with `chmod 0o755`.
+- `tests/test_project_tooling.py` pins the macOS/Linux system interpreter
+  at `/usr/bin/python3`.
+- `tests/test_report_metadata.py` hard-codes `Path("/tmp/source-snapshot")`.
+
+Porting would mean rewriting the shell-driven fixtures, not relabelling.
+
+## FF-Weekly-Start-Sit — `ci.yml` — neither job routable
+
+Job `offline` (hobby-linux) runs `make check test` into
+`python3 -m unittest discover`. The suite is POSIX/macOS-bound:
+
+- `tests/test_launchd.py` asserts plist arguments `["/bin/sh", "-c"]`,
+  writes `#!/bin/sh` launchers with the exec bit set, pins
+  `LOG_DIRECTORY = "/var/tmp/ff-weekly-start-sit"`, and shells
+  `plutil -lint` when present.
+- `tests/test_muse_research.py` writes an extensionless `muse` stub
+  starting `#!/bin/bash`, `chmod`s it executable, and executes it.
+
+Job `launchd` (hobby-macos) runs `plutil -lint launchd/*.plist` — a
+macOS-only tool on the macOS runner. It never touches hobby-linux (no
+queue impact) and cannot run on Windows.
+
+## AFL — `ci.yml` job `offline` (hobby-linux) — ROUTABLE (follow-up owns it)
+
+`make check test` runs `compileall` plus `python3 -m unittest discover`.
+The suite is 9 tests in `tests/test_interface.py`, pure stdlib (`json`,
+`pathlib`, `urllib`, `dataclasses`, `unittest`) reading JSON fixtures.
+The `afl/` package imports no `os`, `subprocess`, or `sys`; the repo has
+no `scripts/` directory and no `.sh` files; no subprocess, symlink,
+shebang, or absolute-path use was found anywhere in `afl/` or `tests/`.
+
+Caveats for the follow-up ticket in that repo: CI invokes the suite via
+`make`, so the Windows runner must provide `make` (or the follow-up
+inlines the two `python3 -m ...` commands), and `setup-python` must honour
+`.python-version` (3.12) there. The suite is seconds long, so routing it
+frees hobby-linux only briefly — worth doing, not a capacity fix.
+
+## career-toolset — `ci.yml` job `test` (hobby-linux) — not routable
+
+Runs bare `python3 -m pytest`, but the suite is shell- and
+launchd-bound:
+
+- `tests/test_nightly.py` executes `["/bin/sh", "scripts/nightly.sh"]`
+  with a `#!/bin/sh` fake on `PATH` (`chmod 0o755`), and asserts launchd
+  plist content spelling `$HOME/.local/bin` and
+  `$HOME/.local/share/career-agent/checkout/scripts/nightly.sh`.
+- `tests/test_score.py` and `tests/test_keychain.py` `chmod` executables
+  and shell out to them.
+
+## workbench — `tests.yml` job `tests` (hobby-linux) — not routable
+
+Fails before the tests: the Install step runs
+`command -v lsof || sudo apt-get install -y lsof`, which is Debian-Linux
+only. The suite independently assumes POSIX:
+
+- `colima-port-watch/test_colima_port_watch.py` writes `#!/bin/bash`
+  stubs, sets a POSIX `PATH` (`...:/usr/bin:/bin:/usr/sbin:/sbin`), and
+  runs `["/bin/bash", "colima-port-watch"]`.
+- The chatgpt-messages-connector suite exercises macOS-only surface
+  (`~/Library/Messages/chat.db`, `/usr/bin/osascript`).
+
+## jeffy-finance-agent — `tests.yml` job `tests` (hobby-linux) — not routable
+
+Runs `python -m pytest -q scripts/tests` (Python 3.9), and the collected
+tests pin Unix/macOS tool paths throughout:
+
+- `scripts/tests/test_effect_cli.py` shells `["/usr/bin/git", ...]`
+  repeatedly.
+- `scripts/tests/test_production_runtime.py` matches commands against
+  `["/bin/launchctl", "print"]`; `test_launch_descriptors.py` reads and
+  constrains `scripts/git-sync.sh`, a `#!/bin/bash` wrapper ending in
+  `exec /usr/bin/python3 ...`.
+- `scripts/tests/test_effect_boundary.py` pins `osascript`,
+  `/usr/bin/git`, and `/usr/bin/curl` spellings.
+
+## Conclusion over all seven repos (#1127 restatement)
+
+| Repo | Job (runner) | Verdict |
+|---|---|---|
+| command-center (#1109) | `pytest` (hobby-linux) | not routable |
+| command-center (#1109) | `check` (ubuntu-latest) | no queue impact |
+| The-League | `offline` (hobby-linux) | not routable |
+| FF-Weekly-Start-Sit | `offline` (hobby-linux) | not routable |
+| FF-Weekly-Start-Sit | `launchd` (hobby-macos) | no queue impact, not routable |
+| AFL | `offline` (hobby-linux) | **routable — follow-up ticket owns it** |
+| career-toolset | `test` (hobby-linux) | not routable |
+| workbench | `tests` (hobby-linux) | not routable |
+| jeffy-finance-agent | `tests` (hobby-linux) | not routable |
+
+Restated over all seven repos: **extra hobby-linux processes are still
+the simpler path.** Six of the seven hobby-linux jobs fail the same POSIX
+criteria (bash/sh-driven fixtures, launchd/macOS pins, apt/sudo,
+Unix-absolute tool paths); the single qualifier, AFL `offline`, is a
+seconds-long pure-stdlib suite whose move off the shared runner would not
+dent the burst queue #1076 describes. No routing change was made here; the
+AFL follow-up ticket in that repo does the routing (including the `make`
+caveat above).

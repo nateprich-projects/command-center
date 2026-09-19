@@ -59,7 +59,7 @@ def _error_rows():
             "run": str(i),
             "phase": "finish",
             "ts": NOW.timestamp() - (i + 1) * 3600,
-            "agent": "codex",
+            "agent": "muse",
             "outcome": "errored",
             "note": "boom {}".format(i),
         }
@@ -68,17 +68,17 @@ def _error_rows():
 
 
 def test_agent_health_names_the_agent_and_preserves_watchdog_wording(monkeypatch):
-    monkeypatch.setattr(heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(heartbeat, "PROVIDERS", {"muse": "meta"})
     monkeypatch.setattr(heartbeat, "read", lambda agent: _error_rows())
 
     assert funnel.agent_health(NOW) == [{
-        "agent": "codex",
-        "condition": "`codex` errored 3 times this week. Most recent: boom 0; boom 1; boom 2",
+        "agent": "muse",
+        "condition": "`muse` errored 3 times this week. Most recent: boom 0; boom 1; boom 2",
     }]
 
 
 def test_healthy_heartbeat_rows_render_no_agent_health(monkeypatch):
-    monkeypatch.setattr(heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(heartbeat, "PROVIDERS", {"muse": "meta"})
     monkeypatch.setattr(
         heartbeat,
         "read",
@@ -86,7 +86,7 @@ def test_healthy_heartbeat_rows_render_no_agent_health(monkeypatch):
             "run": "healthy",
             "phase": "finish",
             "ts": NOW.timestamp() - 3600,
-            "agent": "codex",
+            "agent": "muse",
             "outcome": "nothing-to-do",
         }],
     )
@@ -108,11 +108,11 @@ def test_brief_run_summary_separates_rebegins_from_finishes(monkeypatch):
         _start("fresh", 2),
         _finish("fresh", 1),
     ]
-    monkeypatch.setattr(heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(heartbeat, "PROVIDERS", {"muse": "meta"})
     monkeypatch.setattr(heartbeat, "read", lambda agent: rows)
 
     assert funnel.agent_run_summary(NOW) == [{
-        "agent": "codex",
+        "agent": "muse",
         "starts": 2,
         "finishes": 1,
         "re_begins": 1,
@@ -147,20 +147,23 @@ def test_sparse_history_uses_the_absolute_silence_floor_and_reaches_the_brief(
     monkeypatch, capsys,
 ):
     now, rows = _silence_fixture()
+    silent = rows["codex"]
 
-    conditions = assess("codex", rows["codex"], now.timestamp())
+    conditions = assess("muse", silent, now.timestamp())
 
     assert len(conditions) == 1
     assert "absolute silence floor 6h exceeded" in conditions[0]
     assert "Nothing recorded for 1d8h1m" in conditions[0]
     assert "normal gap" not in conditions[0]
+    assert assess("codex", silent, now.timestamp()) == []
 
     monkeypatch.setattr(heartbeat, "PROVIDERS", {
         "codex": "openai",
         "muse": "meta",
     })
     monkeypatch.setattr(
-        funnel, "_brief_heartbeat_rows", lambda agent: rows.get(agent, [])
+        funnel, "_brief_heartbeat_rows",
+        lambda agent: silent if agent in ("codex", "muse") else [],
     )
     monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
@@ -174,7 +177,7 @@ def test_sparse_history_uses_the_absolute_silence_floor_and_reaches_the_brief(
     assert funnel.cmd_brief([item], now) == 0
     brief = json.loads(capsys.readouterr().out)
     assert brief["agent_health"] == [{
-        "agent": "codex",
+        "agent": "muse",
         "condition": conditions[0],
     }]
 

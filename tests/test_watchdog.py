@@ -241,6 +241,7 @@ def test_thin_history_declines_to_alarm_and_prints_a_note():
 
 def test_sparse_silence_floor_reaches_the_watchdog_issue_body(monkeypatch):
     now, rows = silence_fixture()
+    silent = rows["codex"]
     calls = []
 
     monkeypatch.setattr(watchdog.time, "time", lambda: now)
@@ -249,7 +250,8 @@ def test_sparse_silence_floor_reaches_the_watchdog_issue_body(monkeypatch):
         "muse": "meta",
     })
     monkeypatch.setattr(
-        watchdog, "records", lambda agent: rows.get(agent, [])
+        watchdog, "records",
+        lambda agent: silent if agent in ("codex", "muse") else [],
     )
     monkeypatch.setattr(
         watchdog, "existing_issue", lambda: {"number": 160}
@@ -266,7 +268,8 @@ def test_sparse_silence_floor_reaches_the_watchdog_issue_body(monkeypatch):
         for argument in call
         if argument.startswith("body=")
     )
-    assert "- `codex`: absolute silence floor 6h exceeded." in body
+    assert "- `muse`: absolute silence floor 6h exceeded." in body
+    assert "codex" not in body
     assert "normal gap" not in body
 
 

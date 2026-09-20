@@ -130,6 +130,14 @@ PROMPT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-prompt.XXXXXX")"
 ANSWER_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-answer.XXXXXX")"
 DECISION_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-decision.XXXXXX")"
 COMMENT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-comment.XXXXXX")"
+# The helper is a sibling of this runner, not part of the maintained clone's
+# protocol surface: it ships and moves with the script that sources it.
+MUSE_QUOTA_HOLD_LIB="${BASH_SOURCE[0]%/*}/muse-quota-hold.sh"
+if [[ ! -r "$MUSE_QUOTA_HOLD_LIB" ]]; then
+  echo "muse-review-engine: cannot read $MUSE_QUOTA_HOLD_LIB — refusing to run without the quota hold" >&2
+  exit 1
+fi
+. "$MUSE_QUOTA_HOLD_LIB"
 DIAG_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-diag.XXXXXX")"
 RESULT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-result.XXXXXX")"
 if [[ -z "$PACKET_FILE" || -z "$PROMPT_FILE" || -z "$ANSWER_FILE" \
@@ -343,6 +351,17 @@ call_muse() {
 
 muse_failed() {
   local status="$1"
+  # A spent provider window is not the subject's failure. Record the hold so
+  # every lane waits for the reset instead of retrying on its own schedule.
+  if MUSE_QUOTA_RESET="$(muse_quota_record "$DIAG_FILE")"; then
+    echo "muse-review-engine: Muse's provider quota is exhausted; parking every lane until $MUSE_QUOTA_RESET" >&2
+    if [[ -n "${BEGIN_RUN:-}" ]]; then
+      python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+        --outcome skipped-provider-quota \
+        --note "provider quota exhausted until $MUSE_QUOTA_RESET" >&2 || true
+    fi
+    exit 0
+  fi
   if (( status == 124 )); then
     echo "muse-review-engine: the model call outlived the wall-clock bound" >&2
     failure "killed after $((BOUND_SECONDS / 60)) minutes: $TIER $JOB run exceeded the wall-clock bound (#392)" || true
@@ -586,6 +605,14 @@ run_issue_job() {
     exit 1
   done
 }
+
+# Park before claiming anything while Muse's provider quota is spent. The
+# hold is written by whichever lane last met the refusal and expires by
+# itself at the reset the provider named.
+if MUSE_QUOTA_RESET="$(muse_quota_hold_until)"; then
+  echo "muse-review-engine: parked until $MUSE_QUOTA_RESET — Muse's provider quota is exhausted" >&2
+  exit 0
+fi
 
 # Own the opening poll. Empty polls must not launch a model: `begin` has
 # already recorded the heartbeat and made the gate decision, so a stop can

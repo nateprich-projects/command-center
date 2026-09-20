@@ -1207,16 +1207,42 @@ def _review_projection_streams(*, finish_times, shadow_misses=()):
     return shadow, live
 
 
+def _unmatched_shadow_review_records(*, count, start_finished, step,
+                                    first_pr, run_prefix):
+    """Shadow review jobs with no live counterpart.
+
+    They raise ``shadow_jobs`` toward the 50-job window minimum without
+    touching ``compared`` or the comparison finish times, so a test can
+    reach the branch it is about instead of stopping at the minimum.
+    """
+    records = []
+    for index in range(count):
+        pr = first_pr + index
+        records += _review_job(
+            "{}-unmatched-{}".format(run_prefix, index),
+            start_finished + index * step, "approved",
+            "shadow-unmatched-head-{}".format(pr),
+            "shadow review of PR #{}: approved".format(pr),
+            pr=pr,
+        )
+    return records
+
+
 def test_review_projection_recovers_within_a_day_from_finish_rate():
     shadow, live = _review_projection_streams(
         finish_times=[100 + index * 400 for index in range(10)],
         shadow_misses={1},
+    )
+    shadow += _unmatched_shadow_review_records(
+        count=40, start_finished=200, step=5, first_pr=1000,
+        run_prefix="recovers",
     )
 
     projection = shadow_report.build_report(
         shadow, live, now=4000, window_seconds=4000,
     )["projection"]
 
+    assert projection["window_minimum_met"] is True
     assert projection["engine_wrong_upper_bound"] == 1
     assert projection["hard_fail"] is False
     assert projection["rate_per_hour"] == 10.0
@@ -1231,11 +1257,16 @@ def test_review_projection_recommends_restart_when_recovery_exceeds_a_day():
                       for index in range(10)],
         shadow_misses={1},
     )
+    shadow += _unmatched_shadow_review_records(
+        count=40, start_finished=200, step=5, first_pr=1000,
+        run_prefix="slow-recovery",
+    )
 
     projection = shadow_report.build_report(
         shadow, live, now=130000, window_seconds=130000,
     )["projection"]
 
+    assert projection["window_minimum_met"] is True
     assert projection["clean_jobs_needed"] == 10
     assert projection["rate_per_hour"] <= 0.3
     assert projection["hours_to_threshold"] > 24
@@ -1247,11 +1278,16 @@ def test_review_projection_waits_for_a_minimum_sample_without_misses():
     shadow, live = _review_projection_streams(
         finish_times=[100],
     )
+    shadow += _unmatched_shadow_review_records(
+        count=49, start_finished=50, step=1, first_pr=1000,
+        run_prefix="one-comparison",
+    )
 
     projection = shadow_report.build_report(
         shadow, live, now=200, window_seconds=200,
     )["projection"]
 
+    assert projection["window_minimum_met"] is True
     assert projection["rate_per_hour"] == 0.0
     assert projection["hours_to_threshold"] is None
     assert projection["restart_recommended"] is False
@@ -1262,11 +1298,16 @@ def test_empty_comparison_window_does_not_recommend_restart():
     shadow, live = _review_projection_streams(
         finish_times=[],
     )
+    shadow += _unmatched_shadow_review_records(
+        count=50, start_finished=50, step=1, first_pr=1000,
+        run_prefix="no-comparisons",
+    )
 
     projection = shadow_report.build_report(
         shadow, live, now=200, window_seconds=200,
     )["projection"]
 
+    assert projection["window_minimum_met"] is True
     assert projection["hours_to_threshold"] is None
     assert projection["restart_recommended"] is False
     assert "insufficient sample" in projection["reason"]
@@ -1277,11 +1318,16 @@ def test_zero_comparison_rate_with_a_miss_below_sample_floor_does_not_restart():
         finish_times=[100],
         shadow_misses={1},
     )
+    shadow += _unmatched_shadow_review_records(
+        count=49, start_finished=50, step=1, first_pr=1000,
+        run_prefix="one-miss",
+    )
 
     projection = shadow_report.build_report(
         shadow, live, now=200, window_seconds=200,
     )["projection"]
 
+    assert projection["window_minimum_met"] is True
     assert projection["rate_per_hour"] == 0.0
     assert projection["hours_to_threshold"] is None
     assert projection["restart_recommended"] is False
@@ -1307,6 +1353,74 @@ def test_review_wrong_approval_is_a_hard_fail_even_when_bar_is_met():
     assert projection["clean_jobs_needed"] == 0
     assert projection["restart_recommended"] is True
     assert "hard-fail" in projection["reason"]
+
+
+def test_review_projection_holds_threshold_met_until_window_minimum():
+    shadow, live = _review_projection_streams(
+        finish_times=[20000 + index * 8000 for index in range(8)],
+    )
+    shadow += _unmatched_shadow_review_records(
+        count=30, start_finished=21000, step=100, first_pr=1000,
+        run_prefix="young-review",
+    )
+
+    report = shadow_report.build_report(
+        shadow, live, now=100000, window_seconds=84600,
+    )
+
+    assert report["jobs"]["shadow"] == 38
+    assert report["jobs"]["compared"] == 8
+    assert report["agreement"]["rate"] == 1.0
+    projection = report["projection"]
+    assert projection["window_minimum_met"] is False
+    assert projection["reason"] == (
+        "continue: minimum sample not reached (23.5 h, 38 jobs)"
+    )
+    assert projection["hours_to_threshold"] > 0
+    assert projection["hours_to_threshold"] == 24.5
+    assert projection["restart_recommended"] is False
+
+
+def test_review_projection_meets_minimum_at_exactly_48_hours():
+    shadow, live = _review_projection_streams(
+        finish_times=[30000 + index * 8000 for index in range(6)],
+    )
+
+    report = shadow_report.build_report(
+        shadow, live, now=200000, window_seconds=172800,
+    )
+
+    assert report["jobs"]["shadow"] == 6
+    assert report["jobs"]["compared"] == 6
+    assert report["agreement"]["rate"] == 1.0
+    projection = report["projection"]
+    assert projection["window_minimum_met"] is True
+    assert projection["reason"] == "continue: threshold is met"
+    assert projection["hours_to_threshold"] == 0.0
+    assert projection["restart_recommended"] is False
+
+
+def test_review_projection_meets_minimum_at_exactly_50_jobs():
+    shadow, live = _review_projection_streams(
+        finish_times=[16500 + index * 100 for index in range(8)],
+    )
+    shadow += _unmatched_shadow_review_records(
+        count=42, start_finished=16600, step=10, first_pr=1000,
+        run_prefix="jobs-boundary-review",
+    )
+
+    report = shadow_report.build_report(
+        shadow, live, now=20000, window_seconds=3600,
+    )
+
+    assert report["jobs"]["shadow"] == 50
+    assert report["jobs"]["compared"] == 8
+    assert report["agreement"]["rate"] == 1.0
+    projection = report["projection"]
+    assert projection["window_minimum_met"] is True
+    assert projection["reason"] == "continue: threshold is met"
+    assert projection["hours_to_threshold"] == 0.0
+    assert projection["restart_recommended"] is False
 
 
 def test_breakdown_shape_projection_uses_directional_misses():

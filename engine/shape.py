@@ -717,9 +717,20 @@ def apply_shape(items: list, now: datetime, ref: str,
     if authority_signals:
         print("\n--- self-approval advisory ---")
         print("Authority signals are recorded in the Self-approved basis:")
+        descriptions = {
+            "policy authority": (
+                "cites plan.md or AGENTS.md on a gate, membership, "
+                "or who may write"
+            ),
+            "unattended authority": "changes what an agent may do unattended",
+            "gate authority": "changes a gate's question, answer, or owner",
+            "field authority": (
+                "changes who may set a field that other rules act on"
+            ),
+        }
         for signal in authority_signals:
             print("  {}: {}".format(
-                signal, funnel.NEEDS_NATE_SIGNAL_REASONS[signal]
+                signal, descriptions.get(signal, signal)
             ))
     if status != "Ready":
         print("\nIt now waits on you: is the plan good? "

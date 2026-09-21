@@ -1345,3 +1345,110 @@ def test_closed_itself_degrades_explicitly_when_over_budget(
         "reason": "brief budget exhausted before the section started",
     } in brief["degraded"]
     assert brief["counts_by_gate"]["Ready"] == 0
+
+
+def test_ticket_pr_facts_budget_covers_the_observed_max():
+    """The 22.9 s observed max over 738 refs fits inside the budget (#1210)."""
+    assert funnel.BRIEF_SECTION_BUDGETS["ticket_pr_facts"] == 35.0
+
+
+def test_ticket_pr_facts_section_succeeds_under_the_raised_budget(
+    monkeypatch,
+):
+    """A read taking the observed 22.9 s succeeds with no degraded entry."""
+    clock = [0.0]
+
+    monkeypatch.setattr(funnel.time, "perf_counter", lambda: clock[0])
+
+    def reader():
+        clock[0] += 22.9
+        return {"facts": True}
+
+    timings = {}
+    degraded = []
+    assert funnel._brief_timed(
+        "ticket_pr_facts", reader, timings, degraded
+    ) == {"facts": True}
+    assert timings["ticket_pr_facts"] == pytest.approx(22.9)
+    assert degraded == []
+
+
+def test_main_brief_retries_a_pr_facts_timeout_once_within_deadline(
+    monkeypatch, capsys
+):
+    """A first-attempt timeout is retried once sharing the section deadline;
+    when the retry succeeds the dependent sections render instead of
+    reporting missing (#1210)."""
+    item = funnel.Item(
+        repo="nateprich/beta", number=92, title="A ticket",
+        url="https://example.invalid/92", state="OPEN",
+        parent="nateprich/beta#1",
+    )
+    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+    calls = []
+
+    def flaky(_items):
+        calls.append(1)
+        if len(calls) == 1:
+            raise funnel.BriefSectionTimeout(
+                "ticket_pr_facts", "section read timed out"
+            )
+        return {}
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", flaky)
+
+    assert funnel.main(["brief"]) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert len(calls) == 2
+    assert brief["stranded"] is not None
+    assert brief["in_motion"] is not None
+    assert brief["stale_locks_taken_over"] is not None
+    assert [
+        entry for entry in brief["missing"]
+        if entry["section"] in funnel.BRIEF_PR_FACT_SECTIONS
+    ] == []
+
+
+def test_main_brief_retry_exhausted_still_reports_degraded(
+    monkeypatch, capsys
+):
+    """Two timeouts (first attempt plus the one shared-deadline retry) leave
+    the dependent sections missing and record the degraded section (#1210)."""
+    item = funnel.Item(
+        repo="nateprich/beta", number=92, title="A ticket",
+        url="https://example.invalid/92", state="OPEN",
+        parent="nateprich/beta#1",
+    )
+    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+    calls = []
+
+    def always_slow(_items):
+        calls.append(1)
+        raise funnel.BriefSectionTimeout(
+            "ticket_pr_facts", "section read timed out"
+        )
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", always_slow)
+
+    assert funnel.main(["brief"]) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert len(calls) == 2
+    assert brief["stranded"] is None
+    assert brief["in_motion"] is None
+    assert brief["stale_locks_taken_over"] is None
+    assert brief["missing"] == [
+        {
+            "section": section,
+            "error": "could not read ticket branch facts: "
+                     "brief section read timed out",
+        }
+        for section in funnel.BRIEF_PR_FACT_SECTIONS
+    ]
+    degraded = [
+        row for row in brief["degraded"]
+        if row["section"] == "ticket_pr_facts"
+    ]
+    assert len(degraded) == 1
+    assert degraded[0]["budget_seconds"] == 35.0

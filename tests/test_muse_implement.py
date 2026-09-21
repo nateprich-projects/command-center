@@ -378,7 +378,7 @@ def test_a_stop_finishes_without_a_clone_or_model(tmp_path, gate, outcome):
     )
 
 
-def test_the_runner_refuses_any_lane_other_than_escalated_or_standard_max():
+def test_the_runner_refuses_an_unknown_tier_or_a_lowered_escalated_effort():
     bad_tier = subprocess.run(
         ["/bin/bash", str(SCRIPT), "urgent", "max"],
         capture_output=True,
@@ -389,11 +389,34 @@ def test_the_runner_refuses_any_lane_other_than_escalated_or_standard_max():
         capture_output=True,
         text=True,
     )
+    unknown_effort = subprocess.run(
+        ["/bin/bash", str(SCRIPT), "standard", "low"],
+        capture_output=True,
+        text=True,
+    )
 
     assert bad_tier.returncode == 1
     assert "tier must be escalated or standard" in bad_tier.stderr
     assert bad_effort.returncode == 1
-    assert "reasoning effort must be max" in bad_effort.stderr
+    assert "reasoning effort must be max on the escalated tier" in bad_effort.stderr
+    assert unknown_effort.returncode == 1
+    assert "reasoning effort must be max or high" in unknown_effort.stderr
+
+
+def test_the_standard_tier_accepts_high_effort(tmp_path):
+    """`standard high` is what the schedule runs (#1191). It must get past the
+    argument guard; with no routine in the repo it then stops at the prompt
+    check, before begin, which proves the guard let it through."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = dict(os.environ, MUSE_IMPLEMENT_REPO=str(repo),
+               HOME=str(tmp_path), TMPDIR=str(tmp_path))
+    proc = subprocess.run(["/bin/bash", str(SCRIPT), "standard", "high"],
+                          env=env, stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 1
+    assert "reasoning effort" not in proc.stderr
+    assert "refusing to run without a prompt" in proc.stderr
 
 
 def test_a_missing_routine_refuses_before_begin(tmp_path):

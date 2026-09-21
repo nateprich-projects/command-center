@@ -2014,12 +2014,12 @@ def test_a_broken_breakdown_is_not_hidden_behind_an_older_improve_plan(
     assert result["work"]["ref"] == broken_plan.ref
 
 
-def _tight_budget(monkeypatch):
-    """Make begin's preflight report the #1198 `tight` band with its numbers."""
+def _tight_budget(monkeypatch, band="tight"):
+    """Make begin's preflight report a #1198 band with its numbers."""
     def preflight(now, agent, idle):
         return ({
             "agent": agent, "run": "run-id", "gate": "ok",
-            "budget_band": "tight",
+            "budget_band": band,
             "budget": {"used_percent": 62.0, "projected_percent": 118.0,
                        "daily_rate_dollars": 31.0,
                        "runs_out_at": NOW.timestamp() + 2 * 86400},
@@ -2129,6 +2129,53 @@ def test_a_tight_budget_offers_a_broken_ticket_and_holds_an_improve_one(
     assert result["gate"] == "tight"
     assert "projected 118%" in result["why"]
     assert writes == []
+
+
+def test_a_tight_budget_offers_a_pinned_replace_ticket(monkeypatch, capsys):
+    """#1199's Accept names it: a pin is Nate's explicit ordering call, so a
+    pinned Replace project's ticket is still offered while the budget is tight."""
+    _tight_budget(monkeypatch)
+    pinned_project, pinned_ticket = _ticket(181, 180, klass="Replace")
+    pinned_project.pinned = True
+    improve_project, improve_ticket = _ticket(183, 182, klass="Improve")
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys,
+        [improve_project, improve_ticket, pinned_project, pinned_ticket],
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == pinned_ticket.ref
+    assert [ref for ref, _ in writes] == [pinned_ticket.ref]
+
+
+def test_an_ok_band_offers_everything_as_before(monkeypatch, capsys):
+    """Under `ok` nothing is held: a New project's PR review, an Improve
+    ticket and an Improve idea are all offered exactly as without a band."""
+    _tight_budget(monkeypatch, band="ok")
+    project, ticket = _ticket(185, 184, klass="New")
+    result = _reviewer_begin(
+        monkeypatch, capsys, [project, ticket],
+        reviews=[_review_job(ticket)],
+        idea=_idea(186, "Improve idea", "Risk: standard", klass="Improve"),
+    )
+    assert result["budget_band"] == "ok"
+    assert result["do"] == "review"
+    assert "budget_held" not in result
+
+    _tight_budget(monkeypatch, band="ok")
+    result = _reviewer_begin(
+        monkeypatch, capsys, [],
+        idea=_idea(187, "Improve idea", "Risk: standard", klass="Improve"),
+    )
+    assert result["do"] == "shape"
+
+    _tight_budget(monkeypatch, band="ok")
+    improve_project, improve_ticket = _ticket(189, 188, klass="Improve")
+    result, _ = _implementing_begin(
+        monkeypatch, capsys, [improve_project, improve_ticket])
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == improve_ticket.ref
 
 
 def test_work_that_blocks_broken_work_is_essential_with_it():

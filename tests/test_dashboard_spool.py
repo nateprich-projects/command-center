@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import pytest
+
 import funnel  # noqa: E402
 
 
@@ -279,6 +281,42 @@ def test_dashboard_muse_usage_maps_the_seven_day_window(monkeypatch):
         "used_percent": 7.15,
         "calls": 42,
     }
+
+
+def test_dashboard_muse_usage_carries_the_pace_signal(monkeypatch):
+    """#1199: when the reader carries a projection, the row the dashboard
+    draws from says when the window runs out, days ahead of the wall."""
+    import usage
+
+    now = 1_788_000_000.0
+    window = {
+        "used_percent": 62.0, "spent_dollars": 124.0, "cap_dollars": 200.0,
+        "calls": 42, "rolling": True, "resets_at": now + 3 * 86400.0,
+        "window_start": now - 4 * 86400.0, "trailing_72h_dollars": 93.0,
+        "daily_rate_dollars": 31.0, "projected_percent": 108.5,
+    }
+    monkeypatch.setattr(usage, "read_muse", lambda at: {
+        "source": "muse", "captured_at": now, "spent_dollars": 124.0,
+        "cap_dollars": 200.0, "windows": {"seven_day": window},
+    })
+
+    runs_out_at = now + (200.0 - 124.0) / 31.0 * 86400.0
+    # The band is #1198's to compute; this row only carries what `pace` says.
+    monkeypatch.setattr(usage, "pace", lambda reading, at, provider=None: {
+        "windows": [{
+            "window": "seven_day", "band": "tight", "projected_percent": 108.5,
+            "daily_rate_dollars": 31.0, "runs_out_at": runs_out_at,
+        }],
+        "over_pace": False, "band": "tight", "known": True,
+    })
+
+    row = funnel._dashboard_muse_usage(now)
+
+    assert row["band"] == "tight"
+    assert row["projected_percent"] == 108.5
+    assert row["daily_rate_dollars"] == 31.0
+    assert row["runs_out_at"] == pytest.approx(runs_out_at, abs=1)
+    assert row["used_percent"] == 62.0 and row["calls"] == 42
 
 
 def test_dashboard_muse_usage_is_none_when_unreadable(monkeypatch):

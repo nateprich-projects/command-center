@@ -361,26 +361,6 @@ def test_render_marks_empty_decision_lists():
     assert body.count("None recorded.") == 2
 
 
-def test_rendered_categories_match_the_stable_headings():
-    assert [category for _, category in shape.NEEDS_FIELDS] == \
-        list(funnel.NEEDS_NATE_CATEGORIES)
-
-
-def test_an_all_clear_render_passes_the_old_parser():
-    # The decision no longer parses; the rendered body stays readable by
-    # the readers that still do, through the cutover.
-    body = shape.render_plan(shape.validate_answer(answer()))
-    assert funnel.shaped_plan_status(body)[0] == "Ready"
-
-
-def test_an_open_render_holds_under_the_old_parser():
-    body = shape.render_plan(shape.validate_answer(answer(needs_nate={
-        "exposure": None, "gates": ["Who may write Ready?"],
-        "scope": None, "preference": None})))
-    assert funnel.shaped_plan_status(body) == (
-        "Shaped", "open question under Gates")
-
-
 def test_the_all_clear_render_carries_no_authority_signals():
     body = shape.render_plan(shape.validate_answer(answer()))
     assert funnel.needs_nate_signals(body) == []
@@ -401,7 +381,7 @@ def test_render_records_sequencing_dependencies():
         depends_on=["owner/repo#165", "other/repo#7"])))
     assert "## Sequencing" in body
     assert "Depends on: owner/repo#165, other/repo#7" in body
-    # Needs stays last for the readers that still parse it.
+    # Needs stays last in the rendered body.
     assert body.index("## Sequencing") < body.index("## Needs Nate")
 
 
@@ -409,16 +389,6 @@ def test_render_omits_sequencing_when_nothing_waits():
     body = shape.render_plan(shape.validate_answer(answer()))
     assert "## Sequencing" not in body
     assert "Depends on" not in body
-
-
-def test_a_listed_render_holds_under_the_old_parser():
-    body = shape.render_plan(shape.validate_answer(answer(needs_nate={
-        "exposure": None, "gates": None,
-        "scope": ["Should we build it at all?",
-                  "Which milestone owns the work?"],
-        "preference": None})))
-    assert funnel.shaped_plan_status(body) == (
-        "Shaped", "open question under Scope and priority")
 
 
 # -- the mechanical rule -----------------------------------------------------
@@ -786,21 +756,6 @@ def test_apply_holds_a_plan_with_one_open_need_at_shaped(
     output = capsys.readouterr().out
     assert "held at Shaped: open question under Gates" in output
     assert "It now waits on you: is the plan good?" in output
-
-
-def test_apply_never_calls_the_needs_section_parser(monkeypatch):
-    def fail(*args, **kwargs):
-        raise AssertionError("the Needs-section parser was called")
-
-    monkeypatch.setattr(funnel, "plan_needs_nate", fail)
-    monkeypatch.setattr(funnel, "shaped_plan_status", fail)
-    monkeypatch.setattr(funnel, "_needs_nate_sections", fail)
-    item = idea(42)
-    stub_gh(monkeypatch, item)
-    assert shape.apply_shape(
-        [item], NOW, item.ref, answer(),
-        run="shape-run", agent="muse") == 0
-    assert item.status == "Ready"
 
 
 def test_an_open_section_in_prose_does_not_hold_an_all_clear_answer(

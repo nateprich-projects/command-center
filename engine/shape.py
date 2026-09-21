@@ -9,10 +9,8 @@ applies the self-approval rule mechanically.
 
 The decision never parses a Needs section: ``needs_nate``'s four fields
 are the open-question record, and ``decide`` feeds them to the shared
-``self_approval_eligible`` predicate. The old Needs-section parser
-(``shaped_plan_status`` / ``plan_needs_nate``) is not called anywhere on
-this path; the rendered body keeps the stable four-category section only
-so existing readers stay consistent through the cutover.
+``self_approval_eligible`` predicate. The rendered body keeps the stable
+four-category section as the human-readable record of those fields.
 
 Two entry points share this module: ``shape-packet`` is read-only, while
 ``shape-apply`` performs the shaping writes.
@@ -294,9 +292,8 @@ def render_plan(answer: Dict) -> str:
     agent decided itself, the sequencing dependencies where any wait
     (#1053), and the four Needs Nate categories (each open list joined
     on one line, the stable all-clear line where null). Needs stays
-    last so the section holds only its category lines for the readers
-    that still parse it. Takes a validated answer; ``apply_shape``
-    validates before calling.
+    last so the section holds only its category lines. Takes a
+    validated answer; ``apply_shape`` validates before calling.
     """
     lines = [answer["plan_markdown"].rstrip(), "",
              "Proposed class: {}".format(answer["proposed_class"]), "",
@@ -484,9 +481,9 @@ def fetch_repo_text(repo: str, path: str) -> Tuple[str, bool]:
 def sibling_plan_items(items: Sequence, idea) -> list:
     """The other open project plans in the idea's repo, sorted by ref.
 
-    Same "open plans" definition the shaping overlap check uses —
-    parentless, open, Shaped/Ready/Building — narrowed to the idea's
-    own repo, which is what the shape packet promises.
+    Open plans are parentless, open, Shaped/Ready/Building items —
+    narrowed to the idea's own repo, which is what the shape packet
+    promises.
     """
     return sorted(
         (row for row in items
@@ -645,7 +642,6 @@ def apply_shape(items: list, now: datetime, ref: str,
         rendered, "agent", at=now, run=run, agent=agent)
     for block in carried_blocks:
         body = "{}\n\n{}".format(body, block)
-    overlaps = funnel.shaping_plan_overlap_candidates(items, item, rendered)
 
     command = ["gh", "issue", "edit", str(item.number), "--repo",
                item.repo, "--body", body]
@@ -718,13 +714,6 @@ def apply_shape(items: list, now: datetime, ref: str,
         print("advanced to Ready: {}".format(reason))
     else:
         print("held at Shaped: {}".format(reason))
-    print("\n--- plan overlap candidates (advisory) ---")
-    if overlaps:
-        print("Read each candidate and record the conclusion in the plan:")
-        for overlap in overlaps:
-            print("  {}".format(overlap))
-    else:
-        print("  none found")
     if authority_signals:
         print("\n--- self-approval advisory ---")
         print("Authority signals are recorded in the Self-approved basis:")

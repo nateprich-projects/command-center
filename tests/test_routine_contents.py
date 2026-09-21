@@ -73,8 +73,9 @@ def test_shaping_is_the_third_ordered_job_with_a_safe_unattended_boundary(
 def test_breakdown_docs_record_and_resume_needs_decisions():
     """An undecidable breakdown must become visible to Nate and resume from
     his answer, rather than repeatedly consuming Muse runs on the same plan."""
+    # skills/breakdown holds only the sizing standard since #814; the
+    # routine keeps the protocol until #807 deletes it.
     documents = (
-        ROOT / "skills" / "breakdown" / "SKILL.md",
         ROOT / "routines" / "muse.md",
     )
     for path in documents:
@@ -98,7 +99,7 @@ def test_breakdown_docs_record_and_resume_needs_decisions():
 
 
 def test_needs_guidance_uses_the_parser_ready_all_clear_form():
-    """The shaping docs must teach the syntax accepted by shaped_plan_status."""
+    """The shaping routines must teach the stable all-clear category form."""
     example = " ".join(
         """- Exposure: nothing outstanding. No new credentials or reachable surface.
         - Gates: nothing outstanding. No gate ownership changes.
@@ -108,10 +109,11 @@ def test_needs_guidance_uses_the_parser_ready_all_clear_form():
     old_guidance = (
         "explicit answer under every category, including when nothing is outstanding"
     )
+    # skills/shape holds only the decision-record rules since #814; the
+    # routines keep the protocol until #807 deletes them.
     documents = (
         ROOT / "routines" / "muse.md",
         ROOT / "routines" / "claude.md",
-        ROOT / "skills" / "shape" / "SKILL.md",
     )
 
     for path in documents:

@@ -29,8 +29,17 @@ SHA = "abc123def456"
 OTHER_SHA = "7890fedcba98"
 
 
+def requirement(status="met", **kw):
+    entry = {"requirement": "do the thing",
+             "status": status,
+             "evidence": "thing.py cites the new line"}
+    entry.update(kw)
+    return entry
+
+
 def answer(**kw):
-    data = {"verdict": "approved", "blocking": [], "unsure": []}
+    data = {"verdict": "approved", "blocking": [], "unsure": [],
+            "requirements": [requirement()]}
     data.update(kw)
     return json.dumps(data)
 
@@ -66,6 +75,35 @@ MALFORMED = [
                 "unsure": [False]}),
     json.dumps({"verdict": "approved", "blocking": ["a blocker"],
                 "unsure": []}),
+    # The conformance pass (#1187): missing, mistyped, or misshapen.
+    json.dumps({"verdict": "rejected", "blocking": [], "unsure": []}),
+    json.dumps({"verdict": "rejected", "blocking": [], "unsure": [],
+                "requirements": "do the thing"}),
+    json.dumps({"verdict": "rejected", "blocking": [], "unsure": [],
+                "requirements": ["do the thing"]}),
+    json.dumps({"verdict": "rejected", "blocking": [], "unsure": [],
+                "requirements": [{"status": "met",
+                                  "evidence": "thing.py"}]}),
+    json.dumps({"verdict": "rejected", "blocking": [], "unsure": [],
+                "requirements": [{"requirement": "do the thing",
+                                  "evidence": "thing.py"}]}),
+    json.dumps({"verdict": "rejected", "blocking": [], "unsure": [],
+                "requirements": [{"requirement": "do the thing",
+                                  "status": "met"}]}),
+    json.dumps({"verdict": "rejected", "blocking": [], "unsure": [],
+                "requirements": [{"requirement": "do the thing",
+                                  "status": "done",
+                                  "evidence": "thing.py"}]}),
+    json.dumps({"verdict": "rejected", "blocking": [], "unsure": [],
+                "requirements": [{"requirement": "",
+                                  "status": "met",
+                                  "evidence": "thing.py"}]}),
+    json.dumps({"verdict": "rejected", "blocking": [], "unsure": [],
+                "requirements": [{"requirement": "do the thing",
+                                  "status": "met",
+                                  "evidence": "  "}]}),
+    json.dumps({"verdict": "approved", "blocking": [], "unsure": [],
+                "requirements": []}),
 ]
 
 
@@ -73,7 +111,8 @@ MALFORMED = [
 
 def test_a_clean_approval_parses():
     found = review_apply.parse_answer(answer())
-    assert found == {"verdict": "approved", "blocking": [], "unsure": []}
+    assert found == {"verdict": "approved", "blocking": [], "unsure": [],
+                     "requirements": [requirement()]}
 
 
 def test_exact_approve_synonym_is_canonicalised_before_validation():
@@ -141,6 +180,40 @@ def test_an_approved_verdict_must_not_carry_blocking():
             answer(blocking=["but this is wrong"]))
 
 
+def test_an_approved_verdict_must_record_a_requirement():
+    with pytest.raises(AnswerError, match="at least one requirement"):
+        review_apply.parse_answer(answer(requirements=[]))
+
+
+def test_a_missing_requirements_key_says_so():
+    with pytest.raises(AnswerError, match="missing required key"):
+        review_apply.parse_answer(json.dumps(
+            {"verdict": "rejected", "blocking": [], "unsure": []}))
+
+
+def test_a_wrong_requirement_status_names_the_allowed_words():
+    with pytest.raises(AnswerError, match="met.*unmet.*unsure.*done"):
+        review_apply.parse_answer(answer(
+            verdict="rejected",
+            requirements=[requirement(status="done")]))
+
+
+def test_a_rejection_may_carry_an_empty_pass():
+    """The runner's own precheck rejections carry no pass: the safe
+    direction needs no evidence to stay safe."""
+    found = review_apply.parse_answer(
+        answer(verdict="rejected", blocking=["ci: CI not green"],
+               requirements=[]))
+    assert found["verdict"] == "rejected"
+    assert found["requirements"] == []
+
+
+def test_unknown_keys_on_a_requirement_are_ignored():
+    found = review_apply.parse_answer(answer(
+        requirements=[dict(requirement(), file="thing.py")]))
+    assert found["requirements"] == [requirement()]
+
+
 # -- the decision -------------------------------------------------------------
 
 def test_a_clean_approval_decides_approved_without_a_note():
@@ -192,6 +265,54 @@ def test_unsure_joins_existing_blocking_with_provenance():
     assert note is not None
 
 
+def test_an_unmet_requirement_turns_an_approval_into_a_rejection():
+    verdict, blocking, note = review_apply.decide(
+        review_apply.parse_answer(answer(requirements=[
+            requirement(status="unmet", requirement="one summary line",
+                        evidence="two call sites emit it")])))
+    assert verdict == "rejected"
+    assert blocking == ["requirement unmet: one summary line "
+                        "-- two call sites emit it"]
+    assert "were unmet" in note
+    assert "approved" in note
+
+
+def test_a_twice_met_requirement_is_caught():
+    """#1187's accept line: a diff satisfying a requirement twice over
+    is rejected, with both sites in the blocking list."""
+    verdict, blocking, _ = review_apply.decide(
+        review_apply.parse_answer(answer(
+            verdict="rejected", blocking=[],
+            requirements=[requirement(
+                status="unmet",
+                requirement="plus one per-day summary line",
+                evidence="summary() called in daily.py and in report.py")])))
+    assert verdict == "rejected"
+    assert blocking == ["requirement unmet: plus one per-day summary line "
+                        "-- summary() called in daily.py and in report.py"]
+
+
+def test_an_unsure_requirement_turns_an_approval_into_a_rejection():
+    verdict, blocking, note = review_apply.decide(
+        review_apply.parse_answer(answer(requirements=[
+            requirement(status="unsure", requirement="rotate monthly",
+                        evidence="no rotation date in the diff")])))
+    assert verdict == "rejected"
+    assert blocking == ["requirement unsure: rotate monthly "
+                        "-- no rotation date in the diff"]
+    assert "were unsure" in note
+
+
+def test_met_requirements_keep_a_rejection_for_other_reasons():
+    """A rejection for scope or plan reasons may still record a clean
+    pass: the pass constrains approvals, not rejections."""
+    verdict, blocking, note = review_apply.decide(
+        review_apply.parse_answer(answer(
+            verdict="rejected", blocking=["touches skills/ unasked"])))
+    assert (verdict, blocking, note) == (
+        "rejected", ["touches skills/ unasked"], None)
+
+
 # -- the acceptance property --------------------------------------------------
 
 @pytest.mark.parametrize("raw", MALFORMED)
@@ -208,10 +329,13 @@ def test_only_a_clean_approval_decides_approved():
         answer(verdict="rejected", blocking=["no"]),
         answer(unsure=["hmm"]),
         answer(verdict="rejected", blocking=["no"], unsure=["hmm"]),
+        answer(requirements=[requirement(status="unmet")]),
+        answer(requirements=[requirement(status="unsure")]),
     ]
     verdicts = [review_apply.decide(review_apply.parse_answer(raw))[0]
                 for raw in raws]
-    assert verdicts == ["approved", "rejected", "rejected", "rejected"]
+    assert verdicts == ["approved", "rejected", "rejected", "rejected",
+                        "rejected", "rejected"]
 
 
 # -- the effects --------------------------------------------------------------

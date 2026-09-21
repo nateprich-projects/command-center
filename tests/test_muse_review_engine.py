@@ -77,8 +77,16 @@ def _packet(**overrides):
     return packet
 
 
+def _requirement(status="met", **overrides):
+    entry = {"requirement": "do the thing", "status": status,
+             "evidence": "thing.py cites the new line"}
+    entry.update(overrides)
+    return entry
+
+
 def _answer(**overrides):
-    data = {"verdict": "approved", "blocking": [], "unsure": []}
+    data = {"verdict": "approved", "blocking": [], "unsure": [],
+            "requirements": [_requirement()]}
     data.update(overrides)
     return json.dumps(data)
 
@@ -187,10 +195,11 @@ PACKET_STUB = (
 )
 
 # Emulates the review-apply contract the runner depends on: strict validation
-# with exit 3 on a retryable malformed answer, the unsure flip, the
-# "recorded <verdict> on PR" report, and the errored-outcome marker on a
-# malformed final answer. A real apply drops an APPLIED marker file, so the
-# shadow tests can prove nothing was applied by its absence.
+# with exit 3 on a retryable malformed answer, the unsure and unmet-
+# requirement flips, the "recorded <verdict> on PR" report, and the
+# errored-outcome marker on a malformed final answer. A real apply drops
+# an APPLIED marker file, so the shadow tests can prove nothing was
+# applied by its absence.
 APPLY_STUB = (
     "import json, os, pathlib, sys\n"
     "root = pathlib.Path(__file__).parent\n"
@@ -219,17 +228,36 @@ APPLY_STUB = (
     "verdict = answer.get('verdict') if isinstance(answer, dict) else None\n"
     "blocking = answer.get('blocking') if isinstance(answer, dict) else None\n"
     "unsure = answer.get('unsure') if isinstance(answer, dict) else None\n"
+    "requirements = answer.get('requirements') if isinstance(answer, dict) else None\n"
     "if verdict not in ('approved', 'rejected'):\n"
     "    malformed('verdict must be approved or rejected')\n"
     "if not isinstance(blocking, list) or any(not isinstance(v, str) for v in blocking):\n"
     "    malformed('blocking must be a list of strings')\n"
     "if not isinstance(unsure, list) or any(not isinstance(v, str) for v in unsure):\n"
     "    malformed('unsure must be a list of strings')\n"
+    "if not isinstance(requirements, list):\n"
+    "    malformed('requirements must be a list')\n"
+    "for entry in requirements:\n"
+    "    if not isinstance(entry, dict):\n"
+    "        malformed('each requirement must be an object')\n"
+    "    if entry.get('status') not in ('met', 'unmet', 'unsure'):\n"
+    "        malformed('requirement status must be met, unmet, or unsure')\n"
+    "    for key in ('requirement', 'evidence'):\n"
+    "        if not isinstance(entry.get(key), str) or not entry.get(key).strip():\n"
+    "            malformed('requirement {} must be a non-empty string'.format(key))\n"
     "if verdict == 'approved' and blocking:\n"
     "    malformed('approved verdict must not carry blocking items')\n"
+    "if verdict == 'approved' and not requirements:\n"
+    "    malformed('approved verdict must record at least one requirement')\n"
     "if unsure:\n"
     "    verdict = 'rejected'\n"
     "    blocking = blocking + ['unsure: ' + item for item in unsure]\n"
+    "unmet = [e for e in requirements if e.get('status') == 'unmet']\n"
+    "req_unsure = [e for e in requirements if e.get('status') == 'unsure']\n"
+    "if unmet or req_unsure:\n"
+    "    verdict = 'rejected'\n"
+    "    blocking = blocking + ['requirement unmet: {} -- {}'.format(e.get('requirement'), e.get('evidence')) for e in unmet]\n"
+    "    blocking = blocking + ['requirement unsure: {} -- {}'.format(e.get('requirement'), e.get('evidence')) for e in req_unsure]\n"
     "if validate_only:\n"
     "    print(json.dumps({'verdict': verdict, 'blocking': blocking, 'note': None}, sort_keys=True))\n"
     "    raise SystemExit(0)\n"
@@ -527,6 +555,19 @@ def test_the_review_prompt_is_judgement_text_under_500_words():
                 protocol))
 
 
+def test_the_review_prompt_requires_a_per_requirement_pass():
+    """#1187: the model walks each requirement one at a time against the
+    diff and records the pass, so plan conformance is enumerated rather
+    than holistically read — and twice-met is unmet."""
+    prompt = ROUTINE.read_text().split("\n---\n", 1)[1]
+    normalized = " ".join(prompt.split()).lower()
+    assert "one at a time" in normalized
+    assert "twice" in normalized
+    assert '"requirements"' in prompt
+    assert '"met" | "unmet" | "unsure"' in prompt
+    assert "any `unmet` or `unsure` is recorded as rejected" in normalized
+
+
 def test_the_runner_reads_the_routine_at_run_time():
     """The prompt is the routine file, not a copy: the drift surface #52
     exists for must not come back in the engine."""
@@ -724,7 +765,8 @@ def test_a_failing_precheck_applies_rejected_without_calling_muse(tmp_path):
     assert applied == {"verdict": "rejected",
                        "blocking": ["ci: CI not green (state red): tests",
                                     "stop: stop_auto_merging set"],
-                       "unsure": []}
+                       "unsure": [],
+                       "requirements": []}
     assert (repo / "applied.marker").exists()
     assert _heartbeat(repo) == (
         "finish --agent muse --run engine-run --outcome done "

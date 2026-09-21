@@ -171,8 +171,17 @@ wrong.
   **Muse's scheduled budget is now locally metered.** The CLI still does not expose a
   quota endpoint, but each session journal carries goal_usage_attribution provider
   records. usage.py prices their input, cached-input, and output tokens at the
-  **standard** rate ($1.25 / $0.15 / $4.25 per 1M) and gates a rolling seven-day total
-  against a $200 cap. A missing or malformed record fails closed.
+  **standard** rate ($1.25 / $0.15 / $4.25 per 1M) and gates the total **since the
+  provider's own weekly reset** — Monday 00:00 UTC, Sunday 17:00 PDT — against a $200
+  cap. A missing or malformed record fails closed.
+
+  **The total is anchored to that reset, not to a trailing seven days.** The cap is
+  calibrated from one window's refusal, and a trailing week straddles two: measured
+  2026-09-20, the rolling reading was $224.81 against the $200 cap — 112%, which would
+  have stopped every lane for days — where the live window held $20.44. The anchored
+  reading matched the account panel to within a quarter of a point (10.22% against the
+  panel's 10%), which is the closest agreement any local meter has had with a vendor's
+  own number here.
 
   **Those dollars are a pacing index, not a bill.** The plan is a flat $50/month Muse
   Code Power Usage subscription, so nothing the meter reports is money owed; the cap

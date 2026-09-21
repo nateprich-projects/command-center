@@ -1,7 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  The escalated reviewer: one Muse run, one escalated PR, then stop.
+  The escalated reviewer: one engine run; one escalated review or shape job;
+  then stop.
+
+  Cut over from the old routine (`scripts/muse-review`) to the engine
+  (`scripts/muse-review-engine`) on 2026-09-21, Nate's decision in session,
+  as a recorded override of #806's shadow gate rather than a pass of it. The
+  escalated tier has almost no review traffic (all 177 shadow reviews before
+  2026-09-20 were standard tier), so its own 48-hour window could only ever
+  have produced a single-digit sample. The evidence it rests on is the
+  standard tier's: over 57 compared reviews the engine wrongly approved once
+  (The-League PR #237) and the old reviewer approved six diffs the engine
+  rejected. #1187 fixes the #237 miss and lands after this cutover, where an
+  engine fix no longer costs a window restart. The shadow plist is retired.
+
+  Rollback while `scripts/muse-review` still exists (#807 deletes it): put
+  that script back in ProgramArguments and re-install as below.
 
   The canonical copy lives here in the repo. launchd refuses a symlinked plist
   (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the
@@ -28,7 +43,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/nateprich/.claude/command-center-run/scripts/muse-review</string>
+        <string>/Users/nateprich/.claude/command-center-run/scripts/muse-review-engine</string>
         <string>escalated</string>
         <string>max</string>
     </array>

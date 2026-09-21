@@ -23,7 +23,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from funnel import escalation_reasons, required_tier  # noqa: E402
+from funnel import escalation_reasons, plan_is_escalated, required_tier  # noqa: E402
 
 
 # -- the marker is authoritative ----------------------------------------------
@@ -134,3 +134,40 @@ def test_a_failure_adds_to_declared_reasons_rather_than_replacing_them():
 def test_an_unmarked_ordinary_ticket_is_standard():
     assert required_tier("Add a column to the brief", "Print Class in cmd_ideas.") \
         == "standard"
+
+
+# -- plans use the same machinery with no separate title ----------------------
+
+def test_plan_escalation_scans_the_whole_body_and_returns_reasons():
+    plan = """
+    ## Decided from precedent
+    Take the single-in-motion lock and keep the gate vocabulary ordinary.
+
+    ## Needs Nate
+    Nothing.
+
+    ## Rejected
+    Allow destructive or irreversible operations unattended.
+    """
+    assert plan_is_escalated(plan) == ["destructive"]
+
+
+def test_lock_and_gate_subject_matter_stays_standard():
+    plan = """
+    ## Decided from precedent
+    The funnel takes the lock, checks the gate, and can park an issue.
+    It does not change permissions or perform a migration.
+
+    ## Needs Nate
+    Nothing.
+    """
+    assert plan_is_escalated(plan) == []
+
+
+def test_plan_escalation_preserves_the_shared_risk_marker_rule():
+    plan = """
+    Risk: standard
+    ## Rejected
+    Guard against a race condition in the spool.
+    """
+    assert plan_is_escalated(plan) == []

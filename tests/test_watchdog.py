@@ -645,6 +645,139 @@ def test_a_record_is_lost_only_when_both_routes_fail(tmp_path, monkeypatch):
         "codex", {"run": "a", "phase": "start", "ts": 1}) == "lost"
 
 
+# -- _push never writes the same record twice (#1237) --------------------------
+#
+# Two causes put the same record in twice: concurrent lanes draining the same
+# spool, and a lost-response retry re-appending a record the PUT already
+# landed. Both produce a byte-identical line, so one predicate — skip a
+# pending record whose exact JSON is already in the fetched content — covers
+# both. Measured 09-17 to 09-21: start 3283 records against 2232 runs, and
+# 250 of 251 duplicate-finish runs byte-identical with the same ts.
+
+
+def _pushed_text(sent):
+    import base64
+    return base64.b64decode(json.loads(sent["input"])["content"]).decode()
+
+
+def _store(monkeypatch, initial=""):
+    """A fake heartbeat branch: _fetch reads it, the fake gh PUT rewrites it."""
+    store = {"text": initial, "sha": "s0", "puts": 0}
+
+    def fetch(agent):
+        return (store["text"] or None), store["sha"]
+
+    def fake_gh(*args, **k):
+        store["puts"] += 1
+        store["text"] = _pushed_text({"input": k.get("input")})
+        store["sha"] = "s{}".format(store["puts"])
+        return "{}"
+
+    monkeypatch.setattr(heartbeat, "_fetch", fetch)
+    monkeypatch.setattr(heartbeat, "gh", fake_gh)
+    return store
+
+
+def test_two_concurrent_drains_append_the_record_once(tmp_path, monkeypatch):
+    """Both lanes read the same spool; the loser re-fetches — now containing
+    the winner's line — and must not append its own copy on top."""
+    _isolate_spool(tmp_path, monkeypatch)
+    store = _store(monkeypatch)
+    record = {"run": "a", "phase": "finish", "ts": 1,
+              "agent": "codex", "outcome": "done"}
+
+    heartbeat._spool("codex", record)
+    heartbeat._push("codex")            # the winner writes the line
+    heartbeat._spool("codex", record)   # the loser's copy, read pre-truncate
+    heartbeat._push("codex")            # the loser re-fetches and skips
+
+    line = json.dumps(record, sort_keys=True)
+    assert store["text"].splitlines() == [line]
+    assert heartbeat._spooled("codex") == []
+
+
+def test_a_lost_response_retry_appends_nothing(tmp_path, monkeypatch):
+    """The PUT landed but its reply never arrived: the retry re-fetches the
+    blob that already holds the record, appends nothing, and still succeeds."""
+    _isolate_spool(tmp_path, monkeypatch)
+    monkeypatch.setattr(heartbeat, "BACKOFF", [0])
+    store = {"text": "", "sha": "s0", "puts": 0}
+
+    def fetch(agent):
+        return (store["text"] or None), store["sha"]
+
+    def flaky_gh(*args, **k):
+        store["puts"] += 1
+        store["text"] = _pushed_text({"input": k.get("input")})
+        store["sha"] = "s{}".format(store["puts"])
+        if store["puts"] == 1:
+            raise heartbeat.HeartbeatError("response lost")
+        return "{}"
+
+    monkeypatch.setattr(heartbeat, "_fetch", fetch)
+    monkeypatch.setattr(heartbeat, "gh", flaky_gh)
+
+    record = {"run": "a", "phase": "finish", "ts": 1,
+              "agent": "codex", "outcome": "done"}
+    heartbeat._spool("codex", record)
+    assert heartbeat._push("codex") is None
+
+    line = json.dumps(record, sort_keys=True)
+    assert store["text"].splitlines() == [line]
+    assert store["puts"] == 2
+    assert heartbeat._spooled("codex") == []
+
+
+def test_a_byte_identical_line_in_the_blob_is_not_appended_again(
+        tmp_path, monkeypatch):
+    _isolate_spool(tmp_path, monkeypatch)
+    record = {"run": "a", "phase": "finish", "ts": 1,
+              "agent": "codex", "outcome": "done"}
+    line = json.dumps(record, sort_keys=True)
+    other = json.dumps({"run": "b", "phase": "start", "ts": 2,
+                        "agent": "codex", "ticket": 1}, sort_keys=True)
+    store = _store(monkeypatch, other + "\n" + line + "\n")
+
+    heartbeat._spool("codex", record)
+    heartbeat._push("codex")
+
+    assert store["text"].splitlines() == [other, line]
+
+
+def test_distinct_events_with_different_ts_are_both_kept(
+        tmp_path, monkeypatch):
+    _isolate_spool(tmp_path, monkeypatch)
+    old = {"run": "a", "phase": "event", "ts": 1,
+           "agent": "codex", "outcome": "done"}
+    new = dict(old, ts=2)
+    store = _store(monkeypatch, json.dumps(old, sort_keys=True) + "\n")
+
+    heartbeat._spool("codex", new)
+    heartbeat._push("codex")
+
+    assert store["text"].splitlines() == [
+        json.dumps(old, sort_keys=True),
+        json.dumps(new, sort_keys=True),
+    ]
+
+
+def test_a_record_spooled_during_a_push_survives_to_the_next_drain(
+        tmp_path, monkeypatch):
+    """The truncate step still clears only what came from the spool."""
+    _isolate_spool(tmp_path, monkeypatch)
+    monkeypatch.setattr(heartbeat, "_fetch", lambda agent: (None, None))
+
+    def ok(*args, **k):
+        heartbeat._spool("codex", {"run": "b", "phase": "start", "ts": 2})
+        return "{}"
+
+    monkeypatch.setattr(heartbeat, "gh", ok)
+    heartbeat._spool("codex", {"run": "a", "phase": "start", "ts": 1})
+    heartbeat._push("codex")
+
+    assert [r["run"] for r in heartbeat._spooled("codex")] == ["b"]
+
+
 def test_an_api_reserve_decline_is_not_an_alarm():
     """Coasting to a stop on budget is the design working, not a fault (#273)."""
     rows = [start("a", 1), finish("a", 1, "skipped-api-reserve")]

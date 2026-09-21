@@ -496,7 +496,9 @@ CLEARED_BLOCK_WINDOW = timedelta(days=7)
 # 120 s total remains the transport envelope.
 BRIEF_TOTAL_BUDGET_SECONDS = 120.0
 BRIEF_SECTION_BUDGETS = {
-    "ticket_pr_facts": 20.0,
+    # Past the 22.9 s observed max over 738 refs plus headroom for GitHub
+    # variance (#1168, #1210).
+    "ticket_pr_facts": 35.0,
     "items": 0.25,
     "counts_by_gate": 0.25,
     "in_motion": 0.25,
@@ -12969,6 +12971,18 @@ def main(argv: Optional[Sequence[str]] = None, *,
 
                 def read_pr_facts():
                     try:
+                        return cache.get_pr_facts(items)
+                    except BriefSectionTimeout:
+                        # One retry sharing the section deadline (#1210):
+                        # the section state set by _brief_timed still
+                        # bounds the second attempt, so no extra budget
+                        # is granted. Only retry when time remains.
+                        state = _BRIEF_SECTION_STATE.get()
+                        if (
+                            state is not None
+                            and float(state[1]) - time.monotonic() <= 0
+                        ):
+                            raise
                         return cache.get_pr_facts(items)
                     except GitHubError as exc:
                         pr_facts_error.append(

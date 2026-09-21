@@ -39,6 +39,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Set, Tuple)
 
+import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
 
 # --------------------------------------------------------------------------
@@ -3112,8 +3113,16 @@ def agent_health(now: datetime) -> List[Dict[str, str]]:
         if agent in retired:
             continue  # a stopped schedule is not a dying one (#431)
         try:
+            # The provider hold is Muse's file and speaks only for Muse. A
+            # parked lane is explained, not dead, and the watchdog reads the
+            # same record the runners write so the two cannot disagree.
+            hold_until = (
+                agent_health_module.quota_hold_until()
+                if agent == agent_health_module.QUOTA_HOLD_AGENT else None
+            )
             conditions = assess_agent_health(
-                agent, _brief_heartbeat_rows(agent), now.timestamp()
+                agent, _brief_heartbeat_rows(agent), now.timestamp(),
+                hold_until=hold_until,
             )
         except Exception:
             # The brief is a diagnostic surface. An unreachable heartbeat must

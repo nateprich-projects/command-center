@@ -154,16 +154,15 @@ def test_a_marker_only_in_the_title_is_not_ticket_text():
 # -- the mirror is pinned to the shared source, not a third list -------------
 
 
-def test_freeze_mirror_matches_the_engine_lists():
-    """The queue predicate mirrors engine/review.py; this test is the update
-    mechanism. The package dependency runs one way only, so funnel.py cannot
-    read the canonical lists at run time — but if they move, this fails until
-    the mirror moves with them. The two can never drift silently, and #794
-    closeout must delete both together."""
-    assert funnel.FROZEN_GROUND_PATHS == tuple(engine_review.FROZEN_PATHS)
-    assert funnel.FROZEN_GROUND_PARSERS == tuple(engine_review.FROZEN_PARSERS)
-    assert (funnel.FROZEN_GROUND_EXEMPT_PARENTS
-            == tuple(engine_review.FREEZE_PARENT_NUMBERS))
+def test_freeze_lists_come_from_the_engine_source():
+    """The queue predicate reads engine/review.py at run time through the
+    thin adapter, so the two can never drift and there is no second list to
+    update. #794 closeout must delete the adapter together with the
+    review-side freeze row."""
+    paths, parsers, exempt = funnel._canonical_freeze_lists()
+    assert tuple(paths) == tuple(engine_review.FROZEN_PATHS)
+    assert tuple(parsers) == tuple(engine_review.FROZEN_PARSERS)
+    assert tuple(exempt) == tuple(engine_review.FREEZE_PARENT_NUMBERS)
 
 
 # -- the predicate goes inert with the freeze --------------------------------
@@ -195,7 +194,8 @@ def test_an_open_794_keeps_the_freeze_governing():
 def test_a_landed_freeze_releases_parser_tickets_too():
     owner = project(794, children_total=0, state="CLOSED")
     mine = ticket(1143, 1135,
-                  body(1135, "delete the PROSE_DEPENDENCY_RE parser"))
+                  body(1135, "delete the {} parser".format(
+                      engine_review.FROZEN_PARSERS[2])))
     items = [owner, project(1135), mine]
     assert funnel.startable(items) == [mine]
 

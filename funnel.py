@@ -1825,28 +1825,35 @@ _TICKET_SECTION_RE = re.compile(
     r"(?m)^\s*(Parent|Depends on|What|Accept|Risk|Sequencing|Human step)\s*:"
 )
 
-#: Mirror of the #794 freeze lists whose canonical home is
-#: ``engine/review.py`` (``FROZEN_PATHS``, ``FROZEN_PARSERS``,
-#: ``FREEZE_PARENT_NUMBERS``). This module cannot read them at run time:
-#: the package dependency runs one way only — the review package reads
-#: this module, never the reverse — so a copy lives here instead. The
-#: copy is not a second source of truth: the sync test pins every tuple
-#: equal to the canonical one, and #794 closeout deletes this mirror
+#: Canonical freeze lists live in ``engine/review.py``. This module reads
+#: them at run time through a lazy import inside ``_canonical_freeze_lists``,
+#: so no copy of the lists lives here. #794 closeout deletes this adapter
 #: together with the review-side freeze row, so neither outlives the freeze.
-FROZEN_GROUND_PATHS = ("routines/", "skills/")
-FROZEN_GROUND_PARSERS = (
-    "SELF_APPROVED_LINE",
-    "NEEDS_NATE_CLAUSE_END",
-    "PROSE_DEPENDENCY_RE",
-    "PLAN_HEADING",
-    "PLAN_FUNCTION_RE",
-    "PLAN_PATH_RE",
-    "PLAN_ISSUE_RE",
-    "PLAN_REF_RE",
-    "OVERLAP_CHECK_SECTION_RE",
-    "PROPOSED_CLASS_RE",
-)
-FROZEN_GROUND_EXEMPT_PARENTS = (794, 1044)
+def _canonical_freeze_lists(
+) -> Tuple[Tuple[str, ...], Tuple[str, ...], Tuple[int, ...]]:
+    """The canonical freeze lists, parsed out of the review engine source.
+
+    The package dependency runs one way only — the review package reads
+    this module, never the reverse — so this adapter parses the three
+    assignments out of the ``review.py`` file as text instead of importing
+    them. Returns (paths, parsers, exempt parents) as tuples, so the queue
+    predicate can never drift from the freeze row it mirrors.
+    """
+    import ast
+    source_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "engine", "review.py")
+    with open(source_path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    wanted = ("FROZEN_PATHS", "FROZEN_PARSERS", "FREEZE_PARENT_NUMBERS")
+    values: Dict[str, object] = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in wanted):
+            values[node.targets[0].id] = ast.literal_eval(node.value)
+    return (tuple(values["FROZEN_PATHS"]),  # type: ignore[arg-type]
+            tuple(values["FROZEN_PARSERS"]),  # type: ignore[arg-type]
+            tuple(values["FREEZE_PARENT_NUMBERS"]))  # type: ignore[arg-type]
 
 
 def _freeze_governing(
@@ -1863,8 +1870,7 @@ def _freeze_governing(
     owner = by_ref.get(FREEZE_OWNER_REF)
     if owner is not None and owner.state != "OPEN":
         return None
-    return (FROZEN_GROUND_PATHS, FROZEN_GROUND_PARSERS,
-            FROZEN_GROUND_EXEMPT_PARENTS)
+    return _canonical_freeze_lists()
 
 
 def freeze_active(by_ref: Mapping[str, Item]) -> bool:
@@ -1897,25 +1903,24 @@ def _ticket_work_text(body: Optional[str]) -> str:
 def freeze_markers(body: Optional[str]) -> List[str]:
     """Frozen-ground markers a ticket body names in What or Accept.
 
-    Paths match the mirrored ``FROZEN_GROUND_PATHS`` prefixes; parser names
-    match the mirrored ``FROZEN_GROUND_PARSERS`` tuple by substring, exactly
-    as the review-side freeze row's diff scan does. The match is deliberately
-    conservative: any hit withholds, because a false positive costs one
-    reason line while a false negative costs a full run ending in a certain
-    rejection.
+    Paths match the canonical frozen prefixes; parser names match the
+    canonical parser tuple by substring, exactly as the review-side freeze
+    row's diff scan does. The match is deliberately conservative: any hit
+    withholds, because a false positive costs one reason line while a
+    false negative costs a full run ending in a certain rejection.
     """
     text = _ticket_work_text(body)
     if not text:
         return []
+    paths, parsers, _exempt = _canonical_freeze_lists()
     found: Set[str] = set()
-    if FROZEN_GROUND_PATHS:
+    if paths:
         pattern = re.compile(
             "(?:{})[^\\s`'\"(),;:!?]*".format(
-                "|".join(re.escape(prefix)
-                         for prefix in FROZEN_GROUND_PATHS)))
+                "|".join(re.escape(prefix) for prefix in paths)))
         for match in pattern.finditer(text):
             found.add(match.group(0).rstrip("."))
-    for name in FROZEN_GROUND_PARSERS:
+    for name in parsers:
         if name and name in text:
             found.add(name)
     return sorted(found)

@@ -30,8 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import funnel  # noqa: E402
 
 #: Entries ending in "/" match a directory prefix; the rest match exactly.
-#: From routines/muse.md: a ticket PR touching any of these fails review
-#: unless its own ticket asked for the change.
+#: A ticket PR touching any of these fails review unless its own ticket
+#: asked for the change.
 PROTECTED_PATHS = (
     ".claude/settings.json",
     "routines/",

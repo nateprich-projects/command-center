@@ -8,8 +8,8 @@ answer and performs every side effect through `finish-ticket`. Judgement
 text only: the model needs a shell to run tests, so the runner makes
 `funnel.py` and `gh` unnecessary rather than impossible.
 
-This stays a separate runner from `scripts/muse-review`. **Never add an
-implementation mode to `muse-review`**: one script carrying both flag sets
+This stays a separate runner from `scripts/muse-review-engine`. **Never add an
+implementation mode to `muse-review-engine`**: one script carrying both flag sets
 lets a flag error turn a reviewer into a writer.
 
 ---

@@ -19,8 +19,8 @@
 # one ISO-8601 stamp: it expires by itself, so nothing has to remember to
 # clear it, and a lane started after the reset removes it on the way past.
 #
-# Sourced by scripts/muse-implement, scripts/muse-review and
-# scripts/muse-review-engine. Keep it POSIX-plain; it is sourced, never run.
+# Sourced by scripts/muse-implement and scripts/muse-review-engine.
+# Keep it POSIX-plain; it is sourced, never run.
 
 MUSE_QUOTA_HOLD_FILE="${MUSE_QUOTA_HOLD_FILE:-$HOME/.claude/command-center-muse-quota-hold}"
 

@@ -5,7 +5,7 @@
 #   tier   -- escalated (default) or standard; each tier has its own launchd job
 #   effort -- max (default; the only effort escalated accepts) or high (standard)
 #
-# This is deliberately a separate runner from muse-review. The reviewer has
+# This is deliberately a separate runner from muse-review-engine. The reviewer has
 # write access disabled; putting both flag sets behind a mode switch would let
 # a flag error turn a reviewer into a writer.
 #

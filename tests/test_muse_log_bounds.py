@@ -12,11 +12,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Only the implement lane still bounds its log in its own runner: #807
+# deleted scripts/muse-review, and the engine review runner that replaced it
+# carries no log cap.
 LANES = (
-    ("review-standard", "muse-review", "muse.md", "standard", "high",
-     "MUSE_REVIEW_REPO", "command-center-muse-review-standard.log"),
-    ("review-escalated", "muse-review", "muse.md", "escalated", "max",
-     "MUSE_REVIEW_REPO", "command-center-muse-review.log"),
     ("implement", "muse-implement", "muse-implement.md", "escalated", "max",
      "MUSE_IMPLEMENT_REPO", "command-center-muse-implement.log"),
 )

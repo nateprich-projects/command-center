@@ -232,6 +232,37 @@ def test_tight_is_read_from_the_rate_not_from_an_even_line(tmp_path, monkeypatch
     assert not verdict["over_pace"]
 
 
+def test_the_tickets_own_case_c_is_tight_at_110_percent():
+    """#1198 (c), with the ticket's exact numbers: $100 spent of $200 with two
+    days left and $180 in the trailing 72 hours is $60 a day, so the window
+    projects 50 + 60 = 110 percent. `tight`, although 50 percent used is behind
+    an even line at day five. Fed to `pace` as a reading, because no journal
+    can hold these numbers: on day five the trailing 72 hours lie inside the
+    window, so they cannot exceed what the window has spent. The journal-built
+    test above covers the same claim with numbers that can occur."""
+    days_left = 2.0
+    reading = {"windows": {"seven_day": {
+        "used_percent": 50.0,
+        "resets_at": NOW + days_left * 86400.0,
+        "window_start": NOW + days_left * 86400.0 - usage.SEVEN_DAY,
+        "rolling": True,
+        "spent_dollars": 100.0,
+        "cap_dollars": 200.0,
+        "trailing_72h_dollars": 180.0,
+        "daily_rate_dollars": 60.0,
+        "projected_percent": 50.0 + 100.0 * 60.0 * days_left / 200.0,
+    }}}
+    verdict = usage.pace(reading, NOW, provider="meta")
+    weekly = verdict["windows"][0]
+    assert weekly["projected_percent"] == pytest.approx(110.0)
+    assert verdict["band"] == "tight"
+    assert not verdict["over_pace"]
+    even_line = 100.0 * (usage.SEVEN_DAY - days_left * 86400.0) / usage.SEVEN_DAY
+    assert weekly["used_percent"] < even_line
+    assert weekly["runs_out_at"] == pytest.approx(
+        NOW + (200.0 - 100.0) / 60.0 * 86400.0, abs=1)
+
+
 def test_the_flat_ceiling_still_stops_whatever_the_projection(tmp_path, monkeypatch):
     """#1198 (d): $196 plus the session reserve passes the cap."""
     _, verdict, _ = _projected(

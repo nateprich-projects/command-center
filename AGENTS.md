@@ -210,8 +210,10 @@ wrong.
   than one because daily totals swing fourfold. A window with no spend in it yet reads
   as zero, not unknown: every window opens that way, and reading it as unknown would
   stop every lane at the reset with nothing left to make the first call.
-  _(Pacing, the ladder rule and the instruction to build and land this design:
-  confirmed by Nate 2026-09-21. The 72-hour lookback is the agent's number.)_
+  Nate decided on 2026-09-21 that Muse is paced rather than held to a flat ceiling
+  alone, and said of the existing policy: "Don't just read the pace policy. If that
+  policy sucks then make a good one." The design above is the agent's answer to that.
+  _(agent rule, unconfirmed — advisory)_
 - **No Copilot automation.** Those are employer-provided tokens; personal use stays
   one-off and manual.
 - **Every routine starts, reads fresh usage, and exits immediately if over the pace

@@ -512,7 +512,7 @@ def test_engine_imports_funnel_and_funnel_does_not_import_engine():
     assert "from engine" not in source
 
 
-@pytest.mark.parametrize("reason", funnel.HUMAN_STEP_REASONS)
+@pytest.mark.parametrize("reason", implement.BLOCKED_ON_HUMAN_REASONS)
 def test_blocked_answer_accepts_each_allowlisted_reason(tmp_path, reason):
     path = tmp_path / "answer.json"
     path.write_text(json.dumps(blocked(reason=reason, action="  Do it  ")))
@@ -529,14 +529,12 @@ def test_declined_answer_returns_the_trimmed_reason(tmp_path):
     }
 
 
-@pytest.mark.parametrize("reason", funnel.HUMAN_STEP_REASONS)
-def test_human_step_body_carries_the_exact_marker_line(reason):
+@pytest.mark.parametrize("reason", implement.BLOCKED_ON_HUMAN_REASONS)
+def test_human_step_body_carries_the_reason_as_prose(reason):
     body = implement.render_human_step_body(
         parent_number=7, ticket_number=42, reason=reason,
         action="Approve the OAuth app",
     )
-    assert funnel.HUMAN_STEP_LINE.search(body) is not None
-    assert funnel.parse_human_step(body) == reason
     assert "Human step: {}".format(reason) in body.splitlines()
     assert body.startswith("Part of #7; discovered while implementing #42.")
     assert body.rstrip().endswith("Risk: standard")
@@ -559,7 +557,7 @@ def test_finish_blocked_on_human_files_blocks_comments_and_finishes(
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
 
     effects = {"created": [], "blocked": [], "comments": [], "released": [],
-               "finished": []}
+               "finished": [], "needs": []}
 
     def create(repo, parent, title, body, **kwargs):
         effects["created"].append((repo, parent, title, body))
@@ -579,6 +577,7 @@ def test_finish_blocked_on_human_files_blocks_comments_and_finishes(
             (args, kwargs)),
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
+        needs_effect=lambda url, ref: effects["needs"].append((url, ref)),
     )
 
     assert result == {"ticket": REPO + "#42",
@@ -588,7 +587,10 @@ def test_finish_blocked_on_human_files_blocks_comments_and_finishes(
     (repo, parent, title, body), = effects["created"]
     assert repo == REPO and parent == 7
     assert title == "Human step: Approve the OAuth app"
-    assert funnel.parse_human_step(body) == "entering a credential"
+    assert "Human step: entering a credential" in body.splitlines()
+    assert effects["needs"] == [
+        ("https://github.com/{}/issues/43".format(REPO), REPO + "#43")
+    ]
     ((_, number), kwargs), = effects["blocked"]
     assert number == 42 and kwargs["blocked_by"] == 43
     (comment_args, comment_kwargs), = effects["comments"]

@@ -814,36 +814,6 @@ def test_brief_carries_breakdown_question_on_decision_and_blocked_rows(
     )
 
 
-def test_brief_surfaces_suspected_human_steps_separately(
-    monkeypatch, capsys
-):
-    suspected = funnel.Item(
-        repo="nateprich/beta", number=34, title="Provision the token",
-        url="https://example.invalid/34", state="OPEN",
-        labels=["blocked"], parent="nateprich/beta#29",
-        block_reason="Human step: entering a credential",
-    )
-    named = funnel.Item(
-        repo="nateprich/beta", number=35, title="Wait for the token",
-        url="https://example.invalid/35", state="OPEN",
-        labels=["blocked"], parent="nateprich/beta#29",
-        block_references=["#77"],
-        block_reason="Human step: entering a credential",
-    )
-
-    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
-
-    assert funnel.cmd_brief([named, suspected], NOW) == 0
-    brief = json.loads(capsys.readouterr().out)
-
-    assert brief["suspected_human_steps"] == [{
-        "ref": "nateprich/beta#34",
-        "title": "Provision the token",
-        "url": "https://example.invalid/34",
-        "reason": "entering a credential",
-    }]
-
-
 def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
     monkeypatch, capsys
 ):
@@ -851,18 +821,19 @@ def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
         repo="nateprich/beta", number=40, title="Create the account",
         url="https://example.invalid/40", state="OPEN",
         parent="nateprich/beta#39",
-        body="Part of the deployment.\n\nHuman step: an account or billing setting\n",
+        needs="human",
     )
     ordinary_ticket = funnel.Item(
         repo="nateprich/beta", number=41, title="Deploy the service",
         url="https://example.invalid/41", state="OPEN",
         parent="nateprich/beta#39",
+        needs="none",
     )
     machine_local_step = funnel.Item(
         repo="nateprich/beta", number=42, title="Run the local setup",
         url="https://example.invalid/42", state="OPEN",
         parent="nateprich/beta#39",
-        body="Human step: {}\n".format(funnel.MACHINE_LOCAL_REASON),
+        needs="claude-code-environment",
     )
 
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
@@ -876,7 +847,7 @@ def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
         "ref": "nateprich/beta#40",
         "title": "Create the account",
         "url": "https://example.invalid/40",
-        "reason": "an account or billing setting",
+        "reason": "human",
         # Every row says how long it has waited, as the decision rows do; a
         # fixture with no creation time reads "unknown" rather than guessing.
         "waited": "unknown",
@@ -885,7 +856,7 @@ def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
         "ref": "nateprich/beta#42",
         "title": "Run the local setup",
         "url": "https://example.invalid/42",
-        "reason": funnel.MACHINE_LOCAL_REASON,
+        "reason": "claude-code-environment",
     }]
     assert brief["items"] == []
     assert brief["total_needing_nate"] == 0
@@ -914,26 +885,26 @@ def test_brief_separates_blocked_human_and_machine_local_steps(
         repo="nateprich/beta", number=46, title="Create the account",
         url="https://example.invalid/46", state="OPEN",
         parent=parent.ref,
-        body="Human step: an account or billing setting\n",
+        needs="human",
         open_blockers=[blocker.ref],
     )
     blocked_machine_local = funnel.Item(
         repo="nateprich/beta", number=47, title="Run local setup",
         url="https://example.invalid/47", state="OPEN",
         parent=blocked_parent.ref,
-        body="Human step: {}\n".format(funnel.MACHINE_LOCAL_REASON),
+        needs="claude-code-environment",
     )
     actionable_human = funnel.Item(
         repo="nateprich/beta", number=48, title="Set the account option",
         url="https://example.invalid/48", state="OPEN",
         parent=parent.ref,
-        body="Human step: an account or billing setting\n",
+        needs="human",
     )
     actionable_machine_local = funnel.Item(
         repo="nateprich/beta", number=49, title="Run the local check",
         url="https://example.invalid/49", state="OPEN",
         parent=parent.ref,
-        body="Human step: {}\n".format(funnel.MACHINE_LOCAL_REASON),
+        needs="claude-code-environment",
     )
 
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
@@ -959,7 +930,7 @@ def test_brief_separates_blocked_human_and_machine_local_steps(
         "ref": blocked_human.ref,
         "title": "Create the account",
         "url": "https://example.invalid/46",
-        "reason": "an account or billing setting",
+        "reason": "human",
         "blocked_reason": "open native blockers",
         "blockers": [blocker.ref],
     }]
@@ -967,7 +938,7 @@ def test_brief_separates_blocked_human_and_machine_local_steps(
         "ref": blocked_machine_local.ref,
         "title": "Run local setup",
         "url": "https://example.invalid/47",
-        "reason": funnel.MACHINE_LOCAL_REASON,
+        "reason": "claude-code-environment",
         "blocked_reason": "parent carries blocked marker",
         "blockers": [blocked_parent.ref],
     }]
@@ -995,7 +966,7 @@ def test_brief_flags_completed_access_plan_without_any_human_ticket(
         repo="nateprich/beta", number=52, title="Register the connector",
         url="https://example.invalid/52", state="CLOSED",
         parent=carried.ref,
-        body="Human step: an app UI with no API",
+        needs="human",
     )
     quiet = funnel.Item(
         repo="nateprich/beta", number=53, title="A quiet project",

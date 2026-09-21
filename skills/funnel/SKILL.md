@@ -56,10 +56,11 @@ If the command fails, show the error. Do not fall back to querying GitHub yourse
 | `command_center_ticket_pr_share` | In the same 30-day window, the share of merged PRs in `command-center` whose head branch is `ticket/<number>`; `unavailable`, `partial`, or `insufficient_data` is unknown, never zero |
 | `resend_ratio` | Recent total-input over fresh-input ratio for metered agents (`codex` and `zcode`); agents without usable telemetry are omitted |
 | `outcome_signals` | The named signals computed from durable outcome records: cost per merged PR by observed lane, rework rate, and intervention rate. Each signal carries its sample and `status`; `insufficient_data` or `partial` is unknown, never zero. Cost is shown only from an already-priced observation; raw token counts are not dollars |
-| `human_steps` | Open tickets whose Needs field is `human`, waiting on Nate to go and do them. **Work he owes, not a decision he owes** — deliberately outside `total_needing_nate`, the same distinction that keeps `blocked` out. No agent can pick these up: `startable()` excludes them, so this list is the only place they surface |
-| `machine_local_steps` | Open tickets whose Needs field is `claude-code-environment`, waiting on a Claude Code session to go and do them. **Work that session owes, not a decision Nate owes** — deliberately outside `total_needing_nate` |
-| `blocked_human_steps` | Open human-step tickets that cannot start because the ticket, its native dependencies, or its parent is blocked. Advisory only; each row keeps `reason: human`, `blocked_reason`, and `blockers` refs |
-| `blocked_machine_local_steps` | Open machine-local tickets that cannot start because the ticket, its native dependencies, or its parent is blocked. Advisory only; each row keeps `reason: claude-code-environment`, `blocked_reason`, and `blockers` refs |
+| `human_steps` | Open tickets waiting on Nate to go and do the declared `reason`. **Work he owes, not a decision he owes** — deliberately outside `total_needing_nate`, the same distinction that keeps `blocked` out. No agent can pick these up: `startable()` excludes them, so this list is the only place they surface |
+| `machine_local_steps` | Open tickets waiting on a Claude Code session to go and do the declared `reason`. **Work that session owes, not a decision Nate owes** — deliberately outside `total_needing_nate` |
+| `blocked_human_steps` | Open human-step tickets that cannot start because the ticket, its native dependencies, or its parent is blocked. Advisory only; each row keeps the declared `reason`, `blocked_reason`, and `blockers` refs |
+| `blocked_machine_local_steps` | Open machine-local tickets that cannot start because the ticket, its native dependencies, or its parent is blocked. Advisory only; each row keeps the declared `reason`, `blocked_reason`, and `blockers` refs |
+| `suspected_human_steps` | Blocked child tickets whose block has no machine-readable condition but whose reason matches the known human-step vocabulary. Diagnostic only: leave the ticket blocked and let Nate decide whether to restate or split it |
 | `parked` | Stopped items with the written reason each carries. The reason is the artifact that makes re-encountering an idea a 30-second decision |
 | `closed_itself` | Projects the funnel closed in the recent named window, newest first, with the drift recorded at close |
 | `cleared_blocks` | Tickets whose fully parsed conditions all closed and whose `blocked` label the funnel mechanically cleared in the last seven days |
@@ -137,10 +138,11 @@ ticket-branch numerator, merged-PR denominator, and percentage for the second. T
 bounded scan into zero.
 
 Then the gate counts on one line. Then anything unusual, and only if present:
-`prose_dependencies`, `unclassed_captures`, `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`,
+`prose_dependencies`, `suspected_human_steps`, `unclassed_captures`, `needs_class`, `stale_locks_taken_over`, `stranded`, `in_motion`,
 `working_tree_touched`,
 `awaiting_breakdown`, `unattended_merges`, `unattended_approvals`, `outcome_signals`, `run_summary`, `agent_health`, `resend_ratio`, `rejected_merges`, `degraded`, and
-`closed_with_access_vocabulary`.
+`closed_with_access_vocabulary`. A suspected human step is report-only: do not clear its
+`blocked` label, restate it, or split it while rendering the brief.
 
 Show `run_summary` as the health line for each agent: starts, ordinary finishes,
 and same-session re-begins. Keep re-begins visibly separate from finishes; a

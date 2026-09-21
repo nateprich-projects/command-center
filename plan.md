@@ -488,6 +488,39 @@ in-app scheduling is the only acceptable path; account risk is not worth a nicer
 scheduler. Rejected: GitHub Actions for agent work — it cannot reach subscription
 logins and would bill metered API rates for capacity already purchased._
 
+### Design amendment, 2026-09-21: Muse's budget gate has three bands
+
+Until this amendment a budget problem had one response, a full stop. On 2026-09-19
+every Muse lane ran at full speed into the provider's weekly wall and stayed dark for
+about 21 hours. Nate, 2026-09-21: *"We can't have the funnel running at full speed into
+a wall; the brakes need to be applied ASAP and prioritization needs to happen ASAP."*
+
+`usage.pace` now reports a band for Muse from one signal, the projected end of the
+weekly window at the last 72 hours' spending rate (#1198):
+
+- **`ok`**: everything runs.
+- **`tight`**: the projection passes 100 percent. `begin` offers only work in a
+  preempting class (`Broken`, `Maintenance`), work that blocks such work, and work
+  under a pinned project, for every job type: review, breakdown, shape and
+  implementation. Everything else waits until the rate falls or the window resets.
+  When the budget is the reason a run has nothing to do, the stop says so with the
+  numbers and is recorded as `skipped-over-pace`, not as an empty funnel (#1199).
+- **`over`**: used plus the session reserve passes 100 percent. The flat ceiling,
+  unchanged, and still the only band that stops a run outright.
+
+The rule the routines state, that a run exits at once when over the pace line, is
+unchanged: `over` is that line. `tight` is an ordering rule inside `funnel.py`, where
+ordering belongs.
+
+_Rejected: the proportional floor-to-target line Claude and Codex use. It keeps room
+on a subscription Nate shares; Muse's plan is flat and used by nothing else, so budget
+left at the reset is worth nothing, a line throttles an early burst in a week that
+would end far under the cap, and it reads healthy at day five with a rate two days
+from the wall. Rejected: protecting member-repo work ahead of command-center's own
+Broken tickets when tight. Nate was asked exactly that on 2026-09-21, with 20 of the
+28 startable tickets being command-center's own, and chose the ladder. Rejected: a
+one-day rate; daily totals swung fourfold in the window that ended 2026-09-20._
+
 ## Scope and membership
 
 Repos **opt in via a topic**. Membership is itself a gate: in the funnel is a

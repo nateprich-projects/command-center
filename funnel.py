@@ -8734,6 +8734,12 @@ def _begin_parent(items: Sequence[Item], ticket: Item) -> None:
     parent = next((i for i in items if i.ref == ticket.parent), None)
     if parent is None or parent.status != "Ready" or not parent.item_id:
         return
+    refusal = status_write_refusal(parent, "Building")
+    if refusal is not None:
+        _post_status_refusal(parent, refusal)
+        print("note: claimed {} but {}".format(ticket.ref, refusal),
+              file=sys.stderr)
+        return
     try:
         gh_graphql(SET_FIELD, project=PROJECT_ID, item=parent.item_id,
                    field=STATUS_FIELD_ID,
@@ -8787,6 +8793,86 @@ def _status_write_confirmed(response: object, item_id: str) -> bool:
     )
 
 
+#: The two stages a closed issue may hold. Everything else describes work in
+#: progress, and a closed issue has none: #1206 moved a CLOSED project to
+#: ``Ready``, which put it in the startable queue and the self-approval path
+#: at once, with nothing able to close it again.
+TERMINAL_STATUSES = ("Done", "Parked")
+
+
+def live_issue_state(item: Item) -> Optional[str]:
+    """Read one issue's state from GitHub now, or ``None`` if it cannot.
+
+    Deliberately a fresh read rather than ``item.state``. A FunnelSession
+    reuses its Project objects across commands, so the loaded state can be
+    minutes old and a close that happened in between is exactly the case this
+    guards. No cache, no journal, no state file: GitHub is the state.
+    """
+    try:
+        payload = _gh_json(
+            "gh", "issue", "view", str(item.number), "--repo", item.repo,
+            "--json", "state",
+        )
+    except (GitHubError, OSError, subprocess.SubprocessError, ValueError):
+        return None
+    state = payload.get("state") if isinstance(payload, dict) else None
+    return str(state).upper() if isinstance(state, str) and state else None
+
+
+def status_write_refusal(item: Item, status: str) -> Optional[str]:
+    """Why this Status write must not happen, or ``None`` to allow it.
+
+    A closed issue may be recorded as ``Done`` or ``Parked`` — those are what
+    being closed means — and as nothing else.
+
+    When the live read cannot be made, the loaded state decides. That is a
+    weaker check and deliberately not a refusal: the loaded value is usually
+    seconds old and was CLOSED in the case this guards (#1206), while refusing
+    on an unreadable read would let one GitHub hiccup block every approve and
+    every claim. The live read is the improvement; it is not a new dependency
+    the whole funnel stops for.
+    """
+    if status in TERMINAL_STATUSES:
+        return None
+    state = live_issue_state(item) or (
+        str(item.state).upper() if item.state else None
+    )
+    if state is None or state == "OPEN":
+        return None
+    return (
+        "refusing to write Status {} on {}: the issue is {} on GitHub, and a "
+        "closed issue may only be {}".format(
+            status, item.ref, state, " or ".join(TERMINAL_STATUSES)
+        )
+    )
+
+
+def _post_status_refusal(item: Item, refusal: str) -> None:
+    """Leave a refused Status write on the issue it was refused for.
+
+    Best effort on purpose. The refusal has already done its job by not
+    writing; failing to record it must not turn a safe refusal into an error.
+    """
+    body = (
+        "**Status write refused.** {}\n\nA closed issue may be recorded as "
+        "{} and as nothing else — every other stage describes work in "
+        "progress, and a closed issue has none. Reopen it if the work is "
+        "live, or leave the stage alone.".format(
+            refusal, " or ".join(TERMINAL_STATUSES)
+        )
+    )
+    try:
+        _run_gh(
+            ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+             "--body", append_provenance(
+                 body, "agent", at=datetime.now(timezone.utc)
+             )],
+            capture_output=True, text=True,
+        )
+    except (OSError, subprocess.SubprocessError, GitHubError):
+        pass
+
+
 def _write_status(item: Item, status: str, now: datetime) -> Optional[str]:
     """Write and locally record a Project status, or return a failure reason.
 
@@ -8795,9 +8881,19 @@ def _write_status(item: Item, status: str, now: datetime) -> Optional[str]:
     report the stage that was true before the mutation. Treat the mutation
     payload as the confirmation boundary: only the expected Project item
     response permits the local state and its gate timestamp to advance.
+
+    The closed-issue guard lives here because this is the one helper every
+    Status write goes through. A refusal is both returned to the caller and
+    left on the issue, so the record of what was refused survives the session
+    that refused it.
     """
     if not item.item_id:
         return "{} is not in the Project".format(item.ref)
+
+    refusal = status_write_refusal(item, status)
+    if refusal is not None:
+        _post_status_refusal(item, refusal)
+        return refusal
 
     try:
         response = gh_graphql(
@@ -12297,6 +12393,15 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
                 adopted_class, source_line, CLASS_ADOPTION_OVERRIDE_NOTE
             )
         )
+
+    # The guard, not the whole writer: this path has its own confirmation and
+    # local-state handling, and the closed-issue rule is one predicate shared
+    # by every Status write rather than a second implementation.
+    refusal = status_write_refusal(item, nxt)
+    if refusal is not None:
+        _post_status_refusal(item, refusal)
+        print(refusal, file=sys.stderr)
+        return 1
 
     gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
                field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, nxt))

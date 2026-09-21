@@ -674,6 +674,22 @@ if ! BEGIN_DO="$(begin_value do)" \
   exit 1
 fi
 
+begin_stop_why() {
+  printf '%s\n' "$BEGIN_JSON" | python3 -c '
+import json
+import sys
+
+try:
+    value = json.load(sys.stdin).get("why")
+except ValueError:
+    value = None
+if not isinstance(value, str) or not value.strip():
+    print("")
+else:
+    print(value)
+'
+}
+
 if [[ "$BEGIN_DO" == "stop" ]]; then
   case "$BEGIN_GATE" in
     over) STOP_OUTCOME="skipped-over-pace" ;;
@@ -681,8 +697,14 @@ if [[ "$BEGIN_DO" == "stop" ]]; then
     reserve) STOP_OUTCOME="skipped-api-reserve" ;;
     *) STOP_OUTCOME="nothing-to-do" ;;
   esac
-  if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
-      --outcome "$STOP_OUTCOME"; then
+  BEGIN_WHY="$(begin_stop_why)"
+  FINISH_ARGS=(finish --agent muse --run "$BEGIN_RUN"
+    --outcome "$STOP_OUTCOME")
+  if [[ -n "$BEGIN_WHY" ]]; then
+    echo "muse-review-engine: begin stopped: $BEGIN_WHY" >&2
+    FINISH_ARGS+=(--note "$BEGIN_WHY")
+  fi
+  if ! python3 "$REPO/heartbeat.py" "${FINISH_ARGS[@]}"; then
     echo "muse-review-engine: could not finish the stopped run" >&2
     exit 1
   fi

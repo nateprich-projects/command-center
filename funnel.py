@@ -10870,6 +10870,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     except GitHubError as exc:
         out.update(
             do="stop",
+            gate="error",
             why="could not establish ticket branch facts: {}".format(exc),
         )
         print(json.dumps(out, indent=2))
@@ -10942,6 +10943,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             except GitHubError as exc:
                 out.update(
                     do="stop",
+                    gate="error",
                     why="could not re-read {} claim: {}".format(ticket.ref, exc),
                 )
                 ticket = None
@@ -11030,6 +11032,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                         out.pop("work", None)
                         out.update(
                             do="stop",
+                            gate="error",
                             why="could not assemble implementation packet: {}".format(
                                 exc
                             ),

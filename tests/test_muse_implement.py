@@ -378,6 +378,26 @@ def test_a_stop_finishes_without_a_clone_or_model(tmp_path, gate, outcome):
     )
 
 
+def test_a_stop_with_a_why_records_the_note_and_names_it_on_stderr(tmp_path):
+    why = "could not establish ticket branch facts: transient GraphQL response"
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        {"agent": "muse", "run": "stop-run", "gate": "error",
+         "do": "stop", "why": why},
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert not (repo / "gh.log").exists()
+    assert _muse_calls(repo) == 0
+    assert _calls(repo, "packet") == []
+    assert _calls(repo, "finish") == []
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run stop-run --outcome nothing-to-do "
+        "--note {}\n".format(why)
+    )
+    assert "muse-implement: begin stopped: {}".format(why) in proc.stderr
+
+
 def test_the_runner_refuses_an_unknown_tier_or_a_lowered_escalated_effort():
     bad_tier = subprocess.run(
         ["/bin/bash", str(SCRIPT), "urgent", "max"],

@@ -853,9 +853,27 @@ def _branch_paths(root: pathlib.Path) -> List[str]:
         root, ("diff", "--name-only", "-z", "origin/main...HEAD"))))
 
 
+def _addable_paths(root: pathlib.Path, paths: Sequence[str]) -> List[str]:
+    """Drop the paths `git add` cannot match, keeping the rest in sorted order.
+
+    A file removed with `git rm` is gone from the worktree *and* the index,
+    while `git diff --cached` still reports it as a staged deletion. `git add`
+    has nothing to match, so it exits 128 with `pathspec ... did not match any
+    files` and takes the whole finish down with it (#1214). Such a path is
+    already staged; there is nothing left to add. A file removed with plain
+    `rm` is still in the index, so `git add` stages its deletion and is kept.
+    """
+    selected = sorted(set(paths))
+    if not selected:
+        return []
+    tracked = set(_git_name_paths(root, ("ls-files", "-z", "--", *selected)))
+    return [path for path in selected
+            if path in tracked or os.path.lexists(os.path.join(root, path))]
+
+
 def _stage_explicit_paths(root: pathlib.Path, paths: Sequence[str]) -> None:
     """Stage exactly the observed paths, never a blanket add or status sweep."""
-    selected = sorted(set(paths))
+    selected = _addable_paths(root, paths)
     if selected:
         _run(["git", "add", "--", *selected], cwd=root)
 

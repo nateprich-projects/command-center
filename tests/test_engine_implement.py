@@ -332,6 +332,8 @@ def test_pre_pr_stray_check_sees_scratch_already_on_the_ticket_branch(tmp_path):
 
 def test_staging_uses_an_explicit_sorted_file_list(monkeypatch, tmp_path):
     seen = []
+    (tmp_path / "new.txt").write_text("new\n")
+    (tmp_path / "answer.json").write_text("{}\n")
 
     def fake_run(command, **kwargs):
         seen.append(list(command))
@@ -342,7 +344,50 @@ def test_staging_uses_an_explicit_sorted_file_list(monkeypatch, tmp_path):
         tmp_path, ["new.txt", "answer.json", "new.txt"]
     )
 
-    assert seen == [["git", "add", "--", "answer.json", "new.txt"]]
+    assert seen[-1] == ["git", "add", "--", "answer.json", "new.txt"]
+
+
+def test_commit_stages_a_git_rm_deletion_without_failing(tmp_path):
+    """#1214: `git add` cannot match a path `git rm` removed from the index."""
+    _, clone = make_clone(tmp_path)
+    (clone / "removed-with-git-rm.txt").write_text("gone\n")
+    (clone / "removed-with-rm.txt").write_text("also gone\n")
+    (clone / "edited.txt").write_text("before\n")
+    run_git("add", "-A", cwd=clone)
+    run_git("commit", "--quiet", "-m", "files to remove", cwd=clone)
+
+    run_git("rm", "--quiet", "removed-with-git-rm.txt", cwd=clone)
+    (clone / "removed-with-rm.txt").unlink()
+    (clone / "edited.txt").write_text("after\n")
+    (clone / "added.txt").write_text("new\n")
+
+    assert implement._commit_if_needed(clone, 1214, "remove the old routine")
+
+    shipped = set(run_git(
+        "show", "--name-status", "--format=", "HEAD", cwd=clone,
+    ).stdout.split())
+    assert {"D", "M", "A"} <= shipped
+    assert "removed-with-git-rm.txt" in shipped
+    assert "removed-with-rm.txt" in shipped
+    assert "edited.txt" in shipped
+    assert "added.txt" in shipped
+    assert run_git("status", "--porcelain", cwd=clone).stdout == ""
+
+
+def test_addable_paths_keeps_only_what_git_add_can_match(tmp_path):
+    _, clone = make_clone(tmp_path)
+    (clone / "staged-deletion.txt").write_text("gone\n")
+    (clone / "kept.txt").write_text("kept\n")
+    run_git("add", "-A", cwd=clone)
+    run_git("commit", "--quiet", "-m", "two files", cwd=clone)
+    run_git("rm", "--quiet", "staged-deletion.txt", cwd=clone)
+    (clone / "untracked.txt").write_text("new\n")
+
+    found = implement._addable_paths(
+        clone, ["staged-deletion.txt", "kept.txt", "untracked.txt"]
+    )
+
+    assert found == ["kept.txt", "untracked.txt"]
 
 
 def test_finish_ticket_releases_and_errors_when_tests_fail(tmp_path, monkeypatch):

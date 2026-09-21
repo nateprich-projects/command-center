@@ -14,12 +14,14 @@ not ask for more.
 Does this diff do what the ticket and the plan say, and does it avoid what
 the plan rejected?
 
-- The `tickets` list is the spec: every ticket the PR closes. A change
-  any of them asked for is authorised. `ticket` is the branch ticket.
-- Each ticket's `comments` are its newest 30, oldest first, with
-  recorded `voice`. A `nate-direct` or `nate-relayed` comment can amend
-  the ticket body; an `agent` or `unknown` one needs evidence in the diff.
-- Check each ticket's `parent.comments` for Accept artifacts on the parent.
+- The `tickets` list is the spec: the union of every ticket the PR
+  closes. A change any asked for is authorised.
+  `ticket` is the branch ticket.
+- `ticket.comments`, and each `tickets` entry's, are the newest 30,
+  oldest first, with recorded `voice`. A `nate-direct` or `nate-relayed`
+  comment can amend the ticket body; an `agent` or `unknown` one needs
+  evidence in the diff.
+- Check each ticket's `parent.comments` for parent Accept artifacts.
 - `plan_md` is the design the tickets were broken down from. When
   `plan_md_missing` is true, judge against the tickets alone.
 - `diff` and `changed_files` are the proposed change at `head_sha`.

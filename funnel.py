@@ -523,6 +523,9 @@ BRIEF_SECTION_BUDGETS = {
     "run_summary": 1.0,
     "agent_health": 1.0,
     "working_tree_touched": 1.0,
+    # One REST read per member repo for main's head, plus a bounded follow-up
+    # only where that head's run failed. Sized like the other small live reads.
+    "main_ci": 3.0,
     "outcome_signals": 3.0,
     "portfolio_metrics": 3.0,
     "rejected_merges": 0.25,
@@ -1866,6 +1869,22 @@ CI_BILLING_MARKERS = (
     "spend limit",
 )
 
+#: A self-hosted runner that stops answering fails the job with an annotation
+#: and no test output at all. Run 35546576274 on main at a3c97b14 died this way
+#: after ten minutes; the same SHA went green on a manual rerun fifteen minutes
+#: later, and main stayed red for 2h12m in between because nothing read the
+#: annotation (#1178). These phrases are GitHub's own wording for the
+#: condition, kept narrow on purpose: a real test failure must never match one.
+CI_LOST_RUNNER_MARKERS = (
+    "lost communication with the server",
+    "lost contact with the server",
+    "has not been able to communicate with the server",
+    "the runner has received a shutdown signal",
+)
+# Deliberately absent: "the operation was canceled". A cancellation is
+# ambiguous — a person pressing cancel looks exactly like a host dying — and
+# the plan's rule is that anything ambiguous reads as a real failure.
+
 
 def _ci_result(check: Mapping[str, object]) -> Optional[str]:
     """Return a rollup result in the case-insensitive wire vocabulary."""
@@ -1919,6 +1938,12 @@ def _ci_annotation_is_startup_or_billing(text: str) -> bool:
         or any(marker in normalized for marker in CI_BILLING_MARKERS)
         or ("payment" in normalized and "fail" in normalized)
     )
+
+
+def _ci_annotation_is_lost_runner(text: str) -> bool:
+    """Whether one annotation names a runner that stopped answering."""
+    normalized = re.sub(r"[-_]+", " ", text.casefold())
+    return any(marker in normalized for marker in CI_LOST_RUNNER_MARKERS)
 
 
 def _ci_completed_steps(value: Mapping[str, object]) -> Optional[int]:
@@ -4770,6 +4795,117 @@ def enrich_actions_run(repo: str, source: Mapping[str, object]) -> Dict[str, obj
         if annotations:
             run["annotations"] = annotations
     return run
+
+
+#: What the main-CI check says about one red main. Two values only: an
+#: infrastructure stop that a rerun would clear, and a real failure that needs
+#: a person or a fix. Anything the read cannot settle is ``real`` — a wrong
+#: ``infra`` invites a pointless rerun and hides a genuine break, while a wrong
+#: ``real`` only costs a look (#1178).
+MAIN_CI_INFRA = "infra"
+MAIN_CI_REAL = "real"
+
+
+def _main_ci_failed_job(run: Mapping[str, object]) -> Optional[str]:
+    """Name the first job in a run that did not succeed."""
+    jobs = run.get("jobs")
+    if not isinstance(jobs, list):
+        return None
+    for job in jobs:
+        if not isinstance(job, Mapping):
+            continue
+        if _ci_result(job) in CI_SUCCESS_CONCLUSIONS:
+            continue
+        name = job.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return None
+
+
+def main_ci_infra_reason(run: Mapping[str, object]) -> Optional[str]:
+    """Why this failed run never really ran, or ``None`` if it did.
+
+    Two signatures, both from #1178: a failure with zero completed steps, and a
+    failure annotation naming a runner that stopped answering. The first is
+    already the shared no-start shape (`ci_could_not_run_reasons`); the second
+    is this check's addition, because a lost self-hosted runner reports a plain
+    job failure with no test output rather than a startup failure.
+    """
+    for text in _ci_annotation_texts(run):
+        if _ci_annotation_is_lost_runner(text):
+            return text
+    return ci_could_not_run_reason([run])
+
+
+def main_ci_row(repo: str) -> Optional[Dict[str, object]]:
+    """One member repo's main-branch CI verdict, or ``None`` when it is green.
+
+    The canonical reader: every lane that wants to know whether a red main is
+    worth a rerun asks this, so no two of them can disagree about what the
+    annotations said.
+
+    A read this cannot complete is reported as a ``real`` failure carrying the
+    reason, never as silence and never as green. That is the same fail-closed
+    direction the merge gate takes, for the same reason: an absent signal that
+    reads as good news is how main stayed red for 2h12m with nobody told.
+    """
+    try:
+        head = _gh_api_json(
+            "repos/{}/commits/main".format(repo), cache=False
+        )
+        sha = head.get("sha") if isinstance(head, Mapping) else None
+        if not isinstance(sha, str) or not sha:
+            return {
+                "repo": repo, "sha": None, "job": None,
+                "verdict": MAIN_CI_REAL,
+                "reason": "could not read the main head for {}".format(repo),
+            }
+        runs = _actions_runs(_gh_api_json(
+            "repos/{}/actions/runs?branch=main&head_sha={}&per_page=1".format(
+                repo, sha
+            ),
+            cache=False,
+        ))
+        if not runs:
+            # No workflow run for this head is not a failure: CI may not have
+            # started yet, and the merge gate already refuses on an absent
+            # check. Stay quiet rather than inventing a red main.
+            return None
+        run = enrich_actions_run(repo, runs[0])
+        result = _ci_result(run)
+        if result in CI_SUCCESS_CONCLUSIONS:
+            return None
+        if result is None or result != "FAILURE":
+            # Still running, or a conclusion this does not recognise. Neither
+            # is a red main to act on.
+            return None
+        reason = main_ci_infra_reason(run)
+        return {
+            "repo": repo,
+            "sha": sha,
+            "job": _main_ci_failed_job(run),
+            "verdict": MAIN_CI_INFRA if reason else MAIN_CI_REAL,
+            "reason": reason or "no infrastructure signature in this failure",
+        }
+    except (GitHubError, OSError, subprocess.SubprocessError,
+            TypeError, ValueError) as exc:
+        return {
+            "repo": repo, "sha": None, "job": None,
+            "verdict": MAIN_CI_REAL,
+            "reason": "could not read main CI for {}: {}".format(repo, exc),
+        }
+
+
+def main_ci_json(repos: Optional[Sequence[str]] = None) -> List[Dict[str, object]]:
+    """The brief's thin reader over `main_ci_row`, one row per red main.
+
+    Derived every run from the run, job, step and annotation facts. No label,
+    no Project field, nothing stored: a verdict written down is a verdict that
+    can go stale, and this one changes the moment somebody reruns the job.
+    """
+    names = list(repos) if repos is not None else member_repos()
+    rows = [main_ci_row(repo) for repo in names]
+    return [row for row in rows if row is not None]
 
 
 def latest_actions_run_probe(repo: str) -> Tuple[Optional[str], Optional[str]]:
@@ -8683,6 +8819,7 @@ def cmd_brief(
         rejected = section(
             "rejected_merges", lambda: rejected_merges(items, now), {}
         )
+        main_ci = section("main_ci", main_ci_json, [])
 
         blocked_comment_errors = [
             "{}: {}".format(item.ref, item.block_comments_error)
@@ -8738,6 +8875,7 @@ def cmd_brief(
             "run_summary": run_summary,
             "agent_health": health,
             "working_tree_touched": touched,
+            "main_ci": main_ci,
             "outcome_signals": outcome_signals,
             "rejected_merges": rejected,
             "degraded": degraded,

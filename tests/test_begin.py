@@ -1298,9 +1298,31 @@ def test_codex_packet_failure_releases_the_claim_and_stops(
     result, writes = _implementing_begin(monkeypatch, capsys, [project, ticket])
 
     assert result["do"] == "stop"
+    assert result["gate"] == "error"
     assert "work" not in result
     assert "packet source unavailable" in result["why"]
     assert writes[-1] == (ticket.ref, None)
+
+
+def test_ticket_branch_facts_failure_stops_with_an_error_gate(
+    monkeypatch, capsys
+):
+    """A begin that stops on a GitHub failure must not look like an empty
+    queue: the stop carries gate error (#1216)."""
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+    monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+
+    def facts(rows):
+        raise funnel.GitHubError("HTTP 502")
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", facts)
+    assert funnel.cmd_begin([], NOW, "muse", "escalated", False) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["do"] == "stop"
+    assert result["gate"] == "error"
+    assert "could not establish ticket branch facts" in result["why"]
 
 
 def test_two_same_minute_begins_claim_different_tickets(monkeypatch, capsys):

@@ -263,7 +263,18 @@ def _push(agent: str, extra: Optional[List[Dict]] = None) -> None:
     for attempt in range(len(BACKOFF) + 1):
         content, sha = _fetch(agent)
         lines = [ln for ln in (content or "").splitlines() if ln.strip()]
-        lines += [json.dumps(r, sort_keys=True) for r in pending]
+        # A concurrent lane may have drained the same spool first, or an
+        # earlier PUT may have landed while its reply was lost; either way
+        # the re-fetched blob already holds the pending record as a
+        # byte-identical line, so appending it again would write it twice
+        # (#1237). The comparison is exact, not semantic: pending records
+        # are serialised the same way they are written.
+        seen = set(lines)
+        for record in pending:
+            line = json.dumps(record, sort_keys=True)
+            if line not in seen:
+                seen.add(line)
+                lines.append(line)
         body = ("\n".join(lines[-KEEP:]) + "\n").encode("utf-8")
 
         # The body goes on stdin: as an argument it overran ARG_MAX (1 MB on

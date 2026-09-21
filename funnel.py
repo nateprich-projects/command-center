@@ -7915,6 +7915,23 @@ def stranded_items(
         if item.parent is None and item.status == "Building" and not item.children_total:
             reasons.append("Building project has no tickets")
 
+        # An open ticket under a closed project has nowhere to go: no gate is
+        # watching it, the ladder ranks it through a parent that is finished,
+        # and nothing will close it. Parked parents are excluded on purpose —
+        # parking is a decision, and its tickets are meant to sit. Detection
+        # only; nothing here closes anything.
+        parent = by_ref.get(item.parent or "")
+        if (
+            parent is not None
+            and parent.state != "OPEN"
+            and parent.status != "Parked"
+        ):
+            reasons.append(
+                "parent {} is closed with Status {}".format(
+                    parent.ref, parent.status or "unset"
+                )
+            )
+
         if _auto_closeable_project(item):
             reasons.append("finished upkeep project not closed")
 

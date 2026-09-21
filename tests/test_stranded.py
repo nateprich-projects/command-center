@@ -344,3 +344,44 @@ def test_stranded_reports_finished_upkeep_projects_without_acceptance():
         },
     ]
     assert funnel.gate_question(carried_human_step) is None
+
+
+def test_open_ticket_under_a_closed_parent_is_stranded():
+    """No gate watches it and nothing will close it (#1212)."""
+    parent = issue(20, state="CLOSED", status="Done", klass="Broken",
+                   children_total=1, children_done=0)
+    orphan = issue(21, parent="{}#20".format(REPO))
+
+    rows = funnel.stranded_items([parent, orphan], NOW)
+
+    assert [row["ref"] for row in rows] == ["{}#21".format(REPO)]
+    assert rows[0]["reason"] == (
+        "parent {}#20 is closed with Status Done".format(REPO)
+    )
+
+
+def test_open_ticket_under_a_parked_parent_is_not_stranded():
+    """Parking is a decision; its tickets are meant to sit."""
+    parent = issue(30, state="CLOSED", status="Parked", klass="New",
+                   children_total=1)
+    child = issue(31, parent="{}#30".format(REPO))
+
+    assert funnel.stranded_items([parent, child], NOW) == []
+
+
+def test_open_ticket_under_an_open_parent_is_not_stranded():
+    parent = issue(40, status="Building", klass="Broken", children_total=1)
+    child = issue(41, parent="{}#40".format(REPO))
+
+    assert funnel.stranded_items([parent, child], NOW) == []
+
+
+def test_a_closed_parent_with_no_status_is_still_named():
+    parent = issue(50, state="CLOSED", klass="Broken", children_total=1)
+    child = issue(51, parent="{}#50".format(REPO))
+
+    rows = funnel.stranded_items([parent, child], NOW)
+
+    assert rows[0]["reason"] == (
+        "parent {}#50 is closed with Status unset".format(REPO)
+    )

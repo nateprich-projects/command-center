@@ -1,4 +1,3 @@
-{"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 73}, "phase": "api_cost", "run": "b51416d7e8be", "ts": 1789656987}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/command-center", "run": "b51416d7e8be", "ts": 1789656984, "work": "1031"}
 {"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": null}, "phase": "api_cost", "run": "59c4735b973f", "ts": 1789656985}
 {"agent": "muse", "api_cost": {"gh_calls": 58, "graphql_points": null}, "attempt": null, "ci_green": null, "escalated_from": null, "harness": "muse-code", "human_intervention_required": null, "merged": null, "model": "muse-spark-1.3", "model_source": "detected", "note": null, "outcome": "nothing-to-do", "phase": "finish", "provider": "meta", "reasoning_effort": null, "repo": {"dirty": 0, "head": "56acd855713a"}, "review_result": null, "run": "59c4735b973f", "runtime": {"head": "56acd855713a", "root": "/Users/nateprich/.claude/command-center-run"}, "token_usage": {"cache_read_input_tokens": null, "cache_write_input_tokens": null, "fresh_input_tokens": null, "output_tokens": null}, "ts": 1789656999, "usage": {"source": "meta", "unmetered": true}}
@@ -9998,3 +9997,4 @@
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/command-center", "run": "ca3008987b15", "ts": 1790016338, "work": "1226"}
 {"agent": "muse", "api_cost": {"gh_calls": 38, "graphql_points": 78}, "phase": "api_cost", "run": "ca3008987b15", "ts": 1790016343}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/command-center", "run": "3873ef0b50ad", "ts": 1790016408, "work": "1200"}
+{"agent": "muse", "api_cost": {"gh_calls": 38, "graphql_points": 78}, "phase": "api_cost", "run": "3873ef0b50ad", "ts": 1790016414}

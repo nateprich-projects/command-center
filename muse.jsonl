@@ -1,5 +1,4 @@
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/command-center", "run": "205e6720a215", "ts": 1789657276, "work": "1031"}
-{"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/command-center", "run": "205e6720a215", "ts": 1789657276, "work": "1031"}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/command-center", "run": "12295b2030b4", "ts": 1789657279, "work": "1031"}
 {"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 73}, "phase": "api_cost", "run": "12295b2030b4", "ts": 1789657286}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/command-center", "run": "12295b2030b4", "ts": 1789657279, "work": "1031"}
@@ -9998,3 +9997,4 @@
 {"agent": "muse", "do": "shape", "phase": "bind", "run": "e9589a6b3fd0", "ts": 1790016994, "work": "nateprich-projects/command-center#1180"}
 {"agent": "muse", "api_cost": {"gh_calls": 37, "graphql_points": 78}, "phase": "api_cost", "run": "e9589a6b3fd0", "ts": 1790016999}
 {"agent": "muse", "api_cost": {"gh_calls": 1, "graphql_points": null}, "phase": "api_cost", "run": "35fa5392e379", "ts": 1790017224}
+{"agent": "muse", "api_cost": {"gh_calls": 37, "graphql_points": 78}, "attempt": null, "ci_green": null, "escalated_from": null, "harness": "muse-code", "human_intervention_required": null, "merged": null, "model": "muse-spark-1.3", "model_source": "detected", "note": "shaped nateprich-projects/command-center#1180: Shaped (origin is Nate's; open question under Scope and priority)", "outcome": "done", "phase": "finish", "provider": "meta", "reasoning_effort": null, "repo": {"dirty": 0, "head": "16a2281532e9"}, "review_result": null, "run": "e9589a6b3fd0", "runtime": {"head": "940af9c8bfa1", "root": "/Users/nateprich/.claude/command-center-run"}, "shape_status": "Shaped", "token_usage": {"cache_read_input_tokens": null, "cache_write_input_tokens": null, "fresh_input_tokens": null, "output_tokens": null}, "ts": 1790017339, "usage": {"seven_day": {"resets_at": 1790553600.0, "used_percent": 35.36}}}

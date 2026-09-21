@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import pathlib
@@ -150,6 +151,48 @@ def test_muse_reader_prices_provider_calls(tmp_path, monkeypatch):
     # An agent nobody registered has no pool: a configuration error, not an
     # empty budget.
     assert usage.read_agent("nonesuch", NOW) is None
+
+
+def test_muse_reader_counts_only_the_current_provider_window(tmp_path, monkeypatch):
+    """#1182: the total is anchored to the provider's reset, not to now - 7d.
+
+    A trailing seven days straddles two weekly windows, so it can hold two
+    windows' spend against a cap calibrated from one. Measured 2026-09-20 the
+    rolling reading was 112% of the cap while the live window held 0.26% of it.
+    """
+    window_start = usage.muse_window_start(NOW)
+    assert window_start < NOW
+    assert NOW - window_start < usage.SEVEN_DAY
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_record(
+            window_start + 60, input_tokens=1_000_000, usage_id="inside"
+        ),
+        _muse_record(
+            window_start - 60, input_tokens=100_000_000, usage_id="last-week"
+        ),
+    ])
+    reading = usage.read_agent("muse", NOW)
+    window = reading["windows"]["seven_day"]
+    assert window["calls"] == 1
+    assert reading["spent_dollars"] == pytest.approx(1.25)
+    assert window["window_start"] == window_start
+    assert window["resets_at"] == window_start + usage.SEVEN_DAY
+
+
+def test_muse_window_start_is_the_monday_utc_lattice():
+    """The observed resets all sit on Monday 00:00 UTC — Sunday 17:00 PDT."""
+    observed = (
+        datetime.datetime(2026, 9, 14, tzinfo=datetime.timezone.utc),
+        datetime.datetime(2026, 9, 21, tzinfo=datetime.timezone.utc),
+        datetime.datetime(2026, 9, 28, tzinfo=datetime.timezone.utc),
+    )
+    for reset in observed:
+        just_after = reset.timestamp() + 3600
+        assert usage.muse_window_start(just_after) == reset.timestamp()
+        just_before = reset.timestamp() - 3600
+        assert usage.muse_window_start(just_before) == (
+            reset.timestamp() - usage.SEVEN_DAY
+        )
 
 
 def test_muse_reader_uses_the_flat_cap_path(tmp_path, monkeypatch):

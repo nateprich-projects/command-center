@@ -251,15 +251,15 @@ def _muse_reading(**overrides):
     reading = {
         "source": "muse",
         "captured_at": 1_788_000_000.0,
-        "spent_dollars": 0.704,
-        "cap_dollars": 20.0,
+        "spent_dollars": 14.30,
+        "cap_dollars": 200.0,
         "windows": {
             "seven_day": {
-                "used_percent": 3.52,
+                "used_percent": 7.15,
                 "resets_at": 1_788_604_800.0,
                 "rolling": True,
-                "spent_dollars": 0.704,
-                "cap_dollars": 20.0,
+                "spent_dollars": 14.30,
+                "cap_dollars": 200.0,
                 "calls": 42,
             }
         },
@@ -274,9 +274,9 @@ def test_dashboard_muse_usage_maps_the_seven_day_window(monkeypatch):
     monkeypatch.setattr(usage, "read_muse", lambda now: _muse_reading())
 
     assert funnel._dashboard_muse_usage(1_788_000_000.0) == {
-        "spent_dollars": 0.704,
-        "cap_dollars": 20.0,
-        "used_percent": 3.52,
+        "spent_dollars": 14.30,
+        "cap_dollars": 200.0,
+        "used_percent": 7.15,
         "calls": 42,
     }
 
@@ -322,9 +322,9 @@ def test_successful_brief_spools_muse_usage(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setattr(funnel, "cmd_brief", fake_cmd_brief)
     row = {
-        "spent_dollars": 0.704,
-        "cap_dollars": 20.0,
-        "used_percent": 3.52,
+        "spent_dollars": 14.30,
+        "cap_dollars": 200.0,
+        "used_percent": 7.15,
         "calls": 42,
     }
     monkeypatch.setattr(

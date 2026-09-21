@@ -266,21 +266,60 @@ IDLE_RESET_TOLERANCE = 120.0
 FIVE_HOUR = 300 * 60
 SEVEN_DAY = 10080 * 60
 
-# Muse's pay-per-use contributor pricing, per million tokens. The local session
+# Muse's pay-per-use **standard** pricing, per million tokens. The local session
 # journal records total input, its cached subset, and output in each
 # `goal_usage_attribution` provider event, so the reader can price the calls
 # without depending on heartbeat session-id binding (#790).
-MUSE_INPUT_RATE = 0.10 / 1_000_000
-MUSE_CACHED_INPUT_RATE = 0.002 / 1_000_000
-MUSE_OUTPUT_RATE = 0.20 / 1_000_000
-MUSE_WEEKLY_CAP_DOLLARS = 20.0
+#
+# These were the contributor rates ($0.10 / $0.002 / $0.20) until 2026-09-20, on
+# the strength of a 2026-09-10 reading that the plan metered at that tier. Nate
+# checked the account and found the sessions run on the standard model, so the
+# contributor card was pricing work never billed at it. The correction is not a
+# flat multiple: contributor discounts a cache read to 2% of a fresh token and
+# standard only to 12%, so on this cache-heavy workload the old card read ~28x
+# low. _(confirmed by Nate 2026-09-20.)_
+MUSE_INPUT_RATE = 1.25 / 1_000_000
+MUSE_CACHED_INPUT_RATE = 0.15 / 1_000_000
+MUSE_OUTPUT_RATE = 4.25 / 1_000_000
 
-# The largest measured contributor-rate session was about eleven cents. Keep
-# that worst case below the flat weekly cap before admitting another session.
-MUSE_SESSION_RESERVE_DOLLARS = 0.11
+#: The weekly ceiling, calibrated from the wall the provider actually refused
+#: at. The window that ended 2026-09-19 18:14 PDT ran to a 429 at $214.02 of
+#: standard-rate compute (786.6M tokens, priced from the journals), so $200
+#: sits just under it and the gate stops the lanes shortly before Meta does.
+#: It replaces a $20 cap that belonged to the contributor card and would refuse
+#: every fire at these rates. **This is a pacing ceiling, not a bill** — the
+#: $50/month plan is flat, and nothing here is money owed.
+MUSE_WEEKLY_CAP_DOLLARS = 200.0
+
+# The largest single session measured in the trailing week was $4.34 at standard
+# rates (2026-09-20), so round the worst case to $4.50 and keep it below the
+# weekly cap before admitting another session.
+MUSE_SESSION_RESERVE_DOLLARS = 4.50
 MUSE_WEEKLY_RESERVE = round(
     100.0 * MUSE_SESSION_RESERVE_DOLLARS / MUSE_WEEKLY_CAP_DOLLARS, 2
 )
+
+
+#: The provider's weekly window opens on the same lattice every week: Monday
+#: 00:00 UTC, which the account panel shows as Sunday 5:00 PM local. Three
+#: observed resets sit on it — 2026-09-14 and 2026-09-21, both named by 429
+#: refusals, and the 2026-09-28 the panel displays as "Resets Sep 27 at 5:00
+#: PM".
+#:
+#: **Anchoring here rather than at ``now - 7d`` is what makes the total
+#: comparable to the cap.** The cap is calibrated from one window's refusal,
+#: while a trailing seven days straddles two of them: measured 2026-09-20, the
+#: rolling total read $224.81 against a $200 cap — 112%, which would have
+#: stopped every lane for days — where the current window held $0.52.
+MUSE_WINDOW_ANCHOR_WEEKDAY = 0  # Monday, in UTC
+
+
+def muse_window_start(now: float) -> float:
+    """Epoch seconds at which the provider's current weekly window opened."""
+    moment = datetime.datetime.fromtimestamp(now, timezone.utc)
+    midnight = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+    back = (midnight.weekday() - MUSE_WINDOW_ANCHOR_WEEKDAY) % 7
+    return (midnight - datetime.timedelta(days=back)).timestamp()
 
 
 def read_claude_local(now: Optional[float] = None) -> Optional[Dict]:
@@ -479,7 +518,7 @@ def _muse_cost(quantity: object) -> Optional[float]:
 
 
 def read_muse(now: float) -> Optional[Dict]:
-    """Price Muse provider calls in the trailing seven-day window.
+    """Price Muse provider calls in the provider's current weekly window.
 
     Muse does not expose a scheduled-run quota endpoint. Its session journal is
     the available source of truth: each provider ``goal_usage_attribution``
@@ -488,7 +527,7 @@ def read_muse(now: float) -> Optional[Dict]:
     because they are not provider calls. A provider event with an unreadable
     timestamp or quantity fails closed rather than silently undercounting.
     """
-    cutoff = now - SEVEN_DAY
+    cutoff = muse_window_start(now)
     spent = 0.0
     calls = 0
     seen_usage_ids = set()
@@ -549,7 +588,14 @@ def read_muse(now: float) -> Optional[Dict]:
                 "used_percent": round(
                     100.0 * spent / MUSE_WEEKLY_CAP_DOLLARS, 2
                 ),
-                "resets_at": now + SEVEN_DAY,
+                "resets_at": cutoff + SEVEN_DAY,
+                "window_start": cutoff,
+                # The flag `pace` and `shaping_allowed` key on: gate this
+                # window against the flat ceiling rather than a proportional
+                # line. It no longer describes a trailing window — the total
+                # is anchored to the provider's own reset — and the key is
+                # kept because the dashboard, the brief and the heartbeat all
+                # read it.
                 "rolling": True,
                 "spent_dollars": spent,
                 "cap_dollars": MUSE_WEEKLY_CAP_DOLLARS,

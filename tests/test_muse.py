@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import pathlib
@@ -139,11 +140,11 @@ def test_muse_reader_prices_provider_calls(tmp_path, monkeypatch):
     ])
     reading = usage.read_agent("muse", NOW)
     assert reading["source"] == "muse"
-    assert reading["spent_dollars"] == pytest.approx(0.704)
-    assert reading["cap_dollars"] == 20.0
+    assert reading["spent_dollars"] == pytest.approx(14.30)
+    assert reading["cap_dollars"] == 200.0
     window = reading["windows"]["seven_day"]
-    assert window["spent_dollars"] == pytest.approx(0.704)
-    assert window["used_percent"] == pytest.approx(3.52)
+    assert window["spent_dollars"] == pytest.approx(14.30)
+    assert window["used_percent"] == pytest.approx(7.15)
     assert window["rolling"] is True
     assert window["calls"] == 1
 
@@ -152,11 +153,53 @@ def test_muse_reader_prices_provider_calls(tmp_path, monkeypatch):
     assert usage.read_agent("nonesuch", NOW) is None
 
 
+def test_muse_reader_counts_only_the_current_provider_window(tmp_path, monkeypatch):
+    """#1182: the total is anchored to the provider's reset, not to now - 7d.
+
+    A trailing seven days straddles two weekly windows, so it can hold two
+    windows' spend against a cap calibrated from one. Measured 2026-09-20 the
+    rolling reading was 112% of the cap while the live window held 0.26% of it.
+    """
+    window_start = usage.muse_window_start(NOW)
+    assert window_start < NOW
+    assert NOW - window_start < usage.SEVEN_DAY
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_record(
+            window_start + 60, input_tokens=1_000_000, usage_id="inside"
+        ),
+        _muse_record(
+            window_start - 60, input_tokens=100_000_000, usage_id="last-week"
+        ),
+    ])
+    reading = usage.read_agent("muse", NOW)
+    window = reading["windows"]["seven_day"]
+    assert window["calls"] == 1
+    assert reading["spent_dollars"] == pytest.approx(1.25)
+    assert window["window_start"] == window_start
+    assert window["resets_at"] == window_start + usage.SEVEN_DAY
+
+
+def test_muse_window_start_is_the_monday_utc_lattice():
+    """The observed resets all sit on Monday 00:00 UTC — Sunday 17:00 PDT."""
+    observed = (
+        datetime.datetime(2026, 9, 14, tzinfo=datetime.timezone.utc),
+        datetime.datetime(2026, 9, 21, tzinfo=datetime.timezone.utc),
+        datetime.datetime(2026, 9, 28, tzinfo=datetime.timezone.utc),
+    )
+    for reset in observed:
+        just_after = reset.timestamp() + 3600
+        assert usage.muse_window_start(just_after) == reset.timestamp()
+        just_before = reset.timestamp() - 3600
+        assert usage.muse_window_start(just_before) == (
+            reset.timestamp() - usage.SEVEN_DAY
+        )
+
+
 def test_muse_reader_uses_the_flat_cap_path(tmp_path, monkeypatch):
     """A rolling total uses the flat cap rather than the proportional line."""
     _muse_fixture(tmp_path, monkeypatch, [
         _muse_record(
-            NOW - 3600, input_tokens=190_000_000, output_tokens=1_000_000,
+            NOW - 3600, input_tokens=19_000_000, output_tokens=1_000_000,
             usage_id="provider-1"
         )
     ])
@@ -177,12 +220,12 @@ def test_muse_reader_reports_spend_over_the_weekly_cap(tmp_path, monkeypatch):
     """The rolling reader leaves an over-cap percentage visible to the gate."""
     _muse_fixture(tmp_path, monkeypatch, [
         _muse_record(
-            NOW - 3600, input_tokens=202_000_000, usage_id="provider-1"
+            NOW - 3600, input_tokens=161_600_000, usage_id="provider-1"
         )
     ])
     reading = usage.read_agent("muse", NOW)
     window = reading["windows"]["seven_day"]
-    assert reading["spent_dollars"] == pytest.approx(20.2)
+    assert reading["spent_dollars"] == pytest.approx(202.0)
     assert window["used_percent"] == pytest.approx(101.0)
     assert usage.pace(reading, NOW, provider="meta")["over_pace"]
 
@@ -194,7 +237,7 @@ def test_muse_is_metered_with_a_measured_session_reserve():
     assert "openai" not in usage.UNMETERED_PROVIDERS
     assert "zai" not in usage.UNMETERED_PROVIDERS
     assert usage.PROVIDER_POLICY["meta"]["weekly_target"] == 100.0
-    assert usage.PROVIDER_POLICY["meta"]["weekly_reserve"] == pytest.approx(0.55)
+    assert usage.PROVIDER_POLICY["meta"]["weekly_reserve"] == pytest.approx(2.25)
 
 
 def test_muse_model_detection_reads_snapshots_not_jsonl():

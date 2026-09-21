@@ -196,19 +196,34 @@ def test_the_brief_carries_the_section(monkeypatch, capsys):
     monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
     monkeypatch.setattr(funnel, "_read_outcome_signals", lambda now: None)
     monkeypatch.setattr(funnel, "_read_portfolio_metrics", lambda items, now: None)
-    monkeypatch.setattr(
-        funnel, "main_ci_json",
-        lambda *args: [{"repo": REPO, "sha": SHA, "job": "test",
-                        "verdict": "infra", "reason": "lost communication "
-                                                      "with the server"}],
-    )
 
     from datetime import datetime, timezone
     now = datetime(2026, 9, 21, 12, 0, 0, tzinfo=timezone.utc)
-    assert funnel.cmd_brief([], now) == 0
+    assert funnel.cmd_brief([], now, main_ci=[{
+        "repo": REPO, "sha": SHA, "job": "test", "verdict": "infra",
+        "reason": "lost communication with the server",
+    }]) == 0
     brief = json.loads(capsys.readouterr().out)
 
     assert brief["main_ci"] == [{
         "repo": REPO, "sha": SHA, "job": "test", "verdict": "infra",
         "reason": "lost communication with the server",
     }]
+
+
+def test_a_fixture_brief_reports_the_section_as_unknown(monkeypatch, capsys):
+    """Null, not []: a brief that never made the live read knows nothing about
+    any main, and an empty list would read as every main being green."""
+    import json
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
+    monkeypatch.setattr(funnel, "_read_outcome_signals", lambda now: None)
+    monkeypatch.setattr(funnel, "_read_portfolio_metrics", lambda items, now: None)
+
+    now = datetime(2026, 9, 21, 12, 0, 0, tzinfo=timezone.utc)
+    assert funnel.cmd_brief([], now) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["main_ci"] is None
+    assert [row for row in brief["missing"] if row["section"] == "main_ci"] == []

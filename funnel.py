@@ -8676,6 +8676,7 @@ def cmd_brief(
     brief_cache: Optional[BriefCache] = None,
     outcome_signals: Optional[Dict[str, object]] = None,
     portfolio_metrics: Optional[Dict[str, object]] = None,
+    main_ci: Optional[List[Dict[str, object]]] = None,
 ) -> int:
     missing = list(missing or [])
     timings = {} if timings is None else timings
@@ -8819,7 +8820,6 @@ def cmd_brief(
         rejected = section(
             "rejected_merges", lambda: rejected_merges(items, now), {}
         )
-        main_ci = section("main_ci", main_ci_json, [])
 
         blocked_comment_errors = [
             "{}: {}".format(item.ref, item.block_comments_error)
@@ -13155,6 +13155,19 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
                 if portfolio_metrics is _BRIEF_UNAVAILABLE:
                     portfolio_metrics = None
+                # Live read, computed here rather than inside cmd_brief for the
+                # same reason as the two above: the renderer stays pure over its
+                # arguments, so a fixture brief needs no network and reports
+                # `main_ci` as null — unknown — instead of an empty list.
+                main_ci = _brief_timed(
+                    "main_ci",
+                    lambda: _brief_read("main_ci", main_ci_json, missing),
+                    timings,
+                    degraded,
+                    deadline=deadline,
+                )
+                if main_ci is _BRIEF_UNAVAILABLE:
+                    main_ci = None
                 # Keep the existing brief JSON as the command's stdout. The
                 # display snapshot is a separate, best-effort side effect and
                 # must not change what callers parse or whether the command
@@ -13174,6 +13187,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             brief_cache=cache,
                             outcome_signals=outcome_signals,
                             portfolio_metrics=portfolio_metrics,
+                            main_ci=main_ci,
                         )
                 finally:
                     output = brief_stdout.getvalue()

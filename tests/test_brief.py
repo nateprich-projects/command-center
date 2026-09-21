@@ -1155,7 +1155,12 @@ def test_main_brief_marks_sections_depending_on_unreadable_pr_facts(
     assert brief["stranded"] is None
     assert brief["in_motion"] is None
     assert brief["stale_locks_taken_over"] is None
-    assert brief["missing"] == [
+    # Filtered to this test's subject: `main_ci` is a separate live read
+    # (#1219) and reports its own unreadable row beside these.
+    assert [
+        row for row in brief["missing"]
+        if row["section"] in funnel.BRIEF_PR_FACT_SECTIONS
+    ] == [
         {
             "section": section,
             "error": "could not read ticket branch facts: PR scan offline",

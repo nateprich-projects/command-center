@@ -167,6 +167,154 @@ def test_muse_reader_reports_spend_over_the_weekly_cap(tmp_path, monkeypatch):
     assert usage.pace(reading, NOW, provider="meta")["over_pace"]
 
 
+def _projected(tmp_path, monkeypatch, *, spent, trailing, days_left):
+    """A Muse reading with `spent` dollars in the window, `trailing` dollars in
+    the last 72 hours, read `days_left` days before the reset."""
+    window_start = usage.muse_window_start(NOW)
+    now = window_start + usage.SEVEN_DAY - days_left * 86400.0
+    records = []
+    older = spent - min(spent, trailing)
+    in_window_recent = min(spent, trailing)
+    if older:
+        records.append(_muse_record(
+            window_start + 60, input_tokens=int(older / 1.25 * 1_000_000),
+            usage_id="older"))
+    if in_window_recent:
+        records.append(_muse_record(
+            now - 3600, input_tokens=int(in_window_recent / 1.25 * 1_000_000),
+            usage_id="recent"))
+    before_window = trailing - in_window_recent
+    if before_window:
+        records.append(_muse_record(
+            now - usage.MUSE_RATE_LOOKBACK + 3600,
+            input_tokens=int(before_window / 1.25 * 1_000_000),
+            usage_id="before-window"))
+    _muse_fixture(tmp_path, monkeypatch, records)
+    reading = usage.read_agent("muse", now)
+    return reading, usage.pace(reading, now, provider="meta"), now
+
+
+def test_a_burst_in_a_light_week_is_not_throttled(tmp_path, monkeypatch):
+    """#1198 (a): $44 spent with six days left and $45 in the last 72 hours
+    projects 67 percent. A proportional line would have refused this."""
+    reading, verdict, _ = _projected(
+        tmp_path, monkeypatch, spent=44.0, trailing=45.0, days_left=6.0)
+    window = reading["windows"]["seven_day"]
+    assert window["trailing_72h_dollars"] == pytest.approx(45.0)
+    assert window["daily_rate_dollars"] == pytest.approx(15.0)
+    assert window["projected_percent"] == pytest.approx(67.0)
+    assert verdict["band"] == "ok"
+    assert not verdict["over_pace"]
+    assert verdict["windows"][0]["runs_out_at"] is None
+
+
+def test_a_rate_that_outruns_the_window_is_tight_not_a_stop(tmp_path, monkeypatch):
+    """#1198 (b): the same spend at $31 a day projects 115 percent."""
+    reading, verdict, now = _projected(
+        tmp_path, monkeypatch, spent=44.0, trailing=93.0, days_left=6.0)
+    assert reading["windows"]["seven_day"]["projected_percent"] == pytest.approx(115.0)
+    assert verdict["band"] == "tight"
+    assert not verdict["over_pace"]
+    runs_out_at = verdict["windows"][0]["runs_out_at"]
+    assert runs_out_at == pytest.approx(now + (200.0 - 44.0) / 31.0 * 86400.0, abs=1)
+
+
+def test_tight_is_read_from_the_rate_not_from_an_even_line(tmp_path, monkeypatch):
+    """#1198 (c): with two days left, 65 percent used is behind an even line
+    (71 percent), and at $40 a day it still ends at 105. The ticket's own
+    numbers for this case could not occur: once a window is older than 72
+    hours its trailing spend cannot exceed what the window has spent."""
+    reading, verdict, _ = _projected(
+        tmp_path, monkeypatch, spent=130.0, trailing=120.0, days_left=2.0)
+    assert reading["windows"]["seven_day"]["used_percent"] == pytest.approx(65.0)
+    assert reading["windows"]["seven_day"]["projected_percent"] == pytest.approx(105.0)
+    assert verdict["band"] == "tight"
+    assert not verdict["over_pace"]
+
+
+def test_the_tickets_own_case_c_is_tight_at_110_percent():
+    """#1198 (c), with the ticket's exact numbers: $100 spent of $200 with two
+    days left and $180 in the trailing 72 hours is $60 a day, so the window
+    projects 50 + 60 = 110 percent. `tight`, although 50 percent used is behind
+    an even line at day five. Fed to `pace` as a reading, because no journal
+    can hold these numbers: on day five the trailing 72 hours lie inside the
+    window, so they cannot exceed what the window has spent. The journal-built
+    test above covers the same claim with numbers that can occur."""
+    days_left = 2.0
+    reading = {"windows": {"seven_day": {
+        "used_percent": 50.0,
+        "resets_at": NOW + days_left * 86400.0,
+        "window_start": NOW + days_left * 86400.0 - usage.SEVEN_DAY,
+        "rolling": True,
+        "spent_dollars": 100.0,
+        "cap_dollars": 200.0,
+        "trailing_72h_dollars": 180.0,
+        "daily_rate_dollars": 60.0,
+        "projected_percent": 50.0 + 100.0 * 60.0 * days_left / 200.0,
+    }}}
+    verdict = usage.pace(reading, NOW, provider="meta")
+    weekly = verdict["windows"][0]
+    assert weekly["projected_percent"] == pytest.approx(110.0)
+    assert verdict["band"] == "tight"
+    assert not verdict["over_pace"]
+    even_line = 100.0 * (usage.SEVEN_DAY - days_left * 86400.0) / usage.SEVEN_DAY
+    assert weekly["used_percent"] < even_line
+    assert weekly["runs_out_at"] == pytest.approx(
+        NOW + (200.0 - 100.0) / 60.0 * 86400.0, abs=1)
+
+
+def test_the_flat_ceiling_still_stops_whatever_the_projection(tmp_path, monkeypatch):
+    """#1198 (d): $196 plus the session reserve passes the cap."""
+    _, verdict, _ = _projected(
+        tmp_path, monkeypatch, spent=196.0, trailing=0.0, days_left=1.0)
+    assert verdict["band"] == "over"
+    assert verdict["over_pace"]
+
+
+def test_no_recent_spend_is_ok_with_no_run_out_time(tmp_path, monkeypatch):
+    """#1198 (e)."""
+    reading, verdict, _ = _projected(
+        tmp_path, monkeypatch, spent=50.0, trailing=0.0, days_left=3.0)
+    assert reading["windows"]["seven_day"]["daily_rate_dollars"] == 0.0
+    assert verdict["band"] == "ok"
+    assert verdict["windows"][0]["runs_out_at"] is None
+
+
+def test_a_window_with_no_spend_yet_is_a_reading_of_zero(tmp_path, monkeypatch):
+    """Every window opens with no calls in it, and after a wall the last 72
+    hours are empty too. That is a budget of zero used, not an unreadable one:
+    read as unknown it would stop every lane at the reset, with nothing left
+    to make the first call."""
+    window_start = usage.muse_window_start(NOW)
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_record(window_start - 5 * 86400.0, input_tokens=1_000_000,
+                     usage_id="long-ago"),
+    ])
+    just_after_reset = window_start + 60
+    reading = usage.read_agent("muse", just_after_reset)
+    assert reading is not None
+    assert reading["spent_dollars"] == 0.0
+    verdict = usage.pace(reading, just_after_reset, provider="meta")
+    assert verdict["known"] and not verdict["over_pace"]
+    assert verdict["band"] == "ok"
+
+
+def test_no_journal_at_all_still_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        usage, "MUSE_SESSIONS", str(tmp_path / "*/*/*/*/session.jsonl"))
+    assert usage.read_agent("muse", NOW) is None
+
+
+def test_other_providers_carry_no_band():
+    """#1198 (f): a reading without a projection behaves exactly as before."""
+    reading = {"windows": {"seven_day": {
+        "used_percent": 10.0, "resets_at": NOW + 3 * 86400.0}}}
+    verdict = usage.pace(reading, NOW, provider="anthropic")
+    assert verdict["band"] is None
+    assert "band" not in verdict["windows"][0]
+    assert "projected_percent" not in verdict["windows"][0]
+
+
 def test_muse_is_metered_with_a_measured_session_reserve():
     """Muse uses the measured worst-case session reserve under the cap."""
     assert "meta" not in usage.UNMETERED_PROVIDERS

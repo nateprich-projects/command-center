@@ -314,6 +314,14 @@ MUSE_WEEKLY_RESERVE = round(
 MUSE_WINDOW_ANCHOR_WEEKDAY = 0  # Monday, in UTC
 
 
+#: How far back the pace signal looks for Muse's spending rate. Three days,
+#: not one: the daily totals of the window that ended 2026-09-20 ran from
+#: $12.64 to $53.05, a fourfold swing, so a one-day rate would flap between
+#: bands. It may reach back past the window's start on purpose: it estimates
+#: a rate, and a rate does not reset on Sunday.
+MUSE_RATE_LOOKBACK = 72 * 3600
+
+
 def muse_window_start(now: float) -> float:
     """Epoch seconds at which the provider's current weekly window opened."""
     moment = datetime.datetime.fromtimestamp(now, timezone.utc)
@@ -528,13 +536,17 @@ def read_muse(now: float) -> Optional[Dict]:
     timestamp or quantity fails closed rather than silently undercounting.
     """
     cutoff = muse_window_start(now)
+    rate_cutoff = now - MUSE_RATE_LOOKBACK
+    oldest = min(cutoff, rate_cutoff)
     spent = 0.0
+    trailing = 0.0
     calls = 0
     seen_usage_ids = set()
+    journals = glob.glob(MUSE_SESSIONS)
 
-    for path in glob.glob(MUSE_SESSIONS):
+    for path in journals:
         try:
-            if os.path.getmtime(path) < cutoff:
+            if os.path.getmtime(path) < oldest:
                 continue
             with open(path, errors="replace") as handle:
                 for line in handle:
@@ -559,7 +571,7 @@ def read_muse(now: float) -> Optional[Dict]:
                     recorded_at = _muse_epoch(record)
                     if recorded_at is None:
                         return None
-                    if recorded_at < cutoff or recorded_at > now:
+                    if recorded_at < oldest or recorded_at > now:
                         continue
                     cost = _muse_cost(attribution.get("quantity"))
                     if cost is None:
@@ -569,15 +581,32 @@ def read_muse(now: float) -> Optional[Dict]:
                         if usage_id in seen_usage_ids:
                             continue
                         seen_usage_ids.add(usage_id)
-                    spent += cost
-                    calls += 1
+                    if recorded_at >= rate_cutoff:
+                        trailing += cost
+                    if recorded_at >= cutoff:
+                        spent += cost
+                        calls += 1
         except OSError:
             continue
 
-    if not calls:
+    # No journal at all is an unreadable budget and fails closed. A window
+    # with no spend in it yet is a reading of zero, and must not: every window
+    # opens that way, and after a wall the lanes have been dark for days, so
+    # "no calls means unknown" would stop every lane at the reset with nothing
+    # left to make the first call (#1198).
+    if not journals:
         return None
 
     spent = round(spent, 6)
+    trailing = round(trailing, 6)
+    used_percent = round(100.0 * spent / MUSE_WEEKLY_CAP_DOLLARS, 2)
+    resets_at = cutoff + SEVEN_DAY
+    daily_rate = round(trailing / (MUSE_RATE_LOOKBACK / 86400.0), 6)
+    days_left = max(0.0, resets_at - now) / 86400.0
+    projected_percent = round(
+        used_percent
+        + 100.0 * daily_rate * days_left / MUSE_WEEKLY_CAP_DOLLARS, 2
+    )
     return {
         "source": "muse",
         "captured_at": now,
@@ -585,11 +614,14 @@ def read_muse(now: float) -> Optional[Dict]:
         "cap_dollars": MUSE_WEEKLY_CAP_DOLLARS,
         "windows": {
             "seven_day": {
-                "used_percent": round(
-                    100.0 * spent / MUSE_WEEKLY_CAP_DOLLARS, 2
-                ),
-                "resets_at": cutoff + SEVEN_DAY,
+                "used_percent": used_percent,
+                "resets_at": resets_at,
                 "window_start": cutoff,
+                # The pace signal (#1198): at the last three days' rate, where
+                # does this window end? `pace` turns it into a band.
+                "trailing_72h_dollars": trailing,
+                "daily_rate_dollars": daily_rate,
+                "projected_percent": projected_percent,
                 # The flag `pace` and `shaping_allowed` key on: gate this
                 # window against the flat ceiling rather than a proportional
                 # line. It no longer describes a trailing window — the total
@@ -846,25 +878,67 @@ def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:
             weekly_floor = policy(provider, "weekly_floor", WEEKLY_FLOOR)
             weekly_target = policy(provider, "weekly_target", WEEKLY_TARGET)
             allowed = weekly_floor + (weekly_target - weekly_floor) * elapsed_fraction
-        verdicts.append(
-            {
-                "window": "seven_day",
-                "used_percent": seven["used_percent"],
-                "reserve": policy(provider, "weekly_reserve", WEEKLY_RESERVE),
-                "allowed_percent": round(allowed, 1),
-                "elapsed_fraction": (
-                    round(elapsed_fraction, 3) if elapsed_fraction is not None else None
-                ),
-                "over": seven["used_percent"] + policy(
-                    provider, "weekly_reserve", WEEKLY_RESERVE) > allowed,
-            }
-        )
+        weekly = {
+            "window": "seven_day",
+            "used_percent": seven["used_percent"],
+            "reserve": policy(provider, "weekly_reserve", WEEKLY_RESERVE),
+            "allowed_percent": round(allowed, 1),
+            "elapsed_fraction": (
+                round(elapsed_fraction, 3) if elapsed_fraction is not None else None
+            ),
+            "over": seven["used_percent"] + policy(
+                provider, "weekly_reserve", WEEKLY_RESERVE) > allowed,
+        }
+        weekly.update(_projection_band(seven, weekly["over"], now))
+        verdicts.append(weekly)
 
+    bands = [v["band"] for v in verdicts if v.get("band")]
     return {
         "windows": verdicts,
         "over_pace": any(v["over"] for v in verdicts),
+        # `tight` is not a stop: it narrows what `begin` offers (#1199). Only
+        # `over` sets `over_pace`. Absent when no window carries a projection.
+        "band": (
+            "over" if "over" in bands
+            else "tight" if "tight" in bands
+            else "ok" if bands else None
+        ),
         # No window read at all is not "under pace" — it is unknown.
         "known": bool(verdicts),
+    }
+
+
+def _projection_band(window: Dict, over: bool, now: float) -> Dict:
+    """The pace signal for a window that carries a projection, or nothing.
+
+    The question is the one a person means by pace: at the rate of the last
+    three days, will this window last until its reset? It is deliberately not
+    the proportional line above. That line keeps room on a subscription Nate
+    also uses; Muse's plan is flat and used by nothing else, so budget left at
+    the reset is worth nothing, and a line throttles an early burst even in a
+    week that would end far under the cap. It is also blind the other way: at
+    day five with half the window spent it reads healthy while a $60-a-day
+    rate is two days from the wall. _(agent rule, unconfirmed — advisory;
+    Nate asked for pacing and for the design, 2026-09-21.)_
+
+    ``over`` is the flat ceiling, unchanged, and wins. ``tight`` means the
+    projection passes 100 percent. ``runs_out_at`` is when the cap would be
+    reached at that rate, so a dark weekend is visible days ahead.
+    """
+    projected = window.get("projected_percent")
+    if projected is None:
+        return {}
+    rate = float(window.get("daily_rate_dollars") or 0.0)
+    cap = float(window.get("cap_dollars") or 0.0)
+    spent = float(window.get("spent_dollars") or 0.0)
+    runs_out_at = None
+    if rate > 0 and cap > 0 and projected > 100.0:
+        runs_out_at = round(now + max(0.0, cap - spent) / rate * 86400.0, 0)
+    return {
+        "band": "over" if over else "tight" if projected > 100.0 else "ok",
+        "projected_percent": projected,
+        "daily_rate_dollars": rate,
+        "runs_out_at": runs_out_at,
     }
 
 
@@ -971,10 +1045,13 @@ PROVIDER_POLICY = {
     # unchanged and is recorded below.
     "zai": {"weekly_floor": 22.0, "weekly_reserve": 0.5},
 
-    # Muse's contributor-rate pool is metered from local session attribution.
-    # A rolling total uses the flat path in `pace`; 100% is the decided $20
-    # cap, and the measured $0.11 worst-case session reserve admits another
-    # session without crossing it.
+    # Muse's pool is metered from local session attribution at the standard
+    # rate card, counted from the provider's weekly reset (#1190). 100% is the
+    # $200 cap, the flat ceiling that stops a run, and the $4.50 session
+    # reserve admits another session without crossing it. Pacing is not a
+    # floor-and-target line here: `_projection_band` asks whether the last
+    # three days' rate lasts the window, and a `tight` answer narrows what
+    # `begin` offers instead of stopping the lanes (#1198, #1199).
     "meta": {"weekly_target": 100.0,
              "weekly_reserve": MUSE_WEEKLY_RESERVE},
 

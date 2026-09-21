@@ -198,6 +198,22 @@ wrong.
   on the Sunday lattice is the weekly wall, a floating stamp under five hours out is
   the five-hour one. Only the weekly wall has been hit so far (2026-09-19). #1182
   covers recording each hit so the windows can be calibrated from evidence.
+  **Muse is paced by a projection, not by a line.** At the last 72 hours' spending
+  rate, will the window last until its reset? `usage.pace` answers with a band: `ok`;
+  `tight` when the projected end passes 100 percent; `over` when used plus the session
+  reserve passes 100 percent, which is the flat ceiling and the only band that stops a
+  run. `tight` narrows what `begin` offers to Broken, Maintenance and pinned work
+  (#1199); it follows the ladder, which Nate chose over protecting member-repo work
+  when asked on 2026-09-21. The proportional line Claude and Codex use is deliberately
+  not applied: it keeps room on a subscription Nate shares, and Muse's plan is flat and
+  used by nothing else, so budget left at the reset is worth nothing. Three days rather
+  than one because daily totals swing fourfold. A window with no spend in it yet reads
+  as zero, not unknown: every window opens that way, and reading it as unknown would
+  stop every lane at the reset with nothing left to make the first call.
+  Nate decided on 2026-09-21 that Muse is paced rather than held to a flat ceiling
+  alone, and said of the existing policy: "Don't just read the pace policy. If that
+  policy sucks then make a good one." The design above is the agent's answer to that.
+  _(agent rule, unconfirmed — advisory)_
 - **No Copilot automation.** Those are employer-provided tokens; personal use stays
   one-off and manual.
 - **Every routine starts, reads fresh usage, and exits immediately if over the pace

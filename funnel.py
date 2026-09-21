@@ -504,7 +504,6 @@ BRIEF_SECTION_BUDGETS = {
     "closed_itself": 45.0,
     "cleared_blocks": 7.0,
     "blocked": 0.25,
-    "prose_dependencies": 0.25,
     "suspected_human_steps": 0.25,
     "human_steps": 0.25,
     "machine_local_steps": 0.25,
@@ -803,21 +802,11 @@ def gate_question(item: Item) -> Optional[str]:
             return None
         return GATES["Building"]
     if item.status == "Shaped":
-        # The shaping writer and this reader must agree about every reason a
-        # plan was held at Shaped, not only an open Needs question.
-        body = item.body or ""
-        origin = parse_origin(body)
-        override = parse_origin_override(body)
-        override_target = override["target"] if override is not None else None
-        risk = plan_is_escalated(body)
-        return (
-            GATES["Shaped"]
-            if not shaped_self_approvable(
-                body, origin, item.klass, risk,
-                override_target=override_target,
-            )
-            else None
-        )
+        # The shape runner decides Ready versus Shaped at write time, so an
+        # item at Shaped was held and waits on Nate. This reader must not
+        # re-derive eligibility from plan prose: re-deriving could only hide
+        # an item the writer held.
+        return GATES["Shaped"]
     return None
 
 
@@ -825,8 +814,8 @@ def question_since(item: Item) -> Optional[datetime]:
     """When the item's current question became live.
 
     ``gate_question`` is the authority for which question is live. A Shaped
-    project asks "Is the plan good?" only when its plan carries an open
-    question. A Building project starts asking "Accept it?" when its last
+    project asks "Is the plan good?": the shape runner held it. A Building
+    project starts asking "Accept it?" when its last
     sub-issue closes. A blocked item starts asking its unblock question when
     the ``blocked`` label is applied. The status timestamp remains the
     fallback for older or partial fixture data without the event details.
@@ -1231,151 +1220,6 @@ def needs_nate_signals(plan_body: str) -> List[str]:
             if re.search(pattern, text, re.IGNORECASE)]
 
 
-PLAN_HEADING = re.compile(r"^\s{0,3}(?P<marks>#{1,6})\s+(?P<title>.*?)\s*#*\s*$")
-NEEDS_NATE_HEADINGS = {"needs nate", "needs you"}
-EMPTY_NEEDS_NATE = {"", "nothing", "nothing."}
-NEEDS_NATE_CATEGORIES = (
-    "Exposure",
-    "Gates",
-    "Scope and priority",
-    "Preference",
-)
-NEEDS_NATE_CLEAR_ANSWERS = {
-    "nothing",
-    "nothing outstanding",
-    "none",
-}
-NEEDS_NATE_CLAUSE_END = re.compile(r"[.;\u2013\u2014]| - ")
-
-
-def _needs_nate_sections(plan_body: str) -> List[str]:
-    """Return the contents of every recognised Needs section in a plan."""
-    if not isinstance(plan_body, str):
-        return []
-
-    sections: List[str] = []
-    lines = plan_body.splitlines()
-    index = 0
-    while index < len(lines):
-        match = PLAN_HEADING.match(lines[index])
-        if not match:
-            index += 1
-            continue
-
-        title = match.group("title").strip().lower().rstrip(":").strip()
-        if title not in NEEDS_NATE_HEADINGS:
-            index += 1
-            continue
-
-        level = len(match.group("marks"))
-        body: List[str] = []
-        index += 1
-        while index < len(lines):
-            next_heading = PLAN_HEADING.match(lines[index])
-            if next_heading and len(next_heading.group("marks")) <= level:
-                break
-            body.append(lines[index])
-            index += 1
-        sections.append("\n".join(body))
-
-    return sections
-
-
-def _needs_nate_category_line(line: str) -> Optional[Tuple[str, str]]:
-    """Return a category and answer from one supported Needs line."""
-    text = re.sub(r"^(?:[-+*]|\d+[.)])\s+", "", line.strip())
-    for category in NEEDS_NATE_CATEGORIES:
-        escaped = re.escape(category)
-        patterns = (
-            rf"\*\*{escaped}\s*[:.]\s*\*\*\s*(?P<answer>.*)",
-            rf"\*\*{escaped}\*\*\s*[:.]\s*(?P<answer>.*)",
-            rf"{escaped}\s*[:.]\s*(?P<answer>.*)",
-        )
-        for pattern in patterns:
-            match = re.fullmatch(pattern, text, re.IGNORECASE)
-            if match:
-                return category, match.group("answer").strip()
-    return None
-
-
-def _needs_nate_answer_is_clear(answer: str) -> bool:
-    """Whether an answer's first clause is an explicit all-clear token."""
-    clause = NEEDS_NATE_CLAUSE_END.split(answer, maxsplit=1)[0].strip().lower()
-    return clause in NEEDS_NATE_CLEAR_ANSWERS
-
-
-def _needs_nate_section_reason(section: str) -> Optional[str]:
-    """Return a hold reason, or ``None`` when one Needs section is clear."""
-    if section.strip().lower() in EMPTY_NEEDS_NATE:
-        return None
-
-    # A wrapped elaboration continues the category line above it: Muse writes
-    # Markdown at eighty columns, and #514's clear section read as an open
-    # question because its indented second lines counted as extra lines
-    # (#524). A blank line, a new list item, or an unindented line still ends
-    # the answer and is judged on its own.
-    lines: List[str] = []
-    for line in section.splitlines():
-        if not line.strip():
-            continue
-        continues = (
-            line[:1].isspace()
-            and not re.match(r"^\s*(?:[-+*]|\d+[.)])\s+", line)
-            and bool(lines)
-        )
-        if continues:
-            lines[-1] = lines[-1].rstrip() + " " + line.strip()
-        else:
-            lines.append(line)
-    found = set()
-    for line in lines:
-        parsed = _needs_nate_category_line(line)
-        if parsed is None:
-            return "plan has an open question"
-        category, answer = parsed
-        if category in found or not _needs_nate_answer_is_clear(answer):
-            return "open question under {}".format(category)
-        found.add(category)
-
-    for category in NEEDS_NATE_CATEGORIES:
-        if category not in found:
-            return "open question under {}".format(category)
-    return None
-
-
-def shaped_plan_status(plan_body: str) -> Tuple[str, str]:
-    """Return the status and reason earned by a newly recorded plan.
-
-    The all-clear is deliberately narrow: a recognised Needs section must be
-    present, either explicitly empty or made up of the four category lines with
-    an explicit all-clear as each answer's first clause. Authority-shaped
-    prose is reported separately by ``needs_nate_signals`` and does not change
-    this section result. Everything else stays at Shaped with a reason the
-    caller can print.
-    """
-    sections = _needs_nate_sections(plan_body)
-    if not sections:
-        return "Shaped", "plan has no ## Needs you section"
-    for section in sections:
-        reason = _needs_nate_section_reason(section)
-        if reason:
-            return "Shaped", reason
-    return "Ready", "plan declares nothing open"
-
-
-def plan_needs_nate(plan_body: str) -> bool:
-    """Whether a plan's Needs Nate/Needs you section asks for Nate.
-
-    A missing section is not an all-clear: the section itself is the plan's
-    explicit evidence that Nate's questions were considered. Only a section
-    containing exactly ``Nothing`` (with optional punctuation and whitespace)
-    is empty. Multiple recognised sections fail closed if any one contains
-    content. Authority-shaped prose is an advisory signal for the unattended
-    approval record, not an open question for this parser.
-    """
-    return shaped_plan_status(plan_body)[0] == "Shaped"
-
-
 def plan_is_escalated(plan_body: str) -> List[str]:
     """Return escalation reasons found across the whole plan body.
 
@@ -1386,178 +1230,7 @@ def plan_is_escalated(plan_body: str) -> List[str]:
     return escalation_reasons("", plan_body)
 
 
-# Plans already cite implementation details in ordinary Markdown. Keep this
-# detector deliberately mechanical: it reports shared tokens for a reader to
-# judge, rather than trying to decide whether two plans really collide.
-PLAN_FUNCTION_RE = re.compile(
-    r"(?<![\w.])(?P<name>(?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*)"
-    r"\s*\([^()\n]*\)"
-)
-PLAN_PATH_RE = re.compile(
-    r"(?<![\w/.-])(?P<path>"
-    r"(?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_.~-]+\."
-    r"(?:cpp|tsx|jsx|yaml|json|html|toml|xml|css|sql|ini|txt|js|md|py|sh|go|cc|ts|yml|h|c)"
-    r"(?![A-Za-z0-9])"
-    r")(?:\:\d+(?:-\d+)?)?(?:#L\d+(?:-L\d+)?)?"
-)
-PLAN_ISSUE_RE = re.compile(
-    r"(?<![\w./-])(?P<ref>"
-    r"(?:(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+)?#\d+\b)"
-)
-
-
-OVERLAP_CHECK_SECTION_RE = re.compile(
-    r"(?ms)^[ \t]*##[ \t]+Overlap check[ \t]*(?:\r?\n|\Z)"
-    r".*?(?=^[ \t]*##[ \t]+|\Z)"
-)
-
-
-PLAN_REF_RE = re.compile(
-    r"^(?:(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+)?#(?P<number>\d+)$"
-)
-
-
-def _without_overlap_check(plan_body: object) -> object:
-    """Remove the recorded overlap result before extracting plan signals."""
-    if not isinstance(plan_body, str):
-        return plan_body
-    return OVERLAP_CHECK_SECTION_RE.sub("", plan_body, count=1)
-
-
-def _normalized_plan_ref(ref: object) -> object:
-    """Compare bare and owner-prefixed issue refs by their issue number."""
-    if not isinstance(ref, str):
-        return ref
-    match = PLAN_REF_RE.fullmatch(ref.strip())
-    if match is None:
-        return ref
-    return "#{}".format(match.group("number"))
-
-
-def _plan_overlap_signals(plan_body: object) -> Tuple[Set[str], Set[str], Set[str]]:
-    """Extract the three checkable overlap signals from one plan body."""
-    if not isinstance(plan_body, str):
-        return set(), set(), set()
-    plan_body = _without_overlap_check(plan_body)
-
-    functions = {
-        match.group("name")
-        for match in PLAN_FUNCTION_RE.finditer(plan_body)
-    }
-    paths = set()
-    for match in PLAN_PATH_RE.finditer(plan_body):
-        path = match.group("path")
-        if path.startswith("./"):
-            path = path[2:]
-        paths.add(path)
-    issues = {
-        match.group("ref")
-        for match in PLAN_ISSUE_RE.finditer(plan_body)
-    }
-    return functions, paths, issues
-
-
-def plan_overlap_candidates(
-    plan_ref: str,
-    plan_body: str,
-    other_plans: Iterable[Tuple[str, str]],
-) -> List[str]:
-    """Return advisory lines for mechanical overlap with other plans.
-
-    ``other_plans`` supplies ``(ref, body)`` pairs for the open plans the
-    caller wants to compare. Shared function calls, file paths and issue
-    references are intentionally the whole signal: a human decides whether a
-    candidate is a real collision. The output is deterministic so the shaping
-    surface can print it without adding state or doing its own ranking.
-    """
-    current = _plan_overlap_signals(plan_body)
-    normalized_plan_ref = _normalized_plan_ref(plan_ref)
-    current = (
-        current[0],
-        current[1],
-        {
-            issue for issue in current[2]
-            if _normalized_plan_ref(issue) != normalized_plan_ref
-        },
-    )
-    candidates: List[str] = []
-    seen: Set[str] = set()
-    pairs = sorted(other_plans, key=lambda pair: pair[0])
-
-    for other_ref, other_body in pairs:
-        if _normalized_plan_ref(other_ref) == normalized_plan_ref:
-            continue
-        other = _plan_overlap_signals(other_body)
-        other = (
-            other[0],
-            other[1],
-            {
-                issue for issue in other[2]
-                if _normalized_plan_ref(issue) != _normalized_plan_ref(other_ref)
-            },
-        )
-
-        for function in sorted(current[0] & other[0]):
-            line = "{} and {} both name `{}()`".format(
-                plan_ref, other_ref, function
-            )
-            if line not in seen:
-                candidates.append(line)
-                seen.add(line)
-        for path in sorted(current[1] & other[1]):
-            line = "{} and {} both touch `{}`".format(
-                plan_ref, other_ref, path
-            )
-            if line not in seen:
-                candidates.append(line)
-                seen.add(line)
-        for issue in sorted(current[2] & other[2]):
-            line = "{} and {} both reference {}".format(
-                plan_ref, other_ref, issue
-            )
-            if line not in seen:
-                candidates.append(line)
-                seen.add(line)
-
-    return candidates
-
-
 SHAPING_PLAN_STATUSES = frozenset(("Shaped", "Ready", "Building"))
-
-
-OVERLAP_CHECK_SECTION_RE = re.compile(
-    r"(?ms)^[ \t]*##[ \t]+Overlap check[ \t]*(?:\r?\n|\Z)"
-    r".*?(?=^[ \t]*##[ \t]+|\Z)"
-)
-
-
-def _without_overlap_check(plan_body: object) -> object:
-    """Remove the recorded overlap result before extracting plan signals."""
-    if not isinstance(plan_body, str):
-        return plan_body
-    return OVERLAP_CHECK_SECTION_RE.sub("", plan_body, count=1)
-
-
-def shaping_plan_overlap_candidates(
-    items: Iterable[Item], item: Item, plan_body: str
-) -> List[str]:
-    """Find advisory overlaps with the other open project plans in flight.
-
-    Status belongs to parent Project items, so child tickets are not plans even
-    if a fixture or a future API response gives one a status. Closed projects
-    are not in flight and must not keep influencing a newly shaped plan.
-    """
-    other_plans = (
-        (other.ref, _without_overlap_check(other.body or ""))
-        for other in items
-        if other.ref != item.ref
-        and other.parent is None
-        and other.state == "OPEN"
-        and other.status in SHAPING_PLAN_STATUSES
-    )
-    return plan_overlap_candidates(
-        item.ref, _without_overlap_check(plan_body), other_plans
-    )
 
 
 # These are evidence words, not a closed list of human-step categories. A plan
@@ -1632,70 +1305,6 @@ def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],
         and effective_shape_owner(origin_voice, override_target) == "agents"
         and not needs_nate
         and not escalated
-    )
-
-
-def shaped_self_approvable(
-    body: object,
-    origin: object,
-    klass: Optional[str],
-    risk: object,
-    *,
-    override_target: Optional[str] = None,
-) -> bool:
-    """Whether a shaped plan may advance to ``Ready`` unattended.
-
-    This is the single decision shared by the shaping write and the Shaped
-    gate reader. Every input is checked here so a missing or malformed plan,
-    origin, Class, or risk result stays at Shaped for Nate rather than becoming
-    an accidental self-approval.
-    """
-    if not isinstance(body, str) or not body.strip():
-        return False
-
-    if isinstance(origin, dict):
-        origin_voice = origin.get("voice")
-    elif isinstance(origin, str):
-        # The voice string is useful to pure callers, while cmd_shaped and the
-        # queue reader pass the parsed origin marker. Both forms are validated
-        # against the same closed vocabulary.
-        origin_voice = origin
-    else:
-        origin_voice = None
-    if origin_voice not in ORIGIN_VOICES:
-        return False
-
-    if klass not in SELF_APPROVABLE_CLASSES:
-        return False
-
-    if isinstance(risk, bool):
-        escalated = risk
-    elif isinstance(risk, (list, tuple, set, frozenset)):
-        if not all(isinstance(reason, str) for reason in risk):
-            return False
-        escalated = bool(risk)
-    else:
-        return False
-
-    if override_target not in (None, "nate", "agents"):
-        return False
-
-    # Issue bodies retain the captured origin and agent provenance after the
-    # plan is written. Those machine blocks are not part of the plan's Needs
-    # section; remove only parseable owned blocks before asking the plan
-    # parser for its all-clear result.
-    plan_body = body
-    for marker in (PROVENANCE_MARKER, ORIGIN_MARKER,
-                   ORIGIN_OVERRIDE_MARKER):
-        for _payload, block in _marked_json_blocks(plan_body, marker):
-            plan_body = plan_body.replace(block, "")
-
-    return self_approval_eligible(
-        klass,
-        origin_voice,
-        override_target,
-        needs_nate=plan_needs_nate(plan_body),
-        escalated=escalated,
     )
 
 
@@ -3220,7 +2829,7 @@ def _self_approval_transition_times(item: Item, now: datetime) -> List[datetime]
         previous = event.get("previous_status")
         if previous is None:
             previous = event.get("previousStatus")
-        # `cmd_shaped` writes Ideas -> Ready on a clear first pass, while a
+        # The shape path writes Ideas -> Ready on a clear first pass, while a
         # plan held at Shaped produces Shaped -> Ready when it is later
         # approved by the path. Both need the marker check below; Nate's
         # explicit approval has no Self-approved line and is omitted.
@@ -5379,7 +4988,6 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         checks.append(check_class_assignments(items))
         checks.append(check_block_comments(items))
         checks.append(check_block_conditions(items))
-        checks.append(check_prose_dependencies(items))
         checks.append(check_suspected_human_steps(items))
     return checks
 
@@ -7496,133 +7104,13 @@ def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     return [_blocked_item_json(item) for item in blocked_items(items)]
 
 
-PROSE_DEPENDENCY_RE = re.compile(
-    r"\b(?:depends\s+on|blocked\s+on)\s+"
-    r"(?P<references>#[0-9]+(?:\s*(?:,|and)\s*#[0-9]+)*"
-    r"|(?P<unnumbered>(?![^.!?]*#[0-9]+)[^.!?]+))"
-    r"|\bafter\s+(?P<after>#[0-9]+)\s+lands\b"
-    r"|\b(?:until|requires)\s+(?P<single>#[0-9]+)\b",
-    re.IGNORECASE,
-)
-
-# A Nate-origin idea may move through the shaping command without an assigned
-# Class, but only when the plan leaves him a visible proposal to answer. This
-# is a presence check, not a parser for a value: no agent infers or writes a
-# Class from plan prose on Nate's behalf.
-PROPOSED_CLASS_RE = re.compile(
-    r"^[ \t]*Proposed[ \t]+class:[ \t]*\S.*$",
-    re.IGNORECASE | re.MULTILINE,
-)
+# Approval may adopt an unset Class only from an explicit, whole-line
+# proposal: no agent infers or writes a Class from plan prose on Nate's
+# behalf. The value match below is exact, so a fuzzy line stays with him.
 PROPOSED_CLASS_LINE_RE = re.compile(
     r"^[ \t]*Proposed[ \t]+class:[ \t]*(?P<value>.*?)\s*$",
     re.IGNORECASE,
 )
-
-
-def _prose_dependency_sentences(body: str) -> Iterable[Tuple[str, List[str]]]:
-    """Yield recognised dependency sentences and their named issue numbers."""
-    if not isinstance(body, str):
-        return
-
-    for line in body.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        for sentence in re.split(r"(?<=[.!?])\s+", line):
-            sentence = sentence.strip()
-            if not sentence:
-                continue
-            match = PROSE_DEPENDENCY_RE.search(sentence)
-            if match is None:
-                continue
-            references = (
-                match.group("references")
-                or match.group("after")
-                or match.group("single")
-            )
-            yield sentence, re.findall(r"#[0-9]+", references or "")
-
-
-def prose_dependencies(items: Iterable[Item]) -> List[Dict[str, object]]:
-    """Report open prose dependencies that have no matching native edge.
-
-    This is deliberately pure over the Project items already loaded by the
-    funnel. A named issue is reportable only when it is present and open in
-    that set; resolving an absent issue would require a new API call and would
-    turn a diagnostic into a second dependency source.
-    """
-    rows = list(items)
-    by_ref = {item.ref: item for item in rows}
-    found: List[Dict[str, object]] = []
-
-    for item in rows:
-        if item.state != "OPEN" or item.parent is None:
-            continue
-
-        native = {
-            _dependency_ref(item, value) or str(value).strip()
-            for value in item.open_blockers
-        }
-        for sentence, numbers in _prose_dependency_sentences(item.body or ""):
-            if not numbers:
-                # An unnumbered dependency cannot be matched to one edge. It
-                # is reportable only while the ticket has no native dependency
-                # at all; the repair run reads the sentence before choosing
-                # which blocker to write.
-                if native or item.dead_blockers:
-                    continue
-                found.append({
-                    "ref": item.ref,
-                    "names": [],
-                    "sentence": sentence,
-                })
-                continue
-            names: List[str] = []
-            for number in numbers:
-                ref = item.repo + number
-                blocker = by_ref.get(ref)
-                if (
-                    blocker is None
-                    or blocker.state != "OPEN"
-                    or ref in native
-                    or ref in names
-                ):
-                    continue
-                names.append(ref)
-            if names:
-                found.append({
-                    "ref": item.ref,
-                    "names": names,
-                    "sentence": sentence,
-                })
-
-    return sorted(found, key=lambda row: row["ref"])
-
-
-def prose_dependency_findings(items: Iterable[Item]) -> List[str]:
-    """Render the shared prose-dependency rows for ``funnel doctor``."""
-    findings = []
-    for row in prose_dependencies(items):
-        names = row["names"]
-        if names:
-            detail = "missing native blocked_by edge for {}: {}".format(
-                ", ".join(names), row["sentence"]
-            )
-        else:
-            detail = "unnumbered dependency: {}".format(row["sentence"])
-        findings.append("{}: {}".format(row["ref"], detail))
-    return findings
-
-
-def check_prose_dependencies(items: Iterable[Item]) -> Check:
-    """Build the report-only prose-dependency doctor check."""
-    findings = prose_dependency_findings(items)
-    return Check("prose dependencies", not findings, "\n".join(findings), "")
-
-
-def has_proposed_class(plan: str) -> bool:
-    """Whether a plan gives Nate a non-empty ``Proposed class:`` line."""
-    return isinstance(plan, str) and PROPOSED_CLASS_RE.search(plan) is not None
 
 
 def proposed_class_for_approval(
@@ -8880,9 +8368,6 @@ def cmd_brief(
             "cleared_blocks", lambda: cleared_blocks_json(items, now), []
         )
         blocked = section("blocked", lambda: blocked_json(items), [])
-        prose = section(
-            "prose_dependencies", lambda: prose_dependencies(items), []
-        )
         suspected = section(
             "suspected_human_steps",
             lambda: suspected_human_step_json(items),
@@ -8985,7 +8470,6 @@ def cmd_brief(
             "closed_itself": closed_itself,
             "cleared_blocks": cleared_blocks,
             "blocked": blocked,
-            "prose_dependencies": prose,
             "suspected_human_steps": suspected,
             "human_steps": human,
             "machine_local_steps": machine_local,
@@ -9643,182 +9127,6 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
     else:
         raise GitHubError(_capture_item_add_error(add))
-    return 0
-
-
-def cmd_shaped(items: List[Item], now: datetime, ref: str, plan_file: str,
-               run: Optional[str] = None, agent: Optional[str] = None,
-               klass: Optional[str] = None) -> int:
-    """Record that an idea has been grilled and a plan now exists.
-
-    Writes the plan into the issue body — `plan.md` puts it there through Ideas
-    and Shaped, and it only becomes a repo's own `plan.md` at the Ready gate —
-    then moves the item to `Ready` only when the unattended self-approval
-    predicate accepts the effective Class, origin, Needs section, and risk.
-    Otherwise it stays at `Shaped`, which asks Nate the next gate: is the plan
-    good?
-    """
-    item = find(items, ref)
-    if klass is not None and klass not in LADDER:
-        raise GitHubError(
-            "unknown shaping class {!r}; choose one of {}".format(
-                klass, ", ".join(LADDER)
-            )
-        )
-
-    original_body = item.body or ""
-    origin = parse_origin(original_body)
-    origin_voice = origin["voice"] if origin is not None else None
-    captured_origin = (
-        _marked_json_block(original_body, ORIGIN_MARKER)
-        if origin is not None else None
-    )
-    captured_override = _marked_json_block(
-        original_body, ORIGIN_OVERRIDE_MARKER
-    )
-    override = parse_origin_override(original_body)
-    override_target = override["target"] if override is not None else None
-    class_missing = item.klass not in LADDER
-    if class_missing and origin_voice == "agent" and klass is None:
-        raise GitHubError(
-            "agent-origin idea has no Class; pass --class with one of {}".format(
-                ", ".join(LADDER)
-            )
-        )
-
-    try:
-        if plan_file == "-":
-            # Muse runs with --disable-write and cannot write a plan file; a
-            # pipe writes nothing to disk (#366).
-            plan = sys.stdin.read()
-        else:
-            plan = pathlib.Path(plan_file).read_text()
-    except OSError as exc:
-        raise GitHubError("cannot read {}: {}".format(plan_file, exc))
-    if not plan.strip():
-        raise GitHubError("the plan is empty; nothing to record")
-    if class_missing and origin_voice != "agent" and not has_proposed_class(plan):
-        raise GitHubError(
-            "unclassed idea requires a non-empty Proposed class: line"
-        )
-    authority_signals = needs_nate_signals(plan)
-    body = append_provenance(plan, "agent", at=now, run=run, agent=agent)
-    if captured_origin is not None:
-        body = "{}\n\n{}".format(body, captured_origin)
-    if captured_override is not None:
-        body = "{}\n\n{}".format(body, captured_override)
-    overlaps = shaping_plan_overlap_candidates(items, item, plan)
-
-    out = _run_gh(
-        ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
-         "--body", body],
-        capture_output=True, text=True,
-    )
-    if out.returncode != 0:
-        raise GitHubError(out.stderr.strip())
-    # The session keeps this object after the issue-body write. Keep its body
-    # aligned with GitHub before a same-session `show` evaluates the plan.
-    item.body = body
-
-    if not item.item_id:
-        raise GitHubError("{} is not in the Project".format(item.ref))
-    plan_status, plan_reason = shaped_plan_status(plan)
-    by_ref = {candidate.ref: candidate for candidate in items}
-    effective_klass = effective_class(item, by_ref)
-    if class_missing and origin_voice == "agent" and klass is not None:
-        effective_klass = klass
-    escalation_reasons = plan_is_escalated(plan)
-    needs_nate = plan_status != "Ready"
-    eligible = shaped_self_approvable(
-        plan,
-        origin,
-        effective_klass,
-        escalation_reasons,
-        override_target=override_target,
-    )
-    status = "Ready" if eligible else "Shaped"
-    failed_conditions = []
-    if effective_klass not in SELF_APPROVABLE_CLASSES:
-        class_name = effective_klass or "unset"
-        failed_conditions.append(
-            "class {} is not self-approvable".format(class_name)
-        )
-    if effective_shape_owner(origin_voice, override_target) != "agents":
-        failed_conditions.append("origin is Nate's")
-    if needs_nate:
-        failed_conditions.append(plan_reason)
-    if escalation_reasons:
-        failed_conditions.append(
-            "escalated risk ({})".format(", ".join(escalation_reasons))
-        )
-    reason = plan_reason if status == "Ready" else "; ".join(failed_conditions)
-    if class_missing and origin_voice == "agent":
-        # This recovery write is the only place shaping may assign a Class.
-        # Keep it immediately before the Status mutation so the latter never
-        # makes an unclassed idea look like it advanced cleanly.
-        gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
-                   field=CLASS_FIELD_ID, option=_option_id(CLASS_FIELD_ID, klass))
-    status_error = _write_status(item, status, now)
-    if status_error is not None:
-        # The body is durable, but the stage is not confirmed. Do not clear
-        # the shaping label or post a self-approval marker, both of which
-        # would make the item look further along than its known Project state.
-        persisted_status = item.status or "unknown"
-        print("{} → {}\n{}".format(item.ref, persisted_status, item.url))
-        print(
-            "could not confirm requested Status {} for {}; retaining the "
-            "previously observed stage {}: {}".format(
-                status, item.ref, persisted_status, status_error
-            ),
-            file=sys.stderr,
-        )
-        return 1
-
-    label = _run_gh(
-        ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
-         "--remove-label", "needs-shaping"],
-        capture_output=True, text=True,
-    )
-    if label.returncode == 0:
-        item.labels = [
-            value for value in item.labels if value != "needs-shaping"
-        ]
-    if status == "Ready":
-        basis = "{}; no escalated risk".format(reason)
-        if authority_signals:
-            basis += "; authority signals: {}".format(
-                ", ".join(authority_signals)
-            )
-        comment = _run_gh(
-            ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
-             "--body", self_approval_comment(
-                 basis, at=now, run=run, agent=agent
-             )],
-            capture_output=True, text=True,
-        )
-        if comment.returncode != 0:
-            raise GitHubError(comment.stderr.strip())
-    print("{} → {}\n{}".format(item.ref, status, item.url))
-    if status == "Ready":
-        print("advanced to Ready: {}".format(reason))
-    else:
-        print("held at Shaped: {}".format(reason))
-    print("\n--- plan overlap candidates (advisory) ---")
-    if overlaps:
-        print("Read each candidate and record the conclusion in the plan:")
-        for overlap in overlaps:
-            print("  {}".format(overlap))
-    else:
-        print("  none found")
-    if authority_signals:
-        print("\n--- self-approval advisory ---")
-        print("Authority signals are recorded in the Self-approved basis:")
-        for signal in authority_signals:
-            print("  {}: {}".format(
-                signal, NEEDS_NATE_SIGNAL_REASONS[signal]
-            ))
-    if status != "Ready":
-        print("\nIt now waits on you: is the plan good? Answer by moving it to Ready.")
     return 0
 
 
@@ -12922,22 +12230,6 @@ def main(argv: Optional[Sequence[str]] = None, *,
         metavar="REF",
         help="earlier PR or ticket that caused this idea; repeat for more",
     )
-    shaped = sub.add_parser("shaped", help="record a grilled plan and move to Shaped")
-    shaped.add_argument("ref", help="issue number, owner/repo#number, or URL")
-    shaped.add_argument("--plan", required=True,
-                        help="file holding the plan, or - to read it from stdin")
-    shaped.add_argument(
-        "--run", default=None,
-        help="heartbeat run id; otherwise infer a unique open local start",
-    )
-    shaped.add_argument(
-        "--agent", default=None,
-        help="agent that wrote the body; otherwise read the heartbeat spool",
-    )
-    shaped.add_argument(
-        "--class", dest="klass", choices=LADDER, default=None,
-        help="fill an unset Class on an agent-origin idea",
-    )
     claim = sub.add_parser("claim", help="take the single-in-motion lock on a ticket")
     claim.add_argument("ref", help="issue number, owner/repo#number, or URL")
     release = sub.add_parser("release", help="give up the lock on a ticket")
@@ -13225,9 +12517,6 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_capture(items, now, args.title, args.note, args.repo,
                                args.run, args.agent, args.origin, args.klass,
                                args.caused_by)
-        if args.command == "shaped":
-            return cmd_shaped(items, now, args.ref, args.plan,
-                              args.run, args.agent, args.klass)
         if args.command == "begin":
             begin_kwargs = {
                 "repo_readiness": repo_readiness,

@@ -1397,20 +1397,6 @@ def test_shaped_plan_with_an_open_needs_you_question_waits_on_nate():
     assert gate_question(shaped) == "Is the plan good?"
 
 
-def test_agent_owned_improve_plan_declaring_nothing_open_does_not_wait_on_nate():
-    shaped = item(
-        1,
-        "Shaped",
-        "Improve",
-        body=(
-            "## Needs you\n\nNothing.\n\n"
-            + funnel.origin_block("agent", at=NOW, run="shape-run", agent="claude")
-        ),
-    )
-
-    assert gate_question(shaped) is None
-
-
 def test_shaped_plan_without_needs_you_fails_closed_at_the_plan_gate():
     shaped = item(
         1, "Shaped", "New",

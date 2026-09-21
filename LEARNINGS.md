@@ -244,7 +244,8 @@ is not re-derived.
   ~160 — 7–8% of tickets — for 22% of Codex's week, most of it idle: 42 of 54 Sol fires
   found nothing. A worked Sol session's token profile (72k uncached in, 2.2M cached,
   11k out) priced at Muse's contributor rate is ~0.45 points; at max effort on a hard
-  ticket call it 0.5–1.0. Muse has never coded a ticket, so that is an estimate.
+  ticket call it 0.5–1.0. (Its dollar basis was corrected on 2026-09-20 — see the
+  entry below — but the figure is in points, so it stands.) Muse has never coded a ticket, so that is an estimate.
 - **Per parent it adds ~15%**: 1.53 (shaping, breakdown, 3.2 reviews) + 0.2 escalated
   tickets × ~1.5 sessions × ~0.75 ≈ **1.75 points**.
 - **Where the limit moves.** On the $15 plan the pipeline stays Muse-bound at ~51
@@ -273,7 +274,20 @@ not fire until Mon 18:00, so 80 points went in **53.6 hours over 486 sessions**.
 Nate confirmed on 2026-09-10 that the Muse Code Personal Plan ($15/month) meters at
 the **contributor** rate ($0.10 in / $0.002 cached / $0.20 out per 1M), so the cycle is
 ~$2.47 and a Muse week is ~$3.09 of API compute against a $3.46/week plan price — the
-plan is priced at cost. The table below is at the standard-tier weighting it was first
+plan is priced at cost.
+
+> **Corrected 2026-09-20.** Both halves of that sentence were wrong, and the dollar
+> figures above are superseded. Nate checked the account: the sessions run on the
+> **standard** model ($1.25 in / $0.15 cached / $4.25 out per 1M), not the contributor
+> tier, and he has been on the **$50/month Power Usage plan since before 2026-09-13**.
+> Re-priced from the journals, which still hold that cycle, the same 53.5 hours come to
+> **$66.05** of standard-rate compute — a full window of **~$82.57** at the 80% panel
+> reading, not $3.09. The plan is not priced at cost: it returns roughly 18–24× its
+> price in standard-rate compute. The percentage figures below are unaffected, because
+> they are shares of the window rather than dollars; only the dollar statements change.
+> Measured against the $50 window a week later, the 2026-09-19 refusal came at
+> **$214.02** (786.6M tokens), which is 2.6× the $15 window and close to the 3.33×
+> projected below. The table below is at the standard-tier weighting it was first
 computed with; at contributor rates the per-run prices become review 0.28, breakdown
 0.23, shaping 0.40, **empty fire 0.12** (relatively dearer, because cache reads are
 near-free and the routine's uncached read dominates), and a parent costs **1.53

@@ -266,18 +266,35 @@ IDLE_RESET_TOLERANCE = 120.0
 FIVE_HOUR = 300 * 60
 SEVEN_DAY = 10080 * 60
 
-# Muse's pay-per-use contributor pricing, per million tokens. The local session
+# Muse's pay-per-use **standard** pricing, per million tokens. The local session
 # journal records total input, its cached subset, and output in each
 # `goal_usage_attribution` provider event, so the reader can price the calls
 # without depending on heartbeat session-id binding (#790).
-MUSE_INPUT_RATE = 0.10 / 1_000_000
-MUSE_CACHED_INPUT_RATE = 0.002 / 1_000_000
-MUSE_OUTPUT_RATE = 0.20 / 1_000_000
-MUSE_WEEKLY_CAP_DOLLARS = 20.0
+#
+# These were the contributor rates ($0.10 / $0.002 / $0.20) until 2026-09-20, on
+# the strength of a 2026-09-10 reading that the plan metered at that tier. Nate
+# checked the account and found the sessions run on the standard model, so the
+# contributor card was pricing work never billed at it. The correction is not a
+# flat multiple: contributor discounts a cache read to 2% of a fresh token and
+# standard only to 12%, so on this cache-heavy workload the old card read ~28x
+# low. _(confirmed by Nate 2026-09-20.)_
+MUSE_INPUT_RATE = 1.25 / 1_000_000
+MUSE_CACHED_INPUT_RATE = 0.15 / 1_000_000
+MUSE_OUTPUT_RATE = 4.25 / 1_000_000
 
-# The largest measured contributor-rate session was about eleven cents. Keep
-# that worst case below the flat weekly cap before admitting another session.
-MUSE_SESSION_RESERVE_DOLLARS = 0.11
+#: The weekly ceiling, calibrated from the wall the provider actually refused
+#: at. The window that ended 2026-09-19 18:14 PDT ran to a 429 at $214.02 of
+#: standard-rate compute (786.6M tokens, priced from the journals), so $200
+#: sits just under it and the gate stops the lanes shortly before Meta does.
+#: It replaces a $20 cap that belonged to the contributor card and would refuse
+#: every fire at these rates. **This is a pacing ceiling, not a bill** — the
+#: $50/month plan is flat, and nothing here is money owed.
+MUSE_WEEKLY_CAP_DOLLARS = 200.0
+
+# The largest single session measured in the trailing week was $4.34 at standard
+# rates (2026-09-20), so round the worst case to $4.50 and keep it below the
+# weekly cap before admitting another session.
+MUSE_SESSION_RESERVE_DOLLARS = 4.50
 MUSE_WEEKLY_RESERVE = round(
     100.0 * MUSE_SESSION_RESERVE_DOLLARS / MUSE_WEEKLY_CAP_DOLLARS, 2
 )

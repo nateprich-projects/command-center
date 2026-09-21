@@ -171,8 +171,24 @@ wrong.
   **Muse's scheduled budget is now locally metered.** The CLI still does not expose a
   quota endpoint, but each session journal carries goal_usage_attribution provider
   records. usage.py prices their input, cached-input, and output tokens at the
-  contributor rate and gates a rolling seven-day total against the $20 cap. A missing
-  or malformed record fails closed.
+  **standard** rate ($1.25 / $0.15 / $4.25 per 1M) and gates a rolling seven-day total
+  against a $200 cap. A missing or malformed record fails closed.
+
+  **Those dollars are a pacing index, not a bill.** The plan is a flat $50/month Muse
+  Code Power Usage subscription, so nothing the meter reports is money owed; the cap
+  exists to stop the lanes shortly before the provider does. It was the contributor
+  card ($0.10 / $0.002 / $0.20) against a $20 cap until 2026-09-20, when Nate checked
+  the account and found the sessions run on the standard model. The two cards are not
+  a flat multiple — contributor discounts a cache read to 2% of a fresh token, standard
+  to 12% — so on this cache-heavy workload the old card read about 28x low.
+  _(confirmed by Nate 2026-09-20.)_
+
+  **The provider meters two windows, and the refusal text names neither.** The account
+  panel shows a five-hour window whose reset floats with use and a weekly window that
+  resets Sunday 17:00 PDT; a 429 says only `Your usage window resets at <ISO>`. A stamp
+  on the Sunday lattice is the weekly wall, a floating stamp under five hours out is
+  the five-hour one. Only the weekly wall has been hit so far (2026-09-19). #1182
+  covers recording each hit so the windows can be calibrated from evidence.
 - **No Copilot automation.** Those are employer-provided tokens; personal use stays
   one-off and manual.
 - **Every routine starts, reads fresh usage, and exits immediately if over the pace

@@ -3,9 +3,9 @@
 
 Phase 1 of #794: the review runner shows the model a packet (see
 ``engine/review.py``) and nothing else. The model answers with one JSON
-object, ``{"verdict", "blocking", "unsure"}``, and this step validates
-that answer against the schema and performs every side effect. The model
-never runs ``funnel.py`` or ``gh`` itself.
+object, ``{"verdict", "blocking", "unsure", "requirements"}``, and this
+step validates that answer against the schema and performs every side
+effect. The model never runs ``funnel.py`` or ``gh`` itself.
 
 Effects, through the existing paths, never re-derived here:
 
@@ -13,6 +13,8 @@ Effects, through the existing paths, never re-derived here:
   review``, merge with ``funnel merge`` (which also closes the ticket).
 * rejected -> record the verdict with its blocking list. No merge.
 * ``unsure`` non-empty -> rejected, whatever the verdict said.
+* any ``requirements`` entry not ``met`` -> rejected, whatever the
+  verdict said, with the requirement quoted in the blocking list.
 * malformed, first attempt -> exit 3 with the parse error, recording
   nothing, so the runner can retry once with the error fed back.
 * malformed, final attempt -> record rejected with the raw output in
@@ -70,6 +72,12 @@ NORMALISED_VERDICTS = {
     "reject": "rejected",
 }
 
+#: The per-requirement statuses the conformance pass (#1187) records.
+#: ``met`` means the diff does exactly what the requirement asks — a
+#: requirement satisfied twice over is ``unmet``, with both sites cited
+#: in the evidence, because the diff does more than asked.
+REQUIREMENT_STATUSES = ("met", "unmet", "unsure")
+
 
 class AnswerError(ValueError):
     """The model's answer failed schema validation. Fail-closed."""
@@ -91,13 +99,61 @@ def _string_list(answer: dict, key: str) -> List[str]:
     return list(values)
 
 
+def _requirements_list(answer: dict) -> List[Dict[str, str]]:
+    """The validated per-requirement conformance pass, or raise.
+
+    Each entry quotes one requirement the tickets or the plan state,
+    says whether the diff meets it, and cites the diff lines as
+    evidence. Unknown keys on an entry are ignored, like unknown keys
+    on the answer itself.
+    """
+    if "requirements" not in answer:
+        raise AnswerError("missing required key 'requirements'")
+    values = answer["requirements"]
+    if not isinstance(values, list):
+        raise AnswerError(
+            "'requirements' must be a list, got {}".format(
+                type(values).__name__))
+    shaped: List[Dict[str, str]] = []
+    for index, entry in enumerate(values):
+        if not isinstance(entry, dict):
+            raise AnswerError(
+                "'requirements'[{}] must be an object, got {}".format(
+                    index, type(entry).__name__))
+        for key in ("requirement", "status", "evidence"):
+            if key not in entry:
+                raise AnswerError(
+                    "'requirements'[{}] is missing required key {!r}".format(
+                        index, key))
+        requirement = entry["requirement"]
+        status = entry["status"]
+        evidence = entry["evidence"]
+        if not isinstance(requirement, str) or not requirement.strip():
+            raise AnswerError(
+                "'requirements'[{}].requirement must be a non-empty "
+                "string".format(index))
+        if status not in REQUIREMENT_STATUSES:
+            raise AnswerError(
+                "'requirements'[{}].status must be one of {}; received "
+                "value {!r}".format(
+                    index, list(REQUIREMENT_STATUSES), status))
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise AnswerError(
+                "'requirements'[{}].evidence must be a non-empty "
+                "string".format(index))
+        shaped.append({"requirement": requirement, "status": status,
+                       "evidence": evidence})
+    return shaped
+
+
 def parse_answer(raw: str) -> Dict[str, object]:
     """Parse and schema-validate one model answer.
 
-    Returns the answer with its verdict, blocking, and unsure lists.
-    Unknown keys are ignored: they cannot smuggle an approval through,
-    because only the validated ``verdict`` decides. Raises
-    ``AnswerError`` describing the first violation found.
+    Returns the answer with its verdict, blocking, and unsure lists
+    and its per-requirement conformance pass. Unknown keys are
+    ignored: they cannot smuggle an approval through, because only the
+    validated ``verdict`` decides. Raises ``AnswerError`` describing
+    the first violation found.
     """
     if not (raw or "").strip():
         raise AnswerError("empty answer: expected a JSON object")
@@ -123,6 +179,7 @@ def parse_answer(raw: str) -> Dict[str, object]:
                 list(funnel.VERDICTS), original_verdict))
     blocking = _string_list(answer, "blocking")
     unsure = _string_list(answer, "unsure")
+    requirements = _requirements_list(answer)
     if verdict == "approved" and blocking:
         # An approval that names blockers contradicts itself, and the
         # merge gate only reads the verdict word: recording this as
@@ -130,7 +187,16 @@ def parse_answer(raw: str) -> Dict[str, object]:
         # the confusion as malformed so the runner retries once.
         raise AnswerError(
             "approved verdict must not carry blocking items")
-    parsed = {"verdict": verdict, "blocking": blocking, "unsure": unsure}
+    if verdict == "approved" and not requirements:
+        # An approval with no conformance pass is baseless: the model
+        # must have walked at least one requirement to approve. A
+        # rejection may carry an empty pass — the runner's own
+        # precheck rejections do — because the safe direction needs
+        # no evidence to stay safe.
+        raise AnswerError(
+            "approved verdict must record at least one requirement")
+    parsed = {"verdict": verdict, "blocking": blocking, "unsure": unsure,
+              "requirements": requirements}
     if normalised_from is not None:
         parsed["normalised_from"] = normalised_from
     return parsed
@@ -142,11 +208,15 @@ def decide(answer: Dict[str, object]) -> Tuple[str, List[str], Optional[str]]:
     ``unsure`` non-empty means rejected even when the verdict said
     approved; the unsure entries join the blocking list with their
     provenance marked, so the engineer sees every reason in one place.
-    Pure: no IO.
+    Any ``requirements`` entry not ``met`` does the same: the detailed
+    findings override a summary approval, so a diff the pass caught —
+    a requirement met twice over, a line missing — can never merge on
+    the strength of the verdict word alone. Pure: no IO.
     """
     verdict = str(answer["verdict"])
     blocking = list(answer["blocking"])  # type: ignore[arg-type]
     unsure = list(answer["unsure"])  # type: ignore[arg-type]
+    requirements = answer.get("requirements") or []
     notes = []
     normalised_from = answer.get("normalised_from")
     if isinstance(normalised_from, str):
@@ -159,6 +229,30 @@ def decide(answer: Dict[str, object]) -> Tuple[str, List[str], Optional[str]]:
             "the model said {!r}".format(verdict))
         verdict = "rejected"
         blocking = blocking + ["unsure: " + item for item in unsure]
+    unmet = [entry for entry in requirements  # type: ignore[union-attr]
+             if isinstance(entry, dict) and entry.get("status") == "unmet"]
+    req_unsure = [entry for entry in requirements  # type: ignore[union-attr]
+                  if isinstance(entry, dict)
+                  and entry.get("status") == "unsure"]
+    if unmet or req_unsure:
+        parts = []
+        if unmet:
+            parts.append("{} requirement(s) were unmet".format(len(unmet)))
+        if req_unsure:
+            parts.append("{} requirement(s) were unsure".format(
+                len(req_unsure)))
+        notes.append(
+            "recorded as rejected because {}; "
+            "the model said {!r}".format(" and ".join(parts), verdict))
+        verdict = "rejected"
+        blocking = blocking + [
+            "requirement unmet: {} -- {}".format(
+                entry.get("requirement"), entry.get("evidence"))
+            for entry in unmet]
+        blocking = blocking + [
+            "requirement unsure: {} -- {}".format(
+                entry.get("requirement"), entry.get("evidence"))
+            for entry in req_unsure]
     return verdict, blocking, "; ".join(notes) or None
 
 

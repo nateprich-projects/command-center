@@ -779,6 +779,7 @@ elif field == "rejected_answer":
         "verdict": "rejected",
         "blocking": packet.get("precheck", {}).get("reasons", []),
         "unsure": [],
+        "requirements": [],
     }))
 elif field == "ci_rerun_action":
     print((packet.get("ci_rerun") or {}).get("action") or "")
@@ -989,7 +990,8 @@ PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$PACKET_JSON}"
 printf '%s' "$PROMPT" >"$PROMPT_FILE"
 
 # The recorded verdict word, read back from review-apply's own report — never
-# re-derived here, because unsure non-empty flips an approval to a rejection.
+# re-derived here, because unsure non-empty and unmet requirements flip an
+# approval to a rejection.
 recorded_verdict() {
   grep -o 'recorded \(approved\|rejected\)' "$DIAG_FILE" | tail -n 1 | awk '{print $2}'
 }

@@ -10805,6 +10805,22 @@ def _record_begin_reserve(agent: str, run: Optional[str], why: object) -> None:
     print("funnel: skipped-api-reserve: {}".format(note), file=sys.stderr)
 
 
+def _queue_candidate(entries: Sequence[object],
+                     class_of: Callable[[object], Optional[str]]):
+    """The entry a queue puts forward for cross-stage ranking, or ``None``.
+
+    Each queue keeps its own order, oldest first, and cross-stage ranking
+    reads one entry from each. The first entry in a preempting class is the
+    one to put forward when there is one, because it is the entry the ranking
+    key favours; with none, the head stands for the queue as before. Order
+    within a class group is unchanged either way.
+    """
+    for entry in entries:
+        if class_of(entry) in PREEMPTING_CLASSES:
+            return entry
+    return entries[0] if entries else None
+
+
 def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               idle: bool, breakdown: bool = False,
               repo_readiness: Optional[
@@ -11044,14 +11060,28 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     queue = _call_with_optional_keyword(
         review_queue, "pr_facts", pr_facts, items, tier
     )
-    review = queue[0] if queue else None
-
     # The fixed job order remains the tiebreak within a class group, but a
-    # finite preempting class can cross stages. Build only the head of each
+    # finite preempting class can cross stages. Build one candidate for each
     # queue: the next run gets the next item if this run preempts it.
+    #
+    # The candidate is the first preempting entry, not the head (#1222). The
+    # review queue and `awaiting_breakdown` are oldest first, so offering the
+    # head let its class speak for everything behind it: on 2026-09-21 one old
+    # New-class PR ranked below every Broken breakdown and shape, and seven
+    # green Broken reviews waited behind it for five hours. `ideas()` already
+    # puts Broken first, so the shape queue needs no such pick.
     by_ref = {item.ref: item for item in items}
+
+    def review_class_of(entry):
+        entry_item = by_ref.get(entry.get("ref"))
+        if entry_item is None:
+            return None
+        return effective_class(entry_item, by_ref)
+
+    review = _queue_candidate(queue, review_class_of)
     pending = awaiting_breakdown(items) if breakdown else []
-    breakdown_item = pending[0] if pending else None
+    breakdown_item = _queue_candidate(
+        pending, lambda entry: getattr(entry, "klass", None))
     shape_item = shapeable_idea(items, tier, reading)
     candidates: List[Tuple[int, int, str, object]] = []
 

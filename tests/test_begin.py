@@ -1768,18 +1768,27 @@ def _reviewer_begin(
     breakdown_item=None,
     idea=None,
     breakdown=False,
+    reviews=None,
+    breakdown_items=None,
 ):
+    """``reviews`` and ``breakdown_items`` give a whole queue, oldest first;
+    ``review`` and ``breakdown_item`` remain the one-entry shorthand."""
+    if reviews is None:
+        reviews = [review] if review is not None else []
+    if breakdown_items is None:
+        breakdown_items = (
+            [breakdown_item] if breakdown_item is not None else [])
     _allow_begin(monkeypatch)
     monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     monkeypatch.setattr(
         funnel,
         "review_queue",
-        lambda rows, tier: [review] if review is not None else [],
+        lambda rows, tier: list(reviews),
     )
     monkeypatch.setattr(
         funnel,
         "awaiting_breakdown",
-        lambda rows: ([breakdown_item] if breakdown_item is not None else []),
+        lambda rows: list(breakdown_items),
     )
     monkeypatch.setattr(
         funnel,
@@ -1910,6 +1919,99 @@ def test_same_class_candidates_keep_bottom_up_order(monkeypatch, capsys):
 
     assert result["do"] == "review"
     assert result["work"] == _review_job(ticket)
+
+
+def _ready_plan(number, klass):
+    return funnel.Item(
+        repo="nateprich/example",
+        number=number,
+        title="Project {}".format(number),
+        url="https://github.com/nateprich/example/issues/{}".format(number),
+        state="OPEN",
+        status="Ready",
+        klass=klass,
+        children_total=0,
+    )
+
+
+def test_a_broken_review_is_not_hidden_behind_an_older_new_class_pr(
+    monkeypatch, capsys
+):
+    """#1222: the review queue is oldest first, and its head used to speak for
+    the whole queue. On 2026-09-21 one old New-class PR ranked below every
+    Broken shape, and seven Broken reviews waited behind it for five hours."""
+    new_project, new_ticket = _ticket(121, 120, klass="New")
+    broken_project, broken_ticket = _ticket(123, 122, klass="Broken")
+    idea = _idea(124, "Broken idea", "Risk: standard", klass="Broken")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [new_project, new_ticket, broken_project, broken_ticket],
+        reviews=[_review_job(new_ticket, pr=7), _review_job(broken_ticket, pr=9)],
+        idea=idea,
+    )
+
+    assert result["do"] == "review"
+    assert result["work"] == _review_job(broken_ticket, pr=9)
+
+
+def test_the_oldest_review_still_leads_when_nothing_waiting_preempts(
+    monkeypatch, capsys
+):
+    older_project, older_ticket = _ticket(126, 125, klass="New")
+    newer_project, newer_ticket = _ticket(128, 127, klass="Improve")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [older_project, older_ticket, newer_project, newer_ticket],
+        reviews=[_review_job(older_ticket, pr=7), _review_job(newer_ticket, pr=9)],
+    )
+
+    assert result["do"] == "review"
+    assert result["work"] == _review_job(older_ticket, pr=7)
+
+
+def test_a_lone_new_class_review_still_yields_to_a_broken_idea(
+    monkeypatch, capsys
+):
+    """The cross-stage key is unchanged: only which entry a queue puts
+    forward moved. With no preempting review waiting, Broken shaping wins."""
+    project, ticket = _ticket(130, 129, klass="New")
+    idea = _idea(131, "Broken idea", "Risk: standard", klass="Broken")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [project, ticket],
+        reviews=[_review_job(ticket)],
+        idea=idea,
+    )
+
+    assert result["do"] == "shape"
+    assert result["work"]["ref"] == idea.ref
+
+
+def test_a_broken_breakdown_is_not_hidden_behind_an_older_improve_plan(
+    monkeypatch, capsys
+):
+    """#1222, the breakdown half: `awaiting_breakdown` is oldest first too."""
+    improve_plan = _ready_plan(132, "Improve")
+    broken_plan = _ready_plan(133, "Broken")
+    idea = _idea(134, "Broken idea", "Risk: standard", klass="Broken")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [improve_plan, broken_plan],
+        breakdown_items=[improve_plan, broken_plan],
+        idea=idea,
+        breakdown=True,
+    )
+
+    assert result["do"] == "breakdown"
+    assert result["work"]["ref"] == broken_plan.ref
 
 
 def test_shape_is_not_offered_when_the_first_idea_is_the_other_tier(

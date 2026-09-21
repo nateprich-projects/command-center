@@ -8,6 +8,113 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Run-path prose moved out of routines and skills (#825)
+
+**2026-09-21 · word counts measured on this checkout**
+
+#825 moved every dated incident and rationale paragraph out of the five
+run-path files that exceeded 500 words, and replaced the /funnel rendering
+section with `funnel_render.py`, which the skill invokes. Word counts before
+→ after, by `len(text.split())`: `routines/claude.md` 2776 → 491,
+`routines/zcode.md` 2847 → 479, `skills/funnel/SKILL.md` 3374 → 492,
+`skills/breakdown/SKILL.md` 1077 → 488, `skills/shape/SKILL.md` 1205 →
+462. The history below is what came out, newest incident first, confidence
+labelled per entry. Live protocol stayed in the files; the suite pins the
+load-bearing phrases (`tests/test_routine_contents.py`,
+`tests/test_guardrails.py`, `tests/test_funnel_skill_documents_brief.py`,
+plus the new `tests/test_funnel_render_template.py`, which pins that the
+code template names every brief key).
+
+### From routines/claude.md: approval gate history and review rationale
+
+**2026-09-21 · moved by #825; incidents dated as quoted · documented**
+
+- 2026-09-16: on an explicit `funnel approve --yes` with unset Class, the
+  command adopts one exact whole-line `Proposed class:` value before the
+  Status write. Earlier rule (#477, no inference for Nate-origin ideas)
+  stands as history. Adoption never satisfies the Shaped gate (#59 brake).
+- Rejected verdicts hand the ticket back to the engineer with a specific
+  `--blocking` note (#39); unsure is never merged. Three rejected merges in
+  a week stops auto-merging until the review bar is fixed — a broken merged
+  PR is a failed bar, not a bug.
+- 2026-09-05: Nate authorised agents to type `approve`/`accept` on his
+  explicit instruction (voice sessions left decided gates unexecuted for a
+  whole session that way). An agent once ran one by accident and wrote the
+  no-agent rule; the accident was real, so agents still never decide, only
+  type — with a comment recording who decided, since the Project never
+  shows it (#31).
+- Failure mode is the half-applied sequence (approved-but-unmerged,
+  merged-but-ticket-open), fixed by reading GitHub, not local state.
+- One `begin` call opens the run because every extra tool call is another
+  model turn on Nate's own subscription pool, and almost every poll is
+  empty. Breakdown moved to the zcode routine for the same quota reason —
+  stale as history now: zcode retired 2026-09-09 (next entry), and the
+  breakdown runner owns the job.
+
+### From routines/zcode.md: retirement and the separate-pool rationale
+
+**2026-09-21 · moved by #825; incidents dated as quoted · documented**
+
+- 2026-09-09, Nate: kill the zcode lanes, use Muse going forward (cheaper,
+  better models). Preceding 24h heartbeat: zcode worked 18 of 93 runs,
+  refused on pace 63; per-job cost first measured ~1% of weekly quota, later
+  corrected (refused fires cost 11–17 credits each, jobs far less).
+- Schedule it ran on (#52): every 15 min at :08/:23/:38/:53 from
+  2026-09-07 02:11Z. Re-enable by pasting `begin`, scheduling in the app,
+  removing `"zcode"` from `heartbeat.RETIRED_AGENTS`.
+- Why it ran there at all: routine review/breakdown/standard shaping needs
+  no scarce judgement, so it ran on z.ai's separate quota (#86 tiering;
+  2026-09-09 revision also allowed Muse standard shaping). Read-only by
+  necessity: disk writes mean approval prompts a scheduled run cannot
+  answer, and `find` across home trips macOS privacy prompts.
+- 2026-09-06, two incidents: a run handed #42 closed #41 as superseded on
+  its own initiative (act only on the PR given); a run added `git worktree`
+  entries and `git pull --ff-only` inside Nate's own checkout, moving it
+  underneath him — nothing lost only because nothing was uncommitted.
+
+### From skills/funnel/SKILL.md: brief-rendering rationale
+
+**2026-09-21 · moved by #825; incidents dated as quoted · documented,
+inferred where noted**
+
+- The full per-section rendering wording now lives in `funnel_render.py`
+  (`RENDER_TEMPLATE`, printed with `--list`); the skill keeps the field
+  table, the order, and the gate-answering rules.
+- Never rank from prose: two vendors' agents implementing ordering from
+  text drift silently while both lists look plausible (confirmed by Nate
+  2026-09-05) — `inferred` as a general law, `measured` as the reason the
+  rule exists here.
+- #147 added `human_steps` to the brief while nothing taught the skill to
+  render it — correct data, invisible as long as anyone looked — right after
+  #141 removed the only other surface. New brief keys must land in the
+  template and the skill together; both sides have tests now.
+- Ideas excluded from counts: unbounded and guilt-free; counting it turns
+  it into pressure. Portfolio signal (`upkeep_share`, `disposal`) is
+  flagged, never tuned; null is unknown, not zero.
+- TickTick receives operational failure alerts only; funnel items there
+  would compete with real tasks and erode its trustworthiness —
+  `inferred`, held as policy.
+
+### From skills/breakdown and skills/shape: sizing and grilling rationale
+
+**2026-09-21 · moved by #825 · inferred unless noted**
+
+- Fifty unattended breakdowns with no shared memory drift exactly like two
+  agents ranking from prose; the sizing standard exists so the fiftieth
+  runs like the first.
+- Sizing guesses were never measurements when written: replace them with
+  the measured p90 once heartbeat start/finish usage gives real one-ticket
+  data. Open measurement, still to do.
+- #25 is the worked outcome-incomplete failure: tickets can cover a running
+  server and connector while missing the outcome (reaching the funnel from
+  general chat) when no ticket registers the connector. Kept short in the
+  skill; full case stays here.
+- Grilling feeds the funnel: ungrilled ideas never reach an engineer, so
+  the frontier rule (precedent never enters it) protects Nate's attention,
+  and the #31 anti-laundering split (agent judgement visibly its own)
+  keeps reversible decisions reversible. #84's Needs section stays the
+  worked all-clear example.
+
 ### Shadow-shape questions cluster in order, technical defaults, and real Nate choices
 
 **2026-09-17 · Command Center #1036 · measured**

@@ -420,3 +420,72 @@ def test_load_items_fetches_comments_only_for_open_blocked_items(monkeypatch):
     assert blocked.needs_decision is None
     assert blocked.unparseable_block_comments == []
     assert blocked.block_comments_error is None
+
+
+def _dated_block_queue(blocked_until):
+    """#1138's shape: one Ready parent, seven tickets, one date-blocked.
+
+    The recorded case is a ticket that carried `Not before 2026-10-03` in its
+    body and a canonical `**Blocked until 2026-10-04:**` comment; it took the
+    startable count from 7 to 6 and must keep doing so.
+    """
+    parent = funnel.Item(
+        repo="nateprich/beta", number=1137, title="Start-date parent", url="",
+        state="OPEN", status="Ready", klass="Broken", children_total=7,
+    )
+    tickets = [
+        funnel.Item(
+            repo="nateprich/beta", number=1130 + n,
+            title="ticket {}".format(1130 + n), url="", state="OPEN",
+            parent="nateprich/beta#1137",
+        )
+        for n in range(6)
+    ]
+    dated = funnel.Item(
+        repo="nateprich/beta", number=1138, title="Start-date ticket", url="",
+        state="OPEN", parent="nateprich/beta#1137",
+        body="Not before 2026-10-03.",
+        labels=["blocked"] if blocked_until is not None else [],
+        block_reason="Wait for the start date.",
+        blocked_until=blocked_until,
+    )
+    return [parent] + tickets + [dated], dated
+
+
+def test_an_unexpired_date_block_keeps_a_ticket_out_of_startable():
+    """The contract the start-date rule rides on (#1161, pinned by #1174).
+
+    A date-blocked ticket is withheld by the ordinary `blocked` exclusion, so
+    nothing in `startable` needs to read the date itself. That is exactly why
+    it is worth a regression test: the rule is load-bearing and invisible.
+    """
+    items, dated = _dated_block_queue(date.today() + timedelta(days=13))
+
+    startable = funnel.startable(items)
+
+    assert len(startable) == 6
+    assert dated.ref not in [i.ref for i in startable]
+
+
+def test_the_same_ticket_is_startable_once_its_block_is_cleared():
+    """7, not 6: clearing the label is what lets the date rule release work."""
+    items, dated = _dated_block_queue(None)
+
+    startable = funnel.startable(items)
+
+    assert len(startable) == 7
+    assert dated.ref in [i.ref for i in startable]
+
+
+def test_a_passed_date_still_waits_on_the_label_being_cleared():
+    """The begin path clears a satisfied condition; `startable` never guesses.
+
+    A passed date with the label still on stays out of the queue. Anything else
+    would let two readers disagree about whether a block is live.
+    """
+    items, dated = _dated_block_queue(date.today() - timedelta(days=1))
+
+    startable = funnel.startable(items)
+
+    assert len(startable) == 6
+    assert dated.ref not in [i.ref for i in startable]

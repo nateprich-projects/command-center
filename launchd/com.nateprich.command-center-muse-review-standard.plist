@@ -16,8 +16,8 @@
   engine is the one deciding.
 
   The escalated reviewer (`com.nateprich.command-center-muse-review.plist`)
-  still runs the old routine: it was never shadowed, so it has no evidence of
-  its own. The shadow plist now observes that tier instead (#806).
+  followed on 2026-09-21 by Nate's override of #806's shadow gate; its header
+  records why. The shadow plist is retired.
 
   The canonical copy lives here in the repo. launchd refuses a symlinked plist
   (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the

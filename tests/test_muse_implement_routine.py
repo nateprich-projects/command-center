@@ -65,4 +65,4 @@ def test_setup_header_keeps_the_runner_boundary_for_the_reader():
     assert "ticket/<n>" in normalized
     assert "finish-ticket" in normalized
     assert "makes `funnel.py` and `gh` unnecessary rather than impossible" in normalized
-    assert "Never add an implementation mode to `muse-review`" in normalized
+    assert "Never add an implementation mode to `muse-review-engine`" in normalized

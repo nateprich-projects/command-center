@@ -32,12 +32,10 @@ RESOLVED = "/Volumes/"
 
 CAPTURE_ROUTINES = (
     "claude.md",
-    "muse.md",
     "zcode.md",
 )
 AGENT_CAPTURE_ROUTINES = (
     "claude.md",
-    "muse.md",
 )
 CAPTURE_RULE = (
     "When this run observes a defect (broken behaviour, a failing command, or a "

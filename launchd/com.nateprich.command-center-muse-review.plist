@@ -15,8 +15,8 @@
   rejected. #1187 fixes the #237 miss and lands after this cutover, where an
   engine fix no longer costs a window restart. The shadow plist is retired.
 
-  Rollback while `scripts/muse-review` still exists (#807 deletes it): put
-  that script back in ProgramArguments and re-install as below.
+  The old runner is deleted (#807): there is no rollback to it. A revert
+  of the engine would need the script restored from git history first.
 
   The canonical copy lives here in the repo. launchd refuses a symlinked plist
   (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the

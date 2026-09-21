@@ -212,7 +212,7 @@ def test_the_merge_path_sources_never_name_brief():
                          inspect.getsource(func), re.IGNORECASE) is None
 
 
-@pytest.mark.parametrize("routine", ("muse", "zcode", "claude"))
+@pytest.mark.parametrize("routine", ("zcode", "claude"))
 def test_no_review_routine_runs_brief_before_merging(routine):
     body = " ".join(
         (ROOT / "routines" / (routine + ".md")).read_text(

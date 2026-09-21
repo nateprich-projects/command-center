@@ -8956,7 +8956,7 @@ def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -
         "",
         "**What this means:** not that there is a bug, but that the auto-merge bar",
         "failed. Three of these in a week and auto-merging stops until the review",
-        "prompt in `routines/claude-review.md` is fixed.",
+        "prompt in `routines/muse-review.md` is fixed.",
         "",
         "What is broken: {}".format(note) if note else None,
     ]))
@@ -8987,7 +8987,7 @@ def cmd_reject(items: List[Item], now: datetime, pr: str, note: Optional[str]) -
     print("\nrejected merges in the last {} days: {}".format(
         REJECTED_MERGE_WINDOW.days, count))
     if count >= REJECTED_MERGE_ALARM:
-        print("STOP AUTO-MERGING. Fix routines/claude-review.md before the next run.")
+        print("STOP AUTO-MERGING. Fix routines/muse-review.md before the next run.")
     return 0
 
 

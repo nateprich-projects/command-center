@@ -229,7 +229,7 @@ def test_a_session_reuses_brief_auxiliary_reads_until_a_mutation(monkeypatch):
 
 
 def test_the_muse_runner_starts_a_session_and_stops_it_with_the_run():
-    runner = (ROOT / "scripts" / "muse-review").read_text()
+    runner = (ROOT / "scripts" / "muse-review-engine").read_text()
     assert "session-server" in runner
     assert "FUNNEL_SESSION" in runner
     assert "session-stop" in runner
@@ -633,11 +633,3 @@ def test_session_dispatch_restores_stdin_when_main_raises(monkeypatch):
     )
     assert result == (2, "", "funnel: boom\n")
     assert sys.stdin is original_stdin
-
-
-def test_muse_documents_direct_piped_shaped_calls_without_a_session_workaround():
-    routine = (ROOT / "routines" / "muse.md").read_text()
-    assert "shaped --plan -" in routine
-    assert "env -u FUNNEL_SESSION" not in routine
-    assert "179-second server-side budget" in routine
-    assert "never repeat `begin`" in routine

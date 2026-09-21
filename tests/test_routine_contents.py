@@ -9,7 +9,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-ROUTINES = ("claude", "muse", "zcode")
+ROUTINES = ("claude", "zcode")
 
 
 @pytest.mark.parametrize("routine", ROUTINES)
@@ -25,32 +25,9 @@ def test_finish_uses_the_run_id_from_this_runs_begin(routine):
     assert "never wrap the id in `run=$(...)`" in normalized
 
 
-def test_muse_step_one_uses_the_runner_opening_result():
-    body = (ROOT / "routines" / "muse.md").read_text(encoding="utf-8")
-    normalized = " ".join(body.split()).lower()
-
-    assert "the runner has already run the opening command before handing you this prompt" in normalized
-    assert "its json result is inserted into the code block below" in normalized
-    assert "do not run `begin` again" in normalized
-    assert "if it says `\"do\": \"stop\"`, the runner has finished the heartbeat" in normalized
-
-
-def test_muse_review_finish_records_a_structured_verdict():
-    """The live plist path must leave comparison-readable review telemetry."""
-    body = (ROOT / "routines" / "muse.md").read_text(encoding="utf-8")
-    normalized = " ".join(body.split()).lower()
-
-    assert "if this run reviewed a pr" in normalized
-    assert "--review-result approved" in normalized
-    assert "--review-result rejected" in normalized
-    assert "must match the verdict written by `funnel review`" in normalized
-    assert "a non-review job" in normalized
-
-
 @pytest.mark.parametrize(
     ("routine", "tier_phrase"),
-    (("zcode", "standard-tier idea"), ("claude", "escalated idea"),
-     ("muse", "standard-tier idea")),
+    (("zcode", "standard-tier idea"), ("claude", "escalated idea")),
 )
 def test_shaping_is_the_third_ordered_job_with_a_safe_unattended_boundary(
     routine, tier_phrase
@@ -70,34 +47,6 @@ def test_shaping_is_the_third_ordered_job_with_a_safe_unattended_boundary(
             or "funnel.py shaped <ref> --plan -" in normalized)
 
 
-def test_breakdown_docs_record_and_resume_needs_decisions():
-    """An undecidable breakdown must become visible to Nate and resume from
-    his answer, rather than repeatedly consuming Muse runs on the same plan."""
-    # skills/breakdown holds only the sizing standard since #814; the
-    # routine keeps the protocol until #807 deletes it.
-    documents = (
-        ROOT / "routines" / "muse.md",
-    )
-    for path in documents:
-        normalized = " ".join(path.read_text(encoding="utf-8").split()).lower()
-        assert (
-            "python3 /users/nateprich/.claude/command-center-run/funnel.py "
-            "comment <ref> --voice agent --needs-decision"
-        ) in normalized
-        assert "read the issue's comments" in normalized
-        assert "an earlier `**needs a decision:**` header" in normalized
-        assert "the answer that followed it" in normalized
-        assert "act on that answer" in normalized
-        assert "create no tickets" in normalized
-        assert "--outcome done" in normalized or "finish `done`" in normalized
-        assert "answer the breakdown's question?" in normalized
-        assert "removes the `blocked` label" in normalized
-        assert (
-            "comment on the issue saying precisely what is undecided, and leave it"
-            not in normalized
-        )
-
-
 def test_needs_guidance_uses_the_parser_ready_all_clear_form():
     """The shaping routines must teach the stable all-clear category form."""
     example = " ".join(
@@ -110,9 +59,9 @@ def test_needs_guidance_uses_the_parser_ready_all_clear_form():
         "explicit answer under every category, including when nothing is outstanding"
     )
     # skills/shape holds only the decision-record rules since #814; the
-    # routines keep the protocol until #807 deletes them.
+    # routines keep the protocol until their own runner is deleted (#807
+    # removed routines/muse.md; routines/claude.md follows with its lane).
     documents = (
-        ROOT / "routines" / "muse.md",
         ROOT / "routines" / "claude.md",
     )
 
@@ -125,9 +74,8 @@ def test_needs_guidance_uses_the_parser_ready_all_clear_form():
         assert "stays at `shaped`, with the reason printed" in normalized
 
 
-@pytest.mark.parametrize("routine", ["claude", "muse"])
-def test_unattended_shaping_can_recover_an_unclassed_agent_idea(routine):
-    body = (ROOT / "routines" / (routine + ".md")).read_text(encoding="utf-8")
+def test_unattended_shaping_can_recover_an_unclassed_agent_idea():
+    body = (ROOT / "routines" / "claude.md").read_text(encoding="utf-8")
     normalized = " ".join(body.split()).lower()
 
     assert "capture origin is `agent`" in normalized
@@ -135,7 +83,7 @@ def test_unattended_shaping_can_recover_an_unclassed_agent_idea(routine):
     assert "proposed class:" in normalized
 
 
-@pytest.mark.parametrize("routine", ("muse", "claude", "zcode"))
+@pytest.mark.parametrize("routine", ("claude", "zcode"))
 def test_every_capture_line_names_its_repo(routine):
     """With two member repos, a capture without --repo refuses and the
     observation is lost (#668). The resolver defaults from the run's binding;

@@ -27,11 +27,10 @@ REVIEWER_NAMES = [
     "com.nateprich.command-center-muse-review.plist",           # escalated, hourly
     "com.nateprich.command-center-muse-review-standard.plist",  # standard, /5
 ]
-SHADOW_REVIEWER_NAME = "com.nateprich.command-center-muse-review-shadow.plist"
 IMPLEMENTER_NAME = "com.nateprich.command-center-muse-implement.plist"
 STANDARD_IMPLEMENTER_NAME = "com.nateprich.command-center-muse-implement-standard.plist"
 IMPLEMENTER_NAMES = [IMPLEMENTER_NAME, STANDARD_IMPLEMENTER_NAME]
-MUSE_SCHEDULE_NAMES = REVIEWER_NAMES + [SHADOW_REVIEWER_NAME] + IMPLEMENTER_NAMES
+MUSE_SCHEDULE_NAMES = REVIEWER_NAMES + IMPLEMENTER_NAMES
 KEEPER_NAME = "com.nateprich.command-center-run-keeper.plist"
 #: The Remote Control listener. Not a schedule; see the carve-out in `AGENTS.md`.
 REMOTE_CONTROL_NAME = "com.nateprich.command-center-remote-control.plist"
@@ -141,10 +140,11 @@ def test_the_plist_points_at_the_stable_path(name):
     assert args[0] == "/bin/bash"
     if name in IMPLEMENTER_NAMES:
         script = "muse-implement"
-    elif name == SHADOW_REVIEWER_NAME:
-        script = "muse-review-engine"
     else:
-        script = "muse-review"
+        # Both review tiers run the engine: standard since 2026-09-20 (#813),
+        # escalated since 2026-09-21 on Nate's override of #806's shadow gate.
+        # The shadow plist is retired with them.
+        script = "muse-review-engine"
     assert any(a.endswith("/scripts/{}".format(script)) for a in args), args
     # Checked against the arguments, not the file text: the header explains the
     # TCC blocker and has to name `/Volumes/External SSD` to do so. Asserting on
@@ -189,38 +189,12 @@ def test_the_escalated_reviewer_polls_every_fifteen_minutes_while_794_clears():
 def test_each_schedule_asks_for_its_own_tier_and_effort():
     """One runner serves both, so the arguments are the only thing that
     distinguishes them. Escalated gets max effort because that is the work where
-    judgement matters most; standard gets high, which is cheaper."""
-    import plistlib
+    judgement matters most.
 
-    def args(name):
-        with (ROOT / "launchd" / name).open("rb") as handle:
-            return plistlib.load(handle)["ProgramArguments"][2:]
-
-    assert args(NAMES[0]) == ["escalated", "max"]
-    assert args(NAMES[1]) == ["standard", "high"]
-    assert args(SHADOW_REVIEWER_NAME) == ["--shadow", "standard", "high"]
-    assert args(IMPLEMENTER_NAME) == ["escalated", "max"]
-    assert args(STANDARD_IMPLEMENTER_NAME) == ["standard", "max"]
-
-
-def test_the_shadow_reviewer_runs_beside_standard_on_the_same_cadence():
-    """The shadow engine observes every standard slot without replacing it."""
-    import plistlib
-
-    with (ROOT / "launchd" / SHADOW_REVIEWER_NAME).open("rb") as handle:
-        shadow = plistlib.load(handle)
-    with (ROOT / "launchd" / REVIEWER_NAMES[1]).open("rb") as handle:
-        standard = plistlib.load(handle)
-
-    assert shadow["StartCalendarInterval"] == standard["StartCalendarInterval"]
-    assert "StartInterval" not in shadow
-
-
-def test_the_shadow_reviewer_matches_the_live_standard_effort():
-    """#806 measures agreement between the two, so effort must not differ.
-
-    The engine defaults to `max`; a shadow plist that names no effort compared
-    `max` against the live reviewer's `high` (#976).
+    The standard reviewer ran the old routine at `high` until 2026-09-20, when
+    it cut over to the engine (#813, and the standard half of #806) and took
+    the engine's own default effort, `max` (#976). The escalated reviewer
+    followed on 2026-09-21 and kept `max`.
     """
     import plistlib
 
@@ -228,15 +202,10 @@ def test_the_shadow_reviewer_matches_the_live_standard_effort():
         with (ROOT / "launchd" / name).open("rb") as handle:
             return plistlib.load(handle)["ProgramArguments"][2:]
 
-    shadow = [a for a in args(SHADOW_REVIEWER_NAME) if a != "--shadow"]
-    assert shadow == args(REVIEWER_NAMES[1])
-
-
-def test_the_shadow_reviewer_header_documents_non_applying_side_by_side_run():
-    header = (ROOT / "launchd" / SHADOW_REVIEWER_NAME).read_text()
-
-    assert "runs beside the old routine" in header
-    assert "applies nothing" in header
+    assert args(NAMES[0]) == ["escalated", "max"]
+    assert args(NAMES[1]) == ["standard", "max"]
+    assert args(IMPLEMENTER_NAME) == ["escalated", "max"]
+    assert args(STANDARD_IMPLEMENTER_NAME) == ["standard", "max"]
 
 
 def test_the_implementer_polls_every_fifteen_minutes_while_794_clears():

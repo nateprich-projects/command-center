@@ -103,11 +103,49 @@ esac
     )
 
 
-def write_launchctl_stub(path: Path, log: Path, fail_bootstrap: bool = False) -> None:
-    body = 'echo "$@" >> "{}"\n'.format(log)
-    if fail_bootstrap:
-        body += 'if [ "$1" = "bootstrap" ]; then exit 5; fi\n'
-    body += "exit 0\n"
+def write_launchctl_stub(path: Path, log: Path, fail_bootstrap: bool = False,
+                         fail_bootstrap_times: int = 0) -> None:
+    """A launchctl that remembers which labels it has loaded.
+
+    ``print`` is a read, so it is not logged: the log holds only the calls
+    that change launchd. Every label starts loaded unless it is named in the
+    ``unloaded`` file beside the log; ``bootout`` adds a label to that file and
+    a successful ``bootstrap`` removes it, which is what makes ``print`` fail
+    between the two the way the real one does (#1196).
+    """
+    unloaded = log.parent / "launchctl.unloaded"
+    failures = log.parent / "launchctl.bootstrap-failures"
+    body = """unloaded="{unloaded}"
+failures="{failures}"
+case "$1" in
+  print)
+    label="${{2##*/}}"
+    if [ -f "$unloaded" ] && grep -qx "$label" "$unloaded"; then exit 113; fi
+    exit 0
+    ;;
+esac
+echo "$@" >> "{log}"
+case "$1" in
+  bootout)
+    echo "${{2##*/}}" >> "$unloaded"
+    ;;
+  bootstrap)
+    if [ "{always_fail}" = "yes" ]; then exit 5; fi
+    seen=0
+    [ -f "$failures" ] && seen=$(wc -l < "$failures" | tr -d ' ')
+    if [ "$seen" -lt "{fail_times}" ]; then echo x >> "$failures"; exit 5; fi
+    name="${{3##*/}}"
+    label="${{name%.plist}}"
+    if [ -f "$unloaded" ]; then
+      grep -vx "$label" "$unloaded" > "$unloaded.next" || true
+      mv "$unloaded.next" "$unloaded"
+    fi
+    ;;
+esac
+exit 0
+""".format(unloaded=unloaded, failures=failures, log=log,
+           always_fail="yes" if fail_bootstrap else "no",
+           fail_times=fail_bootstrap_times)
     write_executable(path, body)
 
 
@@ -272,6 +310,9 @@ def keeper_env(checkout: Path, home: Path, tools: Path, launchctl: Path) -> dict
             "COMMAND_CENTER_SENTINEL_UPTIME": str(tools / "uptime"),
             "COMMAND_CENTER_SENTINEL_FILE": "sentinel.log",
             "COMMAND_CENTER_KEEPER_LAUNCHCTL": str(launchctl),
+            # The real waits are seconds long; the stub answers at once.
+            "COMMAND_CENTER_KEEPER_RELOAD_WAIT_SECONDS": "0",
+            "COMMAND_CENTER_KEEPER_BOOTSTRAP_RETRY_SECONDS": "0",
             "HOME": str(home),
         }
     )
@@ -301,13 +342,21 @@ def one_readiness_record(bare: Path) -> dict:
     return parse_record(lines[0])
 
 
-def make_tools(tmp_path: Path, fail_bootstrap: bool = False):
+def make_tools(tmp_path: Path, fail_bootstrap: bool = False,
+               fail_bootstrap_times: int = 0):
     tools = tmp_path / "tools"
     tools.mkdir()
     write_tool_stubs(tools)
     launchctl_log = tmp_path / "launchctl.log"
-    write_launchctl_stub(tools / "launchctl", launchctl_log, fail_bootstrap)
+    write_launchctl_stub(tools / "launchctl", launchctl_log, fail_bootstrap,
+                         fail_bootstrap_times)
     return tools, launchctl_log
+
+
+def mark_unloaded(tmp_path: Path, label: str) -> None:
+    """Tell the launchctl stub that launchd does not have this label."""
+    with (tmp_path / "launchctl.unloaded").open("a") as handle:
+        handle.write(label + "\n")
 
 
 def test_keeper_installs_prompts_when_the_routine_changed(tmp_path):
@@ -479,6 +528,75 @@ def test_keeper_records_a_failed_reload_and_keeps_both_records(tmp_path):
         "reload_pending": PUBLISHER_LABEL,
     }
     assert len(show_heartbeat_file(bare, "sentinel.log").splitlines()) == 1
+
+
+def test_keeper_retries_a_bootstrap_that_fails_once(tmp_path):
+    """#1196: a bootstrap issued while the booted-out label is still leaving
+    launchd fails once and then succeeds. One failure is not a pending reload."""
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    install_launchd_copies(seed, home)
+
+    change_plist(seed, PUBLISHER_PLIST)
+    commit_and_push(seed, "plist change")
+
+    tools, launchctl_log = make_tools(tmp_path, fail_bootstrap_times=1)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    calls = launchctl_log.read_text()
+    assert calls.count("bootout") == 1
+    assert calls.count("bootstrap") == 2
+    assert one_readiness_record(bare)["reload_pending"] == "-"
+
+
+def test_keeper_loads_an_installed_label_launchd_does_not_have(tmp_path):
+    """#1196: a reload that failed on an earlier run left the standard review
+    lane unloaded for 38 minutes, because nothing carried `reload_pending`
+    forward. The owed reload is derived from launchd on every run instead."""
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    install_launchd_copies(seed, home)
+
+    tools, launchctl_log = make_tools(tmp_path)
+    mark_unloaded(tmp_path, PUBLISHER_LABEL)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    calls = launchctl_log.read_text()
+    assert "bootout" not in calls
+    assert calls.count("bootstrap") == 1 and PUBLISHER_PLIST in calls
+    assert "loaded {}, which launchd did not have".format(
+        PUBLISHER_LABEL) in result.stderr
+    assert one_readiness_record(bare)["reload_pending"] == "-"
+
+
+def test_keeper_reports_an_unloaded_label_it_cannot_bootstrap(tmp_path):
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    install_launchd_copies(seed, home)
+
+    tools, _ = make_tools(tmp_path, fail_bootstrap=True)
+    mark_unloaded(tmp_path, PUBLISHER_LABEL)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    assert one_readiness_record(bare)["reload_pending"] == PUBLISHER_LABEL
+
+
+def test_keeper_never_bootstraps_itself_or_a_plist_that_was_never_installed(tmp_path):
+    bare, checkout, seed = make_install_remote(tmp_path)
+    home = tmp_path / "home"
+    install_launchd_copies(seed, home, skip=(PUBLISHER_PLIST,))
+
+    tools, launchctl_log = make_tools(tmp_path)
+    mark_unloaded(tmp_path, KEEPER_LABEL)
+    mark_unloaded(tmp_path, PUBLISHER_LABEL)
+    result = run_keeper(checkout, home, tools, tools / "launchctl")
+    assert result.returncode == 0, result.stderr
+
+    assert not launchctl_log.exists()
+    assert one_readiness_record(bare)["reload_pending"] == "-"
 
 
 def test_keeper_copies_but_never_reloads_itself(tmp_path):

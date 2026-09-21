@@ -8,6 +8,10 @@
 # temporary worktree, so the maintained checkout stays on `main` for the next
 # run.
 #
+# Every run also loads any installed plist whose label launchd does not have
+# (#1196). To pause a lane on purpose, move its plist out of LaunchAgents: an
+# installed plist with no loaded label is read as a failed reload and healed.
+#
 # The Codex prompt derivation lives here, in keeper_prompts below: this script
 # is the only writer of the installed automations, and the only reader of them
 # outside the Codex app. Nothing in the pytest suite touches them.
@@ -24,6 +28,13 @@ SYSCTL="${COMMAND_CENTER_SENTINEL_SYSCTL:-/usr/sbin/sysctl}"
 UPTIME="${COMMAND_CENTER_SENTINEL_UPTIME:-/usr/bin/uptime}"
 READINESS_FILE="${COMMAND_CENTER_KEEPER_READINESS_FILE:-keeper-readiness.log}"
 LAUNCHCTL="${COMMAND_CENTER_KEEPER_LAUNCHCTL:-/bin/launchctl}"
+# A booted-out label takes a moment to leave launchd, longer when a run was in
+# flight, and a bootstrap issued before it has gone fails with an input/output
+# error (#1196).  Wait for it, bounded, and retry a bootstrap that still fails.
+RELOAD_WAIT_TRIES="${COMMAND_CENTER_KEEPER_RELOAD_WAIT_TRIES:-30}"
+RELOAD_WAIT_SECONDS="${COMMAND_CENTER_KEEPER_RELOAD_WAIT_SECONDS:-1}"
+BOOTSTRAP_TRIES="${COMMAND_CENTER_KEEPER_BOOTSTRAP_TRIES:-3}"
+BOOTSTRAP_RETRY_SECONDS="${COMMAND_CENTER_KEEPER_BOOTSTRAP_RETRY_SECONDS:-5}"
 
 KEEPER_LABEL="com.nateprich.command-center-run-keeper"
 ROUTINE_PATH="routines/codex-work.md"
@@ -305,6 +316,59 @@ PY
 # affects only the next run (amendment accepted 2026-09-13).  An install
 # failure warns on stderr and shows up in the readiness record below; it never
 # suppresses either record.
+label_loaded() {
+  "$LAUNCHCTL" print "gui/$(id -u)/$1" >/dev/null 2>&1
+}
+
+wait_until_unloaded() {
+  local label="$1" tries=0
+  while [ "$tries" -lt "$RELOAD_WAIT_TRIES" ] && label_loaded "$label"; do
+    tries=$((tries + 1))
+    sleep "$RELOAD_WAIT_SECONDS"
+  done
+}
+
+bootstrap_label() {
+  local dst="$1" tries=0
+  while [ "$tries" -lt "$BOOTSTRAP_TRIES" ]; do
+    if "$LAUNCHCTL" bootstrap "gui/$(id -u)" "$dst" >/dev/null 2>&1; then
+      return 0
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -lt "$BOOTSTRAP_TRIES" ] && sleep "$BOOTSTRAP_RETRY_SECONDS"
+  done
+  return 1
+}
+
+# Heal: an installed plist whose label launchd does not have is a reload that
+# failed on an earlier run.  `reload_pending` describes one run's attempt and
+# nothing carries it forward, so derive the owed reload from launchd instead of
+# remembering it: on 2026-09-21 a failed bootstrap left the standard review
+# lane unloaded for 38 minutes while every later readiness line read clean
+# (#1196).  To pause a lane on purpose, move its installed plist out of
+# LaunchAgents, as the retired shadow plist was; an installed plist with no
+# loaded label is treated as a failure, not an intention.
+heal_unloaded_labels() {
+  local src name dst label
+  [ -n "${HOME:-}" ] || return 0
+  for src in "$REPO"/launchd/*.plist; do
+    [ -f "$src" ] || continue
+    name="${src##*/}"
+    dst="$LAUNCH_AGENTS_DIR/$name"
+    [ -f "$dst" ] || continue
+    label="${name%.plist}"
+    [ "$label" = "$KEEPER_LABEL" ] && continue
+    case ",$reload_pending," in *",$label,"*) continue ;; esac
+    label_loaded "$label" && continue
+    if bootstrap_label "$dst"; then
+      echo "run-keeper: loaded $label, which launchd did not have" >&2
+    else
+      echo "run-keeper: $label is not loaded and could not be bootstrapped" >&2
+      reload_pending=$(csv_add "$reload_pending" "$label")
+    fi
+  done
+}
+
 install_plist() {
   local name="$1" label src dst
   name="${name##*/}"
@@ -329,9 +393,8 @@ install_plist() {
     return 0
   fi
   "$LAUNCHCTL" bootout "gui/$(id -u)/$label" >/dev/null 2>&1 || true
-  if "$LAUNCHCTL" bootstrap "gui/$(id -u)" "$dst" >/dev/null 2>&1; then
-    :
-  else
+  wait_until_unloaded "$label"
+  if ! bootstrap_label "$dst"; then
     echo "run-keeper: reload of $label failed" >&2
     reload_pending=$(csv_add "$reload_pending" "$label")
   fi
@@ -345,6 +408,7 @@ while IFS= read -r changed_path; do
     launchd/*.plist) install_plist "$changed_path" ;;
   esac
 done <<< "$pulled_changes"
+heal_unloaded_labels
 if [ -n "$routine_changed" ]; then
   keeper_prompts install || \
     echo "run-keeper: prompt install failed; see the readiness record" >&2

@@ -9585,6 +9585,18 @@ PR_GRAPHQL_PAGE_SIZE = 100
 PR_GRAPHQL_COMMENT_PAGE_SIZE = 100
 PR_GRAPHQL_REF_PAGE_SIZE = 100
 
+#: Pull requests asked for per repository per page of the batched PR read.
+#: Deliberately below the API maximum the sub-selections above use. One
+#: document asking 100 PRs per member repository, each with its comment tail,
+#: body, refs and check rollup, stopped being served as the board grew past a
+#: thousand items: HTTP 502/504 at about 37 seconds, six attempts out of six
+#: (#1217, measured 2026-09-21). At 50 the same call returns in 13.2s with
+#: identical coverage, because MERGED_PR_SCAN_LIMIT still decides how many rows
+#: arrive — this decides only how many are asked for at once. The ceiling moves
+#: with the board, so this is a measured number: if the read starts timing out
+#: again, measure and halve it rather than raising it back.
+PR_GRAPHQL_PR_PAGE_SIZE = 50
+
 
 def _batched_pr_query(
     repos: Sequence[str],
@@ -9800,10 +9812,10 @@ def _read_batched_pr_snapshots(
     while active:
         first = {
             repo: min(
-                PR_GRAPHQL_PAGE_SIZE,
+                PR_GRAPHQL_PR_PAGE_SIZE,
                 limit + 1 - len(rows_by_repo[repo])
-                if limit < PR_GRAPHQL_PAGE_SIZE
-                else PR_GRAPHQL_PAGE_SIZE,
+                if limit < PR_GRAPHQL_PR_PAGE_SIZE
+                else PR_GRAPHQL_PR_PAGE_SIZE,
             )
             for repo in active
         }

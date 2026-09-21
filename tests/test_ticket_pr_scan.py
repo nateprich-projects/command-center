@@ -244,7 +244,8 @@ def test_batch_replaces_per_pr_fanout_and_measures_saving_against_655(
     assert before_calls == 31
     assert after_calls == 1
     assert before_calls - after_calls == 30
-    assert "pullRequests(first: 100" in calls[0][0]
+    assert "pullRequests(first: {}".format(
+        funnel.PR_GRAPHQL_PR_PAGE_SIZE) in calls[0][0]
     assert "rateLimit { cost remaining resetAt }" in calls[0][0]
     assert 'refs(refPrefix: "refs/heads/", first: 100)' in calls[0][0]
 
@@ -326,3 +327,37 @@ def test_index_keeps_all_rows_for_history_consumers(monkeypatch):
     assert truncated is False
     assert index["nateprich/beta#10"]["number"] == 10
     assert [row["number"] for row in index.all_rows] == [10, 11]
+
+
+def test_a_page_never_asks_for_more_prs_than_the_measured_page_size(monkeypatch):
+    """#1217: the document has to stay inside GitHub's gateway timeout.
+
+    One page of 100 PRs per member repository, each with its comment tail,
+    body, refs and check rollup, stopped being served on 2026-09-21 — HTTP
+    502/504 at about 37 seconds, six attempts out of six. The scan limit still
+    decides how many rows arrive; this decides only how many are asked for at
+    once, so a limit above the page size must page rather than widen the
+    request.
+    """
+    assert funnel.PR_GRAPHQL_PR_PAGE_SIZE < funnel.PR_GRAPHQL_PAGE_SIZE
+    assert funnel.MERGED_PR_SCAN_LIMIT > funnel.PR_GRAPHQL_PR_PAGE_SIZE
+
+    calls = []
+    count = funnel.PR_GRAPHQL_PR_PAGE_SIZE + 5
+    rows = [pr_row(n, "ticket/{}".format(n)) for n in range(2000, 2000 + count)]
+    monkeypatch.setattr(
+        funnel, "gh_graphql", repo_graphql_reads(rows, [], calls)
+    )
+
+    found = funnel.ticket_pr_facts(
+        [ticket(n) for n in range(2000, 2000 + count)]
+    )
+
+    requested = [
+        int(query.split("pullRequests(first: ", 1)[1].split(",", 1)[0])
+        for query, _ in calls
+    ]
+    assert requested, "the batched read made no request"
+    assert max(requested) <= funnel.PR_GRAPHQL_PR_PAGE_SIZE
+    assert len(calls) > 1, "a board past one page must page, not widen"
+    assert len(found) == count, "paging must not lose rows"

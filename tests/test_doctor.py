@@ -858,7 +858,8 @@ def test_merged_pr_facts_intersects_one_bounded_repo_scan(monkeypatch):
 
     assert result == funnel.MergedPRFacts(frozenset([ticket.ref]), False)
     assert len(calls) == 1
-    assert "pullRequests(first: 100" in calls[0][0]
+    assert "pullRequests(first: {}".format(
+        funnel.PR_GRAPHQL_PR_PAGE_SIZE) in calls[0][0]
     assert "states: [MERGED]" in calls[0][0]
     assert "rateLimit { cost remaining resetAt }" in calls[0][0]
 

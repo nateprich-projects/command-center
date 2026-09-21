@@ -8,6 +8,10 @@
   It is its own job, beside the escalated one, so the two tiers never queue
   behind each other; launchd starts no second instance of either while it runs.
 
+  Effort is `high`; the escalated implementer runs `max`. Nate, 2026-09-21: the
+  two tiers are meant to differ in effort. This job was created at `max` on
+  2026-09-18, and the provider's weekly window was spent the next day (#1189).
+
   The canonical copy lives here in the repo. launchd refuses a symlinked plist
   (Bootstrap failed: 5: Input/output error, measured 2026-09-07), so the
   installed file is a copy and tests/test_launchd_drift.py compares them.
@@ -35,7 +39,7 @@
         <string>/bin/bash</string>
         <string>/Users/nateprich/.claude/command-center-run/scripts/muse-implement</string>
         <string>standard</string>
-        <string>max</string>
+        <string>high</string>
     </array>
 
     <!--

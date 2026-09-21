@@ -10,10 +10,11 @@
   20 of 20 breakdown/shape agreement with 1.3% malformed output over 76 shadow
   jobs, and 0% engine-wrong review disagreements with no wrong approval.
 
-  Effort is `max`, the engine's own default (#976). The shadow ran at `high`
-  only so its review agreement measured the engine rather than the effort
-  level; nothing measured argues for keeping the cheaper setting once the
-  engine is the one deciding.
+  Effort is `high`; the escalated tier runs `max`. Nate, 2026-09-21: the two
+  tiers are meant to differ in effort, and running both at `max` spent the
+  provider's weekly window a day early (#1189). `high` is also what the
+  evidence measured: all 177 standard-tier shadow reviews ran at `high`
+  (#976). The 2026-09-20 cutover set `max`, the engine's default, for one day.
 
   The escalated reviewer (`com.nateprich.command-center-muse-review.plist`)
   followed on 2026-09-21 by Nate's override of #806's shadow gate; its header
@@ -46,7 +47,7 @@
         <string>/bin/bash</string>
         <string>/Users/nateprich/.claude/command-center-run/scripts/muse-review-engine</string>
         <string>standard</string>
-        <string>max</string>
+        <string>high</string>
     </array>
 
     <!--

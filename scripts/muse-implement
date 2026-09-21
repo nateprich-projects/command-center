@@ -3,7 +3,7 @@
 #
 # Usage: muse-implement [tier] [reasoning-effort]
 #   tier   -- escalated (default) or standard; each tier has its own launchd job
-#   effort -- max (default and only accepted effort)
+#   effort -- max (default; the only effort escalated accepts) or high (standard)
 #
 # This is deliberately a separate runner from muse-review. The reviewer has
 # write access disabled; putting both flag sets behind a mode switch would let
@@ -93,8 +93,15 @@ if [[ "$TIER" != "escalated" && "$TIER" != "standard" ]]; then
   echo "muse-implement: tier must be escalated or standard, got '$TIER'" >&2
   exit 1
 fi
-if [[ "$EFFORT" != "max" ]]; then
-  echo "muse-implement: reasoning effort must be max, got '$EFFORT'" >&2
+# Escalated is `max` and nothing else: a typo must never quietly lower the
+# effort on the work where judgement matters most. Standard runs `high`
+# (Nate, 2026-09-21, #1189) and still accepts `max` so a rollback is one word.
+if [[ "$TIER" == "escalated" && "$EFFORT" != "max" ]]; then
+  echo "muse-implement: reasoning effort must be max on the escalated tier, got '$EFFORT'" >&2
+  exit 1
+fi
+if [[ "$EFFORT" != "max" && "$EFFORT" != "high" ]]; then
+  echo "muse-implement: reasoning effort must be max or high, got '$EFFORT'" >&2
   exit 1
 fi
 

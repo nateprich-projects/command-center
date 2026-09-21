@@ -191,10 +191,11 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
     distinguishes them. Escalated gets max effort because that is the work where
     judgement matters most.
 
-    The standard reviewer ran the old routine at `high` until 2026-09-20, when
-    it cut over to the engine (#813, and the standard half of #806) and took
-    the engine's own default effort, `max` (#976). The escalated reviewer
-    followed on 2026-09-21 and kept `max`.
+    Standard runs `high` and escalated runs `max` on both the review and the
+    implement lanes (Nate, 2026-09-21, #1189): the tiers differ in effort as
+    well as in queue. The standard reviewer briefly took the engine's default
+    `max` at its 2026-09-20 cutover, and the standard implementer was created
+    at `max` on 2026-09-18; both were the same effort as escalated until #1191.
     """
     import plistlib
 
@@ -203,9 +204,9 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
             return plistlib.load(handle)["ProgramArguments"][2:]
 
     assert args(NAMES[0]) == ["escalated", "max"]
-    assert args(NAMES[1]) == ["standard", "max"]
+    assert args(NAMES[1]) == ["standard", "high"]
     assert args(IMPLEMENTER_NAME) == ["escalated", "max"]
-    assert args(STANDARD_IMPLEMENTER_NAME) == ["standard", "max"]
+    assert args(STANDARD_IMPLEMENTER_NAME) == ["standard", "high"]
 
 
 def test_the_implementer_polls_every_fifteen_minutes_while_794_clears():

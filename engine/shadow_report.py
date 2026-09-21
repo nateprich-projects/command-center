@@ -2424,6 +2424,8 @@ def build_report(
         hard_fail=hard_fail,
         finish_times=comparison_finish_times,
         upper_bound_field=True,
+        elapsed_hours=(end - start) / 3600.0,
+        shadow_jobs=len(shadow),
     )
 
     return {

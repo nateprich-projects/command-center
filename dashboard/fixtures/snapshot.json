@@ -33,7 +33,7 @@
       }
     ],
     "human_steps": [
-      { "ref": "nateprich-projects/command-center#649", "reason": "an account or billing setting" }
+      { "ref": "nateprich-projects/command-center#649", "reason": "human" }
     ],
     "maintenance_load": { "upkeep_share": 0.25 },
     "disposal": { "finished_vs_abandoned": 3, "done": 3, "parked": 1, "net_open_growth": 0 },

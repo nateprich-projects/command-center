@@ -57,11 +57,11 @@ CI_PENDING = funnel.CI_PENDING_STATES
 FROZEN_PATHS = ("routines/", "skills/")
 
 #: Parser constants scheduled for deletion by the #794 project: the union of
-#: the Phase 2 prose list and #814's operative deletion list, minus the two
-#: #814 explicitly keeps (RISK_LINE stays as a code-read of a code-written
-#: line; HUMAN_STEP_LINE stays as the dual-read fallback until Phase 6). A
-#: diff that adds or removes a line naming one of these fails the freeze row
-#: unless the ticket's parent is #794 or #1044.
+#: the Phase 2 prose list and #814's operative deletion list, minus RISK_LINE,
+#: which stays as a code-read of a code-written line. The Human step marker
+#: (#826) is already deleted with its parser. A diff that adds or removes a
+#: line naming one of these fails the freeze row unless the ticket's parent
+#: is #794 or #1044.
 FROZEN_PARSERS = (
     "SELF_APPROVED_LINE",
     "NEEDS_NATE_CLAUSE_END",

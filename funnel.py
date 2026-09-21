@@ -496,7 +496,9 @@ CLEARED_BLOCK_WINDOW = timedelta(days=7)
 # 120 s total remains the transport envelope.
 BRIEF_TOTAL_BUDGET_SECONDS = 120.0
 BRIEF_SECTION_BUDGETS = {
-    "ticket_pr_facts": 20.0,
+    # Past the 22.9 s observed max over 738 refs plus headroom for GitHub
+    # variance (#1168, #1210).
+    "ticket_pr_facts": 35.0,
     "items": 0.25,
     "counts_by_gate": 0.25,
     "in_motion": 0.25,
@@ -504,7 +506,6 @@ BRIEF_SECTION_BUDGETS = {
     "closed_itself": 45.0,
     "cleared_blocks": 7.0,
     "blocked": 0.25,
-    "suspected_human_steps": 0.25,
     "human_steps": 0.25,
     "machine_local_steps": 0.25,
     "blocked_human_steps": 0.25,
@@ -568,6 +569,11 @@ class Item:
     status: Optional[str] = None
     klass: Optional[str] = None
     pinned: bool = False
+    # The ticket's Needs single-select: "none", "human", or
+    # "claude-code-environment", or None when unset. Tickets carry this one
+    # field of their own (Nate 2026-09-13, #794); #826 made it the only
+    # capability signal, replacing the Human step body marker.
+    needs: Optional[str] = None
     status_since: Optional[datetime] = None
     # ProjectV2 status history retained from the load query. The brief uses it
     # to find likely unattended shaping transitions before reading comments.
@@ -588,9 +594,9 @@ class Item:
     parent: Optional[str] = None  # "owner/repo#123"
     children_total: int = 0
     children_done: int = 0
-    # Derived at load time from child ticket bodies. This is deliberately not
-    # a second GitHub record: the Human step marker remains the only source of
-    # truth, including after its ticket closes.
+    # Derived at load time from child ticket Needs fields. This is
+    # deliberately not a second GitHub record: the Needs field remains the
+    # only source of truth, including after its ticket closes.
     carried_human_step: bool = False
     first_child_created_at: Optional[datetime] = None
     last_child_closed_at: Optional[datetime] = None
@@ -1014,80 +1020,24 @@ def agent_has_role(agent: str, role: str, tier: Optional[str]) -> bool:
 RISK_LINE = re.compile(r"^\s*Risk:\s*(standard|escalated)\b(.*)$",
                        re.IGNORECASE | re.MULTILINE)
 
-#: A ticket declares a step that is not workable in every agent environment in
-#: its body, written at breakdown. An unmarked ticket is workable by any agent;
-#: this reason is the middle outcome, workable only where Claude Code's local
-#: environment is present. It is deliberately an allowlist: a lack of access
-#: to the Claude Code environment is not the same as an engineer finding work
-#: difficult.
-MACHINE_LOCAL_REASON = "a Claude Code environment"
-MACHINE_LOCAL_REASONS = (MACHINE_LOCAL_REASON,)
-
-#: These reasons still mean that no agent can perform the step. Keep them
-#: separate from MACHINE_LOCAL_REASONS so the next capability-aware consumer
-#: can distinguish Claude-Code-only work from work Nate must perform.
-HUMAN_STEP_PREFIX = "Human step: "
-HUMAN_STEP_REASONS = (
-    "an app UI with no API",
-    "entering a credential",
-    "an account or billing setting",
-    "physical access to a machine",
-)
-HUMAN_STEP_MARKER_REASONS = MACHINE_LOCAL_REASONS + HUMAN_STEP_REASONS
-HUMAN_STEP_LINE = re.compile(
-    r"^\s*" + re.escape(HUMAN_STEP_PREFIX)
-    + r"(?P<reason>"
-    + "|".join(re.escape(reason) for reason in HUMAN_STEP_MARKER_REASONS)
-    + r")\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-
-def parse_human_step(body: str) -> Optional[str]:
-    """Return an allowlisted capability reason from a ticket body.
-
-    Like ``RISK_LINE``, the marker must begin a body line. Matching only the
-    stated access reasons keeps a ticket from becoming restricted merely
-    because an agent found it difficult. ``None`` means any agent may work the
-    ticket; ``MACHINE_LOCAL_REASON`` means only Claude Code may work it; and a
-    reason in ``HUMAN_STEP_REASONS`` means no agent may work it.
-    """
-    if not isinstance(body, str):
-        return None
-    match = HUMAN_STEP_LINE.search(body)
-    return match.group("reason") if match else None
-
-
-def matching_human_step_reason(text: object) -> Optional[str]:
-    """Return an allowlisted human-step reason found in block-comment text.
-
-    A malformed block header may put the reason on the same line as the
-    header, so ``parse_human_step`` cannot read it directly. This narrower
-    scanner is used only on a parsed block reason or on the first line already
-    recorded for a malformed block comment. It returns the canonical spelling
-    from ``HUMAN_STEP_REASONS`` rather than trusting the comment's casing.
-    """
-    if not isinstance(text, str):
-        return None
-    for reason in HUMAN_STEP_REASONS:
-        pattern = r"(?<!\w){}(?!\w)".format(re.escape(reason))
-        if re.search(pattern, text, re.IGNORECASE):
-            return reason
-    return None
+# A ticket's capability is its Needs Project field (#826): "none" means any
+# agent may work it, "claude-code-environment" means only Claude Code may,
+# and "human" means no agent may. The Human step body marker this replaced
+# is deleted with its parser; readers check item.needs and nothing else.
 
 
 def mark_projects_that_carried_human_steps(items: Sequence[Item]) -> None:
-    """Derive project acceptance history from child ticket markers.
+    """Derive project acceptance history from child ticket Needs fields.
 
     Closed child tickets remain in the Project item feed, so deriving this
     after all pages load preserves "ever carried" without persisting a second
-    field that could drift from the marker.
+    record that could drift from the field.
     """
     parent_refs = {
         item.parent
         for item in items
         if item.parent is not None
-        and parse_human_step(item.body or "") is not None
+        and item.needs in ("human", "claude-code-environment")
     }
     for item in items:
         item.carried_human_step = item.ref in parent_refs
@@ -1198,16 +1148,6 @@ NEEDS_NATE_PATTERNS = {
         r"\b(?:by|who|agent|agents|Nate)\b"
     ),
 }
-
-NEEDS_NATE_SIGNAL_REASONS = {
-    "policy authority": (
-        "cites plan.md or AGENTS.md on a gate, membership, or who may write"
-    ),
-    "unattended authority": "changes what an agent may do unattended",
-    "gate authority": "changes a gate's question, answer, or owner",
-    "field authority": "changes who may set a field that other rules act on",
-}
-
 
 def needs_nate_signals(plan_body: str) -> List[str]:
     """Return authority signals that contradict an all-clear Needs section.
@@ -1322,22 +1262,20 @@ def _startable_without_repo_readiness(
     agent: str = "codex",
 ) -> bool:
     """Apply the queue exclusions that do not require a repository read."""
-    capability_reason = parse_human_step(item.body or "")
-    machine_local = (
-        capability_reason is not None
-        and capability_reason.casefold() == MACHINE_LOCAL_REASON.casefold()
-    )
+    needs = item.needs
+    machine_local = needs == "claude-code-environment"
+    human = needs == "human"
     if (
         item.state != "OPEN"
         or item.is_blocked
         or item.open_blockers
         or item.children_total
-        # A machine-local marker is the middle capability outcome: Claude
-        # Code may work it, while every other requester must leave it in
-        # the queue. All other parsed markers remain human steps and are
-        # excluded from every agent, as #141 established.
-        or (capability_reason is not None
-            and (not machine_local or agent != "claude"))
+        # The Needs field is the only capability signal (#826). A
+        # claude-code-environment ticket is the middle outcome: Claude Code
+        # may work it, while every other requester must leave it in the
+        # queue. A human ticket is excluded from every agent, as #141
+        # established for the marker this field replaced.
+        or (human or (machine_local and agent != "claude"))
     ):
         return False
     if item.ref in awaiting_review:
@@ -5205,24 +5143,6 @@ def check_block_comments(items: Iterable[Item]) -> Check:
     return Check("block comments", not findings, "\n".join(findings), "")
 
 
-def suspected_human_step_findings(items: Iterable[Item]) -> List[str]:
-    """Return blocked tickets whose human requirement is not machine-readable."""
-    return [
-        "{}: suspected human step ({})".format(
-            item.ref, suspected_human_step_reason(item)
-        )
-        for item in suspected_human_step_items(items)
-    ]
-
-
-def check_suspected_human_steps(items: Iterable[Item]) -> Check:
-    """Build the read-only suspected-human-step doctor check."""
-    findings = suspected_human_step_findings(items)
-    return Check(
-        "suspected human steps", not findings, "\n".join(findings), ""
-    )
-
-
 def check_block_conditions(
     items: Iterable[Item], now: Optional[datetime] = None
 ) -> Check:
@@ -5329,7 +5249,6 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         checks.append(check_class_assignments(items))
         checks.append(check_block_comments(items))
         checks.append(check_block_conditions(items))
-        checks.append(check_suspected_human_steps(items))
     return checks
 
 
@@ -5543,6 +5462,9 @@ query($login: String!, $number: Int!, $cursor: String) {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           pinned: fieldValueByName(name: "Pinned") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          needs: fieldValueByName(name: "Needs") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           content {
@@ -6286,6 +6208,7 @@ def _from_node(node: dict) -> Optional[Item]:
         status=status,
         klass=(node.get("class") or {}).get("name"),
         pinned=(node.get("pinned") or {}).get("name") == "Pinned",
+        needs=(node.get("needs") or {}).get("name"),
         labels=[n["name"] for n in content["labels"]["nodes"]],
         assignees=[n["login"] for n in content["assignees"]["nodes"]],
         parent=(
@@ -6516,7 +6439,7 @@ def _dashboard_stage_age(item: Item, now: datetime) -> str:
 
 #: Who owes the next move on a ticket, for the dashboard's owner flag. These
 #: are display names for the reader, derived from facts the funnel already
-#: holds: the capability marker, the PR and its verdict, and the risk tier.
+#: holds: the Needs field, the PR and its verdict, and the risk tier.
 OWNER_NATE = "Nate"
 OWNER_CLAUDE = "Claude"
 OWNER_MUSE = "Muse"
@@ -6617,7 +6540,7 @@ def _dashboard_ticket(
         else:
             block_reason = "project blocked: " + parent_block
     body = item.body or ""
-    reason = parse_human_step(body)
+    needs = item.needs
     tier = "escalated" if escalation_reasons(item.title, body) else "standard"
 
     pr_state = str((pr_fact or {}).get("state") or "").upper()
@@ -6648,9 +6571,9 @@ def _dashboard_ticket(
         owner: Optional[str] = None
     elif blocked:
         owner = None
-    elif reason == MACHINE_LOCAL_REASON:
+    elif needs == "claude-code-environment":
         owner = OWNER_CLAUDE
-    elif reason is not None:
+    elif needs == "human":
         owner = OWNER_NATE
     elif pr == "changes requested":
         owner = _dashboard_rework_owner(
@@ -6685,7 +6608,7 @@ def _dashboard_ticket(
         "tier": tier,
         "owner": owner,
         "blocked": blocked,
-        "human_step": reason,
+        "human_step": needs if needs in ("human", "claude-code-environment") else None,
     }
 
 
@@ -7533,87 +7456,13 @@ def unclassed_captures_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     ]
 
 
-def suspected_human_step_reason(item: Item) -> Optional[str]:
-    """Return a human-step reason hidden inside an unreadable block.
-
-    This is deliberately narrower than ``human_step_items``. It only reports
-    open child issues that are already blocked and whose block has no
-    machine-readable references. A named block stays an ordinary machine
-    block, even when its prose happens to mention a human-step reason.
-    """
-    if (
-        item.state != "OPEN"
-        or item.parent is None
-        or not item.is_blocked
-        or item.block_references
-    ):
-        return None
-
-    reason = matching_human_step_reason(item.block_reason)
-    if reason is not None:
-        return reason
-
-    # ``_load_block_comment`` keeps the first line of malformed block comments
-    # so the existing doctor check can report it without another fetch. Use the
-    # newest recorded line first, and fail closed when it contains no exact
-    # allowlisted reason.
-    for first_line in reversed(item.unparseable_block_comments):
-        reason = matching_human_step_reason(first_line)
-        if reason is not None:
-            return reason
-    return None
-
-
-def suspected_human_step_items(items: Iterable[Item]) -> List[Item]:
-    """Return blocked child issues that may hide an unrecognised human step."""
-    return sorted(
-        (
-            item for item in items
-            if suspected_human_step_reason(item) is not None
-        ),
-        key=lambda item: (item.repo, item.number),
-    )
-
-
-def _suspected_human_step_item_json(item: Item) -> Dict[str, object]:
-    return {
-        "ref": item.ref,
-        "title": item.title,
-        "url": item.url,
-        "reason": suspected_human_step_reason(item),
-    }
-
-
-def suspected_human_step_json(
-    items: Iterable[Item],
-) -> List[Dict[str, object]]:
-    """Render suspected human steps without changing any GitHub state."""
-    return [
-        _suspected_human_step_item_json(item)
-        for item in suspected_human_step_items(items)
-    ]
-
-
-def _item_human_step_reason(item: Item) -> Optional[str]:
-    """Return the parsed marker, tolerating fixture Items without a body."""
-    return parse_human_step(item.body or "")
-
-
-def _reason_matches(reason: Optional[str], candidates: Iterable[str]) -> bool:
-    """Match a parsed marker against an allowlist without trusting casing."""
-    if not isinstance(reason, str):
-        return False
-    normalized = reason.casefold()
-    return any(normalized == candidate.casefold() for candidate in candidates)
-
-
 def blocked_step_reason(
     item: Item, by_ref: Mapping[str, Item]
 ) -> Optional[str]:
-    """Return why a marked child ticket is not currently actionable.
+    """Return why a Needs child ticket is not currently actionable.
 
     This is deliberately a smaller readiness check than ``startable``. A
-    marked step is withheld from its work-owner section when it carries the
+    Needs step is withheld from its work-owner section when it carries the
     ``blocked`` label, has an open native dependency, or belongs to a blocked
     parent. The parent lookup uses the Project rows already loaded for the
     brief; it never fetches issue state of its own.
@@ -7630,7 +7479,7 @@ def blocked_step_reason(
 
 
 def _blocked_step_refs(item: Item, by_ref: Mapping[str, Item]) -> List[str]:
-    """Return stable blocker references for one withheld marked step."""
+    """Return stable blocker references for one withheld Needs step."""
     refs: List[str] = []
     if item.is_blocked:
         refs.extend(item.block_references)
@@ -7663,8 +7512,8 @@ def human_step_items(items: Iterable[Item]) -> List[Item]:
 
     Human-step tickets are work, not decisions. They are therefore rendered in
     their own brief section instead of being added to the decision queue.
-    Closed tickets remain in ``items`` so the completed-project backstop can
-    tell a project that carried a human step from one that never had one.
+    The Needs field is the only signal (#826); a ticket reads here exactly
+    when its field is "human".
     """
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
@@ -7673,9 +7522,7 @@ def human_step_items(items: Iterable[Item]) -> List[Item]:
             item for item in rows
             if item.state == "OPEN"
             and item.parent is not None
-            and _reason_matches(
-                _item_human_step_reason(item), HUMAN_STEP_REASONS
-            )
+            and item.needs == "human"
             and blocked_step_reason(item, by_ref) is None
         ),
         key=lambda item: (item.repo, item.number),
@@ -7689,7 +7536,7 @@ def _human_step_item_json(
         "ref": item.ref,
         "title": item.title,
         "url": item.url,
-        "reason": _item_human_step_reason(item),
+        "reason": item.needs,
     }
     # How long this action has been waiting on him, phrased exactly as the
     # decision rows are (Nate, 2026-09-16). A ticket with no creation time
@@ -7719,9 +7566,7 @@ def blocked_human_step_items(items: Iterable[Item]) -> List[Item]:
             item for item in rows
             if item.state == "OPEN"
             and item.parent is not None
-            and _reason_matches(
-                _item_human_step_reason(item), HUMAN_STEP_REASONS
-            )
+            and item.needs == "human"
             and blocked_step_reason(item, by_ref) is not None
         ),
         key=lambda item: (item.repo, item.number),
@@ -7749,9 +7594,7 @@ def machine_local_step_items(items: Iterable[Item]) -> List[Item]:
             item for item in rows
             if item.state == "OPEN"
             and item.parent is not None
-            and _reason_matches(
-                _item_human_step_reason(item), MACHINE_LOCAL_REASONS
-            )
+            and item.needs == "claude-code-environment"
             and blocked_step_reason(item, by_ref) is None
         ),
         key=lambda item: (item.repo, item.number),
@@ -7777,9 +7620,7 @@ def blocked_machine_local_step_items(items: Iterable[Item]) -> List[Item]:
             item for item in rows
             if item.state == "OPEN"
             and item.parent is not None
-            and _reason_matches(
-                _item_human_step_reason(item), MACHINE_LOCAL_REASONS
-            )
+            and item.needs == "claude-code-environment"
             and blocked_step_reason(item, by_ref) is not None
         ),
         key=lambda item: (item.repo, item.number),
@@ -7799,18 +7640,19 @@ def blocked_machine_local_step_json(
 
 
 def completed_projects_missing_human_steps(items: Iterable[Item]) -> List[Item]:
-    """Completed projects whose plans mention access but have no marker.
+    """Completed projects whose plans mention access but have no Needs ticket.
 
     This is a detective signal, not proof that a human step was required. A
     parked project is deliberately excluded: parking is not a claim that its
-    plan shipped. Any human-step ticket, including one already closed, clears
+    plan shipped. Any Needs ticket, including one already closed, clears
     the flag because the backstop asks whether the project ever carried one.
     """
     rows = list(items)
     human_step_parents = {
         item.parent
         for item in rows
-        if item.parent is not None and _item_human_step_reason(item) is not None
+        if item.parent is not None
+        and item.needs in ("human", "claude-code-environment")
     }
     return sorted(
         (
@@ -8742,11 +8584,6 @@ def cmd_brief(
             "cleared_blocks", lambda: cleared_blocks_json(items, now), []
         )
         blocked = section("blocked", lambda: blocked_json(items), [])
-        suspected = section(
-            "suspected_human_steps",
-            lambda: suspected_human_step_json(items),
-            [],
-        )
         human = section("human_steps", lambda: human_step_json(items, now), [])
         machine_local = section(
             "machine_local_steps",
@@ -8844,7 +8681,6 @@ def cmd_brief(
             "closed_itself": closed_itself,
             "cleared_blocks": cleared_blocks,
             "blocked": blocked,
-            "suspected_human_steps": suspected,
             "human_steps": human,
             "machine_local_steps": machine_local,
             "blocked_human_steps": blocked_human,
@@ -13107,6 +12943,18 @@ def main(argv: Optional[Sequence[str]] = None, *,
 
                 def read_pr_facts():
                     try:
+                        return cache.get_pr_facts(items)
+                    except BriefSectionTimeout:
+                        # One retry sharing the section deadline (#1210):
+                        # the section state set by _brief_timed still
+                        # bounds the second attempt, so no extra budget
+                        # is granted. Only retry when time remains.
+                        state = _BRIEF_SECTION_STATE.get()
+                        if (
+                            state is not None
+                            and float(state[1]) - time.monotonic() <= 0
+                        ):
+                            raise
                         return cache.get_pr_facts(items)
                     except GitHubError as exc:
                         pr_facts_error.append(

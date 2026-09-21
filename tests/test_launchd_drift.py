@@ -141,7 +141,10 @@ def test_the_plist_points_at_the_stable_path(name):
     assert args[0] == "/bin/bash"
     if name in IMPLEMENTER_NAMES:
         script = "muse-implement"
-    elif name == SHADOW_REVIEWER_NAME:
+    elif name in (SHADOW_REVIEWER_NAME, REVIEWER_NAMES[1]):
+        # The standard tier cut over to the engine on 2026-09-20 (#813, and
+        # the standard half of #806). The escalated reviewer still runs the
+        # old routine, and the shadow now observes that tier.
         script = "muse-review-engine"
     else:
         script = "muse-review"
@@ -189,7 +192,13 @@ def test_the_escalated_reviewer_polls_every_fifteen_minutes_while_794_clears():
 def test_each_schedule_asks_for_its_own_tier_and_effort():
     """One runner serves both, so the arguments are the only thing that
     distinguishes them. Escalated gets max effort because that is the work where
-    judgement matters most; standard gets high, which is cheaper."""
+    judgement matters most.
+
+    The standard reviewer ran the old routine at `high` until 2026-09-20, when
+    it cut over to the engine (#813, and the standard half of #806) and took
+    the engine's own default effort, `max` (#976). The shadow moved with it,
+    onto the escalated tier, which has never been measured.
+    """
     import plistlib
 
     def args(name):
@@ -197,30 +206,36 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
             return plistlib.load(handle)["ProgramArguments"][2:]
 
     assert args(NAMES[0]) == ["escalated", "max"]
-    assert args(NAMES[1]) == ["standard", "high"]
-    assert args(SHADOW_REVIEWER_NAME) == ["--shadow", "standard", "high"]
+    assert args(NAMES[1]) == ["standard", "max"]
+    assert args(SHADOW_REVIEWER_NAME) == ["--shadow", "escalated", "max"]
     assert args(IMPLEMENTER_NAME) == ["escalated", "max"]
     assert args(STANDARD_IMPLEMENTER_NAME) == ["standard", "max"]
 
 
-def test_the_shadow_reviewer_runs_beside_standard_on_the_same_cadence():
-    """The shadow engine observes every standard slot without replacing it."""
+def test_the_shadow_reviewer_runs_beside_the_escalated_tier_on_its_cadence():
+    """The shadow engine observes every escalated slot without replacing it.
+
+    It shadowed the standard tier on its five-minute calendar until that tier
+    cut over on 2026-09-20. The escalated reviewer polls on a fixed interval
+    (#859), so the shadow matches that instead.
+    """
     import plistlib
 
     with (ROOT / "launchd" / SHADOW_REVIEWER_NAME).open("rb") as handle:
         shadow = plistlib.load(handle)
-    with (ROOT / "launchd" / REVIEWER_NAMES[1]).open("rb") as handle:
-        standard = plistlib.load(handle)
+    with (ROOT / "launchd" / REVIEWER_NAMES[0]).open("rb") as handle:
+        escalated = plistlib.load(handle)
 
-    assert shadow["StartCalendarInterval"] == standard["StartCalendarInterval"]
-    assert "StartInterval" not in shadow
+    assert shadow["StartInterval"] == escalated["StartInterval"]
+    assert "StartCalendarInterval" not in shadow
 
 
-def test_the_shadow_reviewer_matches_the_live_standard_effort():
+def test_the_shadow_reviewer_matches_the_live_reviewer_it_measures():
     """#806 measures agreement between the two, so effort must not differ.
 
     The engine defaults to `max`; a shadow plist that names no effort compared
-    `max` against the live reviewer's `high` (#976).
+    `max` against the live reviewer's `high` (#976). Since 2026-09-20 the
+    reviewer it measures is the escalated one, which already runs `max`.
     """
     import plistlib
 
@@ -229,7 +244,7 @@ def test_the_shadow_reviewer_matches_the_live_standard_effort():
             return plistlib.load(handle)["ProgramArguments"][2:]
 
     shadow = [a for a in args(SHADOW_REVIEWER_NAME) if a != "--shadow"]
-    assert shadow == args(REVIEWER_NAMES[1])
+    assert shadow == args(REVIEWER_NAMES[0])
 
 
 def test_the_shadow_reviewer_header_documents_non_applying_side_by_side_run():

@@ -1,16 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  The shadow reviewer: one standard Muse review run that records its judgement
+  The shadow reviewer: one escalated Muse review run that records its judgement
   but applies nothing.
 
-  This schedule runs beside the old routine, the standard reviewer, during
+  This schedule runs beside the old routine, now the escalated reviewer, during
   the shadow period required before the #794 cutover. The engine records its
   answer on the PR and in the finish note; the live review path remains
   unchanged.
-  It runs at `high` effort, the same as the live standard reviewer it is
-  measured against, so the agreement rate compares the engine rather than the
-  effort level. The engine's own default is `max` (#976).
+
+  It shadowed the standard tier until 2026-09-20, when that tier cut over to
+  the engine (#813, and the standard half of #806). The escalated tier was
+  never shadowed, so it has no evidence of its own; Nate's decision in session
+  was to ship the measured tier and measure the unmeasured one. It runs at
+  `max` effort, the same as the live escalated reviewer it is measured
+  against, so the agreement rate compares the engine rather than the effort
+  level. `max` is also the engine's own default (#976).
 
   The canonical copy lives here in the repo. launchd refuses a symlinked plist
   (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so the
@@ -40,30 +45,22 @@
         <string>/bin/bash</string>
         <string>/Users/nateprich/.claude/command-center-run/scripts/muse-review-engine</string>
         <string>--shadow</string>
-        <string>standard</string>
-        <string>high</string>
+        <string>escalated</string>
+        <string>max</string>
     </array>
 
     <!--
-      Every five minutes, identical to the standard review routine. Running
-      beside the old routine gives the engine a shadow record for every
-      standard review slot without changing the live review path.
+      Every fifteen minutes on a fixed interval, identical to the escalated
+      review routine it now shadows (#859 put that tier on `StartInterval`
+      while #794's escalated tickets clear). Running beside the old routine
+      gives the engine a shadow record for every escalated review slot without
+      changing the live review path.
+
+      Was a five-minute calendar schedule, matching the standard reviewer, until
+      that tier cut over to the engine on 2026-09-20.
     -->
-    <key>StartCalendarInterval</key>
-    <array>
-        <dict><key>Minute</key><integer>0</integer></dict>
-        <dict><key>Minute</key><integer>5</integer></dict>
-        <dict><key>Minute</key><integer>10</integer></dict>
-        <dict><key>Minute</key><integer>15</integer></dict>
-        <dict><key>Minute</key><integer>20</integer></dict>
-        <dict><key>Minute</key><integer>25</integer></dict>
-        <dict><key>Minute</key><integer>30</integer></dict>
-        <dict><key>Minute</key><integer>35</integer></dict>
-        <dict><key>Minute</key><integer>40</integer></dict>
-        <dict><key>Minute</key><integer>45</integer></dict>
-        <dict><key>Minute</key><integer>50</integer></dict>
-        <dict><key>Minute</key><integer>55</integer></dict>
-    </array>
+    <key>StartInterval</key>
+    <integer>900</integer>
 
     <key>RunAtLoad</key>
     <false/>

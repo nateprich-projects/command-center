@@ -1423,6 +1423,204 @@ def _readiness_blocker_summary(blockers: Sequence[Dict[str, object]]) -> str:
     )
 
 
+#: The issue whose landing ends the frozen-ground queue rule. The freeze is
+#: owned by #794 alone: #1044 measures the cutover but its closing changes
+#: nothing here.
+FREEZE_OWNER_REF = REPO + "#794"
+
+#: Section headers a ticket body may carry (skills/breakdown). Only What and
+#: Accept describe the work; the rest name context, not files to change.
+_TICKET_SECTION_RE = re.compile(
+    r"(?m)^\s*(Parent|Depends on|What|Accept|Risk|Sequencing|Human step)\s*:"
+)
+
+#: Canonical freeze lists live in ``engine/review.py``. This module reads
+#: them at run time through a lazy import inside ``_canonical_freeze_lists``,
+#: so no copy of the lists lives here. #794 closeout deletes this adapter
+#: together with the review-side freeze row, so neither outlives the freeze.
+def _canonical_freeze_lists(
+) -> Tuple[Tuple[str, ...], Tuple[str, ...], Tuple[int, ...]]:
+    """The canonical freeze lists, parsed out of the review engine source.
+
+    The package dependency runs one way only — the review package reads
+    this module, never the reverse — so this adapter parses the three
+    assignments out of the ``review.py`` file as text instead of importing
+    them. Returns (paths, parsers, exempt parents) as tuples, so the queue
+    predicate can never drift from the freeze row it mirrors.
+    """
+    import ast
+    source_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "engine", "review.py")
+    with open(source_path, encoding="utf-8") as handle:
+        tree = ast.parse(handle.read())
+    wanted = ("FROZEN_PATHS", "FROZEN_PARSERS", "FREEZE_PARENT_NUMBERS")
+    values: Dict[str, object] = {}
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in wanted):
+            values[node.targets[0].id] = ast.literal_eval(node.value)
+    return (tuple(values["FROZEN_PATHS"]),  # type: ignore[arg-type]
+            tuple(values["FROZEN_PARSERS"]),  # type: ignore[arg-type]
+            tuple(values["FREEZE_PARENT_NUMBERS"]))  # type: ignore[arg-type]
+
+
+def _freeze_governing(
+    by_ref: Mapping[str, Item]
+) -> Optional[Tuple[Tuple[str, ...], Tuple[str, ...], Tuple[int, ...]]]:
+    """The freeze lists while the freeze governs, else None.
+
+    The predicate goes inert when the #794 issue itself has closed, so a
+    landed freeze releases the queue even before its code is removed.
+    Anything else — including #794 missing this read, as in fixture-only
+    callers — reads as active, so a partial load can never quietly offer
+    frozen work.
+    """
+    owner = by_ref.get(FREEZE_OWNER_REF)
+    if owner is not None and owner.state != "OPEN":
+        return None
+    return _canonical_freeze_lists()
+
+
+def freeze_active(by_ref: Mapping[str, Item]) -> bool:
+    """Whether the #794 frozen-ground rule still withholds queue tickets."""
+    return _freeze_governing(by_ref) is not None
+
+
+def _ticket_work_text(body: Optional[str]) -> str:
+    """The What and Accept sections of a ticket body.
+
+    Anything else names context, not work: #1187's Sequencing paragraph
+    mentions routines/muse.md as the rollback that stays, not as a file to
+    change. A body with no recognisable sections is scanned whole, so a
+    malformed body cannot smuggle frozen work past the matcher.
+    """
+    if not isinstance(body, str) or not body.strip():
+        return ""
+    matches = list(_TICKET_SECTION_RE.finditer(body))
+    if not any(match.group(1) in ("What", "Accept") for match in matches):
+        return body
+    parts = []
+    for index, match in enumerate(matches):
+        if match.group(1) not in ("What", "Accept"):
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        parts.append(body[match.end():end])
+    return "\n".join(parts)
+
+
+def freeze_markers(body: Optional[str]) -> List[str]:
+    """Frozen-ground markers a ticket body names in What or Accept.
+
+    Paths match the canonical frozen prefixes; parser names match the
+    canonical parser tuple by substring, exactly as the review-side freeze
+    row's diff scan does. The match is deliberately conservative: any hit
+    withholds, because a false positive costs one reason line while a
+    false negative costs a full run ending in a certain rejection.
+    """
+    text = _ticket_work_text(body)
+    if not text:
+        return []
+    paths, parsers, _exempt = _canonical_freeze_lists()
+    found: Set[str] = set()
+    if paths:
+        pattern = re.compile(
+            "(?:{})[^\\s`'\"(),;:!?]*".format(
+                "|".join(re.escape(prefix) for prefix in paths)))
+        for match in pattern.finditer(text):
+            found.add(match.group(0).rstrip("."))
+    for name in parsers:
+        if name and name in text:
+            found.add(name)
+    return sorted(found)
+
+
+def _parent_ticket_number(item: Item) -> Optional[int]:
+    """The ticket's parent issue number, or None when it cannot be read."""
+    parent = getattr(item, "parent", None)
+    if not isinstance(parent, str) or "#" not in parent:
+        return None
+    try:
+        return int(parent.rsplit("#", 1)[1])
+    except ValueError:
+        return None
+
+
+def freeze_withhold_reason(
+    item: Item, by_ref: Mapping[str, Item]
+) -> Optional[str]:
+    """Why the #794 frozen-ground rule withholds this ticket, or None.
+
+    Mirrors ``engine/review.py`` precheck_freeze, applied to the ticket's
+    What and Accept text instead of a diff: a frozen marker named under a
+    non-exempt parent withholds while the freeze is active. The reason names
+    the marker and the parent number, so the queue never withholds silently.
+    """
+    governing = _freeze_governing(by_ref)
+    if governing is None:
+        return None
+    _paths, _parsers, exempt = governing
+    parent_number = _parent_ticket_number(item)
+    if parent_number in exempt:
+        return None
+    markers = freeze_markers(getattr(item, "body", None))
+    if not markers:
+        return None
+    allowed = ", ".join("#{}".format(n) for n in exempt)
+    if parent_number is None:
+        where = "ticket {} has no parent number".format(item.ref)
+    else:
+        where = "ticket {} is under #{}".format(item.ref, parent_number)
+    return ("freeze: {} named but {}; frozen while #794 lands "
+            "(exempt parents: {})".format(", ".join(markers), where, allowed))
+
+
+def freeze_withheld(
+    items: Sequence[Item],
+    repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+    awaiting_review: Optional[Set[str]] = None,
+    agent: str = "codex",
+) -> List[Dict[str, object]]:
+    """Otherwise-eligible tickets the #794 frozen-ground rule withholds.
+
+    The diagnostic twin of the ``startable()`` exclusion, shaped after
+    ``readiness_blockers``: callers that find an empty queue can say why
+    without changing the shared ordering. Each row names the frozen marker
+    and the parent number, so a withheld ticket never goes stale invisibly.
+    """
+    awaiting_review = awaiting_review or frozenset()
+    rows = list(items)
+    by_ref = {i.ref: i for i in rows}
+    if not freeze_active(by_ref):
+        return []
+    found: List[Dict[str, object]] = []
+    for item in rows:
+        if not _startable_without_repo_readiness(
+            item, by_ref, awaiting_review, agent
+        ):
+            continue
+        if _repo_blocking_reasons(item, repo_readiness):
+            continue
+        reason = freeze_withhold_reason(item, by_ref)
+        if reason is None:
+            continue
+        found.append({
+            "ref": item.ref,
+            "repo": item.repo,
+            "parent": _parent_ticket_number(item),
+            "markers": freeze_markers(getattr(item, "body", None)),
+            "reason": reason,
+        })
+    return sorted(found, key=lambda row: (str(row["repo"]), str(row["ref"])))
+
+
+def _freeze_withheld_summary(withheld: Sequence[Dict[str, object]]) -> str:
+    """Render the stable queue-empty explanation for frozen-ground rows."""
+    return "tickets withheld by frozen ground — {}".format(
+        "; ".join(str(row["reason"]) for row in withheld)
+    )
+
+
 def startable(
     items: Sequence[Item],
     awaiting_review: Optional[Set[str]] = None,
@@ -1445,6 +1643,11 @@ def startable(
     ``repo_readiness`` is an optional, caller-supplied snapshot from the member
     repository checks. Its blocking requirements are applied here; advisory
     facts remain available to ``doctor`` but never affect queue membership.
+
+    Tickets naming frozen ground in What or Accept are withheld while the
+    #794 freeze governs (see ``freeze_withhold_reason``): offering them
+    would only fail at review, on a diff that does not exist until a run
+    has already built it.
     """
     awaiting_review = awaiting_review or frozenset()
     by_ref = {i.ref: i for i in items}
@@ -1473,7 +1676,9 @@ def startable(
             item, by_ref, awaiting_review, agent
         ):
             return False
-        return not _repo_blocking_reasons(item, repo_readiness)
+        if _repo_blocking_reasons(item, repo_readiness):
+            return False
+        return freeze_withhold_reason(item, by_ref) is None
 
     def in_flight(item: Item) -> bool:
         """Once a project is Building, its remaining tickets finish first.
@@ -7967,6 +8172,12 @@ def cmd_queue(
             print("  {:<34} {}".format(
                 blocker["ref"], ", ".join(blocker["reasons"])))
 
+    frozen = freeze_withheld(items, repo_readiness=repo_readiness)
+    if frozen:
+        print("\nWithheld by frozen ground ({}):".format(len(frozen)))
+        for row in frozen:
+            print("  {:<34} {}".format(row["ref"], row["reason"]))
+
     pending = awaiting_breakdown(items)
     if pending:
         print("\nApproved, awaiting breakdown into tickets ({}):".format(len(pending)))
@@ -8084,6 +8295,10 @@ def cmd_next(
             items, repo_readiness=repo_readiness, awaiting_review=blocked,
             agent=agent,
         )
+        frozen = freeze_withheld(
+            items, repo_readiness=repo_readiness, awaiting_review=blocked,
+            agent=agent,
+        )
         if holder is not None:
             print(
                 "nothing — lock held by {} (claimed {} ago)".format(
@@ -8094,6 +8309,10 @@ def cmd_next(
         elif withheld:
             print("nothing — {}".format(
                 _readiness_blocker_summary(withheld)
+            ), file=sys.stderr)
+        elif frozen:
+            print("nothing — {}".format(
+                _freeze_withheld_summary(frozen)
             ), file=sys.stderr)
         elif tier:
             print("nothing — no {} work waiting".format(tier), file=sys.stderr)
@@ -10973,6 +11192,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     except GitHubError as exc:
         out.update(
             do="stop",
+            gate="error",
             why="could not establish ticket branch facts: {}".format(exc),
         )
         print(json.dumps(out, indent=2))
@@ -11055,6 +11275,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             except GitHubError as exc:
                 out.update(
                     do="stop",
+                    gate="error",
                     why="could not re-read {} claim: {}".format(ticket.ref, exc),
                 )
                 ticket = None
@@ -11107,8 +11328,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             withheld = readiness_blockers(
                 items, repo_readiness=repo_readiness, awaiting_review=blocked
             )
+            frozen = freeze_withheld(
+                items, repo_readiness=repo_readiness, awaiting_review=blocked,
+                agent=agent,
+            )
             if withheld:
                 out["withheld"] = withheld
+            if frozen:
+                out["freeze_withheld"] = frozen
             if out.get("why"):
                 why = str(out["why"])
             elif holder is not None:
@@ -11118,6 +11345,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             elif withheld:
                 why = "nothing — {}".format(
                     _readiness_blocker_summary(withheld)
+                )
+            elif frozen:
+                why = "nothing — {}".format(
+                    _freeze_withheld_summary(frozen)
                 )
             elif tier:
                 why = "nothing — no {} work waiting".format(tier)
@@ -11156,6 +11387,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                         out.pop("work", None)
                         out.update(
                             do="stop",
+                            gate="error",
                             why="could not assemble implementation packet: {}".format(
                                 exc
                             ),

@@ -670,6 +670,25 @@ def test_a_stop_finishes_without_launching_anything(tmp_path, gate, outcome):
     )
 
 
+def test_a_stop_with_a_why_records_the_note_and_names_it_on_stderr(tmp_path):
+    why = "could not establish ticket branch facts: transient GraphQL response"
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        {"agent": "muse", "run": "stop-run", "gate": "error",
+         "do": "stop", "why": why},
+        _packet(),
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert not (repo / "packet.calls").exists()
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run stop-run --outcome nothing-to-do "
+        "--note {}\n".format(why)
+    )
+    assert "muse-review-engine: begin stopped: {}".format(why) in proc.stderr
+
+
 def test_an_unexpected_begin_job_finishes_the_started_run(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path,

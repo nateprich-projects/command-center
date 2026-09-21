@@ -94,6 +94,23 @@ def test_healthy_heartbeat_rows_render_no_agent_health(monkeypatch):
     assert funnel.agent_health(NOW) == []
 
 
+def test_a_lane_held_by_a_tight_budget_raises_no_condition():
+    """#1199: a tight-budget stop finishes every fire as `skipped-over-pace`
+    with begin's numbers in the note, so the lane is neither silent nor
+    erroring. #1160 is what it looks like when a hold writes nothing."""
+    rows = []
+    for index in range(12):
+        minutes_ago = 5 + index * 10
+        rows.append(_start("hold-{}".format(index), minutes_ago + 1))
+        finish = _finish("hold-{}".format(index), minutes_ago)
+        finish["outcome"] = "skipped-over-pace"
+        finish["note"] = "tight: 62% used, projected 118% at $31/day"
+        rows.append(finish)
+    rows.sort(key=lambda row: row["ts"])
+
+    assert assess("muse", rows, NOW.timestamp()) == []
+
+
 def test_brief_run_summary_separates_rebegins_from_finishes(monkeypatch):
     rows = [
         _start("old", 4),

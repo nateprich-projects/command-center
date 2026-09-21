@@ -2014,6 +2014,138 @@ def test_a_broken_breakdown_is_not_hidden_behind_an_older_improve_plan(
     assert result["work"]["ref"] == broken_plan.ref
 
 
+def _tight_budget(monkeypatch):
+    """Make begin's preflight report the #1198 `tight` band with its numbers."""
+    def preflight(now, agent, idle):
+        return ({
+            "agent": agent, "run": "run-id", "gate": "ok",
+            "budget_band": "tight",
+            "budget": {"used_percent": 62.0, "projected_percent": 118.0,
+                       "daily_rate_dollars": 31.0,
+                       "runs_out_at": NOW.timestamp() + 2 * 86400},
+        }, {"windows": {}})
+    monkeypatch.setattr(funnel, "_begin_preflight", preflight)
+
+
+def test_a_tight_budget_offers_only_the_ladders_urgent_judgement_work(
+    monkeypatch, capsys
+):
+    """#1199: a New project's PR and an Improve plan wait; a Broken PR behind
+    them is still read. The ladder decides, as Nate chose on 2026-09-21."""
+    _tight_budget(monkeypatch)
+    new_project, new_ticket = _ticket(141, 140, klass="New")
+    broken_project, broken_ticket = _ticket(143, 142, klass="Broken")
+    improve_plan = _ready_plan(144, "Improve")
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [new_project, new_ticket, broken_project, broken_ticket, improve_plan],
+        reviews=[_review_job(new_ticket, pr=7), _review_job(broken_ticket, pr=9)],
+        breakdown_items=[improve_plan],
+        idea=_idea(145, "Improve idea", "Risk: standard", klass="Improve"),
+        breakdown=True,
+    )
+
+    assert result["budget_band"] == "tight"
+    assert result["do"] == "review"
+    assert result["work"] == _review_job(broken_ticket, pr=9)
+
+
+def test_a_tight_budget_still_offers_a_maintenance_breakdown_and_pinned_work(
+    monkeypatch, capsys
+):
+    _tight_budget(monkeypatch)
+    maintenance_plan = _ready_plan(146, "Maintenance")
+    result = _reviewer_begin(
+        monkeypatch, capsys, [maintenance_plan],
+        breakdown_items=[_ready_plan(147, "Improve"), maintenance_plan],
+        breakdown=True,
+    )
+    assert result["do"] == "breakdown"
+    assert result["work"]["ref"] == maintenance_plan.ref
+
+    pinned_project, pinned_ticket = _ticket(149, 148, klass="Replace")
+    pinned_project.pinned = True
+    result = _reviewer_begin(
+        monkeypatch, capsys, [pinned_project, pinned_ticket],
+        reviews=[_review_job(pinned_ticket, pr=11)],
+    )
+    assert result["do"] == "review"
+    assert result["work"] == _review_job(pinned_ticket, pr=11)
+
+
+def test_a_tight_budget_with_only_other_work_waiting_is_a_hold_with_numbers(
+    monkeypatch, capsys
+):
+    """Not an empty funnel: the stop names the budget, so the heartbeat
+    records a hold rather than nothing-to-do."""
+    _tight_budget(monkeypatch)
+    project, ticket = _ticket(151, 150, klass="New")
+
+    result = _reviewer_begin(
+        monkeypatch, capsys, [project, ticket],
+        reviews=[_review_job(ticket)],
+        idea=_idea(152, "Improve idea", "Risk: standard", klass="Improve"),
+    )
+
+    assert result["do"] == "stop"
+    assert result["gate"] == "tight"
+    assert result["budget_held"] == 2
+    for fragment in ("62% used", "projected 118%", "$31/day", "runs out"):
+        assert fragment in result["why"], result["why"]
+
+
+def test_a_tight_budget_with_nothing_waiting_is_still_an_empty_poll(
+    monkeypatch, capsys
+):
+    _tight_budget(monkeypatch)
+    result = _reviewer_begin(monkeypatch, capsys, [])
+    assert result["do"] == "stop"
+    assert result["gate"] == "ok"
+    assert result["why"] == "nothing to review"
+
+
+def test_a_tight_budget_offers_a_broken_ticket_and_holds_an_improve_one(
+    monkeypatch, capsys
+):
+    """The coding path, where the money goes: same rule, same place."""
+    _tight_budget(monkeypatch)
+    improve_project, improve_ticket = _ticket(161, 160, klass="Improve")
+    broken_project, broken_ticket = _ticket(163, 162, klass="Broken")
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys,
+        [improve_project, improve_ticket, broken_project, broken_ticket],
+    )
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == broken_ticket.ref
+    assert [ref for ref, _ in writes] == [broken_ticket.ref]
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, [improve_project, improve_ticket],
+    )
+    assert result["do"] == "stop"
+    assert result["gate"] == "tight"
+    assert "projected 118%" in result["why"]
+    assert writes == []
+
+
+def test_work_that_blocks_broken_work_is_essential_with_it():
+    """The same inheritance the ticket order uses: a ticket that blocks a
+    Broken one preempts with it, so a tight budget must not hold it."""
+    improve_project, blocker = _ticket(171, 170, klass="Improve")
+    broken_project, waiting = _ticket(173, 172, klass="Broken")
+    waiting.open_blockers = [blocker.ref]
+    other_project, other = _ticket(175, 174, klass="New")
+
+    essential = funnel.budget_essential_refs(
+        [improve_project, blocker, broken_project, waiting, other_project, other])
+
+    assert blocker.ref in essential and waiting.ref in essential
+    assert other.ref not in essential and other_project.ref not in essential
+
+
 def test_shape_is_not_offered_when_the_first_idea_is_the_other_tier(
     monkeypatch, capsys
 ):

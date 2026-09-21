@@ -254,12 +254,19 @@ fi
 if [[ "$BEGIN_DO" == "stop" ]]; then
   case "$BEGIN_GATE" in
     over) STOP_OUTCOME="skipped-over-pace" ;;
+    # #1199: work is waiting and a tight budget is holding it. The same
+    # outcome as a budget stop, with begin's numbers kept on the record.
+    tight) STOP_OUTCOME="skipped-over-pace" ;;
     unknown) STOP_OUTCOME="skipped-usage-unknown" ;;
     reserve) STOP_OUTCOME="skipped-api-reserve" ;;
     *) STOP_OUTCOME="nothing-to-do" ;;
   esac
+  STOP_NOTE_ARGS=()
+  if [[ "$BEGIN_GATE" == "tight" ]] && STOP_WHY="$(begin_value why)"; then
+    STOP_NOTE_ARGS=(--note "$STOP_WHY")
+  fi
   if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
-      --outcome "$STOP_OUTCOME"; then
+      --outcome "$STOP_OUTCOME" ${STOP_NOTE_ARGS[@]+"${STOP_NOTE_ARGS[@]}"}; then
     echo "muse-implement: could not finish the stopped run" >&2
     exit 1
   fi

@@ -99,6 +99,19 @@ def _hold_stamp(hold_until: float) -> str:
     ).isoformat()
 
 
+def _deduplicated(rows: List[Dict]) -> List[Dict]:
+    """Rows with byte-identical duplicates removed.
+
+    The cadence inference reads the gaps between records, and a record written
+    twice with the same ``ts`` is a gap of zero that never happened — it drags
+    the p90 down and so tightens the silence threshold. Same canonical rule as
+    the counting readers, applied to the timing one (#1225).
+    """
+    import heartbeat
+
+    return heartbeat.distinct_records(rows)
+
+
 def _history(
     rows: List[Dict],
     now: float,
@@ -140,7 +153,8 @@ def _normal_gap(
 ) -> Optional[Tuple[float, float, int]]:
     """Return ``(normal gap, latest record, record count)`` when inferable."""
     timestamps, gaps = _history(
-        rows, now, history_window_seconds=history_window_seconds
+        _deduplicated(rows), now,
+        history_window_seconds=history_window_seconds,
     )
     if len(gaps) < minimum_history:
         return None
@@ -220,7 +234,15 @@ def _recent_outcomes(
     outcome: str,
     week: int,
 ) -> List[Dict]:
-    """Return records with ``outcome`` inside the current diagnostic week."""
+    """Return one record per run with ``outcome`` in the diagnostic week.
+
+    A count read from these rows is a count of *runs*. Reading rows instead
+    made the alarm report the heartbeat's own write duplication: 67 muse errors
+    against 55 true runs, measured 2026-09-21 (#1225). The canonical rule lives
+    in ``heartbeat.one_record_per_run``; this is the thin adapter to it.
+    """
+    import heartbeat
+
     found = []
     for row in rows:
         timestamp = row.get("ts")
@@ -232,7 +254,7 @@ def _recent_outcomes(
         ):
             continue
         found.append(row)
-    return found
+    return heartbeat.one_record_per_run(found)
 
 
 def assess(

@@ -33,6 +33,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import funnel  # noqa: E402
 
+from engine import shape  # noqa: E402
+
 
 class ImplementError(RuntimeError):
     """A packet or finish contract could not be completed safely."""
@@ -152,8 +154,47 @@ def fetch_prior_run(number: int, agent: str = "codex") -> Optional[dict]:
     return data
 
 
+#: How much of a target repo's AGENTS.md the packet carries. A packet is read
+#: by a model with a finite context, and a repo could in principle hold a very
+#: long instruction file; truncating with a visible marker is honest, while
+#: silently sending part of it is not.
+MAX_AGENTS_MD_CHARS = 40_000
+
+#: What the marker says when the text was cut. Load-bearing: a reader must be
+#: able to tell "these are the rules" from "these are the first part of them".
+AGENTS_MD_TRUNCATION_MARKER = (
+    "\n\n…[AGENTS.md truncated after {} characters; the rest was not sent]"
+)
+
+
+def fetch_agents_md(repo: str) -> Tuple[str, bool, bool]:
+    """The target repo's AGENTS.md as ``(text, missing, truncated)``.
+
+    The same read shaping already makes (`engine/shape.fetch_repo_text`), so
+    an implementer is shown the rules the reviewer will hold it to. Before
+    this, an implementer working a member repo saw its ticket and plan but not
+    the repo's own canonical instruction file — the one AGENTS.md itself calls
+    the source of truth for every agent working there.
+
+    Missing is recorded as an absent fact, not an error: the ticket is still
+    implementable, and a repo without an AGENTS.md is a repo without one. No
+    retry, because there is nothing to retry — a 404 is the answer.
+    """
+    text, missing = shape.fetch_repo_text(repo, "AGENTS.md")
+    if missing or not text:
+        return "", bool(missing), False
+    if len(text) <= MAX_AGENTS_MD_CHARS:
+        return text, False, False
+    cut = text[:MAX_AGENTS_MD_CHARS] + AGENTS_MD_TRUNCATION_MARKER.format(
+        MAX_AGENTS_MD_CHARS
+    )
+    return cut, False, True
+
+
 def build_packet(*, repo: str, ticket: dict, plan: Optional[dict],
-                 verdict: dict, prior_run: Optional[dict]) -> dict:
+                 verdict: dict, prior_run: Optional[dict],
+                 agents_md: str = "", agents_md_missing: bool = False,
+                 agents_md_truncated: bool = False) -> dict:
     """Build one JSON-serialisable implementation packet from fetched facts."""
     return {
         "repo": repo,
@@ -161,6 +202,12 @@ def build_packet(*, repo: str, ticket: dict, plan: Optional[dict],
         "plan": plan,
         "verdict": verdict,
         "prior_run": prior_run,
+        # The target repo's canonical rules, carried as text and nothing more.
+        # No credential is read, no flag changes, and nothing under .claude/ is
+        # executed or fetched: this is one file's contents in a JSON field.
+        "agents_md": agents_md,
+        "agents_md_missing": agents_md_missing,
+        "agents_md_truncated": agents_md_truncated,
         "collected_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -169,12 +216,19 @@ def collect(repo: Optional[str], number: int, *, agent: str = "codex") -> dict:
     """Fetch every read-only input needed to implement one ticket."""
     resolved = funnel.resolve_repo(repo)
     ticket = fetch_ticket(resolved, number)
+    # The ticket's own repo, which for a member-repo ticket is not this one.
+    agents_md, agents_md_missing, agents_md_truncated = fetch_agents_md(
+        parent_repo(resolved, ticket)
+    )
     return build_packet(
         repo=resolved,
         ticket=ticket,
         plan=fetch_plan(resolved, ticket),
         verdict=fetch_verdict_blocking(resolved, number),
         prior_run=fetch_prior_run(number, agent),
+        agents_md=agents_md,
+        agents_md_missing=agents_md_missing,
+        agents_md_truncated=agents_md_truncated,
     )
 
 

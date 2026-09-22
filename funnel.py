@@ -503,9 +503,16 @@ BRIEF_SECTION_BUDGETS = {
     "items": 0.25,
     "counts_by_gate": 0.25,
     "in_motion": 0.25,
-    "parked": 2.0,
+    # 30 s, not 2 s. The ticket asked for 5 s, sized from a 2.0168 s read on a
+    # 738-ref board. Re-measured 2026-09-21 on 1091 items, three consecutive
+    # reads: 27.86 s, 19.17 s, 22.24 s. 5 s would have degraded every one of
+    # them, so the cap is set from the measurement rather than from the
+    # ticket's number, and 30 s clears the observed maximum (#1211).
+    "parked": 30.0,
     "closed_itself": 45.0,
-    "cleared_blocks": 7.0,
+    # 30 s, not 7 s, and not the ticket's 12 s: re-measured on the same
+    # 1091-item board at 20.93 s, 25.17 s, 22.94 s.
+    "cleared_blocks": 30.0,
     "blocked": 0.25,
     "human_steps": 0.25,
     "machine_local_steps": 0.25,
@@ -530,6 +537,8 @@ BRIEF_SECTION_BUDGETS = {
     # One REST read per member repo for main's head, plus a bounded follow-up
     # only where that head's run failed. Sized like the other small live reads.
     "main_ci": 3.0,
+    # One `gh issue list` per member repo. Sized like the other live scans.
+    "member_issues_without_project_items": 8.0,
     "outcome_signals": 3.0,
     "portfolio_metrics": 3.0,
     "rejected_merges": 0.25,
@@ -8387,6 +8396,98 @@ def stranded_items(
     return found
 
 
+#: The two long-running watch logs. They live in the repo as issues so the
+#: check-ins have somewhere to write, and they are deliberately not funnel
+#: work: adding them to the Project would put a running commentary in the
+#: queue. Excluded by number because that is what they are — two specific
+#: issues, not a category.
+WATCH_LOG_ISSUES = {
+    "nateprich-projects/command-center": (579, 684),
+}
+
+#: #794's sub-issues are tracked through their parent rather than as Project
+#: items of their own. Excluded by parent, so the exclusion follows the
+#: breakdown rather than needing a list of numbers kept in step.
+ORPHAN_SCAN_EXEMPT_PARENTS = (794,)
+
+
+def _orphan_scan_excluded(repo: str, issue: Mapping[str, object]) -> bool:
+    """Whether one open member issue is a known non-Project issue."""
+    number = issue.get("number")
+    if number in WATCH_LOG_ISSUES.get(repo, ()):
+        return True
+    parent = issue.get("parent")
+    parent_number = (
+        parent.get("number") if isinstance(parent, Mapping) else None
+    )
+    return parent_number in ORPHAN_SCAN_EXEMPT_PARENTS
+
+
+def member_issues_without_project_items(
+    items: Sequence[Item], repos: Optional[Sequence[str]] = None
+) -> Dict[str, object]:
+    """Open member-repo issues that are in no Project item, or why not read.
+
+    Membership comes from the `command-center` topic, never a hardcoded list,
+    so a repo that joins the funnel is scanned the run after it opts in.
+
+    Detection only. Nothing is added at `Ideas`: an issue outside the Project
+    may be deliberate, and the two watch logs are exactly that. Known
+    non-Project issues are excluded — the watch logs by number, #794's
+    sub-issues by parent — and everything else is listed for a person to
+    judge. `nateprich-projects/jeffy-finance-agent#53` is expected to appear
+    and is an honest exception rather than a defect; it is not excluded in
+    code, because an exclusion is a claim that something can never be wrong.
+
+    A scan that fails says so. `status` is `read` or `degraded`, never an
+    empty list standing in for an unread one: zero orphans and an unread scan
+    are the same shape and opposite news.
+    """
+    known = {item.ref for item in items}
+    names = list(repos) if repos is not None else None
+    if names is None:
+        try:
+            names = member_repos()
+        except (GitHubError, OSError, subprocess.SubprocessError) as exc:
+            return {
+                "status": "degraded",
+                "reason": "could not read member repositories: {}".format(exc),
+                "issues": [],
+            }
+
+    found: List[Dict[str, object]] = []
+    unread: List[str] = []
+    for repo in names:
+        payload = _gh_json(
+            "gh", "issue", "list", "--repo", repo, "--state", "open",
+            "--limit", "200", "--json", "number,title,url,parent",
+        )
+        if not isinstance(payload, list):
+            unread.append(repo)
+            continue
+        for issue in payload:
+            if not isinstance(issue, Mapping):
+                continue
+            ref = "{}#{}".format(repo, issue.get("number"))
+            if ref in known or _orphan_scan_excluded(repo, issue):
+                continue
+            found.append({
+                "ref": ref,
+                "repo": repo,
+                "title": issue.get("title"),
+                "url": issue.get("url"),
+            })
+
+    found.sort(key=lambda row: str(row["ref"]))
+    if unread:
+        return {
+            "status": "degraded",
+            "reason": "could not list open issues for {}".format(
+                ", ".join(sorted(unread))
+            ),
+            "issues": found,
+        }
+    return {"status": "read", "issues": found}
 def status_state_mismatches(items: Iterable[Item]) -> List[Dict[str, object]]:
     """Items whose Project Status and GitHub state contradict each other.
 
@@ -8949,6 +9050,7 @@ def cmd_brief(
     outcome_signals: Optional[Dict[str, object]] = None,
     portfolio_metrics: Optional[Dict[str, object]] = None,
     main_ci: Optional[List[Dict[str, object]]] = None,
+    orphan_issues: Optional[Dict[str, object]] = None,
 ) -> int:
     missing = list(missing or [])
     timings = {} if timings is None else timings
@@ -8971,6 +9073,31 @@ def cmd_brief(
             deadline=deadline,
         )
         return default if value is _BRIEF_UNAVAILABLE else value
+
+    def named_section(name: str, reader: Callable[[], object]):
+        """A section whose unread state must not look like an empty result.
+
+        `parked` and `cleared_blocks` both read as *news* when empty — nothing
+        is parked, nothing was unblocked — so degrading them to `[]` reports
+        the opposite of what happened. These return null and name themselves
+        in `missing`, the same shape the shared PR-facts read uses.
+        """
+        value = _brief_timed(
+            name,
+            lambda: _brief_read(name, reader, missing),
+            timings,
+            degraded,
+            deadline=deadline,
+        )
+        if value is _BRIEF_UNAVAILABLE:
+            if not any(entry.get("section") == name for entry in missing):
+                missing.append({
+                    "section": name,
+                    "error": "could not read {} within its budget; this is "
+                             "an unread section, not an empty one".format(name),
+                })
+            return None
+        return value
 
     def decision_payload():
         decisions = awaiting_decision(items)
@@ -9004,14 +9131,14 @@ def cmd_brief(
             lambda: in_motion(items, now, pr_facts=pr_facts),
             [],
         )
-        parked = section("parked", lambda: parked_json(items), [])
+        parked = named_section("parked", lambda: parked_json(items))
         closed_itself = section(
             "closed_itself",
             lambda: closed_itself_json(items, now, brief_cache=cache),
             [],
         )
-        cleared_blocks = section(
-            "cleared_blocks", lambda: cleared_blocks_json(items, now), []
+        cleared_blocks = named_section(
+            "cleared_blocks", lambda: cleared_blocks_json(items, now)
         )
         blocked = section("blocked", lambda: blocked_json(items), [])
         human = section("human_steps", lambda: human_step_json(items, now), [])
@@ -9148,6 +9275,7 @@ def cmd_brief(
             "working_tree_touched": touched,
             "status_state_mismatches": status_mismatches,
             "main_ci": main_ci,
+            "member_issues_without_project_items": orphan_issues,
             "outcome_signals": outcome_signals,
             "rejected_merges": rejected,
             "degraded": degraded,
@@ -11459,9 +11587,6 @@ def _begin_preflight(
     out["gate"] = "ok"
     band = verdict.get("band")
     if band:
-        # #1199: `tight` is not a stop. It narrows what selection offers, and
-        # the numbers travel with it so a stop can say why without a second
-        # reading.
         out["budget_band"] = band
         out["budget"] = next(
             ({key: window.get(key) for key in (
@@ -11470,6 +11595,16 @@ def _begin_preflight(
              for window in verdict.get("windows", ()) if window.get("band")),
             {},
         )
+        if band == "tight":
+            # #1269 (Nate, 2026-09-21): a tight budget stops every lane, the
+            # same as `over`. The ladder decides only what goes first once the
+            # projection falls back under the cap or the window resets. #1199
+            # had read `tight` as an ordering rule and let Broken, Maintenance
+            # and pinned work through; on a board that is mostly Broken that
+            # was no brake at all, measured at $50 a day either side of it.
+            out.update(gate="tight", do="stop",
+                       why=_tight_budget_why(out, now))
+            return out, None
     if reading.get("unmetered"):
         # Say so rather than letting ``gate: ok`` imply a budget was checked.
         # Preserve the generic future-provider exception explicitly rather than
@@ -11561,36 +11696,6 @@ def _record_begin_reserve(agent: str, run: Optional[str], why: object) -> None:
     print("funnel: skipped-api-reserve: {}".format(note), file=sys.stderr)
 
 
-def budget_essential_refs(items: Sequence[Item]) -> Set[str]:
-    """The work that keeps running while the Muse budget is tight (#1199).
-
-    The ladder decides, as Nate chose on 2026-09-21 when asked whether a tight
-    week should protect member-repo work instead: anything in a preempting
-    class, anything that blocks such work (the same inheritance the ticket
-    order uses), and anything under a pinned project. Everything else waits
-    until the projection falls back under the cap or the window resets.
-    """
-    by_ref = {item.ref: item for item in items}
-    descendants = dependency_descendants(items)
-    essential: Set[str] = set()
-    for ref, item in by_ref.items():
-        if any(
-            effective_class(by_ref[related], by_ref) in PREEMPTING_CLASSES
-            for related in {ref} | descendants.get(ref, set())
-        ):
-            essential.add(ref)
-            continue
-        seen: Set[str] = set()
-        current: Optional[Item] = item
-        while current is not None and current.ref not in seen:
-            if current.pinned:
-                essential.add(ref)
-                break
-            seen.add(current.ref)
-            current = by_ref.get(current.parent or "")
-    return essential
-
-
 def _tight_budget_why(out: Mapping[str, object], now: datetime) -> str:
     """One line a person can act on: the numbers, and what still runs."""
     budget = out.get("budget") or {}
@@ -11608,8 +11713,9 @@ def _tight_budget_why(out: Mapping[str, object], now: datetime) -> str:
             datetime.fromtimestamp(float(runs_out_at), timezone.utc)
             .strftime("%Y-%m-%d %H:%MZ")))
     return (
-        "tight: {}; only Broken, Maintenance and pinned work until the rate "
-        "falls or the window resets".format(", ".join(parts) or "budget")
+        "tight: {}; every lane waits until the rate falls or the window "
+        "resets, then the ladder decides what goes first".format(
+            ", ".join(parts) or "budget")
     )
 
 
@@ -11662,10 +11768,6 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if reading is None:
         print(json.dumps(out, indent=2))
         return 0
-    tight_budget = out.get("budget_band") == "tight"
-    essential_refs: Set[str] = (
-        budget_essential_refs(items) if tight_budget else set()
-    )
 
     if _detail_loader is not None and not begin_uses_ticket_path(
         agent, tier, caller_role
@@ -11758,19 +11860,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             str(entry["ref"]) for entry in reconciled_merges
             if entry.get("result") == "error" and entry.get("ref")
         )
-        # #1199: while the budget is tight the ladder's urgent work is all
-        # that is offered. The shared order is untouched; the rest is passed
-        # over exactly as a recently claimed ticket is.
-        budget_withheld: Set[str] = set()
-        if tight_budget:
-            budget_withheld = {
-                item.ref for item in items
-                if item.parent and item.ref not in essential_refs
-            }
         begin_backed_off = _backed_off_work(items, now)
         ticket = next_ticket_for_tier(
             items, now, tier=tier, blocked=blocked,
-            excluded=set(budget_withheld),
             agent=agent,
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
@@ -11802,7 +11894,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             recently_claimed.add(ticket.ref)
             ticket = next_ticket_for_tier(
                 items, now, tier=tier, blocked=blocked,
-                excluded=recently_claimed | budget_withheld,
+                excluded=recently_claimed,
                 agent=agent,
                 repo_readiness=repo_readiness,
                 pr_facts=pr_facts,
@@ -11834,20 +11926,6 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     for row in sorted(withheld_rows,
                                       key=lambda row: str(row["ref"]))
                 ]
-        if ticket is None and budget_withheld and not out.get("why"):
-            # Say so only when the budget is the reason: a ticket the ladder
-            # would have offered is being held back. With nothing startable
-            # either way this stays an ordinary empty poll.
-            unrestricted = next_ticket_for_tier(
-                items, now, tier=tier, blocked=blocked,
-                excluded=set(recently_claimed),
-                agent=agent,
-                repo_readiness=repo_readiness,
-                pr_facts=pr_facts,
-                backed_off=begin_backed_off,
-            )
-            if unrestricted is not None:
-                out.update(gate="tight", why=_tight_budget_why(out, now))
         if ticket is None:
             holder = lock_holder(items, now, pr_facts=pr_facts)
             withheld = readiness_blockers(
@@ -11947,25 +12025,6 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
 
     pending = awaiting_breakdown(items) if breakdown else []
     shape_item = shapeable_idea(items, tier, reading)
-    budget_held = 0
-    if tight_budget:
-        # #1199: the same rule as the ticket path, for every job type. A
-        # review's ref is its ticket, so a PR under a Broken or pinned project
-        # is still read; an idea or plan is judged by its own class and pin.
-        kept_reviews = [
-            entry for entry in queue if entry.get("ref") in essential_refs
-        ]
-        kept_pending = [
-            entry for entry in pending if entry.ref in essential_refs
-        ]
-        budget_held = (
-            (len(queue) - len(kept_reviews))
-            + (len(pending) - len(kept_pending))
-        )
-        queue, pending = kept_reviews, kept_pending
-        if shape_item is not None and shape_item.ref not in essential_refs:
-            shape_item = None
-            budget_held += 1
     review = _queue_candidate(queue, review_class_of)
     breakdown_item = _queue_candidate(
         pending, lambda entry: getattr(entry, "klass", None))
@@ -12030,12 +12089,6 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 work={"ref": item.ref, "url": item.url,
                       "title": item.title},
             )
-    elif budget_held:
-        # Work is waiting and the budget is why none of it is offered: say so
-        # with the numbers, as a hold, not as an empty funnel (#1199).
-        out.update(do="stop", gate="tight",
-                   why=_tight_budget_why(out, now),
-                   budget_held=budget_held)
     else:
         out.update(
             do="stop",
@@ -13604,6 +13657,23 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
                 if main_ci is _BRIEF_UNAVAILABLE:
                     main_ci = None
+                # Live per-repo read, computed here for the same reason as the
+                # three above: cmd_brief stays pure over its arguments and a
+                # fixture brief reports null — unknown — rather than an empty
+                # list that would read as "nothing outside the Project".
+                orphans = _brief_timed(
+                    "member_issues_without_project_items",
+                    lambda: _brief_read(
+                        "member_issues_without_project_items",
+                        lambda: member_issues_without_project_items(items),
+                        missing,
+                    ),
+                    timings,
+                    degraded,
+                    deadline=deadline,
+                )
+                if orphans is _BRIEF_UNAVAILABLE:
+                    orphans = None
                 # Keep the existing brief JSON as the command's stdout. The
                 # display snapshot is a separate, best-effort side effect and
                 # must not change what callers parse or whether the command
@@ -13624,6 +13694,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             outcome_signals=outcome_signals,
                             portfolio_metrics=portfolio_metrics,
                             main_ci=main_ci,
+                            orphan_issues=orphans,
                         )
                 finally:
                     output = brief_stdout.getvalue()

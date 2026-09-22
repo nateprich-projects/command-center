@@ -499,27 +499,29 @@ a wall; the brakes need to be applied ASAP and prioritization needs to happen AS
 weekly window at the last 72 hours' spending rate (#1198):
 
 - **`ok`**: everything runs.
-- **`tight`**: the projection passes 100 percent. `begin` offers only work in a
-  preempting class (`Broken`, `Maintenance`), work that blocks such work, and work
-  under a pinned project, for every job type: review, breakdown, shape and
-  implementation. Everything else waits until the rate falls or the window resets.
-  When the budget is the reason a run has nothing to do, the stop says so with the
-  numbers and is recorded as `skipped-over-pace`, not as an empty funnel (#1199).
+- **`tight`**: the projection passes 100 percent. Every lane stops, before any
+  Project read, exactly as under `over`; the stop says so with the numbers and is
+  recorded as `skipped-over-pace`, not as an empty funnel. Work resumes when the
+  projection falls back under the cap or the window resets, and then the ladder
+  decides what goes first (#1269, Nate 2026-09-21: *"The brake should apply to ALL
+  work. The ladder just determines what goes first when the brake is let up."*).
 - **`over`**: used plus the session reserve passes 100 percent. The flat ceiling,
   unchanged, and still the only band that stops a run outright.
 
 The rule the routines state, that a run exits at once when over the pace line, is
-unchanged: `over` is that line. `tight` is an ordering rule inside `funnel.py`, where
-ordering belongs.
+unchanged: `over` is that line, and `tight` is the same stop taken earlier. The ladder
+is an ordering rule, and ordering applies to what runs, never to whether anything runs.
 
 _Rejected: the proportional floor-to-target line Claude and Codex use. It keeps room
 on a subscription Nate shares; Muse's plan is flat and used by nothing else, so budget
 left at the reset is worth nothing, a line throttles an early burst in a week that
 would end far under the cap, and it reads healthy at day five with a rate two days
-from the wall. Rejected: protecting member-repo work ahead of command-center's own
-Broken tickets when tight. Nate was asked exactly that on 2026-09-21, with 20 of the
-28 startable tickets being command-center's own, and chose the ladder. Rejected: a
-one-day rate; daily totals swung fourfold in the window that ended 2026-09-20._
+from the wall. Rejected: a one-day rate; daily totals swung fourfold in the window
+that ended 2026-09-20. Rejected, after being built and measured (#1199, live for
+eight hours on 2026-09-21): shedding by class under `tight`, so that Broken,
+Maintenance and pinned work kept running. On a board that is mostly Broken it was no
+brake: spend ran at $50 a day on both sides of it, and the account panel read 70
+percent of the week spent by 20:12 PDT with five days left._
 
 ## Scope and membership
 

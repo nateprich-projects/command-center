@@ -124,11 +124,17 @@ def test_collect_fetches_the_parent_plan_and_open_pr_verdict(monkeypatch):
         },
     )
     monkeypatch.setattr(implement, "fetch_prior_run", lambda number, agent: {"ok": True})
+    # The packet now also carries the target repo's AGENTS.md (#1256); this
+    # test is about the plan and verdict reads, so stub that one.
+    monkeypatch.setattr(
+        implement, "fetch_agents_md", lambda repo: ("# Rules\n", False, False)
+    )
 
     found = implement.collect(REPO, 42)
     assert found["plan"]["ref"] == REPO + "#7"
     assert found["verdict"]["blocking"] == ["fix the fixture"]
     assert found["prior_run"] == {"ok": True}
+    assert found["agents_md"] == "# Rules\n"
 
 
 def cross_repo_ticket():

@@ -952,9 +952,11 @@ def test_class_assignment_dump_is_sorted_and_skips_unassigned_items(monkeypatch)
     )
 
 
-def test_doctor_includes_class_assignment_dump_with_loaded_items(monkeypatch):
+def test_doctor_includes_class_assignment_dump_with_loaded_items(
+        tmp_path, monkeypatch):
     stub_heartbeat_checks(monkeypatch)
     stub_github_checks(monkeypatch)
+    stub_muse_scan(monkeypatch, tmp_path)
 
     checks = funnel.doctor_checks(items=[
         funnel.Item(
@@ -969,9 +971,11 @@ def test_doctor_includes_class_assignment_dump_with_loaded_items(monkeypatch):
     assert checks[-3].found == "owner/repo#1 | issue number 1 | Class Broken"
 
 
-def test_doctor_reports_unparseable_block_comments_with_loaded_items(monkeypatch):
+def test_doctor_reports_unparseable_block_comments_with_loaded_items(
+        tmp_path, monkeypatch):
     stub_heartbeat_checks(monkeypatch)
     stub_github_checks(monkeypatch)
+    stub_muse_scan(monkeypatch, tmp_path)
 
     checks = funnel.doctor_checks(items=[
         funnel.Item(

@@ -5397,24 +5397,35 @@ MUSE_SCAN_ROOTS = (
     CHECKOUT_ROOT,
     CLAUDE_DIR / "command-center-run",
     pathlib.Path.home() / "workbench",
-    pathlib.Path.home() / "code" / "jeffy-finance-agent",
     pathlib.Path.home() / "private" / "career-toolset",
+    pathlib.Path.home() / ".local" / "bin",
 )
 
-#: Globbed roots, relative to home, in the installed-agent layout.
-MUSE_SCAN_GLOBS = (".local/share/*/checkout",)
+#: Globbed roots, relative to home. The installed-agent layout, plus the
+#: loose checkouts under ``~/code``.
+MUSE_SCAN_GLOBS = (".local/share/*/checkout", "code/*")
 
 #: Only these are read. A `muse exec` lives in a script, and walking every
 #: file in every checkout would read data, caches and vendored trees.
+#:
+#: The empty string is the extensionless executable, which is how the
+#: runners here and `ff-operate` are written. **Not covered, and say so
+#: rather than let a reader assume otherwise:** `.bash`, `.zsh`, `.rb`,
+#: `.pl`, `.js`, `.ts`, workflow YAML, and plists — a plist could not
+#: match in any case, since `<string>muse</string><string>exec</string>`
+#: has no adjacency the patterns recognise.
 MUSE_SCAN_SUFFIXES = (".sh", ".py", "")
 
 #: Directories never descended into. ``tests`` is here for a different
 #: reason than the rest: a test that asserts on an invocation contains the
 #: text of one without ever running it, and this repo's own fixtures for
 #: this very check would otherwise be reported. A test is not a call site.
-#: The cost is that a test helper which genuinely shells out to Muse goes
-#: unseen; that is a narrower hole than the noise it buys off, and such a
-#: helper has a larger problem than its model flag.
+#:
+#: **The cost, stated as what the code does rather than what was
+#: intended:** this skips *any path component* named ``tests``, so a
+#: production script that happens to live under one is invisible to the
+#: check — not merely a test helper that shells out to Muse. Nothing on
+#: this machine is in that position today.
 MUSE_SCAN_SKIP_DIRS = frozenset({
     ".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache",
     ".pytest_cache", "site-packages", ".tox", "dist", "build", "tests",
@@ -5427,27 +5438,55 @@ MUSE_SCAN_SKIP_FILE_RE = re.compile(r"\A(?:test_.*|.*_test)\.py\Z")
 #: A file larger than this is not a script.
 MUSE_SCAN_MAX_BYTES = 512 * 1024
 
-#: The start of a `muse exec` invocation, in the three forms this codebase
-#: and its siblings actually write: a bare `muse exec`, a shell variable
-#: holding the binary path, and a Python argv list.
+#: A `muse exec` invocation written as a shell command: a bare `muse`, or
+#: a variable holding the binary path, followed by the `exec` subcommand.
 #:
 #: The trailing lookahead is what separates an invocation from prose. Both
-#: runners log `"muse exec failed (exit $status)"`, and three test files
-#: assert on that sentence; without it this check reports seven call sites
-#: that do not exist and buries the one that does. A real invocation is
-#: followed by a flag, a quoted argument, a variable, a line continuation,
-#: an argv comma, or the end of the line — never by a bare English word.
+#: runners log `"muse exec failed (exit $status)"`; without it this check
+#: reported fourteen call sites that do not exist and buried the one that
+#: does. A real invocation is followed by a flag, a quoted argument, a
+#: variable, a continuation, a redirect, a pipe, a separator, or the end of
+#: the line — never by a bare English word.
+#:
+#: **The cost of that rule, stated plainly:** `muse exec prompt.txt`, with a
+#: positional prompt and no flags, is indistinguishable from prose by this
+#: test and is not reported. Admitting a bare word after `exec` re-admits
+#: every "muse exec failed" sentence in the tree, which is the noise that
+#: hides real findings. The gap is real and narrow; it is not "catches
+#: anything added next".
 MUSE_EXEC_RE = re.compile(
     r"""(?x)
     (?:
         (?: \bmuse \s+ exec \b )
       | (?: (?:"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)
             \s+ exec \b )
-      | (?: [A-Za-z_][A-Za-z0-9_]* \s*,\s* ["\']exec["\'] )
     )
-    (?= \s* (?: $ | [-\\"\',$(\[] ) )
+    (?= \s* (?: $ | \d+ [<>] | [-\\"\',$(\[|&;<>] ) )
     """
 )
+
+#: The same invocation written as a Python argv list, in both spellings
+#: that occur: a constant holding the binary (`[MUSE_COMMAND, "exec"]`) and
+#: the literal (`["muse", "exec"]`). The literal form is the more idiomatic
+#: one and was missed by the first draft — career-agent's scorer used the
+#: constant, so the one real finding on this machine was caught by luck of
+#: spelling.
+#:
+#: Anchoring on the opening bracket or comma is not cosmetic. Starting the
+#: alternative at a bare word class makes the match quadratic in the length
+#: of any word-character run: a measured 28s on a 32 KB run and 7m23s on a
+#: 128 KB one, against a 512 KB per-file cap. The anchor removes the
+#: blowup and most of the routine scan cost with it.
+MUSE_ARGV_RE = re.compile(
+    r"""(?x)
+    [\[(,] \s*
+    (?: ["\'] [^"\']* muse [^"\']* ["\'] | [A-Za-z_][A-Za-z0-9_]* )
+    \s*,\s* ["\']exec["\']
+    """
+)
+
+#: Quoted spans, for blanking string literals before brackets are counted.
+MUSE_LITERAL_RE = re.compile(r"""(?s)"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'""")
 
 #: How far a single invocation may run. A bash continuation or a Python
 #: argv list is a handful of lines; this only stops a malformed file from
@@ -5460,43 +5499,106 @@ MUSE_MODEL_PIN_FIX = (
 )
 
 
-def _muse_statement(lines: Sequence[str], start: int) -> str:
-    """The full text of the invocation beginning on line ``start``.
+def _muse_blank_literals(line: str) -> str:
+    """``line`` with the inside of every quoted span blanked.
 
-    A `muse exec` is written across several lines in both languages this
-    scans: bash with trailing backslashes, Python as an argv list. Reading
-    only the matched line would report every multi-line call site as
-    unpinned, so the statement is followed to its end before `--model` is
-    looked for.
+    Offsets and the quote characters survive, so a caller can ask both
+    "is this bracket structure?" and "did this match start inside a
+    string?" — and `"$MUSE_BIN" exec`, whose match begins *at* the quote,
+    is correctly not the second one.
+
+    Brackets are counted on this, never on the raw line. A parenthesis
+    inside a prompt string is not structure, and counting it was how the
+    first draft *cleared* a genuinely unpinned call: an unbalanced `(` in
+    the prompt ran the statement on until it swallowed an unrelated
+    `--model` three lines later, and the finding vanished. A check that
+    launders a real finding is worse than one that misses it.
+    """
+    return MUSE_LITERAL_RE.sub(
+        lambda match: match.group(0)[0]
+        + " " * (len(match.group(0)) - 2)
+        + match.group(0)[-1],
+        line,
+    )
+
+
+def _muse_code_line(line: str) -> str:
+    """``line`` with any trailing comment removed.
+
+    Documentation and commented-out examples name `muse exec` throughout
+    this tree, and reporting those is how a real finding gets scrolled
+    past. The `#` is located on the literal-blanked line, so a `#` inside
+    a string does not truncate real code.
+
+    Only `#` counts. The scanned suffixes are shell and Python, where
+    `//` is not a comment — treating it as one silently ate every
+    invocation written after a URL on the same line.
+    """
+    position = _muse_blank_literals(line).find("#")
+    return line if position == -1 else line[:position]
+
+
+def _muse_statement(lines: Sequence[str], start: int) -> str:
+    """The text of the invocation beginning on line ``start``.
+
+    A `muse exec` is written across several lines in both scanned
+    languages: bash with trailing backslashes, Python as an argv list.
+    Reading only the matched line would report every multi-line call site
+    as unpinned.
+
+    The window follows three signals, all measured on the blanked line so
+    that string contents cannot move them: a bracket still open, a
+    trailing backslash, and a trailing comma — the last because a match
+    can land *inside* an already-open list, where the depth this function
+    can see starts at zero. It ends on the line closing the enclosing
+    bracket, inclusive.
+
+    Comments are stripped from what it returns, so a `# TODO: pass
+    --model` cannot read as a pin.
     """
     collected = []
     depth = 0
     for offset in range(min(MUSE_STATEMENT_MAX_LINES, len(lines) - start)):
-        line = lines[start + offset]
-        collected.append(line)
-        stripped = line.rstrip()
-        depth += line.count("[") + line.count("(") - \
-            line.count("]") - line.count(")")
-        if stripped.endswith("\\"):
-            continue
-        if depth > 0:
+        code = _muse_code_line(lines[start + offset])
+        collected.append(code)
+        blanked = _muse_blank_literals(code).rstrip()
+        depth += (blanked.count("[") + blanked.count("(")
+                  - blanked.count("]") - blanked.count(")"))
+        if depth < 0:
+            break
+        if blanked.endswith("\\") or blanked.endswith(",") or depth > 0:
             continue
         break
     return "\n".join(collected)
 
 
-def _muse_code_line(line: str) -> str:
-    """The part of ``line`` outside a comment or a Markdown-ish quote.
+def _muse_invocation_on(code: str) -> bool:
+    """Whether ``code`` starts a `muse exec` invocation rather than says so.
 
-    Documentation and commented-out examples name `muse exec` all over this
-    repo. Reporting those would make the check noise, and noise is how a
-    real finding gets scrolled past.
+    The shell form is rejected when the match begins *inside* a string
+    literal, which is the one prose shape the trailing lookahead cannot
+    see: ``USAGE = "usage: muse exec --json <prompt>"`` is followed by a
+    flag and reads exactly like a call.
+
+    Two things that are not "inside": a match beginning *at* the quote,
+    which is `"$MUSE_BIN" exec`, the shape both runners use; and a string
+    handed to `sh -c`, which is a command however it is quoted.
+
+    The argv form is matched on the raw text, because its `"exec"` is
+    itself a string literal.
     """
-    for marker in ("#", "//"):
-        position = line.find(marker)
-        if position != -1:
-            line = line[:position]
-    return line
+    spans = [(match.start(), match.end())
+             for match in MUSE_LITERAL_RE.finditer(code)]
+    for match in MUSE_EXEC_RE.finditer(code):
+        start = match.start()
+        enclosing = next(
+            ((begin, finish) for begin, finish in spans
+             if begin < start < finish), None)
+        if enclosing is None:
+            return True
+        if code[:enclosing[0]].rstrip().endswith("-c"):
+            return True
+    return bool(MUSE_ARGV_RE.search(code))
 
 
 def muse_unpinned_invocations(
@@ -5512,7 +5614,7 @@ def muse_unpinned_invocations(
     value against the allowlist: the allowlist protects the call sites that
     exist today, and this catches the one added next.
     """
-    findings: List[str] = []
+    findings: List[Tuple[str, int]] = []
     for root in _muse_scan_roots(roots):
         for path in _muse_scan_files(root):
             try:
@@ -5521,13 +5623,14 @@ def muse_unpinned_invocations(
                 continue
             lines = text.splitlines()
             for index, line in enumerate(lines):
-                if not MUSE_EXEC_RE.search(_muse_code_line(line)):
+                code = _muse_code_line(line)
+                if not _muse_invocation_on(code):
                     continue
-                statement = _muse_statement(lines, index)
-                if "--model" in statement:
+                if "--model" in _muse_statement(lines, index):
                     continue
-                findings.append("{}:{}".format(path, index + 1))
-    return sorted(set(findings))
+                findings.append((str(path), index + 1))
+    return ["{}:{}".format(path, number)
+            for path, number in sorted(set(findings))]
 
 
 def _muse_scan_roots(

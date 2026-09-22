@@ -52,6 +52,8 @@ def test_zero_completed_steps_reads_as_an_infrastructure_stop(monkeypatch):
     assert row["verdict"] == funnel.MAIN_CI_INFRA
     assert row["sha"] == SHA
     assert row["job"] == "test"
+    assert row["job_id"] == 106173463211
+    assert row["run_id"] == 35546576274
     assert "zero completed steps" in row["reason"]
 
 

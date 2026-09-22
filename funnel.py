@@ -4905,19 +4905,37 @@ MAIN_CI_INFRA = "infra"
 MAIN_CI_REAL = "real"
 
 
-def _main_ci_failed_job(run: Mapping[str, object]) -> Optional[str]:
-    """Name the first job in a run that did not succeed."""
+def _main_ci_failed_job(
+    run: Mapping[str, object]
+) -> Tuple[Optional[str], Optional[object]]:
+    """The first job in a run that did not succeed, as ``(name, id)``."""
     jobs = run.get("jobs")
     if not isinstance(jobs, list):
-        return None
+        return None, None
     for job in jobs:
         if not isinstance(job, Mapping):
             continue
         if _ci_result(job) in CI_SUCCESS_CONCLUSIONS:
             continue
         name = job.get("name")
+        identifier = job.get("id") or job.get("databaseId")
         if isinstance(name, str) and name.strip():
-            return name.strip()
+            return name.strip(), identifier
+        if identifier is not None:
+            return None, identifier
+    return None, None
+
+
+def _main_ci_attempt(run: Mapping[str, object]) -> Optional[int]:
+    """How many times this run has been attempted, if GitHub says."""
+    for key in ("run_attempt", "runAttempt", "attempt"):
+        value = run.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
     return None
 
 
@@ -4979,10 +4997,17 @@ def main_ci_row(repo: str) -> Optional[Dict[str, object]]:
             # is a red main to act on.
             return None
         reason = main_ci_infra_reason(run)
+        job_name, job_id = _main_ci_failed_job(run)
         return {
             "repo": repo,
             "sha": sha,
-            "job": _main_ci_failed_job(run),
+            "job": job_name,
+            "job_id": job_id,
+            "run_id": run.get("id") or run.get("databaseId"),
+            # A rerun raises the attempt count, so GitHub itself records
+            # whether this SHA has already had its one retry (#1220). No
+            # state file: the fact is already in the run.
+            "attempt": _main_ci_attempt(run),
             "verdict": MAIN_CI_INFRA if reason else MAIN_CI_REAL,
             "reason": reason or "no infrastructure signature in this failure",
         }
@@ -4993,6 +5018,115 @@ def main_ci_row(repo: str) -> Optional[Dict[str, object]]:
             "verdict": MAIN_CI_REAL,
             "reason": "could not read main CI for {}: {}".format(repo, exc),
         }
+
+
+#: What a retry attempt did, for the record it leaves and the row it returns.
+MAIN_CI_RETRIED = "retried"
+MAIN_CI_NOT_RETRIED = "not-retried"
+
+
+def main_ci_retry(
+    repo: str,
+    row: Optional[Mapping[str, object]] = None,
+    rerun: Optional[Callable[[Sequence[str]], object]] = None,
+) -> Optional[Dict[str, object]]:
+    """Rerun one main job that never really ran — once per SHA, never twice.
+
+    The narrow half of #1178: main stayed red for 2h12m on a run that died
+    when a self-hosted runner stopped answering, and the same SHA went green
+    on a manual rerun fifteen minutes later. Every merge waited in between,
+    because the merge gate reads main.
+
+    Four conditions, all of them refusals rather than retries:
+
+    - **`real` never retries.** Rerunning a genuine break burns runner time
+      and hides the signal, which is why the plan rejects retry-until-green.
+    - **One attempt only.** A rerun raises GitHub's own ``run_attempt``, so
+      the second red on a SHA is visible as attempt 2 and stays red for the
+      watch. That is the whole once-per-SHA mechanism: no state file, no
+      journal, no label — GitHub is the state, and it already records this.
+    - **An unreadable attempt count does not retry.** Without it there is no
+      way to tell a first failure from a second, and retrying blindly is how
+      a loop starts.
+    - **A green, running or absent main has nothing to retry.**
+
+    Returns the decision either way, so a caller can say what happened and
+    why. ``None`` only when there is no red main at all.
+    """
+    row = row if row is not None else main_ci_row(repo)
+    if row is None:
+        return None
+    decision = dict(row)
+    verdict = row.get("verdict")
+    attempt = row.get("attempt")
+    run_id = row.get("run_id")
+    job_id = row.get("job_id")
+
+    if verdict != MAIN_CI_INFRA:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="a real failure is not retried; it needs a person",
+        )
+        return decision
+    if not isinstance(attempt, int) or attempt < 1:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="could not read how many times this run was "
+                         "attempted, so a first failure and a second are "
+                         "indistinguishable",
+        )
+        return decision
+    if attempt > 1:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="already retried once on this SHA (attempt {}); "
+                         "a second red stays red".format(attempt),
+        )
+        return decision
+    if run_id is None:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="no run id to rerun",
+        )
+        return decision
+
+    command = ["gh", "run", "rerun", str(run_id), "--repo", str(repo)]
+    if job_id is not None:
+        command += ["--job", str(job_id)]
+    runner = rerun if rerun is not None else _run_gh
+    try:
+        result = runner(command, capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="rerun failed: {}".format(exc),
+        )
+        return decision
+    if getattr(result, "returncode", 0) != 0:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="rerun refused: {}".format(
+                (getattr(result, "stderr", "") or "").strip()
+            ),
+        )
+        return decision
+    decision.update(
+        retry=MAIN_CI_RETRIED,
+        retry_reason="infrastructure stop on attempt 1; reran {}".format(
+            row.get("job") or "the failed job"
+        ),
+    )
+    return decision
+
+
+def main_ci_retries(
+    repos: Optional[Sequence[str]] = None,
+    rerun: Optional[Callable[[Sequence[str]], object]] = None,
+) -> List[Dict[str, object]]:
+    """One retry decision per member repo whose main is red."""
+    names = list(repos) if repos is not None else member_repos()
+    rows = [main_ci_retry(repo, rerun=rerun) for repo in names]
+    return [row for row in rows if row is not None]
 
 
 def main_ci_json(repos: Optional[Sequence[str]] = None) -> List[Dict[str, object]]:
@@ -12995,6 +13129,15 @@ def main(argv: Optional[Sequence[str]] = None, *,
     sub.add_parser("ideas", help="captured ideas, flagged ones first")
     sub.add_parser(
         "doctor", help="check the local install and report actionable failures")
+    main_ci = sub.add_parser(
+        "main-ci",
+        help="each member repo's red main, as an infrastructure stop or a "
+             "real failure")
+    main_ci.add_argument(
+        "--retry", action="store_true",
+        help="rerun an infrastructure stop once per SHA; never a real "
+             "failure, and never a SHA already retried",
+    )
     show = sub.add_parser("show", help="everything needed to answer an item's gate")
     show.add_argument("ref", help="issue number, owner/repo#number, or URL")
     for verb, (frm, to, meaning) in ANSWERS.items():
@@ -13186,6 +13329,25 @@ def main(argv: Optional[Sequence[str]] = None, *,
         return serve_session(args.parent_pid)
     # Doctor keeps its fixed checks runnable when the Project cannot be loaded;
     # the data-dependent consistency check is added when that read succeeds.
+    if args.command == "main-ci":
+        rows = (
+            main_ci_retries() if args.retry else main_ci_json()
+        )
+        if not rows:
+            print("nothing — every member repo's main is green or still running")
+            return 0
+        for row in rows:
+            line = "{} {} {} — {}".format(
+                row["repo"], (row.get("sha") or "?")[:12],
+                row["verdict"], row["reason"],
+            )
+            if row.get("job"):
+                line += " (job {})".format(row["job"])
+            print(line)
+            if "retry" in row:
+                print("  {}: {}".format(row["retry"], row["retry_reason"]))
+        return 0
+
     if args.command == "doctor":
         return cmd_doctor()
     # The published snapshot is a local read by design: runners and routines

@@ -2545,12 +2545,26 @@ def answered_gates_body(body: str, answer: str, decider: str,
     """
     if not isinstance(body, str) or not body.strip():
         raise PlanWriteRefused("refusing the write: the plan body is empty")
-    match = GATES_LINE_RE.search(body)
-    if match is None:
+    matches = list(GATES_LINE_RE.finditer(body))
+    if not matches:
         raise PlanWriteRefused(
             "refusing the write: this body has no `- Gates:` line, so it is "
             "not a shaped plan and there is no question here to answer"
         )
+    if len(matches) > 1:
+        # Refusing rather than picking one. A plan may quote the Needs form
+        # while rejecting an alternative — `skills/shape` documents these
+        # lines verbatim, so a quoted `- Gates: …` in a Rejected section is
+        # an ordinary thing to write. Guessing first would rewrite the
+        # quotation and leave the real question open, and the confinement
+        # check could not tell: it strips every Gates line from both sides,
+        # so the wrong one moving looks exactly like the right one moving.
+        raise PlanWriteRefused(
+            "refusing the write: this body has {} `- Gates:` lines and "
+            "nothing here can tell which one is the question. Leave one, or "
+            "record the answer as a comment".format(len(matches))
+        )
+    match = matches[0]
     block = gates_answer_block(
         answer, decider, at=at, run=run, agent=agent)
     record = json.loads(block.split("```json\n", 1)[1].rsplit("\n```", 1)[0])

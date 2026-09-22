@@ -343,3 +343,28 @@ def test_a_body_without_a_gates_line_never_reaches_github(monkeypatch):
             "nateprich-projects/command-center#1167", ANSWER, "Nate")
 
     assert calls == []
+
+
+def test_two_gates_lines_are_refused_rather_than_guessed_between():
+    """A plan may quote the Needs form while rejecting an alternative —
+    `skills/shape` documents these lines verbatim. Rewriting the quotation
+    would leave the real question open, and the confinement check cannot
+    tell: it strips every Gates line from both sides, so the wrong one
+    moving looks exactly like the right one moving."""
+    quoting = PLAN.replace(
+        "- A label for quoted text: the label set is closed at two.",
+        "- Answering in the plan text, as in `- Gates: we decided offline`:\n"
+        "  invisible to every lane.\n"
+        "- Gates: we decided offline",
+    )
+
+    with pytest.raises(funnel.PlanWriteRefused) as refusal:
+        funnel.answered_gates_body(quoting, ANSWER, "Nate", at=AT)
+
+    assert "2 `- Gates:` lines" in str(refusal.value)
+
+
+def test_the_single_line_case_is_unaffected():
+    """The guard above must not have narrowed the ordinary path."""
+    assert funnel.parse_gates_answer(written()) is not None
+    assert len(gates_lines(written())) == 1

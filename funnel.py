@@ -1234,7 +1234,8 @@ def effective_shape_owner(origin_voice: Optional[str],
 
 def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],
                            override_target: Optional[str], *,
-                           needs_nate: bool, escalated: bool) -> bool:
+                           needs_nate: bool, escalated: bool,
+                           state: Optional[str] = None) -> bool:
     """Whether all conditions permit one unattended shaping transition.
 
     #77 supplies the plan booleans and #80 owns the transition. Keeping class,
@@ -1242,7 +1243,17 @@ def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],
     prevents origin from becoming a second gate that can drift from the
     existing self-approval rule. Authority signals remain advisory record
     data and are intentionally not a predicate term.
+
+    ``state`` is the issue's GitHub state, and a closed issue is never
+    self-approvable: advancing one to ``Ready`` puts it in the startable queue
+    with nothing able to close it again (#1206). It is widened here rather
+    than checked by a second predicate for the same reason the rest of the
+    rule lives in one place — a parallel eligibility test is a gate that can
+    drift. ``None`` means the caller has no state to offer and leaves the rule
+    exactly as it was.
     """
+    if state is not None and str(state).upper() != "OPEN":
+        return False
     return (
         klass in SELF_APPROVABLE_CLASSES
         and effective_shape_owner(origin_voice, override_target) == "agents"

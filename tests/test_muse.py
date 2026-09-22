@@ -456,7 +456,6 @@ def test_a_record_with_no_model_event_is_named_not_dropped(
 
     assert list(reading["by_model"]) == [usage.MUSE_MODEL_UNKNOWN]
     assert reading["by_model"][usage.MUSE_MODEL_UNKNOWN]["calls"] == 1
-    assert reading["models_without_a_card"] == [usage.MUSE_MODEL_UNKNOWN]
     assert reading["spent_dollars"] > 0
 
 
@@ -483,9 +482,60 @@ def test_the_ceiling_and_the_reserve_are_untouched():
 
 
 def test_the_rate_names_still_read_the_standard_card():
-    """The dashboard and the brief import these. They are a view of
-    muse_model's card, never a second copy of it."""
-    card = usage.muse_model.RATE_CARDS[STANDARD]
-    assert usage.MUSE_INPUT_RATE == card["input"] / 1_000_000
-    assert usage.MUSE_CACHED_INPUT_RATE == card["cached_input"] / 1_000_000
-    assert usage.MUSE_OUTPUT_RATE == card["output"] / 1_000_000
+    """The dashboard and the brief import these.
+
+    The literals are spelled out rather than derived from
+    `muse_model.RATE_CARDS`: comparing the implementation to itself
+    cannot fail, and would not notice the standard card moving. These
+    three numbers are the ones the $200 ceiling was calibrated against.
+    """
+    assert usage.MUSE_INPUT_RATE == 1.25 / 1_000_000
+    assert usage.MUSE_CACHED_INPUT_RATE == 0.15 / 1_000_000
+    assert usage.MUSE_OUTPUT_RATE == 4.25 / 1_000_000
+
+
+def test_the_breakdown_sums_to_the_gated_total(tmp_path, monkeypatch):
+    """The invariant that catches a record counted in one place and not
+    the other — which is how an under-read would look from outside."""
+    reading = _mixed_window(tmp_path, monkeypatch)
+
+    assert sum(row["dollars_at_standard"]
+               for row in reading["by_model"].values()) == \
+        pytest.approx(reading["spent_dollars"])
+    assert sum(row["calls"] for row in reading["by_model"].values()) == \
+        reading["windows"]["seven_day"]["calls"]
+
+
+def test_a_usage_line_mentioning_the_model_event_is_still_counted(
+        tmp_path, monkeypatch):
+    """`usage.py` contains the string `run.model.configured`, so a Muse
+    session that reads this file puts it in its own journal. A usage
+    record on such a line must not be filtered out as a model event:
+    dropping it under-reads the window, which is the direction that ends
+    at the provider's refusal."""
+    record = _muse_record(NOW - 80, input_tokens=1_000, output_tokens=100,
+                          usage_id="u1", run_id="run-a")
+    record["payload"]["event"]["record"]["note"] = "run.model.configured"
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_model_record(NOW - 100, "run-a", STANDARD),
+        record,
+    ])
+    reading = usage.read_muse(NOW)
+
+    assert reading["windows"]["seven_day"]["calls"] == 1
+    assert reading["spent_dollars"] > 0
+    assert reading["by_model"][STANDARD]["calls"] == 1
+
+
+def test_the_join_break_sentinel_is_not_reported_as_a_missing_card(
+        tmp_path, monkeypatch):
+    """Two different alarms. #1304 reads `models_without_a_card` for a
+    provider version bump; `by_model` already announces a broken join."""
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_record(NOW - 80, input_tokens=1_000, output_tokens=100,
+                     usage_id="u1", run_id="run-orphan"),
+    ])
+    reading = usage.read_muse(NOW)
+
+    assert usage.MUSE_MODEL_UNKNOWN in reading["by_model"]
+    assert reading["models_without_a_card"] == []

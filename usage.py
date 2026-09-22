@@ -542,20 +542,63 @@ def _muse_tokens(quantity: object) -> Optional[Tuple[float, float, float]]:
     return values[0], values[1], values[2]
 
 
+def _muse_rates(model: Optional[str]) -> Tuple[float, float, float]:
+    """``model``'s card as per-token rates: input, cached input, output.
+
+    Divided once here rather than per term in ``_muse_price``. Dividing
+    per term is a different float from multiplying by a pre-divided rate,
+    and this reader's output is compared against its own previous
+    readings; the difference is ~1 ULP a record and cancels in practice,
+    but "cancels in practice" is a worse guarantee than "is the same
+    arithmetic".
+    """
+    card = muse_model.rate_card(model)
+    return (card["input"] / 1_000_000,
+            card["cached_input"] / 1_000_000,
+            card["output"] / 1_000_000)
+
+
 def _muse_price(tokens: Tuple[float, float, float],
-                card: Dict[str, float]) -> float:
-    """Price one attribution's tokens at ``card``."""
+                rates: Tuple[float, float, float]) -> float:
+    """Price one attribution's tokens at per-token ``rates``."""
     fresh, cached, output = tokens
-    return ((fresh - cached) * card["input"] / 1_000_000
-            + cached * card["cached_input"] / 1_000_000
-            + output * card["output"] / 1_000_000)
+    return ((fresh - cached) * rates[0]
+            + cached * rates[1]
+            + output * rates[2])
 
 
-def _muse_cost(quantity: object) -> Optional[float]:
-    """Price one attribution at the standard card, or report unknown.
+def _muse_read_model(line: str, run_models: Dict[str, str]) -> None:
+    """Record a `run.model.configured` event's run-to-model mapping."""
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return
+    if not isinstance(record, dict):
+        return
+    payload = record.get("payload")
+    configured = payload.get("record") if isinstance(payload, dict) else None
+    if not isinstance(configured, dict):
+        return
+    stream = configured.get("run_stream")
+    run_id = stream.get("id") if isinstance(stream, dict) else None
+    model_id = configured.get("model_id")
+    if isinstance(run_id, str) and isinstance(model_id, str):
+        run_models[run_id] = model_id
 
-    **The gate prices everything here, whatever model actually ran**, and
-    that is deliberate rather than an oversight (#1302).
+
+def read_muse(now: float) -> Optional[Dict]:
+    """Price Muse provider calls in the provider's current weekly window.
+
+    Muse does not expose a scheduled-run quota endpoint. Its session journal is
+    the available source of truth: each provider ``goal_usage_attribution``
+    event carries the token quantities. Tool, reminder, and compaction
+    attribution events are deliberately excluded because they are not provider
+    calls. A provider event with an unreadable timestamp or quantity fails
+    closed rather than silently undercounting.
+
+    **The gated total prices everything at the standard card, whatever
+    model actually ran**, and that is deliberate rather than an oversight
+    (#1302).
 
     The $200 ceiling was calibrated from a 429 at $214.02 in a window
     where every session was on the standard model, and that anchored
@@ -570,23 +613,7 @@ def _muse_cost(quantity: object) -> Optional[float]:
     purpose. Leaving them at the standard card is what they cost here
     today, so the brake does not move; the only cost is forfeiting a
     discount nobody has measured yet. #1304 reads the panel and settles
-    it, and `by_model` below is what it reads.
-    """
-    tokens = _muse_tokens(quantity)
-    if tokens is None:
-        return None
-    return _muse_price(tokens, muse_model.RATE_CARDS[muse_model.STANDARD_MODEL])
-
-
-def read_muse(now: float) -> Optional[Dict]:
-    """Price Muse provider calls in the provider's current weekly window.
-
-    Muse does not expose a scheduled-run quota endpoint. Its session journal is
-    the available source of truth: each provider ``goal_usage_attribution``
-    event carries the token quantities needed for contributor-rate pricing.
-    Tool, reminder, and compaction attribution events are deliberately excluded
-    because they are not provider calls. A provider event with an unreadable
-    timestamp or quantity fails closed rather than silently undercounting.
+    it, and ``by_model`` is what it reads.
     """
     cutoff = muse_window_start(now)
     rate_cutoff = now - MUSE_RATE_LOOKBACK
@@ -612,27 +639,18 @@ def read_muse(now: float) -> Optional[Dict]:
             pending = []
             with open(path, errors="replace") as handle:
                 for line in handle:
-                    if "run.model.configured" in line:
-                        try:
-                            record = json.loads(line)
-                        except ValueError:
-                            continue
-                        if not isinstance(record, dict):
-                            continue
-                        payload = record.get("payload")
-                        configured = (payload.get("record")
-                                      if isinstance(payload, dict) else None)
-                        if not isinstance(configured, dict):
-                            continue
-                        stream = configured.get("run_stream")
-                        run_id = (stream.get("id")
-                                  if isinstance(stream, dict) else None)
-                        model_id = configured.get("model_id")
-                        if isinstance(run_id, str) and isinstance(
-                                model_id, str):
-                            run_models[run_id] = model_id
-                        continue
+                    # The usage test comes first, and a line that is a
+                    # usage attribution is never also read as a model
+                    # event. Testing the model marker first and skipping
+                    # on it would drop any usage record whose line merely
+                    # contained the string `run.model.configured` — and
+                    # this file now writes that string, so a Muse session
+                    # that reads `usage.py` puts it in its own journal.
+                    # Dropping a record under-reads the window, which is
+                    # the direction that ends at the provider's refusal.
                     if "goal_usage_attribution" not in line:
+                        if "run.model.configured" in line:
+                            _muse_read_model(line, run_models)
                         continue
                     try:
                         record = json.loads(line)
@@ -668,9 +686,9 @@ def read_muse(now: float) -> Optional[Dict]:
                               if isinstance(owner, dict) else None)
                     pending.append((recorded_at, tokens, run_id))
 
-            standard_card = muse_model.RATE_CARDS[muse_model.STANDARD_MODEL]
+            standard_rates = _muse_rates(muse_model.STANDARD_MODEL)
             for recorded_at, tokens, run_id in pending:
-                cost = _muse_price(tokens, standard_card)
+                cost = _muse_price(tokens, standard_rates)
                 if recorded_at >= rate_cutoff:
                     trailing += cost
                 if recorded_at < cutoff:
@@ -691,7 +709,7 @@ def read_muse(now: float) -> Optional[Dict]:
                 row["calls"] += 1
                 row["dollars_at_standard"] += cost
                 row["dollars_at_own_card"] += _muse_price(
-                    tokens, muse_model.rate_card(model_id))
+                    tokens, _muse_rates(model_id))
         except OSError:
             continue
 
@@ -765,9 +783,15 @@ def read_muse(now: float) -> Optional[Dict]:
         # Named rather than silently priced at the standard card. A
         # provider version bump to `muse-spark-1.4` would otherwise be
         # mispriced with nothing to read it from.
+        # The sentinel is deliberately not in here. "A model the
+        # provider published that we have no card for" and "the run-id
+        # join broke" are two different alarms, and #1304 reads this
+        # field; `by_model[MUSE_MODEL_UNKNOWN]` already announces the
+        # second one.
         "models_without_a_card": sorted(
             model_id for model_id in by_model
-            if model_id not in muse_model.RATE_CARDS),
+            if model_id != MUSE_MODEL_UNKNOWN
+            and model_id not in muse_model.RATE_CARDS),
     }
 
 

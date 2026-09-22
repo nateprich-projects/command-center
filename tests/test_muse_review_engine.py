@@ -424,8 +424,10 @@ MUSE_STUB = (
     "  run_dir=\"${prompt_file%/*}\"\n"
     "  {\n"
     "    printf 'dir %s\\n' \"$run_dir\"\n"
-    "    printf 'mode %s\\n' \"$(stat -f '%Lp' \"$run_dir\" 2>/dev/null \\\n"
-    "      || stat -c '%a' \"$run_dir\")\"\n"
+    # `find -perm 700` rather than `stat`: the mode flag is `-f` on BSD and
+    # `-c` on GNU, and this suite runs on both a Mac and Linux CI.
+    "    if [[ -n \"$(find \"$run_dir\" -maxdepth 0 -perm 700 2>/dev/null)\" ]]\n"
+    "    then printf 'owner_only yes\\n'; else printf 'owner_only no\\n'; fi\n"
     "    for entry in \"$run_dir\"/*; do printf 'entry %s\\n' \"${entry##*/}\"; done\n"
     "  } >> \"$MUSE_RUNDIR_PROBE\"\n"
     "fi\n"
@@ -1587,11 +1589,15 @@ def test_the_retry_reuses_the_model_it_resolved(tmp_path):
 def _probe(tmp_path, repo):
     """What the muse stub saw of the run directory while the run was live."""
     text = (repo / "rundir.probe").read_text()
-    lines = [line.split(" ", 1) for line in text.splitlines() if line]
+    # `partition`, not `split`: a probe line the stub could not fill must show
+    # up as an empty value in the assertion below, not as a ValueError three
+    # frames away from the thing that actually went wrong.
+    lines = [line.partition(" ") for line in text.splitlines() if line]
     return {
-        "dirs": [value for key, value in lines if key == "dir"],
-        "modes": [value for key, value in lines if key == "mode"],
-        "entries": sorted({value for key, value in lines if key == "entry"}),
+        "dirs": [tail for key, _, tail in lines if key == "dir"],
+        "owner_only": [tail for key, _, tail in lines if key == "owner_only"],
+        "entries": sorted({tail for key, _, tail in lines if key == "entry"}),
+        "raw": text,
     }
 
 
@@ -1635,7 +1641,7 @@ def test_the_run_directory_is_readable_only_by_its_owner(tmp_path):
     # per-file 600 left the name, size and timing of every review legible to
     # any other account on the machine.
     probe = _probe(tmp_path, repo)
-    assert probe["modes"] == ["700"]
+    assert probe["owner_only"] == ["yes"], probe["raw"]
     assert pathlib.Path(probe["dirs"][0]) != tmp_path
 
 

@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Outcome-record derivation (#1288, under #1272). Once a day it derives one
+  append-only outcome record for every closed ticket in every member
+  repository and appends the new ones to outcomes.jsonl on the heartbeat
+  branch.
+
+  Why this exists: outcomes.py derive had no scheduler at all between
+  2026-09-13 and this job. Every signal drawn from outcomes.jsonl — the
+  rework rate, first-pass approval, cost per merged PR — was therefore as
+  stale as whenever somebody last ran the command by hand, while reading as
+  current. An unscheduled derivation is worse than an absent one, because the
+  numbers still render.
+
+  It passes no repository list; the all-members flag asks GitHub which repositories
+  carry the funnel topic, so a repository that opts in is scanned without
+  anyone remembering to edit this file; see AGENTS.md, "GitHub is the state".
+  The flag fails closed when that answer is empty rather than deriving
+  nothing and exiting 0.
+
+  A Python script on a timer, not a headless prompt: AGENTS.md's
+  in-app-scheduling rule covers Claude Code and Codex prompt execution and
+  does not reach this, which is the same reading the publisher (#652) and the
+  dashboard deploy (#653) already run under.
+
+  StartCalendarInterval at 03:20, not StartInterval: daily is a calendar
+  notion, and 03:20 is off the Muse lanes' :00/:05/:15 slots, off the 07:00
+  member-repo dailies, and inside the window when nothing else contends for
+  the GraphQL budget this job spends.
+
+  The canonical copy lives here in the repo. launchd refuses a symlinked
+  plist (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so
+  the installed file is a copy and tests/test_launchd_drift.py compares them.
+
+  Note for editors: XML forbids a double hyphen inside a comment. Use an em
+  dash or a semicolon; plutil accepts the double hyphen and plistlib rejects
+  it, so a file can lint clean and still be unparseable.
+
+  After editing, re-install from a Terminal in the logged-in console session:
+    cp launchd/com.nateprich.command-center-outcomes-derive.plist ~/Library/LaunchAgents/
+    launchctl bootout gui/$(id -u)/com.nateprich.command-center-outcomes-derive
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nateprich.command-center-outcomes-derive.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nateprich.command-center-outcomes-derive</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/nateprich/.claude/command-center-run/outcomes.py</string>
+        <string>derive</string>
+        <string>--all-members</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>20</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-outcomes-derive.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-outcomes-derive.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/nateprich/.local/bin</string>
+        <key>HOME</key>
+        <string>/Users/nateprich</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

@@ -579,3 +579,52 @@ def test_remote_append_uses_sha_and_retries_a_contents_conflict(monkeypatch):
     assert outcomes.append_records([existing, addition]) == 1
     assert any("sha=new" in command for command in commands[-1])
     assert len(commands) == 4
+
+
+def test_all_members_resolves_the_topic_and_never_a_list_in_the_schedule(
+        monkeypatch):
+    """#1288: the daily schedule passes no repository, so a repository that
+    opts into the funnel topic is scanned without anyone editing a plist.
+    AGENTS.md: GitHub is the state; `funnel.member_repos` is "never an
+    allowlist"."""
+    monkeypatch.setattr(
+        funnel, "member_repos",
+        lambda: ["nateprich-projects/The-League",
+                 "nateprich-projects/command-center"])
+
+    assert outcomes.resolve_derive_repos(None, True) == [
+        "nateprich-projects/The-League",
+        "nateprich-projects/command-center",
+    ]
+
+
+def test_all_members_refuses_to_derive_nothing_and_report_success(monkeypatch):
+    """Fail closed. A scheduled run that resolved no repositories would append
+    no records and exit 0, and the gap would be indistinguishable from a quiet
+    day — the same reason `usage.py` refuses to turn an unknown count into a
+    zero."""
+    monkeypatch.setattr(funnel, "member_repos", lambda: [])
+
+    with pytest.raises(outcomes.OutcomeError) as caught:
+        outcomes.resolve_derive_repos(None, True)
+
+    assert "refusing to derive nothing" in str(caught.value)
+
+
+def test_all_members_and_an_explicit_repo_is_refused_rather_than_merged(
+        monkeypatch):
+    """Silently taking the union would make the schedule's behaviour depend on
+    a flag nobody passed; silently preferring one would drop the other."""
+    monkeypatch.setattr(funnel, "member_repos", lambda: ["owner/repo"])
+
+    with pytest.raises(outcomes.OutcomeError) as caught:
+        outcomes.resolve_derive_repos(["owner/other"], True)
+
+    assert "do not also pass" in str(caught.value)
+
+
+def test_without_all_members_the_explicit_repos_and_the_default_are_unchanged():
+    """The existing callers keep their behaviour: #1288 adds a flag, it does
+    not change what `derive` does when the flag is absent."""
+    assert outcomes.resolve_derive_repos(["a/b", "c/d"], False) == ["a/b", "c/d"]
+    assert outcomes.resolve_derive_repos(None, False) == [outcomes.REPO]

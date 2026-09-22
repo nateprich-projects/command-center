@@ -38,10 +38,14 @@ REMOTE_CONTROL_NAME = "com.nateprich.command-center-remote-control.plist"
 PUBLISHER_NAME = "com.nateprich.command-center-funnel-publisher.plist"
 #: The dashboard auto-deploy (#653). A five-minute poll in the keeper mould.
 DEPLOY_NAME = "com.nateprich.command-center-funnel-deploy.plist"
+#: The daily outcome-record derivation (#1288). A once-a-day Python run, not a
+#: routine schedule; outcomes.py had no scheduler at all before it.
+OUTCOMES_NAME = "com.nateprich.command-center-outcomes-derive.plist"
 NAMES = MUSE_SCHEDULE_NAMES + [
-    KEEPER_NAME, REMOTE_CONTROL_NAME, PUBLISHER_NAME, DEPLOY_NAME]
+    KEEPER_NAME, REMOTE_CONTROL_NAME, PUBLISHER_NAME, DEPLOY_NAME,
+    OUTCOMES_NAME]
 INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [
-    KEEPER_NAME, PUBLISHER_NAME, DEPLOY_NAME]
+    KEEPER_NAME, PUBLISHER_NAME, DEPLOY_NAME, OUTCOMES_NAME]
 
 
 def console_reload_hint(name):
@@ -340,3 +344,33 @@ def test_the_deploy_logs_to_its_own_files():
     assert plist["StandardErrorPath"] == (
         "/Users/nateprich/Library/Logs/command-center-funnel-deploy.err.log"
     )
+
+
+def test_the_outcomes_derivation_runs_daily_and_scans_every_member_repo():
+    """#1288: `outcomes.py derive` had no scheduler between 2026-09-13 and this
+    job, so every signal drawn from `outcomes.jsonl` was as stale as the last
+    hand-run while still rendering as current.
+
+    Two things are asserted rather than the schedule alone. It must carry **no**
+    repository argument: the repositories come from the funnel topic at run time
+    (`--all-members`), because AGENTS.md's "GitHub is the state" rules out a
+    second list kept in a plist, and `funnel.member_repos` calls itself "never
+    an allowlist". And it must be a calendar schedule: daily is a calendar
+    notion, and `StartInterval` would restart the run 86,400 seconds after
+    whenever launchd last felt like starting it.
+    """
+    import plistlib
+
+    with (ROOT / "launchd" / OUTCOMES_NAME).open("rb") as handle:
+        plist = plistlib.load(handle)
+
+    args = plist["ProgramArguments"]
+    assert args[0] == "/usr/bin/python3"
+    assert args[1].endswith("/outcomes.py")
+    assert args[2] == "derive"
+    assert "--all-members" in args
+    assert "--repo" not in args, args
+    assert not any(a.startswith("/Volumes/") for a in args), args
+
+    assert plist["StartCalendarInterval"] == {"Hour": 3, "Minute": 20}
+    assert "StartInterval" not in plist

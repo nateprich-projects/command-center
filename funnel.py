@@ -36,8 +36,8 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
-from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
-                    Sequence, Set, Tuple)
+from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping,
+                    Optional, Sequence, Set, Tuple)
 
 import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
@@ -5388,6 +5388,220 @@ def check_member_repo(repo: str) -> Check:
     )
 
 
+#: Where a `muse exec` invocation can live on this machine. The explicit
+#: entries are the checkouts that do not follow the installed-agent layout;
+#: the glob catches the ones that do, so an agent installed next month is
+#: scanned without this list being edited. A path that is not present is
+#: skipped: not every machine holds every checkout.
+MUSE_SCAN_ROOTS = (
+    CHECKOUT_ROOT,
+    CLAUDE_DIR / "command-center-run",
+    pathlib.Path.home() / "workbench",
+    pathlib.Path.home() / "code" / "jeffy-finance-agent",
+    pathlib.Path.home() / "private" / "career-toolset",
+)
+
+#: Globbed roots, relative to home, in the installed-agent layout.
+MUSE_SCAN_GLOBS = (".local/share/*/checkout",)
+
+#: Only these are read. A `muse exec` lives in a script, and walking every
+#: file in every checkout would read data, caches and vendored trees.
+MUSE_SCAN_SUFFIXES = (".sh", ".py", "")
+
+#: Directories never descended into. ``tests`` is here for a different
+#: reason than the rest: a test that asserts on an invocation contains the
+#: text of one without ever running it, and this repo's own fixtures for
+#: this very check would otherwise be reported. A test is not a call site.
+#: The cost is that a test helper which genuinely shells out to Muse goes
+#: unseen; that is a narrower hole than the noise it buys off, and such a
+#: helper has a larger problem than its model flag.
+MUSE_SCAN_SKIP_DIRS = frozenset({
+    ".git", ".venv", "venv", "node_modules", "__pycache__", ".mypy_cache",
+    ".pytest_cache", "site-packages", ".tox", "dist", "build", "tests",
+})
+
+#: File names skipped for the same reason, where the tests do not live in
+#: a directory of their own.
+MUSE_SCAN_SKIP_FILE_RE = re.compile(r"\A(?:test_.*|.*_test)\.py\Z")
+
+#: A file larger than this is not a script.
+MUSE_SCAN_MAX_BYTES = 512 * 1024
+
+#: The start of a `muse exec` invocation, in the three forms this codebase
+#: and its siblings actually write: a bare `muse exec`, a shell variable
+#: holding the binary path, and a Python argv list.
+#:
+#: The trailing lookahead is what separates an invocation from prose. Both
+#: runners log `"muse exec failed (exit $status)"`, and three test files
+#: assert on that sentence; without it this check reports seven call sites
+#: that do not exist and buries the one that does. A real invocation is
+#: followed by a flag, a quoted argument, a variable, a line continuation,
+#: an argv comma, or the end of the line — never by a bare English word.
+MUSE_EXEC_RE = re.compile(
+    r"""(?x)
+    (?:
+        (?: \bmuse \s+ exec \b )
+      | (?: (?:"\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)
+            \s+ exec \b )
+      | (?: [A-Za-z_][A-Za-z0-9_]* \s*,\s* ["\']exec["\'] )
+    )
+    (?= \s* (?: $ | [-\\"\',$(\[] ) )
+    """
+)
+
+#: How far a single invocation may run. A bash continuation or a Python
+#: argv list is a handful of lines; this only stops a malformed file from
+#: swallowing the rest of itself.
+MUSE_STATEMENT_MAX_LINES = 40
+
+MUSE_MODEL_PIN_FIX = (
+    "pass --model explicitly at each call site; "
+    "muse-spark-1.3-contributor is the catalog default"
+)
+
+
+def _muse_statement(lines: Sequence[str], start: int) -> str:
+    """The full text of the invocation beginning on line ``start``.
+
+    A `muse exec` is written across several lines in both languages this
+    scans: bash with trailing backslashes, Python as an argv list. Reading
+    only the matched line would report every multi-line call site as
+    unpinned, so the statement is followed to its end before `--model` is
+    looked for.
+    """
+    collected = []
+    depth = 0
+    for offset in range(min(MUSE_STATEMENT_MAX_LINES, len(lines) - start)):
+        line = lines[start + offset]
+        collected.append(line)
+        stripped = line.rstrip()
+        depth += line.count("[") + line.count("(") - \
+            line.count("]") - line.count(")")
+        if stripped.endswith("\\"):
+            continue
+        if depth > 0:
+            continue
+        break
+    return "\n".join(collected)
+
+
+def _muse_code_line(line: str) -> str:
+    """The part of ``line`` outside a comment or a Markdown-ish quote.
+
+    Documentation and commented-out examples name `muse exec` all over this
+    repo. Reporting those would make the check noise, and noise is how a
+    real finding gets scrolled past.
+    """
+    for marker in ("#", "//"):
+        position = line.find(marker)
+        if position != -1:
+            line = line[:position]
+    return line
+
+
+def muse_unpinned_invocations(
+    roots: Optional[Iterable[os.PathLike]] = None,
+) -> List[str]:
+    """Every `muse exec` call site that does not name its model.
+
+    Muse's model catalog marks ``muse-spark-1.3-contributor`` as
+    ``is_default: true``, so an invocation with no ``--model`` resolves to
+    Meta's Discounted Services tier, where submitted content is eligible for
+    product improvement. The unsafe value is the one a caller gets by saying
+    nothing, which is why this looks for the omission rather than checking a
+    value against the allowlist: the allowlist protects the call sites that
+    exist today, and this catches the one added next.
+    """
+    findings: List[str] = []
+    for root in _muse_scan_roots(roots):
+        for path in _muse_scan_files(root):
+            try:
+                text = path.read_text(errors="replace")
+            except OSError:
+                continue
+            lines = text.splitlines()
+            for index, line in enumerate(lines):
+                if not MUSE_EXEC_RE.search(_muse_code_line(line)):
+                    continue
+                statement = _muse_statement(lines, index)
+                if "--model" in statement:
+                    continue
+                findings.append("{}:{}".format(path, index + 1))
+    return sorted(set(findings))
+
+
+def _muse_scan_roots(
+    roots: Optional[Iterable[os.PathLike]] = None,
+) -> List[pathlib.Path]:
+    """The scan roots that exist, explicit ones plus the globbed layout."""
+    if roots is not None:
+        candidates = [pathlib.Path(root) for root in roots]
+    else:
+        candidates = list(MUSE_SCAN_ROOTS)
+        home = pathlib.Path.home()
+        for pattern in MUSE_SCAN_GLOBS:
+            candidates.extend(sorted(home.glob(pattern)))
+    seen: List[pathlib.Path] = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved.is_dir() and resolved not in seen:
+            seen.append(resolved)
+    return seen
+
+
+def _muse_scan_files(root: pathlib.Path) -> Iterator[pathlib.Path]:
+    """Script-shaped files under ``root``, skipping vendored trees."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in sorted(dirnames)
+                       if name not in MUSE_SCAN_SKIP_DIRS]
+        for filename in sorted(filenames):
+            path = pathlib.Path(dirpath) / filename
+            if path.suffix not in MUSE_SCAN_SUFFIXES:
+                continue
+            if MUSE_SCAN_SKIP_FILE_RE.match(filename):
+                continue
+            try:
+                if path.is_symlink() or path.stat().st_size > \
+                        MUSE_SCAN_MAX_BYTES:
+                    continue
+            except OSError:
+                continue
+            yield path
+
+
+def check_muse_model_pins(
+    roots: Optional[Iterable[os.PathLike]] = None,
+) -> Check:
+    """Report any `muse exec` on this machine that does not name its model.
+
+    This outlives the repository allowlist it ships beside. On 2026-09-22 a
+    scan found 72 sessions on the contributor model from one call site that
+    simply never said which model it wanted (career-toolset#199).
+    """
+    try:
+        findings = muse_unpinned_invocations(roots)
+    except OSError as exc:
+        return Check(
+            "muse model pins", False,
+            "could not scan for muse exec invocations ({})".format(
+                str(exc) or "unknown error"),
+            MUSE_MODEL_PIN_FIX,
+        )
+    if not findings:
+        return Check("muse model pins", True, "", "")
+    return Check(
+        "muse model pins", False,
+        "{} muse exec invocation(s) do not pass --model, so they run on "
+        "the contributor model by default:\n{}".format(
+            len(findings),
+            "\n".join("  " + finding for finding in findings)),
+        MUSE_MODEL_PIN_FIX,
+    )
+
+
 def check_member_repos(repos: Optional[Iterable[str]] = None) -> List[Check]:
     """Return one readiness check for every topic-bearing member repository."""
     try:
@@ -5636,6 +5850,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         check_project_fields(),
         check_topic(),
         *check_member_repos(),
+        check_muse_model_pins(),
         check_usage_cache(cache_path=usage_cache),
         check_heartbeat(spool_dir=heartbeat_spool),
     ]

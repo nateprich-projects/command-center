@@ -894,7 +894,7 @@ def signal_summary(
     }
 
 
-def _run_gh(args: Sequence[str]):
+def _run_gh(args: Sequence[str], stdin: Optional[str] = None):
     """Run a GitHub CLI read through funnel's route guard.
 
     Outcome derivation is a consumer of the same GraphQL-backed ``gh`` route
@@ -902,10 +902,15 @@ def _run_gh(args: Sequence[str]):
     after the first observed failure instead of producing one failing call per
     historical ticket (#513). REST calls, including the repository-wide issue
     event scan, keep their own route as funnel does.
+
+    ``stdin`` carries a request body that must not go on the command line.
+    ``funnel._run_gh`` forwards keyword arguments to ``subprocess.run``, so
+    this is the existing route with a body attached, not a second launcher.
     """
-    return funnel._run_gh(
-        ["gh"] + list(args), capture_output=True, text=True
-    )
+    kwargs = {"capture_output": True, "text": True}
+    if stdin is not None:
+        kwargs["input"] = stdin
+    return funnel._run_gh(["gh"] + list(args), **kwargs)
 
 
 def gh_json(*args: str):
@@ -1202,13 +1207,54 @@ def _read_remote(repo: str = REPO, branch: str = HEARTBEAT_BRANCH) -> Tuple[List
         raise OutcomeError(result.stderr.strip() or "could not read {}".format(OUTCOMES_PATH))
     try:
         payload = json.loads(result.stdout)
-        content = base64.b64decode(payload.get("content", "")).decode("utf-8")
+        content = base64.b64decode(payload.get("content") or "").decode("utf-8")
         sha = payload.get("sha")
+        size = payload.get("size")
     except (TypeError, ValueError, UnicodeDecodeError) as exc:
         raise OutcomeError("invalid remote {} response: {}".format(OUTCOMES_PATH, exc)) from exc
     if not isinstance(sha, str) and sha is not None:
         raise OutcomeError("remote {} response has an invalid sha".format(OUTCOMES_PATH))
+    # Above one megabyte the Contents API answers with an empty ``content``
+    # and a perfectly good ``sha`` (#1294). Read as-is that is indistinguishable
+    # from an empty ledger, and the caller is ``append_records``, which would
+    # then write ``[] + fresh`` over every existing record with a valid sha in
+    # hand. The ledger crossed that line at 1,277,231 bytes on 2026-09-22.
+    if not content and isinstance(size, int) and size > 0:
+        if not isinstance(sha, str) or not sha:
+            raise OutcomeError(
+                "remote {} is {} bytes but returned no content and no sha "
+                "to read it by".format(OUTCOMES_PATH, size)
+            )
+        content = _read_blob(repo, sha, size)
     return _decode_records(content), sha
+
+
+def _read_blob(repo: str, sha: str, size: int) -> str:
+    """Read a blob the Contents API declined to inline.
+
+    Fails closed. Every caller of ``_read_remote`` treats its record list as
+    the full ledger, so an unreadable blob must raise rather than return
+    nothing: silently empty is the shape that overwrites history.
+    """
+    result = _run_gh(["api", "repos/{}/git/blobs/{}".format(repo, sha)])
+    if result.returncode != 0:
+        raise OutcomeError(
+            result.stderr.strip()
+            or "could not read {} blob {}".format(OUTCOMES_PATH, sha)
+        )
+    try:
+        payload = json.loads(result.stdout)
+        content = base64.b64decode(payload.get("content") or "").decode("utf-8")
+    except (TypeError, ValueError, UnicodeDecodeError) as exc:
+        raise OutcomeError(
+            "invalid {} blob response: {}".format(OUTCOMES_PATH, exc)
+        ) from exc
+    if not content:
+        raise OutcomeError(
+            "remote {} is {} bytes but its blob read back empty".format(
+                OUTCOMES_PATH, size)
+        )
+    return content
 
 
 def read_records(
@@ -1250,16 +1296,26 @@ def append_records(
         if not fresh:
             return 0
         body = _encode_records(existing + fresh).encode("utf-8")
+        payload = {
+            "message": "outcomes: +{} record(s)".format(len(fresh)),
+            "branch": branch,
+            "content": base64.b64encode(body).decode("ascii"),
+        }
+        if sha:
+            payload["sha"] = sha
+        # The body goes on stdin, never on the command line. Passing the
+        # encoded ledger as `-f content=...` put the whole file in argv, and
+        # once it outgrew the system limit every append died with
+        # `OSError: [Errno 7] Argument list too long` before reaching GitHub
+        # (#1294, measured 2026-09-22 on the first seven-repo run). Nothing
+        # was written, so the next run re-derived the same backlog and failed
+        # identically: the ledger could never grow past the limit again.
         args = [
             "api", "-X", "PUT",
             "repos/{}/contents/{}".format(repo, OUTCOMES_PATH),
-            "-f", "message=outcomes: +{} record(s)".format(len(fresh)),
-            "-f", "branch=" + branch,
-            "-f", "content=" + base64.b64encode(body).decode("ascii"),
+            "--input", "-",
         ]
-        if sha:
-            args.extend(["-f", "sha=" + sha])
-        result = _run_gh(args)
+        result = _run_gh(args, stdin=json.dumps(payload))
         if result.returncode == 0:
             return len(fresh)
         detail = (result.stderr or result.stdout or "").lower()

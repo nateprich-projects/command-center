@@ -581,11 +581,11 @@ def test_the_runner_always_names_a_model_and_never_hardcodes_one():
     """Superseded the flat pin on 2026-09-22 (#1301).
 
     The runner used to pass `--model muse-spark-1.3` literally, and this
-    test asserted the word "contributor" appeared nowhere in it. Three
-    repositories may now use the contributor model by Nate's decision, so
-    the flag is resolved per repository — but the invariant that matters
-    is unchanged and is what this asserts: `--model` is always in argv,
-    and its value is never written into this file.
+    test asserted the word "contributor" appeared nowhere in it. The flag
+    has been resolved per repository since then; #1315 emptied the
+    allowlist the same day, but the resolver stays, and the invariant that
+    matters is unchanged: `--model` is always in argv, and its value is
+    never written into this file.
     """
     runner = SCRIPT.read_text()
     body = "\n".join(
@@ -1404,8 +1404,6 @@ def test_a_refused_breakdown_apply_finishes_errored(tmp_path):
     assert "is closed" in heartbeat
 
 
-
-
 # --- which model carries which repository (#1301) ------------------------
 
 
@@ -1420,14 +1418,33 @@ def _engine_model(repo):
     "nateprich-projects/FF-Weekly-Start-Sit",
     "nateprich-projects/The-League",
 ])
-def test_a_review_of_a_cleared_repo_uses_the_contributor_model(
+def test_a_review_of_a_formerly_cleared_repo_uses_the_private_model(
         tmp_path, subject):
+    """#1299 cleared these three on 2026-09-22; #1315 withdrew them the
+    same day, and judgement runs on the private model."""
     proc, repo = _stubbed_runner(
         tmp_path,
         _begin(work={"pr": PR, "repo": subject,
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
         answers=[_answer()])
+
+    assert proc.returncode == 0, proc.stderr
+    assert _engine_model(repo) == "muse-spark-1.3"
+
+
+def test_a_review_of_an_allowlisted_repo_carries_the_contributor_model(
+        tmp_path, resolver_clearing):
+    """The mechanism outlives the empty list: clear a repository in the
+    resolver and the engine must carry that answer, not its fallback."""
+    subject = "nateprich-projects/The-League"
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"pr": PR, "repo": subject,
+                     "ref": subject + "#6", "tier": "escalated"}),
+        _packet(repo=subject),
+        answers=[_answer()],
+        muse_model_body=resolver_clearing("The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _engine_model(repo) == "muse-spark-1.3-contributor"
@@ -1439,15 +1456,17 @@ def test_a_review_of_a_cleared_repo_uses_the_contributor_model(
     "nateprich-projects/career-toolset",
 ])
 def test_a_review_of_an_excluded_repo_uses_the_private_model(
-        tmp_path, subject):
+        tmp_path, subject, resolver_clearing):
     """A review packet carries the PR's diff and ticket text, so this is
-    the lane where a wrong model discloses the most."""
+    the lane where a wrong model discloses the most. Run against #1299's
+    allowlist, not the empty one, so the exclusion is tested."""
     proc, repo = _stubbed_runner(
         tmp_path,
         _begin(work={"pr": PR, "repo": subject,
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
-        answers=[_answer()])
+        answers=[_answer()],
+        muse_model_body=resolver_clearing("command-center", "FF-Weekly-Start-Sit", "The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _engine_model(repo) == "muse-spark-1.3"
@@ -1478,7 +1497,7 @@ def test_a_broken_resolver_still_names_the_private_model(tmp_path):
 
 @pytest.mark.parametrize("job", ["breakdown", "shape"])
 def test_an_issue_job_resolves_the_model_from_its_subject_repo(
-        tmp_path, job):
+        tmp_path, job, resolver_clearing):
     """Breakdown and shape carry no PR, so the repository comes from the
     subject ref rather than from the review's work block. Both branches
     must reach `muse exec` with a model named."""
@@ -1491,7 +1510,8 @@ def test_an_issue_job_resolves_the_model_from_its_subject_repo(
         packet[key]["ref"] = ref
 
     proc, repo = _stubbed_runner(
-        tmp_path, begin, packet, answers=(_issue_answer(job),))
+        tmp_path, begin, packet, answers=(_issue_answer(job),),
+        muse_model_body=resolver_clearing("The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _engine_model(repo) == "muse-spark-1.3-contributor"
@@ -1499,7 +1519,7 @@ def test_an_issue_job_resolves_the_model_from_its_subject_repo(
 
 @pytest.mark.parametrize("job", ["breakdown", "shape"])
 def test_an_issue_job_on_an_excluded_repo_uses_the_private_model(
-        tmp_path, job):
+        tmp_path, job, resolver_clearing):
     begin = _issue_begin(job)
     ref = "nateprich-projects/workbench#" + begin["work"]["ref"].split("#")[1]
     begin["work"]["ref"] = ref
@@ -1509,7 +1529,8 @@ def test_an_issue_job_on_an_excluded_repo_uses_the_private_model(
         packet[key]["ref"] = ref
 
     proc, repo = _stubbed_runner(
-        tmp_path, begin, packet, answers=(_issue_answer(job),))
+        tmp_path, begin, packet, answers=(_issue_answer(job),),
+        muse_model_body=resolver_clearing("command-center", "FF-Weekly-Start-Sit", "The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _engine_model(repo) == "muse-spark-1.3"
@@ -1547,7 +1568,7 @@ def test_a_resolver_printing_nothing_still_names_the_private_model(tmp_path):
     assert _engine_model(repo) == "muse-spark-1.3"
 
 
-def test_the_retry_reuses_the_model_it_resolved(tmp_path):
+def test_the_retry_reuses_the_model_it_resolved(tmp_path, resolver_clearing):
     """The repository does not change between attempts, and re-resolving
     would be one more place for the answer to differ."""
     subject = "nateprich-projects/The-League"
@@ -1556,7 +1577,8 @@ def test_the_retry_reuses_the_model_it_resolved(tmp_path):
         _begin(work={"pr": PR, "repo": subject,
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
-        answers=["not json at all", _answer()])
+        answers=["not json at all", _answer()],
+        muse_model_body=resolver_clearing("The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 2

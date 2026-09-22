@@ -152,11 +152,15 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
     distinguishes them. Escalated gets max effort because that is the work where
     judgement matters most.
 
-    Standard runs `high` and escalated runs `max` on both the review and the
-    implement lanes (Nate, 2026-09-21, #1189): the tiers differ in effort as
-    well as in queue. The standard reviewer briefly took the engine's default
-    `max` at its 2026-09-20 cutover, and the standard implementer was created
-    at `max` on 2026-09-18; both were the same effort as escalated until #1191.
+    Both review schedules run `max` (Nate, 2026-09-22, #1315): judgement
+    runs on the private model at max effort, and the review tiers now differ
+    in queue and cadence, not in effort. The implement schedules keep #1189's split, standard `high`
+    and escalated `max`, until implementation leaves Muse for Codex
+    (#1322).
+    History: standard ran `high` from #1191 (Nate, 2026-09-21, #1189); the
+    standard reviewer briefly took the engine's default `max` at its
+    2026-09-20 cutover, and the standard implementer was created at `max` on
+    2026-09-18.
     """
     import plistlib
 
@@ -165,7 +169,7 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
             return plistlib.load(handle)["ProgramArguments"][2:]
 
     assert args(NAMES[0]) == ["escalated", "max"]
-    assert args(NAMES[1]) == ["standard", "high"]
+    assert args(NAMES[1]) == ["standard", "max"]
     assert args(IMPLEMENTER_NAME) == ["escalated", "max"]
     assert args(STANDARD_IMPLEMENTER_NAME) == ["standard", "high"]
 

@@ -120,8 +120,11 @@ def _ticket(number, parent, *, body="Risk: standard", klass="Improve",
 
 def _implementing_begin(monkeypatch, capsys, items, *, agent="codex",
                         tier="standard", repo_readiness=None, pr_facts=None,
-                        caller_role=None, current_claims=None, reconcile=None):
+                        caller_role=None, current_claims=None, reconcile=None,
+                        band=None):
     _allow_begin(monkeypatch)
+    if band is not None:
+        _tight_budget(monkeypatch, band)
     monkeypatch.setattr(
         funnel,
         "reconcile_approved_merges",
@@ -1792,15 +1795,19 @@ def _reviewer_begin(
     breakdown=False,
     reviews=None,
     breakdown_items=None,
+    band=None,
 ):
     """``reviews`` and ``breakdown_items`` give a whole queue, oldest first;
-    ``review`` and ``breakdown_item`` remain the one-entry shorthand."""
+    ``review`` and ``breakdown_item`` remain the one-entry shorthand.
+    ``band`` makes the usage gate report that #1198 band."""
     if reviews is None:
         reviews = [review] if review is not None else []
     if breakdown_items is None:
         breakdown_items = (
             [breakdown_item] if breakdown_item is not None else [])
     _allow_begin(monkeypatch)
+    if band is not None:
+        _tight_budget(monkeypatch, band)
     monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
     monkeypatch.setattr(
         funnel,
@@ -2037,182 +2044,95 @@ def test_a_broken_breakdown_is_not_hidden_behind_an_older_improve_plan(
 
 
 def _tight_budget(monkeypatch, band="tight"):
-    """Make begin's preflight report a #1198 band with its numbers."""
-    def preflight(now, agent, idle):
-        return ({
-            "agent": agent, "run": "run-id", "gate": "ok",
-            "budget_band": band,
-            "budget": {"used_percent": 62.0, "projected_percent": 118.0,
-                       "daily_rate_dollars": 31.0,
-                       "runs_out_at": NOW.timestamp() + 2 * 86400},
-        }, {"windows": {}})
-    monkeypatch.setattr(funnel, "_begin_preflight", preflight)
+    """Make the usage reader report a #1198 band with its numbers.
+
+    The real `_begin_preflight` runs, because the stop it makes on `tight`
+    (#1269) is the thing under test; only the reading and its verdict are
+    stubbed. Applied after `_allow_begin`, which installs a bandless verdict,
+    so the helpers take `band=` rather than calling this first."""
+    window = {"used_percent": 62.0, "projected_percent": 118.0,
+              "daily_rate_dollars": 31.0,
+              "runs_out_at": NOW.timestamp() + 2 * 86400,
+              "resets_at": NOW.timestamp() + 2 * 86400, "rolling": True}
+    monkeypatch.setattr(
+        usage, "read_agent", lambda agent, now: {"windows": {"seven_day": window}})
+    monkeypatch.setattr(
+        usage, "pace", lambda reading, now, provider=None: {
+            "windows": [dict(window, window="seven_day", band=band, over=False)],
+            "over_pace": False, "band": band, "known": True})
 
 
-def test_a_tight_budget_offers_only_the_ladders_urgent_judgement_work(
+def test_a_tight_budget_stops_every_lane_before_reading_the_project(
     monkeypatch, capsys
 ):
-    """#1199: a New project's PR and an Improve plan wait; a Broken PR behind
-    them is still read. The ladder decides, as Nate chose on 2026-09-21."""
-    _tight_budget(monkeypatch)
-    new_project, new_ticket = _ticket(141, 140, klass="New")
-    broken_project, broken_ticket = _ticket(143, 142, klass="Broken")
-    improve_plan = _ready_plan(144, "Improve")
+    """#1269 (Nate, 2026-09-21): tight stops everything, like over. The
+    ladder decides what goes first when the brake lifts, not what runs under
+    it. #1199 had let Broken, Maintenance and pinned work through, and on a
+    board that is mostly Broken that was no brake at all."""
+    broken_project, broken_ticket = _ticket(141, 140, klass="Broken")
+    pinned_project, pinned_ticket = _ticket(143, 142, klass="Replace")
+    pinned_project.pinned = True
+    maintenance_plan = _ready_plan(144, "Maintenance")
+    idea = _idea(145, "Broken idea", "Risk: standard", klass="Broken")
+    items = [broken_project, broken_ticket, pinned_project, pinned_ticket,
+             maintenance_plan]
 
     result = _reviewer_begin(
-        monkeypatch,
-        capsys,
-        [new_project, new_ticket, broken_project, broken_ticket, improve_plan],
-        reviews=[_review_job(new_ticket, pr=7), _review_job(broken_ticket, pr=9)],
-        breakdown_items=[improve_plan],
-        idea=_idea(145, "Improve idea", "Risk: standard", klass="Improve"),
-        breakdown=True,
+        monkeypatch, capsys, items,
+        reviews=[_review_job(broken_ticket, pr=7), _review_job(pinned_ticket, pr=9)],
+        breakdown_items=[maintenance_plan], idea=idea, breakdown=True,
+        band="tight",
     )
-
+    assert result["do"] == "stop"
+    assert result["gate"] == "tight"
     assert result["budget_band"] == "tight"
-    assert result["do"] == "review"
-    assert result["work"] == _review_job(broken_ticket, pr=9)
-
-
-def test_a_tight_budget_still_offers_a_maintenance_breakdown_and_pinned_work(
-    monkeypatch, capsys
-):
-    _tight_budget(monkeypatch)
-    maintenance_plan = _ready_plan(146, "Maintenance")
-    result = _reviewer_begin(
-        monkeypatch, capsys, [maintenance_plan],
-        breakdown_items=[_ready_plan(147, "Improve"), maintenance_plan],
-        breakdown=True,
-    )
-    assert result["do"] == "breakdown"
-    assert result["work"]["ref"] == maintenance_plan.ref
-
-    pinned_project, pinned_ticket = _ticket(149, 148, klass="Replace")
-    pinned_project.pinned = True
-    result = _reviewer_begin(
-        monkeypatch, capsys, [pinned_project, pinned_ticket],
-        reviews=[_review_job(pinned_ticket, pr=11)],
-    )
-    assert result["do"] == "review"
-    assert result["work"] == _review_job(pinned_ticket, pr=11)
-
-
-def test_a_tight_budget_with_only_other_work_waiting_is_a_hold_with_numbers(
-    monkeypatch, capsys
-):
-    """Not an empty funnel: the stop names the budget, so the heartbeat
-    records a hold rather than nothing-to-do."""
-    _tight_budget(monkeypatch)
-    project, ticket = _ticket(151, 150, klass="New")
-
-    result = _reviewer_begin(
-        monkeypatch, capsys, [project, ticket],
-        reviews=[_review_job(ticket)],
-        idea=_idea(152, "Improve idea", "Risk: standard", klass="Improve"),
-    )
-
-    assert result["do"] == "stop"
-    assert result["gate"] == "tight"
-    assert result["budget_held"] == 2
-    for fragment in ("62% used", "projected 118%", "$31/day", "runs out"):
+    for fragment in ("62% used", "projected 118%", "$31/day", "runs out",
+                     "every lane waits"):
         assert fragment in result["why"], result["why"]
-
-
-def test_a_tight_budget_with_nothing_waiting_is_still_an_empty_poll(
-    monkeypatch, capsys
-):
-    _tight_budget(monkeypatch)
-    result = _reviewer_begin(monkeypatch, capsys, [])
-    assert result["do"] == "stop"
-    assert result["gate"] == "ok"
-    assert result["why"] == "nothing to review"
-
-
-def test_a_tight_budget_offers_a_broken_ticket_and_holds_an_improve_one(
-    monkeypatch, capsys
-):
-    """The coding path, where the money goes: same rule, same place."""
-    _tight_budget(monkeypatch)
-    improve_project, improve_ticket = _ticket(161, 160, klass="Improve")
-    broken_project, broken_ticket = _ticket(163, 162, klass="Broken")
+    assert "work" not in result
 
     result, writes = _implementing_begin(
-        monkeypatch, capsys,
-        [improve_project, improve_ticket, broken_project, broken_ticket],
-    )
-    assert result["do"] == "ticket"
-    assert result["work"]["ref"] == broken_ticket.ref
-    assert [ref for ref, _ in writes] == [broken_ticket.ref]
-
-    result, writes = _implementing_begin(
-        monkeypatch, capsys, [improve_project, improve_ticket],
-    )
+        monkeypatch, capsys, items, band="tight")
     assert result["do"] == "stop"
     assert result["gate"] == "tight"
-    assert "projected 118%" in result["why"]
     assert writes == []
+    assert "reconciled_claims" not in result and "held" not in result
 
 
-def test_a_tight_budget_offers_a_pinned_replace_ticket(monkeypatch, capsys):
-    """#1199's Accept names it: a pin is Nate's explicit ordering call, so a
-    pinned Replace project's ticket is still offered while the budget is tight."""
-    _tight_budget(monkeypatch)
-    pinned_project, pinned_ticket = _ticket(181, 180, klass="Replace")
-    pinned_project.pinned = True
-    improve_project, improve_ticket = _ticket(183, 182, klass="Improve")
-
-    result, writes = _implementing_begin(
-        monkeypatch, capsys,
-        [improve_project, improve_ticket, pinned_project, pinned_ticket],
-    )
-
-    assert result["do"] == "ticket"
-    assert result["work"]["ref"] == pinned_ticket.ref
-    assert [ref for ref, _ in writes] == [pinned_ticket.ref]
+def test_a_tight_budget_stops_an_empty_funnel_too(monkeypatch, capsys):
+    """The stop is the budget's, not the queue's: it reads the same with
+    nothing waiting, and it is recorded as a hold rather than nothing-to-do."""
+    result = _reviewer_begin(monkeypatch, capsys, [], band="tight")
+    assert result["do"] == "stop"
+    assert result["gate"] == "tight"
 
 
 def test_an_ok_band_offers_everything_as_before(monkeypatch, capsys):
     """Under `ok` nothing is held: a New project's PR review, an Improve
     ticket and an Improve idea are all offered exactly as without a band."""
-    _tight_budget(monkeypatch, band="ok")
     project, ticket = _ticket(185, 184, klass="New")
     result = _reviewer_begin(
         monkeypatch, capsys, [project, ticket],
         reviews=[_review_job(ticket)],
         idea=_idea(186, "Improve idea", "Risk: standard", klass="Improve"),
+        band="ok",
     )
     assert result["budget_band"] == "ok"
     assert result["do"] == "review"
     assert "budget_held" not in result
 
-    _tight_budget(monkeypatch, band="ok")
     result = _reviewer_begin(
         monkeypatch, capsys, [],
         idea=_idea(187, "Improve idea", "Risk: standard", klass="Improve"),
+        band="ok",
     )
     assert result["do"] == "shape"
 
-    _tight_budget(monkeypatch, band="ok")
     improve_project, improve_ticket = _ticket(189, 188, klass="Improve")
     result, _ = _implementing_begin(
-        monkeypatch, capsys, [improve_project, improve_ticket])
+        monkeypatch, capsys, [improve_project, improve_ticket], band="ok")
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == improve_ticket.ref
-
-
-def test_work_that_blocks_broken_work_is_essential_with_it():
-    """The same inheritance the ticket order uses: a ticket that blocks a
-    Broken one preempts with it, so a tight budget must not hold it."""
-    improve_project, blocker = _ticket(171, 170, klass="Improve")
-    broken_project, waiting = _ticket(173, 172, klass="Broken")
-    waiting.open_blockers = [blocker.ref]
-    other_project, other = _ticket(175, 174, klass="New")
-
-    essential = funnel.budget_essential_refs(
-        [improve_project, blocker, broken_project, waiting, other_project, other])
-
-    assert blocker.ref in essential and waiting.ref in essential
-    assert other.ref not in essential and other_project.ref not in essential
 
 
 def test_shape_is_not_offered_when_the_first_idea_is_the_other_tier(

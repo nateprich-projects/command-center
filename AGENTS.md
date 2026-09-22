@@ -201,10 +201,12 @@ wrong.
   **Muse is paced by a projection, not by a line.** At the last 72 hours' spending
   rate, will the window last until its reset? `usage.pace` answers with a band: `ok`;
   `tight` when the projected end passes 100 percent; `over` when used plus the session
-  reserve passes 100 percent, which is the flat ceiling and the only band that stops a
-  run. `tight` narrows what `begin` offers to Broken, Maintenance and pinned work
-  (#1199); it follows the ladder, which Nate chose over protecting member-repo work
-  when asked on 2026-09-21. The proportional line Claude and Codex use is deliberately
+  reserve passes 100 percent, which is the flat ceiling. Both `tight` and `over` stop
+  every lane before any Project read; the ladder decides only what goes first when
+  the brake lifts (#1269, Nate 2026-09-21: "The brake should apply to ALL work. The
+  ladder just determines what goes first when the brake is let up."). Shedding by
+  class under `tight` was built and measured first (#1199) and was no brake on a
+  board that is mostly Broken. The proportional line Claude and Codex use is deliberately
   not applied: it keeps room on a subscription Nate shares, and Muse's plan is flat and
   used by nothing else, so budget left at the reset is worth nothing. Three days rather
   than one because daily totals swing fourfold. A window with no spend in it yet reads

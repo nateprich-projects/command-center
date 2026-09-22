@@ -525,6 +525,8 @@ BRIEF_SECTION_BUDGETS = {
     "run_summary": 1.0,
     "agent_health": 1.0,
     "working_tree_touched": 1.0,
+    # Pure over the items already loaded: no read of its own to time out.
+    "status_state_mismatches": 0.25,
     # One REST read per member repo for main's head, plus a bounded follow-up
     # only where that head's run failed. Sized like the other small live reads.
     "main_ci": 3.0,
@@ -8112,6 +8114,47 @@ def stranded_items(
     return found
 
 
+def status_state_mismatches(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """Items whose Project Status and GitHub state contradict each other.
+
+    Two directions, both derived from the one ``load_items()`` pass with no
+    extra read, no cache and nothing stored:
+
+    - **closed but not finished** — a closed issue at any Status other than
+      ``Done`` or ``Parked``. #1206 was one of these: a CLOSED project written
+      to ``Ready``, which put it in the startable queue and the self-approval
+      path at once with nothing able to close it again.
+    - **open but Done** — an issue recorded as finished that is still open.
+      The lane filters all read OPEN, so it keeps being treated as live work
+      while every count says it is finished.
+
+    Deliberately its own section rather than a widening of the lane filters:
+    those stay on OPEN so a closed-at-Ready item appears here and nowhere
+    else, instead of turning up as breakdown work (#1209).
+    """
+    found: List[Dict[str, object]] = []
+    for item in items:
+        if item.status is None:
+            continue
+        if item.state != "OPEN" and item.status not in TERMINAL_STATUSES:
+            mismatch = "closed at Status {}, which is not {}".format(
+                item.status, " or ".join(TERMINAL_STATUSES)
+            )
+        elif item.state == "OPEN" and item.status == "Done":
+            mismatch = "open at Status Done"
+        else:
+            continue
+        found.append({
+            "ref": item.ref,
+            "title": item.title,
+            "url": item.url,
+            "state": item.state,
+            "status": item.status,
+            "mismatch": mismatch,
+        })
+    return sorted(found, key=lambda row: str(row["ref"]))
+
+
 def stranded_json(
     items: Iterable[Item],
     now: datetime,
@@ -8694,6 +8737,11 @@ def cmd_brief(
         rejected = section(
             "rejected_merges", lambda: rejected_merges(items, now), {}
         )
+        status_mismatches = section(
+            "status_state_mismatches",
+            lambda: status_state_mismatches(items),
+            [],
+        )
 
         blocked_comment_errors = [
             "{}: {}".format(item.ref, item.block_comments_error)
@@ -8748,6 +8796,7 @@ def cmd_brief(
             "run_summary": run_summary,
             "agent_health": health,
             "working_tree_touched": touched,
+            "status_state_mismatches": status_mismatches,
             "main_ci": main_ci,
             "outcome_signals": outcome_signals,
             "rejected_merges": rejected,

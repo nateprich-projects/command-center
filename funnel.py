@@ -11587,9 +11587,6 @@ def _begin_preflight(
     out["gate"] = "ok"
     band = verdict.get("band")
     if band:
-        # #1199: `tight` is not a stop. It narrows what selection offers, and
-        # the numbers travel with it so a stop can say why without a second
-        # reading.
         out["budget_band"] = band
         out["budget"] = next(
             ({key: window.get(key) for key in (
@@ -11598,6 +11595,16 @@ def _begin_preflight(
              for window in verdict.get("windows", ()) if window.get("band")),
             {},
         )
+        if band == "tight":
+            # #1269 (Nate, 2026-09-21): a tight budget stops every lane, the
+            # same as `over`. The ladder decides only what goes first once the
+            # projection falls back under the cap or the window resets. #1199
+            # had read `tight` as an ordering rule and let Broken, Maintenance
+            # and pinned work through; on a board that is mostly Broken that
+            # was no brake at all, measured at $50 a day either side of it.
+            out.update(gate="tight", do="stop",
+                       why=_tight_budget_why(out, now))
+            return out, None
     if reading.get("unmetered"):
         # Say so rather than letting ``gate: ok`` imply a budget was checked.
         # Preserve the generic future-provider exception explicitly rather than
@@ -11689,36 +11696,6 @@ def _record_begin_reserve(agent: str, run: Optional[str], why: object) -> None:
     print("funnel: skipped-api-reserve: {}".format(note), file=sys.stderr)
 
 
-def budget_essential_refs(items: Sequence[Item]) -> Set[str]:
-    """The work that keeps running while the Muse budget is tight (#1199).
-
-    The ladder decides, as Nate chose on 2026-09-21 when asked whether a tight
-    week should protect member-repo work instead: anything in a preempting
-    class, anything that blocks such work (the same inheritance the ticket
-    order uses), and anything under a pinned project. Everything else waits
-    until the projection falls back under the cap or the window resets.
-    """
-    by_ref = {item.ref: item for item in items}
-    descendants = dependency_descendants(items)
-    essential: Set[str] = set()
-    for ref, item in by_ref.items():
-        if any(
-            effective_class(by_ref[related], by_ref) in PREEMPTING_CLASSES
-            for related in {ref} | descendants.get(ref, set())
-        ):
-            essential.add(ref)
-            continue
-        seen: Set[str] = set()
-        current: Optional[Item] = item
-        while current is not None and current.ref not in seen:
-            if current.pinned:
-                essential.add(ref)
-                break
-            seen.add(current.ref)
-            current = by_ref.get(current.parent or "")
-    return essential
-
-
 def _tight_budget_why(out: Mapping[str, object], now: datetime) -> str:
     """One line a person can act on: the numbers, and what still runs."""
     budget = out.get("budget") or {}
@@ -11736,8 +11713,9 @@ def _tight_budget_why(out: Mapping[str, object], now: datetime) -> str:
             datetime.fromtimestamp(float(runs_out_at), timezone.utc)
             .strftime("%Y-%m-%d %H:%MZ")))
     return (
-        "tight: {}; only Broken, Maintenance and pinned work until the rate "
-        "falls or the window resets".format(", ".join(parts) or "budget")
+        "tight: {}; every lane waits until the rate falls or the window "
+        "resets, then the ladder decides what goes first".format(
+            ", ".join(parts) or "budget")
     )
 
 
@@ -11790,10 +11768,6 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if reading is None:
         print(json.dumps(out, indent=2))
         return 0
-    tight_budget = out.get("budget_band") == "tight"
-    essential_refs: Set[str] = (
-        budget_essential_refs(items) if tight_budget else set()
-    )
 
     if _detail_loader is not None and not begin_uses_ticket_path(
         agent, tier, caller_role
@@ -11886,19 +11860,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             str(entry["ref"]) for entry in reconciled_merges
             if entry.get("result") == "error" and entry.get("ref")
         )
-        # #1199: while the budget is tight the ladder's urgent work is all
-        # that is offered. The shared order is untouched; the rest is passed
-        # over exactly as a recently claimed ticket is.
-        budget_withheld: Set[str] = set()
-        if tight_budget:
-            budget_withheld = {
-                item.ref for item in items
-                if item.parent and item.ref not in essential_refs
-            }
         begin_backed_off = _backed_off_work(items, now)
         ticket = next_ticket_for_tier(
             items, now, tier=tier, blocked=blocked,
-            excluded=set(budget_withheld),
             agent=agent,
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
@@ -11930,7 +11894,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             recently_claimed.add(ticket.ref)
             ticket = next_ticket_for_tier(
                 items, now, tier=tier, blocked=blocked,
-                excluded=recently_claimed | budget_withheld,
+                excluded=recently_claimed,
                 agent=agent,
                 repo_readiness=repo_readiness,
                 pr_facts=pr_facts,
@@ -11962,20 +11926,6 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     for row in sorted(withheld_rows,
                                       key=lambda row: str(row["ref"]))
                 ]
-        if ticket is None and budget_withheld and not out.get("why"):
-            # Say so only when the budget is the reason: a ticket the ladder
-            # would have offered is being held back. With nothing startable
-            # either way this stays an ordinary empty poll.
-            unrestricted = next_ticket_for_tier(
-                items, now, tier=tier, blocked=blocked,
-                excluded=set(recently_claimed),
-                agent=agent,
-                repo_readiness=repo_readiness,
-                pr_facts=pr_facts,
-                backed_off=begin_backed_off,
-            )
-            if unrestricted is not None:
-                out.update(gate="tight", why=_tight_budget_why(out, now))
         if ticket is None:
             holder = lock_holder(items, now, pr_facts=pr_facts)
             withheld = readiness_blockers(
@@ -12075,25 +12025,6 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
 
     pending = awaiting_breakdown(items) if breakdown else []
     shape_item = shapeable_idea(items, tier, reading)
-    budget_held = 0
-    if tight_budget:
-        # #1199: the same rule as the ticket path, for every job type. A
-        # review's ref is its ticket, so a PR under a Broken or pinned project
-        # is still read; an idea or plan is judged by its own class and pin.
-        kept_reviews = [
-            entry for entry in queue if entry.get("ref") in essential_refs
-        ]
-        kept_pending = [
-            entry for entry in pending if entry.ref in essential_refs
-        ]
-        budget_held = (
-            (len(queue) - len(kept_reviews))
-            + (len(pending) - len(kept_pending))
-        )
-        queue, pending = kept_reviews, kept_pending
-        if shape_item is not None and shape_item.ref not in essential_refs:
-            shape_item = None
-            budget_held += 1
     review = _queue_candidate(queue, review_class_of)
     breakdown_item = _queue_candidate(
         pending, lambda entry: getattr(entry, "klass", None))
@@ -12158,12 +12089,6 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 work={"ref": item.ref, "url": item.url,
                       "title": item.title},
             )
-    elif budget_held:
-        # Work is waiting and the budget is why none of it is offered: say so
-        # with the numbers, as a hold, not as an empty funnel (#1199).
-        out.update(do="stop", gate="tight",
-                   why=_tight_budget_why(out, now),
-                   budget_held=budget_held)
     else:
         out.update(
             do="stop",

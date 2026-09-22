@@ -581,11 +581,11 @@ def test_the_runner_always_names_a_model_and_never_hardcodes_one():
     """Superseded the flat pin on 2026-09-22 (#1301).
 
     The runner used to pass `--model muse-spark-1.3` literally, and this
-    test asserted the word "contributor" appeared nowhere in it. Three
-    repositories may now use the contributor model by Nate's decision, so
-    the flag is resolved per repository — but the invariant that matters
-    is unchanged and is what this asserts: `--model` is always in argv,
-    and its value is never written into this file.
+    test asserted the word "contributor" appeared nowhere in it. The flag
+    has been resolved per repository since then; #1315 emptied the
+    allowlist the same day, but the resolver stays, and the invariant that
+    matters is unchanged: `--model` is always in argv, and its value is
+    never written into this file.
     """
     runner = SCRIPT.read_text()
     body = "\n".join(
@@ -1409,6 +1409,21 @@ def test_a_refused_breakdown_apply_finishes_errored(tmp_path):
 # --- which model carries which repository (#1301) ------------------------
 
 
+def _resolver_clearing(*names):
+    """The real resolver with ``names`` on its allowlist.
+
+    The production allowlist is empty since #1315, so every repository
+    resolves to the fallback and a runner that ignored the resolver would
+    look identical. These tests are about the runner carrying the
+    resolver's answer into argv, which only shows when the answer differs.
+    """
+    source = (ROOT / "muse_model.py").read_text()
+    anchor = "CONTRIBUTOR_REPOS = frozenset()"
+    assert source.count(anchor) == 1
+    return source.replace(anchor, "CONTRIBUTOR_REPOS = frozenset({!r})".format(
+        set(names)), 1)
+
+
 def _engine_model(repo):
     args = (repo / "muse.args.1").read_text().splitlines()
     assert "--model" in args, args
@@ -1420,14 +1435,33 @@ def _engine_model(repo):
     "nateprich-projects/FF-Weekly-Start-Sit",
     "nateprich-projects/The-League",
 ])
-def test_a_review_of_a_cleared_repo_uses_the_contributor_model(
+def test_a_review_of_a_formerly_cleared_repo_uses_the_private_model(
         tmp_path, subject):
+    """#1299 cleared these three on 2026-09-22; #1315 withdrew them the
+    same day, and judgement runs on the private model."""
     proc, repo = _stubbed_runner(
         tmp_path,
         _begin(work={"pr": PR, "repo": subject,
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
         answers=[_answer()])
+
+    assert proc.returncode == 0, proc.stderr
+    assert _engine_model(repo) == "muse-spark-1.3"
+
+
+def test_a_review_of_an_allowlisted_repo_carries_the_contributor_model(
+        tmp_path):
+    """The mechanism outlives the empty list: clear a repository in the
+    resolver and the engine must carry that answer, not its fallback."""
+    subject = "nateprich-projects/The-League"
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"pr": PR, "repo": subject,
+                     "ref": subject + "#6", "tier": "escalated"}),
+        _packet(repo=subject),
+        answers=[_answer()],
+        muse_model_body=_resolver_clearing("The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _engine_model(repo) == "muse-spark-1.3-contributor"
@@ -1491,7 +1525,8 @@ def test_an_issue_job_resolves_the_model_from_its_subject_repo(
         packet[key]["ref"] = ref
 
     proc, repo = _stubbed_runner(
-        tmp_path, begin, packet, answers=(_issue_answer(job),))
+        tmp_path, begin, packet, answers=(_issue_answer(job),),
+        muse_model_body=_resolver_clearing("The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _engine_model(repo) == "muse-spark-1.3-contributor"
@@ -1556,7 +1591,8 @@ def test_the_retry_reuses_the_model_it_resolved(tmp_path):
         _begin(work={"pr": PR, "repo": subject,
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
-        answers=["not json at all", _answer()])
+        answers=["not json at all", _answer()],
+        muse_model_body=_resolver_clearing("The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 2

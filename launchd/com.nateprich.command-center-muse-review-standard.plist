@@ -47,7 +47,7 @@
         <string>/bin/bash</string>
         <string>/Users/nateprich/.claude/command-center-run/scripts/muse-review-engine</string>
         <string>standard</string>
-        <string>high</string>
+        <string>max</string>
     </array>
 
     <!--

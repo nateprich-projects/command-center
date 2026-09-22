@@ -67,10 +67,6 @@ def heartbeat_isolation(monkeypatch, tmp_path, offline_bin):
     yield test_spool
 
 
-#: The three repositories #1299 cleared for the contributor model, withdrawn
-#: by #1315. Runner tests put them back to show the mechanism still works.
-FORMERLY_CLEARED = ("command-center", "FF-Weekly-Start-Sit", "The-League")
-
 
 @pytest.fixture
 def resolver_clearing():

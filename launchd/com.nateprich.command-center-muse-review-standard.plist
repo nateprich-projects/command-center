@@ -12,10 +12,8 @@
 
   Effort is `max`, the same as the escalated tier (Nate, 2026-09-22, #1315):
   judgement runs on the private model at max effort, and implementation
-  leaves Muse for Codex. Implementation was about 87% of Muse's metered spend
-  in the week of 2026-09-15 to 09-21 (tool-using sessions against the
-  one-call judgement sessions), so the review tiers now differ in queue and
-  cadence, not in effort.
+  leaves Muse for Codex. The review tiers now differ in queue and cadence,
+  not in effort.
 
   History: from 2026-09-21 this lane ran `high` (Nate, #1189), because running
   both tiers at `max` while Muse also implemented spent the provider's weekly

@@ -749,7 +749,6 @@ def test_a_fresh_workspace_resolves_uid_and_pushes_over_ssh(tmp_path):
 # --- which model carries which repository (#1301) ------------------------
 
 
-
 def _model_in_argv(repo_dir):
     args = (repo_dir / "muse.args.1").read_text().splitlines()
     assert "--model" in args, args

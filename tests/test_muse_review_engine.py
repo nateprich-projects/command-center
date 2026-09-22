@@ -1404,10 +1404,7 @@ def test_a_refused_breakdown_apply_finishes_errored(tmp_path):
     assert "is closed" in heartbeat
 
 
-
-
 # --- which model carries which repository (#1301) ------------------------
-
 
 
 def _engine_model(repo):

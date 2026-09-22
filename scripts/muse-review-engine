@@ -534,8 +534,8 @@ fi
 #
 # Breakdown rides with the standard tier, not with escalated — the same rule
 # the old routine stated: it is mechanical work for the frequent schedule,
-# and the escalated schedule exists so rare risky
-# reviews never wait behind it. Shape needs no flag: begin offers a waiting
+# and the escalated schedule exists so rare risky reviews never wait
+# behind it. Shape needs no flag: begin offers a waiting
 # idea on any tier once review and breakdown are empty.
 BEGIN_FLAGS="--tier $TIER"
 if [[ "$TIER" == "standard" ]]; then

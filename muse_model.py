@@ -171,9 +171,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     model = sub.add_parser("model", help="print the model id for a repo")
     model.add_argument("--repo", required=True,
                        help="owner/name, or the bare repository name")
+    # The bash runners validate the resolver's answer against this rather
+    # than against a list of their own. A second copy of the model ids in
+    # each runner would reject a provider version bump the day this module
+    # accepted it, and would do it silently.
+    sub.add_parser("models", help="print every model id with a rate card")
     args = parser.parse_args(argv)
     if args.command == "model":
         sys.stdout.write(model_for(args.repo) + "\n")
+        return 0
+    if args.command == "models":
+        sys.stdout.write("".join(
+            model + "\n" for model in sorted(RATE_CARDS)))
         return 0
     return 2  # pragma: no cover - argparse rejects an unknown subcommand
 

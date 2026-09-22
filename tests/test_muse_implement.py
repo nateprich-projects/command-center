@@ -835,6 +835,20 @@ def test_the_runner_never_writes_a_model_id_except_the_fallback():
         line for line in SCRIPT.read_text().splitlines()
         if not line.strip().startswith("#"))
     assert '--model "$MUSE_MODEL"' in body
-    assert "contributor" not in body
+    assert "--model muse-spark-1.3" not in body
+    assert "muse_model.py" in body
+    # The exposure rule is which repository gets which model, and none of
+    # it is written here. A runner naming a repository would be the copy
+    # that drifts.
+    # (`command-center` is not in the list: it is this repo, and its name
+    # is structural here — log paths, the run checkout — not a routing
+    # decision.)
+    for repo in ("FF-Weekly-Start-Sit", "The-League",
+                 "jeffy-finance-agent", "workbench", "career-toolset"):
+        assert repo not in body, repo
+    # One model id: the fail-closed anchor. The set of *valid* ids is not
+    # written here either — it is read back from muse_model.py, so a
+    # provider version bump cannot be rejected by a stale copy.
     assert body.count("muse-spark-1.3") == 1
     assert 'MUSE_FALLBACK_MODEL="muse-spark-1.3"' in body
+    assert 'muse_model.py" models' in body

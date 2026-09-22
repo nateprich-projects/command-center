@@ -289,12 +289,30 @@ print(flat)
 MUSE_FALLBACK_MODEL="muse-spark-1.3"
 
 resolve_muse_model() {
-  local subject="$1" resolved
-  resolved="$(python3 "$REPO/muse_model.py" model --repo "$subject" 2>/dev/null)"
-  case "$resolved" in
-    muse-spark-*) printf '%s\n' "$resolved" ;;
-    *) printf '%s\n' "$MUSE_FALLBACK_MODEL" ;;
-  esac
+  local subject="${1:-}" resolved known
+  # Whitespace is stripped before the check, so a CRLF or a stray newline
+  # cannot reach argv attached to an otherwise valid id. Muse accepts an
+  # unrecognised model without complaining, so `muse-spark-1.3\r` would
+  # not fail loudly — it would just stop meaning anything.
+  resolved="$(python3 "$REPO/muse_model.py" model --repo "$subject" \
+    2>/dev/null | tr -d '[:space:]')"
+  # Membership, checked against the ids muse_model.py itself publishes
+  # rather than a list written out here. A second copy in each runner
+  # would reject a provider version bump the day the module accepted it,
+  # and would do it silently.
+  known="$(python3 "$REPO/muse_model.py" models 2>/dev/null)"
+  # And the list is only trusted if it contains the private model. A
+  # muse_model.py that is corrupt, half-written, or some other script
+  # entirely answers both calls with the same wrong thing, and membership
+  # against itself always passes; requiring the one id that must always
+  # be there turns that back into a fallback.
+  if [[ -n "$resolved" ]] \
+    && printf '%s\n' "$known" | grep -qxF -- "$MUSE_FALLBACK_MODEL" \
+    && printf '%s\n' "$known" | grep -qxF -- "$resolved"; then
+    printf '%s\n' "$resolved"
+  else
+    printf '%s\n' "$MUSE_FALLBACK_MODEL"
+  fi
 }
 
 # One model call: the prompt file in, the raw answer on stdout. Plain kill,
@@ -658,6 +676,10 @@ if [[ "$JOB" == "review" ]]; then
 else
   MUSE_MODEL="$(resolve_muse_model "$SUBJECT_REPO")"
 fi
+# See muse-implement for why this is here and not only in the helper: a
+# command substitution that dies yields the empty string without stopping
+# the runner, and `--model ""` is an id Muse accepts without complaint.
+[[ -n "$MUSE_MODEL" ]] || MUSE_MODEL="$MUSE_FALLBACK_MODEL"
 
 if [[ "$JOB" != "review" ]]; then
   run_issue_job

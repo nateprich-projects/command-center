@@ -592,11 +592,22 @@ def test_the_runner_always_names_a_model_and_never_hardcodes_one():
         line for line in runner.splitlines() if not line.strip().startswith("#"))
     assert '--model "$MUSE_MODEL"' in body
     assert "--model muse-spark-1.3" not in body
-    assert "contributor" not in body
-    # The only model id in the body is the fail-closed anchor.
+    assert "muse_model.py" in body
+    # The exposure rule is which repository gets which model, and none of
+    # it is written here. A runner naming a repository would be the copy
+    # that drifts.
+    # (`command-center` is not in the list: it is this repo, and its name
+    # is structural here — log paths, the run checkout — not a routing
+    # decision.)
+    for repo in ("FF-Weekly-Start-Sit", "The-League",
+                 "jeffy-finance-agent", "workbench", "career-toolset"):
+        assert repo not in body, repo
+    # One model id: the fail-closed anchor. The set of *valid* ids is not
+    # written here either — it is read back from muse_model.py, so a
+    # provider version bump cannot be rejected by a stale copy.
     assert body.count("muse-spark-1.3") == 1
     assert 'MUSE_FALLBACK_MODEL="muse-spark-1.3"' in body
-    assert "muse_model.py" in body
+    assert 'muse_model.py" models' in body
 
 
 def test_the_runner_disables_every_model_tool():
@@ -1502,3 +1513,53 @@ def test_an_issue_job_on_an_excluded_repo_uses_the_private_model(
 
     assert proc.returncode == 0, proc.stderr
     assert _engine_model(repo) == "muse-spark-1.3"
+
+
+def test_a_resolver_printing_junk_still_names_the_private_model(tmp_path):
+    """The engine's counterpart to the implement runner's case. A module
+    that answers both calls with the same wrong thing passes membership
+    against itself; requiring the private model in the published list is
+    what turns that back into a fallback."""
+    subject = "nateprich-projects/The-League"
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"pr": PR, "repo": subject,
+                     "ref": subject + "#6", "tier": "escalated"}),
+        _packet(repo=subject),
+        answers=[_answer()],
+        muse_model_body="print('not-a-model-at-all')\n")
+
+    assert proc.returncode == 0, proc.stderr
+    assert _engine_model(repo) == "muse-spark-1.3"
+
+
+def test_a_resolver_printing_nothing_still_names_the_private_model(tmp_path):
+    subject = "nateprich-projects/The-League"
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"pr": PR, "repo": subject,
+                     "ref": subject + "#6", "tier": "escalated"}),
+        _packet(repo=subject),
+        answers=[_answer()],
+        muse_model_body="pass\n")
+
+    assert proc.returncode == 0, proc.stderr
+    assert _engine_model(repo) == "muse-spark-1.3"
+
+
+def test_the_retry_reuses_the_model_it_resolved(tmp_path):
+    """The repository does not change between attempts, and re-resolving
+    would be one more place for the answer to differ."""
+    subject = "nateprich-projects/The-League"
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"pr": PR, "repo": subject,
+                     "ref": subject + "#6", "tier": "escalated"}),
+        _packet(repo=subject),
+        answers=["not json at all", _answer()])
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 2
+    for attempt in (1, 2):
+        args = (repo / "muse.args.{}".format(attempt)).read_text().splitlines()
+        assert args[args.index("--model") + 1] == "muse-spark-1.3-contributor"

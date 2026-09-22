@@ -171,3 +171,153 @@ def test_plan_escalation_preserves_the_shared_risk_marker_rule():
     Guard against a race condition in the spool.
     """
     assert plan_is_escalated(plan) == []
+
+
+# -- the scan reads asserted prose only (#1167, #1235) ----------------------
+#
+# Nate answered the gate question on 2026-09-21: skip quoted text, having been
+# shown the cost — a plan that describes its real risk only inside a code
+# fence would drop to the standard lane.
+
+import re  # noqa: E402
+
+import pytest  # noqa: E402
+
+import funnel  # noqa: E402
+
+FIXTURES = pathlib.Path(__file__).parent / "fixtures"
+
+
+def scan_everything(text: str) -> list:
+    """The pre-change scan: every pattern against the whole text.
+
+    Kept here rather than in funnel.py so these fixtures can pin what the old
+    behaviour was without leaving a second scanner in the shipped code.
+    """
+    return [name for name, pattern in sorted(funnel.ESCALATION_PATTERNS.items())
+            if re.search(pattern, text, re.IGNORECASE)]
+
+
+def test_the_recorded_1167_score_comes_entirely_from_quoted_evidence():
+    """#1167 recorded that a report *about* the scan, with none of these
+    properties, scored all four risks. This fixture reproduces that body's
+    shape — pasted log lines and a rejected alternative in a block quote —
+    because the issue itself has since been rewritten by shaping and GitHub
+    exposes no body history, so the original text cannot be fetched."""
+    body = (FIXTURES / "escalation_scan_1167_recorded.md").read_text()
+
+    assert scan_everything(body) == [
+        "authorisation", "concurrency", "data-migration", "destructive",
+    ]
+    assert funnel.escalation_reasons("", body) == []
+
+
+def test_the_recorded_ff225_capture_scored_one_pasted_log_line():
+    """FF-Weekly-Start-Sit#225 was captured with one line copied from an
+    operator log and scored ['data-migration']; the plan written for the same
+    work, without the pasted line, scored nothing. Same reconstruction: the
+    capture body was replaced by the plan when the item was shaped."""
+    body = (FIXTURES / "escalation_scan_ff225_capture.md").read_text()
+
+    assert scan_everything(body) == ["data-migration"]
+    assert funnel.escalation_reasons("", body) == []
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~", "````"])
+def test_a_fenced_block_is_not_scanned(fence):
+    body = "A report.\n{}\nResource deadlock avoided\n{}\n".format(fence, fence)
+
+    assert funnel.escalation_reasons("x", body) == []
+
+
+def test_a_fence_with_an_info_string_still_opens_and_closes():
+    assert funnel.escalation_reasons(
+        "x", "A report.\n```text\nhard delete\n```\nNothing else.\n"
+    ) == []
+
+
+def test_a_tilde_fence_is_not_closed_by_backticks():
+    assert funnel.escalation_reasons(
+        "x", "~~~\nrewrite history\n```\nstill quoted\n~~~\n"
+    ) == []
+
+
+def test_a_block_quote_is_not_scanned():
+    assert funnel.escalation_reasons(
+        "x", "The plan says:\n\n> we will migrate the schema\n\nIt will not.\n"
+    ) == []
+
+
+def test_everything_outside_those_two_regions_is_scanned_as_before():
+    """The authorised narrowing is fences and block quotes, and no more. An
+    inline code span holds the same kind of evidence and is deliberately still
+    scanned; widening a safety gate's blind spot past what was approved is not
+    this change's to do."""
+    assert funnel.escalation_reasons(
+        "x", "The OS error was `Resource deadlock avoided`, not ours.\n"
+    ) == ["concurrency"]
+    assert funnel.escalation_reasons(
+        "x", "This step will migrate the schema in place.\n"
+    ) == ["data-migration"]
+    assert funnel.escalation_reasons(
+        "x", "It runs destructive operations on the branch.\n"
+    ) == ["destructive"]
+
+
+def test_a_risk_sentence_after_a_fence_is_still_read():
+    body = (
+        "```\nResource deadlock avoided\n```\n\n"
+        "This ticket will migrate the schema.\n"
+    )
+
+    assert funnel.escalation_reasons("x", body) == ["data-migration"]
+
+
+def test_the_marker_still_outranks_the_regex_in_both_directions():
+    assert funnel.escalation_reasons(
+        "x", "Risk: standard\n\nThis will migrate the schema.\n"
+    ) == []
+    assert funnel.escalation_reasons(
+        "x", "Risk: escalated — concurrency\n\nNothing risky in prose.\n"
+    ) == ["declared: concurrency"]
+
+
+def test_a_marker_inside_a_fence_is_not_a_marker():
+    """It is being shown, like everything else in there."""
+    assert funnel.escalation_reasons(
+        "x", "```\nRisk: standard\n```\n\nThis will migrate the schema.\n"
+    ) == ["data-migration"]
+
+
+def test_lines_are_blanked_rather_than_deleted():
+    """A marker must not be joined to the sentence above it."""
+    assert funnel.asserted_text(
+        "one\n```\ntwo\n```\nthree\n"
+    ).splitlines() == ["one", "", "", "", "three"]
+
+
+def test_an_unclosed_fence_quiets_the_rest_of_the_body():
+    """Fail towards the cheap lane only where the author opened a fence and
+    never closed it; the alternative is scanning a block they meant to quote."""
+    assert funnel.escalation_reasons(
+        "x", "```\nThis will migrate the schema.\n"
+    ) == []
+
+
+def test_a_negated_sentence_in_prose_still_matches_and_is_not_this_fix():
+    """Two of the six recorded false positives are asserted prose that says
+    the opposite — "authorises no lineup change", "performs no destructive
+    operation". The negation lookaheads miss those forms, and narrowing the
+    scanned region cannot help: the sentence is an assertion about the work.
+    Pinned so the gap is recorded rather than assumed fixed."""
+    assert funnel.escalation_reasons(
+        "x", "This plan authorises no lineup change.\n"
+    ) == ["authorisation"]
+    assert funnel.escalation_reasons(
+        "x", "It performs no destructive operation.\n"
+    ) == ["destructive"]
+
+
+def test_empty_and_missing_text_are_unchanged():
+    assert funnel.asserted_text("") == ""
+    assert funnel.escalation_reasons("", "") == []

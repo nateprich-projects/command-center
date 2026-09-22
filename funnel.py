@@ -1087,13 +1087,6 @@ _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 #: A block quote is a line whose first non-space character is ``>``.
 _QUOTE_RE = re.compile(r"^\s*>")
 
-#: An inline code span: one or more backticks, the shortest run to a matching
-#: run of the same length. Same class as a fence — a path, a command, an error
-#: string, a job name — and it carries the same evidence a fence does when the
-#: evidence is a single line. `Resource deadlock avoided`, quoted from an OS
-#: error in #1167's own report, matched the concurrency pattern from inside
-#: one of these.
-_CODE_SPAN_RE = re.compile(r"(`+)(?:(?!\1).)*?\1", re.DOTALL)
 
 
 def asserted_text(text: str) -> str:
@@ -1109,11 +1102,13 @@ def asserted_text(text: str) -> str:
     start still behaves the same, and so a marker cannot be joined to the
     sentence above it.
 
-    Inline code spans are removed for the same reason as fences: they hold the
-    thing being shown. What is deliberately *not* removed is ordinary quoted
-    prose — a phrase in double quotes can perfectly well be an assertion about
-    the work, and excluding it would narrow the gate to a region that can
-    contain one, which is the line #1167 draws.
+    Two regions and no more: everything outside a fence or a block quote is
+    scanned exactly as it was. An inline code span is arguably the same class
+    of text — `Resource deadlock avoided`, quoted from an OS error in #1167's
+    own report, matches the concurrency pattern from inside one — but the
+    plan authorises fences and block quotes, and widening a safety gate's
+    blind spot past what was approved is not this ticket's to do. Captured
+    separately.
     """
     if not text:
         return text or ""
@@ -1131,10 +1126,7 @@ def asserted_text(text: str) -> str:
             fence = match.group(1)
             kept.append("")
             continue
-        if _QUOTE_RE.match(line):
-            kept.append("")
-            continue
-        kept.append(_CODE_SPAN_RE.sub(" ", line))
+        kept.append("" if _QUOTE_RE.match(line) else line)
     return "\n".join(kept)
 
 

@@ -65,3 +65,33 @@ def heartbeat_isolation(monkeypatch, tmp_path, offline_bin):
                                 os.environ.get("PATH", "")))
 
     yield test_spool
+
+
+
+@pytest.fixture
+def resolver_clearing():
+    """Build a copy of the real resolver with some repositories cleared.
+
+    The production allowlist is empty since #1315, so every repository
+    resolves to the fallback, and a runner that ignored the resolver would
+    look the same as one that followed it. Runner tests write this source
+    into their temporary repository to make the resolver's answer differ.
+
+    The override goes immediately above the ``__main__`` guard. It then
+    binds before the runners call the module as a script, and it does not
+    depend on how the allowlist itself is written.
+    """
+    source = (Path(__file__).resolve().parent.parent
+              / "muse_model.py").read_text()
+    guard = '\nif __name__ == "__main__":'
+    if source.count(guard) != 1:
+        raise AssertionError(
+            "muse_model.py no longer has exactly one __main__ guard; the "
+            "resolver_clearing fixture inserts its override above it")
+
+    def clearing(*names):
+        override = "\nCONTRIBUTOR_REPOS = frozenset({!r})\n".format(
+            sorted(names))
+        return source.replace(guard, override + guard, 1)
+
+    return clearing

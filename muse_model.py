@@ -29,19 +29,20 @@ CONTRIBUTOR_MODEL = "muse-spark-1.3-contributor"
 #: including one this module has never heard of.
 STANDARD_MODEL = "muse-spark-1.3"
 
-#: The repositories Nate cleared for the contributor model on 2026-09-22,
-#: by bare name. `command-center` is public; `FF-Weekly-Start-Sit` and
-#: `The-League` are private, and routing them here is his deliberate
-#: override of the FAIL recorded in docs/meta-model-api-tos-aup-1095.md.
-#: That document stands as written and is not to be edited to agree.
+#: The repositories cleared for the contributor model, by bare name. Empty.
+#:
+#: #1299 cleared `command-center`, `FF-Weekly-Start-Sit` and `The-League` on
+#: 2026-09-22, the last two as Nate's deliberate override of the FAIL in
+#: docs/meta-model-api-tos-aup-1095.md. He withdrew all three the same day
+#: (#1315): judgement runs on the private model at `max`, and
+#: implementation leaves Muse for Codex, so no lane needs the discount. The
+#: resolver, both rate cards and the doctor check stay. Every `muse exec`
+#: still names its model, and clearing a repository again is a deliberate
+#: edit here.
 #:
 #: Membership is exact. A near-miss spelling is not a member, because the
 #: failure it would otherwise cause cannot be withdrawn.
-CONTRIBUTOR_REPOS = frozenset({
-    "command-center",
-    "FF-Weekly-Start-Sit",
-    "The-League",
-})
+CONTRIBUTOR_REPOS = frozenset()
 
 #: Per-million-token rates by model id: input, cached input, output. The
 #: two cards are not a flat multiple — contributor discounts a cache read
@@ -54,8 +55,9 @@ CONTRIBUTOR_REPOS = frozenset({
 #: bill or a panel: it is the card LEARNINGS.md recorded on 2026-09-10
 #: and then retracted on 2026-09-20, kept here because it is the only
 #: published figure, not because it was confirmed. Anything gating spend
-#: on the contributor card is trusting an unverified number; see #1304,
-#: which reads the panel after the lanes move.
+#: on the contributor card is trusting an unverified number. #1304 was to
+#: read the panel once the lanes moved; #1315 withdrew the routing the same
+#: day, so no lane sends it contributor traffic to read.
 RATE_CARDS: Dict[str, Dict[str, float]] = {
     CONTRIBUTOR_MODEL: {"input": 0.10, "cached_input": 0.002, "output": 0.20},
     STANDARD_MODEL: {"input": 1.25, "cached_input": 0.15, "output": 4.25},
@@ -70,10 +72,10 @@ RATE_CARDS: Dict[str, Dict[str, float]] = {
 #: stay equal instead.
 KNOWN_OWNERS = frozenset({"nateprich-projects", "nateprich"})
 
-#: The owner the three cleared repositories actually live under.
+#: The owner a cleared repository must live under.
 #:
 #: `nateprich` is a known owner because member repos do appear under the
-#: user account, but none of the cleared three do. Without this,
+#: user account, but none of the three #1299 cleared did. Without this,
 #: `nateprich/The-League` — a scratch fork, a rename in progress, anything
 #: that happens to share the name — would route to the training tier. That
 #: is the same class of hole as accepting a filesystem path, found by the
@@ -132,8 +134,8 @@ def model_for(repo: Optional[str]) -> str:
 
     Fails safe in the only direction that matters: anything not named
     exactly on the allowlist — an unknown repository, a near-miss
-    spelling, an empty string, ``None``, or one of the three names under
-    an owner they do not live under — gets the private model. A
+    spelling, an empty string, ``None``, or a cleared name under an
+    owner it does not live under — gets the private model. A
     repository nobody has cleared is therefore safe by default, and
     adding one is a deliberate edit here rather than an accident
     somewhere else.

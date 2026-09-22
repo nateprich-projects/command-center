@@ -465,6 +465,21 @@ ORIGIN_OVERRIDE_TARGETS = ("nate", "agents")
 #: instead of each lane scanning prose for an answer-shaped sentence.
 GATES_ANSWER_MARKER = "<!-- command-center-gates-answer -->"
 
+#: The human half of the same record. ``engine/shape.py`` renders the Needs
+#: section as one ``- <Category>: <text>`` line per category, so the Gates
+#: line is addressable on its own. Anchoring on the heading instead would be
+#: wrong about half the time: this tree spells it both "Needs Nate" and
+#: "Needs you", and `skills/shape` treats the two as the same section.
+GATES_LINE_RE = re.compile(
+    r"(?m)^(?P<indent>[ \t]*)-[ \t]+Gates:[ \t]*(?P<text>.*)$"
+)
+
+#: What an answered Gates line says. The verbatim answer is repeated here
+#: rather than summarised, so the line a person reads and the marker a lane
+#: reads cannot disagree about what was decided — the whole point of writing
+#: both in one operation.
+GATES_ANSWERED_LINE = "{indent}- Gates: answered {at} by {decider}. {answer}"
+
 #: Three rejected merges in a week means the auto-merge bar has failed. That is
 #: not "there are bugs" — it is a different and more serious fact, and the
 #: response is to stop auto-merging and fix the review prompt.
@@ -2420,6 +2435,140 @@ def parse_gates_answer(body: str) -> Optional[Dict]:
     if parse_time(found.get("at")) is None:
         return None
     return found
+
+
+class PlanWriteRefused(Exception):
+    """A post-Ready plan-body write that would have changed something else.
+
+    Raised rather than returned. The whole reason this write exists is that
+    hand-editing a plan after Ready is the drift it replaces; a refusal that
+    a caller could ignore by not reading a return value would reintroduce
+    exactly that.
+    """
+
+
+def gates_answer_block(answer: str, decider: str,
+                       at: Optional[datetime] = None,
+                       run: Optional[str] = None,
+                       agent: Optional[str] = None) -> str:
+    """Build the marker block recording one answered Gates question.
+
+    The payload carries the instruction verbatim rather than a paraphrase.
+    A record saying only that something was answered is the state #1167 was
+    already in — the block had cleared and nobody could see what it cleared
+    on — so ``answer`` is the words that were said, and ``decider`` is who
+    said them. ``run`` and ``agent`` name the session that heard it, which
+    is instrumentation and never part of the validity test.
+    """
+    if not isinstance(answer, str) or not answer.strip():
+        raise ValueError("a Gates answer must not be empty")
+    if not isinstance(decider, str) or not decider.strip():
+        raise ValueError("a Gates answer must name its decider")
+    run, agent = _heartbeat_context(run, agent)
+    # `parse_gates_answer` validates this through `parse_time`, which accepts
+    # only `%Y-%m-%dT%H:%M:%SZ` — narrower than the `isoformat()` every other
+    # marker in this file writes. A writer that followed the house style here
+    # would emit a record its own reader fails closed on, and the symptom is
+    # the gate silently staying open: the exact defect #1261 exists to end.
+    # Measured 2026-09-22: `parse_time` returns None for both
+    # `2026-09-22T17:59:09.465909+00:00` and `2026-09-22T17:59:09+00:00`.
+    stamp = (at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    fields = {
+        "agent": agent,
+        "answer": answer.strip(),
+        "at": stamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "decider": decider.strip(),
+        "run": run,
+    }
+    return "{}\n\n```json\n{}\n```".format(
+        GATES_ANSWER_MARKER, json.dumps(fields, indent=2, sort_keys=True)
+    )
+
+
+def _without_gates_record(body: str) -> str:
+    """``body`` with the Gates line and any answer marker removed.
+
+    The comparison basis for the confinement check below. Both halves of a
+    legitimate write disappear from it, so two bodies that differ only in
+    those two places compare equal and anything else does not.
+    """
+    remainder = GATES_LINE_RE.sub("", body)
+    while True:
+        block = _marked_json_block(remainder, GATES_ANSWER_MARKER)
+        if block is None:
+            return remainder
+        remainder = remainder.replace(block, "", 1)
+
+
+def _refuse_unconfined_write(original: str, updated: str) -> None:
+    """Raise unless the only changes are the marker and the Gates line.
+
+    This is the loud refusal the plan asks for, and it is deliberately a
+    check on the *result* rather than on the caller's intent. ``answered_gates_body``
+    takes no prose and so cannot be asked to edit any, but that is an
+    argument about today's code; a later edit that widened it would pass
+    every test that only checked the arguments. Comparing what actually
+    changed cannot be widened by accident.
+
+    Whitespace is normalised before the comparison because removing a list
+    item leaves the blank structure around it slightly different on each
+    side, which is not a prose edit.
+    """
+    def basis(value: str) -> str:
+        return re.sub(r"\s+", " ", _without_gates_record(value)).strip()
+
+    if basis(original) != basis(updated):
+        raise PlanWriteRefused(
+            "refusing the write: it changes the plan outside the Gates line "
+            "and the answer marker. Editing plan prose after Ready is the "
+            "drift this write replaces; change the plan before Ready, or "
+            "record the disagreement as a comment"
+        )
+
+
+def answered_gates_body(body: str, answer: str, decider: str,
+                        at: Optional[datetime] = None,
+                        run: Optional[str] = None,
+                        agent: Optional[str] = None) -> str:
+    """``body`` with the Gates question recorded as answered.
+
+    Exactly two things change: the ``- Gates:`` line in the Needs section,
+    and the answer marker — replaced in place when one is already there, so
+    a second answer supersedes the first rather than stacking a block the
+    newest-first reader would have to arbitrate.
+
+    A body with no Gates line is refused. That is not pedantry about
+    formatting: every plan this write is for was rendered by the shaper,
+    which always emits the four category lines, so a body without one is
+    not the plan this caller thinks it is holding.
+    """
+    if not isinstance(body, str) or not body.strip():
+        raise PlanWriteRefused("refusing the write: the plan body is empty")
+    match = GATES_LINE_RE.search(body)
+    if match is None:
+        raise PlanWriteRefused(
+            "refusing the write: this body has no `- Gates:` line, so it is "
+            "not a shaped plan and there is no question here to answer"
+        )
+    block = gates_answer_block(
+        answer, decider, at=at, run=run, agent=agent)
+    record = json.loads(block.split("```json\n", 1)[1].rsplit("\n```", 1)[0])
+    line = GATES_ANSWERED_LINE.format(
+        indent=match.group("indent"),
+        at=record["at"],
+        decider=record["decider"],
+        answer=record["answer"],
+    )
+    updated = body[:match.start()] + line + body[match.end():]
+
+    existing = _marked_json_block(updated, GATES_ANSWER_MARKER)
+    if existing is not None:
+        updated = updated.replace(existing, block, 1)
+    else:
+        updated = "{}\n\n{}".format(updated.rstrip("\n"), block)
+
+    _refuse_unconfined_write(body, updated)
+    return updated
 
 
 def _parse_block_comment_header(
@@ -9772,6 +9921,61 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
     return 0
 
 
+def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
+                     answer: str, decider: str,
+                     run: Optional[str] = None,
+                     agent: Optional[str] = None) -> int:
+    """Record one answered Gates question in the plan body.
+
+    The sanctioned post-Ready write. It is one ``gh issue edit``: the marker
+    and the Gates line move together or neither does, so no reader can catch
+    the body in a state where the two disagree.
+
+    Deliberately not gated on Status. The question this answers is asked from
+    a block, and a blocked project can be sitting at Shaped, Ready or Building
+    depending on when the lane reached it; refusing on a stage would make the
+    write unusable exactly where #1167 happened. What is enforced is the
+    shape of the change, which is the thing that can corrupt a plan.
+    """
+    item = find(items, ref)
+    if item.state != "OPEN":
+        raise GitHubError(
+            "{} is {}; a closed project takes no answer".format(
+                item.ref, item.state)
+        )
+    if item.parent is not None:
+        raise GitHubError(
+            "{} is a ticket; the Gates question belongs to its project "
+            "{}".format(item.ref, item.parent)
+        )
+
+    body = answered_gates_body(
+        item.body or "", answer, decider, at=now, run=run, agent=agent)
+    out = _run_gh(
+        ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
+         "--body", body],
+        capture_output=True, text=True,
+    )
+    if out.returncode != 0:
+        raise GitHubError(out.stderr.strip())
+    # The caller may evaluate this item again in the same session; keep it
+    # aligned with what GitHub now holds rather than with what it held.
+    item.body = body
+
+    recorded = parse_gates_answer(body)
+    if recorded is None:
+        # Unreachable through this path, and checked anyway: the reader is
+        # the whole point of the write, and a record it rejects is a gate
+        # that stays open while the body claims otherwise.
+        raise GitHubError(
+            "wrote {} but the answered-Gates reader rejects the "
+            "record".format(item.ref)
+        )
+    print("{} Gates answered by {}\n{}\n{}".format(
+        item.ref, recorded["decider"], recorded["answer"], item.url))
+    return 0
+
+
 def _pinnable_item(items: Sequence[Item], ref: str) -> Item:
     """Return a Project item suitable for a pin mutation."""
     item = find(items, ref)
@@ -13365,6 +13569,28 @@ def main(argv: Optional[Sequence[str]] = None, *,
         "--agent", default=None,
         help="agent that wrote the comment; otherwise read the heartbeat spool",
     )
+    answer_gates = sub.add_parser(
+        "answer-gates",
+        help="record an answered Gates question in a plan body",
+    )
+    answer_gates.add_argument(
+        "ref", help="issue number, owner/repo#number, or URL")
+    answer_gates.add_argument(
+        "--answer", required=True,
+        help="the instruction verbatim, not a paraphrase of it",
+    )
+    answer_gates.add_argument(
+        "--decider", default="Nate",
+        help="who answered; defaults to Nate, who owns this gate",
+    )
+    answer_gates.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    answer_gates.add_argument(
+        "--agent", default=None,
+        help="agent that heard the answer; otherwise read the heartbeat spool",
+    )
     comment = sub.add_parser(
         "comment", help="post an issue comment with an explicit voice"
     )
@@ -13604,6 +13830,9 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "park":
             return cmd_park(items, now, args.ref, args.reason,
                             args.run, args.agent)
+        if args.command == "answer-gates":
+            return cmd_answer_gates(items, now, args.ref, args.answer,
+                                    args.decider, args.run, args.agent)
         if args.command == "comment":
             if args.needs_decision is not None:
                 body = _needs_decision_comment_body(args.needs_decision)

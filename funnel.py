@@ -537,6 +537,8 @@ BRIEF_SECTION_BUDGETS = {
     # One REST read per member repo for main's head, plus a bounded follow-up
     # only where that head's run failed. Sized like the other small live reads.
     "main_ci": 3.0,
+    # One `gh issue list` per member repo. Sized like the other live scans.
+    "member_issues_without_project_items": 8.0,
     "outcome_signals": 3.0,
     "portfolio_metrics": 3.0,
     "rejected_merges": 0.25,
@@ -8394,6 +8396,98 @@ def stranded_items(
     return found
 
 
+#: The two long-running watch logs. They live in the repo as issues so the
+#: check-ins have somewhere to write, and they are deliberately not funnel
+#: work: adding them to the Project would put a running commentary in the
+#: queue. Excluded by number because that is what they are — two specific
+#: issues, not a category.
+WATCH_LOG_ISSUES = {
+    "nateprich-projects/command-center": (579, 684),
+}
+
+#: #794's sub-issues are tracked through their parent rather than as Project
+#: items of their own. Excluded by parent, so the exclusion follows the
+#: breakdown rather than needing a list of numbers kept in step.
+ORPHAN_SCAN_EXEMPT_PARENTS = (794,)
+
+
+def _orphan_scan_excluded(repo: str, issue: Mapping[str, object]) -> bool:
+    """Whether one open member issue is a known non-Project issue."""
+    number = issue.get("number")
+    if number in WATCH_LOG_ISSUES.get(repo, ()):
+        return True
+    parent = issue.get("parent")
+    parent_number = (
+        parent.get("number") if isinstance(parent, Mapping) else None
+    )
+    return parent_number in ORPHAN_SCAN_EXEMPT_PARENTS
+
+
+def member_issues_without_project_items(
+    items: Sequence[Item], repos: Optional[Sequence[str]] = None
+) -> Dict[str, object]:
+    """Open member-repo issues that are in no Project item, or why not read.
+
+    Membership comes from the `command-center` topic, never a hardcoded list,
+    so a repo that joins the funnel is scanned the run after it opts in.
+
+    Detection only. Nothing is added at `Ideas`: an issue outside the Project
+    may be deliberate, and the two watch logs are exactly that. Known
+    non-Project issues are excluded — the watch logs by number, #794's
+    sub-issues by parent — and everything else is listed for a person to
+    judge. `nateprich-projects/jeffy-finance-agent#53` is expected to appear
+    and is an honest exception rather than a defect; it is not excluded in
+    code, because an exclusion is a claim that something can never be wrong.
+
+    A scan that fails says so. `status` is `read` or `degraded`, never an
+    empty list standing in for an unread one: zero orphans and an unread scan
+    are the same shape and opposite news.
+    """
+    known = {item.ref for item in items}
+    names = list(repos) if repos is not None else None
+    if names is None:
+        try:
+            names = member_repos()
+        except (GitHubError, OSError, subprocess.SubprocessError) as exc:
+            return {
+                "status": "degraded",
+                "reason": "could not read member repositories: {}".format(exc),
+                "issues": [],
+            }
+
+    found: List[Dict[str, object]] = []
+    unread: List[str] = []
+    for repo in names:
+        payload = _gh_json(
+            "gh", "issue", "list", "--repo", repo, "--state", "open",
+            "--limit", "200", "--json", "number,title,url,parent",
+        )
+        if not isinstance(payload, list):
+            unread.append(repo)
+            continue
+        for issue in payload:
+            if not isinstance(issue, Mapping):
+                continue
+            ref = "{}#{}".format(repo, issue.get("number"))
+            if ref in known or _orphan_scan_excluded(repo, issue):
+                continue
+            found.append({
+                "ref": ref,
+                "repo": repo,
+                "title": issue.get("title"),
+                "url": issue.get("url"),
+            })
+
+    found.sort(key=lambda row: str(row["ref"]))
+    if unread:
+        return {
+            "status": "degraded",
+            "reason": "could not list open issues for {}".format(
+                ", ".join(sorted(unread))
+            ),
+            "issues": found,
+        }
+    return {"status": "read", "issues": found}
 def status_state_mismatches(items: Iterable[Item]) -> List[Dict[str, object]]:
     """Items whose Project Status and GitHub state contradict each other.
 
@@ -8956,6 +9050,7 @@ def cmd_brief(
     outcome_signals: Optional[Dict[str, object]] = None,
     portfolio_metrics: Optional[Dict[str, object]] = None,
     main_ci: Optional[List[Dict[str, object]]] = None,
+    orphan_issues: Optional[Dict[str, object]] = None,
 ) -> int:
     missing = list(missing or [])
     timings = {} if timings is None else timings
@@ -9180,6 +9275,7 @@ def cmd_brief(
             "working_tree_touched": touched,
             "status_state_mismatches": status_mismatches,
             "main_ci": main_ci,
+            "member_issues_without_project_items": orphan_issues,
             "outcome_signals": outcome_signals,
             "rejected_merges": rejected,
             "degraded": degraded,
@@ -13636,6 +13732,23 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
                 if main_ci is _BRIEF_UNAVAILABLE:
                     main_ci = None
+                # Live per-repo read, computed here for the same reason as the
+                # three above: cmd_brief stays pure over its arguments and a
+                # fixture brief reports null — unknown — rather than an empty
+                # list that would read as "nothing outside the Project".
+                orphans = _brief_timed(
+                    "member_issues_without_project_items",
+                    lambda: _brief_read(
+                        "member_issues_without_project_items",
+                        lambda: member_issues_without_project_items(items),
+                        missing,
+                    ),
+                    timings,
+                    degraded,
+                    deadline=deadline,
+                )
+                if orphans is _BRIEF_UNAVAILABLE:
+                    orphans = None
                 # Keep the existing brief JSON as the command's stdout. The
                 # display snapshot is a separate, best-effort side effect and
                 # must not change what callers parse or whether the command
@@ -13656,6 +13769,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             outcome_signals=outcome_signals,
                             portfolio_metrics=portfolio_metrics,
                             main_ci=main_ci,
+                            orphan_issues=orphans,
                         )
                 finally:
                     output = brief_stdout.getvalue()

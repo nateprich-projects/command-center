@@ -945,8 +945,8 @@ def test_apply_main_with_attempt_rejects_unparsable_json(
 
 def test_apply_main_validate_only_prints_without_creating(
         monkeypatch, tmp_path, capsys):
-    """The runner's shadow path: validate and report, with no ticket, no
-    edge, no comment, and no label."""
+    """Validate and report, with no ticket, no edge, no comment, and no
+    label; the runner uses this to validate a retried answer."""
     calls = stub_apply(monkeypatch)
     monkeypatch.setattr(breakdown, "fetch_issue_state", lambda ref: "OPEN")
     answer = tmp_path / "answer.json"

@@ -704,10 +704,6 @@ def drift_since_approval(
 # --------------------------------------------------------------------------
 
 
-def stage_index(status: Optional[str]) -> int:
-    return STAGES.index(status) if status in STAGES else -1
-
-
 def ladder_index(klass: Optional[str]) -> int:
     """Rank on the ladder. An unset Class sorts last and never preempts.
 

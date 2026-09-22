@@ -5,9 +5,7 @@ answers one question. begin offers the work, the packet command assembles
 the evidence, and a failing review precheck is applied as rejected with no
 model call at all. Otherwise the model sees the job's judgement prompt with
 the packet inline and no tools, its one JSON answer is validated, retried
-once on a parse error, and handed to the apply command. --shadow records
-the answer on the PR or issue and the finish note instead of applying: the
-shadow period before the cutover.
+once on a parse error, and handed to the apply command.
 
 The harness below stubs the funnel, heartbeat, packet, apply, gh, and muse
 binaries; the routine text is the real files, so the prompt-substitution
@@ -198,8 +196,7 @@ PACKET_STUB = (
 # with exit 3 on a retryable malformed answer, the unsure and unmet-
 # requirement flips, the "recorded <verdict> on PR" report, and the
 # errored-outcome marker on a malformed final answer. A real apply drops
-# an APPLIED marker file, so the shadow tests can prove nothing was
-# applied by its absence.
+# an APPLIED marker file, so a test can prove whether an apply happened.
 APPLY_STUB = (
     "import json, os, pathlib, sys\n"
     "root = pathlib.Path(__file__).parent\n"
@@ -288,8 +285,7 @@ def _issue_packet_stub(noun):
 # --attempt retry protocol (exit 3 below attempt 2, exit 1 at it),
 # --validate-only printing the normalized answer, and the live report with
 # the created refs or the needs-decision question. A real apply drops an
-# APPLIED marker file, so the shadow tests can prove nothing was applied by
-# its absence.
+# APPLIED marker file, so a test can prove whether an apply happened.
 BREAKDOWN_APPLY_STUB = (
     "import json, os, pathlib, sys\n"
     "root = pathlib.Path(__file__).parent\n"
@@ -834,44 +830,11 @@ def test_a_could_not_run_ci_stands_down_without_a_verdict_or_rejection(tmp_path)
     assert "--review-result" not in heartbeat
 
 
-def test_a_shadow_could_not_run_ci_records_no_verdict(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _could_not_run_packet(), args=("--shadow",))
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 0
-    assert _apply_calls(repo) == []
-    assert not (repo / "applied.marker").exists()
-    body = (repo / "gh.body").read_text()
-    assert "No model was called" in body
-    assert "CI could not run: Recent account payments have failed" in body
-    assert "No verdict was recorded" in body
-    assert "--review-result" not in _heartbeat(repo)
-
-
-def test_a_shadow_non_open_precheck_records_no_verdict(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _non_open_packet(), args=("--shadow",))
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 0
-    assert _apply_calls(repo) == []
-    assert not (repo / "applied.marker").exists()
-    body = (repo / "gh.body").read_text()
-    assert "No model was called" in body
-    assert "pr_not_open state=CLOSED merged_at=2026-09-16T03:46:42Z" in body
-    assert "No verdict was recorded" in body
-    heartbeat = _heartbeat(repo)
-    assert "no decision" in heartbeat
-    assert "--review-result" not in heartbeat
-
-
 # -- passing precheck with a CI re-run outstanding (#1019) ----------------------
 #
-# The branch is clean but no green run yet covers the merged overlap: live
-# re-runs CI once and waits for the result, shadow records what live would
-# do. No model call, no verdict, and a failing precheck rejects first and
-# never reaches here.
+# The branch is clean but no green run yet covers the merged overlap: the
+# runner re-runs CI once and waits for the result. No model call, no
+# verdict, and a failing precheck rejects first and never reaches here.
 
 def _rerun_packet():
     return _packet(ci_rerun={"action": "rerun", "run_id": 123,
@@ -927,41 +890,6 @@ def test_a_wait_packet_finishes_without_calling_anything(tmp_path):
         "--note review of PR #7 in owner/repo at {} waits for CI run 124 "
         "covering merged overlap (#5)\n".format(HEAD)
     )
-
-
-def test_a_shadow_rerun_records_but_never_reruns(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _rerun_packet(), args=("--shadow",))
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 0
-    assert _apply_calls(repo) == []
-    assert not (repo / "applied.marker").exists()
-    gh_log = (repo / "gh.log").read_text()
-    assert "run rerun" not in gh_log
-    assert "pr comment 7 --repo owner/repo --body-file" in gh_log
-    body = (repo / "gh.body").read_text()
-    assert "<!-- command-center-shadow-review -->" in body
-    assert "No model was called" in body
-    assert "gh run rerun 123" in body
-    assert "No verdict was recorded" in body
-    heartbeat = _heartbeat(repo)
-    assert "no decision; ci_rerun: rerun" in heartbeat
-    assert "--review-result" not in heartbeat
-
-
-def test_a_shadow_wait_records_no_decision(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _wait_packet(), args=("--shadow",))
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 0
-    assert _apply_calls(repo) == []
-    body = (repo / "gh.body").read_text()
-    assert "wait for CI run 124" in body
-    heartbeat = _heartbeat(repo)
-    assert "no decision; ci_rerun: wait" in heartbeat
-    assert "--review-result" not in heartbeat
 
 
 def test_a_failing_precheck_rejects_first_and_never_reruns(tmp_path):
@@ -1133,131 +1061,6 @@ def test_a_run_past_the_bound_is_killed_and_finished_errored(tmp_path):
     assert "--outcome errored" in heartbeat
     assert "killed after 0 minutes" in heartbeat
     assert "#392" in heartbeat
-
-
-# -- shadow: record the answer, apply nothing ----------------------------------
-
-def test_a_shadow_run_applies_nothing_and_records_its_answer(tmp_path):
-    """The ticket's accept line: --shadow validates the answer, posts it as
-    an agent comment on the PR, and carries it on the finish note — while
-    review-apply never runs without --validate-only."""
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), args=("--shadow",),
-        answers=(_answer(),))
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 1
-    calls = _apply_calls(repo)
-    assert len(calls) == 1
-    assert "--validate-only" in calls[0]
-    assert not (repo / "applied.marker").exists(), \
-        "a shadow run must not apply"
-    gh_log = (repo / "gh.log").read_text()
-    assert "pr comment 7 --repo owner/repo --body-file" in gh_log
-    body = (repo / "gh.body").read_text()
-    assert "<!-- command-center-shadow-review -->" in body
-    assert "not applied" in body
-    assert "engine-run" in body
-    assert HEAD in body
-    assert '"verdict": "approved"' in body
-    heartbeat = _heartbeat(repo)
-    assert heartbeat.startswith(
-        "finish --agent muse --run engine-run --outcome done "
-        "--note shadow review of PR #7 in owner/repo at {}: approved; "
-        "answer: ".format(HEAD)
-    )
-    assert '"verdict": "approved"' in heartbeat
-    assert "--review-result approved" in heartbeat
-
-
-def test_shadow_accepts_the_flag_in_any_position(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), args=("standard", "--shadow", "high"),
-        answers=(_answer(),))
-
-    assert proc.returncode == 0, proc.stderr
-    assert _heartbeat(repo).startswith(
-        "finish --agent muse --run engine-run --outcome done "
-        "--note shadow review of PR #7"
-    )
-    invoked = (repo / "muse.args.1").read_text().splitlines()
-    assert invoked[invoked.index("--reasoning-effort") + 1] == "high"
-
-
-def test_a_shadow_precheck_failure_calls_no_model(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _failing_packet(), args=("--shadow",))
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 0
-    assert _apply_calls(repo) == []
-    body = (repo / "gh.body").read_text()
-    assert "No model was called" in body
-    assert "CI not green" in body
-    heartbeat = _heartbeat(repo)
-    assert "--outcome done" in heartbeat
-    assert "shadow review of PR #7 in owner/repo" in heartbeat
-    assert "rejected" in heartbeat
-    assert "--review-result rejected" in heartbeat
-
-
-def test_an_unsure_answer_is_decided_rejected_in_shadow(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), args=("--shadow",),
-        answers=(_answer(unsure=["not sure about the migration"]),))
-
-    assert proc.returncode == 0, proc.stderr
-    heartbeat = _heartbeat(repo)
-    assert ": rejected; answer: " in heartbeat
-    body = (repo / "gh.body").read_text()
-    assert "Decision: **rejected**" in body
-
-
-def test_a_shadow_retry_records_the_second_answer(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), args=("--shadow",),
-        answers=("{not json", _answer()))
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 2
-    calls = _apply_calls(repo)
-    assert len(calls) == 2
-    assert all("--validate-only" in call for call in calls)
-    assert not (repo / "applied.marker").exists()
-    assert _heartbeat(repo).startswith(
-        "finish --agent muse --run engine-run --outcome done "
-        "--note shadow review of PR #7 in owner/repo at {}: approved; "
-        "answer: ".format(HEAD)
-    )
-
-
-def test_a_shadow_malformed_final_answer_records_raw_and_errors(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), args=("--shadow",),
-        answers=("{not json", "still not"))
-
-    assert proc.returncode == 1
-    assert not (repo / "applied.marker").exists()
-    body = (repo / "gh.body").read_text()
-    assert "could not be parsed" in body
-    assert "still not" in body
-    heartbeat = _heartbeat(repo)
-    assert "--outcome errored" in heartbeat
-    assert "final answer unparseable" in heartbeat
-    assert "still not" in heartbeat
-
-
-def test_a_shadow_comment_failure_finishes_errored(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), args=("--shadow",),
-        answers=(_answer(),), extra_env={"GH_STATUS": "1"})
-
-    assert proc.returncode == 1
-    assert not (repo / "applied.marker").exists()
-    heartbeat = _heartbeat(repo)
-    assert "--outcome errored" in heartbeat
-    assert "gh pr comment failed" in heartbeat
-    assert '"verdict": "approved"' in heartbeat
 
 
 # -- the issue prompts ---------------------------------------------------------
@@ -1571,118 +1374,3 @@ def test_a_refused_breakdown_apply_finishes_errored(tmp_path):
     assert "is closed" in heartbeat
 
 
-# -- issue shadow: record the answer, create nothing ----------------------------
-
-def test_a_shadow_breakdown_records_its_answer_and_creates_nothing(tmp_path):
-    """The #811 accept line: --shadow validates the answer, posts it as a
-    comment on the project, and carries it on the finish note — creating
-    no issues."""
-    proc, repo = _stubbed_runner(
-        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
-        args=("--shadow",), answers=(_issue_answer("breakdown"),))
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 1
-    calls = _apply_calls(repo)
-    assert len(calls) == 1
-    assert "--validate-only" in calls[0]
-    assert not (repo / "applied.marker").exists(), \
-        "a shadow run must not apply"
-    gh_log = (repo / "gh.log").read_text()
-    assert "create" not in gh_log, "a shadow run creates no issues"
-    assert "issue comment 1 --repo owner/repo --body-file" in gh_log
-    assert len(gh_log.strip().splitlines()) == 1
-    body = (repo / "gh.body").read_text()
-    assert "<!-- command-center-shadow-breakdown -->" in body
-    assert "not applied" in body
-    assert "engine-run" in body
-    assert BREAKDOWN_REF in body
-    assert "Decision: **2 tickets**" in body
-    assert '"needs_decision": null' in body
-    heartbeat = _heartbeat(repo)
-    assert heartbeat.startswith(
-        "finish --agent muse --run engine-run --outcome done "
-        "--note shadow breakdown of {}: 2 tickets; "
-        "answer: ".format(BREAKDOWN_REF)
-    )
-    assert '"needs_decision": null' in heartbeat
-
-
-def test_a_shadow_shape_records_its_answer_and_applies_nothing(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
-        args=("--shadow",), answers=(_issue_answer("shape"),))
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 1
-    calls = _apply_calls(repo)
-    assert len(calls) == 1
-    assert "--validate-only" in calls[0]
-    assert not (repo / "applied.marker").exists(), \
-        "a shadow run must not apply"
-    gh_log = (repo / "gh.log").read_text()
-    assert "issue comment 5 --repo owner/repo --body-file" in gh_log
-    body = (repo / "gh.body").read_text()
-    assert "<!-- command-center-shadow-shape -->" in body
-    assert "not applied" in body
-    assert "engine-run" in body
-    assert SHAPE_REF in body
-    assert "Decision: **Ready**" in body
-    assert '"proposed_class": "Improve"' in body
-    heartbeat = _heartbeat(repo)
-    assert heartbeat.startswith(
-        "finish --agent muse --run engine-run --outcome done "
-        "--note shadow shape of {}: Ready; answer: ".format(SHAPE_REF)
-    )
-    assert '"proposed_class": "Improve"' in heartbeat
-
-
-def test_a_shadow_breakdown_retry_records_the_second_answer(tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
-        args=("--shadow",),
-        answers=("{not json", _issue_answer("breakdown")))
-
-    assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 2
-    calls = _apply_calls(repo)
-    assert len(calls) == 2
-    assert all("--validate-only" in call for call in calls)
-    assert not (repo / "applied.marker").exists()
-    assert _heartbeat(repo).startswith(
-        "finish --agent muse --run engine-run --outcome done "
-        "--note shadow breakdown of {}: 2 tickets; "
-        "answer: ".format(BREAKDOWN_REF)
-    )
-
-
-def test_a_shadow_breakdown_malformed_final_answer_records_raw_and_errors(
-        tmp_path):
-    proc, repo = _stubbed_runner(
-        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
-        args=("--shadow",), answers=("{not json", "still not"))
-
-    assert proc.returncode == 1
-    assert not (repo / "applied.marker").exists()
-    body = (repo / "gh.body").read_text()
-    assert "could not be parsed" in body
-    assert "still not" in body
-    heartbeat = _heartbeat(repo)
-    assert "--outcome errored" in heartbeat
-    assert "final answer unparseable" in heartbeat
-    assert "still not" in heartbeat
-
-
-@pytest.mark.parametrize("job", ("breakdown", "shape"))
-def test_a_shadow_issue_comment_failure_finishes_errored(tmp_path, job):
-    proc, repo = _stubbed_runner(
-        tmp_path, _issue_begin(job), _issue_packet(job),
-        args=("--shadow",), answers=(_issue_answer(job),),
-        extra_env={"GH_STATUS": "1"})
-
-    assert proc.returncode == 1
-    assert not (repo / "applied.marker").exists()
-    heartbeat = _heartbeat(repo)
-    assert "--outcome errored" in heartbeat
-    assert "gh issue comment failed" in heartbeat
-    assert "recorded no decision" in heartbeat

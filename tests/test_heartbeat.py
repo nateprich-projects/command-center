@@ -639,5 +639,5 @@ def test_budget_exhausted_is_a_named_non_skipped_finish():
     assert not "budget-exhausted".startswith("skipped-")
 
 
-def test_heartbeat_retains_enough_records_for_a_48_hour_shadow_window():
+def test_heartbeat_retains_about_three_days_of_records():
     assert heartbeat.KEEP == 10000

@@ -2,12 +2,9 @@
 # A Muse judgement engine: one review, breakdown, or shape job against its
 # packet, then stop.
 #
-# Usage: muse-review-engine [tier] [reasoning-effort] [--shadow]
+# Usage: muse-review-engine [tier] [reasoning-effort]
 #   tier   -- escalated (default) or standard; substituted into begin
 #   effort -- max (default) or high
-#   --shadow -- record the answer on the PR or issue and the finish note
-#              instead of applying it: the shadow period before the #794
-#              cutover
 #
 # Phase 1 of #794: the runner executes the protocol and the model answers one
 # question. begin offers the work, the packet command assembles the evidence,
@@ -35,11 +32,9 @@ set -uo pipefail
 
 TIER="escalated"
 EFFORT="max"
-SHADOW=0
 SEEN=0
 for arg in "$@"; do
   case "$arg" in
-    --shadow) SHADOW=1 ;;
     --*) echo "muse-review-engine: unknown flag '$arg'" >&2; exit 1 ;;
     *)
       SEEN=$((SEEN + 1))
@@ -48,7 +43,7 @@ for arg in "$@"; do
       elif (( SEEN == 2 )); then
         EFFORT="$arg"
       else
-        echo "muse-review-engine: usage: muse-review-engine [tier] [effort] [--shadow]" >&2
+        echo "muse-review-engine: usage: muse-review-engine [tier] [effort]" >&2
         exit 1
       fi
       ;;
@@ -78,10 +73,6 @@ ROUTINE_SHAPE="$REPO/routines/muse-shape.md"
 # no tools so it cannot see this at all; it exists only because exec wants a
 # workspace root.
 WORKSPACE="$HOME/.claude/command-center-muse-workspace"
-# Markers so the shadow-agreement read finds the engine's shadow comments.
-SHADOW_MARKER="<!-- command-center-shadow-review -->"
-SHADOW_MARKER_BREAKDOWN="<!-- command-center-shadow-breakdown -->"
-SHADOW_MARKER_SHAPE="<!-- command-center-shadow-shape -->"
 
 mkdir -p "$WORKSPACE" || exit 1
 
@@ -128,7 +119,6 @@ PACKET_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-packet.XXXXXX")"
 PROMPT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-prompt.XXXXXX")"
 ANSWER_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-answer.XXXXXX")"
 DECISION_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-decision.XXXXXX")"
-COMMENT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-comment.XXXXXX")"
 # The helper is a sibling of this runner, not part of the maintained clone's
 # protocol surface: it ships and moves with the script that sources it.
 MUSE_QUOTA_HOLD_LIB="${BASH_SOURCE[0]%/*}/muse-quota-hold.sh"
@@ -140,7 +130,7 @@ fi
 DIAG_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-diag.XXXXXX")"
 RESULT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-result.XXXXXX")"
 if [[ -z "$PACKET_FILE" || -z "$PROMPT_FILE" || -z "$ANSWER_FILE" \
-  || -z "$DECISION_FILE" || -z "$COMMENT_FILE" || -z "$DIAG_FILE" \
+  || -z "$DECISION_FILE" || -z "$DIAG_FILE" \
   || -z "$RESULT_FILE" ]]; then
   echo "muse-review-engine: could not create scratch files" >&2
   exit 1
@@ -169,7 +159,7 @@ export FUNNEL_SESSION
 cleanup() {
   python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
   rm -f -- "$PACKET_FILE" "$PROMPT_FILE" "$ANSWER_FILE" \
-    "$DECISION_FILE" "$COMMENT_FILE" "$DIAG_FILE" "$RESULT_FILE"
+    "$DECISION_FILE" "$DIAG_FILE" "$RESULT_FILE"
 }
 trap cleanup EXIT
 
@@ -265,22 +255,6 @@ PY
     echo "muse-review-engine: could not finish the run" >&2
     exit 1
   fi
-}
-
-# Cap a blob pasted into a note or comment, with the cut marked. Mirrors
-# review-apply's MAX_RAW_NOTE: a GitHub comment is no place for unbounded
-# model output.
-cap_text() {
-  python3 -c '
-import sys
-
-text = open(sys.argv[1]).read()
-limit = int(sys.argv[2])
-if len(text) <= limit:
-    sys.stdout.write(text)
-else:
-    sys.stdout.write(text[:limit] + "\n…[truncated {} chars]".format(len(text) - limit))
-' "$1" "$2"
 }
 
 compact_json() {
@@ -390,9 +364,7 @@ collect_issue_packet() {
   fi
 }
 
-# One issue-job apply invocation. Extra arguments ($@) slot the shadow
-# path's --validate-only in; --run/--agent ride both paths for one shape,
-# and the read-only one ignores them — nothing stamped without writes.
+# One issue-job apply invocation; --run/--agent stamp the runner comments.
 run_issue_apply() {
   local attempt="$1"
   shift
@@ -404,27 +376,6 @@ run_issue_apply() {
       --answer "$ANSWER_FILE" --attempt "$attempt" "$@" \
       --run "$BEGIN_RUN" --agent muse
   fi
-}
-
-# The decision word for a shadow comment, read back from --validate-only's
-# own report: the ticket count or the needs-decision question for a
-# breakdown, the Shaped-versus-Ready status for a shape.
-issue_shadow_decision() {
-  python3 -c '
-import json
-import sys
-
-job, path = sys.argv[1], sys.argv[2]
-decision = json.load(open(path))
-if job == "breakdown":
-    if decision.get("needs_decision"):
-        print("needs-decision question")
-    else:
-        count = len(decision.get("tickets", []))
-        print("{} ticket{}".format(count, "" if count == 1 else "s"))
-else:
-    print(decision.get("status") or "unknown")
-' "$JOB" "$DECISION_FILE"
 }
 
 # The finish note for a live apply, read back from the apply's own report —
@@ -467,57 +418,6 @@ retry_issue_prompt() {
     "$PROMPT" "$parse_err" >"$PROMPT_FILE"
 }
 
-# A shadow run records the answer as a comment on the project or idea and
-# finishes done instead of applying: no tickets, no plan, no status change.
-record_issue_shadow() {
-  local decision="$1"
-  local answer_note="$2"
-  local model_line="$3"
-  {
-    printf '%s\n' "$SHADOW_MARKER_JOB"
-    printf '**Shadow %s (not applied)** — run `%s`, %s `%s`\n' \
-      "$JOB" "$BEGIN_RUN" "$SUBJECT_WORD" "$BEGIN_REF"
-    printf '\n%s\n' "$model_line"
-    printf '\nDecision: **%s**.\n' "$decision"
-    printf '\n```json\n'
-    cap_text "$ANSWER_FILE" 4000
-    printf '\n```\n'
-  } >"$COMMENT_FILE"
-  if ! "$GH_BIN" issue comment "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
-      --body-file "$COMMENT_FILE" 2>"$DIAG_FILE"; then
-    gh_err="$(cat "$DIAG_FILE")"
-    echo "muse-review-engine: shadow comment failed: $gh_err" >&2
-    failure "shadow $JOB of $BEGIN_REF recorded no decision (gh issue comment failed: $gh_err); answer: $answer_note" || true
-    exit 1
-  fi
-  finish_done "shadow $JOB of $BEGIN_REF: $decision; answer: $answer_note"
-}
-
-# A malformed final answer: record what the model actually said, with the
-# parse error, and finish errored — the shadow comparison for this subject
-# is lost, and the next run collects the packet again.
-issue_shadow_malformed() {
-  parse_err="$(cat "$DIAG_FILE")"
-  printf '%s' "$parse_err" >"$DECISION_FILE"
-  ANSWER_NOTE="unparseable ($(compact_json "$DECISION_FILE" 500)): $(compact_json "$ANSWER_FILE" 2000)"
-  {
-    printf '%s\n' "$SHADOW_MARKER_JOB"
-    printf '**Shadow %s (not applied)** — run `%s`, %s `%s`\n' \
-      "$JOB" "$BEGIN_RUN" "$SUBJECT_WORD" "$BEGIN_REF"
-    printf '\nThe model answered the %s question, but the final answer could not be parsed: %s\n' \
-      "$JOB" "$parse_err"
-    printf '\nRaw output:\n\n```\n'
-    cap_text "$ANSWER_FILE" 4000
-    printf '\n```\n'
-  } >"$COMMENT_FILE"
-  if "$GH_BIN" issue comment "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
-      --body-file "$COMMENT_FILE" 2>/dev/null; then
-    failure "shadow $JOB of $BEGIN_REF recorded no decision (final answer unparseable); answer: $ANSWER_NOTE" || true
-  else
-    failure "shadow $JOB of $BEGIN_REF recorded no decision (final answer unparseable, and gh issue comment failed); answer: $ANSWER_NOTE" || true
-  fi
-}
-
 run_issue_job() {
   # The packet is the only evidence the model ever sees. Reads only;
   # nothing here changes remote state.
@@ -551,35 +451,6 @@ run_issue_job() {
     muse_status=$?
     if (( muse_status != 0 )); then
       muse_failed "$muse_status"
-    fi
-    if (( SHADOW )); then
-      # Read the status directly into a variable: `$?` after an `if`
-      # whose condition failed is 0, not the command's status, so the `fi`
-      # below would never see a retryable 3. (A bare `name=$(...)`
-      # assignment keeps the substitution's status.)
-      decision="$(run_issue_apply "$ATTEMPT" --validate-only \
-        2>"$DIAG_FILE")"
-      validate_status=$?
-      if (( validate_status == 0 )); then
-        printf '%s' "$decision" >"$DECISION_FILE"
-        if ! DECISION_WORD="$(issue_shadow_decision)"; then
-          DECISION_WORD="undecided"
-        fi
-        if [[ -z "$DECISION_WORD" ]]; then
-          DECISION_WORD="undecided"
-        fi
-        ANSWER_NOTE="$(compact_json "$ANSWER_FILE" 4000)"
-        record_issue_shadow "$DECISION_WORD" "$ANSWER_NOTE" \
-          "The model answered the $JOB question."
-        exit 0
-      fi
-      if (( validate_status == 3 && ATTEMPT == 1 )); then
-        retry_issue_prompt
-        ATTEMPT=2
-        continue
-      fi
-      issue_shadow_malformed
-      exit 1
     fi
     # Read the status directly: `$?` after an `if` whose condition failed
     # is 0, never the apply exit, so the retryable 3 must be caught here.
@@ -742,13 +613,9 @@ elif [[ "$BEGIN_DO" == "breakdown" || "$BEGIN_DO" == "shape" ]]; then
   FAIL_SUBJECT="on $JOB of $BEGIN_REF"
   if [[ "$JOB" == "breakdown" ]]; then
     PROMPT_TEMPLATE="$PROMPT_BREAKDOWN"
-    SHADOW_MARKER_JOB="$SHADOW_MARKER_BREAKDOWN"
-    SUBJECT_WORD="project"
     JOB_PAST="broke down"
   else
     PROMPT_TEMPLATE="$PROMPT_SHAPE"
-    SHADOW_MARKER_JOB="$SHADOW_MARKER_SHAPE"
-    SUBJECT_WORD="idea"
     JOB_PAST="shaped"
   fi
 else
@@ -832,92 +699,11 @@ if [[ -z "$HEAD_SHORT" ]]; then
   HEAD_SHORT="unknown-head"
 fi
 
-# A shadow run records the answer and finishes done instead of applying. The
-# answer file holds what the model said (or the constructed precheck
-# rejection); the decision is the verdict word that would have been recorded.
-record_shadow() {
-  local verdict="$1"
-  local answer_note="$2"
-  local model_line="$3"
-  {
-    printf '%s\n' "$SHADOW_MARKER"
-    printf '**Shadow review (not applied)** — run `%s`, packet head `%s`\n' \
-      "$BEGIN_RUN" "$HEAD_SHORT"
-    printf '\n%s\n' "$model_line"
-    printf '\nDecision: **%s**.\n' "$verdict"
-    printf '\n```json\n'
-    cap_text "$ANSWER_FILE" 4000
-    printf '\n```\n'
-  } >"$COMMENT_FILE"
-  if ! "$GH_BIN" pr comment "$BEGIN_PR" --repo "$BEGIN_REPO" \
-      --body-file "$COMMENT_FILE" 2>"$DIAG_FILE"; then
-    gh_err="$(cat "$DIAG_FILE")"
-    echo "muse-review-engine: shadow comment failed: $gh_err" >&2
-    failure "shadow review of PR #$BEGIN_PR in $BEGIN_REPO recorded no verdict (gh pr comment failed: $gh_err); answer: $answer_note" || true
-    exit 1
-  fi
-  finish_done "shadow review of PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $verdict; answer: $answer_note" "$verdict"
-}
-
-record_shadow_no_decision() {
-  local reason="$1"
-  {
-    printf '%s\n' "$SHADOW_MARKER"
-    printf '**Shadow review (not applied)** — run `%s`, packet head `%s`\n' \
-      "$BEGIN_RUN" "$HEAD_SHORT"
-    printf '\nNo model was called: the packet precheck stopped before judgement.\n'
-    printf '\nPrecheck: `%s`\n\nNo verdict was recorded.\n' "$reason"
-  } >"$COMMENT_FILE"
-  if ! "$GH_BIN" pr comment "$BEGIN_PR" --repo "$BEGIN_REPO" \
-      --body-file "$COMMENT_FILE" 2>"$DIAG_FILE"; then
-    gh_err="$(cat "$DIAG_FILE")"
-    echo "muse-review-engine: shadow comment failed: $gh_err" >&2
-    failure "shadow review of PR #$BEGIN_PR in $BEGIN_REPO recorded no verdict (gh pr comment failed: $gh_err); precheck: $reason" || true
-    exit 1
-  fi
-  finish_done "shadow review of PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: no decision; precheck: $reason"
-}
-
-# A shadow run whose packet asks for a CI re-run: record what live would
-# do and finish without a decision. The re-run itself is an apply, so
-# shadow never performs it.
-record_shadow_rerun() {
-  local action="$1"
-  local run="$2"
-  local overlaps="$3"
-  local doing
-  if [[ "$action" == "rerun" ]]; then
-    doing="Live would re-run CI (\`gh run rerun $run\`) to cover the merged overlap ($overlaps) and wait for the result."
-  elif [[ -n "$run" ]]; then
-    doing="Live would wait for CI run $run covering the merged overlap ($overlaps)."
-  else
-    doing="Live would wait for a CI run covering the merged overlap ($overlaps)."
-  fi
-  {
-    printf '%s\n' "$SHADOW_MARKER"
-    printf '**Shadow review (not applied)** — run `%s`, packet head `%s`\n' \
-      "$BEGIN_RUN" "$HEAD_SHORT"
-    printf '\nNo model was called: the packet precheck passed but no green run yet covers the merged overlap.\n'
-    printf '\n%s\n\nNo verdict was recorded.\n' "$doing"
-  } >"$COMMENT_FILE"
-  if ! "$GH_BIN" pr comment "$BEGIN_PR" --repo "$BEGIN_REPO" \
-      --body-file "$COMMENT_FILE" 2>"$DIAG_FILE"; then
-    gh_err="$(cat "$DIAG_FILE")"
-    echo "muse-review-engine: shadow comment failed: $gh_err" >&2
-    failure "shadow review of PR #$BEGIN_PR in $BEGIN_REPO recorded no verdict (gh pr comment failed: $gh_err); ci_rerun: $action" || true
-    exit 1
-  fi
-  finish_done "shadow review of PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: no decision; ci_rerun: $action"
-}
-
 # A startup or account stop is not a code-review verdict.  The run stays
 # healthy and quiet until Actions recovers; recording rejection here would
 # count the same untestable head against the auto-merge bar and hand the
 # engineer a branch-shaped problem that no branch can fix.
 if [[ "$PACKET_CI" == "could-not-run" ]]; then
-  if (( SHADOW )); then
-    record_shadow_no_decision "CI could not run: $PACKET_CI_REASON"
-  fi
   finish_done "review skipped PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: CI could not run: $PACKET_CI_REASON; no verdict recorded"
   exit 0
 fi
@@ -930,10 +716,6 @@ if [[ "$PACKET_PASS" != "True" ]]; then
       exit 1
     fi
     PR_NOT_OPEN_REASON="$(cat "$DECISION_FILE")"
-    if (( SHADOW )); then
-      record_shadow_no_decision "$PR_NOT_OPEN_REASON"
-      exit 0
-    fi
     finish_done "review skipped PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $PR_NOT_OPEN_REASON; no verdict recorded"
     exit 0
   fi
@@ -947,11 +729,6 @@ if [[ "$PACKET_PASS" != "True" ]]; then
   fi
   REASON_COUNT="$(packet_field reason_count)"
   ANSWER_NOTE="$(compact_json "$ANSWER_FILE" 4000)"
-  if (( SHADOW )); then
-    record_shadow "rejected" "$ANSWER_NOTE" \
-      "No model was called: the packet precheck failed with $REASON_COUNT reason(s)."
-    exit 0
-  fi
   if python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
       --answer "$ANSWER_FILE" --ci "$PACKET_CI" --head "$PACKET_HEAD" \
       --attempt 1 --run "$BEGIN_RUN" --agent muse >"$DIAG_FILE" 2>&1; then
@@ -968,18 +745,13 @@ fi
 # no green run yet covers the merged overlap. Re-run CI once and wait for
 # the result — no model call, no verdict — so the engineer needs no rebase
 # (#1019). A failing precheck rejects first (above) and never reaches here.
-# The finish notes carry no verdict word: the shadow report reads a missing
-# decision as excluded from agreement, and "no verdict" would read as
-# malformed output, which a healthy wait is not.
+# The finish notes carry no verdict word, because a healthy wait is not a
+# verdict.
 if [[ -n "$CI_RERUN_ACTION" ]]; then
   if [[ "$CI_RERUN_ACTION" != "rerun" && "$CI_RERUN_ACTION" != "wait" ]]; then
     echo "muse-review-engine: unknown ci_rerun action '$CI_RERUN_ACTION'" >&2
     failure "unknown ci_rerun action '$CI_RERUN_ACTION' for PR #$BEGIN_PR in $BEGIN_REPO; recorded nothing" || true
     exit 1
-  fi
-  if (( SHADOW )); then
-    record_shadow_rerun "$CI_RERUN_ACTION" "$CI_RERUN_RUN" "$CI_RERUN_OVERLAPS"
-    exit 0
   fi
   if [[ "$CI_RERUN_ACTION" == "rerun" ]]; then
     if [[ ! "$CI_RERUN_RUN" =~ ^[0-9]+$ ]]; then
@@ -1019,66 +791,6 @@ printf '%s' "$PROMPT" >"$PROMPT_FILE"
 recorded_verdict() {
   grep -o 'recorded \(approved\|rejected\)' "$DIAG_FILE" | tail -n 1 | awk '{print $2}'
 }
-
-if (( SHADOW )); then
-  ATTEMPT=1
-  while true; do
-    # Read the status into a variable: `$?` inside an `if !` branch is the
-    # negated condition's status (0), not the call's.
-    call_muse
-    muse_status=$?
-    if (( muse_status != 0 )); then
-      muse_failed "$muse_status"
-    fi
-    # Read the status directly into a variable: `$?` after an `if`
-    # whose condition failed is 0, not the command's status, so the `fi`
-    # below would never see a retryable 3. (A bare `name=$(...)`
-    # assignment keeps the substitution's status.)
-    decision="$(python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
-        --answer "$ANSWER_FILE" --validate-only --attempt "$ATTEMPT" \
-        2>"$DIAG_FILE")"
-    validate_status=$?
-    if (( validate_status == 0 )); then
-      printf '%s' "$decision" >"$DECISION_FILE"
-      VERDICT="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["verdict"])' "$DECISION_FILE")"
-      if [[ -z "$VERDICT" ]]; then
-        VERDICT="unknown"
-      fi
-      ANSWER_NOTE="$(compact_json "$ANSWER_FILE" 4000)"
-      record_shadow "$VERDICT" "$ANSWER_NOTE" "The model answered the review question."
-      exit 0
-    fi
-    if (( validate_status == 3 && ATTEMPT == 1 )); then
-      parse_err="$(cat "$DIAG_FILE")"
-      printf '%s\n\nYour previous answer could not be parsed: %s\nReply again with exactly one JSON object and nothing else.' \
-        "$PROMPT" "$parse_err" >"$PROMPT_FILE"
-      ATTEMPT=2
-      continue
-    fi
-    # A malformed final answer: record what the model actually said, with
-    # the parse error, and finish errored — the shadow comparison for this
-    # head is lost, and the next run collects the packet again.
-    parse_err="$(cat "$DIAG_FILE")"
-    printf '%s' "$parse_err" >"$DECISION_FILE"
-    ANSWER_NOTE="unparseable ($(compact_json "$DECISION_FILE" 500)): $(compact_json "$ANSWER_FILE" 2000)"
-    {
-      printf '%s\n' "$SHADOW_MARKER"
-      printf '**Shadow review (not applied)** — run `%s`, packet head `%s`\n' \
-        "$BEGIN_RUN" "$HEAD_SHORT"
-      printf '\nThe model answered the review question, but the final answer could not be parsed: %s\n' "$parse_err"
-      printf '\nRaw output:\n\n```\n'
-      cap_text "$ANSWER_FILE" 4000
-      printf '\n```\n'
-    } >"$COMMENT_FILE"
-    if "$GH_BIN" pr comment "$BEGIN_PR" --repo "$BEGIN_REPO" \
-        --body-file "$COMMENT_FILE" 2>/dev/null; then
-      failure "shadow review of PR #$BEGIN_PR in $BEGIN_REPO recorded no verdict (final answer unparseable); answer: $ANSWER_NOTE" || true
-    else
-      failure "shadow review of PR #$BEGIN_PR in $BEGIN_REPO recorded no verdict (final answer unparseable, and gh pr comment failed); answer: $ANSWER_NOTE" || true
-    fi
-    exit 1
-  done
-fi
 
 ATTEMPT=1
 while true; do

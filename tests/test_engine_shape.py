@@ -1137,8 +1137,8 @@ def test_apply_cli_with_attempt_rejects_invalid_json(monkeypatch, capsys):
 
 def test_apply_cli_validate_only_reports_the_decision_without_writing(
         monkeypatch, capsys):
-    """The runner's shadow path: decide from the same inputs as the live
-    path and report, without touching the idea."""
+    """Decide from the same inputs as the live path and report, without
+    touching the idea; the runner uses this to validate a retried answer."""
     item = idea(42)
     monkeypatch.setattr(funnel, "load_items", lambda: [item])
 

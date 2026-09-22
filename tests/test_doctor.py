@@ -59,6 +59,17 @@ def stub_github_checks(monkeypatch):
     )
 
 
+def stub_muse_scan(monkeypatch, root):
+    """Scan the fixture checkout, never this machine's real checkouts.
+
+    `check_muse_model_pins` reads module-level roots like the other local
+    checks, so a doctor test that did not redirect them would pass or fail
+    on whatever happens to be installed under ~/.local/share.
+    """
+    monkeypatch.setattr(funnel, "MUSE_SCAN_ROOTS", (root,))
+    monkeypatch.setattr(funnel, "MUSE_SCAN_GLOBS", ())
+
+
 def install_fixture(tmp_path):
     checkout = tmp_path / "checkout"
     (checkout / "skills" / "funnel").mkdir(parents=True)
@@ -85,12 +96,14 @@ def test_all_local_checks_pass_and_discover_every_skill(tmp_path, monkeypatch):
     os.symlink(checkout / "skills" / "shape", claude / "skills" / "shape")
     stub_heartbeat_checks(monkeypatch)
     stub_github_checks(monkeypatch)
+    stub_muse_scan(monkeypatch, checkout)
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
     assert [check.name for check in checks] == [
         "install symlinks", "checkout staleness", "repository drift", "settings.json", "process table", "gh auth", "Project fields",
-        "command-center topic", "member repo owner/repo", "usage cache", "heartbeat branch",
+        "command-center topic", "member repo owner/repo", "muse model pins", "usage cache",
+        "heartbeat branch",
     ]
     assert all(check.ok for check in checks)
     assert "3 links" in checks[0].found
@@ -260,10 +273,11 @@ def test_doctor_does_not_require_a_self_referential_checkout_link(tmp_path, monk
     (claude / "command-center").unlink()
     stub_heartbeat_checks(monkeypatch)
     stub_github_checks(monkeypatch)
+    stub_muse_scan(monkeypatch, checkout)
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
-    assert len(checks) == 11
+    assert len(checks) == 12
     assert checks[0].ok
     assert checks[2].ok
 
@@ -938,9 +952,11 @@ def test_class_assignment_dump_is_sorted_and_skips_unassigned_items(monkeypatch)
     )
 
 
-def test_doctor_includes_class_assignment_dump_with_loaded_items(monkeypatch):
+def test_doctor_includes_class_assignment_dump_with_loaded_items(
+        tmp_path, monkeypatch):
     stub_heartbeat_checks(monkeypatch)
     stub_github_checks(monkeypatch)
+    stub_muse_scan(monkeypatch, tmp_path)
 
     checks = funnel.doctor_checks(items=[
         funnel.Item(
@@ -955,9 +971,11 @@ def test_doctor_includes_class_assignment_dump_with_loaded_items(monkeypatch):
     assert checks[-3].found == "owner/repo#1 | issue number 1 | Class Broken"
 
 
-def test_doctor_reports_unparseable_block_comments_with_loaded_items(monkeypatch):
+def test_doctor_reports_unparseable_block_comments_with_loaded_items(
+        tmp_path, monkeypatch):
     stub_heartbeat_checks(monkeypatch)
     stub_github_checks(monkeypatch)
+    stub_muse_scan(monkeypatch, tmp_path)
 
     checks = funnel.doctor_checks(items=[
         funnel.Item(

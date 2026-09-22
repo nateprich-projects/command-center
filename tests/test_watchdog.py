@@ -778,6 +778,132 @@ def test_a_record_spooled_during_a_push_survives_to_the_next_drain(
     assert [r["run"] for r in heartbeat._spooled("codex")] == ["b"]
 
 
+# -- advisory non-blocking lock on the spool (#1238) --------------------------
+#
+# Dedup in _push makes a concurrent drain harmless; the lock makes it rarer.
+# Best-effort, on the spool that is already there, never waited on, never
+# fatal: a missed lock only costs the dedup predicate a line to skip.
+
+
+def _fcntl_or_skip():
+    fcntl = pytest.importorskip("fcntl")
+    if heartbeat.fcntl is None:
+        pytest.skip("file locking unavailable here")
+    return fcntl
+
+
+def _try_lock(path):
+    """Take the spool lock if it is free; True when it was free."""
+    import fcntl
+
+    probe = open(path)
+    try:
+        try:
+            fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
+        return True
+    finally:
+        probe.close()
+
+
+def test_a_push_that_cannot_take_the_lock_still_completes(
+        tmp_path, monkeypatch):
+    """The loser of the lock race carries on without it — no wait, no fail."""
+    fcntl = _fcntl_or_skip()
+    _isolate_spool(tmp_path, monkeypatch)
+    store = _store(monkeypatch)
+
+    def busy(*args, **kwargs):
+        raise BlockingIOError(11, "lock held by a concurrent lane")
+
+    monkeypatch.setattr(fcntl, "flock", busy)
+    record = {"run": "a", "phase": "finish", "ts": 1,
+              "agent": "codex", "outcome": "done"}
+    heartbeat._spool("codex", record)
+    heartbeat._push("codex")
+
+    line = json.dumps(record, sort_keys=True)
+    assert store["text"].splitlines() == [line]
+    assert heartbeat._spooled("codex") == []
+
+
+def test_a_lock_error_is_swallowed_and_the_push_proceeds(
+        tmp_path, monkeypatch):
+    """A filesystem that will not lock reads as unlocked, not as a failure."""
+    import errno
+
+    fcntl = _fcntl_or_skip()
+    _isolate_spool(tmp_path, monkeypatch)
+    store = _store(monkeypatch)
+
+    def unsupported(*args, **kwargs):
+        raise OSError(errno.ENOSYS, "locking not supported here")
+
+    monkeypatch.setattr(fcntl, "flock", unsupported)
+    record = {"run": "a", "phase": "start", "ts": 1}
+    heartbeat._spool("codex", record)
+    heartbeat._push("codex")
+
+    line = json.dumps(record, sort_keys=True)
+    assert store["text"].splitlines() == [line]
+    assert heartbeat._spooled("codex") == []
+
+
+def test_the_lock_is_held_during_the_push_and_released_after(
+        tmp_path, monkeypatch):
+    _fcntl_or_skip()
+    _isolate_spool(tmp_path, monkeypatch)
+    monkeypatch.setattr(heartbeat, "_fetch", lambda agent: (None, None))
+    held = {}
+
+    def ok(*args, **k):
+        held["during"] = not _try_lock(heartbeat._spool_path("codex"))
+        return "{}"
+
+    monkeypatch.setattr(heartbeat, "gh", ok)
+    heartbeat._spool("codex", {"run": "a", "phase": "start", "ts": 1})
+    heartbeat._push("codex")
+
+    assert held == {"during": True}
+    assert _try_lock(heartbeat._spool_path("codex"))
+
+
+def test_the_lock_is_released_when_the_push_raises(tmp_path, monkeypatch):
+    _fcntl_or_skip()
+    _isolate_spool(tmp_path, monkeypatch)
+    _offline(monkeypatch)
+    heartbeat._spool("codex", {"run": "a", "phase": "start", "ts": 1})
+    with pytest.raises(heartbeat.HeartbeatError):
+        heartbeat._push("codex")
+    assert _try_lock(heartbeat._spool_path("codex"))
+
+
+def test_the_lock_creates_no_file_beside_the_spool(tmp_path, monkeypatch):
+    _isolate_spool(tmp_path, monkeypatch)
+    store = _store(monkeypatch)
+    heartbeat._spool("codex", {"run": "a", "phase": "start", "ts": 1})
+    heartbeat._push("codex")
+
+    assert store["text"].splitlines() != []
+    assert sorted(p.name for p in
+                  pathlib.Path(heartbeat.SPOOL_DIR).iterdir()) == ["codex.jsonl"]
+
+
+def test_a_missing_spool_pushes_extra_without_creating_a_file(
+        tmp_path, monkeypatch):
+    """No spool yet means nothing to serialize against: fall through unlocked."""
+    _isolate_spool(tmp_path, monkeypatch)
+    store = _store(monkeypatch)
+    record = {"run": "a", "phase": "start", "ts": 1}
+    heartbeat._push("codex", extra=[record])
+
+    line = json.dumps(record, sort_keys=True)
+    assert store["text"].splitlines() == [line]
+    assert not pathlib.Path(heartbeat._spool_path("codex")).exists()
+
+
 def test_an_api_reserve_decline_is_not_an_alarm():
     """Coasting to a stop on budget is the design working, not a fault (#273)."""
     rows = [start("a", 1), finish("a", 1, "skipped-api-reserve")]

@@ -388,7 +388,10 @@ import sys
 job, ref, path = sys.argv[1], sys.argv[2], sys.argv[3]
 if job == "breakdown":
     result = json.load(open(path))
-    if result.get("needs_decision"):
+    if result.get("already_answered"):
+        print("broke down {}: the Gates question was already answered, "
+              "nothing posted".format(ref))
+    elif result.get("needs_decision"):
         print("broke down {}: asked a needs-decision question".format(ref))
     else:
         count = len(result.get("created", []))

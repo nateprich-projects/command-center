@@ -348,7 +348,8 @@ def decide(answer: Dict, *,
            klass: Optional[str],
            origin_voice: Optional[str],
            override_target: Optional[str] = None,
-           escalation_reasons: Sequence[str] = ()) -> Tuple[str, str]:
+           escalation_reasons: Sequence[str] = (),
+           state: Optional[str] = None) -> Tuple[str, str]:
     """Apply the self-approval rule to validated fields. Pure: no IO.
 
     Returns the status and its reason: ``Ready`` only when the four
@@ -377,7 +378,8 @@ def decide(answer: Dict, *,
     if funnel.self_approval_eligible(
             klass, origin_voice, override_target,
             needs_nate=bool(open_categories),
-            escalated=bool(reasons)):
+            escalated=bool(reasons),
+            state=state):
         if origin_voice == "agent":
             owner_basis = "origin agent"
         else:
@@ -386,6 +388,9 @@ def decide(answer: Dict, *,
                 "needs_nate all null; class {} self-approvable; "
                 "{}".format(klass, owner_basis))
     failed = []
+    if state is not None and str(state).upper() != "OPEN":
+        failed.append("the issue is {} on GitHub".format(
+            str(state).upper()))
     if klass not in funnel.SELF_APPROVABLE_CLASSES:
         failed.append("class {} is not self-approvable".format(
             klass or "unset"))
@@ -424,6 +429,7 @@ def preview_decision(items: list, item, answer: Dict) -> Tuple[str, str]:
         origin_voice=origin_voice,
         override_target=override_target,
         escalation_reasons=funnel.plan_is_escalated(render_plan(answer)),
+        state=item.state,
     )
 
 
@@ -717,9 +723,20 @@ def apply_shape(items: list, now: datetime, ref: str,
     if authority_signals:
         print("\n--- self-approval advisory ---")
         print("Authority signals are recorded in the Self-approved basis:")
+        descriptions = {
+            "policy authority": (
+                "cites plan.md or AGENTS.md on a gate, membership, "
+                "or who may write"
+            ),
+            "unattended authority": "changes what an agent may do unattended",
+            "gate authority": "changes a gate's question, answer, or owner",
+            "field authority": (
+                "changes who may set a field that other rules act on"
+            ),
+        }
         for signal in authority_signals:
             print("  {}: {}".format(
-                signal, funnel.NEEDS_NATE_SIGNAL_REASONS[signal]
+                signal, descriptions.get(signal, signal)
             ))
     if status != "Ready":
         print("\nIt now waits on you: is the plan good? "

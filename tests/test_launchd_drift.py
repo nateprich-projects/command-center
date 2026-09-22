@@ -42,24 +42,6 @@ NAMES = MUSE_SCHEDULE_NAMES + [
     KEEPER_NAME, REMOTE_CONTROL_NAME, PUBLISHER_NAME, DEPLOY_NAME]
 INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [
     KEEPER_NAME, PUBLISHER_NAME, DEPLOY_NAME]
-CLAUDE_CODE_MARKER = "Human step: a Claude Code environment"
-LAUNCHD_CLAUDE_CODE_TRIGGER = re.compile(
-    r"\blaunchctl\s+(?:bootstrap|bootout|load)\b"
-    r"|\b(?:a|the)\s+plist\s+loads\b",
-    re.IGNORECASE,
-)
-CLAUDE_CODE_MARKER_LINE = re.compile(
-    r"^\s*" + re.escape(CLAUDE_CODE_MARKER) + r"\s*$",
-    re.MULTILINE,
-)
-
-
-def launchd_ticket_body_has_required_marker(body):
-    """Apply the breakdown rule without touching a real LaunchAgent."""
-    return (
-        not LAUNCHD_CLAUDE_CODE_TRIGGER.search(body)
-        or CLAUDE_CODE_MARKER_LINE.search(body) is not None
-    )
 
 
 def console_reload_hint(name):
@@ -98,31 +80,6 @@ def test_drift_hint_requires_the_console_session():
     assert "logged-in console (Aqua) session" in hint
     assert "not an automation shell" in hint
     assert "launchctl print gui/$(id -u)/com.nateprich.command-center-run-keeper" in hint
-
-
-@pytest.mark.parametrize(
-    "trigger",
-    (
-        "launchctl bootstrap",
-        "launchctl bootout",
-        "launchctl load",
-        "Accept: a plist loads",
-    ),
-)
-def test_launchd_load_ticket_bodies_require_the_claude_code_marker(trigger):
-    marked = "Action: {} the LaunchAgent.\n\n{}\n".format(
-        trigger, CLAUDE_CODE_MARKER
-    )
-    unmarked = "Action: {} the LaunchAgent.\n".format(trigger)
-
-    assert launchd_ticket_body_has_required_marker(marked)
-    assert not launchd_ticket_body_has_required_marker(unmarked)
-
-
-def test_drift_check_ticket_does_not_need_the_claude_code_marker():
-    body = "Compare the installed and repository plists, then run pytest."
-
-    assert launchd_ticket_body_has_required_marker(body)
 
 
 @pytest.mark.parametrize("name", MUSE_SCHEDULE_NAMES)

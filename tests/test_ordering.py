@@ -684,10 +684,7 @@ def test_blocked_work_is_not_startable_at_either_level():
 def test_a_machine_local_ticket_is_startable_by_claude_only():
     rows = [
         project(1, "Building", "New"),
-        ticket(
-            2, 1,
-            body="Human step: {}".format(funnel.MACHINE_LOCAL_REASON),
-        ),
+        ticket(2, 1, needs="claude-code-environment"),
     ]
 
     assert startable(rows, agent="codex") == []
@@ -699,7 +696,7 @@ def test_a_machine_local_ticket_is_startable_by_claude_only():
 def test_a_human_step_ticket_is_not_startable_by_any_agent():
     rows = [
         project(1, "Building", "New"),
-        ticket(2, 1, body="Human step: entering a credential"),
+        ticket(2, 1, needs="human"),
     ]
 
     assert startable(rows, agent="codex") == []
@@ -709,7 +706,8 @@ def test_a_human_step_ticket_is_not_startable_by_any_agent():
 def test_an_unmarked_ticket_is_startable_by_both_agents():
     rows = [
         project(1, "Building", "New"),
-        ticket(2, 1, body="Enter a value supplied through the environment."),
+        ticket(2, 1, needs="none",
+               body="Enter a value supplied through the environment."),
     ]
 
     assert [candidate.number for candidate in startable(
@@ -1078,10 +1076,7 @@ def test_next_cli_filters_machine_local_work_by_requesting_agent(
 ):
     rows = [
         project(1, "Building", "New"),
-        ticket(
-            2, 1,
-            body="Human step: {}".format(funnel.MACHINE_LOCAL_REASON),
-        ),
+        ticket(2, 1, needs="claude-code-environment"),
     ]
     monkeypatch.setattr(funnel, "load_items", lambda: rows)
     monkeypatch.setattr(funnel, "awaiting_review", lambda items: set())

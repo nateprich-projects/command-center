@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json
 import os
 import glob
@@ -35,6 +36,11 @@ import sys
 import time
 import uuid
 from typing import Dict, List, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - the schedule Mac and CI are Unix
+    fcntl = None  # type: ignore
 
 import session_usage
 
@@ -241,6 +247,52 @@ def _spooled(agent: str) -> List[Dict]:
         return []
 
 
+@contextlib.contextmanager
+def _spool_lock(agent: str):
+    """Hold a best-effort advisory lock on the agent's spool file (#1238).
+
+    Yields the open spool handle while an exclusive non-blocking `flock` is
+    held, or `None` when there is nothing to hold: no `fcntl` on this
+    platform, no spool file yet, the lock already taken by a concurrent
+    lane, or a filesystem that will not lock. Every one of those falls
+    through to the unlocked path — instrumentation must not gate the thing
+    it instruments, and the dedup predicate in `_push` catches the
+    duplicate a missed lock lets through.
+
+    The lock is on the spool that is already there: opening it read-only
+    never creates a file, and removing the lock leaves dedup-only
+    correctness behind.
+    """
+    if fcntl is None:
+        yield None
+        return
+    try:
+        fh = open(_spool_path(agent), "r")
+    except OSError:
+        yield None
+        return
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            fh.close()
+        except OSError:
+            pass
+        yield None
+        return
+    try:
+        yield fh
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            fh.close()
+        except OSError:
+            pass
+
+
 def _push(agent: str, extra: Optional[List[Dict]] = None) -> None:
     """Drain the spool to GitHub. Raises if it cannot.
 
@@ -253,7 +305,17 @@ def _push(agent: str, extra: Optional[List[Dict]] = None) -> None:
     is rejected rather than silently lost, and the retry re-reads before
     rewriting. Both agents can be running at once, even though only one Codex
     run can.
+
+    A best-effort non-blocking `flock` on the spool narrows the
+    concurrent-drain window; it is never waited on and never fatal, and a
+    missed lock only costs the dedup predicate a line to skip (#1238).
     """
+    with _spool_lock(agent):
+        _push_drain(agent, extra)
+
+
+def _push_drain(agent: str, extra: Optional[List[Dict]] = None) -> None:
+    """The drain itself; `_push` holds the spool lock around it."""
     from_spool = _spooled(agent)
     pending = from_spool + list(extra or [])
     if not pending:
@@ -263,7 +325,18 @@ def _push(agent: str, extra: Optional[List[Dict]] = None) -> None:
     for attempt in range(len(BACKOFF) + 1):
         content, sha = _fetch(agent)
         lines = [ln for ln in (content or "").splitlines() if ln.strip()]
-        lines += [json.dumps(r, sort_keys=True) for r in pending]
+        # A concurrent lane may have drained the same spool first, or an
+        # earlier PUT may have landed while its reply was lost; either way
+        # the re-fetched blob already holds the pending record as a
+        # byte-identical line, so appending it again would write it twice
+        # (#1237). The comparison is exact, not semantic: pending records
+        # are serialised the same way they are written.
+        seen = set(lines)
+        for record in pending:
+            line = json.dumps(record, sort_keys=True)
+            if line not in seen:
+                seen.add(line)
+                lines.append(line)
         body = ("\n".join(lines[-KEEP:]) + "\n").encode("utf-8")
 
         # The body goes on stdin: as an argument it overran ARG_MAX (1 MB on
@@ -477,6 +550,74 @@ def close_rebegun_starts(agent: str, records: List[Dict], run: str,
     return closed
 
 
+def distinct_records(records: List[Dict]) -> List[Dict]:
+    """``records`` with byte-identical duplicates removed, order kept.
+
+    The canonical de-duplication for readers that sum values rather than count
+    runs. A run legitimately writes several ``api_cost`` events — one per funnel
+    command — which differ in their timestamps and numbers, so they must not be
+    collapsed by run id. What is never legitimate is the same record twice, and
+    that is exactly the shape the duplicate writes took: 250 of the 251
+    duplicate-finish runs measured on 2026-09-21 were byte-identical with the
+    same ``ts``.
+
+    Compared by the same serialisation ``_push`` writes, so equality here means
+    equality in the blob.
+    """
+    seen = set()
+    found = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        try:
+            key = json.dumps(record, sort_keys=True)
+        except (TypeError, ValueError):
+            found.append(record)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(record)
+    return found
+
+
+def one_record_per_run(records: List[Dict]) -> List[Dict]:
+    """The newest record per run id, for readers that count runs.
+
+    The canonical counting rule: a count read from heartbeat records is a count
+    of runs, not of rows. Before this existed, `agent_health` read 67 muse
+    errors against 55 true runs — the alarm was reporting the write duplication
+    rather than the lane's health.
+
+    Records with no run id are kept as they are: they cannot be attributed, and
+    dropping them would quietly lose history.
+    """
+    newest: Dict[str, Dict] = {}
+    unattributed: List[Dict] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        run = record.get("run")
+        if not run:
+            unattributed.append(record)
+            continue
+        stamp = record.get("ts")
+        stamp = float(stamp) if isinstance(stamp, (int, float)) and not isinstance(
+            stamp, bool
+        ) else float("-inf")
+        current = newest.get(str(run))
+        if current is None:
+            newest[str(run)] = record
+            continue
+        current_stamp = current.get("ts")
+        current_stamp = float(current_stamp) if isinstance(
+            current_stamp, (int, float)
+        ) and not isinstance(current_stamp, bool) else float("-inf")
+        if stamp >= current_stamp:
+            newest[str(run)] = record
+    return list(newest.values()) + unattributed
+
+
 def api_cost_for_run(records: List[Dict], run: Optional[str]) -> Dict[str, Optional[int]]:
     """Sum the per-command API events for one run, independently by field.
 
@@ -489,10 +630,12 @@ def api_cost_for_run(records: List[Dict], run: Optional[str]) -> Dict[str, Optio
     if not run:
         return result
 
+    # Exact duplicates only: a run writes one api_cost event per funnel
+    # command, so collapsing by run id would throw away real numbers, while
+    # the same event twice is always a duplicate write (#1225).
     events = [
         record.get("api_cost")
-        for record in records
-        if isinstance(record, dict)
+        for record in distinct_records(records)
         if record.get("phase") == "api_cost" and record.get("run") == run
     ]
     if not events:

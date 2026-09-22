@@ -42,6 +42,19 @@ class StrayFileError(ImplementError):
     """The ticket branch contains run scratch that must not reach a PR."""
 
 
+#: The blocked_on_human reason enum: the four specific human capabilities
+#: from the implement answer schema (#794). These are prose in the created
+#: sub-issue for Nate to read; the machine signal is Needs=human on the
+#: Project field, written alongside. Kept here (not in funnel) because only
+#: this job validates the implement answer.
+BLOCKED_ON_HUMAN_REASONS = (
+    "an app UI with no API",
+    "entering a credential",
+    "an account or billing setting",
+    "physical access to a machine",
+)
+
+
 def fetch_ticket(repo: str, number: int) -> dict:
     """Read the ticket and its native parent identity."""
     data = funnel._gh_json(
@@ -247,10 +260,10 @@ def _read_blocked_answer(value: object) -> dict:
     if not isinstance(value, dict):
         raise ImplementError("blocked_on_human must be an object")
     reason = value.get("reason")
-    if reason not in funnel.HUMAN_STEP_REASONS:
+    if reason not in BLOCKED_ON_HUMAN_REASONS:
         raise ImplementError(
             "blocked_on_human reason must be one of: {}".format(
-                ", ".join(funnel.HUMAN_STEP_REASONS)))
+                ", ".join(BLOCKED_ON_HUMAN_REASONS)))
     action = value.get("action")
     if not isinstance(action, str) or not action.strip():
         raise ImplementError("blocked_on_human action must be a non-empty string")
@@ -983,11 +996,12 @@ def render_human_step_title(action: str) -> str:
 
 def render_human_step_body(*, parent_number: int, ticket_number: int,
                            reason: str, action: str) -> str:
-    """Render the human-step sub-issue body with its exact marker line.
+    """Render the human-step sub-issue body with its reason as prose.
 
-    The ``Human step: <reason>`` line must match ``HUMAN_STEP_LINE``
-    exactly, because the body scanner reads that marker until the Needs
-    field covers every open ticket.
+    The ``Human step: <reason>`` line is prose for Nate to read, not a
+    marker: the body scanner is deleted (#826) and the machine signal is
+    Needs=human on the Project field, written alongside by
+    ``finish_blocked_on_human``.
     """
     doing = action.rstrip()
     if not doing.endswith("."):
@@ -996,7 +1010,7 @@ def render_human_step_body(*, parent_number: int, ticket_number: int,
         "Part of #{}; discovered while implementing #{}.".format(
             parent_number, ticket_number),
         "",
-        "{}{}".format(funnel.HUMAN_STEP_PREFIX, reason),
+        "Human step: {}".format(reason),
         "",
         "Action Nate must perform: {}".format(doing),
         "",
@@ -1043,6 +1057,21 @@ def create_human_step_issue(repo: str, parent_number: int, title: str,
     url = [line.strip() for line in (proc.stdout or "").splitlines()
            if line.strip()][-1]
     return {"number": number, "ref": "{}#{}".format(repo, number), "url": url}
+
+
+def write_human_step_needs(url: str, ref: str) -> None:
+    """Set Needs=human on a new human-step sub-issue. Two GitHub calls.
+
+    The sub-issue joins the parent's Project automatically with its fields
+    blank; ``gh project item-add`` answers its row id whether fresh or
+    already present (as breakdown's ``add_to_project`` does), then one
+    mutation sets the field. Without this the new ticket would read as
+    unset and miss the human_steps section (#826).
+    """
+    from engine import breakdown as breakdown_engine
+
+    item_id = breakdown_engine.add_to_project(url)
+    breakdown_engine.write_needs(item_id, "human", ref)
 
 
 def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = None,
@@ -1264,6 +1293,7 @@ def finish_blocked_on_human(
         create_effect: Callable[..., dict] = create_human_step_issue,
         block_effect: Callable[..., None] = mark_ticket_blocked,
         comment_effect: Callable[..., None] = post_agent_comment,
+        needs_effect: Callable[[str, str], None] = write_human_step_needs,
         extra_note: Optional[str] = None) -> dict:
     """File the human step, block the ticket, release, and finish. No PR.
 
@@ -1289,6 +1319,7 @@ def finish_blocked_on_human(
     created = create_effect(
         resolved, parent_number, title, body, cwd=context["root"])
     try:
+        needs_effect(created["url"], created["ref"])
         block_effect(resolved, context["number"],
                      blocked_by=created["number"], cwd=context["root"])
         comment_effect(

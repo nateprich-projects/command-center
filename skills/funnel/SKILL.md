@@ -43,8 +43,8 @@ The code template documents the rest: `generated_at`, `counts_by_gate`,
 `blocked_machine_local_steps`, `suspected_human_steps`, `parked`,
 `closed_itself`, `cleared_blocks`, `awaiting_breakdown`,
 `prose_dependencies`, `unattended_approvals`, `run_summary`, `agent_health`,
-`rejected_merges`, `closed_with_access_vocabulary`, `missing`, `timings`,
-`degraded`.
+`rejected_merges`, `status_state_mismatches`, `main_ci`,
+`closed_with_access_vocabulary`, `missing`, `timings`, `degraded`.
 
 ## How to render it
 

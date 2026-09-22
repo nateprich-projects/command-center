@@ -136,12 +136,13 @@ def test_a_merged_pr_and_no_pr_are_distinct():
     assert pr == {11: "merged", 12: None}
 
 
-def test_the_owner_follows_the_capability_marker_then_the_pr_then_the_tier():
+def test_the_owner_follows_the_needs_field_then_the_pr_then_the_tier():
     facts = {REPO + "#14": {"state": "OPEN", "number": 7, "headRefOid": "abc"}}
     found = rows([
         project(),
-        ticket(11, body="Human step: a Claude Code environment\nRisk: standard"),
-        ticket(12, body="Human step: entering a credential\nRisk: standard"),
+        ticket(11, needs="claude-code-environment",
+               body="Risk: standard"),
+        ticket(12, needs="human", body="Risk: standard"),
         ticket(13, body="Risk: escalated — credentials"),
         ticket(14),
         ticket(15),
@@ -211,7 +212,7 @@ def test_the_project_row_names_only_the_next_step_owner():
     rows = funnel.dashboard_board(
         [project(status="Building", children_total=2),
          ticket(11, body="Risk: standard"),
-         ticket(12, body="Human step: entering a credential\nRisk: standard")],
+         ticket(12, needs="human", body="Risk: standard")],
         NOW,
     )["columns"]
     column = next(c for c in rows if c["stage"] == "Building")

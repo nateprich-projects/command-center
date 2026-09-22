@@ -1203,3 +1203,47 @@ def test_apply_main_rejects_an_attempt_below_1(monkeypatch):
         shape.apply_main(["42", "--repo", REPO, "--answer", "-",
                           "--attempt", "0"])
     assert caught.value.code == 2
+
+
+# -- a closed issue is never self-approvable (#1206, #1208) -----------------
+
+
+def test_a_closed_issue_is_never_self_approvable():
+    """Advancing one to Ready puts it in the startable queue with nothing
+    able to close it again. The state is a term of the one predicate, not a
+    second gate beside it."""
+    assert funnel.self_approval_eligible(
+        "Broken", "agent", None, needs_nate=False, escalated=False,
+        state="CLOSED",
+    ) is False
+    assert funnel.self_approval_eligible(
+        "Broken", "agent", None, needs_nate=False, escalated=False,
+        state="OPEN",
+    ) is True
+
+
+def test_an_absent_state_leaves_the_rule_exactly_as_it_was():
+    assert funnel.self_approval_eligible(
+        "Broken", "agent", None, needs_nate=False, escalated=False,
+    ) is True
+    assert funnel.self_approval_eligible(
+        "New", "agent", None, needs_nate=False, escalated=False,
+    ) is False
+
+
+def test_decide_holds_a_closed_issue_and_says_why():
+    validated = shape.validate_answer(answer())
+
+    status, reason = shape.decide(
+        validated, klass="Broken", origin_voice="agent", state="CLOSED")
+
+    assert status == "Shaped"
+    assert "the issue is CLOSED on GitHub" in reason
+
+
+def test_decide_on_an_open_issue_is_unchanged():
+    validated = shape.validate_answer(answer())
+
+    assert shape.decide(
+        validated, klass="Broken", origin_voice="agent", state="OPEN"
+    ) == shape.decide(validated, klass="Broken", origin_voice="agent")

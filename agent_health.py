@@ -7,6 +7,8 @@ the thresholds and wording here prevents the two readers from drifting apart.
 
 from __future__ import annotations
 
+import datetime
+import os
 import statistics
 from typing import Dict, List, Optional, Tuple
 
@@ -39,6 +41,75 @@ OPEN_START_FLOOR_SECONDS = 15 * 60
 OPEN_START_MULTIPLE = 10
 ERROR_THRESHOLD = 3
 WEEK = 7 * 86400
+
+#: The provider hold the Muse lanes write when a window is spent. The same file
+#: the runners check (`scripts/muse-quota-hold.sh`), read here so the watchdog
+#: and the lanes cannot disagree about whether an agent is parked or dead.
+#: One ISO-8601 stamp, nothing else.
+QUOTA_HOLD_ENV = "MUSE_QUOTA_HOLD_FILE"
+QUOTA_HOLD_DEFAULT = "~/.claude/command-center-muse-quota-hold"
+
+#: Which agent the hold speaks for. It is Muse's file and says nothing about
+#: any other lane's silence.
+QUOTA_HOLD_AGENT = "muse"
+
+
+def quota_hold_path() -> str:
+    """Where the hold lives: the environment's answer, else the default."""
+    return os.environ.get(QUOTA_HOLD_ENV) or os.path.expanduser(
+        QUOTA_HOLD_DEFAULT
+    )
+
+
+def quota_hold_until(path: Optional[str] = None) -> Optional[float]:
+    """Epoch seconds of a recorded provider hold, or ``None``.
+
+    Missing, empty, unreadable and unparseable all mean *no hold* — the same
+    direction the runners take, and the safe one: a hold that cannot be
+    understood must not silence a dead lane. Unlike the shell reader, this one
+    never removes the file. It is a watchdog, and a diagnostic that deletes the
+    evidence it read is worse than one that reports nothing.
+
+    An expired stamp is returned as-is rather than dropped, because the caller
+    needs it: silence after a park is measured from the reset, not from the
+    last record before it.
+    """
+    try:
+        with open(path or quota_hold_path()) as handle:
+            stamp = handle.read().strip()
+    except OSError:
+        return None
+    if not stamp:
+        return None
+    if stamp.endswith("Z"):
+        stamp = stamp[:-1] + "+00:00"
+    try:
+        moment = datetime.datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=datetime.timezone.utc)
+    return moment.timestamp()
+
+
+def _hold_stamp(hold_until: float) -> str:
+    """The reset instant, rendered the way the hold file writes it."""
+    return datetime.datetime.fromtimestamp(
+        hold_until, datetime.timezone.utc
+    ).isoformat()
+
+
+def _deduplicated(rows: List[Dict]) -> List[Dict]:
+    """Rows with byte-identical duplicates removed.
+
+    The cadence inference reads the gaps between records, and a record written
+    twice with the same ``ts`` is a gap of zero that never happened — it drags
+    the p90 down and so tightens the silence threshold. Same canonical rule as
+    the counting readers, applied to the timing one (#1225).
+    """
+    import heartbeat
+
+    return heartbeat.distinct_records(rows)
 
 
 def _history(
@@ -82,7 +153,8 @@ def _normal_gap(
 ) -> Optional[Tuple[float, float, int]]:
     """Return ``(normal gap, latest record, record count)`` when inferable."""
     timestamps, gaps = _history(
-        rows, now, history_window_seconds=history_window_seconds
+        _deduplicated(rows), now,
+        history_window_seconds=history_window_seconds,
     )
     if len(gaps) < minimum_history:
         return None
@@ -162,7 +234,15 @@ def _recent_outcomes(
     outcome: str,
     week: int,
 ) -> List[Dict]:
-    """Return records with ``outcome`` inside the current diagnostic week."""
+    """Return one record per run with ``outcome`` in the diagnostic week.
+
+    A count read from these rows is a count of *runs*. Reading rows instead
+    made the alarm report the heartbeat's own write duplication: 67 muse errors
+    against 55 true runs, measured 2026-09-21 (#1225). The canonical rule lives
+    in ``heartbeat.one_record_per_run``; this is the thin adapter to it.
+    """
+    import heartbeat
+
     found = []
     for row in rows:
         timestamp = row.get("ts")
@@ -174,7 +254,7 @@ def _recent_outcomes(
         ):
             continue
         found.append(row)
-    return found
+    return heartbeat.one_record_per_run(found)
 
 
 def assess(
@@ -192,11 +272,23 @@ def assess(
     dying_threshold: Optional[int] = None,
     week: Optional[int] = None,
     error_threshold: Optional[int] = None,
+    hold_until: Optional[float] = None,
 ) -> List[str]:
     """Return raised conditions in the watchdog's existing wording.
 
     The optional keyword arguments keep the Actions wrapper's historical test
     hooks intact while leaving one implementation of the assessment rules.
+
+    ``hold_until`` is a recorded provider park, in epoch seconds. While it is
+    in the future the agent's silence is explained rather than alarming: it
+    reports as parked, naming the reset and the last record before the park,
+    and raises no silence condition for the parked span. Once it has passed,
+    silence is measured from the reset rather than from that last record —
+    a lane that could not run was not quiet, and counting the park against it
+    would alarm for hours after the thing was fixed.
+
+    Every other condition is unchanged by a hold. A park explains a gap in
+    records; it does not explain a run that died or three that errored.
     """
     normal_percentile = (
         NORMAL_PERCENTILE if normal_percentile is None else normal_percentile
@@ -237,8 +329,20 @@ def assess(
         minimum_history=minimum_history,
         history_window_seconds=history_window_seconds,
     )
-    if inferred is not None:
+    parked = hold_until is not None and hold_until > now
+    if parked and inferred is not None:
+        problems.append(
+            "`{}`: parked until {} (provider quota). Last record before the "
+            "park at <t:{}:f>; no silence alarm while the park holds.".format(
+                agent, _hold_stamp(hold_until), int(inferred[1])
+            )
+        )
+    elif inferred is not None:
         normal, latest, record_count = inferred
+        if hold_until is not None:
+            # The park is over. Silence since the reset is the honest gap;
+            # the records before it are older than the reason for the quiet.
+            latest = max(latest, hold_until)
         quiet_for = now - latest
         threshold = max(silence_floor_seconds, normal_multiple * normal)
         if quiet_for > threshold:
@@ -259,6 +363,11 @@ def assess(
                     int(latest),
                 )
             )
+    elif parked and agent not in retired:
+        problems.append(
+            "`{}`: parked until {} (provider quota); no silence alarm while "
+            "the park holds.".format(agent, _hold_stamp(hold_until))
+        )
     elif inferred is None and agent not in retired:
         timestamps = [
             float(row["ts"])
@@ -269,6 +378,8 @@ def assess(
         ]
         if timestamps:
             latest = max(timestamps)
+            if hold_until is not None:
+                latest = max(latest, hold_until)
             quiet_for = now - latest
             if quiet_for > absolute_silence_seconds:
                 problems.append(

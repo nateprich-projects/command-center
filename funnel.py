@@ -39,6 +39,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import (Any, Callable, Dict, Iterable, List, Mapping, Optional,
                     Sequence, Set, Tuple)
 
+import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
 
 # --------------------------------------------------------------------------
@@ -496,7 +497,9 @@ CLEARED_BLOCK_WINDOW = timedelta(days=7)
 # 120 s total remains the transport envelope.
 BRIEF_TOTAL_BUDGET_SECONDS = 120.0
 BRIEF_SECTION_BUDGETS = {
-    "ticket_pr_facts": 20.0,
+    # Past the 22.9 s observed max over 738 refs plus headroom for GitHub
+    # variance (#1168, #1210).
+    "ticket_pr_facts": 35.0,
     "items": 0.25,
     "counts_by_gate": 0.25,
     "in_motion": 0.25,
@@ -504,7 +507,6 @@ BRIEF_SECTION_BUDGETS = {
     "closed_itself": 45.0,
     "cleared_blocks": 7.0,
     "blocked": 0.25,
-    "suspected_human_steps": 0.25,
     "human_steps": 0.25,
     "machine_local_steps": 0.25,
     "blocked_human_steps": 0.25,
@@ -523,6 +525,11 @@ BRIEF_SECTION_BUDGETS = {
     "run_summary": 1.0,
     "agent_health": 1.0,
     "working_tree_touched": 1.0,
+    # Pure over the items already loaded: no read of its own to time out.
+    "status_state_mismatches": 0.25,
+    # One REST read per member repo for main's head, plus a bounded follow-up
+    # only where that head's run failed. Sized like the other small live reads.
+    "main_ci": 3.0,
     "outcome_signals": 3.0,
     "portfolio_metrics": 3.0,
     "rejected_merges": 0.25,
@@ -565,6 +572,11 @@ class Item:
     status: Optional[str] = None
     klass: Optional[str] = None
     pinned: bool = False
+    # The ticket's Needs single-select: "none", "human", or
+    # "claude-code-environment", or None when unset. Tickets carry this one
+    # field of their own (Nate 2026-09-13, #794); #826 made it the only
+    # capability signal, replacing the Human step body marker.
+    needs: Optional[str] = None
     status_since: Optional[datetime] = None
     # ProjectV2 status history retained from the load query. The brief uses it
     # to find likely unattended shaping transitions before reading comments.
@@ -585,9 +597,9 @@ class Item:
     parent: Optional[str] = None  # "owner/repo#123"
     children_total: int = 0
     children_done: int = 0
-    # Derived at load time from child ticket bodies. This is deliberately not
-    # a second GitHub record: the Human step marker remains the only source of
-    # truth, including after its ticket closes.
+    # Derived at load time from child ticket Needs fields. This is
+    # deliberately not a second GitHub record: the Needs field remains the
+    # only source of truth, including after its ticket closes.
     carried_human_step: bool = False
     first_child_created_at: Optional[datetime] = None
     last_child_closed_at: Optional[datetime] = None
@@ -1011,80 +1023,24 @@ def agent_has_role(agent: str, role: str, tier: Optional[str]) -> bool:
 RISK_LINE = re.compile(r"^\s*Risk:\s*(standard|escalated)\b(.*)$",
                        re.IGNORECASE | re.MULTILINE)
 
-#: A ticket declares a step that is not workable in every agent environment in
-#: its body, written at breakdown. An unmarked ticket is workable by any agent;
-#: this reason is the middle outcome, workable only where Claude Code's local
-#: environment is present. It is deliberately an allowlist: a lack of access
-#: to the Claude Code environment is not the same as an engineer finding work
-#: difficult.
-MACHINE_LOCAL_REASON = "a Claude Code environment"
-MACHINE_LOCAL_REASONS = (MACHINE_LOCAL_REASON,)
-
-#: These reasons still mean that no agent can perform the step. Keep them
-#: separate from MACHINE_LOCAL_REASONS so the next capability-aware consumer
-#: can distinguish Claude-Code-only work from work Nate must perform.
-HUMAN_STEP_PREFIX = "Human step: "
-HUMAN_STEP_REASONS = (
-    "an app UI with no API",
-    "entering a credential",
-    "an account or billing setting",
-    "physical access to a machine",
-)
-HUMAN_STEP_MARKER_REASONS = MACHINE_LOCAL_REASONS + HUMAN_STEP_REASONS
-HUMAN_STEP_LINE = re.compile(
-    r"^\s*" + re.escape(HUMAN_STEP_PREFIX)
-    + r"(?P<reason>"
-    + "|".join(re.escape(reason) for reason in HUMAN_STEP_MARKER_REASONS)
-    + r")\s*$",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-
-def parse_human_step(body: str) -> Optional[str]:
-    """Return an allowlisted capability reason from a ticket body.
-
-    Like ``RISK_LINE``, the marker must begin a body line. Matching only the
-    stated access reasons keeps a ticket from becoming restricted merely
-    because an agent found it difficult. ``None`` means any agent may work the
-    ticket; ``MACHINE_LOCAL_REASON`` means only Claude Code may work it; and a
-    reason in ``HUMAN_STEP_REASONS`` means no agent may work it.
-    """
-    if not isinstance(body, str):
-        return None
-    match = HUMAN_STEP_LINE.search(body)
-    return match.group("reason") if match else None
-
-
-def matching_human_step_reason(text: object) -> Optional[str]:
-    """Return an allowlisted human-step reason found in block-comment text.
-
-    A malformed block header may put the reason on the same line as the
-    header, so ``parse_human_step`` cannot read it directly. This narrower
-    scanner is used only on a parsed block reason or on the first line already
-    recorded for a malformed block comment. It returns the canonical spelling
-    from ``HUMAN_STEP_REASONS`` rather than trusting the comment's casing.
-    """
-    if not isinstance(text, str):
-        return None
-    for reason in HUMAN_STEP_REASONS:
-        pattern = r"(?<!\w){}(?!\w)".format(re.escape(reason))
-        if re.search(pattern, text, re.IGNORECASE):
-            return reason
-    return None
+# A ticket's capability is its Needs Project field (#826): "none" means any
+# agent may work it, "claude-code-environment" means only Claude Code may,
+# and "human" means no agent may. The Human step body marker this replaced
+# is deleted with its parser; readers check item.needs and nothing else.
 
 
 def mark_projects_that_carried_human_steps(items: Sequence[Item]) -> None:
-    """Derive project acceptance history from child ticket markers.
+    """Derive project acceptance history from child ticket Needs fields.
 
     Closed child tickets remain in the Project item feed, so deriving this
     after all pages load preserves "ever carried" without persisting a second
-    field that could drift from the marker.
+    record that could drift from the field.
     """
     parent_refs = {
         item.parent
         for item in items
         if item.parent is not None
-        and parse_human_step(item.body or "") is not None
+        and item.needs in ("human", "claude-code-environment")
     }
     for item in items:
         item.carried_human_step = item.ref in parent_refs
@@ -1196,16 +1152,6 @@ NEEDS_NATE_PATTERNS = {
     ),
 }
 
-NEEDS_NATE_SIGNAL_REASONS = {
-    "policy authority": (
-        "cites plan.md or AGENTS.md on a gate, membership, or who may write"
-    ),
-    "unattended authority": "changes what an agent may do unattended",
-    "gate authority": "changes a gate's question, answer, or owner",
-    "field authority": "changes who may set a field that other rules act on",
-}
-
-
 def needs_nate_signals(plan_body: str) -> List[str]:
     """Return authority signals that contradict an all-clear Needs section.
 
@@ -1291,7 +1237,8 @@ def effective_shape_owner(origin_voice: Optional[str],
 
 def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],
                            override_target: Optional[str], *,
-                           needs_nate: bool, escalated: bool) -> bool:
+                           needs_nate: bool, escalated: bool,
+                           state: Optional[str] = None) -> bool:
     """Whether all conditions permit one unattended shaping transition.
 
     #77 supplies the plan booleans and #80 owns the transition. Keeping class,
@@ -1299,7 +1246,17 @@ def self_approval_eligible(klass: Optional[str], origin_voice: Optional[str],
     prevents origin from becoming a second gate that can drift from the
     existing self-approval rule. Authority signals remain advisory record
     data and are intentionally not a predicate term.
+
+    ``state`` is the issue's GitHub state, and a closed issue is never
+    self-approvable: advancing one to ``Ready`` puts it in the startable queue
+    with nothing able to close it again (#1206). It is widened here rather
+    than checked by a second predicate for the same reason the rest of the
+    rule lives in one place — a parallel eligibility test is a gate that can
+    drift. ``None`` means the caller has no state to offer and leaves the rule
+    exactly as it was.
     """
+    if state is not None and str(state).upper() != "OPEN":
+        return False
     return (
         klass in SELF_APPROVABLE_CLASSES
         and effective_shape_owner(origin_voice, override_target) == "agents"
@@ -1319,22 +1276,20 @@ def _startable_without_repo_readiness(
     agent: str = "codex",
 ) -> bool:
     """Apply the queue exclusions that do not require a repository read."""
-    capability_reason = parse_human_step(item.body or "")
-    machine_local = (
-        capability_reason is not None
-        and capability_reason.casefold() == MACHINE_LOCAL_REASON.casefold()
-    )
+    needs = item.needs
+    machine_local = needs == "claude-code-environment"
+    human = needs == "human"
     if (
         item.state != "OPEN"
         or item.is_blocked
         or item.open_blockers
         or item.children_total
-        # A machine-local marker is the middle capability outcome: Claude
-        # Code may work it, while every other requester must leave it in
-        # the queue. All other parsed markers remain human steps and are
-        # excluded from every agent, as #141 established.
-        or (capability_reason is not None
-            and (not machine_local or agent != "claude"))
+        # The Needs field is the only capability signal (#826). A
+        # claude-code-environment ticket is the middle outcome: Claude Code
+        # may work it, while every other requester must leave it in the
+        # queue. A human ticket is excluded from every agent, as #141
+        # established for the marker this field replaced.
+        or (human or (machine_local and agent != "claude"))
     ):
         return False
     if item.ref in awaiting_review:
@@ -1546,6 +1501,127 @@ def _parent_ticket_number(item: Item) -> Optional[int]:
         return None
 
 
+#: Consecutive failed runs on one piece of work before it is withheld.
+#: Measured 2026-09-21 over the heartbeat's 10,000-record window: 27 of 493
+#: bound works recorded two or more errored finishes, and the worst were
+#: FF-Weekly-Start-Sit#208 (11 errored in 23.1 hours, one success), The-League#186
+#: (9 in 21.8 hours), the shape job on command-center#1178 (7 in 4.7 hours) and
+#: The-League#225 (5 in 5.9 hours with no success at all). Three is the first
+#: count that cuts those runs materially while leaving a transient — one bad
+#: GitHub response, one rate limit — to resolve itself on the next pass.
+BACKOFF_FAILURES = 3
+
+#: How long a backed-off job waits before it is offered again. The observed
+#: retry cadence is 40 minutes to 2 hours, so six hours turns the 11-attempt
+#: day above into about five while never parking work overnight. A further
+#: failure restarts it; any non-errored finish clears it outright.
+#:
+#: Both constants are scheduling arithmetic, and re-tuning them is the whole
+#: rollback: nothing is stored, and the count is derived from the heartbeat
+#: every run.
+BACKOFF_COOLDOWN = timedelta(hours=6)
+
+
+def consecutive_failures(
+    rows: Sequence[Mapping[str, object]]
+) -> Dict[str, Tuple[int, float]]:
+    """Trailing failed runs per work, as ``{work: (count, last_failure)}``.
+
+    Counted newest-first and stopped at the first finish that was not an
+    error, so a job that failed four times and then succeeded reads as zero.
+    A skip is not a failure and does not break the run either — a lane that
+    stood down for the budget says nothing about whether the work is broken —
+    so only ``errored`` counts and only ``done`` clears.
+
+    Pure over heartbeat rows. The caller reads them; this decides nothing
+    about GitHub and stores nothing.
+    """
+    import heartbeat
+
+    bound = heartbeat.bindings(list(rows))
+    finishes: Dict[str, List[Tuple[float, str]]] = {}
+    for row in rows:
+        if row.get("phase") != "finish":
+            continue
+        binding = bound.get(row.get("run"))
+        work = binding.get("work") if binding else None
+        if not work:
+            continue
+        stamp = row.get("ts")
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            continue
+        outcome = str(row.get("outcome") or "")
+        finishes.setdefault(str(work), []).append((float(stamp), outcome))
+
+    found: Dict[str, Tuple[int, float]] = {}
+    for work, history in finishes.items():
+        history.sort(key=lambda entry: entry[0], reverse=True)
+        count = 0
+        last = 0.0
+        for stamp, outcome in history:
+            if outcome == "errored":
+                count += 1
+                last = max(last, stamp)
+                continue
+            if outcome == "done":
+                break
+            # Anything else — a skip, a quota park — is neither a failure nor
+            # a success, and the run of failures continues through it.
+        if count:
+            found[work] = (count, last)
+    return found
+
+
+def backoff_withheld(
+    rows: Sequence[Mapping[str, object]], now: datetime
+) -> Dict[str, Dict[str, object]]:
+    """Work withheld by repeated failure, by ref, with the reason to say.
+
+    A withheld job carries its count and the condition that releases it —
+    never a silent hold, which is the state `plan.md` rejects. It is offered
+    again the moment either condition is met: the cooldown passes, or a run
+    finishes it successfully.
+    """
+    found: Dict[str, Dict[str, object]] = {}
+    for work, (count, last) in consecutive_failures(rows).items():
+        if count < BACKOFF_FAILURES:
+            continue
+        until = datetime.fromtimestamp(last, timezone.utc) + BACKOFF_COOLDOWN
+        if until <= now:
+            continue
+        found[work] = {
+            "ref": work,
+            "failures": count,
+            "until": until,
+            "reason": (
+                "backoff: {} consecutive failed runs, the last at {}; "
+                "startable again after {} or as soon as a run finishes it"
+                .format(count,
+                        datetime.fromtimestamp(last, timezone.utc).isoformat(),
+                        until.isoformat())
+            ),
+        }
+    return found
+
+
+def backoff_withheld_rows(
+    items: Sequence[Item],
+    rows: Sequence[Mapping[str, object]],
+    now: datetime,
+) -> List[Dict[str, object]]:
+    """The diagnostic twin of the ``startable()`` exclusion, like freeze's.
+
+    Only work still in the funnel is reported: a backed-off job whose ticket
+    has since closed is history, not a withheld queue entry.
+    """
+    open_refs = {item.ref for item in items if item.state == "OPEN"}
+    return sorted(
+        (row for ref, row in backoff_withheld(rows, now).items()
+         if ref in open_refs),
+        key=lambda row: str(row["ref"]),
+    )
+
+
 def freeze_withhold_reason(
     item: Item, by_ref: Mapping[str, Item]
 ) -> Optional[str]:
@@ -1626,6 +1702,7 @@ def startable(
     awaiting_review: Optional[Set[str]] = None,
     agent: str = "codex",
     repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+    backed_off: Optional[Mapping[str, object]] = None,
 ) -> List[Item]:
     """Tickets the requesting agent may pick up, best-first.
 
@@ -1648,8 +1725,14 @@ def startable(
     #794 freeze governs (see ``freeze_withhold_reason``): offering them
     would only fail at review, on a diff that does not exist until a run
     has already built it.
+
+    ``backed_off`` holds refs withheld by repeated failure (see
+    ``backoff_withheld``). Offering a job that has failed three times in a row
+    spends a whole run to fail a fourth: FF-Weekly-Start-Sit#208 was offered
+    eleven times in 23 hours and errored on every one but the last.
     """
     awaiting_review = awaiting_review or frozenset()
+    backed_off = backed_off or {}
     by_ref = {i.ref: i for i in items}
     descendants = dependency_descendants(items)
     effective_rank = {
@@ -1677,6 +1760,11 @@ def startable(
         ):
             return False
         if _repo_blocking_reasons(item, repo_readiness):
+            return False
+        # Repeated failure is passed in rather than read here, like
+        # `awaiting_review`: the count lives in the heartbeat and this
+        # function stays pure over Items and testable from fixtures.
+        if item.ref in backed_off:
             return False
         return freeze_withhold_reason(item, by_ref) is None
 
@@ -1866,6 +1954,22 @@ CI_BILLING_MARKERS = (
     "spend limit",
 )
 
+#: A self-hosted runner that stops answering fails the job with an annotation
+#: and no test output at all. Run 35546576274 on main at a3c97b14 died this way
+#: after ten minutes; the same SHA went green on a manual rerun fifteen minutes
+#: later, and main stayed red for 2h12m in between because nothing read the
+#: annotation (#1178). These phrases are GitHub's own wording for the
+#: condition, kept narrow on purpose: a real test failure must never match one.
+CI_LOST_RUNNER_MARKERS = (
+    "lost communication with the server",
+    "lost contact with the server",
+    "has not been able to communicate with the server",
+    "the runner has received a shutdown signal",
+)
+# Deliberately absent: "the operation was canceled". A cancellation is
+# ambiguous — a person pressing cancel looks exactly like a host dying — and
+# the plan's rule is that anything ambiguous reads as a real failure.
+
 
 def _ci_result(check: Mapping[str, object]) -> Optional[str]:
     """Return a rollup result in the case-insensitive wire vocabulary."""
@@ -1919,6 +2023,12 @@ def _ci_annotation_is_startup_or_billing(text: str) -> bool:
         or any(marker in normalized for marker in CI_BILLING_MARKERS)
         or ("payment" in normalized and "fail" in normalized)
     )
+
+
+def _ci_annotation_is_lost_runner(text: str) -> bool:
+    """Whether one annotation names a runner that stopped answering."""
+    normalized = re.sub(r"[-_]+", " ", text.casefold())
+    return any(marker in normalized for marker in CI_LOST_RUNNER_MARKERS)
 
 
 def _ci_completed_steps(value: Mapping[str, object]) -> Optional[int]:
@@ -2684,6 +2794,7 @@ def next_ticket(items: Sequence[Item], now: datetime,
                 pr_facts: Optional[
                     Dict[str, Optional[Dict[str, object]]]
                 ] = None,
+                backed_off: Optional[Mapping[str, object]] = None,
                 ) -> Optional[Item]:
     """The single ticket the requesting agent should work, or None.
 
@@ -2699,6 +2810,7 @@ def next_ticket(items: Sequence[Item], now: datetime,
             awaiting_review=blocked,
             agent=agent,
             repo_readiness=repo_readiness,
+            backed_off=backed_off,
         )
         if item.ref not in excluded
     ]
@@ -2735,6 +2847,9 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
                          ] = None,
                          pr_facts: Optional[
                              Dict[str, Optional[Dict[str, object]]]
+                         ] = None,
+                         backed_off: Optional[
+                             Mapping[str, object]
                          ] = None) -> Optional[Item]:
     """Return the first shared-order ticket belonging to ``tier``.
 
@@ -2751,6 +2866,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
             agent=agent,
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
+            backed_off=backed_off,
         )
         if ticket is None or tier is None:
             return ticket
@@ -3149,8 +3265,16 @@ def agent_health(now: datetime) -> List[Dict[str, str]]:
         if agent in retired:
             continue  # a stopped schedule is not a dying one (#431)
         try:
+            # The provider hold is Muse's file and speaks only for Muse. A
+            # parked lane is explained, not dead, and the watchdog reads the
+            # same record the runners write so the two cannot disagree.
+            hold_until = (
+                agent_health_module.quota_hold_until()
+                if agent == agent_health_module.QUOTA_HOLD_AGENT else None
+            )
             conditions = assess_agent_health(
-                agent, _brief_heartbeat_rows(agent), now.timestamp()
+                agent, _brief_heartbeat_rows(agent), now.timestamp(),
+                hold_until=hold_until,
             )
         except Exception:
             # The brief is a diagnostic surface. An unreachable heartbeat must
@@ -4772,6 +4896,251 @@ def enrich_actions_run(repo: str, source: Mapping[str, object]) -> Dict[str, obj
     return run
 
 
+#: What the main-CI check says about one red main. Two values only: an
+#: infrastructure stop that a rerun would clear, and a real failure that needs
+#: a person or a fix. Anything the read cannot settle is ``real`` — a wrong
+#: ``infra`` invites a pointless rerun and hides a genuine break, while a wrong
+#: ``real`` only costs a look (#1178).
+MAIN_CI_INFRA = "infra"
+MAIN_CI_REAL = "real"
+
+
+def _main_ci_failed_job(
+    run: Mapping[str, object]
+) -> Tuple[Optional[str], Optional[object]]:
+    """The first job in a run that did not succeed, as ``(name, id)``."""
+    jobs = run.get("jobs")
+    if not isinstance(jobs, list):
+        return None, None
+    for job in jobs:
+        if not isinstance(job, Mapping):
+            continue
+        if _ci_result(job) in CI_SUCCESS_CONCLUSIONS:
+            continue
+        name = job.get("name")
+        identifier = job.get("id") or job.get("databaseId")
+        if isinstance(name, str) and name.strip():
+            return name.strip(), identifier
+        if identifier is not None:
+            return None, identifier
+    return None, None
+
+
+def _main_ci_attempt(run: Mapping[str, object]) -> Optional[int]:
+    """How many times this run has been attempted, if GitHub says."""
+    for key in ("run_attempt", "runAttempt", "attempt"):
+        value = run.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+    return None
+
+
+def main_ci_infra_reason(run: Mapping[str, object]) -> Optional[str]:
+    """Why this failed run never really ran, or ``None`` if it did.
+
+    Two signatures, both from #1178: a failure with zero completed steps, and a
+    failure annotation naming a runner that stopped answering. The first is
+    already the shared no-start shape (`ci_could_not_run_reasons`); the second
+    is this check's addition, because a lost self-hosted runner reports a plain
+    job failure with no test output rather than a startup failure.
+    """
+    for text in _ci_annotation_texts(run):
+        if _ci_annotation_is_lost_runner(text):
+            return text
+    return ci_could_not_run_reason([run])
+
+
+def main_ci_row(repo: str) -> Optional[Dict[str, object]]:
+    """One member repo's main-branch CI verdict, or ``None`` when it is green.
+
+    The canonical reader: every lane that wants to know whether a red main is
+    worth a rerun asks this, so no two of them can disagree about what the
+    annotations said.
+
+    A read this cannot complete is reported as a ``real`` failure carrying the
+    reason, never as silence and never as green. That is the same fail-closed
+    direction the merge gate takes, for the same reason: an absent signal that
+    reads as good news is how main stayed red for 2h12m with nobody told.
+    """
+    try:
+        head = _gh_api_json(
+            "repos/{}/commits/main".format(repo), cache=False
+        )
+        sha = head.get("sha") if isinstance(head, Mapping) else None
+        if not isinstance(sha, str) or not sha:
+            return {
+                "repo": repo, "sha": None, "job": None,
+                "verdict": MAIN_CI_REAL,
+                "reason": "could not read the main head for {}".format(repo),
+            }
+        runs = _actions_runs(_gh_api_json(
+            "repos/{}/actions/runs?branch=main&head_sha={}&per_page=1".format(
+                repo, sha
+            ),
+            cache=False,
+        ))
+        if not runs:
+            # No workflow run for this head is not a failure: CI may not have
+            # started yet, and the merge gate already refuses on an absent
+            # check. Stay quiet rather than inventing a red main.
+            return None
+        run = enrich_actions_run(repo, runs[0])
+        result = _ci_result(run)
+        if result in CI_SUCCESS_CONCLUSIONS:
+            return None
+        if result is None or result != "FAILURE":
+            # Still running, or a conclusion this does not recognise. Neither
+            # is a red main to act on.
+            return None
+        reason = main_ci_infra_reason(run)
+        job_name, job_id = _main_ci_failed_job(run)
+        return {
+            "repo": repo,
+            "sha": sha,
+            "job": job_name,
+            "job_id": job_id,
+            "run_id": run.get("id") or run.get("databaseId"),
+            # A rerun raises the attempt count, so GitHub itself records
+            # whether this SHA has already had its one retry (#1220). No
+            # state file: the fact is already in the run.
+            "attempt": _main_ci_attempt(run),
+            "verdict": MAIN_CI_INFRA if reason else MAIN_CI_REAL,
+            "reason": reason or "no infrastructure signature in this failure",
+        }
+    except (GitHubError, OSError, subprocess.SubprocessError,
+            TypeError, ValueError) as exc:
+        return {
+            "repo": repo, "sha": None, "job": None,
+            "verdict": MAIN_CI_REAL,
+            "reason": "could not read main CI for {}: {}".format(repo, exc),
+        }
+
+
+#: What a retry attempt did, for the record it leaves and the row it returns.
+MAIN_CI_RETRIED = "retried"
+MAIN_CI_NOT_RETRIED = "not-retried"
+
+
+def main_ci_retry(
+    repo: str,
+    row: Optional[Mapping[str, object]] = None,
+    rerun: Optional[Callable[[Sequence[str]], object]] = None,
+) -> Optional[Dict[str, object]]:
+    """Rerun one main job that never really ran — once per SHA, never twice.
+
+    The narrow half of #1178: main stayed red for 2h12m on a run that died
+    when a self-hosted runner stopped answering, and the same SHA went green
+    on a manual rerun fifteen minutes later. Every merge waited in between,
+    because the merge gate reads main.
+
+    Four conditions, all of them refusals rather than retries:
+
+    - **`real` never retries.** Rerunning a genuine break burns runner time
+      and hides the signal, which is why the plan rejects retry-until-green.
+    - **One attempt only.** A rerun raises GitHub's own ``run_attempt``, so
+      the second red on a SHA is visible as attempt 2 and stays red for the
+      watch. That is the whole once-per-SHA mechanism: no state file, no
+      journal, no label — GitHub is the state, and it already records this.
+    - **An unreadable attempt count does not retry.** Without it there is no
+      way to tell a first failure from a second, and retrying blindly is how
+      a loop starts.
+    - **A green, running or absent main has nothing to retry.**
+
+    Returns the decision either way, so a caller can say what happened and
+    why. ``None`` only when there is no red main at all.
+    """
+    row = row if row is not None else main_ci_row(repo)
+    if row is None:
+        return None
+    decision = dict(row)
+    verdict = row.get("verdict")
+    attempt = row.get("attempt")
+    run_id = row.get("run_id")
+    job_id = row.get("job_id")
+
+    if verdict != MAIN_CI_INFRA:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="a real failure is not retried; it needs a person",
+        )
+        return decision
+    if not isinstance(attempt, int) or attempt < 1:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="could not read how many times this run was "
+                         "attempted, so a first failure and a second are "
+                         "indistinguishable",
+        )
+        return decision
+    if attempt > 1:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="already retried once on this SHA (attempt {}); "
+                         "a second red stays red".format(attempt),
+        )
+        return decision
+    if run_id is None:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="no run id to rerun",
+        )
+        return decision
+
+    command = ["gh", "run", "rerun", str(run_id), "--repo", str(repo)]
+    if job_id is not None:
+        command += ["--job", str(job_id)]
+    runner = rerun if rerun is not None else _run_gh
+    try:
+        result = runner(command, capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="rerun failed: {}".format(exc),
+        )
+        return decision
+    if getattr(result, "returncode", 0) != 0:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="rerun refused: {}".format(
+                (getattr(result, "stderr", "") or "").strip()
+            ),
+        )
+        return decision
+    decision.update(
+        retry=MAIN_CI_RETRIED,
+        retry_reason="infrastructure stop on attempt 1; reran {}".format(
+            row.get("job") or "the failed job"
+        ),
+    )
+    return decision
+
+
+def main_ci_retries(
+    repos: Optional[Sequence[str]] = None,
+    rerun: Optional[Callable[[Sequence[str]], object]] = None,
+) -> List[Dict[str, object]]:
+    """One retry decision per member repo whose main is red."""
+    names = list(repos) if repos is not None else member_repos()
+    rows = [main_ci_retry(repo, rerun=rerun) for repo in names]
+    return [row for row in rows if row is not None]
+
+
+def main_ci_json(repos: Optional[Sequence[str]] = None) -> List[Dict[str, object]]:
+    """The brief's thin reader over `main_ci_row`, one row per red main.
+
+    Derived every run from the run, job, step and annotation facts. No label,
+    no Project field, nothing stored: a verdict written down is a verdict that
+    can go stale, and this one changes the moment somebody reruns the job.
+    """
+    names = list(repos) if repos is not None else member_repos()
+    rows = [main_ci_row(repo) for repo in names]
+    return [row for row in rows if row is not None]
+
+
 def latest_actions_run_probe(repo: str) -> Tuple[Optional[str], Optional[str]]:
     """Read the newest Actions run once and classify a startup/account stop.
 
@@ -5069,24 +5438,6 @@ def check_block_comments(items: Iterable[Item]) -> Check:
     return Check("block comments", not findings, "\n".join(findings), "")
 
 
-def suspected_human_step_findings(items: Iterable[Item]) -> List[str]:
-    """Return blocked tickets whose human requirement is not machine-readable."""
-    return [
-        "{}: suspected human step ({})".format(
-            item.ref, suspected_human_step_reason(item)
-        )
-        for item in suspected_human_step_items(items)
-    ]
-
-
-def check_suspected_human_steps(items: Iterable[Item]) -> Check:
-    """Build the read-only suspected-human-step doctor check."""
-    findings = suspected_human_step_findings(items)
-    return Check(
-        "suspected human steps", not findings, "\n".join(findings), ""
-    )
-
-
 def check_block_conditions(
     items: Iterable[Item], now: Optional[datetime] = None
 ) -> Check:
@@ -5193,7 +5544,6 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         checks.append(check_class_assignments(items))
         checks.append(check_block_comments(items))
         checks.append(check_block_conditions(items))
-        checks.append(check_suspected_human_steps(items))
     return checks
 
 
@@ -5407,6 +5757,9 @@ query($login: String!, $number: Int!, $cursor: String) {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           pinned: fieldValueByName(name: "Pinned") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          needs: fieldValueByName(name: "Needs") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           content {
@@ -6150,6 +6503,7 @@ def _from_node(node: dict) -> Optional[Item]:
         status=status,
         klass=(node.get("class") or {}).get("name"),
         pinned=(node.get("pinned") or {}).get("name") == "Pinned",
+        needs=(node.get("needs") or {}).get("name"),
         labels=[n["name"] for n in content["labels"]["nodes"]],
         assignees=[n["login"] for n in content["assignees"]["nodes"]],
         parent=(
@@ -6380,7 +6734,7 @@ def _dashboard_stage_age(item: Item, now: datetime) -> str:
 
 #: Who owes the next move on a ticket, for the dashboard's owner flag. These
 #: are display names for the reader, derived from facts the funnel already
-#: holds: the capability marker, the PR and its verdict, and the risk tier.
+#: holds: the Needs field, the PR and its verdict, and the risk tier.
 OWNER_NATE = "Nate"
 OWNER_CLAUDE = "Claude"
 OWNER_MUSE = "Muse"
@@ -6481,7 +6835,7 @@ def _dashboard_ticket(
         else:
             block_reason = "project blocked: " + parent_block
     body = item.body or ""
-    reason = parse_human_step(body)
+    needs = item.needs
     tier = "escalated" if escalation_reasons(item.title, body) else "standard"
 
     pr_state = str((pr_fact or {}).get("state") or "").upper()
@@ -6512,9 +6866,9 @@ def _dashboard_ticket(
         owner: Optional[str] = None
     elif blocked:
         owner = None
-    elif reason == MACHINE_LOCAL_REASON:
+    elif needs == "claude-code-environment":
         owner = OWNER_CLAUDE
-    elif reason is not None:
+    elif needs == "human":
         owner = OWNER_NATE
     elif pr == "changes requested":
         owner = _dashboard_rework_owner(
@@ -6549,7 +6903,7 @@ def _dashboard_ticket(
         "tier": tier,
         "owner": owner,
         "blocked": blocked,
-        "human_step": reason,
+        "human_step": needs if needs in ("human", "claude-code-environment") else None,
     }
 
 
@@ -7397,87 +7751,13 @@ def unclassed_captures_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     ]
 
 
-def suspected_human_step_reason(item: Item) -> Optional[str]:
-    """Return a human-step reason hidden inside an unreadable block.
-
-    This is deliberately narrower than ``human_step_items``. It only reports
-    open child issues that are already blocked and whose block has no
-    machine-readable references. A named block stays an ordinary machine
-    block, even when its prose happens to mention a human-step reason.
-    """
-    if (
-        item.state != "OPEN"
-        or item.parent is None
-        or not item.is_blocked
-        or item.block_references
-    ):
-        return None
-
-    reason = matching_human_step_reason(item.block_reason)
-    if reason is not None:
-        return reason
-
-    # ``_load_block_comment`` keeps the first line of malformed block comments
-    # so the existing doctor check can report it without another fetch. Use the
-    # newest recorded line first, and fail closed when it contains no exact
-    # allowlisted reason.
-    for first_line in reversed(item.unparseable_block_comments):
-        reason = matching_human_step_reason(first_line)
-        if reason is not None:
-            return reason
-    return None
-
-
-def suspected_human_step_items(items: Iterable[Item]) -> List[Item]:
-    """Return blocked child issues that may hide an unrecognised human step."""
-    return sorted(
-        (
-            item for item in items
-            if suspected_human_step_reason(item) is not None
-        ),
-        key=lambda item: (item.repo, item.number),
-    )
-
-
-def _suspected_human_step_item_json(item: Item) -> Dict[str, object]:
-    return {
-        "ref": item.ref,
-        "title": item.title,
-        "url": item.url,
-        "reason": suspected_human_step_reason(item),
-    }
-
-
-def suspected_human_step_json(
-    items: Iterable[Item],
-) -> List[Dict[str, object]]:
-    """Render suspected human steps without changing any GitHub state."""
-    return [
-        _suspected_human_step_item_json(item)
-        for item in suspected_human_step_items(items)
-    ]
-
-
-def _item_human_step_reason(item: Item) -> Optional[str]:
-    """Return the parsed marker, tolerating fixture Items without a body."""
-    return parse_human_step(item.body or "")
-
-
-def _reason_matches(reason: Optional[str], candidates: Iterable[str]) -> bool:
-    """Match a parsed marker against an allowlist without trusting casing."""
-    if not isinstance(reason, str):
-        return False
-    normalized = reason.casefold()
-    return any(normalized == candidate.casefold() for candidate in candidates)
-
-
 def blocked_step_reason(
     item: Item, by_ref: Mapping[str, Item]
 ) -> Optional[str]:
-    """Return why a marked child ticket is not currently actionable.
+    """Return why a Needs child ticket is not currently actionable.
 
     This is deliberately a smaller readiness check than ``startable``. A
-    marked step is withheld from its work-owner section when it carries the
+    Needs step is withheld from its work-owner section when it carries the
     ``blocked`` label, has an open native dependency, or belongs to a blocked
     parent. The parent lookup uses the Project rows already loaded for the
     brief; it never fetches issue state of its own.
@@ -7494,7 +7774,7 @@ def blocked_step_reason(
 
 
 def _blocked_step_refs(item: Item, by_ref: Mapping[str, Item]) -> List[str]:
-    """Return stable blocker references for one withheld marked step."""
+    """Return stable blocker references for one withheld Needs step."""
     refs: List[str] = []
     if item.is_blocked:
         refs.extend(item.block_references)
@@ -7527,8 +7807,8 @@ def human_step_items(items: Iterable[Item]) -> List[Item]:
 
     Human-step tickets are work, not decisions. They are therefore rendered in
     their own brief section instead of being added to the decision queue.
-    Closed tickets remain in ``items`` so the completed-project backstop can
-    tell a project that carried a human step from one that never had one.
+    The Needs field is the only signal (#826); a ticket reads here exactly
+    when its field is "human".
     """
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
@@ -7537,9 +7817,7 @@ def human_step_items(items: Iterable[Item]) -> List[Item]:
             item for item in rows
             if item.state == "OPEN"
             and item.parent is not None
-            and _reason_matches(
-                _item_human_step_reason(item), HUMAN_STEP_REASONS
-            )
+            and item.needs == "human"
             and blocked_step_reason(item, by_ref) is None
         ),
         key=lambda item: (item.repo, item.number),
@@ -7553,7 +7831,7 @@ def _human_step_item_json(
         "ref": item.ref,
         "title": item.title,
         "url": item.url,
-        "reason": _item_human_step_reason(item),
+        "reason": item.needs,
     }
     # How long this action has been waiting on him, phrased exactly as the
     # decision rows are (Nate, 2026-09-16). A ticket with no creation time
@@ -7583,9 +7861,7 @@ def blocked_human_step_items(items: Iterable[Item]) -> List[Item]:
             item for item in rows
             if item.state == "OPEN"
             and item.parent is not None
-            and _reason_matches(
-                _item_human_step_reason(item), HUMAN_STEP_REASONS
-            )
+            and item.needs == "human"
             and blocked_step_reason(item, by_ref) is not None
         ),
         key=lambda item: (item.repo, item.number),
@@ -7613,9 +7889,7 @@ def machine_local_step_items(items: Iterable[Item]) -> List[Item]:
             item for item in rows
             if item.state == "OPEN"
             and item.parent is not None
-            and _reason_matches(
-                _item_human_step_reason(item), MACHINE_LOCAL_REASONS
-            )
+            and item.needs == "claude-code-environment"
             and blocked_step_reason(item, by_ref) is None
         ),
         key=lambda item: (item.repo, item.number),
@@ -7641,9 +7915,7 @@ def blocked_machine_local_step_items(items: Iterable[Item]) -> List[Item]:
             item for item in rows
             if item.state == "OPEN"
             and item.parent is not None
-            and _reason_matches(
-                _item_human_step_reason(item), MACHINE_LOCAL_REASONS
-            )
+            and item.needs == "claude-code-environment"
             and blocked_step_reason(item, by_ref) is not None
         ),
         key=lambda item: (item.repo, item.number),
@@ -7663,18 +7935,19 @@ def blocked_machine_local_step_json(
 
 
 def completed_projects_missing_human_steps(items: Iterable[Item]) -> List[Item]:
-    """Completed projects whose plans mention access but have no marker.
+    """Completed projects whose plans mention access but have no Needs ticket.
 
     This is a detective signal, not proof that a human step was required. A
     parked project is deliberately excluded: parking is not a claim that its
-    plan shipped. Any human-step ticket, including one already closed, clears
+    plan shipped. Any Needs ticket, including one already closed, clears
     the flag because the backstop asks whether the project ever carried one.
     """
     rows = list(items)
     human_step_parents = {
         item.parent
         for item in rows
-        if item.parent is not None and _item_human_step_reason(item) is not None
+        if item.parent is not None
+        and item.needs in ("human", "claude-code-environment")
     }
     return sorted(
         (
@@ -8075,6 +8348,23 @@ def stranded_items(
         if item.parent is None and item.status == "Building" and not item.children_total:
             reasons.append("Building project has no tickets")
 
+        # An open ticket under a closed project has nowhere to go: no gate is
+        # watching it, the ladder ranks it through a parent that is finished,
+        # and nothing will close it. Parked parents are excluded on purpose —
+        # parking is a decision, and its tickets are meant to sit. Detection
+        # only; nothing here closes anything.
+        parent = by_ref.get(item.parent or "")
+        if (
+            parent is not None
+            and parent.state != "OPEN"
+            and parent.status != "Parked"
+        ):
+            reasons.append(
+                "parent {} is closed with Status {}".format(
+                    parent.ref, parent.status or "unset"
+                )
+            )
+
         if _auto_closeable_project(item):
             reasons.append("finished upkeep project not closed")
 
@@ -8095,6 +8385,47 @@ def stranded_items(
                 "reason": "; ".join(reasons),
             })
     return found
+
+
+def status_state_mismatches(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """Items whose Project Status and GitHub state contradict each other.
+
+    Two directions, both derived from the one ``load_items()`` pass with no
+    extra read, no cache and nothing stored:
+
+    - **closed but not finished** — a closed issue at any Status other than
+      ``Done`` or ``Parked``. #1206 was one of these: a CLOSED project written
+      to ``Ready``, which put it in the startable queue and the self-approval
+      path at once with nothing able to close it again.
+    - **open but Done** — an issue recorded as finished that is still open.
+      The lane filters all read OPEN, so it keeps being treated as live work
+      while every count says it is finished.
+
+    Deliberately its own section rather than a widening of the lane filters:
+    those stay on OPEN so a closed-at-Ready item appears here and nowhere
+    else, instead of turning up as breakdown work (#1209).
+    """
+    found: List[Dict[str, object]] = []
+    for item in items:
+        if item.status is None:
+            continue
+        if item.state != "OPEN" and item.status not in TERMINAL_STATUSES:
+            mismatch = "closed at Status {}, which is not {}".format(
+                item.status, " or ".join(TERMINAL_STATUSES)
+            )
+        elif item.state == "OPEN" and item.status == "Done":
+            mismatch = "open at Status Done"
+        else:
+            continue
+        found.append({
+            "ref": item.ref,
+            "title": item.title,
+            "url": item.url,
+            "state": item.state,
+            "status": item.status,
+            "mismatch": mismatch,
+        })
+    return sorted(found, key=lambda row: str(row["ref"]))
 
 
 def stranded_json(
@@ -8131,14 +8462,50 @@ def cmd_queue(
     items: List[Item],
     now: datetime,
     repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
 ) -> int:
     """Everything, ordered — both queues, each under its own heading.
 
     They are genuinely different orderings over different subsets, so a single
     merged list would have to pick one and misrepresent the other.
+
+    Work already sitting in an open PR is not startable, and this listing used
+    to show it anyway: ``startable`` takes the exclusion as an argument, and
+    the queue was the one caller that never passed it. The read follows
+    ``cmd_next_review``'s pattern — supplied by the caller, else fetched once
+    and retained in an active brief cache.
+
+    A PR read that fails says so. An unfiltered list is the wrong fallback
+    here: it is indistinguishable from a correct one, and the whole defect is
+    a ticket that looks startable and is not.
     """
+    pr_facts_unavailable: Optional[str] = None
+    if pr_facts is None:
+        try:
+            pr_facts = ticket_pr_facts(items)
+        except (GitHubError, BriefSectionTimeout, OSError,
+                subprocess.SubprocessError) as exc:
+            pr_facts_unavailable = str(exc)
+            pr_facts = None
+        else:
+            cache = _ACTIVE_BRIEF_CACHE.get()
+            if cache is not None:
+                cache._pr_facts = pr_facts
+
+    in_review: Set[str] = set()
+    if pr_facts_unavailable is None:
+        try:
+            in_review = _call_with_optional_keyword(
+                awaiting_review, "pr_facts", pr_facts, items
+            )
+        except (GitHubError, BriefSectionTimeout, OSError,
+                subprocess.SubprocessError) as exc:
+            pr_facts_unavailable = str(exc)
+
     decisions = awaiting_decision(items)
-    tickets = startable(items, repo_readiness=repo_readiness)
+    tickets = startable(
+        items, awaiting_review=in_review, repo_readiness=repo_readiness
+    )
 
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
     by_ref = {i.ref: i for i in items}
@@ -8153,6 +8520,13 @@ def cmd_queue(
             gate_question(item),
         ),
     )
+
+    if pr_facts_unavailable is not None:
+        # The brief's degraded convention, in the queue's voice: name the
+        # section, say it could not be read, and say what that costs.
+        print("\ndegraded — open-PR facts: {}. Tickets already in an open PR "
+              "cannot be excluded, so the list below may name work that is "
+              "already done.".format(pr_facts_unavailable))
 
     print("\nStartable by Codex ({}), ladder order:".format(len(tickets)))
     _print_queue_section(
@@ -8232,6 +8606,34 @@ def _brief_read(
         return default
 
 
+def _backoff_rows() -> List[Dict[str, object]]:
+    """Heartbeat records for the backoff read, or none if they cannot be had.
+
+    A selector must not stop because its scheduling history is unreadable:
+    with no rows, ``consecutive_failures`` finds nothing and every ticket is
+    offered exactly as it was before this existed.
+    """
+    rows: List[Dict[str, object]] = []
+    try:
+        import heartbeat
+
+        for agent in sorted(heartbeat.PROVIDERS):
+            try:
+                rows.extend(_brief_heartbeat_rows(agent))
+            except Exception:
+                continue
+    except Exception:
+        return []
+    return rows
+
+
+def _backed_off_work(
+    items: Sequence[Item], now: datetime
+) -> Dict[str, Dict[str, object]]:
+    """Refs withheld by repeated failure, read from the heartbeat."""
+    return backoff_withheld(_backoff_rows(), now)
+
+
 def cmd_next(
     items: List[Item],
     now: datetime,
@@ -8282,11 +8684,14 @@ def cmd_next(
     # approvals for an older head.
     blocked.difference_update(approved_conflicting_refs(pr_facts))
     blocked.update(finished_by_comments(items))
+    backoff_rows = _backoff_rows()
+    backed_off = backoff_withheld(backoff_rows, now)
     ticket = next_ticket_for_tier(
         items, now, tier=tier, blocked=blocked, excluded=excluded,
         agent=agent,
         repo_readiness=repo_readiness,
         pr_facts=pr_facts,
+        backed_off=backed_off,
     )
 
     if ticket is None:
@@ -8299,6 +8704,9 @@ def cmd_next(
             items, repo_readiness=repo_readiness, awaiting_review=blocked,
             agent=agent,
         )
+        for row in backoff_withheld_rows(items, backoff_rows, now):
+            print("withheld — {}: {}".format(row["ref"], row["reason"]),
+                  file=sys.stderr)
         if holder is not None:
             print(
                 "nothing — lock held by {} (claimed {} ago)".format(
@@ -8540,6 +8948,7 @@ def cmd_brief(
     brief_cache: Optional[BriefCache] = None,
     outcome_signals: Optional[Dict[str, object]] = None,
     portfolio_metrics: Optional[Dict[str, object]] = None,
+    main_ci: Optional[List[Dict[str, object]]] = None,
 ) -> int:
     missing = list(missing or [])
     timings = {} if timings is None else timings
@@ -8605,11 +9014,6 @@ def cmd_brief(
             "cleared_blocks", lambda: cleared_blocks_json(items, now), []
         )
         blocked = section("blocked", lambda: blocked_json(items), [])
-        suspected = section(
-            "suspected_human_steps",
-            lambda: suspected_human_step_json(items),
-            [],
-        )
         human = section("human_steps", lambda: human_step_json(items, now), [])
         machine_local = section(
             "machine_local_steps",
@@ -8683,6 +9087,11 @@ def cmd_brief(
         rejected = section(
             "rejected_merges", lambda: rejected_merges(items, now), {}
         )
+        status_mismatches = section(
+            "status_state_mismatches",
+            lambda: status_state_mismatches(items),
+            [],
+        )
 
         blocked_comment_errors = [
             "{}: {}".format(item.ref, item.block_comments_error)
@@ -8707,7 +9116,6 @@ def cmd_brief(
             "closed_itself": closed_itself,
             "cleared_blocks": cleared_blocks,
             "blocked": blocked,
-            "suspected_human_steps": suspected,
             "human_steps": human,
             "machine_local_steps": machine_local,
             "blocked_human_steps": blocked_human,
@@ -8738,6 +9146,8 @@ def cmd_brief(
             "run_summary": run_summary,
             "agent_health": health,
             "working_tree_touched": touched,
+            "status_state_mismatches": status_mismatches,
+            "main_ci": main_ci,
             "outcome_signals": outcome_signals,
             "rejected_merges": rejected,
             "degraded": degraded,
@@ -8898,6 +9308,12 @@ def _begin_parent(items: Sequence[Item], ticket: Item) -> None:
     parent = next((i for i in items if i.ref == ticket.parent), None)
     if parent is None or parent.status != "Ready" or not parent.item_id:
         return
+    refusal = status_write_refusal(parent, "Building")
+    if refusal is not None:
+        _post_status_refusal(parent, refusal)
+        print("note: claimed {} but {}".format(ticket.ref, refusal),
+              file=sys.stderr)
+        return
     try:
         gh_graphql(SET_FIELD, project=PROJECT_ID, item=parent.item_id,
                    field=STATUS_FIELD_ID,
@@ -8951,6 +9367,86 @@ def _status_write_confirmed(response: object, item_id: str) -> bool:
     )
 
 
+#: The two stages a closed issue may hold. Everything else describes work in
+#: progress, and a closed issue has none: #1206 moved a CLOSED project to
+#: ``Ready``, which put it in the startable queue and the self-approval path
+#: at once, with nothing able to close it again.
+TERMINAL_STATUSES = ("Done", "Parked")
+
+
+def live_issue_state(item: Item) -> Optional[str]:
+    """Read one issue's state from GitHub now, or ``None`` if it cannot.
+
+    Deliberately a fresh read rather than ``item.state``. A FunnelSession
+    reuses its Project objects across commands, so the loaded state can be
+    minutes old and a close that happened in between is exactly the case this
+    guards. No cache, no journal, no state file: GitHub is the state.
+    """
+    try:
+        payload = _gh_json(
+            "gh", "issue", "view", str(item.number), "--repo", item.repo,
+            "--json", "state",
+        )
+    except (GitHubError, OSError, subprocess.SubprocessError, ValueError):
+        return None
+    state = payload.get("state") if isinstance(payload, dict) else None
+    return str(state).upper() if isinstance(state, str) and state else None
+
+
+def status_write_refusal(item: Item, status: str) -> Optional[str]:
+    """Why this Status write must not happen, or ``None`` to allow it.
+
+    A closed issue may be recorded as ``Done`` or ``Parked`` — those are what
+    being closed means — and as nothing else.
+
+    When the live read cannot be made, the loaded state decides. That is a
+    weaker check and deliberately not a refusal: the loaded value is usually
+    seconds old and was CLOSED in the case this guards (#1206), while refusing
+    on an unreadable read would let one GitHub hiccup block every approve and
+    every claim. The live read is the improvement; it is not a new dependency
+    the whole funnel stops for.
+    """
+    if status in TERMINAL_STATUSES:
+        return None
+    state = live_issue_state(item) or (
+        str(item.state).upper() if item.state else None
+    )
+    if state is None or state == "OPEN":
+        return None
+    return (
+        "refusing to write Status {} on {}: the issue is {} on GitHub, and a "
+        "closed issue may only be {}".format(
+            status, item.ref, state, " or ".join(TERMINAL_STATUSES)
+        )
+    )
+
+
+def _post_status_refusal(item: Item, refusal: str) -> None:
+    """Leave a refused Status write on the issue it was refused for.
+
+    Best effort on purpose. The refusal has already done its job by not
+    writing; failing to record it must not turn a safe refusal into an error.
+    """
+    body = (
+        "**Status write refused.** {}\n\nA closed issue may be recorded as "
+        "{} and as nothing else — every other stage describes work in "
+        "progress, and a closed issue has none. Reopen it if the work is "
+        "live, or leave the stage alone.".format(
+            refusal, " or ".join(TERMINAL_STATUSES)
+        )
+    )
+    try:
+        _run_gh(
+            ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+             "--body", append_provenance(
+                 body, "agent", at=datetime.now(timezone.utc)
+             )],
+            capture_output=True, text=True,
+        )
+    except (OSError, subprocess.SubprocessError, GitHubError):
+        pass
+
+
 def _write_status(item: Item, status: str, now: datetime) -> Optional[str]:
     """Write and locally record a Project status, or return a failure reason.
 
@@ -8959,9 +9455,19 @@ def _write_status(item: Item, status: str, now: datetime) -> Optional[str]:
     report the stage that was true before the mutation. Treat the mutation
     payload as the confirmation boundary: only the expected Project item
     response permits the local state and its gate timestamp to advance.
+
+    The closed-issue guard lives here because this is the one helper every
+    Status write goes through. A refusal is both returned to the caller and
+    left on the issue, so the record of what was refused survives the session
+    that refused it.
     """
     if not item.item_id:
         return "{} is not in the Project".format(item.ref)
+
+    refusal = status_write_refusal(item, status)
+    if refusal is not None:
+        _post_status_refusal(item, refusal)
+        return refusal
 
     try:
         response = gh_graphql(
@@ -11261,12 +11767,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 item.ref for item in items
                 if item.parent and item.ref not in essential_refs
             }
+        begin_backed_off = _backed_off_work(items, now)
         ticket = next_ticket_for_tier(
             items, now, tier=tier, blocked=blocked,
             excluded=set(budget_withheld),
             agent=agent,
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
+            backed_off=begin_backed_off,
         )
         recently_claimed: Set[str] = set()
         while ticket is not None:
@@ -11298,6 +11806,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 agent=agent,
                 repo_readiness=repo_readiness,
                 pr_facts=pr_facts,
+                backed_off=begin_backed_off,
             )
         held = held_claims_before(
             items,
@@ -11310,6 +11819,21 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         )
         if held:
             out["held"] = held
+        if ticket is None and begin_backed_off:
+            # Never a silent hold: an empty poll that is really a backoff says
+            # so, with the count and the condition that releases it.
+            withheld_rows = [
+                row for row in begin_backed_off.values()
+                if row["ref"] in {i.ref for i in items if i.state == "OPEN"}
+            ]
+            if withheld_rows:
+                out["backed_off"] = [
+                    {"ref": row["ref"], "failures": row["failures"],
+                     "until": row["until"].isoformat(),
+                     "reason": row["reason"]}
+                    for row in sorted(withheld_rows,
+                                      key=lambda row: str(row["ref"]))
+                ]
         if ticket is None and budget_withheld and not out.get("why"):
             # Say so only when the budget is the reason: a ticket the ladder
             # would have offered is being held back. With nothing startable
@@ -11320,6 +11844,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 agent=agent,
                 repo_readiness=repo_readiness,
                 pr_facts=pr_facts,
+                backed_off=begin_backed_off,
             )
             if unrestricted is not None:
                 out.update(gate="tight", why=_tight_budget_why(out, now))
@@ -12462,6 +12987,15 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
             )
         )
 
+    # The guard, not the whole writer: this path has its own confirmation and
+    # local-state handling, and the closed-issue rule is one predicate shared
+    # by every Status write rather than a second implementation.
+    refusal = status_write_refusal(item, nxt)
+    if refusal is not None:
+        _post_status_refusal(item, refusal)
+        print(refusal, file=sys.stderr)
+        return 1
+
     gh_graphql(SET_FIELD, project=PROJECT_ID, item=item.item_id,
                field=STATUS_FIELD_ID, option=_option_id(STATUS_FIELD_ID, nxt))
 
@@ -12595,6 +13129,15 @@ def main(argv: Optional[Sequence[str]] = None, *,
     sub.add_parser("ideas", help="captured ideas, flagged ones first")
     sub.add_parser(
         "doctor", help="check the local install and report actionable failures")
+    main_ci = sub.add_parser(
+        "main-ci",
+        help="each member repo's red main, as an infrastructure stop or a "
+             "real failure")
+    main_ci.add_argument(
+        "--retry", action="store_true",
+        help="rerun an infrastructure stop once per SHA; never a real "
+             "failure, and never a SHA already retried",
+    )
     show = sub.add_parser("show", help="everything needed to answer an item's gate")
     show.add_argument("ref", help="issue number, owner/repo#number, or URL")
     for verb, (frm, to, meaning) in ANSWERS.items():
@@ -12786,6 +13329,25 @@ def main(argv: Optional[Sequence[str]] = None, *,
         return serve_session(args.parent_pid)
     # Doctor keeps its fixed checks runnable when the Project cannot be loaded;
     # the data-dependent consistency check is added when that read succeeds.
+    if args.command == "main-ci":
+        rows = (
+            main_ci_retries() if args.retry else main_ci_json()
+        )
+        if not rows:
+            print("nothing — every member repo's main is green or still running")
+            return 0
+        for row in rows:
+            line = "{} {} {} — {}".format(
+                row["repo"], (row.get("sha") or "?")[:12],
+                row["verdict"], row["reason"],
+            )
+            if row.get("job"):
+                line += " (job {})".format(row["job"])
+            print(line)
+            if "retry" in row:
+                print("  {}: {}".format(row["retry"], row["retry_reason"]))
+        return 0
+
     if args.command == "doctor":
         return cmd_doctor()
     # The published snapshot is a local read by design: runners and routines
@@ -12970,6 +13532,18 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 def read_pr_facts():
                     try:
                         return cache.get_pr_facts(items)
+                    except BriefSectionTimeout:
+                        # One retry sharing the section deadline (#1210):
+                        # the section state set by _brief_timed still
+                        # bounds the second attempt, so no extra budget
+                        # is granted. Only retry when time remains.
+                        state = _BRIEF_SECTION_STATE.get()
+                        if (
+                            state is not None
+                            and float(state[1]) - time.monotonic() <= 0
+                        ):
+                            raise
+                        return cache.get_pr_facts(items)
                     except GitHubError as exc:
                         pr_facts_error.append(
                             "could not read ticket branch facts: {}".format(exc)
@@ -13017,6 +13591,19 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
                 if portfolio_metrics is _BRIEF_UNAVAILABLE:
                     portfolio_metrics = None
+                # Live read, computed here rather than inside cmd_brief for the
+                # same reason as the two above: the renderer stays pure over its
+                # arguments, so a fixture brief needs no network and reports
+                # `main_ci` as null — unknown — instead of an empty list.
+                main_ci = _brief_timed(
+                    "main_ci",
+                    lambda: _brief_read("main_ci", main_ci_json, missing),
+                    timings,
+                    degraded,
+                    deadline=deadline,
+                )
+                if main_ci is _BRIEF_UNAVAILABLE:
+                    main_ci = None
                 # Keep the existing brief JSON as the command's stdout. The
                 # display snapshot is a separate, best-effort side effect and
                 # must not change what callers parse or whether the command
@@ -13036,6 +13623,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             brief_cache=cache,
                             outcome_signals=outcome_signals,
                             portfolio_metrics=portfolio_metrics,
+                            main_ci=main_ci,
                         )
                 finally:
                     output = brief_stdout.getvalue()

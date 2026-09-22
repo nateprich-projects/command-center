@@ -73,6 +73,15 @@ portfolio signals: Broken numerator and denominator; ticket-branch numerator,
 merged-PR denominator and percentage. `unavailable`, `partial` and
 `insufficient_data` are unknown, never zero.
 
+Then `main_ci`, whenever non-empty: each red member-repo `main` with its
+`repo`, `sha`, failing `job` and `verdict`. An `infra` verdict is a run that
+never really ran and is worth a rerun; `real` needs a person. A `null`
+section means the live read was not made — unknown, never green.
+
+Then `status_state_mismatches`, whenever non-empty: each `ref` with its
+GitHub `state`, Project `status` and the `mismatch` in words. A closed item
+at a non-terminal Status surfaces here and in no lane list.
+
 Then the gate counts (`counts_by_gate`) on one line. Then anything unusual,
 and only if present: `prose_dependencies`, `suspected_human_steps`,
 `unclassed_captures`, `needs_class`, `stale_locks_taken_over`, `stranded`,

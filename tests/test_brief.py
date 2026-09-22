@@ -814,36 +814,6 @@ def test_brief_carries_breakdown_question_on_decision_and_blocked_rows(
     )
 
 
-def test_brief_surfaces_suspected_human_steps_separately(
-    monkeypatch, capsys
-):
-    suspected = funnel.Item(
-        repo="nateprich/beta", number=34, title="Provision the token",
-        url="https://example.invalid/34", state="OPEN",
-        labels=["blocked"], parent="nateprich/beta#29",
-        block_reason="Human step: entering a credential",
-    )
-    named = funnel.Item(
-        repo="nateprich/beta", number=35, title="Wait for the token",
-        url="https://example.invalid/35", state="OPEN",
-        labels=["blocked"], parent="nateprich/beta#29",
-        block_references=["#77"],
-        block_reason="Human step: entering a credential",
-    )
-
-    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
-
-    assert funnel.cmd_brief([named, suspected], NOW) == 0
-    brief = json.loads(capsys.readouterr().out)
-
-    assert brief["suspected_human_steps"] == [{
-        "ref": "nateprich/beta#34",
-        "title": "Provision the token",
-        "url": "https://example.invalid/34",
-        "reason": "entering a credential",
-    }]
-
-
 def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
     monkeypatch, capsys
 ):
@@ -851,18 +821,19 @@ def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
         repo="nateprich/beta", number=40, title="Create the account",
         url="https://example.invalid/40", state="OPEN",
         parent="nateprich/beta#39",
-        body="Part of the deployment.\n\nHuman step: an account or billing setting\n",
+        needs="human",
     )
     ordinary_ticket = funnel.Item(
         repo="nateprich/beta", number=41, title="Deploy the service",
         url="https://example.invalid/41", state="OPEN",
         parent="nateprich/beta#39",
+        needs="none",
     )
     machine_local_step = funnel.Item(
         repo="nateprich/beta", number=42, title="Run the local setup",
         url="https://example.invalid/42", state="OPEN",
         parent="nateprich/beta#39",
-        body="Human step: {}\n".format(funnel.MACHINE_LOCAL_REASON),
+        needs="claude-code-environment",
     )
 
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
@@ -876,7 +847,7 @@ def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
         "ref": "nateprich/beta#40",
         "title": "Create the account",
         "url": "https://example.invalid/40",
-        "reason": "an account or billing setting",
+        "reason": "human",
         # Every row says how long it has waited, as the decision rows do; a
         # fixture with no creation time reads "unknown" rather than guessing.
         "waited": "unknown",
@@ -885,7 +856,7 @@ def test_brief_surfaces_open_human_steps_outside_the_decision_queue(
         "ref": "nateprich/beta#42",
         "title": "Run the local setup",
         "url": "https://example.invalid/42",
-        "reason": funnel.MACHINE_LOCAL_REASON,
+        "reason": "claude-code-environment",
     }]
     assert brief["items"] == []
     assert brief["total_needing_nate"] == 0
@@ -914,26 +885,26 @@ def test_brief_separates_blocked_human_and_machine_local_steps(
         repo="nateprich/beta", number=46, title="Create the account",
         url="https://example.invalid/46", state="OPEN",
         parent=parent.ref,
-        body="Human step: an account or billing setting\n",
+        needs="human",
         open_blockers=[blocker.ref],
     )
     blocked_machine_local = funnel.Item(
         repo="nateprich/beta", number=47, title="Run local setup",
         url="https://example.invalid/47", state="OPEN",
         parent=blocked_parent.ref,
-        body="Human step: {}\n".format(funnel.MACHINE_LOCAL_REASON),
+        needs="claude-code-environment",
     )
     actionable_human = funnel.Item(
         repo="nateprich/beta", number=48, title="Set the account option",
         url="https://example.invalid/48", state="OPEN",
         parent=parent.ref,
-        body="Human step: an account or billing setting\n",
+        needs="human",
     )
     actionable_machine_local = funnel.Item(
         repo="nateprich/beta", number=49, title="Run the local check",
         url="https://example.invalid/49", state="OPEN",
         parent=parent.ref,
-        body="Human step: {}\n".format(funnel.MACHINE_LOCAL_REASON),
+        needs="claude-code-environment",
     )
 
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
@@ -959,7 +930,7 @@ def test_brief_separates_blocked_human_and_machine_local_steps(
         "ref": blocked_human.ref,
         "title": "Create the account",
         "url": "https://example.invalid/46",
-        "reason": "an account or billing setting",
+        "reason": "human",
         "blocked_reason": "open native blockers",
         "blockers": [blocker.ref],
     }]
@@ -967,7 +938,7 @@ def test_brief_separates_blocked_human_and_machine_local_steps(
         "ref": blocked_machine_local.ref,
         "title": "Run local setup",
         "url": "https://example.invalid/47",
-        "reason": funnel.MACHINE_LOCAL_REASON,
+        "reason": "claude-code-environment",
         "blocked_reason": "parent carries blocked marker",
         "blockers": [blocked_parent.ref],
     }]
@@ -995,7 +966,7 @@ def test_brief_flags_completed_access_plan_without_any_human_ticket(
         repo="nateprich/beta", number=52, title="Register the connector",
         url="https://example.invalid/52", state="CLOSED",
         parent=carried.ref,
-        body="Human step: an app UI with no API",
+        needs="human",
     )
     quiet = funnel.Item(
         repo="nateprich/beta", number=53, title="A quiet project",
@@ -1155,7 +1126,12 @@ def test_main_brief_marks_sections_depending_on_unreadable_pr_facts(
     assert brief["stranded"] is None
     assert brief["in_motion"] is None
     assert brief["stale_locks_taken_over"] is None
-    assert brief["missing"] == [
+    # Filtered to this test's subject: `main_ci` is a separate live read
+    # (#1219) and reports its own unreadable row beside these.
+    assert [
+        row for row in brief["missing"]
+        if row["section"] in funnel.BRIEF_PR_FACT_SECTIONS
+    ] == [
         {
             "section": section,
             "error": "could not read ticket branch facts: PR scan offline",
@@ -1374,3 +1350,115 @@ def test_closed_itself_degrades_explicitly_when_over_budget(
         "reason": "brief budget exhausted before the section started",
     } in brief["degraded"]
     assert brief["counts_by_gate"]["Ready"] == 0
+
+
+def test_ticket_pr_facts_budget_covers_the_observed_max():
+    """The 22.9 s observed max over 738 refs fits inside the budget (#1210)."""
+    assert funnel.BRIEF_SECTION_BUDGETS["ticket_pr_facts"] == 35.0
+
+
+def test_ticket_pr_facts_section_succeeds_under_the_raised_budget(
+    monkeypatch,
+):
+    """A read taking the observed 22.9 s succeeds with no degraded entry."""
+    clock = [0.0]
+
+    monkeypatch.setattr(funnel.time, "perf_counter", lambda: clock[0])
+
+    def reader():
+        clock[0] += 22.9
+        return {"facts": True}
+
+    timings = {}
+    degraded = []
+    assert funnel._brief_timed(
+        "ticket_pr_facts", reader, timings, degraded
+    ) == {"facts": True}
+    assert timings["ticket_pr_facts"] == pytest.approx(22.9)
+    assert degraded == []
+
+
+def test_main_brief_retries_a_pr_facts_timeout_once_within_deadline(
+    monkeypatch, capsys
+):
+    """A first-attempt timeout is retried once sharing the section deadline;
+    when the retry succeeds the dependent sections render instead of
+    reporting missing (#1210)."""
+    item = funnel.Item(
+        repo="nateprich/beta", number=92, title="A ticket",
+        url="https://example.invalid/92", state="OPEN",
+        parent="nateprich/beta#1",
+    )
+    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+    calls = []
+
+    def flaky(_items):
+        calls.append(1)
+        if len(calls) == 1:
+            raise funnel.BriefSectionTimeout(
+                "ticket_pr_facts", "section read timed out"
+            )
+        return {}
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", flaky)
+
+    assert funnel.main(["brief"]) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert len(calls) == 2
+    assert brief["stranded"] is not None
+    assert brief["in_motion"] is not None
+    assert brief["stale_locks_taken_over"] is not None
+    assert [
+        entry for entry in brief["missing"]
+        if entry["section"] in funnel.BRIEF_PR_FACT_SECTIONS
+    ] == []
+
+
+def test_main_brief_retry_exhausted_still_reports_degraded(
+    monkeypatch, capsys
+):
+    """Two timeouts (first attempt plus the one shared-deadline retry) leave
+    the dependent sections missing and record the degraded section (#1210)."""
+    item = funnel.Item(
+        repo="nateprich/beta", number=92, title="A ticket",
+        url="https://example.invalid/92", state="OPEN",
+        parent="nateprich/beta#1",
+    )
+    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+    calls = []
+
+    def always_slow(_items):
+        calls.append(1)
+        raise funnel.BriefSectionTimeout(
+            "ticket_pr_facts", "section read timed out"
+        )
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", always_slow)
+
+    assert funnel.main(["brief"]) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert len(calls) == 2
+    assert brief["stranded"] is None
+    assert brief["in_motion"] is None
+    assert brief["stale_locks_taken_over"] is None
+    # Filtered to this test's subject, as above: `main_ci` is a separate live
+    # read (#1219) and reports its own unreadable row beside these.
+    assert [
+        row for row in brief["missing"]
+        if row["section"] in funnel.BRIEF_PR_FACT_SECTIONS
+    ] == [
+        {
+            "section": section,
+            "error": "could not read ticket branch facts: "
+                     "brief section read timed out",
+        }
+        for section in funnel.BRIEF_PR_FACT_SECTIONS
+    ]
+    degraded = [
+        row for row in brief["degraded"]
+        if row["section"] == "ticket_pr_facts"
+    ]
+    assert len(degraded) == 1
+    assert degraded[0]["budget_seconds"] == 35.0

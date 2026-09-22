@@ -13,6 +13,8 @@ import stat
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -721,6 +723,133 @@ def test_the_question_path_posts_and_labels_without_tickets(monkeypatch):
     assert calls["labels"] == [(REPO, 1)]
     assert result == {"project": "owner/repo#1",
                       "needs_decision": "tabs or spaces?"}
+
+
+# -- the answered-Gates marker (#1274) -----------------------------------------
+#
+# #1167's shape: a project held at a breakdown question that Nate answered in
+# session. The comment thread still carries the question, so a lane that reads
+# only the thread asks it again — observed at 21:57:38Z, four minutes after the
+# block cleared at 21:53:02Z. The plan body is the one place the answer can
+# live where every lane sees it.
+
+GATES_ANSWER_PLAN = """# Reach the funnel from general chat
+
+## Needs Nate
+
+- Gates: answered — see the marker below.
+
+{marker}
+
+```json
+{payload}
+```
+"""
+
+VALID_GATES_ANSWER = {
+    "answer": "No. The connector never answers a gate; it relays mine.",
+    "at": "2026-09-21T21:53:02Z",
+    "decider": "nate",
+}
+
+
+def gates_answer_plan(payload):
+    """A #1167-shaped plan body carrying one answered-Gates marker."""
+    return plan(body=GATES_ANSWER_PLAN.format(
+        marker=funnel.GATES_ANSWER_MARKER,
+        payload=json.dumps(payload, indent=2),
+    ))
+
+
+def test_an_answered_gates_marker_posts_nothing_and_labels_nothing(monkeypatch):
+    calls = stub_apply(monkeypatch, plan=gates_answer_plan(VALID_GATES_ANSWER))
+    errors, normalized, _ = validate(
+        {"tickets": [],
+         "needs_decision": "Should the connector answer gates on Nate's behalf?"})
+    assert errors == []
+    assert normalized is not None
+
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert calls["comments"] == []
+    assert calls["labels"] == []
+    assert calls["created"] == []
+    assert calls["needs"] == []
+    assert result == {
+        "project": "owner/repo#1",
+        "needs_decision": "Should the connector answer gates on Nate's behalf?",
+        "already_answered": VALID_GATES_ANSWER,
+    }
+    json.dumps(result)
+
+
+def test_the_same_answer_without_a_marker_posts_and_blocks_as_before(monkeypatch):
+    calls = stub_apply(monkeypatch)
+    errors, normalized, _ = validate(
+        {"tickets": [],
+         "needs_decision": "Should the connector answer gates on Nate's behalf?"})
+    assert errors == []
+    assert normalized is not None
+
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert len(calls["comments"]) == 1
+    assert calls["comments"][0][2].startswith("**Needs a decision:**")
+    assert calls["labels"] == [(REPO, 1)]
+    assert "already_answered" not in result
+
+
+@pytest.mark.parametrize("payload", [
+    {"at": "2026-09-21T21:53:02Z", "decider": "nate"},
+    {"answer": "   ", "at": "2026-09-21T21:53:02Z", "decider": "nate"},
+    {"answer": "No.", "decider": "nate"},
+    {"answer": "No.", "at": "not a timestamp", "decider": "nate"},
+    {"answer": "No.", "at": "2026-09-21T21:53:02Z"},
+    {"answer": "No.", "at": "2026-09-21T21:53:02Z", "decider": ""},
+])
+def test_a_malformed_gates_marker_posts_and_blocks(monkeypatch, payload):
+    """A degraded read waits toward Nate. One re-ask beats a dropped question."""
+    calls = stub_apply(monkeypatch, plan=gates_answer_plan(payload))
+    errors, normalized, _ = validate(
+        {"tickets": [], "needs_decision": "which shape?"})
+    assert errors == []
+    assert normalized is not None
+
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert len(calls["comments"]) == 1
+    assert calls["labels"] == [(REPO, 1)]
+    assert "already_answered" not in result
+
+
+def test_an_unparseable_gates_marker_posts_and_blocks(monkeypatch):
+    body = "{}\n\n```json\n{{not json at all}}\n```\n".format(
+        funnel.GATES_ANSWER_MARKER)
+    calls = stub_apply(monkeypatch, plan=plan(body=body))
+    errors, normalized, _ = validate(
+        {"tickets": [], "needs_decision": "which shape?"})
+    assert errors == []
+    assert normalized is not None
+
+    breakdown.apply(REPO, 1, normalized)
+
+    assert len(calls["comments"]) == 1
+    assert calls["labels"] == [(REPO, 1)]
+
+
+def test_a_marker_never_suppresses_the_create_path(monkeypatch):
+    """The marker settles a question. It has no say over tickets."""
+    calls = stub_apply(monkeypatch, plan=gates_answer_plan(VALID_GATES_ANSWER))
+    errors, normalized, _ = validate({"tickets": [raw_ticket()]})
+    assert errors == []
+    assert normalized is not None
+
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert len(calls["created"]) == 1
+    assert len(calls["comments"]) == 1  # the coverage comment
+    assert calls["labels"] == []
+    assert "already_answered" not in result
 
 
 def test_a_closed_project_takes_no_breakdown(monkeypatch):

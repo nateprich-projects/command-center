@@ -25,7 +25,9 @@ exact, every dependency resolving to a sibling index or an existing open
 issue, and no dependency cycles. The create path makes sub-issues with
 native blocked-by edges, writes the Needs field and a code-owned ``Risk:``
 line, and posts the coverage comment; the question path posts the
-needs-decision comment and labels the project blocked.
+needs-decision comment and labels the project blocked — unless the plan
+body already carries a valid answered-Gates marker (#1274), in which case
+the question is settled and nothing is posted or labelled.
 
 The runner protocol (#811) rides on ``--attempt``: a malformed answer
 exits 3 below attempt 2 so the runner retries once with the error fed
@@ -755,6 +757,17 @@ def apply(repo: str, number: int, normalized: dict, *,
                 project_ref, plan.get("state")))
     question = normalized.get("needs_decision")
     if question is not None:
+        # An answered Gates question is settled, and asking it again is the
+        # #1167 defect: Nate answered at 21:53:02Z, the block cleared, and a
+        # breakdown lane posted the same question and re-blocked the item four
+        # minutes later. The plan body is already in hand from fetch_plan, so
+        # this costs no extra read, and it goes through funnel's own reader
+        # rather than a second parse — two parsers of one marker drift.
+        answered = funnel.parse_gates_answer(plan.get("body") or "")
+        if answered is not None:
+            return {"project": project_ref,
+                    "needs_decision": question,
+                    "already_answered": answered}
         apply_question(repo, number, question, run=run, agent=agent)
         return {"project": project_ref, "needs_decision": question}
     created = apply_create(repo, number, normalized.get("tickets", []),

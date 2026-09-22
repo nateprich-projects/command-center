@@ -417,6 +417,20 @@ MUSE_STUB = (
     "  previous=\"$argument\"\n"
     "done\n"
     "cp \"$prompt_file\" \"$MUSE_PROMPT.$n\"\n"
+    # #1240: the only vantage point from inside a live run. The prompt file
+    # sits in the run directory, so its parent is that directory; record the
+    # directory's mode and contents before the EXIT trap removes it.
+    "if [[ -n \"${MUSE_RUNDIR_PROBE:-}\" ]]; then\n"
+    "  run_dir=\"${prompt_file%/*}\"\n"
+    "  {\n"
+    "    printf 'dir %s\\n' \"$run_dir\"\n"
+    # `find -perm 700` rather than `stat`: the mode flag is `-f` on BSD and
+    # `-c` on GNU, and this suite runs on both a Mac and Linux CI.
+    "    if [[ -n \"$(find \"$run_dir\" -maxdepth 0 -perm 700 2>/dev/null)\" ]]\n"
+    "    then printf 'owner_only yes\\n'; else printf 'owner_only no\\n'; fi\n"
+    "    for entry in \"$run_dir\"/*; do printf 'entry %s\\n' \"${entry##*/}\"; done\n"
+    "  } >> \"$MUSE_RUNDIR_PROBE\"\n"
+    "fi\n"
     "if [[ -n \"${MUSE_SLEEP:-}\" ]]; then exec sleep \"$MUSE_SLEEP\"; fi\n"
     "varname=\"MUSE_ANSWER_$n\"\n"
     "answer=\"${!varname:-$MUSE_ANSWER}\"\n"
@@ -1585,3 +1599,176 @@ def test_the_retry_reuses_the_model_it_resolved(tmp_path, resolver_clearing):
     for attempt in (1, 2):
         args = (repo / "muse.args.{}".format(attempt)).read_text().splitlines()
         assert args[args.index("--model") + 1] == "muse-spark-1.3-contributor"
+
+
+# -- #1240: one packet per run, in one owner-only directory --------------------
+# The precondition for #1233, which turns the single review call into a lister
+# plus several judges. Two properties matter to that split and are pinned here:
+# the packet is assembled once and every call reads the same bytes, and the
+# bytes live somewhere no other account on the machine can read.
+
+
+def _probe(tmp_path, repo):
+    """What the muse stub saw of the run directory while the run was live."""
+    text = (repo / "rundir.probe").read_text()
+    # `partition`, not `split`: a probe line the stub could not fill must show
+    # up as an empty value in the assertion below, not as a ValueError three
+    # frames away from the thing that actually went wrong.
+    lines = [line.partition(" ") for line in text.splitlines() if line]
+    return {
+        "dirs": [tail for key, _, tail in lines if key == "dir"],
+        "owner_only": [tail for key, _, tail in lines if key == "owner_only"],
+        "entries": sorted({tail for key, _, tail in lines if key == "entry"}),
+        "raw": text,
+    }
+
+
+def _with_probe(tmp_path, **kwargs):
+    repo_probe = tmp_path / "rundir.probe"
+    kwargs.setdefault("extra_env", {})
+    kwargs["extra_env"] = dict(kwargs["extra_env"],
+                               MUSE_RUNDIR_PROBE=str(repo_probe))
+    proc, repo = _stubbed_runner(tmp_path, **kwargs)
+    if repo_probe.exists():
+        (repo / "rundir.probe").write_text(repo_probe.read_text())
+    return proc, repo
+
+
+def test_every_scratch_file_lives_in_one_run_directory(tmp_path):
+    proc, repo = _with_probe(
+        tmp_path, begin=_begin(), packet=_packet(), answers=(_answer(),))
+
+    assert proc.returncode == 0, proc.stderr
+    probe = _probe(tmp_path, repo)
+    assert len(probe["dirs"]) == 1
+    run_dir = pathlib.Path(probe["dirs"][0])
+    assert run_dir.parent == tmp_path, run_dir
+    assert run_dir.name.startswith("muse-review-engine."), run_dir.name
+    # The packet among them: a judge in #1233 reads this path, not GitHub.
+    assert "packet.json" in probe["entries"]
+    assert "prompt.txt" in probe["entries"]
+
+
+def test_the_run_directory_is_readable_only_by_its_owner(tmp_path):
+    # A world-readable temp root, which is what `/tmp` actually is on this
+    # Mac. Without it the assertion passes on any tree, because pytest hands
+    # out 700 directories and the old runner inherited that by accident.
+    tmp_path.chmod(0o755)
+    proc, repo = _with_probe(
+        tmp_path, begin=_begin(), packet=_packet(), answers=(_answer(),))
+
+    assert proc.returncode == 0, proc.stderr
+    # Not a tidiness check. The packet holds the diff, ticket and plan of a
+    # private member repository, and this repository is public; mktemp's
+    # per-file 600 left the name, size and timing of every review legible to
+    # any other account on the machine.
+    probe = _probe(tmp_path, repo)
+    assert probe["owner_only"] == ["yes"], probe["raw"]
+    assert pathlib.Path(probe["dirs"][0]) != tmp_path
+
+
+def test_the_run_directory_and_the_packet_are_gone_when_the_run_ends(tmp_path):
+    proc, repo = _with_probe(
+        tmp_path, begin=_begin(), packet=_packet(), answers=(_answer(),))
+
+    assert proc.returncode == 0, proc.stderr
+    run_dir = pathlib.Path(_probe(tmp_path, repo)["dirs"][0])
+    assert not run_dir.exists(), sorted(p.name for p in run_dir.iterdir())
+    # Nothing of the run survives anywhere under the temp root either: the
+    # cache lives for one run, because GitHub is the state.
+    assert not list(tmp_path.glob("muse-review-engine.*"))
+
+
+def test_a_killed_model_call_leaves_nothing_behind_either(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), bound_seconds=1,
+        extra_env={"MUSE_SLEEP": "30"}, timeout=60)
+
+    assert proc.returncode == 124, proc.stderr
+    assert not list(tmp_path.glob("muse-review-engine.*"))
+
+
+@pytest.mark.parametrize("begin,args", [
+    (_begin(), ()),
+    (_begin(do="breakdown", work={"ref": BREAKDOWN_REF, "tier": "standard"}),
+     ("standard", "high")),
+    (_begin(do="shape",
+            work={"ref": SHAPE_REF, "number": SHAPE_NUM, "repo": REPO,
+                  "tier": "standard"}),
+     ("standard", "high")),
+])
+def test_the_packet_is_fetched_exactly_once_whatever_the_job(
+        tmp_path, begin, args):
+    answers = (_answer(),) if begin["do"] == "review" else (
+        _breakdown_answer() if begin["do"] == "breakdown"
+        else _shape_answer(),)
+    proc, repo = _stubbed_runner(
+        tmp_path, begin, _packet(), args=args, answers=answers)
+
+    assert proc.returncode == 0, proc.stderr
+    calls = (repo / "packet.calls").read_text().splitlines()
+    assert len(calls) == 1, calls
+
+
+def _guard_harness(tmp_path):
+    """Run the shipped `assemble_packet` on its own, twice.
+
+    Extracted from the script text rather than re-typed: a guard that a test
+    keeps its own copy of stops being the guard that ships. No caller today
+    assembles twice — the guard exists for #1233's judges — so this is the
+    only way to make the refusal a fact rather than an intention.
+    """
+    text = SCRIPT.read_text()
+    start = text.index("assemble_packet() {")
+    end = text.index("\n}\n", start) + len("\n}\n")
+    harness = tmp_path / "guard.sh"
+    harness.write_text(
+        "set -uo pipefail\n"
+        'PACKET_FILE="{}/packet.json"\n'.format(tmp_path)
+        + "PACKET_ASSEMBLED=0\n"
+        + text[start:end]
+        + 'fetch() { printf "fetched\\n" >> "$PACKET_FILE"; return "${FETCH_STATUS:-0}"; }\n'
+        "assemble_packet fetch; echo \"first=$?\"\n"
+        "assemble_packet fetch; echo \"second=$?\"\n"
+    )
+    return subprocess.run(
+        ["/bin/bash", str(harness)], capture_output=True, text=True,
+        timeout=20)
+
+
+def test_a_second_assembly_is_refused_rather_than_silently_refetched(tmp_path):
+    proc = _guard_harness(tmp_path)
+
+    assert "first=0" in proc.stdout, proc.stdout
+    assert "second=2" in proc.stdout, proc.stdout
+    assert "already assembled" in proc.stderr, proc.stderr
+    # The refusal is what keeps the bytes identical: a judge that refetched
+    # would be judging a head the lister never enumerated.
+    assert (tmp_path / "packet.json").read_text() == "fetched\n"
+
+
+def test_a_failed_fetch_does_not_burn_the_one_assembly(tmp_path):
+    text = SCRIPT.read_text()
+    start = text.index("assemble_packet() {")
+    end = text.index("\n}\n", start) + len("\n}\n")
+    harness = tmp_path / "retry.sh"
+    harness.write_text(
+        "set -uo pipefail\n"
+        "PACKET_ASSEMBLED=0\n"
+        'PACKET_FILE="{}/packet.json"\n'.format(tmp_path)
+        + text[start:end]
+        + "attempts=0\n"
+        "fetch() { attempts=$((attempts + 1));"
+        ' [[ "$attempts" -gt 1 ]]; }\n'
+        "assemble_packet fetch; echo \"first=$?\"\n"
+        "assemble_packet fetch; echo \"second=$?\"\n"
+    )
+    proc = subprocess.run(
+        ["/bin/bash", str(harness)], capture_output=True, text=True,
+        timeout=20)
+
+    # A packet command that failed assembled nothing, so the run may still
+    # try. Only a fetch that succeeded closes the door.
+    assert "first=1" in proc.stdout, proc.stdout
+    assert "second=0" in proc.stdout, proc.stdout
+    assert "already assembled" not in proc.stderr

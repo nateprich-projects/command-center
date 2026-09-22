@@ -115,10 +115,38 @@ if ! PROMPT_SHAPE="$(check_routine "$ROUTINE_SHAPE")"; then
   exit 1
 fi
 
-PACKET_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-packet.XXXXXX")"
-PROMPT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-prompt.XXXXXX")"
-ANSWER_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-answer.XXXXXX")"
-DECISION_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-decision.XXXXXX")"
+# One owner-only directory per run, holding every scratch file including the
+# packet, removed whole when the run ends (#1240). Two reasons it is a
+# directory rather than six loose files in a shared temp root:
+#
+#  1. The packet carries the diff, the ticket text and the plan of a *member*
+#     repository, and every member repository is private while this one is
+#     public. `mktemp` gives each file mode 600, but the enclosing root is
+#     world-listable, so the name, size and timing of a private review were
+#     readable by any account on the machine. 700 on one directory closes
+#     that without a mode argument on every file.
+#  2. #1233 turns one model call into a lister plus several judges, all
+#     reading the same assembled packet. A named directory is what they share.
+#
+# The root stays `${TMPDIR:-/tmp}` — runtime-relative, so nothing about this
+# Mac's layout enters Git, and the rollback is to refetch from GitHub per
+# call. Nothing here outlives the run: `GitHub is the state`.
+RUN_DIR="$(mktemp -d "${TMPDIR:-/tmp}/muse-review-engine.XXXXXX")"
+if [[ -z "$RUN_DIR" || ! -d "$RUN_DIR" ]]; then
+  echo "muse-review-engine: could not create the per-run scratch directory" >&2
+  exit 1
+fi
+if ! chmod 700 "$RUN_DIR"; then
+  # Refuse rather than continue: an unreadable-to-others directory is the
+  # whole point, and a packet written into a widened one has already leaked.
+  echo "muse-review-engine: could not make $RUN_DIR owner-only" >&2
+  rmdir "$RUN_DIR" 2>/dev/null || true
+  exit 1
+fi
+PACKET_FILE="$RUN_DIR/packet.json"
+PROMPT_FILE="$RUN_DIR/prompt.txt"
+ANSWER_FILE="$RUN_DIR/answer.json"
+DECISION_FILE="$RUN_DIR/decision.json"
 # The helper is a sibling of this runner, not part of the maintained clone's
 # protocol surface: it ships and moves with the script that sources it.
 MUSE_QUOTA_HOLD_LIB="${BASH_SOURCE[0]%/*}/muse-quota-hold.sh"
@@ -127,16 +155,30 @@ if [[ ! -r "$MUSE_QUOTA_HOLD_LIB" ]]; then
   exit 1
 fi
 . "$MUSE_QUOTA_HOLD_LIB"
-DIAG_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-diag.XXXXXX")"
-RESULT_FILE="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-result.XXXXXX")"
-if [[ -z "$PACKET_FILE" || -z "$PROMPT_FILE" || -z "$ANSWER_FILE" \
-  || -z "$DECISION_FILE" || -z "$DIAG_FILE" \
-  || -z "$RESULT_FILE" ]]; then
-  echo "muse-review-engine: could not create scratch files" >&2
-  exit 1
-fi
+DIAG_FILE="$RUN_DIR/diag.txt"
+RESULT_FILE="$RUN_DIR/result.txt"
 
 BEGIN_RUN=""
+
+# The packet is assembled once per run and every later call reads these same
+# bytes (#1240). Today the review path makes one model call; #1233 makes it a
+# lister plus several judges, and a judge that refetched would be judging a
+# different PR from the lister that enumerated it — the diff can move under a
+# review, which is exactly what `precheck_verdict` exists to catch after the
+# fact. Assembling twice is therefore a bug in the runner, not a slow path, so
+# it fails loudly here rather than quietly costing a second fetch.
+PACKET_ASSEMBLED=0
+
+assemble_packet() {
+  if (( PACKET_ASSEMBLED )); then
+    echo "muse-review-engine: the packet was already assembled for this run;" \
+      "every model call reads $PACKET_FILE" >&2
+    return 2
+  fi
+  "$@" || return 1
+  PACKET_ASSEMBLED=1
+  return 0
+}
 
 # Keep the funnel's Project view in one disposable process for this Muse run.
 # The server prints its loopback endpoint through an inherited pipe; it does
@@ -158,8 +200,9 @@ export FUNNEL_SESSION
 
 cleanup() {
   python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
-  rm -f -- "$PACKET_FILE" "$PROMPT_FILE" "$ANSWER_FILE" \
-    "$DECISION_FILE" "$DIAG_FILE" "$RESULT_FILE"
+  # The directory, not the files: a later call that adds a scratch file must
+  # not have to be remembered here to be cleaned up.
+  rm -rf -- "$RUN_DIR"
 }
 trap cleanup EXIT
 
@@ -321,7 +364,10 @@ resolve_muse_model() {
 call_muse() {
   local killed_marker
   # Split from the declaration: `local x=$(...)` would mask mktemp's status.
-  if ! killed_marker="$(mktemp "${TMPDIR:-/tmp}/muse-review-engine-killed.XXXXXX")"; then
+  # In the run directory with everything else, so the EXIT trap's one `rm -rf`
+  # sweeps it too. #1233 makes several model calls per run, so this name is
+  # per-call rather than fixed.
+  if ! killed_marker="$(mktemp "$RUN_DIR/killed.XXXXXX")"; then
     return 1
   fi
   rm -f "$killed_marker"
@@ -395,7 +441,7 @@ muse_failed() {
 # final answer records nothing — the project stays awaiting breakdown, the
 # idea keeps its needs-shaping label — so the next run asks again.
 
-collect_issue_packet() {
+fetch_issue_packet() {
   if [[ "$JOB" == "breakdown" ]]; then
     python3 "$REPO/breakdown-packet" "$BEGIN_REF" \
       >"$PACKET_FILE" 2>"$DIAG_FILE"
@@ -403,6 +449,10 @@ collect_issue_packet() {
     python3 "$REPO/shape-packet" "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
       >"$PACKET_FILE" 2>"$DIAG_FILE"
   fi
+}
+
+collect_issue_packet() {
+  assemble_packet fetch_issue_packet
 }
 
 # One issue-job apply invocation; --run/--agent stamp the runner comments.
@@ -688,8 +738,12 @@ fi
 
 # The packet is the only evidence the model ever sees. Reads only; nothing
 # here changes remote state.
-if ! python3 "$REPO/review-packet" "$BEGIN_PR" --repo "$BEGIN_REPO" \
-    >"$PACKET_FILE" 2>"$DIAG_FILE"; then
+fetch_review_packet() {
+  python3 "$REPO/review-packet" "$BEGIN_PR" --repo "$BEGIN_REPO" \
+    >"$PACKET_FILE" 2>"$DIAG_FILE"
+}
+
+if ! assemble_packet fetch_review_packet; then
   packet_err="$(cat "$DIAG_FILE")"
   echo "muse-review-engine: review-packet failed: $packet_err" >&2
   failure "review-packet failed for PR #$BEGIN_PR in $BEGIN_REPO: $packet_err" || true

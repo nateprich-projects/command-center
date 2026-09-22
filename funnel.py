@@ -456,6 +456,15 @@ CAUSED_BY_MARKER = "<!-- command-center-caused-by -->"
 ORIGIN_OVERRIDE_MARKER = "<!-- command-center-origin-override -->"
 ORIGIN_OVERRIDE_TARGETS = ("nate", "agents")
 
+#: Nate answers a breakdown's open Gates question in session, and the answer
+#: lands as a comment. Every lane reads the plan body, so a comment answer is
+#: invisible: observed on #1167, where the question was answered at 21:53:02Z
+#: and a breakdown lane posted the same question again four minutes later.
+#: This marker is the body record of that answer — the verbatim quote, when it
+#: was given, and who gave it — so the ask and the read share one predicate
+#: instead of each lane scanning prose for an answer-shaped sentence.
+GATES_ANSWER_MARKER = "<!-- command-center-gates-answer -->"
+
 #: Three rejected merges in a week means the auto-merge bar has failed. That is
 #: not "there are bugs" — it is a different and more serious fact, and the
 #: response is to stop auto-merging and fix the review prompt.
@@ -807,6 +816,12 @@ def gate_question(item: Item) -> Optional[str]:
         if item.block_references or _item_blocked_until(item) is not None:
             return None
         if item.parent is None and item.needs_decision:
+            # An answered Gates question is settled, whatever the comment
+            # thread still says. The marker is consulted before the question
+            # is surfaced so the ask and the read share one predicate; an
+            # absent or malformed marker asks exactly as before.
+            if parse_gates_answer(item.body) is not None:
+                return None
             return "Answer the breakdown's question?"
         return "Unblock?" if item.parent else "Unblock or park?"
     if item.status == "Building":
@@ -2380,6 +2395,30 @@ def parse_origin_override(body: str) -> Optional[Dict]:
         provenance = parse_provenance(body)
         if provenance is None or provenance["voice"] == "agent":
             return None
+    return found
+
+
+def parse_gates_answer(body: str) -> Optional[Dict]:
+    """Return a valid answered-Gates record, or ``None`` when it fails closed.
+
+    The record is complete or it is nothing: an answer quote, the time it was
+    given, and the decider who gave it. A marker missing any of the three is a
+    degraded read, and a degraded read waits toward Nate rather than reporting
+    a gate as settled — the same direction ``parse_satisfied_block_comment``
+    takes, and for the same reason. Guessing "answered" would silently drop a
+    real question; guessing "open" costs one re-ask.
+    """
+    found = _marked_json(body, GATES_ANSWER_MARKER)
+    if found is None:
+        return None
+    answer = found.get("answer")
+    decider = found.get("decider")
+    if not isinstance(answer, str) or not answer.strip():
+        return None
+    if not isinstance(decider, str) or not decider.strip():
+        return None
+    if parse_time(found.get("at")) is None:
+        return None
     return found
 
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json
 import os
 import glob
@@ -35,6 +36,11 @@ import sys
 import time
 import uuid
 from typing import Dict, List, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - the schedule Mac and CI are Unix
+    fcntl = None  # type: ignore
 
 import session_usage
 
@@ -241,6 +247,52 @@ def _spooled(agent: str) -> List[Dict]:
         return []
 
 
+@contextlib.contextmanager
+def _spool_lock(agent: str):
+    """Hold a best-effort advisory lock on the agent's spool file (#1238).
+
+    Yields the open spool handle while an exclusive non-blocking `flock` is
+    held, or `None` when there is nothing to hold: no `fcntl` on this
+    platform, no spool file yet, the lock already taken by a concurrent
+    lane, or a filesystem that will not lock. Every one of those falls
+    through to the unlocked path — instrumentation must not gate the thing
+    it instruments, and the dedup predicate in `_push` catches the
+    duplicate a missed lock lets through.
+
+    The lock is on the spool that is already there: opening it read-only
+    never creates a file, and removing the lock leaves dedup-only
+    correctness behind.
+    """
+    if fcntl is None:
+        yield None
+        return
+    try:
+        fh = open(_spool_path(agent), "r")
+    except OSError:
+        yield None
+        return
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            fh.close()
+        except OSError:
+            pass
+        yield None
+        return
+    try:
+        yield fh
+    finally:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            fh.close()
+        except OSError:
+            pass
+
+
 def _push(agent: str, extra: Optional[List[Dict]] = None) -> None:
     """Drain the spool to GitHub. Raises if it cannot.
 
@@ -253,7 +305,17 @@ def _push(agent: str, extra: Optional[List[Dict]] = None) -> None:
     is rejected rather than silently lost, and the retry re-reads before
     rewriting. Both agents can be running at once, even though only one Codex
     run can.
+
+    A best-effort non-blocking `flock` on the spool narrows the
+    concurrent-drain window; it is never waited on and never fatal, and a
+    missed lock only costs the dedup predicate a line to skip (#1238).
     """
+    with _spool_lock(agent):
+        _push_drain(agent, extra)
+
+
+def _push_drain(agent: str, extra: Optional[List[Dict]] = None) -> None:
+    """The drain itself; `_push` holds the spool lock around it."""
     from_spool = _spooled(agent)
     pending = from_spool + list(extra or [])
     if not pending:

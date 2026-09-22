@@ -1,26 +1,26 @@
-# Claude routine — risky reviews, escalated shaping
+# Claude routine: reviews, escalated shaping
 
-**Claude Code Routine**, Mac mini, never headless. One job per run:
+**Claude Code Routine**, Mac mini, never headless:
 **review, then breakdown, then shaping**.
 
-## 1. Start
+## Start
 
 ```bash
 python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated
 ```
 
-- `"do": "stop"` — finish and stop.
-- `"do": "review"` — `work` names the PR. `"do": "shape"` — one idea; §3.
+- `"do": "stop"`: finish.
+- `"do": "review"`: `work` names the PR. `"do": "shape"`: one idea.
 
-**Keep `run`.** Pass the run id printed by this run's `begin` output as
-`--run <id>` — never an id from an earlier `begin` in the same session. If
+Pass the run id printed by this run's `begin` output as
+`--run <id>`, never an id from an earlier `begin` in the same session. If
 `heartbeat finish` refuses a run/work mismatch, use that id in `--run` and
 retry. Never wrap the id in `RUN=$(...)`.
 
-## 2. Review against `plan.md`
+## Review
 
 Reconcile: approved-but-unmerged, merged-but-ticket-open. Read `plan.md`
-**first**, then the whole diff — **never a diff of the diff.** Bar: **does this do what the plan says, and does it avoid what
+**first**, then the whole diff: **never a diff of the diff.** Bar: **does this do what the plan says, and does it avoid what
 the plan rejected?** Tests must pass. Touching `.claude/settings.json`,
 `routines/`, `skills/`, `AGENTS.md`, `plan.md` fails unless the ticket asked.
 
@@ -29,15 +29,15 @@ python3 /Users/nateprich/.claude/command-center-run/funnel.py review <pr> --verd
 python3 /Users/nateprich/.claude/command-center-run/funnel.py merge <pr> --yes
 ```
 
-`merge` re-checks everything including the approved head. Rejections
+`merge` re-checks everything at the approved head. Rejections
 carry a `--blocking` note; **unsure means do not merge.** Do not
 change `Status` or `Class`: the gate reads the rejected-merge counter
-itself and refuses while auto-merging is stopped.
+itself.
 
 ## 3. Shape one escalated idea
 
-`begin` named it. **Do not grill** — settle what precedent covers, cite
-the source, open questions in `Needs you`, answer first:
+**Do not grill**: settle what precedent covers, cite
+the source, open questions in `Needs you`:
 
 ```text
 - Exposure: nothing outstanding. No new credentials or reachable surface.
@@ -51,7 +51,11 @@ advances to `Ready` with a `Self-approved:` marker that `funnel brief`
 shows; anything else stays at `Shaped`, with the reason printed. **Shaped
 is not approval.** If the capture origin is `agent` and Class is unset,
 pass `--class <Broken|Maintenance|Improve|New|Replace>`; otherwise add a
-`Proposed class: <one ladder name>` line and no `--class`.
+`Proposed class: <one ladder name>` line and no `--class`. When Nate
+explicitly authorises `approve --yes` while Class is still unset, the
+command adopts one exact whole-line `Proposed class:` value before the
+Status write. Adoption fills the field but is not the plan-good decision
+(#59 brake: no `Shaped` gate, no auto-advance to `Ready`).
 
 ```bash
 python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --plan <file>
@@ -80,8 +84,8 @@ thing observed.
 ## Finish
 
 ```bash
-python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent claude --run <id> --outcome done --merged <the PR number, e.g. 96> --note "<what shipped>"
+python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent claude --run <id> --outcome done --merged <pr> --note "<what shipped>"
 ```
 
-`--merged` is the PR number, never a count. No change on unlanded
-ground: `skipped-blocked`. Breakage: `errored`.
+`--merged` is the PR number, never a count. Nothing landed:
+`skipped-blocked`. Breakage: `errored`.

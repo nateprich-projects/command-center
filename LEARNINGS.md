@@ -15,11 +15,14 @@ be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes pe
 #825 moved every dated incident and rationale paragraph out of the five
 run-path files that exceeded 500 words, and replaced the /funnel rendering
 section with `funnel_render.py`, which the skill invokes. Word counts before
-→ after, by `len(text.split())`: `routines/claude.md` 2776 → 491,
-`routines/zcode.md` 2847 → 479, `skills/funnel/SKILL.md` 3374 → 492,
+→ after, by `len(text.split())`: `routines/claude.md` 2776 → 498,
+`routines/zcode.md` 2847 → 479, `skills/funnel/SKILL.md` 3374 → 476,
 `skills/breakdown/SKILL.md` 1077 → 488, `skills/shape/SKILL.md` 1205 →
 462. The history below is what came out, newest incident first, confidence
-labelled per entry. Live protocol stayed in the files; the suite pins the
+labelled per entry. The #984/#1020 Proposed-class adoption rule is live
+protocol, not moved history: its wording stays in `routines/claude.md` and
+`skills/funnel/SKILL.md` (carry-forward, nate-relayed 2026-09-17) and only
+its rationale summary lives here. Live protocol stayed in the files; the suite pins the
 load-bearing phrases (`tests/test_routine_contents.py`,
 `tests/test_guardrails.py`, `tests/test_funnel_skill_documents_brief.py`,
 plus the new `tests/test_funnel_render_template.py`, which pins that the

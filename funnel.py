@@ -8135,14 +8135,50 @@ def cmd_queue(
     items: List[Item],
     now: datetime,
     repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
 ) -> int:
     """Everything, ordered — both queues, each under its own heading.
 
     They are genuinely different orderings over different subsets, so a single
     merged list would have to pick one and misrepresent the other.
+
+    Work already sitting in an open PR is not startable, and this listing used
+    to show it anyway: ``startable`` takes the exclusion as an argument, and
+    the queue was the one caller that never passed it. The read follows
+    ``cmd_next_review``'s pattern — supplied by the caller, else fetched once
+    and retained in an active brief cache.
+
+    A PR read that fails says so. An unfiltered list is the wrong fallback
+    here: it is indistinguishable from a correct one, and the whole defect is
+    a ticket that looks startable and is not.
     """
+    pr_facts_unavailable: Optional[str] = None
+    if pr_facts is None:
+        try:
+            pr_facts = ticket_pr_facts(items)
+        except (GitHubError, BriefSectionTimeout, OSError,
+                subprocess.SubprocessError) as exc:
+            pr_facts_unavailable = str(exc)
+            pr_facts = None
+        else:
+            cache = _ACTIVE_BRIEF_CACHE.get()
+            if cache is not None:
+                cache._pr_facts = pr_facts
+
+    in_review: Set[str] = set()
+    if pr_facts_unavailable is None:
+        try:
+            in_review = _call_with_optional_keyword(
+                awaiting_review, "pr_facts", pr_facts, items
+            )
+        except (GitHubError, BriefSectionTimeout, OSError,
+                subprocess.SubprocessError) as exc:
+            pr_facts_unavailable = str(exc)
+
     decisions = awaiting_decision(items)
-    tickets = startable(items, repo_readiness=repo_readiness)
+    tickets = startable(
+        items, awaiting_review=in_review, repo_readiness=repo_readiness
+    )
 
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
     by_ref = {i.ref: i for i in items}
@@ -8157,6 +8193,13 @@ def cmd_queue(
             gate_question(item),
         ),
     )
+
+    if pr_facts_unavailable is not None:
+        # The brief's degraded convention, in the queue's voice: name the
+        # section, say it could not be read, and say what that costs.
+        print("\ndegraded — open-PR facts: {}. Tickets already in an open PR "
+              "cannot be excluded, so the list below may name work that is "
+              "already done.".format(pr_facts_unavailable))
 
     print("\nStartable by Codex ({}), ladder order:".format(len(tickets)))
     _print_queue_section(

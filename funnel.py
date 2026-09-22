@@ -1488,6 +1488,127 @@ def _parent_ticket_number(item: Item) -> Optional[int]:
         return None
 
 
+#: Consecutive failed runs on one piece of work before it is withheld.
+#: Measured 2026-09-21 over the heartbeat's 10,000-record window: 27 of 493
+#: bound works recorded two or more errored finishes, and the worst were
+#: FF-Weekly-Start-Sit#208 (11 errored in 23.1 hours, one success), The-League#186
+#: (9 in 21.8 hours), the shape job on command-center#1178 (7 in 4.7 hours) and
+#: The-League#225 (5 in 5.9 hours with no success at all). Three is the first
+#: count that cuts those runs materially while leaving a transient — one bad
+#: GitHub response, one rate limit — to resolve itself on the next pass.
+BACKOFF_FAILURES = 3
+
+#: How long a backed-off job waits before it is offered again. The observed
+#: retry cadence is 40 minutes to 2 hours, so six hours turns the 11-attempt
+#: day above into about five while never parking work overnight. A further
+#: failure restarts it; any non-errored finish clears it outright.
+#:
+#: Both constants are scheduling arithmetic, and re-tuning them is the whole
+#: rollback: nothing is stored, and the count is derived from the heartbeat
+#: every run.
+BACKOFF_COOLDOWN = timedelta(hours=6)
+
+
+def consecutive_failures(
+    rows: Sequence[Mapping[str, object]]
+) -> Dict[str, Tuple[int, float]]:
+    """Trailing failed runs per work, as ``{work: (count, last_failure)}``.
+
+    Counted newest-first and stopped at the first finish that was not an
+    error, so a job that failed four times and then succeeded reads as zero.
+    A skip is not a failure and does not break the run either — a lane that
+    stood down for the budget says nothing about whether the work is broken —
+    so only ``errored`` counts and only ``done`` clears.
+
+    Pure over heartbeat rows. The caller reads them; this decides nothing
+    about GitHub and stores nothing.
+    """
+    import heartbeat
+
+    bound = heartbeat.bindings(list(rows))
+    finishes: Dict[str, List[Tuple[float, str]]] = {}
+    for row in rows:
+        if row.get("phase") != "finish":
+            continue
+        binding = bound.get(row.get("run"))
+        work = binding.get("work") if binding else None
+        if not work:
+            continue
+        stamp = row.get("ts")
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            continue
+        outcome = str(row.get("outcome") or "")
+        finishes.setdefault(str(work), []).append((float(stamp), outcome))
+
+    found: Dict[str, Tuple[int, float]] = {}
+    for work, history in finishes.items():
+        history.sort(key=lambda entry: entry[0], reverse=True)
+        count = 0
+        last = 0.0
+        for stamp, outcome in history:
+            if outcome == "errored":
+                count += 1
+                last = max(last, stamp)
+                continue
+            if outcome == "done":
+                break
+            # Anything else — a skip, a quota park — is neither a failure nor
+            # a success, and the run of failures continues through it.
+        if count:
+            found[work] = (count, last)
+    return found
+
+
+def backoff_withheld(
+    rows: Sequence[Mapping[str, object]], now: datetime
+) -> Dict[str, Dict[str, object]]:
+    """Work withheld by repeated failure, by ref, with the reason to say.
+
+    A withheld job carries its count and the condition that releases it —
+    never a silent hold, which is the state `plan.md` rejects. It is offered
+    again the moment either condition is met: the cooldown passes, or a run
+    finishes it successfully.
+    """
+    found: Dict[str, Dict[str, object]] = {}
+    for work, (count, last) in consecutive_failures(rows).items():
+        if count < BACKOFF_FAILURES:
+            continue
+        until = datetime.fromtimestamp(last, timezone.utc) + BACKOFF_COOLDOWN
+        if until <= now:
+            continue
+        found[work] = {
+            "ref": work,
+            "failures": count,
+            "until": until,
+            "reason": (
+                "backoff: {} consecutive failed runs, the last at {}; "
+                "startable again after {} or as soon as a run finishes it"
+                .format(count,
+                        datetime.fromtimestamp(last, timezone.utc).isoformat(),
+                        until.isoformat())
+            ),
+        }
+    return found
+
+
+def backoff_withheld_rows(
+    items: Sequence[Item],
+    rows: Sequence[Mapping[str, object]],
+    now: datetime,
+) -> List[Dict[str, object]]:
+    """The diagnostic twin of the ``startable()`` exclusion, like freeze's.
+
+    Only work still in the funnel is reported: a backed-off job whose ticket
+    has since closed is history, not a withheld queue entry.
+    """
+    open_refs = {item.ref for item in items if item.state == "OPEN"}
+    return sorted(
+        (row for ref, row in backoff_withheld(rows, now).items()
+         if ref in open_refs),
+        key=lambda row: str(row["ref"]),
+    )
+
+
 def freeze_withhold_reason(
     item: Item, by_ref: Mapping[str, Item]
 ) -> Optional[str]:
@@ -1568,6 +1689,7 @@ def startable(
     awaiting_review: Optional[Set[str]] = None,
     agent: str = "codex",
     repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+    backed_off: Optional[Mapping[str, object]] = None,
 ) -> List[Item]:
     """Tickets the requesting agent may pick up, best-first.
 
@@ -1590,8 +1712,14 @@ def startable(
     #794 freeze governs (see ``freeze_withhold_reason``): offering them
     would only fail at review, on a diff that does not exist until a run
     has already built it.
+
+    ``backed_off`` holds refs withheld by repeated failure (see
+    ``backoff_withheld``). Offering a job that has failed three times in a row
+    spends a whole run to fail a fourth: FF-Weekly-Start-Sit#208 was offered
+    eleven times in 23 hours and errored on every one but the last.
     """
     awaiting_review = awaiting_review or frozenset()
+    backed_off = backed_off or {}
     by_ref = {i.ref: i for i in items}
     descendants = dependency_descendants(items)
     effective_rank = {
@@ -1619,6 +1747,11 @@ def startable(
         ):
             return False
         if _repo_blocking_reasons(item, repo_readiness):
+            return False
+        # Repeated failure is passed in rather than read here, like
+        # `awaiting_review`: the count lives in the heartbeat and this
+        # function stays pure over Items and testable from fixtures.
+        if item.ref in backed_off:
             return False
         return freeze_withhold_reason(item, by_ref) is None
 
@@ -2648,6 +2781,7 @@ def next_ticket(items: Sequence[Item], now: datetime,
                 pr_facts: Optional[
                     Dict[str, Optional[Dict[str, object]]]
                 ] = None,
+                backed_off: Optional[Mapping[str, object]] = None,
                 ) -> Optional[Item]:
     """The single ticket the requesting agent should work, or None.
 
@@ -2663,6 +2797,7 @@ def next_ticket(items: Sequence[Item], now: datetime,
             awaiting_review=blocked,
             agent=agent,
             repo_readiness=repo_readiness,
+            backed_off=backed_off,
         )
         if item.ref not in excluded
     ]
@@ -2699,6 +2834,9 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
                          ] = None,
                          pr_facts: Optional[
                              Dict[str, Optional[Dict[str, object]]]
+                         ] = None,
+                         backed_off: Optional[
+                             Mapping[str, object]
                          ] = None) -> Optional[Item]:
     """Return the first shared-order ticket belonging to ``tier``.
 
@@ -2715,6 +2853,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
             agent=agent,
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
+            backed_off=backed_off,
         )
         if ticket is None or tier is None:
             return ticket
@@ -8236,6 +8375,34 @@ def _brief_read(
         return default
 
 
+def _backoff_rows() -> List[Dict[str, object]]:
+    """Heartbeat records for the backoff read, or none if they cannot be had.
+
+    A selector must not stop because its scheduling history is unreadable:
+    with no rows, ``consecutive_failures`` finds nothing and every ticket is
+    offered exactly as it was before this existed.
+    """
+    rows: List[Dict[str, object]] = []
+    try:
+        import heartbeat
+
+        for agent in sorted(heartbeat.PROVIDERS):
+            try:
+                rows.extend(_brief_heartbeat_rows(agent))
+            except Exception:
+                continue
+    except Exception:
+        return []
+    return rows
+
+
+def _backed_off_work(
+    items: Sequence[Item], now: datetime
+) -> Dict[str, Dict[str, object]]:
+    """Refs withheld by repeated failure, read from the heartbeat."""
+    return backoff_withheld(_backoff_rows(), now)
+
+
 def cmd_next(
     items: List[Item],
     now: datetime,
@@ -8286,11 +8453,14 @@ def cmd_next(
     # approvals for an older head.
     blocked.difference_update(approved_conflicting_refs(pr_facts))
     blocked.update(finished_by_comments(items))
+    backoff_rows = _backoff_rows()
+    backed_off = backoff_withheld(backoff_rows, now)
     ticket = next_ticket_for_tier(
         items, now, tier=tier, blocked=blocked, excluded=excluded,
         agent=agent,
         repo_readiness=repo_readiness,
         pr_facts=pr_facts,
+        backed_off=backed_off,
     )
 
     if ticket is None:
@@ -8303,6 +8473,9 @@ def cmd_next(
             items, repo_readiness=repo_readiness, awaiting_review=blocked,
             agent=agent,
         )
+        for row in backoff_withheld_rows(items, backoff_rows, now):
+            print("withheld — {}: {}".format(row["ref"], row["reason"]),
+                  file=sys.stderr)
         if holder is not None:
             print(
                 "nothing — lock held by {} (claimed {} ago)".format(
@@ -11261,12 +11434,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 item.ref for item in items
                 if item.parent and item.ref not in essential_refs
             }
+        begin_backed_off = _backed_off_work(items, now)
         ticket = next_ticket_for_tier(
             items, now, tier=tier, blocked=blocked,
             excluded=set(budget_withheld),
             agent=agent,
             repo_readiness=repo_readiness,
             pr_facts=pr_facts,
+            backed_off=begin_backed_off,
         )
         recently_claimed: Set[str] = set()
         while ticket is not None:
@@ -11298,6 +11473,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 agent=agent,
                 repo_readiness=repo_readiness,
                 pr_facts=pr_facts,
+                backed_off=begin_backed_off,
             )
         held = held_claims_before(
             items,
@@ -11310,6 +11486,21 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         )
         if held:
             out["held"] = held
+        if ticket is None and begin_backed_off:
+            # Never a silent hold: an empty poll that is really a backoff says
+            # so, with the count and the condition that releases it.
+            withheld_rows = [
+                row for row in begin_backed_off.values()
+                if row["ref"] in {i.ref for i in items if i.state == "OPEN"}
+            ]
+            if withheld_rows:
+                out["backed_off"] = [
+                    {"ref": row["ref"], "failures": row["failures"],
+                     "until": row["until"].isoformat(),
+                     "reason": row["reason"]}
+                    for row in sorted(withheld_rows,
+                                      key=lambda row: str(row["ref"]))
+                ]
         if ticket is None and budget_withheld and not out.get("why"):
             # Say so only when the budget is the reason: a ticket the ladder
             # would have offered is being held back. With nothing startable
@@ -11320,6 +11511,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 agent=agent,
                 repo_readiness=repo_readiness,
                 pr_facts=pr_facts,
+                backed_off=begin_backed_off,
             )
             if unrestricted is not None:
                 out.update(gate="tight", why=_tight_budget_why(out, now))

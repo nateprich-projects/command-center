@@ -550,6 +550,74 @@ def close_rebegun_starts(agent: str, records: List[Dict], run: str,
     return closed
 
 
+def distinct_records(records: List[Dict]) -> List[Dict]:
+    """``records`` with byte-identical duplicates removed, order kept.
+
+    The canonical de-duplication for readers that sum values rather than count
+    runs. A run legitimately writes several ``api_cost`` events — one per funnel
+    command — which differ in their timestamps and numbers, so they must not be
+    collapsed by run id. What is never legitimate is the same record twice, and
+    that is exactly the shape the duplicate writes took: 250 of the 251
+    duplicate-finish runs measured on 2026-09-21 were byte-identical with the
+    same ``ts``.
+
+    Compared by the same serialisation ``_push`` writes, so equality here means
+    equality in the blob.
+    """
+    seen = set()
+    found = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        try:
+            key = json.dumps(record, sort_keys=True)
+        except (TypeError, ValueError):
+            found.append(record)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(record)
+    return found
+
+
+def one_record_per_run(records: List[Dict]) -> List[Dict]:
+    """The newest record per run id, for readers that count runs.
+
+    The canonical counting rule: a count read from heartbeat records is a count
+    of runs, not of rows. Before this existed, `agent_health` read 67 muse
+    errors against 55 true runs — the alarm was reporting the write duplication
+    rather than the lane's health.
+
+    Records with no run id are kept as they are: they cannot be attributed, and
+    dropping them would quietly lose history.
+    """
+    newest: Dict[str, Dict] = {}
+    unattributed: List[Dict] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        run = record.get("run")
+        if not run:
+            unattributed.append(record)
+            continue
+        stamp = record.get("ts")
+        stamp = float(stamp) if isinstance(stamp, (int, float)) and not isinstance(
+            stamp, bool
+        ) else float("-inf")
+        current = newest.get(str(run))
+        if current is None:
+            newest[str(run)] = record
+            continue
+        current_stamp = current.get("ts")
+        current_stamp = float(current_stamp) if isinstance(
+            current_stamp, (int, float)
+        ) and not isinstance(current_stamp, bool) else float("-inf")
+        if stamp >= current_stamp:
+            newest[str(run)] = record
+    return list(newest.values()) + unattributed
+
+
 def api_cost_for_run(records: List[Dict], run: Optional[str]) -> Dict[str, Optional[int]]:
     """Sum the per-command API events for one run, independently by field.
 
@@ -562,10 +630,12 @@ def api_cost_for_run(records: List[Dict], run: Optional[str]) -> Dict[str, Optio
     if not run:
         return result
 
+    # Exact duplicates only: a run writes one api_cost event per funnel
+    # command, so collapsing by run id would throw away real numbers, while
+    # the same event twice is always a duplicate write (#1225).
     events = [
         record.get("api_cost")
-        for record in records
-        if isinstance(record, dict)
+        for record in distinct_records(records)
         if record.get("phase") == "api_cost" and record.get("run") == run
     ]
     if not events:

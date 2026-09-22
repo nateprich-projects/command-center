@@ -118,7 +118,11 @@ def test_queue_keeps_single_repo_output_unchanged(capsys):
     ticket = item(3, parent=parent.ref)
     pending = item(4, "Ready", "Maintenance")
 
-    assert funnel.cmd_queue([waiting, parent, ticket, pending], NOW) == 0
+    # The open-PR scan is a live read (#1181); this test is about rendering,
+    # so hand it an empty scan rather than letting it degrade.
+    assert funnel.cmd_queue(
+        [waiting, parent, ticket, pending], NOW, pr_facts={}
+    ) == 0
     output = capsys.readouterr().out
 
     assert output == (

@@ -503,9 +503,16 @@ BRIEF_SECTION_BUDGETS = {
     "items": 0.25,
     "counts_by_gate": 0.25,
     "in_motion": 0.25,
-    "parked": 2.0,
+    # 30 s, not 2 s. The ticket asked for 5 s, sized from a 2.0168 s read on a
+    # 738-ref board. Re-measured 2026-09-21 on 1091 items, three consecutive
+    # reads: 27.86 s, 19.17 s, 22.24 s. 5 s would have degraded every one of
+    # them, so the cap is set from the measurement rather than from the
+    # ticket's number, and 30 s clears the observed maximum (#1211).
+    "parked": 30.0,
     "closed_itself": 45.0,
-    "cleared_blocks": 7.0,
+    # 30 s, not 7 s, and not the ticket's 12 s: re-measured on the same
+    # 1091-item board at 20.93 s, 25.17 s, 22.94 s.
+    "cleared_blocks": 30.0,
     "blocked": 0.25,
     "human_steps": 0.25,
     "machine_local_steps": 0.25,
@@ -525,6 +532,8 @@ BRIEF_SECTION_BUDGETS = {
     "run_summary": 1.0,
     "agent_health": 1.0,
     "working_tree_touched": 1.0,
+    # Pure over the items already loaded: no read of its own to time out.
+    "status_state_mismatches": 0.25,
     # One REST read per member repo for main's head, plus a bounded follow-up
     # only where that head's run failed. Sized like the other small live reads.
     "main_ci": 3.0,
@@ -4905,19 +4914,37 @@ MAIN_CI_INFRA = "infra"
 MAIN_CI_REAL = "real"
 
 
-def _main_ci_failed_job(run: Mapping[str, object]) -> Optional[str]:
-    """Name the first job in a run that did not succeed."""
+def _main_ci_failed_job(
+    run: Mapping[str, object]
+) -> Tuple[Optional[str], Optional[object]]:
+    """The first job in a run that did not succeed, as ``(name, id)``."""
     jobs = run.get("jobs")
     if not isinstance(jobs, list):
-        return None
+        return None, None
     for job in jobs:
         if not isinstance(job, Mapping):
             continue
         if _ci_result(job) in CI_SUCCESS_CONCLUSIONS:
             continue
         name = job.get("name")
+        identifier = job.get("id") or job.get("databaseId")
         if isinstance(name, str) and name.strip():
-            return name.strip()
+            return name.strip(), identifier
+        if identifier is not None:
+            return None, identifier
+    return None, None
+
+
+def _main_ci_attempt(run: Mapping[str, object]) -> Optional[int]:
+    """How many times this run has been attempted, if GitHub says."""
+    for key in ("run_attempt", "runAttempt", "attempt"):
+        value = run.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
     return None
 
 
@@ -4979,10 +5006,17 @@ def main_ci_row(repo: str) -> Optional[Dict[str, object]]:
             # is a red main to act on.
             return None
         reason = main_ci_infra_reason(run)
+        job_name, job_id = _main_ci_failed_job(run)
         return {
             "repo": repo,
             "sha": sha,
-            "job": _main_ci_failed_job(run),
+            "job": job_name,
+            "job_id": job_id,
+            "run_id": run.get("id") or run.get("databaseId"),
+            # A rerun raises the attempt count, so GitHub itself records
+            # whether this SHA has already had its one retry (#1220). No
+            # state file: the fact is already in the run.
+            "attempt": _main_ci_attempt(run),
             "verdict": MAIN_CI_INFRA if reason else MAIN_CI_REAL,
             "reason": reason or "no infrastructure signature in this failure",
         }
@@ -4993,6 +5027,115 @@ def main_ci_row(repo: str) -> Optional[Dict[str, object]]:
             "verdict": MAIN_CI_REAL,
             "reason": "could not read main CI for {}: {}".format(repo, exc),
         }
+
+
+#: What a retry attempt did, for the record it leaves and the row it returns.
+MAIN_CI_RETRIED = "retried"
+MAIN_CI_NOT_RETRIED = "not-retried"
+
+
+def main_ci_retry(
+    repo: str,
+    row: Optional[Mapping[str, object]] = None,
+    rerun: Optional[Callable[[Sequence[str]], object]] = None,
+) -> Optional[Dict[str, object]]:
+    """Rerun one main job that never really ran — once per SHA, never twice.
+
+    The narrow half of #1178: main stayed red for 2h12m on a run that died
+    when a self-hosted runner stopped answering, and the same SHA went green
+    on a manual rerun fifteen minutes later. Every merge waited in between,
+    because the merge gate reads main.
+
+    Four conditions, all of them refusals rather than retries:
+
+    - **`real` never retries.** Rerunning a genuine break burns runner time
+      and hides the signal, which is why the plan rejects retry-until-green.
+    - **One attempt only.** A rerun raises GitHub's own ``run_attempt``, so
+      the second red on a SHA is visible as attempt 2 and stays red for the
+      watch. That is the whole once-per-SHA mechanism: no state file, no
+      journal, no label — GitHub is the state, and it already records this.
+    - **An unreadable attempt count does not retry.** Without it there is no
+      way to tell a first failure from a second, and retrying blindly is how
+      a loop starts.
+    - **A green, running or absent main has nothing to retry.**
+
+    Returns the decision either way, so a caller can say what happened and
+    why. ``None`` only when there is no red main at all.
+    """
+    row = row if row is not None else main_ci_row(repo)
+    if row is None:
+        return None
+    decision = dict(row)
+    verdict = row.get("verdict")
+    attempt = row.get("attempt")
+    run_id = row.get("run_id")
+    job_id = row.get("job_id")
+
+    if verdict != MAIN_CI_INFRA:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="a real failure is not retried; it needs a person",
+        )
+        return decision
+    if not isinstance(attempt, int) or attempt < 1:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="could not read how many times this run was "
+                         "attempted, so a first failure and a second are "
+                         "indistinguishable",
+        )
+        return decision
+    if attempt > 1:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="already retried once on this SHA (attempt {}); "
+                         "a second red stays red".format(attempt),
+        )
+        return decision
+    if run_id is None:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="no run id to rerun",
+        )
+        return decision
+
+    command = ["gh", "run", "rerun", str(run_id), "--repo", str(repo)]
+    if job_id is not None:
+        command += ["--job", str(job_id)]
+    runner = rerun if rerun is not None else _run_gh
+    try:
+        result = runner(command, capture_output=True, text=True)
+    except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="rerun failed: {}".format(exc),
+        )
+        return decision
+    if getattr(result, "returncode", 0) != 0:
+        decision.update(
+            retry=MAIN_CI_NOT_RETRIED,
+            retry_reason="rerun refused: {}".format(
+                (getattr(result, "stderr", "") or "").strip()
+            ),
+        )
+        return decision
+    decision.update(
+        retry=MAIN_CI_RETRIED,
+        retry_reason="infrastructure stop on attempt 1; reran {}".format(
+            row.get("job") or "the failed job"
+        ),
+    )
+    return decision
+
+
+def main_ci_retries(
+    repos: Optional[Sequence[str]] = None,
+    rerun: Optional[Callable[[Sequence[str]], object]] = None,
+) -> List[Dict[str, object]]:
+    """One retry decision per member repo whose main is red."""
+    names = list(repos) if repos is not None else member_repos()
+    rows = [main_ci_retry(repo, rerun=rerun) for repo in names]
+    return [row for row in rows if row is not None]
 
 
 def main_ci_json(repos: Optional[Sequence[str]] = None) -> List[Dict[str, object]]:
@@ -8345,6 +8488,45 @@ def member_issues_without_project_items(
             "issues": found,
         }
     return {"status": "read", "issues": found}
+def status_state_mismatches(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """Items whose Project Status and GitHub state contradict each other.
+
+    Two directions, both derived from the one ``load_items()`` pass with no
+    extra read, no cache and nothing stored:
+
+    - **closed but not finished** — a closed issue at any Status other than
+      ``Done`` or ``Parked``. #1206 was one of these: a CLOSED project written
+      to ``Ready``, which put it in the startable queue and the self-approval
+      path at once with nothing able to close it again.
+    - **open but Done** — an issue recorded as finished that is still open.
+      The lane filters all read OPEN, so it keeps being treated as live work
+      while every count says it is finished.
+
+    Deliberately its own section rather than a widening of the lane filters:
+    those stay on OPEN so a closed-at-Ready item appears here and nowhere
+    else, instead of turning up as breakdown work (#1209).
+    """
+    found: List[Dict[str, object]] = []
+    for item in items:
+        if item.status is None:
+            continue
+        if item.state != "OPEN" and item.status not in TERMINAL_STATUSES:
+            mismatch = "closed at Status {}, which is not {}".format(
+                item.status, " or ".join(TERMINAL_STATUSES)
+            )
+        elif item.state == "OPEN" and item.status == "Done":
+            mismatch = "open at Status Done"
+        else:
+            continue
+        found.append({
+            "ref": item.ref,
+            "title": item.title,
+            "url": item.url,
+            "state": item.state,
+            "status": item.status,
+            "mismatch": mismatch,
+        })
+    return sorted(found, key=lambda row: str(row["ref"]))
 
 
 def stranded_json(
@@ -8381,14 +8563,50 @@ def cmd_queue(
     items: List[Item],
     now: datetime,
     repo_readiness: Optional[Mapping[str, MemberRepoReadiness]] = None,
+    pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
 ) -> int:
     """Everything, ordered — both queues, each under its own heading.
 
     They are genuinely different orderings over different subsets, so a single
     merged list would have to pick one and misrepresent the other.
+
+    Work already sitting in an open PR is not startable, and this listing used
+    to show it anyway: ``startable`` takes the exclusion as an argument, and
+    the queue was the one caller that never passed it. The read follows
+    ``cmd_next_review``'s pattern — supplied by the caller, else fetched once
+    and retained in an active brief cache.
+
+    A PR read that fails says so. An unfiltered list is the wrong fallback
+    here: it is indistinguishable from a correct one, and the whole defect is
+    a ticket that looks startable and is not.
     """
+    pr_facts_unavailable: Optional[str] = None
+    if pr_facts is None:
+        try:
+            pr_facts = ticket_pr_facts(items)
+        except (GitHubError, BriefSectionTimeout, OSError,
+                subprocess.SubprocessError) as exc:
+            pr_facts_unavailable = str(exc)
+            pr_facts = None
+        else:
+            cache = _ACTIVE_BRIEF_CACHE.get()
+            if cache is not None:
+                cache._pr_facts = pr_facts
+
+    in_review: Set[str] = set()
+    if pr_facts_unavailable is None:
+        try:
+            in_review = _call_with_optional_keyword(
+                awaiting_review, "pr_facts", pr_facts, items
+            )
+        except (GitHubError, BriefSectionTimeout, OSError,
+                subprocess.SubprocessError) as exc:
+            pr_facts_unavailable = str(exc)
+
     decisions = awaiting_decision(items)
-    tickets = startable(items, repo_readiness=repo_readiness)
+    tickets = startable(
+        items, awaiting_review=in_review, repo_readiness=repo_readiness
+    )
 
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
     by_ref = {i.ref: i for i in items}
@@ -8403,6 +8621,13 @@ def cmd_queue(
             gate_question(item),
         ),
     )
+
+    if pr_facts_unavailable is not None:
+        # The brief's degraded convention, in the queue's voice: name the
+        # section, say it could not be read, and say what that costs.
+        print("\ndegraded — open-PR facts: {}. Tickets already in an open PR "
+              "cannot be excluded, so the list below may name work that is "
+              "already done.".format(pr_facts_unavailable))
 
     print("\nStartable by Codex ({}), ladder order:".format(len(tickets)))
     _print_queue_section(
@@ -8849,6 +9074,31 @@ def cmd_brief(
         )
         return default if value is _BRIEF_UNAVAILABLE else value
 
+    def named_section(name: str, reader: Callable[[], object]):
+        """A section whose unread state must not look like an empty result.
+
+        `parked` and `cleared_blocks` both read as *news* when empty — nothing
+        is parked, nothing was unblocked — so degrading them to `[]` reports
+        the opposite of what happened. These return null and name themselves
+        in `missing`, the same shape the shared PR-facts read uses.
+        """
+        value = _brief_timed(
+            name,
+            lambda: _brief_read(name, reader, missing),
+            timings,
+            degraded,
+            deadline=deadline,
+        )
+        if value is _BRIEF_UNAVAILABLE:
+            if not any(entry.get("section") == name for entry in missing):
+                missing.append({
+                    "section": name,
+                    "error": "could not read {} within its budget; this is "
+                             "an unread section, not an empty one".format(name),
+                })
+            return None
+        return value
+
     def decision_payload():
         decisions = awaiting_decision(items)
         by_ref = {i.ref: i for i in items}
@@ -8881,14 +9131,14 @@ def cmd_brief(
             lambda: in_motion(items, now, pr_facts=pr_facts),
             [],
         )
-        parked = section("parked", lambda: parked_json(items), [])
+        parked = named_section("parked", lambda: parked_json(items))
         closed_itself = section(
             "closed_itself",
             lambda: closed_itself_json(items, now, brief_cache=cache),
             [],
         )
-        cleared_blocks = section(
-            "cleared_blocks", lambda: cleared_blocks_json(items, now), []
+        cleared_blocks = named_section(
+            "cleared_blocks", lambda: cleared_blocks_json(items, now)
         )
         blocked = section("blocked", lambda: blocked_json(items), [])
         human = section("human_steps", lambda: human_step_json(items, now), [])
@@ -8964,6 +9214,11 @@ def cmd_brief(
         rejected = section(
             "rejected_merges", lambda: rejected_merges(items, now), {}
         )
+        status_mismatches = section(
+            "status_state_mismatches",
+            lambda: status_state_mismatches(items),
+            [],
+        )
 
         blocked_comment_errors = [
             "{}: {}".format(item.ref, item.block_comments_error)
@@ -9018,6 +9273,7 @@ def cmd_brief(
             "run_summary": run_summary,
             "agent_health": health,
             "working_tree_touched": touched,
+            "status_state_mismatches": status_mismatches,
             "main_ci": main_ci,
             "member_issues_without_project_items": orphan_issues,
             "outcome_signals": outcome_signals,
@@ -13001,6 +13257,15 @@ def main(argv: Optional[Sequence[str]] = None, *,
     sub.add_parser("ideas", help="captured ideas, flagged ones first")
     sub.add_parser(
         "doctor", help="check the local install and report actionable failures")
+    main_ci = sub.add_parser(
+        "main-ci",
+        help="each member repo's red main, as an infrastructure stop or a "
+             "real failure")
+    main_ci.add_argument(
+        "--retry", action="store_true",
+        help="rerun an infrastructure stop once per SHA; never a real "
+             "failure, and never a SHA already retried",
+    )
     show = sub.add_parser("show", help="everything needed to answer an item's gate")
     show.add_argument("ref", help="issue number, owner/repo#number, or URL")
     for verb, (frm, to, meaning) in ANSWERS.items():
@@ -13192,6 +13457,25 @@ def main(argv: Optional[Sequence[str]] = None, *,
         return serve_session(args.parent_pid)
     # Doctor keeps its fixed checks runnable when the Project cannot be loaded;
     # the data-dependent consistency check is added when that read succeeds.
+    if args.command == "main-ci":
+        rows = (
+            main_ci_retries() if args.retry else main_ci_json()
+        )
+        if not rows:
+            print("nothing — every member repo's main is green or still running")
+            return 0
+        for row in rows:
+            line = "{} {} {} — {}".format(
+                row["repo"], (row.get("sha") or "?")[:12],
+                row["verdict"], row["reason"],
+            )
+            if row.get("job"):
+                line += " (job {})".format(row["job"])
+            print(line)
+            if "retry" in row:
+                print("  {}: {}".format(row["retry"], row["retry_reason"]))
+        return 0
+
     if args.command == "doctor":
         return cmd_doctor()
     # The published snapshot is a local read by design: runners and routines

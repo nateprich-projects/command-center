@@ -5877,87 +5877,116 @@ def check_muse_model_pins(
 
 #: Nate keeps the Codex standard automation at every ten minutes until the
 #: backlog starts clearing (2026-09-22, #1315). The share of its runs that
-#: find nothing to do is that signal, read directly.
+#: find the queue empty is that signal, read directly.
 CODEX_EMPTY_SHARE_LIMIT = 0.5
 CODEX_EMPTY_MIN_RUNS = 12
 CODEX_EMPTY_WINDOW_SECONDS = 24 * 60 * 60
+CODEX_EMPTY_READ_TIMEOUT = 30
 CODEX_EMPTY_RUNS_FIX = (
     "move command-center-tickets-hourly to every 20 minutes (#1315)")
 
-#: Outcomes a budget or settings gate produced before any queue was read.
-#: They say nothing about whether there was work, so they are left out of
-#: the share rather than counted as empty: a braked lane is not an idle one.
-CODEX_GATE_SKIPS = frozenset({
-    "skipped-over-pace", "skipped-usage-unknown", "skipped-api-reserve",
-    "skipped-provider-quota", "skipped-config-drift", "skipped-nate-active",
-    "budget-exhausted",
-})
+#: The slower cadence the fix names, and the spacing between standard-lane
+#: starts that counts as already there. Once the lane runs at twenty minutes
+#: the share can stay high with nothing left to change, so the row stops
+#: asking.
+CODEX_SLOW_CADENCE_SECONDS = 20 * 60
+CODEX_SLOWED_GAP_SECONDS = 15 * 60
 
 
-def codex_empty_run_share(records: Iterable[Mapping[str, object]],
+def codex_empty_run_share(records: Iterable[object],
                           now: float) -> Dict[str, object]:
-    """How many of the standard lane's recent runs found nothing to do.
+    """How many of the standard lane's recent runs found the queue empty.
 
-    A run belongs to the standard lane when its start record says so;
-    starts written before #1320 carry no tier and are left out rather than
-    guessed at. Only terminal finishes count: an event is a note attached
-    to a run that is still open.
+    Counted in runs, not rows (``heartbeat.one_record_per_run`` is the
+    canonical rule; a run can carry several records). A run is standard
+    when its start record says so; starts written before #1320 carry no
+    tier and are left out rather than guessed at.
+
+    Neither side reads the finish, which the routine can file as
+    ``nothing-to-do`` for a GitHub failure or a held lock. A run *worked*
+    when ``begin`` bound a ticket to it; a run *found nothing* when
+    ``begin`` recorded ``queue: empty``. Everything else, budget gates,
+    errors, locks and withheld work, is neither and is left out.
+
+    The cadence is the median spacing of standard-lane starts in the same
+    window, so the row can tell whether its own fix has been applied.
     """
-    tiers = {record.get("run"): record.get("tier")
-             for record in records if record.get("phase") == "start"}
-    counted = empty = 0
-    for record in records:
-        if record.get("phase") != "finish":
-            continue
-        stamp = record.get("ts")
-        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
-            continue
-        if now - stamp > CODEX_EMPTY_WINDOW_SECONDS:
-            continue
-        if tiers.get(record.get("run")) != "standard":
-            continue
-        outcome = record.get("outcome")
-        if outcome in CODEX_GATE_SKIPS:
-            continue
-        counted += 1
-        if outcome == "nothing-to-do":
-            empty += 1
-    return {"runs": counted, "empty": empty,
-            "share": (empty / counted) if counted else None}
+    rows = [row for row in records if isinstance(row, dict)]
+
+    def recent(row):
+        stamp = row.get("ts")
+        return (not isinstance(stamp, bool)
+                and isinstance(stamp, (int, float))
+                and now - stamp <= CODEX_EMPTY_WINDOW_SECONDS)
+
+    standard = {row.get("run") for row in rows
+                if row.get("phase") == "start" and row.get("run")
+                and row.get("tier") == "standard"}
+    worked = {row.get("run") for row in rows
+              if row.get("phase") == "bind" and row.get("do") == "ticket"
+              and row.get("run") in standard and recent(row)}
+    empty = {row.get("run") for row in rows
+             if row.get("phase") == "event"
+             and row.get("outcome") == "nothing-to-do"
+             and row.get("queue") == "empty"
+             and row.get("run") in standard and recent(row)} - worked
+    counted = len(worked | empty)
+
+    starts = sorted({float(row["ts"]) for row in rows
+                     if row.get("phase") == "start"
+                     and row.get("run") in standard and recent(row)})
+    gaps = [later - earlier for earlier, later in zip(starts, starts[1:])]
+    cadence = None
+    if gaps:
+        ordered = sorted(gaps)
+        middle = len(ordered) // 2
+        cadence = (ordered[middle] if len(ordered) % 2
+                   else (ordered[middle - 1] + ordered[middle]) / 2)
+    return {"runs": counted, "empty": len(empty),
+            "share": (len(empty) / counted) if counted else None,
+            "cadence_seconds": cadence}
 
 
-def check_codex_empty_runs(records: Optional[Iterable[Mapping[str, object]]]
-                           = None, now: Optional[float] = None) -> Check:
-    """Report when the Codex standard lane mostly finds nothing to do.
+def check_codex_empty_runs(records: Optional[Iterable[object]] = None,
+                           now: Optional[float] = None) -> Check:
+    """Report when the Codex standard lane mostly finds its queue empty.
 
     A signal for a cadence decision, not a health check: an unreadable
-    heartbeat or a thin window passes with a note, because the heartbeat's
-    own check already reports whether it can be read.
+    heartbeat, odd records or a thin window pass with a note, because the
+    heartbeat's own row reports whether it can be read. It asks for the
+    slower cadence only while the lane is still faster than that.
     """
     name = "codex empty runs"
     now = time.time() if now is None else now
-    if records is None:
-        try:
+    try:
+        if records is None:
             import heartbeat
 
-            records = heartbeat.read("codex")
-        except Exception as exc:
-            return Check(name, True,
-                         "codex heartbeat could not be read ({}); no cadence "
-                         "signal this run".format(
-                             str(exc) or type(exc).__name__), "")
-    stats = codex_empty_run_share(list(records), now)
+            records = _call_with_optional_keyword(
+                heartbeat.read, "timeout", CODEX_EMPTY_READ_TIMEOUT, "codex")
+        stats = codex_empty_run_share(list(records or []), now)
+    except Exception as exc:
+        return Check(name, True,
+                     "codex heartbeat could not be read ({}); no cadence "
+                     "signal this run".format(str(exc) or type(exc).__name__),
+                     "")
     if stats["runs"] < CODEX_EMPTY_MIN_RUNS:
         return Check(name, True,
-                     "{} standard-lane run(s) past the gates in 24 hours, "
+                     "{} standard-lane run(s) in 24 hours reached the queue, "
                      "too few to judge the cadence".format(stats["runs"]), "")
-    found = ("{} of {} standard-lane runs in 24 hours found nothing to do "
+    found = ("{} of {} standard-lane runs in 24 hours found the queue empty "
              "({:.0%})".format(stats["empty"], stats["runs"], stats["share"]))
-    if stats["share"] >= CODEX_EMPTY_SHARE_LIMIT:
-        return Check(name, False,
-                     found + "; the backlog has cleared enough to slow the lane",
-                     CODEX_EMPTY_RUNS_FIX)
-    return Check(name, True, found, "")
+    cadence = stats["cadence_seconds"]
+    if cadence is not None:
+        found += "; starts every {:.0f} min".format(cadence / 60)
+    if stats["share"] < CODEX_EMPTY_SHARE_LIMIT:
+        return Check(name, True, found, "")
+    if cadence is not None and cadence >= CODEX_SLOWED_GAP_SECONDS:
+        return Check(name, True,
+                     found + "; already at the slower cadence", "")
+    return Check(name, False,
+                 found + "; the backlog has cleared enough to slow the lane",
+                 CODEX_EMPTY_RUNS_FIX)
 
 
 def check_member_repos(repos: Optional[Iterable[str]] = None) -> List[Check]:
@@ -12413,6 +12442,29 @@ def _begin_api_reserve_preflight(
     return None
 
 
+def _record_queue_empty(agent: str, run: Optional[str],
+                        tier: Optional[str]) -> None:
+    """Record, from ``begin`` itself, that this run found no work waiting.
+
+    The routine files every stop that is not a named budget gate as
+    ``nothing-to-do``: a GitHub failure, the WIP cap and a held lock
+    included. #1216 measured 160 such finishes during a 504 outage, the same
+    picture an empty funnel makes. This event is written only on the branch
+    where the queue for the tier was genuinely empty, so readers that need
+    "was there work?" never have to trust the finish (#1320).
+    """
+    if not run:
+        return
+    try:
+        import heartbeat
+
+        heartbeat.record_event(agent, run, "nothing-to-do", queue="empty",
+                               tier=tier)
+    except Exception:
+        # Instrumentation must not gate the thing it instruments.
+        pass
+
+
 def _record_begin_reserve(agent: str, run: Optional[str], why: object) -> None:
     """Record and log a clean reserve stand-down without closing the run.
 
@@ -12687,9 +12739,13 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 )
             elif tier:
                 why = "nothing — no {} work waiting".format(tier)
+                out["queue"] = "empty"
             else:
                 why = "nothing to do"
+                out["queue"] = "empty"
             out.update(do="stop", why=why)
+            if out.get("queue") == "empty":
+                _record_queue_empty(agent, out.get("run"), tier)
         else:
             if _detail_loader is not None:
                 _detail_loader([ticket])

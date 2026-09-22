@@ -1513,6 +1513,53 @@ def test_codex_begin_respects_the_wip_limit(monkeypatch, capsys):
     assert writes == []
 
 
+def _capture_events(monkeypatch):
+    import heartbeat
+
+    events = []
+    monkeypatch.setattr(
+        heartbeat, "record_event",
+        lambda agent, run, outcome, **fields: events.append(
+            (agent, run, outcome, fields)))
+    return events
+
+
+def test_begin_records_an_empty_queue_itself(monkeypatch, capsys):
+    """The routine files many stops as `nothing-to-do`; only this record
+    says the queue was genuinely empty (#1320)."""
+    events = _capture_events(monkeypatch)
+
+    result, writes = _implementing_begin(monkeypatch, capsys, [])
+
+    assert result["do"] == "stop"
+    assert result["queue"] == "empty"
+    assert "no standard work waiting" in result["why"]
+    assert events == [("codex", "run-id", "nothing-to-do",
+                       {"queue": "empty", "tier": "standard"})]
+    assert writes == []
+
+
+def test_a_held_lock_is_not_recorded_as_an_empty_queue(monkeypatch, capsys):
+    """At the WIP limit there is work; the lane just may not take it."""
+    events = _capture_events(monkeypatch)
+    items = []
+    for index in range(funnel.WIP_LIMIT):
+        project, ticket = _ticket(
+            20 + index * 2, 21 + index * 2,
+            in_motion_since=NOW,
+        )
+        items.extend((project, ticket))
+    project, ticket = _ticket(40, 41)
+    items.extend((project, ticket))
+
+    result, _ = _implementing_begin(monkeypatch, capsys, items)
+
+    assert "lock held" in result["why"]
+    assert "queue" not in result
+    assert not [event for event in events
+                if event[3].get("queue") == "empty"]
+
+
 def test_codex_begin_allows_broken_preemption_at_the_wip_limit(
     monkeypatch, capsys
 ):

@@ -19,39 +19,62 @@ NOW = 1_790_100_000.0
 HOUR = 3600
 
 
-def _run(run, outcome, *, tier="standard", age=HOUR, phase="finish"):
-    """One run's start and its terminal record, ``age`` seconds ago."""
-    start = {"run": run, "agent": "codex", "phase": "start",
-             "ts": NOW - age - 60}
+def _start(run, age, tier="standard"):
+    record = {"run": run, "agent": "codex", "phase": "start", "ts": NOW - age}
     if tier is not None:
-        start["tier"] = tier
-    end = {"run": run, "agent": "codex", "phase": phase,
-           "ts": NOW - age, "outcome": outcome}
-    return [start, end]
+        record["tier"] = tier
+    return record
+
+
+def _bind(run, age):
+    """`begin` bound a ticket to the run: it worked."""
+    return {"run": run, "agent": "codex", "phase": "bind", "do": "ticket",
+            "work": "nateprich-projects/command-center#1", "ts": NOW - age + 30}
+
+
+def _empty(run, age):
+    """`begin` found no work waiting for the tier and said so itself."""
+    return {"run": run, "agent": "codex", "phase": "event",
+            "outcome": "nothing-to-do", "queue": "empty", "tier": "standard",
+            "ts": NOW - age + 30}
+
+
+def _finish(run, age, outcome):
+    return {"run": run, "agent": "codex", "phase": "finish",
+            "outcome": outcome, "ts": NOW - age + 60}
 
 
 _LANES = iter(range(10_000))
 
 
-def _lane(worked, empty, **kwargs):
-    """Runs with ids unique across calls, so two lanes never share a run."""
+def _lane(worked, empty, *, gap=600, tier="standard", first_age=HOUR):
+    """Runs with ids unique across calls, starting ``gap`` seconds apart."""
     lane = next(_LANES)
     records = []
+    age = first_age
     for index in range(worked):
-        records += _run("L{}w{}".format(lane, index), "done", **kwargs)
+        run = "L{}w{}".format(lane, index)
+        records += [_start(run, age, tier), _bind(run, age),
+                    _finish(run, age, "done")]
+        age += gap
     for index in range(empty):
-        records += _run("L{}e{}".format(lane, index), "nothing-to-do",
-                        **kwargs)
+        run = "L{}e{}".format(lane, index)
+        records += [_start(run, age, tier), _empty(run, age),
+                    _finish(run, age, "nothing-to-do")]
+        age += gap
     return records
 
 
 # --- the share ------------------------------------------------------------
 
 
-def test_the_share_counts_standard_runs_that_found_nothing():
+def test_the_share_counts_standard_runs_that_found_the_queue_empty():
     stats = funnel.codex_empty_run_share(_lane(6, 4), NOW)
 
-    assert stats == {"runs": 10, "empty": 4, "share": 0.4}
+    assert stats["runs"] == 10
+    assert stats["empty"] == 4
+    assert stats["share"] == 0.4
+    assert stats["cadence_seconds"] == 600
 
 
 def test_escalated_runs_are_not_the_standard_lane():
@@ -70,48 +93,71 @@ def test_starts_without_a_tier_are_left_out_not_guessed():
     assert funnel.codex_empty_run_share(records, NOW)["runs"] == 4
 
 
-@pytest.mark.parametrize("outcome", sorted(funnel.CODEX_GATE_SKIPS))
-def test_a_gate_skip_is_not_an_empty_run(outcome):
-    """A braked lane is not an idle one: these runs never read a queue."""
-    records = _lane(2, 1) + _run("gated", outcome)
-
-    assert funnel.codex_empty_run_share(records, NOW) == {
-        "runs": 3, "empty": 1, "share": pytest.approx(1 / 3)}
-
-
 @pytest.mark.parametrize("outcome", [
-    "skipped-locked", "skipped-blocked", "skipped-human-step", "errored"])
-def test_runs_that_reached_the_queue_count_as_not_empty(outcome):
-    records = _run("other", outcome)
+    "nothing-to-do", "skipped-over-pace", "skipped-api-reserve",
+    "skipped-usage-unknown", "errored", "config-drift",
+])
+def test_a_finish_alone_says_nothing_about_the_queue(outcome):
+    """The routine files a GitHub failure, a held lock and the WIP cap as
+    `nothing-to-do` too (#1216: 160 of them in one outage). Only begin's own
+    records say whether there was work."""
+    records = _lane(2, 1) + [_start("gated", HOUR), _finish(
+        "gated", HOUR, outcome)]
 
-    assert funnel.codex_empty_run_share(records, NOW) == {
-        "runs": 1, "empty": 0, "share": 0.0}
+    assert funnel.codex_empty_run_share(records, NOW)["runs"] == 3
+
+
+def test_an_event_that_is_not_an_empty_queue_is_left_out():
+    reserve = {"run": "r", "agent": "codex", "phase": "event",
+               "outcome": "skipped-api-reserve", "ts": NOW - HOUR}
+    records = _lane(2, 1) + [_start("r", HOUR), reserve]
+
+    assert funnel.codex_empty_run_share(records, NOW)["runs"] == 3
+
+
+def test_it_counts_runs_not_rows():
+    """`heartbeat.one_record_per_run` is the canonical counting rule; a
+    run can carry the same record several times."""
+    records = _lane(1, 1)
+    tripled = records + records + records + [dict(record, ts=record["ts"] + 1)
+                                             for record in records]
+
+    stats = funnel.codex_empty_run_share(tripled, NOW)
+
+    assert (stats["runs"], stats["empty"], stats["share"]) == (2, 1, 0.5)
+
+
+def test_a_run_that_was_bound_is_worked_whatever_else_it_recorded():
+    records = [_start("r", HOUR), _bind("r", HOUR), _empty("r", HOUR)]
+
+    assert funnel.codex_empty_run_share(records, NOW)["empty"] == 0
 
 
 def test_only_the_last_24_hours_count():
-    records = _lane(1, 1) + _lane(0, 5, age=25 * HOUR)
-
-    assert funnel.codex_empty_run_share(records, NOW)["runs"] == 2
-
-
-def test_an_event_is_not_a_finish():
-    """An event is a note on a run that is still open."""
-    records = _lane(2, 0) + _run("noted", "nothing-to-do", phase="event")
+    records = _lane(1, 1) + _lane(0, 5, first_age=25 * HOUR)
 
     assert funnel.codex_empty_run_share(records, NOW)["runs"] == 2
 
 
 @pytest.mark.parametrize("stamp", [None, "yesterday", True])
-def test_a_finish_without_a_usable_timestamp_is_skipped(stamp):
-    records = _run("odd", "nothing-to-do")
-    records[1]["ts"] = stamp
+def test_a_record_without_a_usable_timestamp_is_skipped(stamp):
+    records = [_start("odd", HOUR), dict(_empty("odd", HOUR), ts=stamp)]
 
     assert funnel.codex_empty_run_share(records, NOW)["runs"] == 0
 
 
+def test_records_that_are_not_objects_are_skipped():
+    """A `null` line in the heartbeat file must not abort the doctor."""
+    records = [None, "text", 7] + _lane(1, 1)
+
+    assert funnel.codex_empty_run_share(records, NOW)["runs"] == 2
+
+
 def test_no_runs_is_no_share():
-    assert funnel.codex_empty_run_share([], NOW) == {
-        "runs": 0, "empty": 0, "share": None}
+    stats = funnel.codex_empty_run_share([], NOW)
+
+    assert (stats["runs"], stats["empty"], stats["share"],
+            stats["cadence_seconds"]) == (0, 0, None, None)
 
 
 # --- the doctor row -------------------------------------------------------
@@ -123,10 +169,11 @@ def test_a_mostly_worked_lane_passes():
     assert check.ok is True
     assert check.name == "codex empty runs"
     assert "4 of 14 standard-lane runs" in check.found
+    assert "starts every 10 min" in check.found
     assert check.fix == ""
 
 
-def test_half_or_more_empty_says_slow_the_lane():
+def test_half_or_more_empty_at_ten_minutes_says_slow_the_lane():
     """Nate's instruction: keep ten minutes until the backlog starts
     clearing (#1315). Half the runs finding nothing is that point."""
     check = funnel.check_codex_empty_runs(_lane(6, 6), now=NOW)
@@ -138,6 +185,16 @@ def test_half_or_more_empty_says_slow_the_lane():
     assert "20 minutes" in check.fix
 
 
+def test_the_row_stops_asking_once_the_lane_is_slower():
+    """After the fix the share can stay high with nothing left to change;
+    a row that failed forever would train everyone to ignore it."""
+    check = funnel.check_codex_empty_runs(_lane(4, 10, gap=1200), now=NOW)
+
+    assert check.ok is True
+    assert "already at the slower cadence" in check.found
+    assert check.fix == ""
+
+
 def test_a_thin_window_passes_with_a_note():
     """Too few runs to judge, including while the automations are paused."""
     check = funnel.check_codex_empty_runs(_lane(0, 11), now=NOW)
@@ -146,10 +203,11 @@ def test_a_thin_window_passes_with_a_note():
     assert "too few" in check.found
 
 
-def test_budget_skips_do_not_make_a_braked_lane_look_idle():
+def test_budget_stops_do_not_make_a_braked_lane_look_idle():
     records = _lane(2, 2)
     for index in range(40):
-        records += _run("brake{}".format(index), "skipped-over-pace")
+        run = "brake{}".format(index)
+        records += [_start(run, HOUR), _finish(run, HOUR, "skipped-over-pace")]
 
     check = funnel.check_codex_empty_runs(records, now=NOW)
 
@@ -160,7 +218,7 @@ def test_budget_skips_do_not_make_a_braked_lane_look_idle():
 def test_an_unreadable_heartbeat_passes_with_a_note(monkeypatch):
     """A cadence signal, not a health check: the heartbeat's own row
     reports whether it can be read."""
-    def unreadable(agent):
+    def unreadable(agent, timeout=None):
         raise heartbeat.HeartbeatError("offline")
 
     monkeypatch.setattr(heartbeat, "read", unreadable)
@@ -169,6 +227,27 @@ def test_an_unreadable_heartbeat_passes_with_a_note(monkeypatch):
 
     assert check.ok is True
     assert "could not be read" in check.found
+
+
+def test_the_heartbeat_read_is_bounded(monkeypatch):
+    seen = {}
+
+    def read(agent, timeout=None):
+        seen.update(agent=agent, timeout=timeout)
+        return []
+
+    monkeypatch.setattr(heartbeat, "read", read)
+
+    funnel.check_codex_empty_runs(now=NOW)
+
+    assert seen == {"agent": "codex",
+                    "timeout": funnel.CODEX_EMPTY_READ_TIMEOUT}
+
+
+def test_a_one_argument_reader_double_still_works(monkeypatch):
+    monkeypatch.setattr(heartbeat, "read", lambda agent: _lane(9, 3))
+
+    assert funnel.check_codex_empty_runs(now=NOW).ok is True
 
 
 # --- the tier on the start record -------------------------------------------

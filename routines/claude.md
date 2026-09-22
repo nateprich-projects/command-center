@@ -55,7 +55,7 @@ shows; anything else stays at `Shaped`, with the reason printed. **Shaped
 is not approval.** If the capture origin is `agent` and Class is unset,
 pass `--class <Broken|Maintenance|Improve|New|Replace>`; otherwise add a
 `Proposed class: <one ladder name>` line and no `--class`. When Nate
-explicitly authorises `approve --yes` while Class is still unset, the
+explicitly authorises `approve --yes` while Class is unset, the
 command adopts one exact whole-line `Proposed class:` value before the
 Status write. Adoption fills the field but is not the plan-good decision
 (#59 brake: no `Shaped` gate, no auto-advance to `Ready`).

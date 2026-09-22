@@ -11,14 +11,13 @@ description: Show what is waiting on Nate in the Command Center funnel — decis
 python3 /Users/nateprich/.claude/command-center/funnel.py snapshot
 ```
 
-Use the absolute path, not `~` — it matches the `Bash(python3
-/Users/nateprich/.claude/command-center/*)` allow rule; a tilde would not.
+Use the absolute path, not `~`: it matches the `Bash(python3
+/Users/nateprich/.claude/command-center/*)` allow rule.
 
 It prints the newest published snapshot: `{"brief": ..., "board": ...,
-"generated_at": ...}`. The publisher owns brief generation —
-never run a live brief yourself. Render `.brief` through the code
-template below, and say the snapshot age from `generated_at` past ~15
-minutes: stale is weak evidence nothing waits.
+"generated_at": ...}`. The publisher owns brief generation; never run a
+live brief yourself. Render `.brief` through the code template below, and
+say the snapshot age past ~15 minutes: stale is weak evidence nothing waits.
 
 **Do not rank, reorder, filter or re-prioritise.** `funnel.py` computes all
 ordering. If it looks wrong, say so — do not quietly fix it.
@@ -34,7 +33,7 @@ If the command fails, show the error. Do not query GitHub yourself.
 | `machine_local_steps` | Tickets waiting on a Claude Code session to go and do the declared `reason`; never folded into decisions or the total |
 | `unattended_merges` | Agent merges without him (`pr`, `at`, `note`, `agent`; retired agents excluded); call `self_reviewed: true` self-reviewed |
 
-The code template documents the rest: `generated_at`, `counts_by_gate`,
+The code template documents these: `generated_at`, `counts_by_gate`,
 `items`, `waiting_on`, `waited`, `class`, `pinned`, `needs_class`,
 `unclassed_captures`, `in_motion`, `wip_limit`, `stale_locks_taken_over`,
 `stranded`, `working_tree_touched`, `maintenance_load`, `disposal`,
@@ -55,7 +54,8 @@ error — never read null as all-clear.
 
 Then `working_tree_touched` when non-empty: `before.head → after.head` with every `observers` entry as `agent`/`run`; one observer versus multiple observers explicit, never a bare count; dirty-only rows show counts.
 
-Then `human_steps` when non-empty — what is waiting on Nate to go and do — and `machine_local_steps` — what is waiting on a Claude Code session to go and do.
+Then `human_steps`, waiting on Nate to go and do, and
+`machine_local_steps`, waiting on a Claude Code session to go and do.
 
 Full per-section wording lives in code; render through it:
 
@@ -74,6 +74,10 @@ decided and what moved. Moving to `Shaped` records a plan, not approval.
 ### Adopt an explicit Proposed class at approval
 
 With Class unset, `approve --yes` adopts exactly one non-empty whole-line
-`Proposed class: <one ladder class>` and records its source; anything else
-stays unset. Adoption fills a field; it never satisfies the `Shaped`
-plan-good gate or auto-advances to `Ready` (#59 brake).
+`Proposed class: <one ladder class>`, an exact match for `Investigate`,
+`Broken`, `Maintenance`, `Improve`, `New` or `Replace`, and records the
+source line. Missing, malformed, fuzzy or multiple proposals stay unset;
+never infer a class from a title or body prose (Nate's rule, 2026-09-16,
+overridable by him). Adoption fills a field; it never
+satisfies the `Shaped` plan-good gate or auto-advances to `Ready` (#59
+brake).

@@ -82,6 +82,11 @@ Then `status_state_mismatches`, whenever non-empty: each `ref` with its
 GitHub `state`, Project `status` and the `mismatch` in words. A closed item
 at a non-terminal Status surfaces here and in no lane list.
 
+Then `member_issues_without_project_items`, whenever its `issues` list is
+non-empty: each `ref` and `title`. Detection only; nothing is added at
+`Ideas`, because being outside the Project can be deliberate. A `degraded`
+status is an unread scan, never zero.
+
 Then the gate counts (`counts_by_gate`) on one line. Then anything unusual,
 and only if present: `prose_dependencies`, `suspected_human_steps`,
 `unclassed_captures`, `needs_class`, `stale_locks_taken_over`, `stranded`,

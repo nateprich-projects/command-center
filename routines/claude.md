@@ -1,16 +1,19 @@
 # Claude routine: reviews, escalated shaping
 
-**Claude Code Routine**, Mac mini, never headless:
+**Claude Code Routine**, never headless:
 **review, then breakdown, then shaping**.
 
-## Start
+## Begin
 
 ```bash
 python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --tier escalated
 ```
 
-- `"do": "stop"`: finish.
-- `"do": "review"`: `work` names the PR. `"do": "shape"`: one idea.
+- `"do": "stop"`: finish with the outcome its `gate` names —
+  `over`/`unknown`/`reserve` →
+  `skipped-over-pace`/`skipped-usage-unknown`/`skipped-api-reserve`,
+  else `nothing-to-do`.
+- `"do": "review"`: `work` names the PR; `"do": "shape"`: an idea.
 
 Pass the run id printed by this run's `begin` output as
 `--run <id>`, never an id from an earlier `begin` in the same session. If
@@ -20,19 +23,19 @@ retry. Never wrap the id in `RUN=$(...)`.
 ## Review
 
 Reconcile: approved-but-unmerged, merged-but-ticket-open. Read `plan.md`
-**first**, then the whole diff: **never a diff of the diff.** Bar: **does this do what the plan says, and does it avoid what
-the plan rejected?** Tests must pass. Touching `.claude/settings.json`,
-`routines/`, `skills/`, `AGENTS.md`, `plan.md` fails unless the ticket asked.
+**first**, then the whole diff: **never a diff of the diff.** Bar: **does it
+do what the plan says, and avoid what the plan rejected?** Tests must pass.
+Touching `.claude/settings.json`, `routines/`, `skills/`, `AGENTS.md`,
+`plan.md` fails unless the ticket asked.
 
 ```bash
 python3 /Users/nateprich/.claude/command-center-run/funnel.py review <pr> --verdict approved --ci green
 python3 /Users/nateprich/.claude/command-center-run/funnel.py merge <pr> --yes
 ```
 
-`merge` re-checks everything at the approved head. Rejections
-carry a `--blocking` note; **unsure means do not merge.** Do not
-change `Status` or `Class`: the gate reads the rejected-merge counter
-itself.
+`merge` re-checks everything at the approved head. Rejections carry
+`--blocking`; **unsure means do not merge.** Never change `Status` or
+`Class`: the gate reads the rejected-merge counter itself.
 
 ## 3. Shape one escalated idea
 
@@ -61,11 +64,8 @@ Status write. Adoption fills the field but is not the plan-good decision
 python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --plan <file>
 ```
 
-```bash
-python3 /Users/nateprich/.claude/command-center-run/funnel.py snapshot | jq '.brief.awaiting_breakdown'
-```
 
-## Capture defects
+## Capture
 
 When this run observes a defect (broken behaviour, a failing command, or a
 misbehaving run — evidence, not speculation), record it before finishing
@@ -84,6 +84,7 @@ thing observed.
 ## Finish
 
 ```bash
+python3 /Users/nateprich/.claude/command-center-run/funnel.py snapshot | jq '.brief.awaiting_breakdown'
 python3 /Users/nateprich/.claude/command-center-run/heartbeat.py finish --agent claude --run <id> --outcome done --merged <pr> --note "<what shipped>"
 ```
 

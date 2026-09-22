@@ -11,7 +11,10 @@ No longer runs; history in LEARNINGS.md. Protocol stays pinned below.
 python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent zcode --tier standard --breakdown
 ```
 
-- `"do": "stop"` — finish and stop.
+- `"do": "stop"` — finish with the outcome its `gate` names:
+  `over`/`unknown`/`reserve` →
+  `skipped-over-pace`/`skipped-usage-unknown`/`skipped-api-reserve`,
+  else `nothing-to-do`. Then stop.
 - `"do": "review"` — one PR. `"do": "breakdown"` — one project.
   `"do": "shape"` — one idea; section 4.
 

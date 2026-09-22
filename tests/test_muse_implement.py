@@ -189,7 +189,8 @@ def _seed_remote(base, *, ticket_branch=False):
 
 def _stubbed_runner(tmp_path, begin, *, packet=None, bound_seconds=20,
                     gh_status=0, muse_body=None, gh_body=None,
-                    routine_body=None, ticket_branch=False, extra_env=None):
+                    routine_body=None, ticket_branch=False, extra_env=None,
+                    muse_model_body=None):
     """Run the implementer against stub funnel/heartbeat/packet/finish/gh/muse.
 
     The fixture remote is real git, so the runner's fetch, branch inspection,
@@ -211,6 +212,11 @@ def _stubbed_runner(tmp_path, begin, *, packet=None, bound_seconds=20,
     (repo / "heartbeat.py").write_text(HEARTBEAT_STUB)
     (repo / "implement-packet").write_text(PACKET_STUB)
     (repo / "finish-ticket").write_text(FINISH_STUB)
+    # The real module, not a stub: the point of the model tests below is
+    # that the runner's argv comes from the real allowlist.
+    (repo / "muse_model.py").write_text(
+        muse_model_body if muse_model_body is not None
+        else (ROOT / "muse_model.py").read_text())
 
     remote = _seed_remote(tmp_path, ticket_branch=ticket_branch)
 
@@ -738,3 +744,111 @@ def test_a_fresh_workspace_resolves_uid_and_pushes_over_ssh(tmp_path):
     assert any("git-upload-pack" in call for call in ssh_calls)
     assert "--disable-sandbox" in (repo / "muse.args.1").read_text().splitlines()
     assert len(_calls(repo, "finish")) == 1
+
+
+# --- which model carries which repository (#1301) ------------------------
+
+
+def _model_in_argv(repo_dir):
+    args = (repo_dir / "muse.args.1").read_text().splitlines()
+    assert "--model" in args, args
+    return args[args.index("--model") + 1]
+
+
+@pytest.mark.parametrize("repo", [
+    "nateprich-projects/command-center",
+    "nateprich-projects/FF-Weekly-Start-Sit",
+    "nateprich-projects/The-League",
+])
+def test_a_cleared_repo_runs_on_the_contributor_model(tmp_path, repo):
+    """Nate's 2026-09-22 decision, reaching argv."""
+    proc, runner_repo = _stubbed_runner(
+        tmp_path, _begin(work={"ref": repo + "#42", "repo": repo}))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _model_in_argv(runner_repo) == "muse-spark-1.3-contributor"
+
+
+@pytest.mark.parametrize("repo", [
+    "nateprich-projects/jeffy-finance-agent",
+    "nateprich-projects/workbench",
+    "nateprich-projects/career-toolset",
+])
+def test_an_excluded_repo_runs_on_the_private_model(tmp_path, repo):
+    """The three he kept off Discounted Services. If this ever names the
+    contributor model, confidential code is going somewhere he declined
+    to send it."""
+    proc, runner_repo = _stubbed_runner(
+        tmp_path, _begin(work={"ref": repo + "#42", "repo": repo}))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _model_in_argv(runner_repo) == "muse-spark-1.3"
+
+
+def test_a_repo_nobody_has_named_runs_on_the_private_model(tmp_path):
+    proc, runner_repo = _stubbed_runner(tmp_path, _begin())
+
+    assert proc.returncode == 0, proc.stderr
+    assert _model_in_argv(runner_repo) == "muse-spark-1.3"
+
+
+def test_a_broken_resolver_still_names_the_private_model(tmp_path):
+    """An argv with no `--model` is the exact failure this change exists
+    to prevent, so a resolver that cannot answer must not be able to
+    produce one."""
+    proc, runner_repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"ref": "nateprich-projects/The-League#42",
+                     "repo": "nateprich-projects/The-League"}),
+        muse_model_body="raise SystemExit('resolver is broken')\n")
+
+    assert proc.returncode == 0, proc.stderr
+    assert _model_in_argv(runner_repo) == "muse-spark-1.3"
+
+
+def test_a_resolver_printing_junk_still_names_the_private_model(tmp_path):
+    proc, runner_repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"ref": "nateprich-projects/The-League#42",
+                     "repo": "nateprich-projects/The-League"}),
+        muse_model_body="print('not-a-model-at-all')\n")
+
+    assert proc.returncode == 0, proc.stderr
+    assert _model_in_argv(runner_repo) == "muse-spark-1.3"
+
+
+def test_a_resolver_printing_nothing_still_names_the_private_model(tmp_path):
+    proc, runner_repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"ref": "nateprich-projects/The-League#42",
+                     "repo": "nateprich-projects/The-League"}),
+        muse_model_body="pass\n")
+
+    assert proc.returncode == 0, proc.stderr
+    assert _model_in_argv(runner_repo) == "muse-spark-1.3"
+
+
+def test_the_runner_never_writes_a_model_id_except_the_fallback():
+    """The allowlist lives in muse_model.py. A second copy here would be
+    the drift that sends confidential code to a training tier."""
+    body = "\n".join(
+        line for line in SCRIPT.read_text().splitlines()
+        if not line.strip().startswith("#"))
+    assert '--model "$MUSE_MODEL"' in body
+    assert "--model muse-spark-1.3" not in body
+    assert "muse_model.py" in body
+    # The exposure rule is which repository gets which model, and none of
+    # it is written here. A runner naming a repository would be the copy
+    # that drifts.
+    # (`command-center` is not in the list: it is this repo, and its name
+    # is structural here — log paths, the run checkout — not a routing
+    # decision.)
+    for repo in ("FF-Weekly-Start-Sit", "The-League",
+                 "jeffy-finance-agent", "workbench", "career-toolset"):
+        assert repo not in body, repo
+    # One model id: the fail-closed anchor. The set of *valid* ids is not
+    # written here either — it is read back from muse_model.py, so a
+    # provider version bump cannot be rejected by a stale copy.
+    assert body.count("muse-spark-1.3") == 1
+    assert 'MUSE_FALLBACK_MODEL="muse-spark-1.3"' in body
+    assert 'muse_model.py" models' in body

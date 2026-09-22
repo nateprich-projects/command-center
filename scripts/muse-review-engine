@@ -274,6 +274,47 @@ print(flat)
 ' "$1" "$2"
 }
 
+# --- which model may carry this repository's content (#1301) ------------------
+#
+# Muse's catalog marks `muse-spark-1.3-contributor` as `is_default: true`, so
+# an exec with no `--model` runs on Meta's Discounted Services tier. The
+# allowlist deciding which repositories may go there lives in one place,
+# `muse_model.py`; this asks it about the repository this job is working.
+#
+# Fail closed. An empty or unrecognised answer becomes the private model,
+# never an absent `--model`: an argv without the flag is the exact failure
+# this whole change exists to prevent, so a broken resolver must not be able
+# to produce one. MUSE_FALLBACK_MODEL is the last-resort anchor, not a second
+# copy of the rule — it is only ever reached when muse_model.py cannot answer.
+MUSE_FALLBACK_MODEL="muse-spark-1.3"
+
+resolve_muse_model() {
+  local subject="${1:-}" resolved known
+  # Whitespace is stripped before the check, so a CRLF or a stray newline
+  # cannot reach argv attached to an otherwise valid id. Muse accepts an
+  # unrecognised model without complaining, so `muse-spark-1.3\r` would
+  # not fail loudly — it would just stop meaning anything.
+  resolved="$(python3 "$REPO/muse_model.py" model --repo "$subject" \
+    2>/dev/null | tr -d '[:space:]')"
+  # Membership, checked against the ids muse_model.py itself publishes
+  # rather than a list written out here. A second copy in each runner
+  # would reject a provider version bump the day the module accepted it,
+  # and would do it silently.
+  known="$(python3 "$REPO/muse_model.py" models 2>/dev/null)"
+  # And the list is only trusted if it contains the private model. A
+  # muse_model.py that is corrupt, half-written, or some other script
+  # entirely answers both calls with the same wrong thing, and membership
+  # against itself always passes; requiring the one id that must always
+  # be there turns that back into a fallback.
+  if [[ -n "$resolved" ]] \
+    && printf '%s\n' "$known" | grep -qxF -- "$MUSE_FALLBACK_MODEL" \
+    && printf '%s\n' "$known" | grep -qxF -- "$resolved"; then
+    printf '%s\n' "$resolved"
+  else
+    printf '%s\n' "$MUSE_FALLBACK_MODEL"
+  fi
+}
+
 # One model call: the prompt file in, the raw answer on stdout. Plain kill,
 # not a process-group kill: --disable-shell means the model can have no
 # children to orphan. Exit 124 when the bound kills the call.
@@ -285,7 +326,7 @@ call_muse() {
   fi
   rm -f "$killed_marker"
   "$MUSE_BIN" exec \
-    --model muse-spark-1.3 \
+    --model "$MUSE_MODEL" \
     --reasoning-effort "$EFFORT" \
     --disable-shell \
     --disable-write \
@@ -626,6 +667,19 @@ else
   failure "funnel begin returned unknown job '$BEGIN_DO'" || true
   exit 1
 fi
+
+# Resolved once, from the repository this job works: the PR's repo for a
+# review, the subject issue's repo for a breakdown or a shape. Both are in
+# hand by here, so no job reaches `muse exec` without an answer.
+if [[ "$JOB" == "review" ]]; then
+  MUSE_MODEL="$(resolve_muse_model "$BEGIN_REPO")"
+else
+  MUSE_MODEL="$(resolve_muse_model "$SUBJECT_REPO")"
+fi
+# See muse-implement for why this is here and not only in the helper: a
+# command substitution that dies yields the empty string without stopping
+# the runner, and `--model ""` is an id Muse accepts without complaint.
+[[ -n "$MUSE_MODEL" ]] || MUSE_MODEL="$MUSE_FALLBACK_MODEL"
 
 if [[ "$JOB" != "review" ]]; then
   run_issue_job

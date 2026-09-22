@@ -179,6 +179,99 @@ def test_embedded_needs_decision_prefix_does_not_match():
     ]) is None
 
 
+# #1167's shape: a project held at a breakdown question, answered in session.
+# The comment thread still carries the question; only the body can carry the
+# answer, because every lane reads the body.
+GATES_ANSWER_PLAN = """# Reach the funnel from general chat
+
+## Needs Nate
+
+- Gates: answered — see the marker below.
+
+{marker}
+
+```json
+{payload}
+```
+"""
+
+
+def _gates_answer_item(body):
+    return funnel.Item(
+        repo="owner/repo", number=1167, title="Scan quoted text", url="",
+        state="OPEN", status="Ideas", labels=["blocked"],
+        needs_decision="Should the connector answer gates on Nate's behalf?",
+        body=body,
+    )
+
+
+def _gates_answer_body(payload):
+    return GATES_ANSWER_PLAN.format(
+        marker=funnel.GATES_ANSWER_MARKER,
+        payload=json.dumps(payload, indent=2),
+    )
+
+
+VALID_GATES_ANSWER = {
+    "answer": "No. The connector never answers a gate; it relays mine.",
+    "at": "2026-09-21T21:53:02Z",
+    "decider": "nate",
+}
+
+
+def test_an_answered_gates_marker_settles_the_breakdown_question():
+    item = _gates_answer_item(_gates_answer_body(VALID_GATES_ANSWER))
+
+    assert funnel.parse_gates_answer(item.body) == VALID_GATES_ANSWER
+    assert funnel.gate_question(item) is None
+    assert funnel.awaiting_decision([item]) == []
+
+
+def test_the_same_item_without_the_marker_asks_exactly_as_before():
+    item = _gates_answer_item("# Reach the funnel from general chat\n")
+
+    assert funnel.parse_gates_answer(item.body) is None
+    assert funnel.gate_question(item) == "Answer the breakdown's question?"
+    assert funnel.awaiting_decision([item]) == [item]
+
+
+@pytest.mark.parametrize("payload", [
+    {"at": "2026-09-21T21:53:02Z", "decider": "nate"},
+    {"answer": "   ", "at": "2026-09-21T21:53:02Z", "decider": "nate"},
+    {"answer": "No.", "decider": "nate"},
+    {"answer": "No.", "at": "not a timestamp", "decider": "nate"},
+    {"answer": "No.", "at": "2026-09-21T21:53:02Z"},
+    {"answer": "No.", "at": "2026-09-21T21:53:02Z", "decider": ""},
+])
+def test_a_malformed_gates_marker_waits_toward_nate(payload):
+    item = _gates_answer_item(_gates_answer_body(payload))
+
+    assert funnel.parse_gates_answer(item.body) is None
+    assert funnel.gate_question(item) == "Answer the breakdown's question?"
+    assert funnel.awaiting_decision([item]) == [item]
+
+
+def test_an_unparseable_gates_marker_block_waits_toward_nate():
+    body = "{}\n\n```json\n{{not json at all}}\n```\n".format(
+        funnel.GATES_ANSWER_MARKER
+    )
+    item = _gates_answer_item(body)
+
+    assert funnel.parse_gates_answer(item.body) is None
+    assert funnel.gate_question(item) == "Answer the breakdown's question?"
+
+
+def test_an_answered_marker_does_not_answer_nates_own_shaped_gate():
+    """The marker settles a breakdown's question, never Nate's plan gate."""
+    item = funnel.Item(
+        repo="owner/repo", number=1167, title="Scan quoted text", url="",
+        state="OPEN", status="Shaped",
+        body=_gates_answer_body(VALID_GATES_ANSWER),
+    )
+
+    assert funnel.gate_question(item) == funnel.GATES["Shaped"]
+
+
 def test_unparseable_block_comment_reports_its_first_line(monkeypatch):
     item = funnel.Item(
         repo="owner/repo", number=7, title="Broken comment", url="", state="OPEN",

@@ -1087,6 +1087,56 @@ ESCALATION_PATTERNS = {
 }
 
 
+#: A fenced block opens and closes with three or more backticks or tildes,
+#: optionally followed by an info string on the opening fence.
+_FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+#: A block quote is a line whose first non-space character is ``>``.
+_QUOTE_RE = re.compile(r"^\s*>")
+
+
+
+def asserted_text(text: str) -> str:
+    """``text`` with quoted regions removed, keeping line structure.
+
+    Fenced blocks and block quotes are things the item is *showing*: a pasted
+    log line, a job name, an error string, an alternative a plan records that
+    it will not take. They are not statements about what the work will do, and
+    scanning them is how a report about a deadlock became a ticket with a
+    concurrency risk.
+
+    Lines are blanked rather than deleted so that anything anchored to a line
+    start still behaves the same, and so a marker cannot be joined to the
+    sentence above it.
+
+    Two regions and no more: everything outside a fence or a block quote is
+    scanned exactly as it was. An inline code span is arguably the same class
+    of text — `Resource deadlock avoided`, quoted from an OS error in #1167's
+    own report, matches the concurrency pattern from inside one — but the
+    plan authorises fences and block quotes, and widening a safety gate's
+    blind spot past what was approved is not this ticket's to do. Captured
+    separately.
+    """
+    if not text:
+        return text or ""
+    kept: List[str] = []
+    fence: Optional[str] = None
+    for line in text.splitlines():
+        match = _FENCE_RE.match(line)
+        if fence is not None:
+            # Inside a fence: the closing fence must use the same character.
+            if match and match.group(1)[0] == fence[0]:
+                fence = None
+            kept.append("")
+            continue
+        if match:
+            fence = match.group(1)
+            kept.append("")
+            continue
+        kept.append("" if _QUOTE_RE.match(line) else line)
+    return "\n".join(kept)
+
+
 def escalation_reasons(title: str, body: str,
                        failed_before: bool = False) -> List[str]:
     """Why the cheap default engineer must not take this ticket.
@@ -1095,8 +1145,17 @@ def escalation_reasons(title: str, body: str,
     says `Risk: standard` is standard even if its prose mentions a race
     condition, because the person who wrote the plan knew what it meant and a
     regex does not.
+
+    Only asserted prose is scanned. Quoted evidence — fenced blocks and block
+    quotes — is excluded (#1167): six false escalations in four days came from
+    words the item was reporting on rather than words describing its work, and
+    this issue's own report scored four risks on the four words in its list of
+    past false positives. No pattern is removed, and the marker still outranks
+    the regex in both directions. Nate answered the gate question on
+    2026-09-21, having been shown the cost: a plan that describes its real risk
+    only inside a code fence would drop to the standard lane.
     """
-    text = "{}\n{}".format(title or "", body or "")
+    text = asserted_text("{}\n{}".format(title or "", body or ""))
     marker = RISK_LINE.search(text)
     if marker:
         if marker.group(1).lower() == "standard":

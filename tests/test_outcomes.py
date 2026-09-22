@@ -568,17 +568,70 @@ def test_remote_append_uses_sha_and_retries_a_contents_conflict(monkeypatch):
         SimpleNamespace(returncode=0, stdout="{}", stderr=""),
     ]
     commands = []
+    bodies = []
 
-    def run(args):
+    def run(args, stdin=None):
         commands.append(list(args))
+        bodies.append(stdin)
         return responses.pop(0)
 
     monkeypatch.setattr(outcomes, "_run_gh", run)
     monkeypatch.setattr(outcomes.time, "sleep", lambda seconds: None)
 
     assert outcomes.append_records([existing, addition]) == 1
-    assert any("sha=new" in command for command in commands[-1])
+    # The sha moved from argv into the request body with #1294; what matters
+    # is still that the retry carries the *refreshed* sha, not the stale one.
+    assert json.loads(bodies[-1])["sha"] == "new"
     assert len(commands) == 4
+
+
+def test_the_append_body_goes_on_stdin_and_never_onto_the_command_line(
+        monkeypatch):
+    """#1294. The ledger used to be passed as `-f content=<base64>`, so every
+    append put the whole file in argv. On 2026-09-22, deriving across all seven
+    member repos for the first time, that died with `OSError: [Errno 7]
+    Argument list too long` before `gh` ever ran — and because nothing was
+    written, the next run re-derived the same backlog and failed identically.
+
+    Asserting on the shape rather than on a size: a length threshold would pass
+    against the old code until someone picked a number larger than the
+    fixture."""
+    existing = outcomes.derive_outcome(ticket(1), now=NOW)
+    addition = outcomes.derive_outcome(ticket(2), now=NOW)
+    encoded = base64.b64encode(
+        outcomes._encode_records([existing]).encode()
+    ).decode()
+    responses = [
+        SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"content": encoded, "sha": "old"}),
+            stderr="",
+        ),
+        SimpleNamespace(returncode=0, stdout="{}", stderr=""),
+    ]
+    seen = {}
+
+    def run(args, stdin=None):
+        seen["args"] = list(args)
+        seen["stdin"] = stdin
+        return responses.pop(0)
+
+    monkeypatch.setattr(outcomes, "_run_gh", run)
+
+    assert outcomes.append_records([existing, addition]) == 1
+
+    args, stdin = seen["args"], seen["stdin"]
+    assert "--input" in args and args[args.index("--input") + 1] == "-"
+    # No argument carries the payload, under any flag.
+    assert not any("content=" in a for a in args), args
+    assert not any(a.startswith("-f") and "=" in a for a in args), args
+
+    payload = json.loads(stdin)
+    assert payload["content"] == base64.b64encode(
+        outcomes._encode_records([existing, addition]).encode()
+    ).decode()
+    assert payload["sha"] == "old"
+    assert payload["message"].endswith("+1 record(s)")
 
 
 def test_all_members_resolves_the_topic_and_never_a_list_in_the_schedule(
@@ -628,3 +681,126 @@ def test_without_all_members_the_explicit_repos_and_the_default_are_unchanged():
     not change what `derive` does when the flag is absent."""
     assert outcomes.resolve_derive_repos(["a/b", "c/d"], False) == ["a/b", "c/d"]
     assert outcomes.resolve_derive_repos(None, False) == [outcomes.REPO]
+
+
+def _contents_response(records, *, inline, sha="abc123"):
+    """A Contents API payload. Above 1 MB GitHub sends `size` and `sha` but an
+    empty `content`, which is the case that matters here."""
+    text = outcomes._encode_records(records)
+    encoded = base64.b64encode(text.encode()).decode()
+    return SimpleNamespace(
+        returncode=0,
+        stdout=json.dumps({
+            "content": encoded if inline else "",
+            "size": len(text.encode()),
+            "sha": sha,
+        }),
+        stderr="",
+    )
+
+
+def test_a_ledger_too_big_to_inline_is_read_through_the_blob_api(monkeypatch):
+    """#1294. Over one megabyte the Contents API returns an empty `content`
+    alongside a perfectly valid `sha`, so the old read reported an empty
+    ledger while handing `append_records` a usable sha — and the next write
+    would have put `[] + fresh` over all of history. `outcomes.jsonl` crossed
+    that line at 1,277,231 bytes on 2026-09-22."""
+    records = [outcomes.derive_outcome(ticket(n), now=NOW) for n in (1, 2, 3)]
+    blob = SimpleNamespace(
+        returncode=0,
+        stdout=json.dumps({"content": base64.b64encode(
+            outcomes._encode_records(records).encode()).decode()}),
+        stderr="",
+    )
+    responses = [_contents_response(records, inline=False), blob]
+    calls = []
+
+    def run(args, stdin=None):
+        calls.append(list(args))
+        return responses.pop(0)
+
+    monkeypatch.setattr(outcomes, "_run_gh", run)
+
+    got, sha = outcomes._read_remote(outcomes.REPO, outcomes.HEARTBEAT_BRANCH)
+
+    assert len(got) == 3
+    assert sha == "abc123"
+    assert calls[1] == ["api", "repos/{}/git/blobs/abc123".format(outcomes.REPO)]
+
+
+def test_an_unreadable_blob_raises_rather_than_reporting_an_empty_ledger(
+        monkeypatch):
+    """Fail closed. Every caller treats the returned list as the whole ledger,
+    so 'I could not read it' must never arrive looking like 'there is nothing
+    there' — that is the shape that overwrites history."""
+    records = [outcomes.derive_outcome(ticket(1), now=NOW)]
+    responses = [
+        _contents_response(records, inline=False),
+        SimpleNamespace(returncode=1, stdout="", stderr="HTTP 502"),
+    ]
+
+    monkeypatch.setattr(
+        outcomes, "_run_gh", lambda args, stdin=None: responses.pop(0))
+
+    with pytest.raises(outcomes.OutcomeError) as caught:
+        outcomes._read_remote(outcomes.REPO, outcomes.HEARTBEAT_BRANCH)
+
+    assert "502" in str(caught.value)
+
+
+def test_a_blob_that_reads_back_empty_also_raises(monkeypatch):
+    """A 200 with no content is the same lie as a failed call."""
+    records = [outcomes.derive_outcome(ticket(1), now=NOW)]
+    responses = [
+        _contents_response(records, inline=False),
+        SimpleNamespace(returncode=0, stdout=json.dumps({"content": ""}),
+                        stderr=""),
+    ]
+
+    monkeypatch.setattr(
+        outcomes, "_run_gh", lambda args, stdin=None: responses.pop(0))
+
+    with pytest.raises(outcomes.OutcomeError) as caught:
+        outcomes._read_remote(outcomes.REPO, outcomes.HEARTBEAT_BRANCH)
+
+    assert "read back empty" in str(caught.value)
+
+
+def test_a_ledger_small_enough_to_inline_makes_no_second_call(monkeypatch):
+    """The common path is unchanged: one call, no blob read."""
+    records = [outcomes.derive_outcome(ticket(1), now=NOW)]
+    calls = []
+
+    def run(args, stdin=None):
+        calls.append(list(args))
+        return _contents_response(records, inline=True)
+
+    monkeypatch.setattr(outcomes, "_run_gh", run)
+
+    got, _sha = outcomes._read_remote(outcomes.REPO, outcomes.HEARTBEAT_BRANCH)
+
+    assert len(got) == 1
+    assert len(calls) == 1
+
+
+def test_an_empty_ledger_is_still_read_as_empty(monkeypatch):
+    """Size zero is a genuine empty file, not a declined inline: no blob read
+    and no exception, or a first-ever append could never happen."""
+    responses = [SimpleNamespace(
+        returncode=0,
+        stdout=json.dumps({"content": "", "size": 0, "sha": "abc123"}),
+        stderr="",
+    )]
+    calls = []
+
+    def run(args, stdin=None):
+        calls.append(list(args))
+        return responses.pop(0)
+
+    monkeypatch.setattr(outcomes, "_run_gh", run)
+
+    got, sha = outcomes._read_remote(outcomes.REPO, outcomes.HEARTBEAT_BRANCH)
+
+    assert got == []
+    assert sha == "abc123"
+    assert len(calls) == 1

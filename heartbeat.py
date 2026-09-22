@@ -372,7 +372,7 @@ def _push_drain(agent: str, extra: Optional[List[Dict]] = None) -> None:
             time.sleep(BACKOFF[attempt])
 
 
-def append(agent: str, record: Dict) -> str:
+def append(agent: str, record: Dict, *, push: bool = True) -> str:
     """Record one heartbeat. Never raises.
 
     Returns `"pushed"`, `"spooled"` or `"lost"`. The caller proceeds either way —
@@ -386,6 +386,10 @@ def append(agent: str, record: Dict) -> str:
     `_push` drains the spool, so it can only send what reached the spool. That is
     how two Codex runs on 2026-09-06 reported "spooled locally" while writing
     nothing anywhere — the sandbox denied writes outside its working directory.
+
+    ``push=False`` leaves the record in the spool for the run's next push to
+    carry. Each push re-reads and rewrites the whole agent file (about 1 MB
+    for Codex), so a note that can wait a minute for the finish should.
     """
     spooled = True
     try:
@@ -395,6 +399,8 @@ def append(agent: str, record: Dict) -> str:
         # Not fatal on its own: try GitHub directly, since the spool exists to
         # survive GitHub being down, not the other way round.
         spooled = False
+    if not push:
+        return "spooled" if spooled else "lost"
     try:
         _push(agent, extra=None if spooled else [record])
     except (HeartbeatError, OSError):
@@ -402,8 +408,8 @@ def append(agent: str, record: Dict) -> str:
     return "pushed"
 
 
-def record_event(agent: str, run: Optional[str], outcome: str,
-                 **fields) -> str:
+def record_event(agent: str, run: Optional[str], outcome: str, *,
+                 push: bool = True, **fields) -> str:
     """Record a non-terminal outcome attached to an already-running session.
 
     A misfiled finish can be re-attached to its still-open run as an event,
@@ -421,7 +427,10 @@ def record_event(agent: str, run: Optional[str], outcome: str,
         "outcome": outcome,
     }
     record.update(fields)
-    kept = append(agent, record)
+    # `push` is passed only when it changes something, so the two-argument
+    # doubles of `append` in the suite keep working for every other caller.
+    kept = append(agent, record) if push else append(agent, record,
+                                                     push=False)
     _report(kept)
     return kept
 

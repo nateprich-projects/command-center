@@ -5888,9 +5888,11 @@ CODEX_EMPTY_RUNS_FIX = (
 #: The slower cadence the fix names, and the spacing between standard-lane
 #: starts that counts as already there. Once the lane runs at twenty minutes
 #: the share can stay high with nothing left to change, so the row stops
-#: asking.
+#: asking. The cadence is read from the most recent gaps only, so the row
+#: notices a change within hours rather than a day.
 CODEX_SLOW_CADENCE_SECONDS = 20 * 60
 CODEX_SLOWED_GAP_SECONDS = 15 * 60
+CODEX_CADENCE_GAPS = 12
 
 
 def codex_empty_run_share(records: Iterable[object],
@@ -5908,8 +5910,9 @@ def codex_empty_run_share(records: Iterable[object],
     ``begin`` recorded ``queue: empty``. Everything else, budget gates,
     errors, locks and withheld work, is neither and is left out.
 
-    The cadence is the median spacing of standard-lane starts in the same
-    window, so the row can tell whether its own fix has been applied.
+    The cadence is the median of the most recent spacings between
+    standard-lane starts, so the row can tell whether its own fix has been
+    applied.
     """
     rows = [row for row in records if isinstance(row, dict)]
 
@@ -5936,6 +5939,7 @@ def codex_empty_run_share(records: Iterable[object],
                      if row.get("phase") == "start"
                      and row.get("run") in standard and recent(row)})
     gaps = [later - earlier for earlier, later in zip(starts, starts[1:])]
+    gaps = gaps[-CODEX_CADENCE_GAPS:]
     cadence = None
     if gaps:
         ordered = sorted(gaps)
@@ -12458,8 +12462,10 @@ def _record_queue_empty(agent: str, run: Optional[str],
     try:
         import heartbeat
 
-        heartbeat.record_event(agent, run, "nothing-to-do", queue="empty",
-                               tier=tier)
+        # Spooled, not pushed: the run's finish follows within a minute and
+        # carries it, and a push rewrites the whole agent file.
+        heartbeat.record_event(agent, run, "nothing-to-do", push=False,
+                               queue="empty", tier=tier)
     except Exception:
         # Instrumentation must not gate the thing it instruments.
         pass
@@ -12723,6 +12729,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 out["withheld"] = withheld
             if frozen:
                 out["freeze_withheld"] = frozen
+            # Empty means nothing can start because the work is done or is
+            # waiting on someone else. The lane's own brakes holding work it
+            # has not implemented, the WIP cap, a backoff, readiness, the
+            # freeze or an earlier stop, are not an empty queue (#1320).
+            # A claim in motion alone is not a brake below the cap.
+            queue_empty = not (
+                out.get("why") or out.get("backed_off") or withheld
+                or frozen or at_capacity(items, now, pr_facts=pr_facts))
             if out.get("why"):
                 why = str(out["why"])
             elif holder is not None:
@@ -12739,12 +12753,11 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 )
             elif tier:
                 why = "nothing — no {} work waiting".format(tier)
-                out["queue"] = "empty"
             else:
                 why = "nothing to do"
-                out["queue"] = "empty"
             out.update(do="stop", why=why)
-            if out.get("queue") == "empty":
+            if queue_empty:
+                out["queue"] = "empty"
                 _record_queue_empty(agent, out.get("run"), tier)
         else:
             if _detail_loader is not None:

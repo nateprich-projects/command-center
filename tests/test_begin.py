@@ -1535,8 +1535,44 @@ def test_begin_records_an_empty_queue_itself(monkeypatch, capsys):
     assert result["queue"] == "empty"
     assert "no standard work waiting" in result["why"]
     assert events == [("codex", "run-id", "nothing-to-do",
-                       {"queue": "empty", "tier": "standard"})]
+                       {"push": False, "queue": "empty", "tier": "standard"})]
     assert writes == []
+
+
+def test_backed_off_work_is_not_an_empty_queue(monkeypatch, capsys):
+    """A ticket held back after repeated failures is work nobody has
+    implemented. Near a cleared backlog the remainder is mostly failing
+    work, and calling it empty would read "cleared" while the lane is
+    stuck."""
+    events = _capture_events(monkeypatch)
+    project, ticket = _ticket(40, 41)
+    monkeypatch.setattr(funnel, "_backed_off_work", lambda items, now: {
+        ticket.ref: {"ref": ticket.ref, "failures": 3,
+                     "until": NOW + timedelta(hours=6),
+                     "reason": "errored three times"}})
+
+    result, _ = _implementing_begin(monkeypatch, capsys, [project, ticket])
+
+    assert result["do"] == "stop"
+    assert result["backed_off"][0]["ref"] == ticket.ref
+    assert "queue" not in result
+    assert not [event for event in events
+                if event[3].get("queue") == "empty"]
+
+
+def test_a_claim_below_the_cap_does_not_hide_an_empty_queue(
+        monkeypatch, capsys):
+    """One run in flight is not a brake while the lane has room for more:
+    with nothing else startable, the queue is empty."""
+    events = _capture_events(monkeypatch)
+    project, ticket = _ticket(20, 21, in_motion_since=NOW)
+
+    result, _ = _implementing_begin(monkeypatch, capsys, [project, ticket])
+
+    assert result["do"] == "stop"
+    assert result["queue"] == "empty"
+    assert [event[2] for event in events
+            if event[3].get("queue") == "empty"] == ["nothing-to-do"]
 
 
 def test_a_held_lock_is_not_recorded_as_an_empty_queue(monkeypatch, capsys):

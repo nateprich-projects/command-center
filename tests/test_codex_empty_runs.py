@@ -195,6 +195,20 @@ def test_the_row_stops_asking_once_the_lane_is_slower():
     assert check.fix == ""
 
 
+def test_the_cadence_follows_a_recent_change_within_hours():
+    """A day-long median would keep advising the fix for sixteen hours
+    after it was made; the most recent gaps notice it within a few."""
+    older = _lane(10, 20, gap=600, first_age=5 * HOUR)
+    recent = _lane(2, 11, gap=1200, first_age=HOUR // 2)
+
+    stats = funnel.codex_empty_run_share(older + recent, NOW)
+    check = funnel.check_codex_empty_runs(older + recent, now=NOW)
+
+    assert stats["cadence_seconds"] == 1200
+    assert check.ok is True
+    assert "already at the slower cadence" in check.found
+
+
 def test_a_thin_window_passes_with_a_note():
     """Too few runs to judge, including while the automations are paused."""
     check = funnel.check_codex_empty_runs(_lane(0, 11), now=NOW)
@@ -263,6 +277,29 @@ def _capture_start(monkeypatch):
                         lambda agent, record: records.append(record) or "spooled")
     monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
     return records
+
+
+def test_an_event_can_wait_for_the_next_push(monkeypatch):
+    """A push rewrites the whole agent file; the empty-queue note rides the
+    run's own finish instead of paying for one of its own."""
+    spooled, pushed = [], []
+    monkeypatch.setattr(heartbeat, "_spool",
+                        lambda agent, record: spooled.append(record))
+    monkeypatch.setattr(heartbeat, "_push",
+                        lambda agent, extra=None: pushed.append(extra))
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    kept = heartbeat.record_event("codex", "run-1", "nothing-to-do",
+                                  push=False, queue="empty")
+
+    assert kept == "spooled"
+    assert pushed == []
+    assert spooled[0]["queue"] == "empty"
+    assert "push" not in spooled[0]
+
+    assert heartbeat.record_event("codex", "run-1", "nothing-to-do") == \
+        "pushed"
+    assert len(pushed) == 1
 
 
 @pytest.mark.parametrize("tier", ["standard", "escalated"])

@@ -14,6 +14,7 @@ stored or passed by this program.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import contextvars
 from collections import namedtuple
@@ -5448,12 +5449,20 @@ MUSE_SCAN_MAX_BYTES = 512 * 1024
 #: variable, a continuation, a redirect, a pipe, a separator, or the end of
 #: the line — never by a bare English word.
 #:
-#: **The cost of that rule, stated plainly:** `muse exec prompt.txt`, with a
-#: positional prompt and no flags, is indistinguishable from prose by this
-#: test and is not reported. Admitting a bare word after `exec` re-admits
-#: every "muse exec failed" sentence in the tree, which is the noise that
-#: hides real findings. The gap is real and narrow; it is not "catches
-#: anything added next".
+#: **The costs of that rule, stated plainly rather than implied away.**
+#: `muse exec prompt.txt`, a positional prompt with no flags, is
+#: indistinguishable from prose by this test and is not reported;
+#: admitting a bare word after `exec` re-admits every "muse exec failed"
+#: sentence in the tree, which is the noise that hides real findings.
+#: And in the other direction, a shell line that *quotes* a whole flagged
+#: command — `grep -c "muse exec --json" "$log"` — is reported. An earlier
+#: draft rejected any match inside a string to suppress that, which made
+#: `bash -lc "muse exec"`, `ssh host "muse exec"` and any line with a
+#: stray apostrophe invisible instead. A spurious line is cheap; a missed
+#: call is the whole failure. This applies to shell only: Python is
+#: parsed, so it has neither problem.
+#:
+#: The gap is real and narrow. This is not "catches anything added next".
 MUSE_EXEC_RE = re.compile(
     r"""(?x)
     (?:
@@ -5464,29 +5473,6 @@ MUSE_EXEC_RE = re.compile(
     (?= \s* (?: $ | \d+ [<>] | [-\\"\',$(\[|&;<>] ) )
     """
 )
-
-#: The same invocation written as a Python argv list, in both spellings
-#: that occur: a constant holding the binary (`[MUSE_COMMAND, "exec"]`) and
-#: the literal (`["muse", "exec"]`). The literal form is the more idiomatic
-#: one and was missed by the first draft — career-agent's scorer used the
-#: constant, so the one real finding on this machine was caught by luck of
-#: spelling.
-#:
-#: Anchoring on the opening bracket or comma is not cosmetic. Starting the
-#: alternative at a bare word class makes the match quadratic in the length
-#: of any word-character run: a measured 28s on a 32 KB run and 7m23s on a
-#: 128 KB one, against a 512 KB per-file cap. The anchor removes the
-#: blowup and most of the routine scan cost with it.
-MUSE_ARGV_RE = re.compile(
-    r"""(?x)
-    [\[(,] \s*
-    (?: ["\'] [^"\']* muse [^"\']* ["\'] | [A-Za-z_][A-Za-z0-9_]* )
-    \s*,\s* ["\']exec["\']
-    """
-)
-
-#: Quoted spans, for blanking string literals before brackets are counted.
-MUSE_LITERAL_RE = re.compile(r"""(?s)"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'""")
 
 #: How far a single invocation may run. A bash continuation or a Python
 #: argv list is a handful of lines; this only stops a malformed file from
@@ -5499,106 +5485,133 @@ MUSE_MODEL_PIN_FIX = (
 )
 
 
-def _muse_blank_literals(line: str) -> str:
-    """``line`` with the inside of every quoted span blanked.
+def _muse_shell_code(line: str) -> str:
+    """``line`` with any trailing shell comment removed.
 
-    Offsets and the quote characters survive, so a caller can ask both
-    "is this bracket structure?" and "did this match start inside a
-    string?" — and `"$MUSE_BIN" exec`, whose match begins *at* the quote,
-    is correctly not the second one.
-
-    Brackets are counted on this, never on the raw line. A parenthesis
-    inside a prompt string is not structure, and counting it was how the
-    first draft *cleared* a genuinely unpinned call: an unbalanced `(` in
-    the prompt ran the statement on until it swallowed an unrelated
-    `--model` three lines later, and the finding vanished. A check that
-    launders a real finding is worse than one that misses it.
+    A `#` counts only where a word begins — start of line or after
+    whitespace — so `$#`, a fragment identifier in a URL and a `#` inside
+    a word all survive. No quote tracking: pairing apostrophes is how a
+    naive scanner turns `echo don't  # it's fine` into code, and how it
+    swallows a real call between two unrelated quotes.
     """
-    return MUSE_LITERAL_RE.sub(
-        lambda match: match.group(0)[0]
-        + " " * (len(match.group(0)) - 2)
-        + match.group(0)[-1],
-        line,
-    )
+    match = re.search(r"(?:^|\s)#", line)
+    return line if match is None else line[:match.start()]
 
 
-def _muse_code_line(line: str) -> str:
-    """``line`` with any trailing comment removed.
+def _muse_shell_statement(lines: Sequence[str], start: int) -> str:
+    """The shell statement beginning on line ``start``.
 
-    Documentation and commented-out examples name `muse exec` throughout
-    this tree, and reporting those is how a real finding gets scrolled
-    past. The `#` is located on the literal-blanked line, so a `#` inside
-    a string does not truncate real code.
-
-    Only `#` counts. The scanned suffixes are shell and Python, where
-    `//` is not a comment — treating it as one silently ate every
-    invocation written after a URL on the same line.
-    """
-    position = _muse_blank_literals(line).find("#")
-    return line if position == -1 else line[:position]
-
-
-def _muse_statement(lines: Sequence[str], start: int) -> str:
-    """The text of the invocation beginning on line ``start``.
-
-    A `muse exec` is written across several lines in both scanned
-    languages: bash with trailing backslashes, Python as an argv list.
-    Reading only the matched line would report every multi-line call site
-    as unpinned.
-
-    The window follows three signals, all measured on the blanked line so
-    that string contents cannot move them: a bracket still open, a
-    trailing backslash, and a trailing comma — the last because a match
-    can land *inside* an already-open list, where the depth this function
-    can see starts at zero. It ends on the line closing the enclosing
-    bracket, inclusive.
-
-    Comments are stripped from what it returns, so a `# TODO: pass
-    --model` cannot read as a pin.
+    Backslash continuations only. An earlier draft also followed trailing
+    commas, to reach the end of a Python argv list; that rule let a
+    sibling entry which pinned absolve one which did not, so a real
+    finding was reported clean depending on its position in a dict.
+    Python is parsed rather than scanned now, and this follows the one
+    continuation shell actually has.
     """
     collected = []
-    depth = 0
     for offset in range(min(MUSE_STATEMENT_MAX_LINES, len(lines) - start)):
-        code = _muse_code_line(lines[start + offset])
+        code = _muse_shell_code(lines[start + offset])
         collected.append(code)
-        blanked = _muse_blank_literals(code).rstrip()
-        depth += (blanked.count("[") + blanked.count("(")
-                  - blanked.count("]") - blanked.count(")"))
-        if depth < 0:
+        if not code.rstrip().endswith("\\"):
             break
-        if blanked.endswith("\\") or blanked.endswith(",") or depth > 0:
-            continue
-        break
     return "\n".join(collected)
 
 
-def _muse_invocation_on(code: str) -> bool:
-    """Whether ``code`` starts a `muse exec` invocation rather than says so.
+def _muse_shell_findings(text: str) -> List[int]:
+    """Line numbers of shell `muse exec` invocations with no ``--model``."""
+    found = []
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not MUSE_EXEC_RE.search(_muse_shell_code(line)):
+            continue
+        if "--model" in _muse_shell_statement(lines, index):
+            continue
+        found.append(index + 1)
+    return found
 
-    The shell form is rejected when the match begins *inside* a string
-    literal, which is the one prose shape the trailing lookahead cannot
-    see: ``USAGE = "usage: muse exec --json <prompt>"`` is followed by a
-    flag and reads exactly like a call.
 
-    Two things that are not "inside": a match beginning *at* the quote,
-    which is `"$MUSE_BIN" exec`, the shape both runners use; and a string
-    handed to `sh -c`, which is a command however it is quoted.
+def _muse_string_is_a_command(value: object) -> bool:
+    """Whether a Python string literal is a `muse exec` command line."""
+    return isinstance(value, str) and bool(MUSE_EXEC_RE.search(value))
 
-    The argv form is matched on the raw text, because its `"exec"` is
-    itself a string literal.
+
+def _muse_argv_literals(node: "ast.AST") -> Optional[List[str]]:
+    """The string elements of ``node`` if it is a Muse argv sequence.
+
+    A list or tuple naming the `exec` subcommand, where something in it
+    refers to Muse — a literal path, or a constant like ``MUSE_COMMAND``.
+    Returns ``None`` when it is some other sequence.
     """
-    spans = [(match.start(), match.end())
-             for match in MUSE_LITERAL_RE.finditer(code)]
-    for match in MUSE_EXEC_RE.finditer(code):
-        start = match.start()
-        enclosing = next(
-            ((begin, finish) for begin, finish in spans
-             if begin < start < finish), None)
-        if enclosing is None:
-            return True
-        if code[:enclosing[0]].rstrip().endswith("-c"):
-            return True
-    return bool(MUSE_ARGV_RE.search(code))
+    if not isinstance(node, (ast.List, ast.Tuple)):
+        return None
+    literals = [element.value for element in node.elts
+                if isinstance(element, ast.Constant)
+                and isinstance(element.value, str)]
+    if "exec" not in literals:
+        return None
+    names = [element.id for element in node.elts
+             if isinstance(element, ast.Name)]
+    names += [element.attr for element in node.elts
+              if isinstance(element, ast.Attribute)]
+    mentions_muse = (any("muse" in text.lower() for text in literals)
+                     or any("muse" in name.lower() for name in names))
+    return literals if mentions_muse else None
+
+
+def _muse_python_findings(text: str) -> Optional[List[int]]:
+    """Line numbers of Python `muse exec` calls with no ``--model``.
+
+    Parsed, not scanned. Every false positive and every laundered finding
+    the line-based scanner had in Python came from guessing at structure:
+    a docstring that reads like a command, a sibling list entry that
+    pinned, flags appended after the call, `shell=True` with the command
+    in a string. The tree answers all of them exactly.
+
+    Returns ``None`` when the source will not parse, so the caller can
+    fall back rather than silently reporting a file clean.
+    """
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return None
+    found = set()
+    for node in ast.walk(tree):
+        literals = _muse_argv_literals(node)
+        if literals is not None:
+            if "--model" not in literals:
+                found.add(node.lineno)
+            continue
+        if not isinstance(node, ast.Call):
+            continue
+        # `subprocess.run("muse exec ...", shell=True)`, `os.system(...)`:
+        # the command is a string, so the argv rule above never sees it.
+        for argument in node.args:
+            for inner in ast.walk(argument):
+                if isinstance(inner, ast.Constant) \
+                        and _muse_string_is_a_command(inner.value):
+                    if "--model" not in inner.value:
+                        found.add(inner.lineno)
+    return sorted(found)
+
+
+def _muse_findings(path: pathlib.Path, text: str) -> List[int]:
+    """Line numbers of unpinned invocations in one file.
+
+    Python is parsed; shell is scanned. A `.py` that will not parse —
+    Python 2, a template, a fragment — falls back to the scanner rather
+    than being passed over, because a file this cannot read is exactly
+    where an unpinned call would sit unnoticed.
+    """
+    if "exec" not in text:
+        # Nothing here can be an invocation, and most files are this.
+        # Parsing every Python file in every checkout to find that out
+        # cost four seconds of `funnel doctor` for no findings.
+        return []
+    if path.suffix == ".py":
+        parsed = _muse_python_findings(text)
+        if parsed is not None:
+            return parsed
+    return _muse_shell_findings(text)
 
 
 def muse_unpinned_invocations(
@@ -5621,14 +5634,8 @@ def muse_unpinned_invocations(
                 text = path.read_text(errors="replace")
             except OSError:
                 continue
-            lines = text.splitlines()
-            for index, line in enumerate(lines):
-                code = _muse_code_line(line)
-                if not _muse_invocation_on(code):
-                    continue
-                if "--model" in _muse_statement(lines, index):
-                    continue
-                findings.append((str(path), index + 1))
+            for number in _muse_findings(path, text):
+                findings.append((str(path), number))
     return ["{}:{}".format(path, number)
             for path, number in sorted(set(findings))]
 

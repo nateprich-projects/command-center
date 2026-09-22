@@ -251,29 +251,6 @@ def test_a_comment_promising_a_model_is_not_a_pin(tmp_path):
     assert findings(tmp_path) == ["{}:1".format(path)]
 
 
-def test_a_match_inside_an_already_open_list_follows_to_the_close(tmp_path):
-    """The match lands on a continuation line, so the depth this can see
-    starts at zero; the trailing comma is what carries it forward."""
-    write(tmp_path, "cmd.py", (
-        'cmd = [\n'
-        '    MUSE_BIN, "exec",\n'
-        '    "--json",\n'
-        '    "--model", "muse-spark-1.3",\n'
-        ']\n'
-    ))
-    assert findings(tmp_path) == []
-
-
-def test_a_closing_paren_inside_a_string_does_not_end_the_statement(tmp_path):
-    write(tmp_path, "smiley.py", (
-        'subprocess.run(\n'
-        '    [MUSE, "exec", "--prompt", "done :))",\n'
-        '     "--model", "muse-spark-1.3"],\n'
-        ')\n'
-    ))
-    assert findings(tmp_path) == []
-
-
 def test_a_url_earlier_on_the_line_does_not_hide_the_call(tmp_path):
     """`//` is not a comment in either scanned language, and treating it
     as one ate every invocation written after a URL."""
@@ -355,3 +332,124 @@ def test_a_long_word_run_does_not_hang_the_scan(tmp_path):
     started = time.monotonic()
     assert findings(tmp_path) == []
     assert time.monotonic() - started < 5.0
+
+
+# --- shapes a second review round found, after Python moved to `ast` ---
+#
+# The line-based scanner could not tell structure from text. Each case
+# below was a laundered finding or a false positive it produced; the
+# Python half is parsed now, and the shell half stopped guessing at
+# quotes.
+
+
+def test_a_sibling_entry_that_pins_does_not_absolve_one_that_does_not(
+        tmp_path):
+    """The worst of the second round: whether a real finding survived
+    depended on its position in the dict."""
+    path = write(tmp_path, "tasks.py", (
+        'TASKS = {\n'
+        '    "score": [MUSE, "exec", "--json"],\n'
+        '    "rank":  [MUSE, "exec", "--model", "x"],\n'
+        '}\n'
+    ))
+    assert findings(tmp_path) == ["{}:2".format(path)]
+
+
+def test_the_same_holds_with_the_entries_reversed(tmp_path):
+    path = write(tmp_path, "tasks.py", (
+        'TASKS = {\n'
+        '    "rank":  [MUSE, "exec", "--model", "x"],\n'
+        '    "score": [MUSE, "exec", "--json"],\n'
+        '}\n'
+    ))
+    assert findings(tmp_path) == ["{}:3".format(path)]
+
+
+@pytest.mark.parametrize("body", [
+    'subprocess.run("muse exec --json", shell=True)\n',
+    'subprocess.Popen("muse exec --json " + prompt, shell=True)\n',
+    'os.system("muse exec --json")\n',
+])
+def test_a_shell_true_command_string_is_an_invocation(tmp_path, body):
+    """A Python file shelling out to Muse is this check's whole job, and
+    the argv rule never sees it — the command is one string."""
+    write(tmp_path, "call.py", body)
+    assert len(findings(tmp_path)) == 1
+
+
+def test_a_shell_true_command_that_pins_is_not_reported(tmp_path):
+    write(tmp_path, "call.py",
+          'subprocess.run("muse exec --model muse-spark-1.3", shell=True)\n')
+    assert findings(tmp_path) == []
+
+
+def test_flags_appended_after_the_call_do_not_count_as_a_pin(tmp_path):
+    """`--model` on a later line is not in this argv, whatever the text
+    around it looks like."""
+    path = write(tmp_path, "later.py", (
+        'cmd = ["muse", "exec", "--json"]\n'
+        'cmd += ["--model", model]\n'
+    ))
+    assert findings(tmp_path) == ["{}:1".format(path)]
+
+
+def test_a_multiline_docstring_is_not_a_call(tmp_path):
+    write(tmp_path, "help.py", (
+        'HELP = """\n'
+        'Run it like this:\n'
+        '\n'
+        '    muse exec --json <prompt>\n'
+        '"""\n'
+    ))
+    assert findings(tmp_path) == []
+
+
+def test_python_that_will_not_parse_falls_back_rather_than_passing(
+        tmp_path):
+    """A file this cannot read is exactly where an unpinned call would
+    sit unnoticed."""
+    path = write(tmp_path, "broken.py", 'def f(:\n  muse exec --json\n')
+    assert findings(tmp_path) == ["{}:2".format(path)]
+
+
+@pytest.mark.parametrize("body,expected_line", [
+    ("bash -lc \"muse exec --json\"\n", 1),
+    ("ssh host \"muse exec --json\"\n", 1),
+    ("echo don't; muse exec --json 'x'\n", 1),
+])
+def test_shell_quoting_no_longer_hides_a_call(tmp_path, body, expected_line):
+    """Pairing apostrophes let two unrelated quotes swallow a real call,
+    and the `-c` allowance missed `-lc`, `-euc` and `ssh host "..."`.
+    The shell half does not track quotes at all now."""
+    path = write(tmp_path, "wrap.sh", body)
+    assert findings(tmp_path) == ["{}:{}".format(path, expected_line)]
+
+
+def test_an_apostrophe_no_longer_eats_a_shell_comment(tmp_path):
+    write(tmp_path, "note.sh", "echo won't  # it's muse exec --json\n")
+    assert findings(tmp_path) == []
+
+
+def test_a_fragment_or_url_hash_is_not_a_comment(tmp_path):
+    path = write(tmp_path, "url.sh",
+                 'curl -s https://x/y#z && muse exec --json\n')
+    assert findings(tmp_path) == ["{}:1".format(path)]
+
+
+def test_a_shell_variable_holding_the_flags_is_reported(tmp_path):
+    """Not a false positive to apologise for: a pin this check cannot
+    see is a pin the next reader cannot see either."""
+    path = write(tmp_path, "indirect.sh", (
+        'MUSE_ARGS="--model muse-spark-1.3"\n'
+        'muse exec $MUSE_ARGS --json\n'
+    ))
+    assert findings(tmp_path) == ["{}:2".format(path)]
+
+
+def test_a_quoted_command_line_in_shell_is_reported(tmp_path):
+    """The accepted noise cost. Rejecting a match inside a string is
+    what made `bash -lc` and the apostrophe cases invisible, so a shell
+    line quoting a whole flagged command is reported instead. Cheap to
+    silence at the call site; a missed call is not."""
+    write(tmp_path, "count.sh", 'grep -c "muse exec --json" "$log"\n')
+    assert len(findings(tmp_path)) == 1

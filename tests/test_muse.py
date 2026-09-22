@@ -19,7 +19,7 @@ NOW = 1_788_800_000.0
 
 
 def _muse_record(at, *, input_tokens=0, cached_tokens=0, output_tokens=0,
-                 family="provider", usage_id=None):
+                 family="provider", usage_id=None, run_id=None):
     record = {
         "recorded_at": int(at * 1_000_000),
         "payload": {"event": {
@@ -37,7 +37,26 @@ def _muse_record(at, *, input_tokens=0, cached_tokens=0, output_tokens=0,
     }
     if usage_id is not None:
         record["payload"]["event"]["record"]["usage_id"] = usage_id
+    if run_id is not None:
+        record["payload"]["event"]["record"]["owner"] = {"run_id": run_id}
     return record
+
+
+def _muse_model_record(at, run_id, model_id):
+    """The `run.model.configured` event a usage record joins to (#1302).
+
+    A provider usage record carries no model id of its own, only
+    `owner.run_id`; this is where the model name lives.
+    """
+    return {
+        "recorded_at": int(at * 1_000_000),
+        "payload_type": "run.model.configured",
+        "payload": {"record": {
+            "run_stream": {"kind": "run", "id": run_id},
+            "model_id": model_id,
+            "provider_id": "meta",
+        }},
+    }
 
 
 def _muse_fixture(tmp_path, monkeypatch, records):
@@ -333,3 +352,140 @@ def test_muse_model_detection_reads_snapshots_not_jsonl():
     source = heartbeat.MODEL_SOURCES["muse"]
     assert source.endswith("snapshot-*.json"), source
     assert "HEAD" not in source
+
+
+# --- the per-model breakdown, and the card the gate keeps using (#1302) ---
+
+CONTRIBUTOR = "muse-spark-1.3-contributor"
+STANDARD = "muse-spark-1.3"
+
+
+def _mixed_window(tmp_path, monkeypatch):
+    """One window holding a standard run and a contributor run."""
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_model_record(NOW - 100, "run-std", STANDARD),
+        _muse_model_record(NOW - 90, "run-con", CONTRIBUTOR),
+        _muse_record(NOW - 80, input_tokens=1_000_000,
+                     cached_tokens=800_000, output_tokens=100_000,
+                     usage_id="u1", run_id="run-std"),
+        _muse_record(NOW - 70, input_tokens=1_000_000,
+                     cached_tokens=800_000, output_tokens=100_000,
+                     usage_id="u2", run_id="run-con"),
+    ])
+    return usage.read_muse(NOW)
+
+
+def test_the_gated_total_is_the_standard_card_whatever_model_ran(
+        tmp_path, monkeypatch):
+    """The $200 ceiling was calibrated in a window where every session was
+    on the standard model. Re-pricing contributor calls cheaply assumes a
+    price-shaped window, which nothing has established; if it is
+    token-shaped the brake never trips and the lanes walk into a refusal.
+    Same card means the brake does not move."""
+    reading = _mixed_window(tmp_path, monkeypatch)
+
+    card = usage.muse_model.RATE_CARDS[STANDARD]
+    one_call = ((200_000 * card["input"]
+                 + 800_000 * card["cached_input"]
+                 + 100_000 * card["output"]) / 1_000_000)
+    assert reading["spent_dollars"] == pytest.approx(2 * one_call)
+    assert reading["windows"]["seven_day"]["spent_dollars"] == \
+        pytest.approx(2 * one_call)
+
+
+def test_the_breakdown_counts_calls_and_dollars_per_model(
+        tmp_path, monkeypatch):
+    reading = _mixed_window(tmp_path, monkeypatch)
+
+    assert set(reading["by_model"]) == {STANDARD, CONTRIBUTOR}
+    assert reading["by_model"][STANDARD]["calls"] == 1
+    assert reading["by_model"][CONTRIBUTOR]["calls"] == 1
+    assert all(row["has_rate_card"] for row in reading["by_model"].values())
+
+
+def test_each_model_is_priced_both_ways(tmp_path, monkeypatch):
+    """The difference between the two is the size of the open question."""
+    reading = _mixed_window(tmp_path, monkeypatch)
+
+    standard_row = reading["by_model"][STANDARD]
+    contributor_row = reading["by_model"][CONTRIBUTOR]
+
+    # A standard call costs the same either way; there is one card for it.
+    assert standard_row["dollars_at_standard"] == \
+        pytest.approx(standard_row["dollars_at_own_card"])
+    # A contributor call does not, and by a lot: this workload is
+    # cache-heavy, and the cards discount a cache read to 12% and 2%.
+    assert contributor_row["dollars_at_own_card"] < \
+        contributor_row["dollars_at_standard"] / 10
+    assert reading["own_card_dollars"] == pytest.approx(
+        standard_row["dollars_at_own_card"]
+        + contributor_row["dollars_at_own_card"])
+    assert reading["own_card_dollars"] < reading["spent_dollars"]
+
+
+def test_an_unrecognised_model_prices_at_standard_and_is_named(
+        tmp_path, monkeypatch):
+    """A provider version bump would otherwise be mispriced in silence."""
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_model_record(NOW - 100, "run-next", "muse-spark-1.4"),
+        _muse_record(NOW - 80, input_tokens=1_000_000,
+                     cached_tokens=800_000, output_tokens=100_000,
+                     usage_id="u1", run_id="run-next"),
+    ])
+    reading = usage.read_muse(NOW)
+
+    row = reading["by_model"]["muse-spark-1.4"]
+    assert row["has_rate_card"] is False
+    assert row["dollars_at_own_card"] == pytest.approx(
+        row["dollars_at_standard"])
+    assert reading["models_without_a_card"] == ["muse-spark-1.4"]
+    assert reading["spent_dollars"] == pytest.approx(
+        row["dollars_at_standard"])
+
+
+def test_a_record_with_no_model_event_is_named_not_dropped(
+        tmp_path, monkeypatch):
+    """A window full of these means the join has broken. The dollars
+    still count; what must not happen is the records vanishing from the
+    breakdown while the total stays right."""
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_record(NOW - 80, input_tokens=1_000, output_tokens=100,
+                     usage_id="u1", run_id="run-orphan"),
+    ])
+    reading = usage.read_muse(NOW)
+
+    assert list(reading["by_model"]) == [usage.MUSE_MODEL_UNKNOWN]
+    assert reading["by_model"][usage.MUSE_MODEL_UNKNOWN]["calls"] == 1
+    assert reading["models_without_a_card"] == [usage.MUSE_MODEL_UNKNOWN]
+    assert reading["spent_dollars"] > 0
+
+
+def test_one_model_in_a_journal_covers_a_record_that_did_not_join(
+        tmp_path, monkeypatch):
+    """The run id is the join, but a session that configured exactly one
+    model ran on that model whatever the id says."""
+    _muse_fixture(tmp_path, monkeypatch, [
+        _muse_model_record(NOW - 100, "run-a", CONTRIBUTOR),
+        _muse_record(NOW - 80, input_tokens=1_000, output_tokens=100,
+                     usage_id="u1", run_id="some-other-run"),
+    ])
+    reading = usage.read_muse(NOW)
+
+    assert list(reading["by_model"]) == [CONTRIBUTOR]
+
+
+def test_the_ceiling_and_the_reserve_are_untouched():
+    """This ticket corrects what is counted, not what it is counted
+    against. Moving either would change the brake, which is the thing it
+    deliberately leaves alone."""
+    assert usage.MUSE_WEEKLY_CAP_DOLLARS == 200.0
+    assert usage.MUSE_SESSION_RESERVE_DOLLARS == 4.50
+
+
+def test_the_rate_names_still_read_the_standard_card():
+    """The dashboard and the brief import these. They are a view of
+    muse_model's card, never a second copy of it."""
+    card = usage.muse_model.RATE_CARDS[STANDARD]
+    assert usage.MUSE_INPUT_RATE == card["input"] / 1_000_000
+    assert usage.MUSE_CACHED_INPUT_RATE == card["cached_input"] / 1_000_000
+    assert usage.MUSE_OUTPUT_RATE == card["output"] / 1_000_000

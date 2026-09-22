@@ -12,9 +12,8 @@ here before a Codex run may claim anything, and refuses on any difference
 (#1316).
 
 The run's rollout is found by id, not guessed: the app puts the thread id in
-the run's environment (`CODEX_THREAD_ID`, with `CODEX_SESSION_ID` beside it),
-and the rollout's file name ends in that id. The workspace is only a
-cross-check.
+the run's environment (`CODEX_THREAD_ID`), and the rollout's file name ends
+in that id. The workspace is only a cross-check.
 
 The refusal fails closed. A run whose rollout cannot be found or read is
 refused too: a stopped lane shows in the heartbeat within one run, and a
@@ -71,10 +70,12 @@ AUTOMATION_PREFIX = "command-center-"
 #: listed as paths in `file_system_sandbox_policy`.
 SPECIAL_WRITES = frozenset({"slash_tmp", "tmpdir"})
 
-#: The environment variables the app sets to the run's thread id, which is
+#: The environment variable the app sets to the run's thread id, which is
 #: also the id its rollout's file name ends in. Seen in automation runs'
-#: `env` output on 2026-09-10 and 2026-09-17.
-THREAD_ENVS = ("CODEX_THREAD_ID", "CODEX_SESSION_ID")
+#: `env` output on 2026-09-10 and 2026-09-17. `CODEX_SESSION_ID` is
+#: deliberately not a fallback: a subagent's session id is its parent's, so
+#: it would check the parent's settings on the subagent's behalf.
+THREAD_ENVS = ("CODEX_THREAD_ID",)
 THREAD_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-"
                        r"[0-9a-f]{12}$")
 
@@ -140,6 +141,25 @@ def _has_parent_segment(path: str) -> bool:
     return ".." in path.replace("\\", "/").split("/")
 
 
+def _is_workspace(where: object) -> bool:
+    """A directory strictly inside the app's session workspaces.
+
+    Checked as written and with symlinks resolved: the working directory is
+    writable whatever the root list says, so a link from a workspace into
+    the deployed checkout must not pass.
+    """
+    if not isinstance(where, str) or _has_parent_segment(where) or \
+            not os.path.isabs(where):
+        return False
+    for path, base in ((where, SESSION_WORKSPACES),
+                       (os.path.realpath(where),
+                        os.path.realpath(SESSION_WORKSPACES))):
+        if not _inside(path, base) or \
+                os.path.normpath(path) == os.path.normpath(base):
+            return False
+    return True
+
+
 def find_rollout(run: str, *, now: Optional[datetime.datetime] = None,
                  root: Optional[str] = None) -> Optional[str]:
     """This run's rollout: the file whose name ends in its thread id."""
@@ -185,12 +205,12 @@ def _automation_dir(root: str) -> bool:
             and name.startswith(AUTOMATION_PREFIX))
 
 
-def _root_drift(roots: object) -> List[str]:
-    """Drift in ``sandbox_policy.writable_roots``."""
+def _root_drift(roots: object) -> Tuple[List[str], set]:
+    """Drift in ``sandbox_policy.writable_roots``, and its automation dirs."""
     if not isinstance(roots, list) or not all(
             isinstance(root, str) and root for root in roots):
         return ["writable roots: expected a list of paths, found {!r}".format(
-            roots)]
+            roots)], set()
     drift = []
     automations = set()
     for root in roots:
@@ -203,47 +223,72 @@ def _root_drift(roots: object) -> List[str]:
             automations.add(os.path.normpath(root))
         else:
             drift.append("writable root outside the manifest: {}".format(root))
-    if len(automations) > 1:
-        drift.append("writable roots name {} automation directories, "
-                     "expected at most one: {}".format(
-                         len(automations), ", ".join(sorted(automations))))
-    return drift
+    return drift, automations
 
 
-def _entry_drift(policy: object) -> List[str]:
-    """Drift in ``file_system_sandbox_policy``'s write entries.
+def _entry_drift(label: str, policy: object,
+                 kind_key: str) -> Tuple[List[str], set]:
+    """Drift in one restricted entry list, and its automation dirs.
 
     `writable_roots` omits two things the sandbox grants anyway: the run's
-    working directory and the temporary directories. The entry list names
-    all of them, so it is the complete answer to "where may this run
+    working directory and the temporary directories. The entry lists name
+    all of them, so they are the complete answer to "where may this run
     write". The working directory is held to the workspace rule separately.
+    Strict on shape: the list must be `restricted`, and any access other
+    than `read` counts as a write.
     """
-    if policy is None:
-        return []
-    if not isinstance(policy, dict) or not isinstance(
-            policy.get("entries"), list):
-        return ["file system policy: expected entries, found {!r}".format(
-            policy)]
+    if not isinstance(policy, dict) or policy.get(kind_key) != "restricted" \
+            or not isinstance(policy.get("entries"), list):
+        return ["{}: expected a restricted entry list, found {!r}".format(
+            label, policy)], set()
     drift = []
+    automations = set()
     for entry in policy["entries"]:
-        if not isinstance(entry, dict) or entry.get("access") != "write":
+        if not isinstance(entry, dict):
+            drift.append("{}: entry is not a record: {!r}".format(label, entry))
+            continue
+        if entry.get("access") == "read":
             continue
         path = entry.get("path") if isinstance(entry.get("path"), dict) else {}
         if path.get("type") == "special":
             value = path.get("value") if isinstance(
                 path.get("value"), dict) else {}
             if value.get("kind") not in SPECIAL_WRITES:
-                drift.append("write access to special path {}".format(
-                    value.get("kind")))
+                drift.append("{}: write access to special path {}".format(
+                    label, value.get("kind")))
             continue
         target = path.get("path")
         if not isinstance(target, str) or _has_parent_segment(target) or \
                 not os.path.isabs(target):
-            drift.append("write entry is not a plain absolute path: {!r}"
-                         .format(target))
-        elif not (_allowed_root(target) or _automation_dir(target)):
-            drift.append("write access outside the manifest: {}".format(target))
-    return drift
+            drift.append("{}: write entry is not a plain absolute path: {!r}"
+                         .format(label, target))
+        elif _allowed_root(target):
+            continue
+        elif _automation_dir(target):
+            automations.add(os.path.normpath(target))
+        else:
+            drift.append("{}: write access outside the manifest: {}".format(
+                label, target))
+    return drift, automations
+
+
+def _profile_drift(profile: object) -> Tuple[List[str], set]:
+    """Drift in ``permission_profile``, which carries the same grants again.
+
+    It matched the entry list in every one of 1,685 real records, and it is
+    checked the same way rather than trusted to keep matching.
+    """
+    if not isinstance(profile, dict) or profile.get("type") != "managed":
+        return ["permission profile: expected a managed profile, found "
+                "{!r}".format(profile.get("type") if isinstance(
+                    profile, dict) else profile)], set()
+    drift, automations = _entry_drift(
+        "permission profile", profile.get("file_system"), "type")
+    network = profile.get("network")
+    if isinstance(network, dict) and network.get("network") != "enabled":
+        drift.append("permission profile: network expected enabled, "
+                     "found {}".format(network.get("network")))
+    return drift, automations
 
 
 def drift(settings: Mapping, session_cwd: Optional[str] = None) -> List[str]:
@@ -264,10 +309,7 @@ def drift(settings: Mapping, session_cwd: Optional[str] = None) -> List[str]:
                          ("session directory", session_cwd)):
         if where is None and label == "session directory":
             continue
-        if not isinstance(where, str) or _has_parent_segment(where) or \
-                not _inside(where, SESSION_WORKSPACES) or \
-                os.path.normpath(where) == os.path.normpath(
-                    SESSION_WORKSPACES):
+        if not _is_workspace(where):
             found.append("{}: expected a workspace under {}, found {}".format(
                 label, SESSION_WORKSPACES, where))
     sandbox = settings.get("sandbox_policy")
@@ -281,8 +323,20 @@ def drift(settings: Mapping, session_cwd: Optional[str] = None) -> List[str]:
     if sandbox.get("network_access") is not NETWORK_ACCESS:
         found.append("network access: expected {}, found {}".format(
             NETWORK_ACCESS, sandbox.get("network_access")))
-    found.extend(_root_drift(sandbox.get("writable_roots")))
-    found.extend(_entry_drift(settings.get("file_system_sandbox_policy")))
+    root_drift, automations = _root_drift(sandbox.get("writable_roots"))
+    found.extend(root_drift)
+    for key, reader in (
+            ("file_system_sandbox_policy",
+             lambda value: _entry_drift("file system policy", value, "kind")),
+            ("permission_profile", _profile_drift)):
+        if key in settings:
+            more, dirs = reader(settings[key])
+            found.extend(more)
+            automations |= dirs
+    if len(automations) > 1:
+        found.append("the run may write {} automation directories, expected "
+                     "at most one: {}".format(
+                         len(automations), ", ".join(sorted(automations))))
     return found
 
 

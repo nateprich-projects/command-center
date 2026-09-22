@@ -68,7 +68,7 @@ def _entries(cwd=WORKSPACE, extra=()):
 
 def _turn(model="gpt-6-luna", effort="max", approval="never", network=True,
           roots=None, cwd=WORKSPACE, sandbox_type="workspace-write",
-          entries="default"):
+          entries="default", profile="default"):
     payload = {
         "model": model, "effort": effort, "cwd": cwd,
         "sandbox_policy": {"type": sandbox_type,
@@ -81,6 +81,17 @@ def _turn(model="gpt-6-luna", effort="max", approval="never", network=True,
         payload["file_system_sandbox_policy"] = _entries(cwd)
     elif entries is not None:
         payload["file_system_sandbox_policy"] = entries
+    if profile == "default":
+        policy = payload.get("file_system_sandbox_policy") or _entries(cwd)
+        payload["permission_profile"] = {
+            "type": "managed",
+            "file_system": {"type": "restricted",
+                            "entries": list(policy.get("entries", []))
+                            if isinstance(policy, dict) else []},
+            "network": {"type": "managed", "network": "enabled"},
+        }
+    elif profile is not None:
+        payload["permission_profile"] = profile
     return {"type": "turn_context", "payload": payload}
 
 
@@ -132,9 +143,14 @@ def test_the_sessions_root_cannot_be_pointed_elsewhere(monkeypatch, tmp_path):
 
 def test_the_thread_id_comes_from_the_environment():
     assert codex_run.thread_id({"CODEX_THREAD_ID": THREAD}) == THREAD
-    assert codex_run.thread_id({"CODEX_SESSION_ID": THREAD}) == THREAD
     assert codex_run.thread_id({"CODEX_THREAD_ID": THREAD,
                                 "CODEX_SESSION_ID": OTHER_THREAD}) == THREAD
+
+
+def test_the_session_id_is_not_a_fallback():
+    """A subagent's session id is its parent's: falling back to it would
+    check the parent's settings on the subagent's behalf."""
+    assert codex_run.thread_id({"CODEX_SESSION_ID": THREAD}) is None
 
 
 @pytest.mark.parametrize("value", [
@@ -387,18 +403,25 @@ def test_a_second_automation_directory_is_drift(tmp_path):
     (_write(HOME), "write access outside the manifest"),
     (_special("root"), "write access to special path root"),
     (_write("relative/path"), "write entry is not a plain absolute path"),
+    (dict(_write(HOME), access="read_write"),
+     "write access outside the manifest"),
+    ({"path": {"type": "path", "path": HOME}},
+     "write access outside the manifest"),
 ])
 def test_a_write_entry_outside_the_manifest_is_drift(tmp_path, entry,
                                                      fragment):
-    """The entry list is the complete write set; the root list omits the
-    working directory and the temporary directories."""
+    """The entry lists are the complete write set; the root list omits the
+    working directory and the temporary directories. Any access other than
+    `read`, a missing one included, counts as a write. Both lists are
+    checked."""
     _rollout(tmp_path, turns=[_turn(entries=_entries(extra=[entry]))])
 
     result = _check(tmp_path)
 
     assert result["ok"] is False
-    assert any(line.startswith(fragment) for line in result["drift"]), \
-        result["drift"]
+    for label in ("file system policy", "permission profile"):
+        assert any(line.startswith(label) and fragment in line
+                   for line in result["drift"]), (label, result["drift"])
 
 
 def test_the_temporary_directories_are_expected_writes(tmp_path):
@@ -408,16 +431,93 @@ def test_the_temporary_directories_are_expected_writes(tmp_path):
 
 
 def test_a_turn_without_an_entry_list_relies_on_roots_and_workspace(tmp_path):
-    _rollout(tmp_path, turns=[_turn(entries=None)])
+    _rollout(tmp_path, turns=[_turn(entries=None, profile=None)])
 
     assert _check(tmp_path)["ok"] is True
 
 
-@pytest.mark.parametrize("entries", ["restricted", {"kind": "restricted"}])
-def test_a_malformed_entry_list_is_drift(tmp_path, entries):
-    _rollout(tmp_path, turns=[_turn(entries=entries)])
+@pytest.mark.parametrize("entries", [
+    "restricted", {"kind": "restricted"},
+    {"kind": "unrestricted", "entries": []},
+    {"entries": []},
+])
+def test_a_malformed_or_unrestricted_entry_list_is_drift(tmp_path, entries):
+    _rollout(tmp_path, turns=[_turn(entries=entries, profile=None)])
 
     assert _check(tmp_path)["ok"] is False
+
+
+def test_a_second_automation_directory_only_in_the_entries_is_drift(
+        tmp_path):
+    other = os.path.join(codex_run.AUTOMATIONS,
+                         "command-center-tickets-weekday-mornings")
+    _rollout(tmp_path, turns=[_turn(entries=_entries(extra=[_write(other)]))])
+
+    result = _check(tmp_path)
+
+    assert result["ok"] is False
+    assert any("2 automation directories" in line for line in result["drift"])
+
+
+@pytest.mark.parametrize("profile,fragment", [
+    ({"type": "disabled"}, "expected a managed profile"),
+    ("managed", "expected a managed profile"),
+    ({"type": "managed", "file_system": {"type": "unrestricted",
+                                         "entries": []}},
+     "expected a restricted entry list"),
+    ({"type": "managed", "file_system": {
+        "type": "restricted",
+        "entries": [_write(os.path.join(HOME, ".claude",
+                                        "command-center-run"))]}},
+     "write access outside the manifest"),
+    ({"type": "managed",
+      "file_system": {"type": "restricted", "entries": []},
+      "network": {"type": "managed", "network": "restricted"}},
+     "network expected enabled"),
+])
+def test_the_permission_profile_is_checked_like_the_entry_list(
+        tmp_path, profile, fragment):
+    """It carries the same grants again. It matched the entry list in
+    every real record, and it is checked rather than trusted to."""
+    _rollout(tmp_path, turns=[_turn(profile=profile)])
+
+    result = _check(tmp_path)
+
+    assert result["ok"] is False
+    assert any(line.startswith("permission profile") and fragment in line
+               for line in result["drift"]), result["drift"]
+
+
+def test_a_workspace_that_links_elsewhere_is_refused(tmp_path, monkeypatch):
+    """The working directory is writable whatever the root list says; a
+    symlink from a workspace into the deployed checkout must not pass."""
+    workspaces = tmp_path / "Codex"
+    elsewhere = tmp_path / "command-center-run"
+    (workspaces / "2026-09-22").mkdir(parents=True)
+    elsewhere.mkdir()
+    link = workspaces / "2026-09-22" / "run-1"
+    link.symlink_to(elsewhere)
+    monkeypatch.setattr(codex_run, "SESSION_WORKSPACES", str(workspaces))
+    monkeypatch.setattr(codex_run, "WRITABLE_PREFIXES", (
+        codex_run.HEARTBEAT_SPOOL, str(workspaces), codex_run.VISUALIZATIONS))
+    sessions = tmp_path / "sessions"
+    _rollout(sessions, cwd=str(link), turns=[_turn(
+        cwd=str(link), roots=[codex_run.HEARTBEAT_SPOOL, str(workspaces)],
+        entries=None, profile=None)])
+
+    result = _check(sessions, cwd=str(link))
+
+    assert result["ok"] is False
+    assert any("expected a workspace under" in line
+               for line in result["drift"])
+
+    real = workspaces / "2026-09-22" / "run-2"
+    real.mkdir()
+    _rollout(sessions, cwd=str(real), turns=[_turn(
+        cwd=str(real), roots=[codex_run.HEARTBEAT_SPOOL, str(workspaces)],
+        entries=None, profile=None)])
+
+    assert _check(sessions, cwd=str(real))["ok"] is True
 
 
 def test_every_difference_is_reported_not_just_the_first(tmp_path):

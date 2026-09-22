@@ -279,29 +279,6 @@ def _capture_start(monkeypatch):
     return records
 
 
-def test_an_event_can_wait_for_the_next_push(monkeypatch):
-    """A push rewrites the whole agent file; the empty-queue note rides the
-    run's own finish instead of paying for one of its own."""
-    spooled, pushed = [], []
-    monkeypatch.setattr(heartbeat, "_spool",
-                        lambda agent, record: spooled.append(record))
-    monkeypatch.setattr(heartbeat, "_push",
-                        lambda agent, extra=None: pushed.append(extra))
-    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
-
-    kept = heartbeat.record_event("codex", "run-1", "nothing-to-do",
-                                  push=False, queue="empty")
-
-    assert kept == "spooled"
-    assert pushed == []
-    assert spooled[0]["queue"] == "empty"
-    assert "push" not in spooled[0]
-
-    assert heartbeat.record_event("codex", "run-1", "nothing-to-do") == \
-        "pushed"
-    assert len(pushed) == 1
-
-
 @pytest.mark.parametrize("tier", ["standard", "escalated"])
 def test_a_start_records_its_tier(monkeypatch, capsys, tier):
     records = _capture_start(monkeypatch)

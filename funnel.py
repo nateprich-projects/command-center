@@ -12462,10 +12462,8 @@ def _record_queue_empty(agent: str, run: Optional[str],
     try:
         import heartbeat
 
-        # Spooled, not pushed: the run's finish follows within a minute and
-        # carries it, and a push rewrites the whole agent file.
-        heartbeat.record_event(agent, run, "nothing-to-do", push=False,
-                               queue="empty", tier=tier)
+        heartbeat.record_event(agent, run, "nothing-to-do", queue="empty",
+                               tier=tier)
     except Exception:
         # Instrumentation must not gate the thing it instruments.
         pass

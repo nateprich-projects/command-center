@@ -1535,7 +1535,7 @@ def test_begin_records_an_empty_queue_itself(monkeypatch, capsys):
     assert result["queue"] == "empty"
     assert "no standard work waiting" in result["why"]
     assert events == [("codex", "run-id", "nothing-to-do",
-                       {"push": False, "queue": "empty", "tier": "standard"})]
+                       {"queue": "empty", "tier": "standard"})]
     assert writes == []
 
 

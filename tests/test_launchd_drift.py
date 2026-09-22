@@ -154,7 +154,7 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
 
     Both review schedules run `max` (Nate, 2026-09-22, #1315): judgement
     runs on the private model at max effort, and the review tiers now differ
-    only in queue. The implement schedules keep #1189's split, standard `high`
+    in queue and cadence, not in effort. The implement schedules keep #1189's split, standard `high`
     and escalated `max`, until implementation leaves Muse for Codex (#1322).
     History: standard ran `high` from #1191 (Nate, 2026-09-21, #1189); the
     standard reviewer briefly took the engine's default `max` at its

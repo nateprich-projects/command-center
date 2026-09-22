@@ -21,7 +21,9 @@ import muse_model  # noqa: E402
 #: day a repository is cleared again.
 FORMERLY_CLEARED = ("command-center", "FF-Weekly-Start-Sit", "The-League")
 EXCLUDED = ("jeffy-finance-agent", "workbench", "career-toolset")
-MEMBER_REPOS = FORMERLY_CLEARED + EXCLUDED
+#: Every repository carrying the `command-center` topic on 2026-09-22.
+#: `AFL` was never part of #1299's decision either way.
+MEMBER_REPOS = FORMERLY_CLEARED + EXCLUDED + ("AFL",)
 
 #: Spelled out rather than imported. Every other assertion here compares
 #: against `muse_model.CONTRIBUTOR_MODEL` and `muse_model.STANDARD_MODEL`,

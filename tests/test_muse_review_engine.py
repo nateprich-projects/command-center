@@ -1409,20 +1409,6 @@ def test_a_refused_breakdown_apply_finishes_errored(tmp_path):
 # --- which model carries which repository (#1301) ------------------------
 
 
-def _resolver_clearing(*names):
-    """The real resolver with ``names`` on its allowlist.
-
-    The production allowlist is empty since #1315, so every repository
-    resolves to the fallback and a runner that ignored the resolver would
-    look identical. These tests are about the runner carrying the
-    resolver's answer into argv, which only shows when the answer differs.
-    """
-    source = (ROOT / "muse_model.py").read_text()
-    anchor = "CONTRIBUTOR_REPOS = frozenset()"
-    assert source.count(anchor) == 1
-    return source.replace(anchor, "CONTRIBUTOR_REPOS = frozenset({!r})".format(
-        set(names)), 1)
-
 
 def _engine_model(repo):
     args = (repo / "muse.args.1").read_text().splitlines()
@@ -1451,7 +1437,7 @@ def test_a_review_of_a_formerly_cleared_repo_uses_the_private_model(
 
 
 def test_a_review_of_an_allowlisted_repo_carries_the_contributor_model(
-        tmp_path):
+        tmp_path, resolver_clearing):
     """The mechanism outlives the empty list: clear a repository in the
     resolver and the engine must carry that answer, not its fallback."""
     subject = "nateprich-projects/The-League"
@@ -1461,7 +1447,7 @@ def test_a_review_of_an_allowlisted_repo_carries_the_contributor_model(
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
         answers=[_answer()],
-        muse_model_body=_resolver_clearing("The-League"))
+        muse_model_body=resolver_clearing("The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _engine_model(repo) == "muse-spark-1.3-contributor"
@@ -1473,15 +1459,17 @@ def test_a_review_of_an_allowlisted_repo_carries_the_contributor_model(
     "nateprich-projects/career-toolset",
 ])
 def test_a_review_of_an_excluded_repo_uses_the_private_model(
-        tmp_path, subject):
+        tmp_path, subject, resolver_clearing):
     """A review packet carries the PR's diff and ticket text, so this is
-    the lane where a wrong model discloses the most."""
+    the lane where a wrong model discloses the most. Run against #1299's
+    allowlist, not the empty one, so the exclusion is tested."""
     proc, repo = _stubbed_runner(
         tmp_path,
         _begin(work={"pr": PR, "repo": subject,
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
-        answers=[_answer()])
+        answers=[_answer()],
+        muse_model_body=resolver_clearing("command-center", "FF-Weekly-Start-Sit", "The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _engine_model(repo) == "muse-spark-1.3"
@@ -1512,7 +1500,7 @@ def test_a_broken_resolver_still_names_the_private_model(tmp_path):
 
 @pytest.mark.parametrize("job", ["breakdown", "shape"])
 def test_an_issue_job_resolves_the_model_from_its_subject_repo(
-        tmp_path, job):
+        tmp_path, job, resolver_clearing):
     """Breakdown and shape carry no PR, so the repository comes from the
     subject ref rather than from the review's work block. Both branches
     must reach `muse exec` with a model named."""
@@ -1526,7 +1514,7 @@ def test_an_issue_job_resolves_the_model_from_its_subject_repo(
 
     proc, repo = _stubbed_runner(
         tmp_path, begin, packet, answers=(_issue_answer(job),),
-        muse_model_body=_resolver_clearing("The-League"))
+        muse_model_body=resolver_clearing("The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _engine_model(repo) == "muse-spark-1.3-contributor"
@@ -1534,7 +1522,7 @@ def test_an_issue_job_resolves_the_model_from_its_subject_repo(
 
 @pytest.mark.parametrize("job", ["breakdown", "shape"])
 def test_an_issue_job_on_an_excluded_repo_uses_the_private_model(
-        tmp_path, job):
+        tmp_path, job, resolver_clearing):
     begin = _issue_begin(job)
     ref = "nateprich-projects/workbench#" + begin["work"]["ref"].split("#")[1]
     begin["work"]["ref"] = ref
@@ -1544,7 +1532,8 @@ def test_an_issue_job_on_an_excluded_repo_uses_the_private_model(
         packet[key]["ref"] = ref
 
     proc, repo = _stubbed_runner(
-        tmp_path, begin, packet, answers=(_issue_answer(job),))
+        tmp_path, begin, packet, answers=(_issue_answer(job),),
+        muse_model_body=resolver_clearing("command-center", "FF-Weekly-Start-Sit", "The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _engine_model(repo) == "muse-spark-1.3"
@@ -1582,7 +1571,7 @@ def test_a_resolver_printing_nothing_still_names_the_private_model(tmp_path):
     assert _engine_model(repo) == "muse-spark-1.3"
 
 
-def test_the_retry_reuses_the_model_it_resolved(tmp_path):
+def test_the_retry_reuses_the_model_it_resolved(tmp_path, resolver_clearing):
     """The repository does not change between attempts, and re-resolving
     would be one more place for the answer to differ."""
     subject = "nateprich-projects/The-League"
@@ -1592,7 +1581,7 @@ def test_the_retry_reuses_the_model_it_resolved(tmp_path):
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
         answers=["not json at all", _answer()],
-        muse_model_body=_resolver_clearing("The-League"))
+        muse_model_body=resolver_clearing("The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 2

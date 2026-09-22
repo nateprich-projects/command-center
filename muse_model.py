@@ -55,8 +55,9 @@ CONTRIBUTOR_REPOS = frozenset()
 #: bill or a panel: it is the card LEARNINGS.md recorded on 2026-09-10
 #: and then retracted on 2026-09-20, kept here because it is the only
 #: published figure, not because it was confirmed. Anything gating spend
-#: on the contributor card is trusting an unverified number; see #1304,
-#: which reads the panel after the lanes move.
+#: on the contributor card is trusting an unverified number. #1304 was to
+#: read the panel once the lanes moved; #1315 withdrew the routing the same
+#: day, so no lane sends it contributor traffic to read.
 RATE_CARDS: Dict[str, Dict[str, float]] = {
     CONTRIBUTOR_MODEL: {"input": 0.10, "cached_input": 0.002, "output": 0.20},
     STANDARD_MODEL: {"input": 1.25, "cached_input": 0.15, "output": 4.25},
@@ -133,8 +134,8 @@ def model_for(repo: Optional[str]) -> str:
 
     Fails safe in the only direction that matters: anything not named
     exactly on the allowlist — an unknown repository, a near-miss
-    spelling, an empty string, ``None``, or one of the three names under
-    an owner they do not live under — gets the private model. A
+    spelling, an empty string, ``None``, or a cleared name under an
+    owner it does not live under — gets the private model. A
     repository nobody has cleared is therefore safe by default, and
     adding one is a deliberate edit here rather than an accident
     somewhere else.

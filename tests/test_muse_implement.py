@@ -749,20 +749,6 @@ def test_a_fresh_workspace_resolves_uid_and_pushes_over_ssh(tmp_path):
 # --- which model carries which repository (#1301) ------------------------
 
 
-def _resolver_clearing(*names):
-    """The real resolver with ``names`` on its allowlist.
-
-    The production allowlist is empty since #1315, so every repository
-    resolves to the fallback and a runner that ignored the resolver would
-    look identical. These tests are about the runner carrying the
-    resolver's answer into argv, which only shows when the answer differs.
-    """
-    source = (ROOT / "muse_model.py").read_text()
-    anchor = "CONTRIBUTOR_REPOS = frozenset()"
-    assert source.count(anchor) == 1
-    return source.replace(anchor, "CONTRIBUTOR_REPOS = frozenset({!r})".format(
-        set(names)), 1)
-
 
 def _model_in_argv(repo_dir):
     args = (repo_dir / "muse.args.1").read_text().splitlines()
@@ -785,13 +771,13 @@ def test_a_formerly_cleared_repo_runs_on_the_private_model(tmp_path, repo):
     assert _model_in_argv(runner_repo) == "muse-spark-1.3"
 
 
-def test_an_allowlisted_repo_reaches_argv_as_the_contributor_model(tmp_path):
+def test_an_allowlisted_repo_reaches_argv_as_the_contributor_model(tmp_path, resolver_clearing):
     """The mechanism outlives the empty list: clear a repository in the
     resolver and the runner must carry that answer, not its fallback."""
     repo = "nateprich-projects/The-League"
     proc, runner_repo = _stubbed_runner(
         tmp_path, _begin(work={"ref": repo + "#42", "repo": repo}),
-        muse_model_body=_resolver_clearing("The-League"))
+        muse_model_body=resolver_clearing("The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _model_in_argv(runner_repo) == "muse-spark-1.3-contributor"
@@ -802,12 +788,15 @@ def test_an_allowlisted_repo_reaches_argv_as_the_contributor_model(tmp_path):
     "nateprich-projects/workbench",
     "nateprich-projects/career-toolset",
 ])
-def test_an_excluded_repo_runs_on_the_private_model(tmp_path, repo):
+def test_an_excluded_repo_runs_on_the_private_model(tmp_path, repo,
+                                                   resolver_clearing):
     """The three he kept off Discounted Services. If this ever names the
     contributor model, confidential code is going somewhere he declined
-    to send it."""
+    to send it. Run against #1299's allowlist, not the empty one, so the
+    exclusion is tested rather than implied."""
     proc, runner_repo = _stubbed_runner(
-        tmp_path, _begin(work={"ref": repo + "#42", "repo": repo}))
+        tmp_path, _begin(work={"ref": repo + "#42", "repo": repo}),
+        muse_model_body=resolver_clearing("command-center", "FF-Weekly-Start-Sit", "The-League"))
 
     assert proc.returncode == 0, proc.stderr
     assert _model_in_argv(runner_repo) == "muse-spark-1.3"

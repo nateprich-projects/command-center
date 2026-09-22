@@ -12354,19 +12354,21 @@ def _record_begin_config_drift(agent: str, run: Optional[str],
     """Record a settings refusal the way the reserve gate records its own.
 
     An event, not a finish: the routine owns the terminal finish for a
-    stopped ``begin`` and maps gate ``config`` to ``skipped-config-drift``.
-    The event makes the refusal machine-readable even if a stale copy of the
-    routine files the finish under another outcome.
+    stopped ``begin`` and maps gate ``config`` to ``config-drift``, and a
+    second finish would be refused. The event makes the refusal
+    machine-readable even if a stale copy of the routine files the finish
+    under another outcome. The name is deliberately not ``skipped-*``: the
+    watchdog treats those as the system working, and a drifted run is not.
     """
     import heartbeat
 
     note = str(why)
     try:
-        heartbeat.record_event(agent, run, "skipped-config-drift", note=note)
+        heartbeat.record_event(agent, run, "config-drift", note=note)
     except Exception as exc:  # instrumentation must not unblock the gate
-        print("funnel: could not record skipped-config-drift: {}".format(
+        print("funnel: could not record config-drift: {}".format(
             str(exc) or type(exc).__name__), file=sys.stderr)
-    print("funnel: skipped-config-drift: {}".format(note), file=sys.stderr)
+    print("funnel: config-drift: {}".format(note), file=sys.stderr)
 
 
 def _record_begin_reserve(agent: str, run: Optional[str], why: object) -> None:

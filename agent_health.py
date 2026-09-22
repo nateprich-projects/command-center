@@ -42,6 +42,13 @@ OPEN_START_MULTIPLE = 10
 ERROR_THRESHOLD = 3
 WEEK = 7 * 86400
 
+#: A Codex run refused because its settings differ from `codex_run.py`
+#: (#1316). One is enough to report: the refusal repeats on every run until
+#: someone fixes the automation, and the lane does no work meanwhile. A day
+#: rather than a week, so the alarm clears soon after the fix.
+CONFIG_DRIFT_OUTCOME = "config-drift"
+CONFIG_DRIFT_WINDOW = 86400
+
 #: The provider hold the Muse lanes write when a window is spent. The same file
 #: the runners check (`scripts/muse-quota-hold.sh`), read here so the watchdog
 #: and the lanes cannot disagree about whether an agent is parked or dead.
@@ -451,6 +458,19 @@ def assess(
             "`{}` errored {} times this week.{}".format(
                 agent, len(errored),
                 (" Most recent: " + "; ".join(notes)) if notes else "",
+            )
+        )
+
+    drifted = _recent_outcomes(
+        rows, now, CONFIG_DRIFT_OUTCOME, CONFIG_DRIFT_WINDOW)
+    if drifted:
+        newest = max(drifted, key=lambda r: r.get("ts") or 0)
+        problems.append(
+            "`{}` refused {} run(s) in the last day because its settings "
+            "differ from codex_run.py (#1316).{}".format(
+                agent, len(drifted),
+                (" Most recent: " + str(newest["note"]))
+                if newest.get("note") else "",
             )
         )
     return problems

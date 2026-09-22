@@ -15,6 +15,9 @@ different fixes:
   itself.
 - **Stale runtime.** Three consecutive scheduled runs used a checkout that
   GitHub reports behind `main` after the normal keeper lag.
+- **Config drift.** A Codex run refused in the last day because its model,
+  effort or sandbox differed from `codex_run.py` (#1316). One is enough: the
+  refusal repeats on every run until someone fixes the automation.
 
 Deliberately *not* reported: any `skipped-*` outcome and `nothing-to-do`. Those
 are the system working, and paging on them would train the alert to be ignored.

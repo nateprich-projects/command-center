@@ -23,12 +23,24 @@ limited to the heartbeat spool, all of `~/Documents/Codex`, the automation's
 own `~/.codex/automations/<id>` directory and a dated
 `~/.codex/visualizations` directory.
 
-Two consequences. What a run got can be checked on the run itself, without
-trusting `automation.toml`, which the app has overwritten from its own
-copy (the 2026-09-06 entry below). #1316's `begin` gate does exactly that,
-using the workspace as the join because no session id reaches the
-environment. And each run may write its own automation directory, so a
-run can rewrite its own automation's schedule, model or prompt. The gate
+The run's thread id reaches its environment as `CODEX_THREAD_ID` (with
+`CODEX_SESSION_ID` beside it), and it is the id the rollout's file name
+ends in and its `session_meta.id`. That shows in automation runs' `env`
+output on 2026-09-10 and 2026-09-17. A first draft of #1316 said no id
+reached the environment and matched rollouts by workspace; review found
+the variables.
+
+`writable_roots` is not the whole write set. The run's working directory
+and the temporary directories are writable too; only
+`file_system_sandbox_policy`'s `entries` list all of them.
+
+Three consequences. What a run got can be checked on the run itself,
+without trusting `automation.toml`, which the app has overwritten from its
+own copy (the 2026-09-06 entry below). #1316's `begin` gate does exactly
+that, finding the rollout by thread id. It holds the working directory to
+the app's workspaces, since that directory is writable whatever the root
+list says. And each run may write its own automation directory, so a run
+can rewrite its own automation's schedule, model or prompt. The gate
 refuses a run that may write a second one.
 
 The same day, all five Command Center automations still named GPT-5.6

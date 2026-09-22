@@ -89,7 +89,8 @@ OUTCOMES = [
     "skipped-blocked",     # prerequisite has not landed; no change made
     "skipped-human-step",   # paused for a required human action
     "skipped-api-reserve",  # GraphQL budget below the reserve floor (#273)
-    "skipped-config-drift",  # a Codex run's settings differ from codex_run.py (#1316)
+    "config-drift",        # a Codex run's settings differ from codex_run.py (#1316);
+                           # not `skipped-*`, which the watchdog treats as healthy
     "skipped-provider-quota",  # the model provider refused: its usage window is spent
     "budget-exhausted",     # begin could not start after the GraphQL pool hit zero
     "errored",             # tried and failed

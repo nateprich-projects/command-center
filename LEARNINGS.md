@@ -8,6 +8,35 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### A Codex rollout records the settings its run actually got
+
+**2026-09-22 · Codex desktop · measured**
+
+Every rollout under `~/.codex/sessions/YYYY/MM/DD/` has a `session_meta`
+record whose `cwd` is the session's workspace (for an automation, a fresh
+directory under `~/Documents/Codex/<date>/`). It also has `turn_context`
+records carrying the run's effective `model`, `effort`,
+`sandbox_policy.writable_roots`, `sandbox_policy.network_access` and
+`approval_policy`. Read on a 2026-09-18 standard-lane run:
+`gpt-5.6-luna` / `max`, approval `never`, network on, with writable roots
+limited to the heartbeat spool, all of `~/Documents/Codex`, the automation's
+own `~/.codex/automations/<id>` directory and a dated
+`~/.codex/visualizations` directory.
+
+Two consequences. What a run got can be checked on the run itself, without
+trusting `automation.toml`, which the app has overwritten from its own
+copy (the 2026-09-06 entry below). #1316's `begin` gate does exactly that,
+using the workspace as the join because no session id reaches the
+environment. And each run may write its own automation directory, so a
+run can rewrite its own automation's schedule, model or prompt. The gate
+refuses a run that may write a second one.
+
+The same day, all five Command Center automations still named GPT-5.6
+(`gpt-5.6-luna` / `max`, and `gpt-5.6-sol` / `high` on the four escalated
+windows), although `~/.codex/config.toml` had auto-migrated to
+`gpt-6-luna` / `high`. An automation's model is its own. A global migration
+does not reach it, and flipping it back on unedited runs the old model.
+
 ### Run-path prose moved out of routines and skills (#825)
 
 **2026-09-21 · word counts measured on this checkout**

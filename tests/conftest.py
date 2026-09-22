@@ -65,3 +65,32 @@ def heartbeat_isolation(monkeypatch, tmp_path, offline_bin):
                                 os.environ.get("PATH", "")))
 
     yield test_spool
+
+
+#: What the shared seam answers when a test does not say otherwise.
+CODEX_SETTINGS_MATCH = {
+    "ok": True,
+    "rollout": None,
+    "effective": {"model": "gpt-6-luna", "effort": "max"},
+    "drift": [],
+    "why": "",
+}
+
+
+@pytest.fixture(autouse=True)
+def codex_settings_match(monkeypatch):
+    """Codex runs in tests match the manifest unless a test says otherwise.
+
+    ``begin --agent codex`` reads the run's own rollout under
+    ``~/.codex/sessions`` (#1316). A test must not pass or fail on whatever
+    this machine's Codex app last wrote there, so the seam answers "matches"
+    by default. The check itself is tested against fixture rollouts in
+    ``test_codex_run.py``, which gets the real seam from this fixture's
+    value when it needs it.
+    """
+    import funnel
+
+    real = funnel._codex_settings_check
+    monkeypatch.setattr(funnel, "_codex_settings_check",
+                        lambda: dict(CODEX_SETTINGS_MATCH))
+    yield real

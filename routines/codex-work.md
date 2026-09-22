@@ -23,7 +23,7 @@ until the process exits. Never treat that yield as a failure, and never invoke
 Work one ticket, then stop. When `do` is `stop`, finish the printed `run` with
 the reported gate’s established outcome (`over` is `skipped-over-pace`,
 `unknown` is `skipped-usage-unknown`, `reserve` is `skipped-api-reserve`,
-otherwise `nothing-to-do`) and stop.
+`config` is `skipped-config-drift`, otherwise `nothing-to-do`) and stop.
 
 When `do` is `ticket`, the ticket is already claimed. Treat `packet` as the
 implementation evidence: read its ticket, parent plan, current-head verdict,

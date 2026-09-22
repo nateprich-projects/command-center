@@ -447,7 +447,7 @@ def _executable(path, body):
 
 def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
                     routine_body=None, bound_seconds=20, extra_env=None,
-                    timeout=40):
+                    timeout=40, muse_model_body=None):
     """Run the engine against stub funnel/heartbeat/packet/apply/gh/muse."""
     repo = tmp_path / "repo"
     # exist_ok: the flag-rejection test drives the runner four times in one
@@ -474,6 +474,11 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
     (repo / "heartbeat.py").write_text(HEARTBEAT_STUB)
     (repo / "review-packet").write_text(PACKET_STUB)
     (repo / "review-apply").write_text(APPLY_STUB)
+    # The real module, not a stub: the model tests below assert that the
+    # runner's argv comes from the real allowlist.
+    (repo / "muse_model.py").write_text(
+        muse_model_body if muse_model_body is not None
+        else (ROOT / "muse_model.py").read_text())
     (repo / "breakdown-packet").write_text(_issue_packet_stub("breakdown"))
     (repo / "breakdown-apply").write_text(BREAKDOWN_APPLY_STUB)
     (repo / "shape-packet").write_text(_issue_packet_stub("shape"))
@@ -572,12 +577,26 @@ def test_the_runner_reads_the_routine_at_run_time():
     assert "PACKET_JSON" in runner
 
 
-def test_the_runner_uses_the_model_without_the_data_sharing_notice():
+def test_the_runner_always_names_a_model_and_never_hardcodes_one():
+    """Superseded the flat pin on 2026-09-22 (#1301).
+
+    The runner used to pass `--model muse-spark-1.3` literally, and this
+    test asserted the word "contributor" appeared nowhere in it. Three
+    repositories may now use the contributor model by Nate's decision, so
+    the flag is resolved per repository — but the invariant that matters
+    is unchanged and is what this asserts: `--model` is always in argv,
+    and its value is never written into this file.
+    """
     runner = SCRIPT.read_text()
     body = "\n".join(
         line for line in runner.splitlines() if not line.strip().startswith("#"))
-    assert "--model muse-spark-1.3" in body
+    assert '--model "$MUSE_MODEL"' in body
+    assert "--model muse-spark-1.3" not in body
     assert "contributor" not in body
+    # The only model id in the body is the fail-closed anchor.
+    assert body.count("muse-spark-1.3") == 1
+    assert 'MUSE_FALLBACK_MODEL="muse-spark-1.3"' in body
+    assert "muse_model.py" in body
 
 
 def test_the_runner_disables_every_model_tool():
@@ -1374,3 +1393,112 @@ def test_a_refused_breakdown_apply_finishes_errored(tmp_path):
     assert "is closed" in heartbeat
 
 
+
+
+# --- which model carries which repository (#1301) ------------------------
+
+
+def _engine_model(repo):
+    args = (repo / "muse.args.1").read_text().splitlines()
+    assert "--model" in args, args
+    return args[args.index("--model") + 1]
+
+
+@pytest.mark.parametrize("subject", [
+    "nateprich-projects/command-center",
+    "nateprich-projects/FF-Weekly-Start-Sit",
+    "nateprich-projects/The-League",
+])
+def test_a_review_of_a_cleared_repo_uses_the_contributor_model(
+        tmp_path, subject):
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"pr": PR, "repo": subject,
+                     "ref": subject + "#6", "tier": "escalated"}),
+        _packet(repo=subject),
+        answers=[_answer()])
+
+    assert proc.returncode == 0, proc.stderr
+    assert _engine_model(repo) == "muse-spark-1.3-contributor"
+
+
+@pytest.mark.parametrize("subject", [
+    "nateprich-projects/jeffy-finance-agent",
+    "nateprich-projects/workbench",
+    "nateprich-projects/career-toolset",
+])
+def test_a_review_of_an_excluded_repo_uses_the_private_model(
+        tmp_path, subject):
+    """A review packet carries the PR's diff and ticket text, so this is
+    the lane where a wrong model discloses the most."""
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"pr": PR, "repo": subject,
+                     "ref": subject + "#6", "tier": "escalated"}),
+        _packet(repo=subject),
+        answers=[_answer()])
+
+    assert proc.returncode == 0, proc.stderr
+    assert _engine_model(repo) == "muse-spark-1.3"
+
+
+def test_a_review_of_an_unknown_repo_uses_the_private_model(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), answers=[_answer()])
+
+    assert proc.returncode == 0, proc.stderr
+    assert _engine_model(repo) == "muse-spark-1.3"
+
+
+def test_a_broken_resolver_still_names_the_private_model(tmp_path):
+    """An argv with no `--model` is the exact failure this prevents."""
+    subject = "nateprich-projects/The-League"
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"pr": PR, "repo": subject,
+                     "ref": subject + "#6", "tier": "escalated"}),
+        _packet(repo=subject),
+        answers=[_answer()],
+        muse_model_body="raise SystemExit('resolver is broken')\n")
+
+    assert proc.returncode == 0, proc.stderr
+    assert _engine_model(repo) == "muse-spark-1.3"
+
+
+@pytest.mark.parametrize("job", ["breakdown", "shape"])
+def test_an_issue_job_resolves_the_model_from_its_subject_repo(
+        tmp_path, job):
+    """Breakdown and shape carry no PR, so the repository comes from the
+    subject ref rather than from the review's work block. Both branches
+    must reach `muse exec` with a model named."""
+    begin = _issue_begin(job)
+    ref = "nateprich-projects/The-League#" + begin["work"]["ref"].split("#")[1]
+    begin["work"]["ref"] = ref
+    packet = _issue_packet(job)
+    key = "project" if job == "breakdown" else "idea"
+    if key in packet:
+        packet[key]["ref"] = ref
+
+    proc, repo = _stubbed_runner(
+        tmp_path, begin, packet, answers=(_issue_answer(job),))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _engine_model(repo) == "muse-spark-1.3-contributor"
+
+
+@pytest.mark.parametrize("job", ["breakdown", "shape"])
+def test_an_issue_job_on_an_excluded_repo_uses_the_private_model(
+        tmp_path, job):
+    begin = _issue_begin(job)
+    ref = "nateprich-projects/workbench#" + begin["work"]["ref"].split("#")[1]
+    begin["work"]["ref"] = ref
+    packet = _issue_packet(job)
+    key = "project" if job == "breakdown" else "idea"
+    if key in packet:
+        packet[key]["ref"] = ref
+
+    proc, repo = _stubbed_runner(
+        tmp_path, begin, packet, answers=(_issue_answer(job),))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _engine_model(repo) == "muse-spark-1.3"

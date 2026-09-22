@@ -415,3 +415,115 @@ def test_the_brief_reads_the_hold_only_for_muse(monkeypatch):
     assert len(seen) == 1
     assert [row["agent"] for row in rows] == ["muse"]
     assert "parked until" in rows[0]["condition"]
+
+
+# -- counts are of runs, not of rows (#1225, #1239) -------------------------
+
+
+def _duplicated(row, times=3):
+    """The measured duplicate shape: byte-identical, same ts."""
+    return [dict(row) for _ in range(times)]
+
+
+def test_an_errored_run_written_three_times_counts_once():
+    """agent_health read 67 muse errors against 55 true runs (2026-09-21)."""
+    rows = []
+    for index in range(3):
+        rows += _duplicated({
+            "run": "r{}".format(index),
+            "phase": "finish",
+            "ts": NOW.timestamp() - (index + 1) * 3600,
+            "agent": "muse",
+            "outcome": "errored",
+            "note": "boom",
+        })
+
+    conditions = assess("muse", rows, NOW.timestamp())
+
+    errored = [c for c in conditions if "errored" in c]
+    assert len(errored) == 1
+    assert "3" in errored[0]
+    assert "9" not in errored[0]
+
+
+def test_two_errored_runs_stay_under_the_threshold_however_often_written():
+    rows = []
+    for index in range(2):
+        rows += _duplicated({
+            "run": "r{}".format(index),
+            "phase": "finish",
+            "ts": NOW.timestamp() - (index + 1) * 3600,
+            "agent": "muse",
+            "outcome": "errored",
+        }, times=4)
+
+    assert [c for c in assess("muse", rows, NOW.timestamp())
+            if "errored" in c] == []
+
+
+def test_duplicate_records_do_not_tighten_the_cadence_inference():
+    """A record written twice with the same ts is a gap of zero that never
+    happened, and it drags the p90 down."""
+    clean = _muse_rows(12, first_minutes_ago=600, gap_minutes=10)
+    doubled = [dict(row) for row in clean for _ in range(2)]
+
+    assert assess("muse", doubled, NOW.timestamp()) == assess(
+        "muse", clean, NOW.timestamp()
+    )
+
+
+def test_one_record_per_run_keeps_the_newest_and_the_unattributed():
+    import heartbeat
+
+    rows = [
+        {"run": "a", "phase": "finish", "ts": 10, "outcome": "errored"},
+        {"run": "a", "phase": "finish", "ts": 20, "outcome": "done"},
+        {"phase": "event", "ts": 30, "note": "no run id"},
+    ]
+
+    kept = heartbeat.one_record_per_run(rows)
+
+    assert len(kept) == 2
+    assert kept[0]["outcome"] == "done"
+    assert kept[1]["note"] == "no run id"
+
+
+def test_distinct_records_keeps_genuinely_different_events():
+    import heartbeat
+
+    rows = [
+        {"run": "a", "phase": "api_cost", "ts": 10,
+         "api_cost": {"gh_calls": 5}},
+        {"run": "a", "phase": "api_cost", "ts": 10,
+         "api_cost": {"gh_calls": 5}},
+        {"run": "a", "phase": "api_cost", "ts": 20,
+         "api_cost": {"gh_calls": 7}},
+    ]
+
+    assert len(heartbeat.distinct_records(rows)) == 2
+
+
+def test_a_run_cost_is_not_multiplied_by_duplicate_writes():
+    """Per-run costs in #685 and #1125 read up to ~45% high from raw records."""
+    import heartbeat
+
+    event = {"run": "a", "phase": "api_cost", "ts": 10,
+             "api_cost": {"gh_calls": 12, "graphql_points": 30}}
+    once = heartbeat.api_cost_for_run([event], "a")
+    thrice = heartbeat.api_cost_for_run([dict(event) for _ in range(3)], "a")
+
+    assert once == thrice
+    assert once["gh_calls"] == 12
+
+
+def test_two_real_commands_in_one_run_still_add_up():
+    import heartbeat
+
+    rows = [
+        {"run": "a", "phase": "api_cost", "ts": 10,
+         "api_cost": {"gh_calls": 12, "graphql_points": 30}},
+        {"run": "a", "phase": "api_cost", "ts": 20,
+         "api_cost": {"gh_calls": 8, "graphql_points": 10}},
+    ]
+
+    assert heartbeat.api_cost_for_run(rows, "a")["gh_calls"] == 20

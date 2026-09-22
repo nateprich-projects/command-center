@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""muse_model.py — which Muse model carries which repository, and what it costs.
+"""muse_model.py — which Muse model carries a repository, and what it costs.
 
 Muse's model catalog marks ``muse-spark-1.3-contributor`` as ``is_default:
 true``, so a ``muse exec`` that omits ``--model`` resolves to Meta's
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence
 
 #: Meta's Discounted Services model. Content sent here is eligible for
 #: product improvement, so only repositories on the allowlist may use it.
@@ -47,26 +47,56 @@ CONTRIBUTOR_REPOS = frozenset({
 #: two cards are not a flat multiple — contributor discounts a cache read
 #: to 2% of a fresh token where standard discounts to 12% — so a scaling
 #: factor cannot stand in for two cards on this cache-heavy workload.
-#: Standard confirmed by Nate 2026-09-20; contributor from the same card
-#: comparison recorded in usage.py and LEARNINGS.md.
+#:
+#: **The two cards do not have the same standing.** Standard was checked
+#: against the account on 2026-09-20 and its anchored total matched the
+#: panel to 0.22 of a point. Contributor has never been checked against a
+#: bill or a panel: it is the card LEARNINGS.md recorded on 2026-09-10
+#: and then retracted on 2026-09-20, kept here because it is the only
+#: published figure, not because it was confirmed. Anything gating spend
+#: on the contributor card is trusting an unverified number; see #1304,
+#: which reads the panel after the lanes move.
 RATE_CARDS: Dict[str, Dict[str, float]] = {
     CONTRIBUTOR_MODEL: {"input": 0.10, "cached_input": 0.002, "output": 0.20},
     STANDARD_MODEL: {"input": 1.25, "cached_input": 0.15, "output": 4.25},
 }
 
 
+#: The owners whose repositories this funnel works. An `owner/name` from
+#: any other owner is not one of Nate's repositories, whatever it is
+#: called: `someone-else/The-League` is a fork or a collaborator's copy,
+#: and the allowlist says nothing about it.
+KNOWN_OWNERS = frozenset({"nateprich-projects", "nateprich"})
+
+
 def repo_name(repo: Optional[str]) -> str:
     """The bare repository name from either `owner/name` or `name`.
 
     The runners get `owner/name` from ``funnel.py begin`` while a human
-    or a test says `name`; both must resolve the same way. Anything that
-    is not a string is not a repository, and returns the empty string so
-    the caller lands on the standard model rather than raising inside a
-    lane that is mid-ticket.
+    or a test says `name`; both must resolve the same way. Anything else
+    returns the empty string, so the caller lands on the standard model
+    rather than raising inside a lane that is mid-ticket.
+
+    **A filesystem path is not a repository.** The naive reading of this
+    function — take the last segment after a slash — accepts
+    ``/Users/nateprich/.claude/command-center``, ``~/.claude/command-center``
+    and ``https://github.com/anyone/The-League`` as allowlisted. Both
+    runners hold a `REPO` variable that is a *path* to a checkout beside
+    the `BEGIN_REPO` that is an `owner/name`, so passing the wrong one is
+    a one-character mistake that would route every repository, including
+    the excluded ones, to the training tier while this module reported
+    exactly what the allowlist promised. At most one slash, and a known
+    owner before it.
     """
     if not isinstance(repo, str):
         return ""
-    return repo.strip().rsplit("/", 1)[-1]
+    candidate = repo.strip()
+    if "/" not in candidate:
+        return candidate
+    owner, _, name = candidate.partition("/")
+    if "/" in name or owner.strip() not in KNOWN_OWNERS:
+        return ""
+    return name.strip()
 
 
 def model_for(repo: Optional[str]) -> str:
@@ -84,19 +114,22 @@ def model_for(repo: Optional[str]) -> str:
 
 
 def rate_card(model: Optional[str]) -> Dict[str, float]:
-    """The rate card for ``model``, defaulting to the standard card.
+    """A copy of the rate card for ``model``, defaulting to the standard.
 
-    An unrecognised or missing model id prices at the dearer card. The
-    only consumer is a spending gate, where over-reading stops the lanes
-    early and under-reading walks them into the provider's refusal, so
-    the conservative direction is the expensive one.
+    An unrecognised or missing model id prices at the dearer card, which
+    is the recoverable direction: over-reading stops the lanes early and
+    visibly, while under-reading walks them into the provider's refusal.
+
+    The copy is not ceremony. The only consumer is a spending gate, and
+    handing it the live module dict means one careless mutation silently
+    re-prices every later reading in the process.
     """
     if isinstance(model, str) and model in RATE_CARDS:
-        return RATE_CARDS[model]
-    return RATE_CARDS[STANDARD_MODEL]
+        return dict(RATE_CARDS[model])
+    return dict(RATE_CARDS[STANDARD_MODEL])
 
 
-def main(argv: Optional[list] = None) -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
     """Print one model id, for the bash runners to put in their argv."""
     parser = argparse.ArgumentParser(
         prog="muse_model.py",

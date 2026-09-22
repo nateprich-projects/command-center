@@ -1273,6 +1273,36 @@ def append_records(
     return 0
 
 
+def resolve_derive_repos(repos: Optional[Sequence[str]],
+                         all_members: bool) -> List[str]:
+    """Which repositories one ``derive`` run scans.
+
+    ``--all-members`` asks GitHub which repositories carry the funnel topic
+    rather than reading a list kept here: AGENTS.md's "GitHub is the state",
+    and the same reason ``funnel.member_repos`` calls itself "never an
+    allowlist" — a repository that opts in must be scanned without anyone
+    remembering to edit a schedule.
+
+    It fails closed on an empty answer. A scheduled run that silently scanned
+    nothing would append no records and report success, and the gap would look
+    exactly like a quiet day.
+    """
+    if all_members:
+        if repos:
+            raise OutcomeError(
+                "--all-members scans every member repository; do not also "
+                "pass --repo"
+            )
+        members = funnel.member_repos()
+        if not members:
+            raise OutcomeError(
+                "--all-members resolved no member repositories; refusing to "
+                "derive nothing and report success"
+            )
+        return list(members)
+    return list(repos or [REPO])
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1286,6 +1316,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     derive.add_argument(
         "--ticket", action="append", type=int, default=None,
         help="only derive these closed issue numbers; repeat to sample a run",
+    )
+    derive.add_argument(
+        "--all-members", action="store_true",
+        help="scan every member repository, resolved from the funnel topic "
+             "rather than from a list kept here",
     )
     derive.add_argument(
         "--dry-run", action="store_true",
@@ -1315,7 +1350,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ))
             return 0
 
-        repos = args.repo or [REPO]
+        repos = resolve_derive_repos(args.repo, args.all_members)
         records: List[Dict[str, object]] = []
         for repo in repos:
             records.extend(derive_repository(

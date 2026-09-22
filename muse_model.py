@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import Dict, Optional, Sequence
+from typing import Dict, Optional, Sequence, Tuple
 
 #: Meta's Discounted Services model. Content sent here is eligible for
 #: product improvement, so only repositories on the allowlist may use it.
@@ -62,11 +62,28 @@ RATE_CARDS: Dict[str, Dict[str, float]] = {
 }
 
 
-#: The owners whose repositories this funnel works. An `owner/name` from
-#: any other owner is not one of Nate's repositories, whatever it is
-#: called: `someone-else/The-League` is a fork or a collaborator's copy,
-#: and the allowlist says nothing about it.
+#: The owners whose repositories this funnel works, mirroring the logins
+#: in ``funnel.OWNERS``. An `owner/name` from any other owner is not one
+#: of Nate's repositories, whatever it is called: `someone-else/The-League`
+#: is a fork or a collaborator's copy. Not imported from ``funnel`` because
+#: this runs as a per-invocation CLI inside a lane; a test asserts the two
+#: stay equal instead.
 KNOWN_OWNERS = frozenset({"nateprich-projects", "nateprich"})
+
+#: The owner the three cleared repositories actually live under.
+#:
+#: `nateprich` is a known owner because member repos do appear under the
+#: user account, but none of the cleared three do. Without this,
+#: `nateprich/The-League` — a scratch fork, a rename in progress, anything
+#: that happens to share the name — would route to the training tier. That
+#: is the same class of hole as accepting a filesystem path, found by the
+#: same review one round later.
+CONTRIBUTOR_OWNER = "nateprich-projects"
+
+#: Characters stripped as transport. Deliberately not ``str.strip()``:
+#: that also eats NBSP, vertical tab and U+0085, and "membership is exact"
+#: should mean exact rather than exact-modulo-whatever-Unicode-calls-space.
+TRANSPORT_WHITESPACE = " \t\n\r"
 
 
 def repo_name(repo: Optional[str]) -> str:
@@ -88,15 +105,26 @@ def repo_name(repo: Optional[str]) -> str:
     exactly what the allowlist promised. At most one slash, and a known
     owner before it.
     """
+    return split_ref(repo)[1]
+
+
+def split_ref(repo: Optional[str]) -> "Tuple[Optional[str], str]":
+    """``(owner, name)`` for a repository reference, or ``(None, "")``.
+
+    ``owner`` is ``None`` when the reference was bare, which is what lets
+    the caller treat "no owner given" differently from "an owner I was
+    not expecting".
+    """
     if not isinstance(repo, str):
-        return ""
-    candidate = repo.strip()
+        return None, ""
+    candidate = repo.strip(TRANSPORT_WHITESPACE)
     if "/" not in candidate:
-        return candidate
+        return None, candidate
     owner, _, name = candidate.partition("/")
-    if "/" in name or owner.strip() not in KNOWN_OWNERS:
-        return ""
-    return name.strip()
+    owner = owner.strip(TRANSPORT_WHITESPACE)
+    if "/" in name or owner not in KNOWN_OWNERS:
+        return None, ""
+    return owner, name.strip(TRANSPORT_WHITESPACE)
 
 
 def model_for(repo: Optional[str]) -> str:
@@ -104,13 +132,18 @@ def model_for(repo: Optional[str]) -> str:
 
     Fails safe in the only direction that matters: anything not named
     exactly on the allowlist — an unknown repository, a near-miss
-    spelling, an empty string, ``None`` — gets the private model. A
+    spelling, an empty string, ``None``, or one of the three names under
+    an owner they do not live under — gets the private model. A
     repository nobody has cleared is therefore safe by default, and
     adding one is a deliberate edit here rather than an accident
     somewhere else.
     """
-    return CONTRIBUTOR_MODEL if repo_name(repo) in CONTRIBUTOR_REPOS \
-        else STANDARD_MODEL
+    owner, name = split_ref(repo)
+    if name not in CONTRIBUTOR_REPOS:
+        return STANDARD_MODEL
+    if owner is not None and owner != CONTRIBUTOR_OWNER:
+        return STANDARD_MODEL
+    return CONTRIBUTOR_MODEL
 
 
 def rate_card(model: Optional[str]) -> Dict[str, float]:

@@ -108,15 +108,54 @@ def test_another_owners_repo_is_not_on_the_allowlist(repo):
     assert muse_model.model_for(repo) == STANDARD_ID
 
 
-@pytest.mark.parametrize("owner", sorted(muse_model.KNOWN_OWNERS))
-def test_both_known_owners_resolve(owner):
-    assert muse_model.model_for(owner + "/The-League") == CONTRIBUTOR_ID
+def test_only_the_owner_the_cleared_repos_live_under_resolves():
+    """`nateprich` is a known owner because member repos do appear under
+    the user account — but none of the cleared three do. A scratch fork
+    or a rename in progress that happens to share the name must not
+    inherit the clearance."""
+    assert muse_model.model_for("nateprich-projects/The-League") == \
+        CONTRIBUTOR_ID
+    assert muse_model.model_for("nateprich/The-League") == STANDARD_ID
+    assert muse_model.model_for("nateprich/command-center") == STANDARD_ID
+    assert muse_model.model_for(
+        "nateprich/FF-Weekly-Start-Sit") == STANDARD_ID
+
+
+def test_a_bare_name_still_resolves_without_an_owner():
+    """The runners pass `owner/name`; a human or a test says `name`."""
+    for repo in ALLOWED:
+        assert muse_model.model_for(repo) == CONTRIBUTOR_ID
+
+
+def test_known_owners_match_the_funnel_this_module_serves():
+    """A second copy of a list drifts silently and in the safe
+    direction, which is the direction nobody notices. Add an owner to
+    funnel.OWNERS and every repo under it would quietly resolve to the
+    standard model with no error anywhere."""
+    import funnel
+
+    assert muse_model.KNOWN_OWNERS == {login for _, login in funnel.OWNERS}
+    assert muse_model.CONTRIBUTOR_OWNER in muse_model.KNOWN_OWNERS
+
+
+@pytest.mark.parametrize("repo", [
+    "\xa0The-League",
+    "The-League\x0b",
+    "\x0cThe-League",
+    "The-League\x85",
+])
+def test_unicode_space_is_not_transport(repo):
+    """`str.strip()` eats NBSP, vertical tab, form feed and U+0085.
+    Membership is exact, so transport means the four characters a shell
+    variable can actually pick up."""
+    assert muse_model.model_for(repo) == STANDARD_ID
 
 
 @pytest.mark.parametrize("value,expected", [
     ("command-center", "command-center"),
     ("nateprich-projects/command-center", "command-center"),
     (" nateprich-projects / The-League ", "The-League"),
+    ("nateprich/The-League", "The-League"),
     ("/Users/nateprich/command-center", ""),
     ("stranger/command-center", ""),
     ("", ""),
@@ -166,7 +205,7 @@ def test_rate_cards_cover_both_models():
         muse_model.CONTRIBUTOR_MODEL, muse_model.STANDARD_MODEL}
     for card in muse_model.RATE_CARDS.values():
         assert set(card) == {"input", "cached_input", "output"}
-        assert all(value > 0
+        assert all(isinstance(value, float) and value > 0
                    for value in card.values())
 
 

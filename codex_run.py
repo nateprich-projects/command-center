@@ -284,10 +284,12 @@ def _profile_drift(profile: object) -> Tuple[List[str], set]:
                     profile, dict) else profile)], set()
     drift, automations = _entry_drift(
         "permission profile", profile.get("file_system"), "type")
+    # A plain string in every real record (`"enabled"` or `"restricted"`);
+    # anything other than `"enabled"`, a missing value included, is drift.
     network = profile.get("network")
-    if isinstance(network, dict) and network.get("network") != "enabled":
+    if network != "enabled":
         drift.append("permission profile: network expected enabled, "
-                     "found {}".format(network.get("network")))
+                     "found {!r}".format(network))
     return drift, automations
 
 

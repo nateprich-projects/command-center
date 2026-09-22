@@ -88,7 +88,7 @@ def _turn(model="gpt-6-luna", effort="max", approval="never", network=True,
             "file_system": {"type": "restricted",
                             "entries": list(policy.get("entries", []))
                             if isinstance(policy, dict) else []},
-            "network": {"type": "managed", "network": "enabled"},
+            "network": "enabled",
         }
     elif profile is not None:
         payload["permission_profile"] = profile
@@ -472,7 +472,14 @@ def test_a_second_automation_directory_only_in_the_entries_is_drift(
      "write access outside the manifest"),
     ({"type": "managed",
       "file_system": {"type": "restricted", "entries": []},
-      "network": {"type": "managed", "network": "restricted"}},
+      "network": "restricted"},
+     "network expected enabled"),
+    ({"type": "managed",
+      "file_system": {"type": "restricted", "entries": []}},
+     "network expected enabled"),
+    ({"type": "managed",
+      "file_system": {"type": "restricted", "entries": []},
+      "network": {"network": "enabled"}},
      "network expected enabled"),
 ])
 def test_the_permission_profile_is_checked_like_the_entry_list(

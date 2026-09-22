@@ -1324,9 +1324,14 @@ def test_brief_degrades_a_slow_section_without_losing_the_rest(
     assert brief["items"] == []
     assert brief["total_needing_nate"] == 0
     assert brief["counts_by_gate"]["Ready"] == 1
-    assert section not in [
-        entry["section"] for entry in brief["missing"]
-    ]
+    named = [entry["section"] for entry in brief["missing"]]
+    if section == "cleared_blocks":
+        # This one reads as news when empty — "nothing was unblocked" — so an
+        # unread section names itself rather than degrading to [] (#1211).
+        assert named == [section]
+        assert brief[section] is None
+    else:
+        assert section not in named
 
 
 def test_closed_itself_degrades_explicitly_when_over_budget(
@@ -1462,3 +1467,48 @@ def test_main_brief_retry_exhausted_still_reports_degraded(
     ]
     assert len(degraded) == 1
     assert degraded[0]["budget_seconds"] == 35.0
+
+
+def test_a_timed_out_parked_section_reads_as_unread_not_empty(
+    monkeypatch, capsys
+):
+    """`[]` on this section says "nothing is parked", which is news, and the
+    opposite of what a timeout means (#1211)."""
+    monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS, "parked", 0.0)
+
+    assert funnel.cmd_brief([], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["parked"] is None
+    assert [row["section"] for row in brief["missing"]] == ["parked"]
+    assert "not an empty one" in brief["missing"][0]["error"]
+    assert any(row["section"] == "parked" for row in brief["degraded"])
+
+
+def test_a_timed_out_cleared_blocks_section_reads_as_unread_not_empty(
+    monkeypatch, capsys
+):
+    monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS, "cleared_blocks", 0.0)
+
+    assert funnel.cmd_brief([], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["cleared_blocks"] is None
+    assert [row["section"] for row in brief["missing"]] == ["cleared_blocks"]
+
+
+def test_both_sections_still_read_as_lists_when_they_succeed(capsys):
+    assert funnel.cmd_brief([], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["parked"] == []
+    assert brief["cleared_blocks"] == []
+    assert brief["missing"] == []
+
+
+def test_the_two_budgets_clear_their_measured_reads():
+    """Measured 2026-09-21 on 1091 items: parked 27.86/19.17/22.24 s,
+    cleared_blocks 20.93/25.17/22.94 s. The ticket's 5 s and 12 s came from a
+    738-ref board and would degrade every one of those reads."""
+    assert funnel.BRIEF_SECTION_BUDGETS["parked"] >= 30.0
+    assert funnel.BRIEF_SECTION_BUDGETS["cleared_blocks"] >= 30.0

@@ -503,9 +503,16 @@ BRIEF_SECTION_BUDGETS = {
     "items": 0.25,
     "counts_by_gate": 0.25,
     "in_motion": 0.25,
-    "parked": 2.0,
+    # 30 s, not 2 s. The ticket asked for 5 s, sized from a 2.0168 s read on a
+    # 738-ref board. Re-measured 2026-09-21 on 1091 items, three consecutive
+    # reads: 27.86 s, 19.17 s, 22.24 s. 5 s would have degraded every one of
+    # them, so the cap is set from the measurement rather than from the
+    # ticket's number, and 30 s clears the observed maximum (#1211).
+    "parked": 30.0,
     "closed_itself": 45.0,
-    "cleared_blocks": 7.0,
+    # 30 s, not 7 s, and not the ticket's 12 s: re-measured on the same
+    # 1091-item board at 20.93 s, 25.17 s, 22.94 s.
+    "cleared_blocks": 30.0,
     "blocked": 0.25,
     "human_steps": 0.25,
     "machine_local_steps": 0.25,
@@ -8972,6 +8979,31 @@ def cmd_brief(
         )
         return default if value is _BRIEF_UNAVAILABLE else value
 
+    def named_section(name: str, reader: Callable[[], object]):
+        """A section whose unread state must not look like an empty result.
+
+        `parked` and `cleared_blocks` both read as *news* when empty — nothing
+        is parked, nothing was unblocked — so degrading them to `[]` reports
+        the opposite of what happened. These return null and name themselves
+        in `missing`, the same shape the shared PR-facts read uses.
+        """
+        value = _brief_timed(
+            name,
+            lambda: _brief_read(name, reader, missing),
+            timings,
+            degraded,
+            deadline=deadline,
+        )
+        if value is _BRIEF_UNAVAILABLE:
+            if not any(entry.get("section") == name for entry in missing):
+                missing.append({
+                    "section": name,
+                    "error": "could not read {} within its budget; this is "
+                             "an unread section, not an empty one".format(name),
+                })
+            return None
+        return value
+
     def decision_payload():
         decisions = awaiting_decision(items)
         by_ref = {i.ref: i for i in items}
@@ -9004,14 +9036,14 @@ def cmd_brief(
             lambda: in_motion(items, now, pr_facts=pr_facts),
             [],
         )
-        parked = section("parked", lambda: parked_json(items), [])
+        parked = named_section("parked", lambda: parked_json(items))
         closed_itself = section(
             "closed_itself",
             lambda: closed_itself_json(items, now, brief_cache=cache),
             [],
         )
-        cleared_blocks = section(
-            "cleared_blocks", lambda: cleared_blocks_json(items, now), []
+        cleared_blocks = named_section(
+            "cleared_blocks", lambda: cleared_blocks_json(items, now)
         )
         blocked = section("blocked", lambda: blocked_json(items), [])
         human = section("human_steps", lambda: human_step_json(items, now), [])

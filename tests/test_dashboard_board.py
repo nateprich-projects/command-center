@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pathlib
 import sys
+
+import pytest
 from datetime import datetime, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -150,8 +152,10 @@ def test_the_owner_follows_the_needs_field_then_the_pr_then_the_tier():
         ticket(16, state="CLOSED"),
     ], facts)
     owners = {t["number"]: t["owner"] for t in found[0]["tickets"]}
+    # Fresh escalated work goes to Codex since #1322; an open PR (14) is
+    # still the reviewer's move.
     assert owners == {
-        11: "Claude", 12: "Nate", 13: "Muse", 14: "Muse", 15: "Codex", 16: None,
+        11: "Claude", 12: "Nate", 13: "Codex", 14: "Muse", 15: "Codex", 16: None,
     }
 
 
@@ -447,3 +451,39 @@ def test_an_unblocked_project_row_says_so():
     assert found[0]["blockers"] == []
     assert found[0]["block_reason"] is None
     assert found[0]["tickets"][0]["block_reason"] is None
+
+
+def _rework_owner(monkeypatch, *, tier_body, agents, roster=None):
+    if roster is not None:
+        monkeypatch.setitem(funnel.AGENTS_BY_ROLE, "implement", roster)
+    facts = {REPO + "#11": {
+        "state": "OPEN", "number": 7, "headRefOid": "abc",
+        "verdict": {"verdict": "rejected", "head_sha": "abc"},
+    }}
+    found = funnel.dashboard_board(
+        [project(), ticket(11, body=tier_body)], NOW, pr_facts=facts,
+        authoring_pr_agents={"7": agents},
+    )
+    column = next(c for c in found["columns"] if c["stage"] == "Building")
+    return column["items"][0]["tickets"][0]["owner"]
+
+
+@pytest.mark.parametrize("tier_body", ["Risk: standard",
+                                       "Risk: escalated — concurrency"])
+def test_muse_authored_rework_goes_to_codex(monkeypatch, tier_body):
+    """Muse no longer implements (#1322): a rejected PR it wrote is
+    reworked by the roster's implementer."""
+    assert _rework_owner(monkeypatch, tier_body=tier_body,
+                         agents={"muse"}) == "Codex"
+
+
+def test_a_roster_naming_muse_alone_gives_muse_its_work_back(monkeypatch):
+    """The reversal path keeps the board consistent with begin."""
+    found = rows([project(), ticket(12, body="Risk: escalated — x")])
+    assert found[0]["tickets"][0]["owner"] == "Codex"
+
+    roster = {"muse": frozenset(funnel.TIERS)}
+    assert _rework_owner(monkeypatch, tier_body="Risk: escalated — x",
+                         agents={"muse"}, roster=roster) == "Muse"
+    found = rows([project(), ticket(12, body="Risk: escalated — x")])
+    assert found[0]["tickets"][0]["owner"] == "Muse"

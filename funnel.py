@@ -991,12 +991,8 @@ TIERS = ("standard", "escalated")
 #: Capabilities belong to roles, not harness names. Keeping both agent names in
 #: this one registry prevents a second inline literal from drifting.
 #:
-#: Muse implements at both tiers since 2026-09-18, by Nate's instruction: Codex's
-#: weekly usage was nearly spent and competing with his own, while Muse had ample
-#: headroom. The standard tier runs as its own launchd job
-#: (`com.nateprich.command-center-muse-implement-standard`), separate from the
-#: escalated one, so the two queues never wait on each other. Codex keeps both
-#: tiers here so re-enabling its automation needs no code change.
+#: From 2026-09-18 to 2026-09-22 Muse implemented both tiers too, while
+#: Codex's Plus week was nearly spent.
 #: Who may implement at which tier. Codex implements both tiers from its
 #: in-app automations; Muse judges and no longer implements (Nate,
 #: 2026-09-22, #1315). `scripts/muse-implement` stays as the reversal path:
@@ -1008,9 +1004,10 @@ AGENTS_BY_ROLE = {
 }
 
 
-# ``muse`` is both a reviewer and an implementer, so the harness must identify
-# which caller is opening the run.  Keep the shorter role names canonical and
-# accept the descriptive forms at the CLI boundary as well.
+# A caller names its role so an agent that both reviews and implements (Muse
+# did until #1322) is routed by what it asked for, not by its name. Keep the
+# shorter role names canonical and accept the descriptive forms at the CLI
+# boundary as well.
 BEGIN_CALLER_ROLE_ALIASES = {
     "review": "review",
     "reviewer": "review",
@@ -1074,7 +1071,7 @@ def _begin_role_refusal(agent: str, tier: Optional[str],
         "gate": "role",
         "do": "stop",
         "why": "{} does not implement {} work; AGENTS_BY_ROLE names who "
-               "does (#1322)".format(agent, tier or "any"),
+               "does (#1322)".format(agent, tier or "untiered"),
     }
 
 #: A ticket declares its risk in its body, written by Claude at breakdown when
@@ -7536,6 +7533,16 @@ def _dashboard_block_reason(item: Item) -> Optional[str]:
     return None
 
 
+def _dashboard_implementer(tier: str) -> str:
+    """The implementer the roster names for ``tier``: Codex while Codex is on
+    it (#1322), Muse only if the roster names Muse alone."""
+    if agent_has_role("codex", "implement", tier):
+        return OWNER_CODEX
+    if agent_has_role("muse", "implement", tier):
+        return OWNER_MUSE
+    return OWNER_CODEX
+
+
 def _dashboard_rework_owner(
     tier: str,
     pr_fact: Optional[Mapping[str, object]],
@@ -7543,17 +7550,14 @@ def _dashboard_rework_owner(
 ) -> str:
     """Return the implementer who owns a rejected current PR head.
 
-    Escalated work follows the same implementation registry used by
-    ``begin``. Since #1322 Codex implements both tiers, so this names Muse
-    only if Muse is put back on the roster, which is the reversal path.
+    Rework follows the same implementation registry used by ``begin``:
+    Codex implements both tiers since #1322, so Muse-authored rework goes to
+    Codex too, unless Muse is put back on the roster.
     Standard work that was authored by Claude stays with Claude, whether its
     provenance came from a heartbeat-bound funnel run or the Claude Code PR
     footer used by interactive and funnel-watch sessions. Everything else is
     Codex-owned, including unreadable or conflicting attribution.
     """
-    if tier == "escalated" and begin_uses_ticket_path("muse", tier):
-        return OWNER_MUSE
-
     agents = {
         str(agent).strip().casefold()
         for agent in authoring_agents
@@ -7561,17 +7565,16 @@ def _dashboard_rework_owner(
     }
     if "claude" in agents:
         return OWNER_CLAUDE
-    if agents == {"muse"}:
+    if agents == {"muse"} and agent_has_role("muse", "implement", tier):
         return OWNER_MUSE
 
     body = (pr_fact or {}).get("body")
     if isinstance(body, str) and CLAUDE_CODE_PR_RE.search(body):
         return OWNER_CLAUDE
 
-    # ``begin``'s standard implementation lane is Codex. Keep this fallback
-    # explicit so a missing heartbeat or PR description cannot hand work to a
-    # reviewer by accident.
-    return OWNER_CODEX
+    # The roster's implementer, Codex since #1322. Explicit, so a missing
+    # heartbeat or PR description cannot hand work to a reviewer by accident.
+    return _dashboard_implementer(tier)
 
 
 def _dashboard_ticket(
@@ -7650,10 +7653,8 @@ def _dashboard_ticket(
     elif pr == "submitted" or pr == "approved":
         # An open PR is the reviewer's move, whichever engine wrote it.
         owner = OWNER_MUSE
-    elif tier == "escalated":
-        owner = OWNER_MUSE
     else:
-        owner = OWNER_CODEX
+        owner = _dashboard_implementer(tier)
 
     return {
         "ref": item.ref,

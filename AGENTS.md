@@ -149,8 +149,14 @@ wrong.
     stops on any difference (`config-drift`);
   - `funnel doctor` checks the automation files themselves.
 
-  The way back is the roster plus the two retired implement plists, kept in
-  `~/Library/LaunchAgents-retired/`; `scripts/muse-implement` is unchanged. From
+  The way back is a change in the repository, not a file copy:
+  - put `muse` back on the roster;
+  - restore the two implement plists to `launchd/` and `scripts/install.sh` from git
+    history, and drop the test that pins their absence.
+
+  `scripts/muse-implement` is unchanged. The copies in `~/Library/LaunchAgents-retired/`
+  are only a local record: jobs copied back from there would not be refreshed or
+  drift-checked by the keeper. From
   2026-09-18 to 2026-09-22 Muse implemented both tiers, because Codex's Plus week was
   nearly spent. _(confirmed by Nate 2026-09-22)_
 

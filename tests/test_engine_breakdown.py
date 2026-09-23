@@ -743,6 +743,10 @@ def stub_apply(monkeypatch, **kw):
         calls["added"].append(list(command))
         url = command[command.index("--url") + 1]
         number = url.rsplit("/", 1)[-1]
+        if kw.get("project_add_error_on") == number:
+            return SimpleNamespace(
+                returncode=1, stdout="",
+                stderr=kw.get("project_add_error", "not permitted"))
         return SimpleNamespace(
             returncode=0,
             stdout=json.dumps({"id": "item-{}".format(number)}),
@@ -989,6 +993,30 @@ def test_a_partial_failure_names_the_tickets_already_created(monkeypatch):
         raise AssertionError("the second failure must surface")
 
 
+def test_a_genuine_project_add_failure_keeps_the_created_issue_list(
+        monkeypatch):
+    calls = stub_apply(
+        monkeypatch, project_add_error_on="102",
+        project_add_error="not permitted")
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="first"),
+        raw_ticket(title="second"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    try:
+        breakdown.apply(REPO, 1, normalized)
+    except funnel.GitHubError as exc:
+        assert "not permitted" in str(exc)
+        assert "already created: owner/repo#101, owner/repo#102" in str(exc)
+    else:
+        raise AssertionError("a genuine Project add failure must abort")
+
+    assert calls["needs"] == [("item-101", "none", "owner/repo#101")]
+    assert calls["comments"] == []
+
+
 def test_apply_main_rejects_an_invalid_answer_with_exit_2(
         monkeypatch, tmp_path, capsys):
     def fail_if_called(*args, **kwargs):
@@ -1050,6 +1078,61 @@ def test_the_needs_id_comes_from_item_add(monkeypatch):
     ]
     assert calls["needs"] == [("item-101", "none", "owner/repo#101"),
                               ("item-102", "none", "owner/repo#102")]
+
+
+def test_already_existing_project_add_confirms_membership_and_continues(
+        monkeypatch):
+    calls = stub_apply(
+        monkeypatch,
+        project_add_error_on="101",
+        project_add_error=(
+            "GraphQL: Content already exists in this project "
+            "(addProjectV2Item)"),
+    )
+    membership_reads = []
+
+    def project_items(include_details=True):
+        membership_reads.append(include_details)
+        return [SimpleNamespace(
+            url="https://github.com/owner/repo/issues/101",
+            item_id="existing-item-101",
+        )]
+
+    monkeypatch.setattr(funnel, "load_items", project_items)
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="first"),
+        raw_ticket(title="second"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert [row["ref"] for row in result["created"]] == [
+        "owner/repo#101", "owner/repo#102"]
+    assert membership_reads == [False]
+    assert calls["needs"] == [
+        ("existing-item-101", "none", "owner/repo#101"),
+        ("item-102", "none", "owner/repo#102"),
+    ]
+    assert len(calls["comments"]) == 1
+
+
+def test_already_existing_project_add_requires_membership_confirmation(
+        monkeypatch):
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout="",
+            stderr="GraphQL: Content already exists in this project"))
+    monkeypatch.setattr(funnel, "load_items", lambda include_details=False: [])
+
+    try:
+        breakdown.add_to_project("https://github.com/owner/repo/issues/7")
+    except funnel.GitHubError as exc:
+        assert "did not confirm membership" in str(exc)
+    else:
+        raise AssertionError("the duplicate signal alone must not prove success")
 
 
 def test_a_failed_project_add_names_the_created_issue(monkeypatch):

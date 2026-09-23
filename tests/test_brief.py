@@ -681,7 +681,9 @@ def test_brief_does_not_fetch_comments_for_unparked_items(monkeypatch, capsys):
     assert calls == []
 
 
-def test_parked_items_stay_out_of_gate_counts_and_maintenance_load(monkeypatch, capsys):
+def test_parked_items_stay_out_of_gate_counts_but_remain_in_maintenance_load(
+    monkeypatch, capsys
+):
     items = fixture_items()
     monkeypatch.setattr(funnel, "_gh_json", lambda *args: {"comments": []})
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
@@ -693,7 +695,10 @@ def test_parked_items_stay_out_of_gate_counts_and_maintenance_load(monkeypatch, 
     assert brief["counts_by_gate"]["Parked"] == 0
     assert brief["total_needing_nate"] == len(funnel.awaiting_decision(without_parked))
     assert all(item["ref"] != "nateprich/beta#15" for item in brief["items"])
-    assert brief["maintenance_load"] == funnel.maintenance_load(without_parked, NOW)
+    assert brief["maintenance_load"] == funnel.maintenance_load(items, NOW)
+    assert brief["maintenance_load"]["closed_in_window"] == (
+        funnel.maintenance_load(without_parked, NOW)["closed_in_window"] + 1
+    )
 
 
 def test_brief_reports_disposal_next_to_maintenance_load(monkeypatch, capsys):

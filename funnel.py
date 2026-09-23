@@ -997,10 +997,13 @@ TIERS = ("standard", "escalated")
 #: (`com.nateprich.command-center-muse-implement-standard`), separate from the
 #: escalated one, so the two queues never wait on each other. Codex keeps both
 #: tiers here so re-enabling its automation needs no code change.
+#: Who may implement at which tier. Codex implements both tiers from its
+#: in-app automations; Muse judges and no longer implements (Nate,
+#: 2026-09-22, #1315). `scripts/muse-implement` stays as the reversal path:
+#: putting `muse` back here is the switch.
 AGENTS_BY_ROLE = {
     "implement": {
         "codex": frozenset(TIERS),
-        "muse": frozenset(TIERS),
     },
 }
 
@@ -1050,6 +1053,29 @@ def agent_has_role(agent: str, role: str, tier: Optional[str]) -> bool:
     """Whether ``agent`` owns ``role`` in the requested execution tier."""
     tiers = AGENTS_BY_ROLE.get(role, {}).get(agent, frozenset())
     return tier in tiers
+
+
+def _begin_role_refusal(agent: str, tier: Optional[str],
+                        caller_role: Optional[str]) -> Optional[Dict[str, str]]:
+    """Stop an implement caller whose agent does not implement at this tier.
+
+    `begin_uses_ticket_path` routes a caller that declares `--role implement`
+    by the declaration alone, so removing an agent from `AGENTS_BY_ROLE`
+    would not stop its implement runner (#1322). This is the refusal that
+    makes the roster the switch. An unknown role is left to the router,
+    which rejects it.
+    """
+    if caller_role is None:
+        return None
+    role = BEGIN_CALLER_ROLE_ALIASES.get(str(caller_role).casefold())
+    if role != "implement" or agent_has_role(agent, "implement", tier):
+        return None
+    return {
+        "gate": "role",
+        "do": "stop",
+        "why": "{} does not implement {} work; AGENTS_BY_ROLE names who "
+               "does (#1322)".format(agent, tier or "any"),
+    }
 
 #: A ticket declares its risk in its body, written by Claude at breakdown when
 #: the plan is in front of it. `funnel.py` reads it; the engineer never decides.
@@ -7518,7 +7544,8 @@ def _dashboard_rework_owner(
     """Return the implementer who owns a rejected current PR head.
 
     Escalated work follows the same implementation registry used by
-    ``begin``: Muse is the only non-Codex implementation lane at that tier.
+    ``begin``. Since #1322 Codex implements both tiers, so this names Muse
+    only if Muse is put back on the roster, which is the reversal path.
     Standard work that was authored by Claude stays with Claude, whether its
     provenance came from a heartbeat-bound funnel run or the Claude Code PR
     footer used by interactive and funnel-watch sessions. Everything else is
@@ -12665,6 +12692,11 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if reading is None:
         print(json.dumps(out, indent=2))
         return 0
+    role_refusal = _begin_role_refusal(agent, tier, caller_role)
+    if role_refusal is not None:
+        out.update(role_refusal)
+        print(json.dumps(out, indent=2))
+        return 0
 
     if _detail_loader is not None and not begin_uses_ticket_path(
         agent, tier, caller_role
@@ -14347,6 +14379,12 @@ def main(argv: Optional[Sequence[str]] = None, *,
         begin_preflight = _begin_preflight(
             now, args.agent, args.idle, args.tier)
         if begin_preflight[1] is None:
+            print(json.dumps(begin_preflight[0], indent=2))
+            return 0
+        role_refusal = _begin_role_refusal(
+            args.agent, args.tier, args.caller_role)
+        if role_refusal is not None:
+            begin_preflight[0].update(role_refusal)
             print(json.dumps(begin_preflight[0], indent=2))
             return 0
         try:

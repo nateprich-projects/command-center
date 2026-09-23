@@ -105,7 +105,8 @@ def test_a_current_rejection_requests_changes_and_hands_work_to_the_implementer(
     assert by_number[12]["pr"] == "changes requested"
     assert by_number[12]["owner"] == "Claude"
     assert by_number[13]["pr"] == "changes requested"
-    assert by_number[13]["owner"] == "Muse"
+    # Codex implements escalated work too since #1322; rework goes back to it.
+    assert by_number[13]["owner"] == "Codex"
     assert by_number[14]["pr"] == "submitted"
     assert by_number[14]["owner"] == "Muse"
     assert by_number[15]["pr"] == "submitted"

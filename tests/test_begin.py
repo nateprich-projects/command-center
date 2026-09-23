@@ -1278,6 +1278,10 @@ def test_codex_stop_and_non_codex_ticket_do_not_carry_the_vendor_packet(
     assert stopped["do"] == "stop"
     assert "packet" not in stopped and "vendor" not in stopped
 
+    # No other agent implements since #1322; put Muse back on the roster, the
+    # reversal path, to show a non-Codex ticket still carries no vendor block.
+    monkeypatch.setitem(funnel.AGENTS_BY_ROLE["implement"], "muse",
+                        frozenset(funnel.TIERS))
     project, ticket = _ticket(83, 82, body="Risk: escalated")
     muse, _ = _implementing_begin(
         monkeypatch, capsys, [project, ticket], agent="muse", tier="escalated"
@@ -1458,9 +1462,9 @@ def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):
     assert [ref for ref, value in writes if value] == [standard.ref]
 
 
-def test_muse_escalated_begin_claims_a_ticket_as_an_implementer(
-    monkeypatch, capsys
-):
+def test_muse_escalated_begin_no_longer_claims_a_ticket(monkeypatch, capsys):
+    """Muse judges and Codex implements (Nate, 2026-09-22, #1315, #1322):
+    an escalated Muse begin with no role takes the review path."""
     project, ticket = _ticket(
         12, 13, body="Risk: escalated — concurrency"
     )
@@ -1469,14 +1473,34 @@ def test_muse_escalated_begin_claims_a_ticket_as_an_implementer(
         monkeypatch, capsys, [project, ticket], agent="muse", tier="escalated"
     )
 
+    assert result["do"] != "ticket"
+    assert [ref for ref, value in writes if value] == []
+
+
+def test_muse_back_on_the_roster_claims_a_ticket_again(monkeypatch, capsys):
+    """The reversal path: the roster is the switch."""
+    monkeypatch.setitem(funnel.AGENTS_BY_ROLE["implement"], "muse",
+                        frozenset(funnel.TIERS))
+    project, ticket = _ticket(
+        12, 13, body="Risk: escalated — concurrency"
+    )
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, [project, ticket], agent="muse", tier="escalated",
+        caller_role="implement",
+    )
+
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == ticket.ref
     assert [ref for ref, value in writes if value] == [ticket.ref]
 
 
-def test_muse_escalated_begin_uses_the_explicit_implementer_role(
-    monkeypatch, capsys
-):
+@pytest.mark.parametrize("tier", ["standard", "escalated"])
+def test_an_implement_caller_off_the_roster_is_refused(monkeypatch, capsys,
+                                                        tier):
+    """`--role implement` used to route by the declaration alone, so taking
+    Muse off the roster would not have stopped `scripts/muse-implement`
+    (#1322). The refusal comes before any claim."""
     project, ticket = _ticket(
         14, 15, body="Risk: escalated — concurrency"
     )
@@ -1486,13 +1510,39 @@ def test_muse_escalated_begin_uses_the_explicit_implementer_role(
         capsys,
         [project, ticket],
         agent="muse",
-        tier="escalated",
+        tier=tier,
         caller_role="implement",
     )
 
-    assert result["do"] == "ticket"
-    assert result["work"]["ref"] == ticket.ref
-    assert [ref for ref, value in writes if value] == [ticket.ref]
+    assert result["do"] == "stop"
+    assert result["gate"] == "role"
+    assert "muse does not implement {} work".format(tier) in result["why"]
+    assert writes == []
+
+
+def test_the_role_refusal_comes_before_the_project_read(monkeypatch, capsys):
+    monkeypatch.setattr(funnel, "_start_begin_heartbeat",
+                        lambda agent: "run-id")
+    monkeypatch.setattr(usage, "read_agent", lambda *args: {"windows": {}})
+    monkeypatch.setattr(usage, "pace", lambda *args, **kwargs: {
+        "over_pace": False})
+    monkeypatch.setattr(funnel, "load_items", lambda *args, **kwargs:
+                        pytest.fail("a refused implementer reads no Project"))
+
+    assert funnel.main(["begin", "--agent", "muse", "--tier", "standard",
+                        "--role", "implement"]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["gate"] == "role"
+
+
+def test_codex_implements_both_tiers_and_muse_reviews():
+    assert funnel.AGENTS_BY_ROLE["implement"] == {
+        "codex": frozenset(funnel.TIERS)}
+    assert funnel._begin_role_refusal("codex", "standard", "implement") is None
+    assert funnel._begin_role_refusal("codex", "escalated", "implement") is None
+    assert funnel._begin_role_refusal("muse", "standard", "review") is None
+    assert funnel._begin_role_refusal("muse", "escalated", None) is None
 
 
 def test_codex_begin_respects_the_wip_limit(monkeypatch, capsys):

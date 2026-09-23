@@ -27,10 +27,14 @@ REVIEWER_NAMES = [
     "com.nateprich.command-center-muse-review.plist",           # escalated, hourly
     "com.nateprich.command-center-muse-review-standard.plist",  # standard, /5
 ]
-IMPLEMENTER_NAME = "com.nateprich.command-center-muse-implement.plist"
-STANDARD_IMPLEMENTER_NAME = "com.nateprich.command-center-muse-implement-standard.plist"
-IMPLEMENTER_NAMES = [IMPLEMENTER_NAME, STANDARD_IMPLEMENTER_NAME]
-MUSE_SCHEDULE_NAMES = REVIEWER_NAMES + IMPLEMENTER_NAMES
+#: Muse's implement schedules, retired when implementation moved to Codex
+#: (Nate, 2026-09-22, #1315, #1322). `scripts/muse-implement` stays as the
+#: reversal path; restoring these files is how Muse would implement again.
+RETIRED_IMPLEMENTER_NAMES = [
+    "com.nateprich.command-center-muse-implement.plist",
+    "com.nateprich.command-center-muse-implement-standard.plist",
+]
+MUSE_SCHEDULE_NAMES = REVIEWER_NAMES
 KEEPER_NAME = "com.nateprich.command-center-run-keeper.plist"
 #: The Remote Control listener. Not a schedule; see the carve-out in `AGENTS.md`.
 REMOTE_CONTROL_NAME = "com.nateprich.command-center-remote-control.plist"
@@ -99,13 +103,11 @@ def test_the_plist_points_at_the_stable_path(name):
         plist = plistlib.load(handle)
     args = plist["ProgramArguments"]
     assert args[0] == "/bin/bash"
-    if name in IMPLEMENTER_NAMES:
-        script = "muse-implement"
-    else:
-        # Both review tiers run the engine: standard since 2026-09-20 (#813),
-        # escalated since 2026-09-21 on Nate's override of #806's shadow gate.
-        # The shadow plist is retired with them.
-        script = "muse-review-engine"
+    # Both review tiers run the engine: standard since 2026-09-20 (#813),
+    # escalated since 2026-09-21 on Nate's override of #806's shadow gate.
+    # The shadow plist is retired with them, and the implement plists
+    # since 2026-09-22 (#1322).
+    script = "muse-review-engine"
     assert any(a.endswith("/scripts/{}".format(script)) for a in args), args
     # Checked against the arguments, not the file text: the header explains the
     # TCC blocker and has to name `/Volumes/External SSD` to do so. Asserting on
@@ -154,13 +156,10 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
 
     Both review schedules run `max` (Nate, 2026-09-22, #1315): judgement
     runs on the private model at max effort, and the review tiers now differ
-    in queue and cadence, not in effort. The implement schedules keep #1189's split, standard `high`
-    and escalated `max`, until implementation leaves Muse for Codex
-    (#1322).
+    in queue and cadence, not in effort. Muse no longer implements (#1322).
     History: standard ran `high` from #1191 (Nate, 2026-09-21, #1189); the
     standard reviewer briefly took the engine's default `max` at its
-    2026-09-20 cutover, and the standard implementer was created at `max` on
-    2026-09-18.
+    2026-09-20 cutover.
     """
     import plistlib
 
@@ -170,35 +169,16 @@ def test_each_schedule_asks_for_its_own_tier_and_effort():
 
     assert args(NAMES[0]) == ["escalated", "max"]
     assert args(NAMES[1]) == ["standard", "max"]
-    assert args(IMPLEMENTER_NAME) == ["escalated", "max"]
-    assert args(STANDARD_IMPLEMENTER_NAME) == ["standard", "high"]
 
 
-def test_the_implementer_polls_every_fifteen_minutes_while_794_clears():
-    """The implementation lane polls on a fixed interval while #794's escalated
-    tickets clear (Nate, 2026-09-13, #831). launchd starts no second instance
-    while one runs, so the interval cannot overlap itself. When #794 closes this
-    reverts to the three-hourly :37 calendar schedule, whose test this replaced:
-    hours 0..21 step 3, minute 37, off the :07 and :00/:05 review slots."""
-    import plistlib
-
-    with (ROOT / "launchd" / IMPLEMENTER_NAME).open("rb") as handle:
-        plist = plistlib.load(handle)
-
-    assert plist["StartInterval"] == 900
-    assert "StartCalendarInterval" not in plist
-
-
-def test_the_standard_implementer_polls_every_ten_minutes():
-    """Muse took over the standard lane from Codex on 2026-09-18 (Nate), at the
-    ten-minute cadence of the Codex automation it replaced."""
-    import plistlib
-
-    with (ROOT / "launchd" / STANDARD_IMPLEMENTER_NAME).open("rb") as handle:
-        plist = plistlib.load(handle)
-
-    assert plist["StartInterval"] == 600
-    assert "StartCalendarInterval" not in plist
+def test_muse_has_no_implement_schedule():
+    """Implementation moved to Codex (Nate, 2026-09-22, #1315). The keeper
+    never uninstalls a plist removed from the repository, so the installed
+    copies are moved out of LaunchAgents by hand (#1323); the runner script
+    stays as the way back."""
+    for name in RETIRED_IMPLEMENTER_NAMES:
+        assert not (ROOT / "launchd" / name).exists(), name
+    assert (ROOT / "scripts" / "muse-implement").exists()
 
 
 def test_the_installer_copies_all_launchd_plists(tmp_path):

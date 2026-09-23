@@ -578,7 +578,10 @@ BRIEF_SECTION_BUDGETS = {
     # One `gh issue list` per member repo. Sized like the other live scans.
     "member_issues_without_project_items": 8.0,
     "outcome_signals": 3.0,
-    "portfolio_metrics": 3.0,
+    # 10 s, not 3 s: the ticket-PR share pages every merged PR in the window
+    # (#1286). Measured 2026-09-23 on 476 merges (5 pages): 2.27 s, 2.62 s,
+    # 2.97 s, so 3 s degraded about one read in three, and the window grows.
+    "portfolio_metrics": 10.0,
     "rejected_merges": 0.25,
 }
 
@@ -4106,13 +4109,107 @@ def recorded_cause_regressions(
     }
 
 
+def _recent_merged_pr_rows(
+    repo: str, cutoff: datetime
+) -> List[Dict[str, object]]:
+    """Read merged PRs updated within the window using a light paged query.
+
+    The portfolio metric only needs the branch and merge timestamps. Reusing
+    ``ticket_pr_index`` would also request CI rollups and scan every PR state;
+    the brief's 100-row bound can also hide valid merges. Merged PRs sort by
+    ``updatedAt``, so the first row older than the cutoff proves that later
+    rows cannot have merged in the window.
+    """
+    try:
+        owner, name = repo.split("/", 1)
+    except ValueError:
+        raise GitHubError("invalid repository ref {}".format(repo))
+
+    query = """query($cursor: String) {{
+  rateLimit {{ cost remaining resetAt }}
+  repo0: repository(owner: {owner}, name: {name}) {{
+    pullRequests(
+      first: {page_size}, after: $cursor, states: [MERGED],
+      orderBy: {{field: UPDATED_AT, direction: DESC}}
+    ) {{
+      nodes {{ state headRefName mergedAt updatedAt }}
+      pageInfo {{ hasNextPage endCursor }}
+    }}
+  }}
+}}""".format(
+        owner=json.dumps(owner),
+        name=json.dumps(name),
+        page_size=PR_GRAPHQL_PAGE_SIZE,
+    )
+
+    rows: List[Dict[str, object]] = []
+    cursor: Optional[str] = None
+    while True:
+        variables = {"cursor": cursor} if cursor is not None else {}
+        data = gh_graphql(query, **variables)
+        if not isinstance(data, dict):
+            raise GitHubError("merged PR response was not an object")
+        repository = data.get("repo0")
+        if not isinstance(repository, dict):
+            raise GitHubError(
+                "could not read repository {} in merged PR response".format(
+                    repo
+                )
+            )
+        pull_requests = repository.get("pullRequests")
+        if not isinstance(pull_requests, dict):
+            raise GitHubError(
+                "invalid merged pull-request response for {}".format(repo)
+            )
+        nodes = pull_requests.get("nodes")
+        page_info = pull_requests.get("pageInfo")
+        if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            raise GitHubError(
+                "invalid merged pull-request page for {}".format(repo)
+            )
+
+        for node in nodes:
+            if not isinstance(node, dict):
+                raise GitHubError("invalid merged pull-request row")
+            updated_at = _metric_time(node.get("updatedAt"))
+            if updated_at is None:
+                raise GitHubError(
+                    "merged pull request has no parseable updatedAt"
+                )
+            if updated_at < cutoff:
+                return rows
+            rows.append({
+                "state": node.get("state"),
+                "headRefName": node.get("headRefName"),
+                "mergedAt": node.get("mergedAt"),
+            })
+
+        if not page_info.get("hasNextPage"):
+            return rows
+        next_cursor = page_info.get("endCursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            raise GitHubError(
+                "merged pull-request page for {} has no next cursor".format(
+                    repo
+                )
+            )
+        if next_cursor == cursor:
+            raise GitHubError(
+                "merged pull-request page for {} repeated its cursor".format(
+                    repo
+                )
+            )
+        cursor = next_cursor
+
+
 def command_center_ticket_pr_share(
     items: Iterable[Item], now: datetime
 ) -> Dict[str, object]:
     """Report the fraction of recent command-center merges on ticket branches."""
-    del items  # The bounded repository scan is the source of PR truth.
+    del items  # The command-center repository is the source of PR truth.
+    cutoff = now - MAINTENANCE_WINDOW
     try:
-        index, truncated = ticket_pr_index(REPO)
+        rows = _recent_merged_pr_rows(REPO, cutoff)
     except Exception as exc:
         return {
             "window_days": MAINTENANCE_WINDOW.days,
@@ -4128,27 +4225,6 @@ def command_center_ticket_pr_share(
                 _brief_error(exc)
             ),
         }
-
-    rows = list(getattr(index, "all_rows", ()) or ())
-    if not rows:
-        rows = list(index.values())
-    if truncated:
-        return {
-            "window_days": MAINTENANCE_WINDOW.days,
-            "definition": (
-                "merged command-center PRs in the last 30 days whose branch "
-                "is ticket/<number>"
-            ),
-            "status": "unavailable",
-            "available": False,
-            "value": None,
-            "share": None,
-            "reason": (
-                "bounded command-center PR scan was truncated at {} rows"
-            ).format(MERGED_PR_SCAN_LIMIT),
-        }
-
-    cutoff = now - MAINTENANCE_WINDOW
     merged = 0
     ticket_merged = 0
     unknown_timestamps = 0

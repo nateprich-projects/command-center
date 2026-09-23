@@ -565,7 +565,10 @@ BRIEF_SECTION_BUDGETS = {
     # One `gh issue list` per member repo. Sized like the other live scans.
     "member_issues_without_project_items": 8.0,
     "outcome_signals": 3.0,
-    "portfolio_metrics": 3.0,
+    # 10 s, not 3 s: the ticket-PR share pages every merged PR in the window
+    # (#1286). Measured 2026-09-23 on 476 merges (5 pages): 2.27 s, 2.62 s,
+    # 2.97 s, so 3 s degraded about one read in three, and the window grows.
+    "portfolio_metrics": 10.0,
     "rejected_merges": 0.25,
 }
 

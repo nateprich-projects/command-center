@@ -12223,12 +12223,11 @@ def review_queue(
     matched to the work the same way an engine is: the expensive judgement is
     spent where the ticket says the stakes are, and nowhere else.
 
-    A PR whose checks are still running is not offered unless GitHub has
-    already established a branch conflict: that is a deterministic blocker,
-    and its reason takes precedence over an empty or pending CI rollup. A
-    recorded verdict covers a head for good unless it is the CI-unknown
-    rejection a conflict can replace. Red CI and a normal empty rollup remain
-    visible to the review pre-check.
+    A PR whose checks are still running is not offered. A ticket branch that
+    GitHub reports as conflicting is rejected mechanically at its current
+    head and never offered for model review; repeated queue reads leave that
+    canonical rejection in place until the engineer pushes a new head. Red CI
+    and a normal empty rollup remain visible to the review pre-check.
     """
     if pr_facts is None:
         pr_facts = ticket_pr_facts(items)
@@ -12244,9 +12243,26 @@ def review_queue(
             if not head.startswith("ticket/"):
                 continue
             conflict = _conflicting_branch_blocker(row)
-            if conflict is None and checks_still_running(
-                row.get("statusCheckRollup")
-            ):
+            if conflict is not None:
+                # Conflict is a complete, deterministic rejection. Record it
+                # against this snapshot's head before it can reach a model
+                # reviewer. The gate helper makes repeat ticks idempotent and
+                # replaces any less-specific verdict on the same head.
+                head_sha = row.get("headRefOid")
+                number = row.get("number")
+                if head_sha and number is not None:
+                    _record_unmergeable_rejection(
+                        repo,
+                        number,
+                        pr_fact=row,
+                        candidate_verdict={
+                            "verdict": "rejected",
+                            "ci": "unknown",
+                            "head_sha": head_sha,
+                        },
+                    )
+                continue
+            if checks_still_running(row.get("statusCheckRollup")):
                 # The checks have not reported yet, so the only answer a
                 # reviewer could record is "CI not green (state unknown)" —
                 # and that rejection then covers this head, locking the PR
@@ -12255,16 +12271,7 @@ def review_queue(
                 continue
             verdict = _row_verdict(row, repo)
             if verdict_covers_head(verdict, row.get("headRefOid")):
-                # A conflicting approved head is handled by the merge gate;
-                # an already-canonical rejection is complete. Only the old
-                # CI-unknown rejection needs this deterministic repair pass.
-                if conflict is None or not (
-                    verdict
-                    and verdict.get("verdict") == "rejected"
-                    and verdict.get("ci") == "unknown"
-                    and conflict not in (verdict.get("blocking") or [])
-                ):
-                    continue
+                continue  # this exact diff has already been judged
             needed = required_tier(
                 ticket.title, _loaded_item_body(ticket)
             )
@@ -12275,8 +12282,6 @@ def review_queue(
                          "tier": needed, "url": ticket.url,
                          "title": ticket.title,
                          "opened": row.get("createdAt") or ""}
-            if conflict is not None:
-                candidate["blocking"] = [conflict]
             found.append(candidate)
     # Oldest first. `gh pr list` returns newest first, and handing a reviewer
     # `queue[0]` from that order starved the oldest PR indefinitely: on
@@ -13818,11 +13823,12 @@ def _record_unmergeable_rejection(
 ) -> None:
     """Record a deterministic rejection for a conflicting current head.
 
-    The gate replaces either an approval it can no longer merge or a CI-unknown
-    rejection that mistook a conflict for absent CI. The optional incoming
-    verdict lets ``cmd_review`` take this path before it writes a less-specific
-    rejection. In every case the current head and conflict state come from the
-    same PR fact used to write the canonical blocker.
+    The merge gate and review queue use this path when the conflict itself is
+    the complete mechanical answer, replacing a less-specific verdict or
+    recording one before review. The optional incoming verdict lets
+    ``cmd_review`` supply the current head before it writes a weaker rejection.
+    In every case the current head and conflict state come from the same PR
+    fact used to write the canonical blocker.
     """
     data = dict(pr_fact) if isinstance(pr_fact, Mapping) else None
     if data is None:

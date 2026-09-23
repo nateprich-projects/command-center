@@ -13718,7 +13718,8 @@ def cmd_next_review(
 
 def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
                blocking: List[str], note: Optional[str],
-               run: Optional[str] = None, agent: Optional[str] = None) -> int:
+               run: Optional[str] = None, agent: Optional[str] = None,
+               items: Optional[Sequence[Item]] = None) -> int:
     """Record a structured review verdict on a PR.
 
     The reviewer's judgement is the part only a model can do. Writing it as
@@ -13751,6 +13752,7 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
                     "ci": ci,
                     "head_sha": sha,
                 },
+                items=items,
             )
             return 0
 
@@ -13815,6 +13817,7 @@ def _is_conflicting_branch_blocker(reason: str) -> bool:
 def _record_unmergeable_rejection(
     repo: str, pr: int, pr_fact: Optional[Mapping[str, object]] = None,
     *, candidate_verdict: Optional[Mapping[str, object]] = None,
+    items: Optional[Sequence[Item]] = None,
 ) -> None:
     """Record a deterministic rejection for a conflicting current head.
 
@@ -13860,6 +13863,36 @@ def _record_unmergeable_rejection(
             repo, pr, sha, "rejected", "unknown", [reason], None,
             agent=MERGE_GATE_AGENT,
         )
+
+    # Hand the ticket back when this head is rejected for its conflict. If a
+    # canonical rejection was written by an earlier run, clear only the claim
+    # that predates it; a newer claim belongs to the engineer rebasing the PR.
+    if items is not None:
+        ref = ticket_ref_from_branch(repo, str(data.get("headRefName") or ""))
+        ticket = next((item for item in items if item.ref == ref), None)
+        if ticket is not None and ticket.in_motion_since is not None:
+            prior_rejection = None
+            if already_canonical:
+                stamp = current.get("reviewed_at") if isinstance(current, dict) else None
+                if isinstance(stamp, str):
+                    try:
+                        prior_rejection = datetime.fromisoformat(
+                            stamp.replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        pass
+                    if prior_rejection is not None and prior_rejection.tzinfo is None:
+                        prior_rejection = prior_rejection.replace(tzinfo=timezone.utc)
+                # Lock timestamps have one-second precision. Treat a claim in
+                # the same second as the rejection as newer, since its order is
+                # ambiguous and clearing it could interrupt a rebase.
+                if (
+                    prior_rejection is None
+                    or ticket.in_motion_since >= prior_rejection.replace(microsecond=0)
+                ):
+                    return
+            write_lock(ticket, "")
+            ticket.in_motion_since = None
 
 
 def ticket_ref_from_branch(repo: str, branch: str) -> Optional[str]:
@@ -14242,7 +14275,9 @@ def cmd_merge(
     )
     if why:
         if any(_is_conflicting_branch_blocker(reason) for reason in why):
-            _record_unmergeable_rejection(repo, pr, pr_fact=gate_fact)
+            _record_unmergeable_rejection(
+                repo, pr, pr_fact=gate_fact, items=items
+            )
         print("refusing to merge PR #{}:".format(pr), file=sys.stderr)
         for reason in why:
             print("  - " + reason, file=sys.stderr)
@@ -15078,7 +15113,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_next_review(items, args.tier)
         if args.command == "review":
             return cmd_review(args.repo, args.pr, args.verdict, args.ci,
-                              args.blocking, args.note, args.run, args.agent)
+                              args.blocking, args.note, args.run, args.agent,
+                              items=items)
         if args.command == "merge":
             return cmd_merge(items, now, args.repo, args.pr, args.confirmed)
         if args.command == "next":

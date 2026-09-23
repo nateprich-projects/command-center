@@ -375,6 +375,18 @@ GH_API_CACHE_DURATION = "5m"
 ENGINEERING_RESERVE_LOADS = 20
 REVIEW_RESERVE_LOADS = 5
 
+# The hourly GraphQL window is 5,000 points. The ticket leaves the exact cap
+# unstated; 826 is the highest whole-point floor that clears the observed
+# false stand-down at 826 points, while preserving the 42-point calculation
+# before the cap is applied.
+GRAPHQL_RESERVE_POINT_CEILING = 826
+
+
+def _reserve_floor(loads: int, load_cost: object) -> int:
+    """Return the proportional reserve, bounded by the hourly point ceiling."""
+    return min(loads * int(load_cost), GRAPHQL_RESERVE_POINT_CEILING)
+
+
 # #1047 measured the direct GraphQL cost of one disposable begin session's
 # Project load at 42 points, including the member-repository and paged item
 # reads.  The rate-limit-only pre-read below must reserve that known load before
@@ -573,8 +585,16 @@ BRIEF_SECTION_BUDGETS = {
     # Pure over the items already loaded: no read of its own to time out.
     "status_state_mismatches": 0.25,
     # One REST read per member repo for main's head, plus a bounded follow-up
-    # only where that head's run failed. Sized like the other small live reads.
-    "main_ci": 3.0,
+    # only where that head's run failed. Six direct main_ci_json passes across
+    # 2026-09-22/23: 5.92, 6.30, 7.11, 7.5276, 6.6979, 7.7154 s
+    # (5.92–7.7154 s; 1.7954 s spread). Brief runs
+    # at 2026-09-22 14:27Z and 2026-09-23 13:37Z timed out at 3.0177 and
+    # 3.0112 s. 10 s leaves 2.2846 s (29.6%) above the measured direct tail;
+    # the 2026-09-23 13:42Z brief completed in 6.9585 s and returned []. A
+    # captured 2026-09-23 16:26Z brief stdout excerpt is in
+    # evidence/main-ci-brief-2026-09-23.json: main_ci was [], missing was [],
+    # and the only degraded section was closed_with_access_vocabulary.
+    "main_ci": 10.0,
     # One `gh issue list` per member repo. Sized like the other live scans.
     "member_issues_without_project_items": 8.0,
     "outcome_signals": 3.0,
@@ -1164,6 +1184,10 @@ _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 #: A block quote is a line whose first non-space character is ``>``.
 _QUOTE_RE = re.compile(r"^\s*>")
 
+#: A single-backtick code span must open and close on the same line. Runs of
+#: multiple backticks and unmatched delimiters remain part of the scan.
+_INLINE_CODE_RE = re.compile(r"(?<!`)`(?!`)[^`\n]*`(?!`)")
+
 
 
 def asserted_text(text: str) -> str:
@@ -1171,21 +1195,19 @@ def asserted_text(text: str) -> str:
 
     Fenced blocks and block quotes are things the item is *showing*: a pasted
     log line, a job name, an error string, an alternative a plan records that
-    it will not take. They are not statements about what the work will do, and
+    it will not take. Paired single-backtick spans on one line quote the same
+    kind of evidence. They are not statements about what the work will do, and
     scanning them is how a report about a deadlock became a ticket with a
     concurrency risk.
 
-    Lines are blanked rather than deleted so that anything anchored to a line
-    start still behaves the same, and so a marker cannot be joined to the
-    sentence above it.
+    Lines are blanked rather than deleted, and inline spans are replaced with
+    same-width spaces, so anchors and word boundaries keep their positions and
+    a marker cannot be joined to the sentence above it. Unclosed or multiline
+    backtick runs stay searchable because they do not prove a quoted span.
 
-    Two regions and no more: everything outside a fence or a block quote is
-    scanned exactly as it was. An inline code span is arguably the same class
-    of text — `Resource deadlock avoided`, quoted from an OS error in #1167's
-    own report, matches the concurrency pattern from inside one — but the
-    plan authorises fences and block quotes, and widening a safety gate's
-    blind spot past what was approved is not this ticket's to do. Captured
-    separately.
+    Fences and block quotes are removed first; then only paired single-backtick
+    spans contained on each remaining line are blanked. Everything else is
+    scanned exactly as before.
     """
     if not text:
         return text or ""
@@ -1204,7 +1226,10 @@ def asserted_text(text: str) -> str:
             kept.append("")
             continue
         kept.append("" if _QUOTE_RE.match(line) else line)
-    return "\n".join(kept)
+    return "\n".join(
+        _INLINE_CODE_RE.sub(lambda span: " " * len(span.group(0)), line)
+        for line in kept
+    )
 
 
 def escalation_matches(title: str, body: str,
@@ -1217,14 +1242,11 @@ def escalation_matches(title: str, body: str,
     condition, because the person who wrote the plan knew what it meant and a
     regex does not.
 
-    Only asserted prose is scanned. Quoted evidence — fenced blocks and block
-    quotes — is excluded (#1167): six false escalations in four days came from
-    words the item was reporting on rather than words describing its work, and
-    this issue's own report scored four risks on the four words in its list of
-    past false positives. No pattern is removed, and the marker still outranks
-    the regex in both directions. Nate answered the gate question on
-    2026-09-21, having been shown the cost: a plan that describes its real risk
-    only inside a code fence would drop to the standard lane.
+    Only asserted prose is scanned. Quoted evidence — fenced blocks, block
+    quotes, and paired single-backtick spans on one line — is excluded: words
+    the item was reporting on rather than words describing its work must not
+    change its tier. No pattern is removed, and the marker still outranks the
+    regex in both directions.
 
     Each matched reason carries its first matching line, trimmed. The synthetic
     "prior attempt failed" reason has no matching line.
@@ -2262,10 +2284,6 @@ CONFLICTING_BRANCH_SUFFIX = (
     " is conflicting with the base — an engineer rebase is required"
 )
 
-#: A gate-authored verdict records only what the gate mechanically established.
-#: It did not inspect the diff and must not imply that it did.
-UNMERGEABLE_REJECTION_BLOCKING = "branch could not merge at this head"
-
 #: A reviewer that writes prose and then acts leaves nothing a later step can
 #: check. That is how a merge became something a model simply decided to do, and
 #: how a PR with requested changes ended up owned by nobody (#39).
@@ -3246,7 +3264,7 @@ def approved_conflicting_current_head(
         return False
     if str(pr.get("state") or "").upper() != "OPEN":
         return False
-    if str(pr.get("mergeable") or "").upper() != "CONFLICTING":
+    if _conflicting_branch_blocker(pr) is None:
         return False
     verdict = pr.get("verdict")
     return (
@@ -6854,9 +6872,32 @@ query($login: String!, $number: Int!, $cursor: String) {
 PROJECT_ITEM_DETAIL_BATCH_SIZE = 100
 
 ITEM_DETAILS_QUERY = """
-query($ids: [ID!]!) {
+query($ids: [ID!]!, $childIds: [ID!]!) {
   rateLimit { cost remaining resetAt }
-  nodes(ids: $ids) {
+  history: nodes(ids: $ids) {
+    ... on ProjectV2Item {
+      id
+      content {
+        ... on Issue {
+          timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
+            nodes {
+              __typename
+              ... on ProjectV2ItemStatusChangedEvent {
+                createdAt previousStatus status project { number }
+              }
+              ... on LabeledEvent {
+                createdAt label { name }
+              }
+              ... on UnlabeledEvent {
+                createdAt label { name }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  children: nodes(ids: $childIds) {
     ... on ProjectV2Item {
       id
       content {
@@ -6864,6 +6905,25 @@ query($ids: [ID!]!) {
           subIssues(first: 50) {
             nodes { createdAt closedAt }
           }
+        }
+      }
+    }
+  }
+}
+"""
+
+# GitHub's CLI does not pass an empty list variable, so a detail batch with no
+# child-bearing rows uses this timeline-only form instead of sending an invalid
+# required ``childIds`` variable. It preserves the full timeline query above
+# without asking for child timestamp connections that cannot contribute.
+ITEM_TIMELINE_DETAILS_QUERY = """
+query($ids: [ID!]!) {
+  rateLimit { cost remaining resetAt }
+  nodes(ids: $ids) {
+    ... on ProjectV2Item {
+      id
+      content {
+        ... on Issue {
           timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
             nodes {
               __typename
@@ -7498,34 +7558,17 @@ def resolve_repo(repo: Optional[str]) -> str:
     )
 
 
-def _apply_item_detail_fields(item: Item, content: dict) -> None:
-    """Apply the two history-shaped fields from a targeted Project read."""
-    child_times = []
-    child_close_times = []
-    for child in ((content.get("subIssues") or {}).get("nodes") or []):
-        if not isinstance(child, dict):
-            continue
-        created_at = parse_time(child.get("createdAt"))
-        if created_at is not None:
-            child_times.append(created_at)
-        closed_at = parse_time(child.get("closedAt"))
-        if closed_at is not None:
-            child_close_times.append(closed_at)
-
-    item.first_child_created_at = min(child_times) if child_times else None
-    item.last_child_closed_at = max(child_close_times) if child_close_times else None
+def _apply_item_timeline_fields(item: Item, content: dict) -> None:
+    """Apply status and blocking history from a targeted Project read."""
     item.status_events = []
     item.status_since = None
     item.blocked_since = None
     item.blocked_cleared_at = None
+    matching_status_times = []
 
-    # Time at the current gate: the last status change into the status the item
-    # actually holds, in *this* project. Events arrive oldest-first, and an
-    # issue may sit in several projects — filtering on the project is what
-    # stops time-at-gate being silently wrong.
     timeline_nodes = ((content.get("timelineItems") or {}).get("nodes") or [])
     for event in timeline_nodes:
-        if not event:
+        if not isinstance(event, dict):
             continue
         label = (event.get("label") or {}).get("name")
         if label == "blocked" and event.get("__typename") == "LabeledEvent":
@@ -7544,8 +7587,42 @@ def _apply_item_detail_fields(item: Item, content: dict) -> None:
                     "status": event.get("status"),
                     "at": at,
                 })
-        if event.get("status") == item.status:
-            item.status_since = parse_time(event.get("createdAt"))
+                if item.status is not None and event.get("status") == item.status:
+                    matching_status_times.append(at)
+
+    # Gate age uses the newest transition into the current status in this
+    # Project. Select by timestamp so correctness does not depend on connection
+    # ordering, and exclude matching status events from other Projects above.
+    item.status_since = (
+        max(matching_status_times) if matching_status_times else None
+    )
+
+
+def _apply_item_detail_fields(
+    item: Item,
+    content: dict,
+    *,
+    include_children: bool = True,
+    include_timeline: bool = True,
+) -> None:
+    """Apply child timestamps and timeline history from targeted Project reads."""
+    if include_children:
+        child_times = []
+        child_close_times = []
+        for child in ((content.get("subIssues") or {}).get("nodes") or []):
+            if not isinstance(child, dict):
+                continue
+            created_at = parse_time(child.get("createdAt"))
+            if created_at is not None:
+                child_times.append(created_at)
+            closed_at = parse_time(child.get("closedAt"))
+            if closed_at is not None:
+                child_close_times.append(closed_at)
+
+        item.first_child_created_at = min(child_times) if child_times else None
+        item.last_child_closed_at = max(child_close_times) if child_close_times else None
+    if include_timeline:
+        _apply_item_timeline_fields(item, content)
 
 
 def _from_node(node: dict) -> Optional[Item]:
@@ -7616,6 +7693,7 @@ def hydrate_item_details(
     }
     selected = list(items if candidates is None else candidates)
     ids = []
+    child_ids = []
     seen: Set[str] = set()
     for item in selected:
         item_id = item.item_id
@@ -7626,22 +7704,49 @@ def hydrate_item_details(
         ):
             ids.append(item_id)
             seen.add(item_id)
+            if item.children_total > 0:
+                child_ids.append(item_id)
     if not ids:
         return
 
     for start in range(0, len(ids), PROJECT_ITEM_DETAIL_BATCH_SIZE):
         batch = ids[start:start + PROJECT_ITEM_DETAIL_BATCH_SIZE]
-        data = gh_graphql(ITEM_DETAILS_QUERY, ids=batch)
-        nodes = data.get("nodes") if isinstance(data, dict) else None
-        if not isinstance(nodes, list):
+        child_batch = child_ids[start:start + PROJECT_ITEM_DETAIL_BATCH_SIZE]
+        if child_batch:
+            data = gh_graphql(
+                ITEM_DETAILS_QUERY,
+                ids=batch,
+                childIds=child_batch,
+            )
+            timeline_nodes = data.get("history") if isinstance(data, dict) else None
+            child_nodes = data.get("children") if isinstance(data, dict) else None
+        else:
+            data = gh_graphql(ITEM_TIMELINE_DETAILS_QUERY, ids=batch)
+            timeline_nodes = data.get("nodes") if isinstance(data, dict) else None
+            child_nodes = []
+        if (
+            not isinstance(timeline_nodes, list)
+            or not isinstance(child_nodes, list)
+        ):
             raise GitHubError("Project item detail response was malformed")
-        for node in nodes:
+        for node in timeline_nodes:
             if not isinstance(node, dict):
                 continue
             item = by_id.get(node.get("id"))
             content = node.get("content")
             if item is not None and isinstance(content, dict):
-                _apply_item_detail_fields(item, content)
+                _apply_item_detail_fields(
+                    item, content, include_children=False
+                )
+        for node in child_nodes:
+            if not isinstance(node, dict):
+                continue
+            item = by_id.get(node.get("id"))
+            content = node.get("content")
+            if item is not None and isinstance(content, dict):
+                _apply_item_detail_fields(
+                    item, content, include_timeline=False
+                )
 
 
 def load_items(include_details: bool = True) -> List[Item]:
@@ -11699,7 +11804,7 @@ def _batched_pr_query(
         lines.append("      nodes {")
         lines.append(
             "        number title state url headRefName headRefOid "
-            "mergeable mergedAt createdAt closedAt"
+            "mergeable mergeStateStatus mergedAt createdAt closedAt"
         )
         if include_body:
             lines.append("        body")
@@ -11767,7 +11872,8 @@ def _normalise_pr_node(node: object) -> Optional[Dict[str, object]]:
         name: node.get(name)
         for name in (
             "number", "title", "state", "url", "headRefName",
-            "headRefOid", "mergeable", "mergedAt", "createdAt", "closedAt",
+            "headRefOid", "mergeable", "mergeStateStatus", "mergedAt",
+            "createdAt", "closedAt",
         )
     }
     if "body" in node:
@@ -12214,12 +12320,11 @@ def review_queue(
     matched to the work the same way an engine is: the expensive judgement is
     spent where the ticket says the stakes are, and nowhere else.
 
-    A PR whose checks are still running is not offered at all. The review
-    pre-check rejects anything that is not green, and a recorded rejection
-    covers that head for good, so offering a PR seconds after a push produced
-    a permanent rejection of a commit whose CI went on to pass (#900). Red CI
-    and a rollup with no checks in it are still offered: those are answers,
-    not a signal that has yet to arrive.
+    A PR whose checks are still running is not offered. A ticket branch that
+    GitHub reports as conflicting is rejected mechanically at its current
+    head and never offered for model review; repeated queue reads leave that
+    canonical rejection in place until the engineer pushes a new head. Red CI
+    and a normal empty rollup remain visible to the review pre-check.
     """
     if pr_facts is None:
         pr_facts = ticket_pr_facts(items)
@@ -12233,6 +12338,26 @@ def review_queue(
                 continue
             head = row.get("headRefName") or ""
             if not head.startswith("ticket/"):
+                continue
+            conflict = _conflicting_branch_blocker(row)
+            if conflict is not None:
+                # Conflict is a complete, deterministic rejection. Record it
+                # against this snapshot's head before it can reach a model
+                # reviewer. The gate helper makes repeat ticks idempotent and
+                # replaces any less-specific verdict on the same head.
+                head_sha = row.get("headRefOid")
+                number = row.get("number")
+                if head_sha and number is not None:
+                    _record_unmergeable_rejection(
+                        repo,
+                        number,
+                        pr_fact=row,
+                        candidate_verdict={
+                            "verdict": "rejected",
+                            "ci": "unknown",
+                            "head_sha": head_sha,
+                        },
+                    )
                 continue
             if checks_still_running(row.get("statusCheckRollup")):
                 # The checks have not reported yet, so the only answer a
@@ -12249,11 +12374,12 @@ def review_queue(
             )
             if tier and needed != tier:
                 continue
-            found.append({"pr": row.get("number"), "repo": repo,
-                          "ref": ticket.ref,
-                          "tier": needed, "url": ticket.url,
-                          "title": ticket.title,
-                          "opened": row.get("createdAt") or ""})
+            candidate = {"pr": row.get("number"), "repo": repo,
+                         "ref": ticket.ref,
+                         "tier": needed, "url": ticket.url,
+                         "title": ticket.title,
+                         "opened": row.get("createdAt") or ""}
+            found.append(candidate)
     # Oldest first. `gh pr list` returns newest first, and handing a reviewer
     # `queue[0]` from that order starved the oldest PR indefinitely: on
     # 2026-09-09 four PRs opened before 11:00 were still unreviewed at 15:17
@@ -12962,15 +13088,16 @@ def _begin_api_reserve_preflight(
                    "read its budget does not work",
         }
 
-    floor = loads * BEGIN_PROJECT_LOAD_COST
+    floor = _reserve_floor(loads, BEGIN_PROJECT_LOAD_COST)
     if remaining < floor:
         return {
             "gate": "reserve",
             "do": "stop",
             "why": "GraphQL budget {} is below the {} floor of {} "
-                   "({} loads at {} points)".format(
+                   "({} loads at {} points; ceiling {} points)".format(
                        remaining, lane, floor, loads,
-                       BEGIN_PROJECT_LOAD_COST),
+                       BEGIN_PROJECT_LOAD_COST,
+                       GRAPHQL_RESERVE_POINT_CEILING),
         }
     return None
 
@@ -13652,15 +13779,16 @@ def _reserve_verdict_for_remaining(
 
     loads = (REVIEW_RESERVE_LOADS if do == "review"
              else ENGINEERING_RESERVE_LOADS)
-    floor = loads * int(load_cost)
+    floor = _reserve_floor(loads, load_cost)
     if remaining < floor:
         return {
             "gate": "reserve",
             "do": "stop",
             "why": "GraphQL budget {} is below the {} floor of {} "
-                   "({} loads at {} points)".format(
+                   "({} loads at {} points; ceiling {} points)".format(
                        remaining, "review" if do == "review"
-                       else "engineering", floor, loads, load_cost),
+                       else "engineering", floor, loads, load_cost,
+                       GRAPHQL_RESERVE_POINT_CEILING),
         }
     return None
 
@@ -13692,7 +13820,8 @@ def cmd_next_review(
 
 def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
                blocking: List[str], note: Optional[str],
-               run: Optional[str] = None, agent: Optional[str] = None) -> int:
+               run: Optional[str] = None, agent: Optional[str] = None,
+               items: Optional[Sequence[Item]] = None) -> int:
     """Record a structured review verdict on a PR.
 
     The reviewer's judgement is the part only a model can do. Writing it as
@@ -13708,6 +13837,26 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
     sha = head.get("headRefOid")
     if not sha:
         raise GitHubError("could not read the head commit of PR #{}".format(pr))
+
+    if verdict == "rejected" and ci == "unknown":
+        fact = _pr_fact_for_number(repo, pr, include_comments=True) or {}
+        if (
+            fact.get("state") == "OPEN"
+            and fact.get("headRefOid") == sha
+            and _conflicting_branch_blocker(fact) is not None
+        ):
+            _record_unmergeable_rejection(
+                repo,
+                pr,
+                pr_fact=fact,
+                candidate_verdict={
+                    "verdict": verdict,
+                    "ci": ci,
+                    "head_sha": sha,
+                },
+                items=items,
+            )
+            return 0
 
     return _write_verdict(
         repo, pr, sha, verdict, ci, blocking, note, run=run, agent=agent
@@ -13746,9 +13895,15 @@ def _write_verdict(repo: str, pr: int, sha: str, verdict: str, ci: str,
     return 0
 
 
-def _conflicting_branch_blocker(data: Dict) -> Optional[str]:
+def _conflicting_branch_blocker(
+    data: Mapping[str, object],
+) -> Optional[str]:
     """The mechanical conflict reason, or None for every other branch state."""
-    if str(data.get("mergeable") or "").upper() != "CONFLICTING":
+    mergeable = str(data.get("mergeable") or "").upper()
+    merge_state = str(
+        data.get("mergeStateStatus") or data.get("merge_state_status") or ""
+    ).upper()
+    if mergeable != "CONFLICTING" and merge_state != "DIRTY":
         return None
     return "branch {!r}{}".format(
         data.get("headRefName") or "", CONFLICTING_BRANCH_SUFFIX
@@ -13762,15 +13917,18 @@ def _is_conflicting_branch_blocker(reason: str) -> bool:
 
 
 def _record_unmergeable_rejection(
-    repo: str, pr: int, pr_fact: Optional[Mapping[str, object]] = None
+    repo: str, pr: int, pr_fact: Optional[Mapping[str, object]] = None,
+    *, candidate_verdict: Optional[Mapping[str, object]] = None,
+    items: Optional[Sequence[Item]] = None,
 ) -> None:
-    """Reject an approved current head that the live merge gate finds conflicting.
+    """Record a deterministic rejection for a conflicting current head.
 
-    Re-reading the head and mergeability keeps the verdict tied to the fact the
-    gate actually observed. Requiring an approval at that exact SHA excludes the
-    two self-resolving refusal shapes: no verdict and a verdict for an older head.
-    It also makes retries idempotent, because the newest verdict is then already
-    the gate-authored rejection rather than an approval.
+    The merge gate and review queue use this path when the conflict itself is
+    the complete mechanical answer, replacing a less-specific verdict or
+    recording one before review. The optional incoming verdict lets
+    ``cmd_review`` supply the current head before it writes a weaker rejection.
+    In every case the current head and conflict state come from the same PR
+    fact used to write the canonical blocker.
     """
     data = dict(pr_fact) if isinstance(pr_fact, Mapping) else None
     if data is None:
@@ -13782,19 +13940,62 @@ def _record_unmergeable_rejection(
     if not sha or reason is None:
         return
 
-    verdict = _row_verdict(data, repo)
-    if (
-        verdict is None
-        or verdict.get("verdict") != "approved"
-        or verdict.get("head_sha") != sha
-    ):
+    current = _row_verdict(data, repo)
+    verdict = (
+        dict(candidate_verdict)
+        if isinstance(candidate_verdict, Mapping) else current
+    )
+    if not isinstance(verdict, dict) or verdict.get("head_sha") != sha:
+        return
+    eligible = verdict.get("verdict") == "approved" or (
+        verdict.get("verdict") == "rejected"
+        and verdict.get("ci") == "unknown"
+    )
+    if not eligible:
         return
 
-    _write_verdict(
-        repo, pr, sha, "rejected", "unknown",
-        [UNMERGEABLE_REJECTION_BLOCKING], None,
-        agent=MERGE_GATE_AGENT,
+    already_canonical = (
+        isinstance(current, dict)
+        and current.get("verdict") == "rejected"
+        and current.get("ci") == "unknown"
+        and current.get("head_sha") == sha
+        and current.get("blocking") == [reason]
     )
+    if not already_canonical:
+        _write_verdict(
+            repo, pr, sha, "rejected", "unknown", [reason], None,
+            agent=MERGE_GATE_AGENT,
+        )
+
+    # Hand the ticket back when this head is rejected for its conflict. If a
+    # canonical rejection was written by an earlier run, clear only the claim
+    # that predates it; a newer claim belongs to the engineer rebasing the PR.
+    if items is not None:
+        ref = ticket_ref_from_branch(repo, str(data.get("headRefName") or ""))
+        ticket = next((item for item in items if item.ref == ref), None)
+        if ticket is not None and ticket.in_motion_since is not None:
+            prior_rejection = None
+            if already_canonical:
+                stamp = current.get("reviewed_at") if isinstance(current, dict) else None
+                if isinstance(stamp, str):
+                    try:
+                        prior_rejection = datetime.fromisoformat(
+                            stamp.replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        pass
+                    if prior_rejection is not None and prior_rejection.tzinfo is None:
+                        prior_rejection = prior_rejection.replace(tzinfo=timezone.utc)
+                # Lock timestamps have one-second precision. Treat a claim in
+                # the same second as the rejection as newer, since its order is
+                # ambiguous and clearing it could interrupt a rebase.
+                if (
+                    prior_rejection is None
+                    or ticket.in_motion_since >= prior_rejection.replace(microsecond=0)
+                ):
+                    return
+            write_lock(ticket, "")
+            ticket.in_motion_since = None
 
 
 def ticket_ref_from_branch(repo: str, branch: str) -> Optional[str]:
@@ -13827,16 +14028,15 @@ def closed_itself_comment(tickets: Sequence[Item], drift: Sequence[str]) -> str:
 
 def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
                             ) -> bool:
-    """Whether a project has earned the funnel's unattended close.
+    """Whether an item has earned the funnel's unattended close.
 
     ``funnel merge`` sees the Project summary before GitHub closes the ticket,
     so it supplies the post-merge child count. Every other caller uses the
-    count already loaded on the project.
+    count already loaded on the item.
     """
     completed = item.children_done if children_done is None else children_done
     return (
-        item.parent is None
-        and item.state == "OPEN"
+        item.state == "OPEN"
         and item.status == "Building"
         and _could_carry_closed_itself_marker(
             item, children_done=completed
@@ -13847,7 +14047,7 @@ def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
 def _close_auto_closeable_project(items: Sequence[Item], project: Item,
                                   *, children_done: Optional[int] = None
                                   ) -> bool:
-    """Move one eligible project to Done, close it, and record its marker."""
+    """Move one eligible item to Done, close it, and record its marker."""
     if not _auto_closeable_project(project, children_done=children_done):
         return False
     if not project.item_id:
@@ -13901,7 +14101,7 @@ def _close_auto_closeable_project(items: Sequence[Item], project: Item,
 
 
 def reconcile_auto_closeable_projects(items: Sequence[Item]) -> List[str]:
-    """Close every already-finished upkeep project before queue selection."""
+    """Close every eligible item with finished children before queue selection."""
     closed: List[str] = []
     projects = sorted(
         (item for item in items if _auto_closeable_project(item)),
@@ -14178,7 +14378,9 @@ def cmd_merge(
     )
     if why:
         if any(_is_conflicting_branch_blocker(reason) for reason in why):
-            _record_unmergeable_rejection(repo, pr, pr_fact=gate_fact)
+            _record_unmergeable_rejection(
+                repo, pr, pr_fact=gate_fact, items=items
+            )
         print("refusing to merge PR #{}:".format(pr), file=sys.stderr)
         for reason in why:
             print("  - " + reason, file=sys.stderr)
@@ -15014,7 +15216,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_next_review(items, args.tier)
         if args.command == "review":
             return cmd_review(args.repo, args.pr, args.verdict, args.ci,
-                              args.blocking, args.note, args.run, args.agent)
+                              args.blocking, args.note, args.run, args.agent,
+                              items=items)
         if args.command == "merge":
             return cmd_merge(items, now, args.repo, args.pr, args.confirmed)
         if args.command == "next":

@@ -34,7 +34,8 @@ def pr_row(number, branch, state="OPEN", **kw):
         "number": number, "state": state,
         "url": "https://example.invalid/pr/{}".format(number),
         "headRefName": branch, "headRefOid": "abc123",
-        "mergeable": "MERGEABLE", "mergedAt": None, "reviews": [],
+        "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN",
+        "mergedAt": None, "reviews": [],
     }
     row.update(kw)
     return row
@@ -248,6 +249,20 @@ def test_batch_replaces_per_pr_fanout_and_measures_saving_against_655(
         funnel.PR_GRAPHQL_PR_PAGE_SIZE) in calls[0][0]
     assert "rateLimit { cost remaining resetAt }" in calls[0][0]
     assert 'refs(refPrefix: "refs/heads/", first: 100)' in calls[0][0]
+
+
+def test_scan_preserves_merge_state_status_for_conflict_routing(monkeypatch):
+    calls = []
+    row = pr_row(10, "ticket/10", mergeable="UNKNOWN",
+                 mergeStateStatus="DIRTY")
+    monkeypatch.setattr(
+        funnel, "gh_graphql", repo_graphql_reads([row], calls=calls)
+    )
+
+    facts = funnel.ticket_pr_facts([ticket(10)])
+
+    assert facts["nateprich/beta#10"]["mergeStateStatus"] == "DIRTY"
+    assert "mergeStateStatus" in calls[0][0]
 
 
 def test_a_closed_ticket_with_an_open_pr_is_included(monkeypatch):

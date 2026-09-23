@@ -33,6 +33,36 @@ def _wire(monkeypatch, rows, verdicts=None):
             by_ref.setdefault(ref, []).append(row)
     facts = funnel.TicketPRFacts(rows_by_ref=by_ref)
     monkeypatch.setattr(funnel, "ticket_pr_facts", lambda items: facts)
+    return facts
+
+
+def _capture_conflict_writes(monkeypatch, facts):
+    writes = []
+
+    def write(repo, pr, sha, verdict, ci, blocking, note,
+              run=None, agent=None):
+        writes.append({
+            "repo": repo,
+            "pr": pr,
+            "head_sha": sha,
+            "verdict": verdict,
+            "ci": ci,
+            "blocking": list(blocking),
+            "agent": agent,
+        })
+        for rows in facts.rows_by_ref.values():
+            for row in rows:
+                if row.get("number") == pr:
+                    row["verdict"] = {
+                        "verdict": verdict,
+                        "ci": ci,
+                        "head_sha": sha,
+                        "blocking": list(blocking),
+                    }
+        return 0
+
+    monkeypatch.setattr(funnel, "_write_verdict", write)
+    return writes
 
 
 def _row(pr, ticket, opened, head="abc"):
@@ -185,7 +215,124 @@ def test_a_rollup_with_no_checks_is_still_offered(monkeypatch):
     """No checks at all is an answer, and must stay visible as a refusal."""
     _wire(monkeypatch, [_rollup_row(10, 1, "2026-09-15T23:10:00Z", [])])
 
-    assert [e["pr"] for e in funnel.review_queue([_ticket(1)])] == [10]
+    queue = funnel.review_queue([_ticket(1)])
+    assert [e["pr"] for e in queue] == [10]
+    assert "blocking" not in queue[0]
+
+
+def test_conflict_with_an_empty_rollup_is_rejected_without_review(monkeypatch):
+    row = _rollup_row(10, 1, "2026-09-15T23:10:00Z", [])
+    row.update(state="OPEN", mergeable="CONFLICTING")
+    facts = _wire(monkeypatch, [row])
+    writes = _capture_conflict_writes(monkeypatch, facts)
+
+    queue = funnel.review_queue([_ticket(1)], pr_facts=facts)
+
+    reason = "branch 'ticket/1'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    assert queue == []
+    assert writes == [{
+        "repo": REPO,
+        "pr": 10,
+        "head_sha": "abc",
+        "verdict": "rejected",
+        "ci": "unknown",
+        "blocking": [reason],
+        "agent": funnel.MERGE_GATE_AGENT,
+    }]
+
+
+def test_dirty_merge_state_outweighs_pending_ci(monkeypatch):
+    row = _rollup_row(10, 1, "2026-09-15T23:10:00Z", RUNNING)
+    row.update(state="OPEN", mergeable="UNKNOWN", mergeStateStatus="DIRTY")
+    facts = _wire(monkeypatch, [row])
+    writes = _capture_conflict_writes(monkeypatch, facts)
+
+    queue = funnel.review_queue([_ticket(1)], pr_facts=facts)
+
+    assert queue == []
+    assert len(writes) == 1
+    assert writes[0]["blocking"] == [
+        "branch 'ticket/1'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    ]
+
+
+def test_ci_unknown_rejection_at_a_conflicting_head_is_replaced_without_review(
+        monkeypatch):
+    row = _rollup_row(10, 1, "2026-09-15T23:10:00Z", [])
+    row.update(state="OPEN", mergeable="CONFLICTING")
+    facts = _wire(monkeypatch, [row], verdicts={10: {
+        "verdict": "rejected",
+        "ci": "unknown",
+        "head_sha": "abc",
+        "blocking": ["ci: CI not green (state unknown)"],
+    }})
+    writes = _capture_conflict_writes(monkeypatch, facts)
+
+    queue = funnel.review_queue([_ticket(1)], pr_facts=facts)
+
+    reason = "branch 'ticket/1'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    assert queue == []
+    assert writes[0]["blocking"] == [
+        "branch 'ticket/1'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    ]
+    assert facts.rows_by_ref[REPO + "#1"][0]["verdict"]["blocking"] == [
+        reason
+    ]
+
+
+def test_canonical_conflict_rejection_is_not_reoffered(monkeypatch):
+    row = _rollup_row(10, 1, "2026-09-15T23:10:00Z", [])
+    row.update(state="OPEN", mergeable="CONFLICTING")
+    reason = "branch 'ticket/1'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    facts = _wire(monkeypatch, [row], verdicts={10: {
+        "verdict": "rejected",
+        "ci": "unknown",
+        "head_sha": "abc",
+        "blocking": [reason],
+    }})
+    writes = _capture_conflict_writes(monkeypatch, facts)
+
+    assert funnel.review_queue([_ticket(1)], pr_facts=facts) == []
+    assert writes == []
+
+
+def test_a_conflict_rejection_is_idempotent_across_review_ticks(monkeypatch):
+    row = _rollup_row(10, 1, "2026-09-15T23:10:00Z", GREEN)
+    row.update(state="OPEN", mergeable="CONFLICTING")
+    facts = _wire(monkeypatch, [row])
+    writes = _capture_conflict_writes(monkeypatch, facts)
+
+    first_tick = funnel.review_queue([_ticket(1)], pr_facts=facts)
+    second_tick = funnel.review_queue([_ticket(1)], pr_facts=facts)
+
+    reason = "branch 'ticket/1'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    expected = {
+        "repo": REPO,
+        "pr": 10,
+        "head_sha": "abc",
+        "verdict": "rejected",
+        "ci": "unknown",
+        "blocking": [reason],
+        "agent": funnel.MERGE_GATE_AGENT,
+    }
+    assert first_tick == second_tick == []  # neither tick starts model review
+    assert writes == [expected]
+    assert facts.rows_by_ref[REPO + "#1"][0]["verdict"]["blocking"] == [
+        reason
+    ]
+
+
+def test_conflict_is_removed_without_holding_back_another_review(monkeypatch):
+    conflict = _rollup_row(10, 1, "2026-09-15T23:10:00Z", [])
+    conflict.update(state="OPEN", mergeable="CONFLICTING")
+    clean = _rollup_row(20, 2, "2026-09-15T23:11:00Z", GREEN)
+    clean["state"] = "OPEN"
+    facts = _wire(monkeypatch, [conflict, clean])
+    _capture_conflict_writes(monkeypatch, facts)
+
+    queue = funnel.review_queue([_ticket(1), _ticket(2)], pr_facts=facts)
+
+    assert [entry["pr"] for entry in queue] == [20]
 
 
 def test_one_pending_pr_does_not_hold_back_the_rest(monkeypatch):

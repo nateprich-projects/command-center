@@ -717,7 +717,7 @@ def stub_apply(monkeypatch, **kw):
     every apply test proves the Needs id comes from item-add's answer.
     """
     calls: dict = {"created": [], "added": [], "needs": [], "comments": [],
-                   "labels": [], "plans": []}
+                   "labels": [], "plans": [], "sibling_reads": []}
     next_number = {"n": 100}
 
     def fake_plan(repo, number):
@@ -725,7 +725,8 @@ def stub_apply(monkeypatch, **kw):
         return kw.get("plan", plan(state="OPEN"))
 
     def fake_create(repo, parent, ticket, blocked_by):
-        if kw.get("fail_on") == ticket["title"]:
+        if (kw.get("fail_on") == ticket["title"]
+                or ticket["title"] in kw.get("fail_titles", set())):
             raise funnel.GitHubError("creation refused")
         next_number["n"] += 1
         calls["created"].append({
@@ -735,14 +736,28 @@ def stub_apply(monkeypatch, **kw):
             "number": next_number["n"],
         })
         number = next_number["n"]
-        return (number, "{}#{}".format(repo, number),
+        ref = "{}#{}".format(repo, number)
+        if kw.get("record_created_siblings"):
+            kw["siblings"].append({
+                "ref": ref, "repo": repo, "number": number,
+                "title": ticket["title"], "state": "OPEN",
+            })
+        return (number, ref,
                 "https://github.com/{}/issues/{}".format(repo, number))
+
+    def fake_siblings(repo, parent):
+        calls["sibling_reads"].append((repo, parent))
+        return kw.get("siblings", [])
 
     def fake_run_gh(command, **kwargs):
         assert command[1:3] == ["project", "item-add"], command
         calls["added"].append(list(command))
         url = command[command.index("--url") + 1]
         number = url.rsplit("/", 1)[-1]
+        if kw.get("project_add_error_on") == number:
+            return SimpleNamespace(
+                returncode=1, stdout="",
+                stderr=kw.get("project_add_error", "not permitted"))
         return SimpleNamespace(
             returncode=0,
             stdout=json.dumps({"id": "item-{}".format(number)}),
@@ -758,6 +773,7 @@ def stub_apply(monkeypatch, **kw):
         calls["labels"].append((repo, number))
 
     monkeypatch.setattr(breakdown, "fetch_plan", fake_plan)
+    monkeypatch.setattr(breakdown, "fetch_siblings", fake_siblings)
     monkeypatch.setattr(breakdown, "create_ticket", fake_create)
     monkeypatch.setattr(funnel, "_run_gh", fake_run_gh)
     monkeypatch.setattr(breakdown, "write_needs", fake_needs)
@@ -958,6 +974,95 @@ def test_a_marker_never_suppresses_the_create_path(monkeypatch):
     assert "already_answered" not in result
 
 
+def test_resume_creates_only_missing_siblings_and_repairs_project_fields(
+        monkeypatch):
+    siblings = [{
+        "ref": "{}#{}".format(REPO, 200 + index),
+        "repo": REPO,
+        "number": 200 + index,
+        "title": "slice {}".format(index),
+        "state": "OPEN",
+    } for index in range(1, 13)]
+    calls = stub_apply(monkeypatch, siblings=siblings)
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="slice {}".format(index), needs="human")
+        for index in range(1, 17)
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert [row["ticket"]["title"] for row in calls["created"]] == [
+        "slice 13", "slice 14", "slice 15", "slice 16"]
+    assert len(calls["added"]) == 16
+    assert [row[2] for row in calls["needs"]] == [
+        "{}#{}".format(REPO, 200 + index) for index in range(1, 13)
+    ] + ["{}#{}".format(REPO, number) for number in range(101, 105)]
+    assert [row["ref"] for row in result["created"]] == [
+        "{}#{}".format(REPO, 200 + index) for index in range(1, 13)
+    ] + ["{}#{}".format(REPO, number) for number in range(101, 105)]
+    assert len(calls["comments"]) == 1
+    assert calls["comments"][0][2] == breakdown.coverage_comment_body(
+        "{}#1".format(REPO), result["created"])
+    assert all(row["ref"] in calls["comments"][0][2]
+               for row in result["created"])
+
+
+def test_rerun_after_mid_apply_failure_finishes_without_duplicates(
+        monkeypatch):
+    siblings = []
+    fail_titles = {"second"}
+    calls = stub_apply(
+        monkeypatch, siblings=siblings, fail_titles=fail_titles,
+        record_created_siblings=True)
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="first"), raw_ticket(title="second"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    with pytest.raises(funnel.GitHubError, match="already created: owner/repo#101"):
+        breakdown.apply(REPO, 1, normalized)
+    assert [row["title"] for row in siblings] == ["first"]
+
+    calls["created"].clear()
+    calls["added"].clear()
+    calls["needs"].clear()
+    calls["comments"].clear()
+    fail_titles.clear()
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert [row["ticket"]["title"] for row in calls["created"]] == ["second"]
+    assert [row[2] for row in calls["needs"]] == [
+        "owner/repo#101", "owner/repo#102"]
+    assert [row["ref"] for row in result["created"]] == [
+        "owner/repo#101", "owner/repo#102"]
+    assert len(calls["comments"]) == 1
+
+
+def test_ambiguous_titles_do_not_guess_and_explicit_refs_stay_explicit(
+        monkeypatch):
+    duplicate_siblings = [{
+        "ref": "owner/repo#{}".format(number), "repo": REPO,
+        "number": number, "title": "same title", "state": "OPEN",
+    } for number in (201, 202)]
+    assert breakdown.match_existing_siblings(
+        [{"title": "same title"}], duplicate_siblings) == {}
+
+    calls = stub_apply(monkeypatch, siblings=duplicate_siblings)
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="next", depends_on=["owner/repo#202"]),
+    ]}, states={"owner/repo#202": "OPEN"})
+    assert errors == []
+    assert normalized is not None
+
+    breakdown.apply(REPO, 1, normalized)
+
+    assert calls["created"][0]["blocked_by"] == [
+        "https://github.com/owner/repo/issues/202"]
+
+
 def test_a_closed_project_takes_no_breakdown(monkeypatch):
     calls = stub_apply(monkeypatch, plan=plan(state="CLOSED"))
     errors, normalized, _ = validate({"tickets": [raw_ticket()]})
@@ -987,6 +1092,30 @@ def test_a_partial_failure_names_the_tickets_already_created(monkeypatch):
         assert "already created: owner/repo#101" in str(exc)
     else:
         raise AssertionError("the second failure must surface")
+
+
+def test_a_genuine_project_add_failure_keeps_the_created_issue_list(
+        monkeypatch):
+    calls = stub_apply(
+        monkeypatch, project_add_error_on="102",
+        project_add_error="not permitted")
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="first"),
+        raw_ticket(title="second"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    try:
+        breakdown.apply(REPO, 1, normalized)
+    except funnel.GitHubError as exc:
+        assert "not permitted" in str(exc)
+        assert "already created: owner/repo#101, owner/repo#102" in str(exc)
+    else:
+        raise AssertionError("a genuine Project add failure must abort")
+
+    assert calls["needs"] == [("item-101", "none", "owner/repo#101")]
+    assert calls["comments"] == []
 
 
 def test_apply_main_rejects_an_invalid_answer_with_exit_2(
@@ -1050,6 +1179,61 @@ def test_the_needs_id_comes_from_item_add(monkeypatch):
     ]
     assert calls["needs"] == [("item-101", "none", "owner/repo#101"),
                               ("item-102", "none", "owner/repo#102")]
+
+
+def test_already_existing_project_add_confirms_membership_and_continues(
+        monkeypatch):
+    calls = stub_apply(
+        monkeypatch,
+        project_add_error_on="101",
+        project_add_error=(
+            "GraphQL: Content already exists in this project "
+            "(addProjectV2Item)"),
+    )
+    membership_reads = []
+
+    def project_items(include_details=True):
+        membership_reads.append(include_details)
+        return [SimpleNamespace(
+            url="https://github.com/owner/repo/issues/101",
+            item_id="existing-item-101",
+        )]
+
+    monkeypatch.setattr(funnel, "load_items", project_items)
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="first"),
+        raw_ticket(title="second"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert [row["ref"] for row in result["created"]] == [
+        "owner/repo#101", "owner/repo#102"]
+    assert membership_reads == [False]
+    assert calls["needs"] == [
+        ("existing-item-101", "none", "owner/repo#101"),
+        ("item-102", "none", "owner/repo#102"),
+    ]
+    assert len(calls["comments"]) == 1
+
+
+def test_already_existing_project_add_requires_membership_confirmation(
+        monkeypatch):
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=1, stdout="",
+            stderr="GraphQL: Content already exists in this project"))
+    monkeypatch.setattr(funnel, "load_items", lambda include_details=False: [])
+
+    try:
+        breakdown.add_to_project("https://github.com/owner/repo/issues/7")
+    except funnel.GitHubError as exc:
+        assert "did not confirm membership" in str(exc)
+    else:
+        raise AssertionError("the duplicate signal alone must not prove success")
 
 
 def test_a_failed_project_add_names_the_created_issue(monkeypatch):

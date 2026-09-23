@@ -553,6 +553,75 @@ def test_a_compound_scope_splits_so_only_the_kind_a_half_stays_open():
     assert reason == "open question under Scope and priority"
 
 
+def test_career_toolset_198_replay_drops_false_scope_and_risk():
+    # The plan routes the CSV through the guarded reader and skips a cloud
+    # write on cached input. A generic permission question and a hypothetical
+    # bug in the no-write path are not stakeholder scope or proposed actions.
+    candidate = shape.validate_answer(answer(
+        proposed_class="Broken",
+        plan_markdown=(
+            "Route job-log.csv through the guarded workspace reader. "
+            "On cached content, skip write_log and report a degraded run."),
+        needs_nate={"exposure": None, "gates": None,
+                    "scope": ["Should this Broken fix be built?"],
+                    "preference": None},
+        escalated_risk=[{
+            "reason": "destructive",
+            "why": ("A hypothetical bug in the no-write path could "
+                    "overwrite newer cloud rows."),
+        }]))
+
+    reviewed, rejected = shape.review_agent_broken_output(
+        candidate, klass="Broken", origin_voice="agent")
+
+    assert reviewed["needs_nate"]["scope"] is None
+    assert reviewed["escalated_risk"] == []
+    assert "generic Scope permission" in rejected[0]
+    assert "hypothetical implementation bug" in rejected[1]
+
+
+def test_command_center_1268_replay_keeps_its_gates_question():
+    candidate = shape.validate_answer(answer(
+        proposed_class="Broken",
+        plan_markdown=(
+            "Exclude paired, one-line inline code spans from the scan; "
+            "keep ordinary prose and unclosed spans searchable."),
+        needs_nate={"exposure": None,
+                    "gates": ["May paired inline spans be excluded?"],
+                    "scope": None, "preference": None},
+        escalated_risk=[]))
+
+    reviewed, rejected = shape.review_agent_broken_output(
+        candidate, klass="Broken", origin_voice="agent")
+    status, reason = shape.decide(
+        reviewed, klass="Broken", origin_voice="agent")
+
+    assert rejected == []
+    assert reviewed["needs_nate"]["gates"] == [
+        "May paired inline spans be excluded?"]
+    assert (status, reason) == (
+        "Shaped", "open question under Gates")
+
+
+def test_agent_broken_review_keeps_real_scope_and_proposed_action_risk():
+    candidate = shape.validate_answer(answer(
+        proposed_class="Broken",
+        needs_nate={"exposure": None, "gates": None,
+                    "scope": ["Should the repair also cover archived rows?"],
+                    "preference": None},
+        escalated_risk=[{
+            "reason": "destructive",
+            "why": "The proposed repair deletes archived rows."}]))
+
+    reviewed, rejected = shape.review_agent_broken_output(
+        candidate, klass="Broken", origin_voice="agent")
+
+    assert rejected == []
+    assert reviewed["needs_nate"]["scope"] == [
+        "Should the repair also cover archived rows?"]
+    assert reviewed["escalated_risk"] == candidate["escalated_risk"]
+
+
 def test_a_documented_runtime_root_keeps_a_path_question_out_of_needs_nate():
     # #1053: a machine-local path under the repo's documented runtime
     # root is precedent (or a recorded reversible default), never a
@@ -660,6 +729,21 @@ def test_packet_carries_every_field():
     json.dumps(found)  # the packet is JSON by contract
 
 
+def test_agent_broken_packet_carries_its_output_review():
+    found = packet(idea=idea_dict(klass="Broken"))
+    assert found["output_review"] == shape.AGENT_BROKEN_OUTPUT_REVIEW
+    assert "concrete unresolved stakeholder tradeoff" \
+        in found["output_review"]["scope"]
+    assert "hypothetical implementation bug" \
+        in found["output_review"]["escalated_risk"]
+
+
+def test_other_origins_and_classes_do_not_get_agent_broken_review():
+    assert "output_review" not in packet()
+    assert "output_review" not in packet(
+        idea=idea_dict(klass="Broken"), origin_voice="nate-relayed")
+
+
 def test_packet_marks_missing_instruction_files():
     found = packet(plan_md="", plan_md_missing=True,
                    agents_md="", agents_md_missing=True)
@@ -752,6 +836,37 @@ def test_apply_advances_an_all_clear_agent_plan_to_ready(
     output = capsys.readouterr().out
     assert "owner/repo#42 → Ready" in output
     assert "advanced to Ready: needs_nate all null" in output
+
+
+def test_apply_reviews_false_holds_on_an_agent_broken_replay(
+        monkeypatch, capsys):
+    item = idea(198, klass="Broken")
+    calls = stub_gh(monkeypatch, item)
+    candidate = answer(
+        proposed_class="Broken",
+        plan_markdown=(
+            "# Guard job-log.csv read\n\n"
+            "Use the guarded reader and skip the cloud write on cached input."),
+        needs_nate={"exposure": None, "gates": None,
+                    "scope": ["Should this Broken fix be built?"],
+                    "preference": None},
+        escalated_risk=[{
+            "reason": "destructive",
+            "why": ("A hypothetical bug in the no-write path could "
+                    "overwrite newer cloud rows."),
+        }])
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref, candidate,
+        run="shape-run", agent="muse") == 0
+
+    assert item.status == "Ready"
+    body_write = gh_calls(calls, "gh", "issue", "edit")[0][1][-1]
+    assert "- Scope and priority: nothing outstanding." in body_write
+    assert "Risk: escalated" not in body_write
+    diagnostics = capsys.readouterr().err
+    assert "generic Scope permission" in diagnostics
+    assert "hypothetical implementation bug" in diagnostics
 
 
 def test_apply_holds_a_plan_with_one_open_need_at_shaped(

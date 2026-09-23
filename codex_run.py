@@ -28,6 +28,7 @@ import glob
 import json
 import os
 import re
+import tempfile
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 #: The model and effort every Command Center Codex run uses (Nate,
@@ -409,21 +410,20 @@ def _rollout_drift(run: str, cwd: str, meta: Optional[Dict],
 
 # --- automation memory (#1317) ----------------------------------------------
 
-#: The file the app injects into every automation run: each run starts with
-#: `sed -n '1,240p' <automation dir>/memory.md` and the model patches it
-#: before stopping (measured 2026-09-22). The standard automation's copy had
-#: reached 401 KB of run notes, read back by every later run as guidance.
+#: The file the app's developer message tells every automation run to read
+#: first and to summarise into before returning. The model does both (see
+#: LEARNINGS.md, 2026-09-22). The standard automation's copy had reached 401
+#: KB of run notes, read back by nearly every later run as guidance.
 MEMORY_FILE = "memory.md"
 
-#: What `begin` leaves in that file for the next run. Instructions live in the
-#: routine and the packet; each run's history lives in the heartbeat and on
-#: GitHub. Nothing here should read as advice.
+#: What `begin` leaves in that file. Deliberately short, and naming no file:
+#: a path here would invite an extra read on every run. Each run's history
+#: lives in the heartbeat and on GitHub. Nothing here should read as advice.
 MEMORY_STUB = """# Automation memory
 
-Reset by `funnel.py begin` at the start of every Command Center run (#1317).
-Nothing written here carries past the next run. Instructions come from
-`routines/codex-work.md` and the JSON packet `begin` prints; what earlier
-runs did is on GitHub and in the heartbeat.
+Reset by `funnel.py begin` on every Command Center run (#1317). Notes
+written here do not carry over; what earlier runs did is on GitHub and in
+the heartbeat.
 """
 
 
@@ -449,24 +449,28 @@ def own_automation(settings: Optional[Mapping]) -> Optional[str]:
 def reset_memory(directory: Optional[str]) -> str:
     """Replace ``directory``'s memory file with the stub; say what happened.
 
-    Written to a temporary file and moved into place, so a run that reads
-    the file at the same moment sees the old notes or the stub, never half
-    of each. A failure is reported, not raised: the settings check has
-    already passed, and memory is not a safety boundary.
+    Written to a uniquely named temporary file and moved into place, so a
+    run that reads the file at the same moment sees the old notes or the
+    stub, never half of each, and two resets at once cannot trip over one
+    temporary name. A failure is reported, not raised: the settings check
+    has already passed, and memory is not a safety boundary.
     """
     if not directory:
         return "skipped: no automation directory"
     target = os.path.join(directory, MEMORY_FILE)
-    temporary = target + ".reset"
+    temporary = None
     try:
-        with open(temporary, "w", encoding="utf-8") as handle:
-            handle.write(MEMORY_STUB)
+        handle, temporary = tempfile.mkstemp(
+            dir=directory, prefix=MEMORY_FILE + ".", suffix=".reset")
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(MEMORY_STUB)
         os.replace(temporary, target)
     except OSError as exc:
-        try:
-            os.remove(temporary)
-        except OSError:
-            pass
+        if temporary:
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
         return "failed: {}".format(exc)
     return "reset"
 

@@ -12,21 +12,31 @@ be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes pe
 
 **2026-09-22 · Codex desktop · measured**
 
-Every run of a Codex app automation starts by running
-`sed -n '1,240p' ~/.codex/automations/<id>/memory.md` — the app's own
-startup step, not anything in the prompt — and the model patches that
-file with notes before it stops (a 2026-09-18 standard-lane run did both;
-the read shows in its rollout as a `unified_exec_startup` item). The
-standard automation's copy had grown to 401 KB, 2,854 lines of run
-notes, including per-ticket advice such as "Do not retry this finish".
+The Codex app's developer message tells every automation run to read
+`~/.codex/automations/<id>/memory.md` first, if present, and to write a
+summary there before returning. The model does both. The app itself never
+runs or parses the file (the "last run" time comes from its database). A
+first draft of this entry said the app ran the read as a startup step. It
+does not: the `unified_exec_startup` label marks every command in a
+rollout, not an app step.
 
-So text a model wrote about one ticket was read back as guidance by every
-later run, empty runs included, from a file the repository neither
-versions nor checks. That is the prose-as-protocol failure #794 replaced
-with runner-owned protocol. #1317 has `begin` reset the launching
-automation's file to a fixed stub on every run, so at most one run's notes
-reach the next; the run finds its automation directory among its own
-writable roots.
+Across 1,352 September automation rollouts, 1,253 read the file with
+`sed -n '1,240p'`. Others read 160 to 260 lines, 9 read all of it with
+`cat`, and 19 never read it. In 53 runs the read ran in the same
+parallel call as `begin`. The standard automation's copy had grown to
+401 KB, 2,854 lines of run notes, including per-ticket advice such as
+"Do not retry this finish".
+
+So text a model wrote about one ticket was read back as guidance by
+nearly every later run, empty ones included, from a file the repository
+neither versions nor checks. That is the prose-as-protocol failure #794
+replaced with runner-owned protocol. #1317 has `begin` reset the
+launching automation's file to a fixed stub once the run's settings
+check passes. That bounds the notes, though not to one run. Standard-lane
+runs overlap (438 of 1,229 started while an earlier one was still
+active), and an overlapping run can write its summary after the next run
+has reset the file. Replaying 873 real timelines under the reset rule,
+14.5% of runs would read notes from two to five runs.
 
 ### A Codex rollout records the settings its run actually got
 

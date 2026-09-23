@@ -18,6 +18,10 @@ import funnel  # noqa: E402
 import usage  # noqa: E402
 
 
+#: Captured at import, before the shared fixture stubs the seam for every
+#: test; the tests of begin's reset put the real one back on purpose.
+REAL_MEMORY_RESET = funnel._codex_memory_reset
+
 OWN = os.path.join(codex_run.AUTOMATIONS, "command-center-tickets-hourly")
 OTHER = os.path.join(codex_run.AUTOMATIONS,
                      "command-center-tickets-weekday-mornings")
@@ -67,7 +71,14 @@ def test_a_large_memory_file_is_replaced_by_the_stub(tmp_path):
     assert codex_run.reset_memory(str(tmp_path)) == "reset"
 
     assert memory.read_text() == codex_run.MEMORY_STUB
-    assert not (tmp_path / (codex_run.MEMORY_FILE + ".reset")).exists()
+    assert list(tmp_path.glob("*.reset")) == []
+
+
+def test_two_resets_in_a_row_both_succeed(tmp_path):
+    """A unique temporary name per reset: two at once cannot collide."""
+    assert codex_run.reset_memory(str(tmp_path)) == "reset"
+    assert codex_run.reset_memory(str(tmp_path)) == "reset"
+    assert list(tmp_path.glob("*.reset")) == []
 
 
 def test_a_missing_memory_file_is_created(tmp_path):
@@ -95,7 +106,7 @@ def test_an_unwritable_directory_is_reported_and_leaves_nothing(tmp_path):
 
     assert result.startswith("failed: ")
     assert memory.read_text() == "old notes\n"
-    assert not (tmp_path / (codex_run.MEMORY_FILE + ".reset")).exists()
+    assert list(tmp_path.glob("*.reset")) == []
 
 
 def test_no_directory_is_skipped():
@@ -103,13 +114,20 @@ def test_no_directory_is_skipped():
     assert codex_run.reset_memory("") == "skipped: no automation directory"
 
 
-def test_the_stub_points_at_the_sources_that_do_carry_over():
-    """Instructions come from the routine and the packet; history from
-    GitHub and the heartbeat. Nothing in the stub is advice to follow."""
+def test_the_stub_is_short_and_names_no_file_to_read():
+    """History lives on GitHub and in the heartbeat. A path here would
+    invite an extra read on every run, and nothing in it is advice."""
     stub = codex_run.MEMORY_STUB
-    assert "routines/codex-work.md" in stub
     assert "#1317" in stub
-    assert len(stub.splitlines()) < 12
+    assert "routines/" not in stub
+    assert ".md`" not in stub
+    assert len(stub.splitlines()) < 8
+
+
+def test_the_suite_never_resets_a_real_memory_file():
+    """The shared fixture stubs the seam: a passing check against fixture
+    roots can name this machine's real automation directory."""
+    assert funnel._codex_memory_reset(OWN) == "skipped: stubbed in tests"
 
 
 # --- the check names the directory ------------------------------------------
@@ -157,6 +175,7 @@ def test_a_passing_check_names_the_run_s_automation(tmp_path, monkeypatch):
 
 def _begin(monkeypatch, capsys, settings):
     monkeypatch.setattr(funnel, "_codex_settings_check", lambda: settings)
+    monkeypatch.setattr(funnel, "_codex_memory_reset", REAL_MEMORY_RESET)
     monkeypatch.setattr(funnel, "_start_begin_heartbeat",
                         lambda agent: "run-id")
     monkeypatch.setattr(usage, "read_agent", lambda *args: {"windows": {}})

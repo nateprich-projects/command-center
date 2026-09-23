@@ -12504,11 +12504,11 @@ def _codex_settings_check() -> Dict[str, object]:
 def _codex_memory_reset(directory: object) -> str:
     """Reset the launching automation's memory file; say what happened.
 
-    The app injects the first 240 lines of that file into every run, and the
-    model appends to it, so model-written notes steered every later run
-    (#1317). A failure is reported in the envelope and never stops the run:
-    the settings check has already passed, and memory is not a safety
-    boundary.
+    The app tells every automation run to read that file first and to write
+    a summary into it before returning, so model-written notes steered
+    nearly every later run (#1317). A failure is reported in the envelope
+    and never stops the run: the settings check has already passed, and
+    memory is not a safety boundary.
     """
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     try:

@@ -607,12 +607,41 @@ def create_ticket(repo: str, parent_number: int, ticket: dict,
     return number, "{}#{}".format(repo, number), url
 
 
+PROJECT_ITEM_ADD_ALREADY_EXISTS = "content already exists in this project"
+
+
+def existing_project_item_id(url: str) -> Optional[str]:
+    """Read the Project row for ``url`` and return its item id, if present.
+
+    ``Issue.projectItems`` is empty for org-repo issues in this user-owned
+    Project, so membership is confirmed from the Project's own item list.
+    """
+    target = url.rstrip("/")
+    matches = [
+        item for item in funnel.load_items(include_details=False)
+        if isinstance(getattr(item, "url", None), str)
+        and item.url.rstrip("/") == target
+    ]
+    if len(matches) > 1:
+        raise funnel.GitHubError(
+            "Project read found multiple rows for {}".format(url))
+    if not matches:
+        return None
+    item_id = getattr(matches[0], "item_id", None)
+    if not isinstance(item_id, str) or not item_id:
+        raise funnel.GitHubError(
+            "Project read found {} without an item id".format(url))
+    return item_id
+
+
 def add_to_project(url: str) -> str:
     """Return a new ticket's Project item id, where its Needs field lives.
 
     The id comes from `gh project item-add`, as `cmd_capture` does: the add
     answers the Project row's id, for a fresh ticket or one already on the
-    board. Never query `Issue.projectItems` for it — LEARNINGS.md (2026-09-05,
+    board. If GitHub reports the content is already on the board, confirm
+    membership from the Project's own item list before returning its id.
+    Never query `Issue.projectItems` for it — LEARNINGS.md (2026-09-05,
     measured) records that connection as empty for org-repo issues in this
     user-owned Project, which is exactly what a breakdown creates.
     """
@@ -621,9 +650,25 @@ def add_to_project(url: str) -> str:
          "--owner", funnel.PROJECT_OWNER, "--url", url, "--format", "json"],
         capture_output=True, text=True, timeout=120)
     if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        if PROJECT_ITEM_ADD_ALREADY_EXISTS in detail.lower():
+            try:
+                item_id = existing_project_item_id(url)
+            except Exception as exc:
+                raise funnel.GitHubError(
+                    "created {} but gh project item-add reported already "
+                    "exists and Project membership could not be confirmed: "
+                    "{} (membership read failed: {})".format(
+                        url, detail, exc)) from exc
+            if item_id:
+                return item_id
+            raise funnel.GitHubError(
+                "created {} but gh project item-add reported already "
+                "exists and the Project read did not confirm membership: "
+                "{}".format(url, detail))
         raise funnel.GitHubError(
             "created {} but could not add it to the Project: {}".format(
-                url, (proc.stderr or "").strip()))
+                url, detail))
     try:
         item_id = json.loads(proc.stdout or "").get("id")
     except (ValueError, AttributeError):

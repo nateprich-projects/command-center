@@ -404,6 +404,112 @@ def _rollout_drift(run: str, cwd: str, meta: Optional[Dict],
     return drift(settings, session_cwd)
 
 
+# --- the automation files (#1318) -------------------------------------------
+
+#: The Command Center automations the funnel expects, by directory name, with
+#: the tier each serves. The run-keeper derives the tier from the schedule —
+#: an rrule containing `BYHOUR=` is escalated (`fires_all_day` in
+#: scripts/run-keeper) — so the tier here and the rrule on disk have to
+#: agree, or the escalated automation silently becomes a second standard lane.
+AUTOMATIONS_EXPECTED = {
+    "command-center-tickets-hourly": "standard",
+    "command-center-tickets-weekday-mornings": "escalated",
+}
+
+#: Retired by #1315 and kept on disk, paused. It is not established that the
+#: app tolerates an automation directory removed by hand, so they stay, and
+#: one turned back on is drift.
+AUTOMATIONS_RETIRED = frozenset({
+    "command-center-tickets-mon-fri-after-midnight",
+    "command-center-tickets-sun-thu-late-night",
+    "command-center-tickets-weekend-early-mornings",
+})
+
+#: The keeper's own marker for a schedule that fires in chosen windows.
+BYHOUR = "BYHOUR="
+
+#: One `key = "value"` line of an automation file. The app writes flat TOML
+#: and this machine's python3 has no `tomllib`, so the fields read here are
+#: taken the way the run-keeper takes the prompt: one anchored line each.
+_FIELD = re.compile(r'^(model|reasoning_effort|status|rrule|name) = (".*")$',
+                    re.MULTILINE)
+
+
+def automation_fields(text: str) -> Dict[str, str]:
+    """The flat string fields of one automation file that the manifest reads."""
+    fields: Dict[str, str] = {}
+    for key, raw in _FIELD.findall(text):
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(value, str):
+            fields[key] = value
+    return fields
+
+
+def automation_findings(root: Optional[str] = None) -> Dict[str, List[str]]:
+    """Each way the automation files differ from the manifest, plus notes.
+
+    ``drift`` is what the doctor fails on; ``notes`` is what it reports
+    either way: each automation's status and memory size. Prompts are not
+    compared: the run-keeper derives and installs them and reports their
+    drift itself, and a second derivation here would be one more copy.
+    """
+    root = root or AUTOMATIONS
+    drift: List[str] = []
+    notes: List[str] = []
+    if not os.path.isdir(root):
+        return {"drift": ["no automations directory at {}".format(root)],
+                "notes": notes}
+    found: Dict[str, Dict[str, str]] = {}
+    for path in sorted(glob.glob(os.path.join(
+            root, AUTOMATION_PREFIX + "*", "automation.toml"))):
+        name = os.path.basename(os.path.dirname(path))
+        try:
+            with open(path, encoding="utf-8") as handle:
+                found[name] = automation_fields(handle.read())
+        except OSError as exc:
+            drift.append("{}: unreadable ({})".format(name, exc))
+            found[name] = {}
+    for name in sorted(set(found) - set(AUTOMATIONS_EXPECTED)
+                       - AUTOMATIONS_RETIRED):
+        drift.append("{}: not in the manifest".format(name))
+    for name in sorted(set(AUTOMATIONS_EXPECTED) - set(found)):
+        drift.append("{}: missing".format(name))
+    for name, fields in sorted(found.items()):
+        status = fields.get("status")
+        if name in AUTOMATIONS_RETIRED:
+            if status != "PAUSED":
+                drift.append("{}: retired, but status is {}".format(
+                    name, status))
+        elif name in AUTOMATIONS_EXPECTED:
+            if fields.get("model") != MODEL:
+                drift.append("{}: model expected {}, found {}".format(
+                    name, MODEL, fields.get("model")))
+            if fields.get("reasoning_effort") != EFFORT:
+                drift.append("{}: effort expected {}, found {}".format(
+                    name, EFFORT, fields.get("reasoning_effort")))
+            rrule = fields.get("rrule") or ""
+            windowed = BYHOUR in rrule
+            tier = AUTOMATIONS_EXPECTED[name]
+            if tier == "standard" and windowed:
+                drift.append("{}: standard, but its rrule has {} so the "
+                             "keeper installs it as escalated".format(
+                                 name, BYHOUR))
+            if tier == "escalated" and not windowed:
+                drift.append("{}: escalated, but its rrule has no {} so the "
+                             "keeper installs it as standard".format(
+                                 name, BYHOUR))
+        memory = os.path.join(root, name, "memory.md")
+        try:
+            size = "{:,} bytes".format(os.path.getsize(memory))
+        except OSError:
+            size = "none"
+        notes.append("{}: {}, memory {}".format(name, status, size))
+    return {"drift": drift, "notes": notes}
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Print the check for this run as JSON; exit 1 on drift."""
     del argv

@@ -5993,6 +5993,40 @@ def check_codex_empty_runs(records: Optional[Iterable[object]] = None,
                  CODEX_EMPTY_RUNS_FIX)
 
 
+CODEX_AUTOMATIONS_FIX = (
+    "quit the ChatGPT app, bring each automation.toml to codex_run.py's "
+    "manifest, relaunch, and rerun funnel doctor (#1321)")
+
+
+def check_codex_automations(root: Optional[str] = None) -> Check:
+    """Report Codex automations whose settings differ from the manifest.
+
+    The app holds each automation's model, effort, schedule and status
+    outside the repository and has written stale copies back over edits
+    (LEARNINGS.md, 2026-09-06), so drift in a paused automation must show
+    before anyone turns it on. Prompts are the run-keeper's to install and
+    report; this row reads everything else. Each automation's status and
+    memory size are reported either way (#1318).
+    """
+    name = "codex automations"
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import codex_run
+
+        findings = codex_run.automation_findings(root)
+    except Exception as exc:
+        return Check(name, False,
+                     "could not read the Codex automations ({})".format(
+                         str(exc) or type(exc).__name__),
+                     CODEX_AUTOMATIONS_FIX)
+    notes = "\n".join("  " + note for note in findings["notes"])
+    if findings["drift"]:
+        return Check(name, False, "\n".join(
+            ["  " + line for line in findings["drift"]]
+            + ([notes] if notes else [])), CODEX_AUTOMATIONS_FIX)
+    return Check(name, True, notes, "")
+
+
 def check_member_repos(repos: Optional[Iterable[str]] = None) -> List[Check]:
     """Return one readiness check for every topic-bearing member repository."""
     try:
@@ -6245,6 +6279,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         check_usage_cache(cache_path=usage_cache),
         check_heartbeat(spool_dir=heartbeat_spool),
         check_codex_empty_runs(),
+        check_codex_automations(),
     ]
     if items is not None:
         items = list(items)

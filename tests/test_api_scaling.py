@@ -13,7 +13,9 @@ import funnel  # noqa: E402
 REPO = "owner/repo"
 
 
-def _node(number, *, parent=None, labels=(), blocked_by=()):
+def _node(
+    number, *, parent=None, labels=(), blocked_by=(), children_total=0
+):
     return {
         "status": {"name": "Building"},
         "class": {"name": "New"},
@@ -32,7 +34,10 @@ def _node(number, *, parent=None, labels=(), blocked_by=()):
                 if parent is not None
                 else None
             ),
-            "subIssuesSummary": {"total": 0, "completed": 0},
+            "subIssuesSummary": {
+                "total": children_total,
+                "completed": 0,
+            },
             "blockedBy": {"nodes": list(blocked_by)},
             "timelineItems": {"nodes": []},
         },
@@ -180,7 +185,7 @@ def test_project_item_list_is_compact_and_detail_read_is_candidate_bounded(
     one candidate asks for one detail id, so the nested payload stays bounded
     as the board grows.
     """
-    nodes = [_node(1)]
+    nodes = [_node(1, children_total=1)]
     nodes.extend(_node(number, parent=1) for number in range(2, 101))
     for node in nodes:
         node["id"] = "project-item-{}".format(node["content"]["number"])
@@ -189,18 +194,15 @@ def test_project_item_list_is_compact_and_detail_read_is_candidate_bounded(
 
     def graphql(query, **variables):
         calls.append((query, variables))
-        if "nodes(ids:" in query:
-            assert variables["ids"] == ["project-item-1"]
+        if "history: nodes(ids:" in query:
+            assert variables == {
+                "ids": ["project-item-1"],
+                "childIds": ["project-item-1"],
+            }
             return {
-                "nodes": [{
+                "history": [{
                     "id": "project-item-1",
                     "content": {
-                        "subIssues": {
-                            "nodes": [{
-                                "createdAt": "2026-09-10T00:00:00Z",
-                                "closedAt": None,
-                            }]
-                        },
                         "timelineItems": {
                             "nodes": [{
                                 "__typename": "ProjectV2ItemStatusChangedEvent",
@@ -208,6 +210,17 @@ def test_project_item_list_is_compact_and_detail_read_is_candidate_bounded(
                                 "previousStatus": "Ready",
                                 "status": "Building",
                                 "project": {"number": funnel.PROJECT_NUMBER},
+                            }]
+                        },
+                    },
+                }],
+                "children": [{
+                    "id": "project-item-1",
+                    "content": {
+                        "subIssues": {
+                            "nodes": [{
+                                "createdAt": "2026-09-10T00:00:00Z",
+                                "closedAt": None,
                             }]
                         },
                     },
@@ -243,8 +256,117 @@ def test_project_item_list_is_compact_and_detail_read_is_candidate_bounded(
     detail_query = " ".join(calls[1][0].split())
     assert "subIssues(first: 50)" in detail_query
     assert "timelineItems(last: 60" in detail_query
+    assert "history: nodes(ids: $ids)" in detail_query
+    assert "children: nodes(ids: $childIds)" in detail_query
     assert items[0].first_child_created_at is not None
     assert items[0].status_since is not None
+
+
+def test_detail_query_only_requests_child_times_for_items_with_children(
+    monkeypatch,
+):
+    parent_numbers = {1, 50}
+    nodes = [
+        _node(number, children_total=(1 if number in parent_numbers else 0))
+        for number in range(1, 101)
+    ]
+    for node in nodes:
+        node["id"] = "project-item-{}".format(node["content"]["number"])
+    items = [funnel._from_node(node) for node in nodes]
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        return {
+            "history": [
+                {
+                    "id": item_id,
+                    "content": {
+                        "timelineItems": {
+                            "nodes": [{
+                                "__typename": "ProjectV2ItemStatusChangedEvent",
+                                "createdAt": "2026-09-09T00:00:00Z",
+                                "previousStatus": "Ready",
+                                "status": "Building",
+                                "project": {"number": funnel.PROJECT_NUMBER},
+                            }]
+                        }
+                    },
+                }
+                for item_id in variables["ids"]
+            ],
+            "children": [
+                {
+                    "id": item_id,
+                    "content": {
+                        "subIssues": {
+                            "nodes": [{
+                                "createdAt": "2026-09-10T00:00:00Z",
+                                "closedAt": None,
+                            }]
+                        }
+                    },
+                }
+                for item_id in variables["childIds"]
+            ],
+        }
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    funnel.hydrate_item_details(items)
+
+    assert len(calls) == 1
+    query, variables = calls[0]
+    assert len(variables["ids"]) == 100
+    assert variables["childIds"] == ["project-item-1", "project-item-50"]
+    assert "subIssues(first: 50)" in query
+    assert "timelineItems(last: 60" in query
+    assert all(item.status_since is not None for item in items)
+    assert items[0].first_child_created_at is not None
+    assert items[49].first_child_created_at is not None
+    assert items[1].first_child_created_at is None
+
+
+def test_timeline_only_detail_query_handles_batches_without_children(
+    monkeypatch,
+):
+    nodes = [_node(number) for number in range(1, 3)]
+    for node in nodes:
+        node["id"] = "project-item-{}".format(node["content"]["number"])
+    items = [funnel._from_node(node) for node in nodes]
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        assert query == funnel.ITEM_TIMELINE_DETAILS_QUERY
+        assert variables["ids"] == ["project-item-1", "project-item-2"]
+        return {
+            "nodes": [
+                {
+                    "id": item_id,
+                    "content": {
+                        "timelineItems": {
+                            "nodes": [{
+                                "__typename": "ProjectV2ItemStatusChangedEvent",
+                                "createdAt": "2026-09-09T00:00:00Z",
+                                "previousStatus": "Ready",
+                                "status": "Building",
+                                "project": {"number": funnel.PROJECT_NUMBER},
+                            }]
+                        }
+                    },
+                }
+                for item_id in variables["ids"]
+            ]
+        }
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    funnel.hydrate_item_details(items)
+
+    assert len(calls) == 1
+    assert "subIssues(" not in calls[0][0]
+    assert all(item.status_since is not None for item in items)
 
 
 def test_load_items_follows_the_cursor_after_a_full_page(monkeypatch):

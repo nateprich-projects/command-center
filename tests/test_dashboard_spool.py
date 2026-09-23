@@ -97,6 +97,7 @@ def test_dashboard_board_contains_ordered_parent_projects_and_recent_done_only()
         "class": "New",
         "pinned": False,
         "waited": "8 days",
+        "waited_seconds": 8 * 24 * 60 * 60,
         "tickets_closed": 0,
         "tickets_total": 0,
         "next_owner": None,
@@ -135,7 +136,8 @@ def test_successful_brief_spools_without_changing_stdout(
 
     snapshot = _spooled(spool)
     assert snapshot["brief"] == json.loads(expected)
-    assert snapshot["board"]["columns"][3]["items"] == [{
+    board_item = snapshot["board"]["columns"][3]["items"][0]
+    assert board_item == {
         "repo": "command-center",
         "ref": project.ref,
         "title": project.title,
@@ -143,6 +145,7 @@ def test_successful_brief_spools_without_changing_stdout(
         "class": "New",
         "pinned": False,
         "waited": "7 days",
+        "waited_seconds": board_item["waited_seconds"],
         "tickets_closed": 1,
         "tickets_total": 3,
         "next_owner": None,
@@ -151,7 +154,8 @@ def test_successful_brief_spools_without_changing_stdout(
         "block_reason": None,
         "pips": [],
         "tickets": [],
-    }]
+    }
+    assert 7 * 24 * 60 * 60 <= board_item["waited_seconds"] < 7 * 24 * 60 * 60 + 1
     assert snapshot["generated_at"] == json.loads(expected)["generated_at"]
 
 

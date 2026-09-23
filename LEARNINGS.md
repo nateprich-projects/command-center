@@ -20,10 +20,11 @@ first draft of this entry said the app ran the read as a startup step. It
 does not: the `unified_exec_startup` label marks every command in a
 rollout, not an app step.
 
-Across 1,352 September automation rollouts, 1,253 read the file with
-`sed -n '1,240p'`. Others read 160 to 260 lines, 9 read all of it with
-`cat`, and 19 never read it. In 53 runs the read ran in the same
-parallel call as `begin`. The standard automation's copy had grown to
+Across 1,352 September automation rollouts, 1,333 read the file:
+1,261 with `sed -n '1,240p'`, and the rest 160 to 260 lines or all of
+it with `cat`. 19 never read it. In 53 runs the read and `begin` shared
+one tool call: 40 as a single shell command that read the file first,
+13 in parallel. The standard automation's copy had grown to
 401 KB, 2,854 lines of run notes, including per-ticket advice such as
 "Do not retry this finish".
 

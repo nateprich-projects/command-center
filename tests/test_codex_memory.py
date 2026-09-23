@@ -126,8 +126,9 @@ def test_the_stub_is_short_and_names_no_file_to_read():
 
 def test_the_suite_never_resets_a_real_memory_file():
     """The shared fixture stubs the seam: a passing check against fixture
-    roots can name this machine's real automation directory."""
-    assert funnel._codex_memory_reset(OWN) == "skipped: stubbed in tests"
+    roots can name this machine's real automation directory. Asserted on
+    the seam itself, never by calling it with a real path."""
+    assert funnel._codex_memory_reset is not REAL_MEMORY_RESET
 
 
 # --- the check names the directory ------------------------------------------

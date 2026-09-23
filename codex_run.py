@@ -422,8 +422,8 @@ MEMORY_FILE = "memory.md"
 MEMORY_STUB = """# Automation memory
 
 Reset by `funnel.py begin` on every Command Center run (#1317). Notes
-written here do not carry over; what earlier runs did is on GitHub and in
-the heartbeat.
+written here are cleared when the next run starts; what earlier runs did
+is on GitHub and in the heartbeat.
 """
 
 

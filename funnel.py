@@ -12217,6 +12217,7 @@ def _begin_preflight(
             out.update(gate="config", do="stop", why=why)
             return out, None
         out["effective"] = settings.get("effective")
+        out["memory_reset"] = _codex_memory_reset(settings.get("automation"))
 
     reading = usage.read_agent(agent, now.timestamp())
     if reading is None:
@@ -12347,6 +12348,25 @@ def _codex_settings_check() -> Dict[str, object]:
         return {"ok": False,
                 "why": "Codex run settings could not be checked: {}".format(
                     str(exc) or type(exc).__name__)}
+
+
+def _codex_memory_reset(directory: object) -> str:
+    """Reset the launching automation's memory file; say what happened.
+
+    The app injects the first 240 lines of that file into every run, and the
+    model appends to it, so model-written notes steered every later run
+    (#1317). A failure is reported in the envelope and never stops the run:
+    the settings check has already passed, and memory is not a safety
+    boundary.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        import codex_run
+
+        return codex_run.reset_memory(
+            directory if isinstance(directory, str) else None)
+    except Exception as exc:
+        return "failed: {}".format(str(exc) or type(exc).__name__)
 
 
 def _record_begin_config_drift(agent: str, run: Optional[str],

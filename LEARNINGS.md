@@ -8,6 +8,26 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### A Codex automation's memory file is fed back into every run
+
+**2026-09-22 · Codex desktop · measured**
+
+Every run of a Codex app automation starts by running
+`sed -n '1,240p' ~/.codex/automations/<id>/memory.md` — the app's own
+startup step, not anything in the prompt — and the model patches that
+file with notes before it stops (a 2026-09-18 standard-lane run did both;
+the read shows in its rollout as a `unified_exec_startup` item). The
+standard automation's copy had grown to 401 KB, 2,854 lines of run
+notes, including per-ticket advice such as "Do not retry this finish".
+
+So text a model wrote about one ticket was read back as guidance by every
+later run, empty runs included, from a file the repository neither
+versions nor checks. That is the prose-as-protocol failure #794 replaced
+with runner-owned protocol. #1317 has `begin` reset the launching
+automation's file to a fixed stub on every run, so at most one run's notes
+reach the next; the run finds its automation directory among its own
+writable roots.
+
 ### A Codex rollout records the settings its run actually got
 
 **2026-09-22 · Codex desktop · measured**

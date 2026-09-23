@@ -349,12 +349,13 @@ def check(cwd: Optional[str] = None, *,
     """Whether this run is the run the manifest describes.
 
     Returns ``ok``, the ``rollout`` it read, the ``effective`` model and
-    effort when they could be read, each ``drift`` line, and one ``why``
-    sentence for the refusal.
+    effort when they could be read, the run's own ``automation`` directory
+    when it passed, each ``drift`` line, and one ``why`` sentence for the
+    refusal.
     """
     cwd = cwd or os.getcwd()
     result: Dict = {"ok": False, "rollout": None, "effective": None,
-                    "drift": []}
+                    "automation": None, "drift": []}
     run = thread_id(environ)
     if run is None:
         result["drift"] = ["no Codex thread id in the environment ({})".format(
@@ -380,6 +381,8 @@ def check(cwd: Optional[str] = None, *,
                 if settings is not None:
                     result["effective"] = {"model": settings.get("model"),
                                            "effort": settings.get("effort")}
+                    if not result["drift"]:
+                        result["automation"] = own_automation(settings)
     result["ok"] = not result["drift"]
     result["why"] = (
         "" if result["ok"] else
@@ -402,6 +405,70 @@ def _rollout_drift(run: str, cwd: str, meta: Optional[Dict],
     if settings is None:
         return ["no turn_context in the rollout for thread {}".format(run)]
     return drift(settings, session_cwd)
+
+
+# --- automation memory (#1317) ----------------------------------------------
+
+#: The file the app injects into every automation run: each run starts with
+#: `sed -n '1,240p' <automation dir>/memory.md` and the model patches it
+#: before stopping (measured 2026-09-22). The standard automation's copy had
+#: reached 401 KB of run notes, read back by every later run as guidance.
+MEMORY_FILE = "memory.md"
+
+#: What `begin` leaves in that file for the next run. Instructions live in the
+#: routine and the packet; each run's history lives in the heartbeat and on
+#: GitHub. Nothing here should read as advice.
+MEMORY_STUB = """# Automation memory
+
+Reset by `funnel.py begin` at the start of every Command Center run (#1317).
+Nothing written here carries past the next run. Instructions come from
+`routines/codex-work.md` and the JSON packet `begin` prints; what earlier
+runs did is on GitHub and in the heartbeat.
+"""
+
+
+def own_automation(settings: Optional[Mapping]) -> Optional[str]:
+    """The run's own automation directory, from its writable roots.
+
+    The app grants each automation run exactly its own directory, for the
+    memory file. None when there is not exactly one, as for a session Nate
+    started by hand: then no memory file is touched.
+    """
+    if not isinstance(settings, Mapping):
+        return None
+    sandbox = settings.get("sandbox_policy")
+    roots = sandbox.get("writable_roots") if isinstance(sandbox, dict) else None
+    if not isinstance(roots, list):
+        return None
+    found = sorted({os.path.normpath(root) for root in roots
+                    if isinstance(root, str) and not _has_parent_segment(root)
+                    and os.path.isabs(root) and _automation_dir(root)})
+    return found[0] if len(found) == 1 else None
+
+
+def reset_memory(directory: Optional[str]) -> str:
+    """Replace ``directory``'s memory file with the stub; say what happened.
+
+    Written to a temporary file and moved into place, so a run that reads
+    the file at the same moment sees the old notes or the stub, never half
+    of each. A failure is reported, not raised: the settings check has
+    already passed, and memory is not a safety boundary.
+    """
+    if not directory:
+        return "skipped: no automation directory"
+    target = os.path.join(directory, MEMORY_FILE)
+    temporary = target + ".reset"
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(MEMORY_STUB)
+        os.replace(temporary, target)
+    except OSError as exc:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        return "failed: {}".format(exc)
+    return "reset"
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

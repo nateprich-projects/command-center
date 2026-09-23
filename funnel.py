@@ -3541,7 +3541,7 @@ def unattended_approvals(
 
 
 def agent_health(now: datetime) -> List[Dict[str, str]]:
-    """Raised watchdog conditions, derived from the same heartbeat rows."""
+    """Brief health conditions; errored-run alerts include regressions only."""
     try:
         import heartbeat
 
@@ -3565,6 +3565,7 @@ def agent_health(now: datetime) -> List[Dict[str, str]]:
             conditions = assess_agent_health(
                 agent, _brief_heartbeat_rows(agent), now.timestamp(),
                 hold_until=hold_until,
+                regressions_only=True,
             )
         except Exception:
             # The brief is a diagnostic surface. An unreachable heartbeat must

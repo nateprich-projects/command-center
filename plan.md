@@ -1,7 +1,7 @@
 ---
 title: Command Center — Design Record
 tags: [command-center, funnel, design-record, plan]
-last_updated: 2026-09-17
+last_updated: 2026-09-19
 status: Design settled. v0 in progress.
 ---
 
@@ -91,6 +91,44 @@ predicate for both the `Accept it?` gate and unattended close:
 4. **The #145 amendment is superseded for upkeep classes.** A project that
    carried a human-step ticket does not thereby return to the accept gate;
    the class/origin rule above decides. **Confirmed by Nate, 2026-09-17.**
+
+5. **Analysis projects always wait at `Accept it?`, whatever their class.**
+   An *analysis project* is one whose tickets change no behaviour — the
+   deliverable is a finding, measurement, review, comparison or
+   recommendation. It never closes itself, and it never closes without its
+   findings posted onto the parent issue where Nate reads them. This rule is
+   an exception to rules 1 and 2, not a replacement: an analysis project
+   classed `Maintenance` waits, while a `Maintenance` project that fixes
+   something still closes itself. **Confirmed by Nate, 2026-09-19.**
+
+   The rule exists because #685 demonstrated both halves failing at once. The
+   first-week funnel-watch cost review was classed `Maintenance`, so it closed
+   itself the moment its one ticket closed; and its ticket #711 could not
+   reach GitHub from the implement workspace, so the review landed in
+   `docs/funnel-watch-cost-711.md` and the parent carried no numbers. A
+   project that exists solely to inform a Nate decision closed without that
+   decision being put to him. Analysis is the one output whose whole value is
+   that he reads it — closing it unread is not a gate optimisation, it is
+   losing the work.
+
+   **The default is on.** Any project meeting the no-behaviour-change test
+   waits, unless Nate expressly says that one does not. **Confirmed by Nate,
+   2026-09-19.**
+
+_Rejected: scoping the rule to the `Investigate` class, which needs no new marker and
+is read straight off the existing class field. It would have missed #685, which was
+`Maintenance` — the exact case that prompted the rule — and classing every analysis as
+`Investigate` would overload a class that also holds quick diagnoses Nate does not want
+back at a gate._
+
+_Rejected: keeping self-close and merely requiring findings on the parent. It fixes the
+visibility half and leaves the decision half broken: Nate would see the numbers on a
+project already marked Done, which is a notification, not a gate. #685's three options
+were priced precisely so he could choose between them, and a closed project asks nothing._
+
+_Rejected: a standing weekly or monthly analysis-review digest instead of a per-project
+gate. Batching restores the "review queue" shape this document rejects, and an analysis
+commissioned for a decision is stale by the time a digest reaches it._
 
 _Rejected: a hold state — a flag or priority that keeps a good plan out of Building
 without parking it. That is "yes, but not now", which this document already rejected as a

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -189,3 +189,112 @@ def test_park_with_wake_date_records_and_reads_status_and_reason(monkeypatch):
     assert brief_item["reason"] == "Resume after the study"
     assert brief_item["wake_date"] == wake_date.isoformat()
     assert brief_item["wake_status"] == "Ready"
+
+
+def _wake_candidate():
+    return funnel.Item(
+        repo="nateprich/beta",
+        number=43,
+        title="A project to resume",
+        url="https://github.com/nateprich/beta/issues/43",
+        state="CLOSED",
+        state_reason="NOT_PLANNED",
+        status="Parked",
+        klass="New",
+        children_total=1,
+        children_done=1,
+        item_id="project-item-43",
+    )
+
+
+def _wake_comment(wake_date, status="Building"):
+    status_line = " status={}".format(status) if status is not None else ""
+    return (
+        "{}date={}{}\n{}Resume after the study".format(
+            funnel.PARK_WAKE_PREFIX, wake_date, status_line,
+            funnel.PARK_COMMENT_PREFIX,
+        )
+    )
+
+
+def _wire_wake_writes(monkeypatch, item, comment, events):
+    monkeypatch.setattr(
+        funnel, "_issue_comments", lambda current: [{"body": comment}]
+    )
+
+    def run(args, capture_output, text=True):
+        events.append(("gh", tuple(args)))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def graphql(query, **variables):
+        events.append(("graphql", variables))
+        return {
+            "updateProjectV2ItemFieldValue": {
+                "projectV2Item": {"id": item.item_id}
+            }
+        }
+
+    monkeypatch.setattr(funnel, "_run_gh", run)
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel, "_option_id", lambda *args: "building-option")
+    monkeypatch.setattr(funnel, "live_issue_state", lambda current: current.state)
+
+
+def test_park_wake_stays_parked_before_the_utc_date(monkeypatch):
+    now = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+    item = _wake_candidate()
+    comment = _wake_comment("2026-09-24")
+    events = []
+    _wire_wake_writes(monkeypatch, item, comment, events)
+
+    assert funnel.reconcile_parked_wakes([item], now) == []
+
+    assert item.status == "Parked"
+    assert item.state == "CLOSED"
+    assert events == []
+    assert funnel.gate_question(item) is None
+    assert funnel.awaiting_decision([item]) == []
+
+
+@pytest.mark.parametrize("wake_date", ["2026-09-23", "2026-09-22"])
+def test_park_wake_restores_prior_status_on_and_after_the_utc_date(
+    monkeypatch, wake_date
+):
+    now = datetime(2026, 9, 23, 23, 59, tzinfo=timezone.utc)
+    item = _wake_candidate()
+    comment = _wake_comment(wake_date)
+    events = []
+    _wire_wake_writes(monkeypatch, item, comment, events)
+
+    assert funnel.reconcile_parked_wakes([item], now) == [item.ref]
+
+    assert [event[0] for event in events] == ["gh", "graphql"]
+    assert events[0][1] == (
+        "gh", "issue", "reopen", "43", "--repo", "nateprich/beta"
+    )
+    assert events[1][1] == {
+        "project": funnel.PROJECT_ID,
+        "item": item.item_id,
+        "field": funnel.STATUS_FIELD_ID,
+        "option": "building-option",
+    }
+    assert item.state == "OPEN"
+    assert item.state_reason == "REOPENED"
+    assert item.status == "Building"
+    parsed = funnel.parse_park_comment(comment)
+    assert parsed["reason"] == "Resume after the study"
+    assert funnel.gate_question(item) == "Accept it?"
+
+
+def test_park_wake_without_prior_status_fails_closed(monkeypatch):
+    now = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+    item = _wake_candidate()
+    comment = _wake_comment("2026-09-22", status=None)
+    events = []
+    _wire_wake_writes(monkeypatch, item, comment, events)
+
+    assert funnel.reconcile_parked_wakes([item], now) == []
+
+    assert item.status == "Parked"
+    assert item.state == "CLOSED"
+    assert events == []

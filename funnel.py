@@ -10849,6 +10849,84 @@ def _option_id(field_id: str, name: str) -> str:
     raise GitHubError("no option {} on that field".format(name))
 
 
+def reconcile_parked_wakes(
+    items: Sequence[Item], now: datetime
+) -> List[str]:
+    """Resume dated parks whose UTC wake date has arrived.
+
+    The latest parseable park comment is the source of both the date and the
+    prior Status. A missing or malformed header is deliberately inert: the
+    funnel never guesses where to put an item. Reopen first so the shared
+    guarded Status writer can safely restore an active stage; if that write
+    fails, the still-Parked item is eligible for an idempotent retry next run.
+    """
+    candidates = sorted(
+        (
+            item for item in items
+            if not item.parent
+            and item.status == "Parked"
+            and item.state in ("CLOSED", "OPEN")
+        ),
+        key=lambda item: (item.repo, item.number),
+    )
+    woke: List[str] = []
+    today = _block_condition_date(now)
+
+    for item in candidates:
+        parsed = None
+        for comment in reversed(_issue_comments(item)):
+            if not isinstance(comment, dict):
+                continue
+            parsed = parse_park_comment(comment.get("body") or "")
+            if parsed is not None:
+                break
+        if parsed is None:
+            continue
+
+        wake_date = parsed.get("wake_date")
+        prior_status = parsed.get("prior_status")
+        if (
+            not isinstance(wake_date, date)
+            or isinstance(wake_date, datetime)
+            or wake_date > today
+            or not isinstance(prior_status, str)
+            or prior_status not in PARK_WAKE_STATUSES
+        ):
+            continue
+        if not item.item_id:
+            raise GitHubError(
+                "{} is not in the Project; cannot restore its wake Status"
+                .format(item.ref)
+            )
+
+        if item.state == "CLOSED":
+            reopened = _run_gh(
+                [
+                    "gh", "issue", "reopen", str(item.number),
+                    "--repo", item.repo,
+                ],
+                capture_output=True, text=True,
+            )
+            if reopened.returncode != 0:
+                raise GitHubError(
+                    "could not reopen {} for its wake date: {}".format(
+                        item.ref, reopened.stderr.strip()
+                    )
+                )
+            item.state = "OPEN"
+            item.state_reason = "REOPENED"
+
+        refusal = _write_status(item, prior_status, now)
+        if refusal is not None:
+            raise GitHubError(
+                "could not restore {} to Status {} after its wake date: {}"
+                .format(item.ref, prior_status, refusal)
+            )
+        woke.append(item.ref)
+
+    return woke
+
+
 def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
              run: Optional[str] = None, agent: Optional[str] = None,
              wake_date: Optional[date] = None) -> int:
@@ -13329,6 +13407,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         "closed_items", reconcile_closed_items, items)
     if reconciled_statuses:
         out["reconciled_statuses"] = reconciled_statuses
+    woke_parked = attempt_reconcile(
+        "parked_wakes", reconcile_parked_wakes, items, now)
+    if woke_parked:
+        out["woke_parked"] = woke_parked
     released_claims = attempt_reconcile(
         "closed_claims", reconcile_closed_claims, items)
     if released_claims:

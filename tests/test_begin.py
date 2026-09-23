@@ -720,6 +720,25 @@ def test_begin_keeps_merge_and_status_reconciles_in_separate_keys(
     assert "reconciled" not in result
 
 
+def test_begin_runs_parked_wakes_as_a_reconcile_step(monkeypatch, capsys):
+    items = [
+        _closed_project_item(
+            234, status="Parked", state_reason="NOT_PLANNED"
+        )
+    ]
+    calls = []
+
+    def wake(rows, now):
+        calls.append((rows, now))
+        return [items[0].ref]
+
+    monkeypatch.setattr(funnel, "reconcile_parked_wakes", wake)
+    result, _, _ = _begin_with_reconcile_wired(monkeypatch, capsys, items)
+
+    assert calls == [(items, NOW)]
+    assert result["woke_parked"] == [items[0].ref]
+
+
 def test_begin_retries_an_approval_at_the_current_head(monkeypatch, capsys):
     project, ticket = _ticket(7, 6)
     result, calls = _reconcile_begin(

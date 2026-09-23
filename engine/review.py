@@ -52,8 +52,9 @@ RESOLVED_PATH_MARKER = "/Volumes/"
 CI_SUCCESS = funnel.CI_SUCCESS_CONCLUSIONS
 CI_PENDING = funnel.CI_PENDING_STATES
 
-#: Path prefixes the #794 freeze covers. A diff touching these fails the
-#: freeze row unless the ticket's parent is #794 or #1044.
+#: Path prefixes the #794 freeze covered. The review-side freeze row was
+#: retired when #794 closed (#1362); these lists stay only because
+#: ``funnel._canonical_freeze_lists`` still parses them, and go with it.
 FROZEN_PATHS = ("routines/", "skills/")
 
 #: Parser constants scheduled for deletion by the #794 project: the union of
@@ -877,28 +878,6 @@ def precheck_pr_open(packet: dict) -> List[str]:
         state, timestamp_name, timestamp)]
 
 
-def precheck_freeze(packet: dict) -> List[str]:
-    """Row 2: frozen ground needs a ticket under #794 or #1044."""
-    touches = freeze_touches(packet.get("changed_files"), packet.get("diff"))
-    frozen = touches["paths"] + touches["parsers"]
-    if not frozen:
-        return []
-    ticket = packet.get("ticket") or {}
-    parent = ticket.get("parent") or {}
-    if parent.get("number") in FREEZE_PARENT_NUMBERS:
-        return []
-    if ticket.get("number") is None:
-        where = "the PR has no ticket"
-    elif parent.get("number") is None:
-        where = "ticket {} has no parent".format(ticket.get("ref"))
-    else:
-        where = "ticket {} is under #{}".format(
-            ticket.get("ref"), parent.get("number"))
-    allowed = ", ".join("#{}".format(n) for n in FREEZE_PARENT_NUMBERS)
-    return ["freeze: {} touched but {}; frozen while #794 lands "
-            "(exempt parents: {})".format(", ".join(frozen), where, allowed)]
-
-
 def precheck_ci(packet: dict) -> List[str]:
     """Row 3: green passes; pending/red fail; startup stops stand down."""
     ci = packet.get("ci") or {}
@@ -999,9 +978,13 @@ def precheck_repo_rules(packet: dict) -> List[str]:
 
 
 def precheck(packet: dict) -> Dict[str, object]:
-    """All eight rows in ticket order. Any reason fails the packet."""
+    """All seven rows in ticket order. Any reason fails the packet.
+
+    The freeze row was retired when #794 closed (#1362); the queue-side
+    predicate had already gone inert with it.
+    """
     reasons: List[str] = []
-    for row in (precheck_pr_open, precheck_freeze, precheck_ci,
+    for row in (precheck_pr_open, precheck_ci,
                 precheck_verdict,
                 precheck_merged_overlap, precheck_protected, precheck_stop,
                 precheck_repo_rules):

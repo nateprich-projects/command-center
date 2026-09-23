@@ -1660,6 +1660,126 @@ def freeze_markers(body: Optional[str]) -> List[str]:
     return sorted(found)
 
 
+FREEZE_BLOCKER_URL = "https://github.com/{}/issues/794".format(REPO)
+FREEZE_BLOCKER_NUMBER = FREEZE_BLOCKER_URL.rsplit("/", 1)[-1]
+FREEZE_BLOCKER_SENTENCE = (
+    "Blocked on #794: the frozen-ground freeze must end before this work starts."
+)
+
+
+def _gh_option_value(command: Sequence[str], option: str) -> Optional[str]:
+    """Return one `gh` option value in either supported spelling."""
+    for index, part in enumerate(command):
+        if part == option:
+            if index + 1 < len(command):
+                return command[index + 1]
+            return None
+        if part.startswith(option + "="):
+            return part[len(option) + 1:]
+    return None
+
+
+def _append_gh_csv_option(command: List[str], option: str, value: str,
+                          repo: str) -> None:
+    """Add a native issue-reference option without repeating an existing edge."""
+    target = value
+    same_repo_number = target.rsplit("/", 1)[-1]
+    if repo == REPO:
+        target = same_repo_number
+
+    for index, part in enumerate(command):
+        if part == option and index + 1 < len(command):
+            values = [entry.strip() for entry in command[index + 1].split(",")
+                      if entry.strip()]
+            if not _gh_blocker_has_freeze_edge(values, repo):
+                values.append(target)
+            command[index + 1] = ",".join(values)
+            return
+        if part.startswith(option + "="):
+            values = [entry.strip() for entry in
+                      part[len(option) + 1:].split(",") if entry.strip()]
+            if not _gh_blocker_has_freeze_edge(values, repo):
+                values.append(target)
+            command[index] = option + "=" + ",".join(values)
+            return
+    command.extend([option, target])
+
+
+def _gh_blocker_has_freeze_edge(values: Sequence[str], repo: str) -> bool:
+    """Whether a create command already names the #794 issue as a blocker."""
+    for value in values:
+        if value == FREEZE_BLOCKER_URL:
+            return True
+        if repo == REPO and value == FREEZE_BLOCKER_NUMBER:
+            return True
+        if re.search(r"/issues/{}/?\Z".format(FREEZE_BLOCKER_NUMBER), value):
+            return True
+    return False
+
+
+def _body_with_freeze_blocker(body: str) -> str:
+    """Keep a readable #794 dependency beside the native blocker edge."""
+    if FREEZE_BLOCKER_SENTENCE in body:
+        return body
+    note = FREEZE_BLOCKER_SENTENCE
+    risk = RISK_LINE.search(body)
+    if risk:
+        return (body[:risk.start()].rstrip() + "\n\n" + note + "\n\n"
+                + body[risk.start():].lstrip())
+    return body.rstrip() + "\n\n" + note
+
+
+def _frozen_ticket_create_command(command: List[str]) -> List[str]:
+    """Make a child issue blocked on #794 when its work names frozen ground.
+
+    The breakdown engine creates sub-issues through ``_run_gh``. Keeping the
+    check at that boundary lets the breakdown implementation reuse the exact
+    matcher and source adapter used by ``startable()`` without a second list.
+    """
+    if command[:3] != ["gh", "issue", "create"]:
+        return command
+    raw_parent = _gh_option_value(command, "--parent")
+    if raw_parent is None:
+        return command
+    try:
+        parent_number = int(raw_parent)
+    except (TypeError, ValueError):
+        raise GitHubError(
+            "cannot check the frozen-ground rule: invalid sub-issue parent {!r}"
+            .format(raw_parent))
+    _paths, _parsers, exempt = _canonical_freeze_lists()
+    if parent_number in exempt:
+        return command
+    body = _gh_option_value(command, "--body")
+    markers = freeze_markers(body)
+    if not markers:
+        return command
+
+    owner = _gh_json(
+        "gh", "issue", "view", "794", "--repo", REPO, "--json", "state")
+    if not isinstance(owner, dict) or not isinstance(owner.get("state"), str):
+        raise GitHubError(
+            "could not verify whether the #794 frozen-ground freeze is active")
+    state = owner["state"].upper()
+    if state == "CLOSED":
+        return command
+    if state != "OPEN":
+        raise GitHubError(
+            "could not verify whether the #794 frozen-ground freeze is active")
+
+    repo = _gh_option_value(command, "--repo") or REPO
+    _append_gh_csv_option(command, "--blocked-by", FREEZE_BLOCKER_URL, repo)
+    for index, part in enumerate(command):
+        if part == "--body" and index + 1 < len(command):
+            command[index + 1] = _body_with_freeze_blocker(command[index + 1])
+            break
+        if part.startswith("--body="):
+            command[index] = "--body=" + _body_with_freeze_blocker(
+                part[len("--body="):])
+            break
+    return command
+
+
 def _parent_ticket_number(item: Item) -> Optional[int]:
     """The ticket's parent issue number, or None when it cannot be read."""
     parent = getattr(item, "parent", None)
@@ -6973,7 +7093,7 @@ def _run_gh(args: Sequence[str], **kwargs):
     route exhausted and the call would spend it (#429); learns the exhaustion
     from `gh`'s own stderr when the output is captured.
     """
-    command = list(args)
+    command = _frozen_ticket_create_command(list(args))
     _refuse_if_exhausted(command)
     if command[:3] == ["gh", "api", "graphql"]:
         _API_USAGE["graphql_calls"] += 1

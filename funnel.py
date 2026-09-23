@@ -3676,18 +3676,38 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
     recent = [
         i
         for i in items
-        if i.klass is not None
+        if i.parent is None
         and i.closed_at
         and i.closed_at >= cutoff
-        and i.state_reason != "NOT_PLANNED"
     ]
-    upkeep = [i for i in recent if i.klass in PREEMPTING]
+    # The Execution metrics plan defines upkeep as these three project
+    # classes.  Keep this reporting definition separate from PREEMPTING,
+    # which controls ticket ordering and intentionally has different scope.
+    upkeep = [i for i in recent if i.klass in {"Broken", "Maintenance", "Investigate"}]
 
-    started_new = [
-        i.status_since
-        for i in items
-        if i.klass == "New" and i.status_since and i.status in ("Building", "Done")
-    ]
+    started_new = []
+    for item in items:
+        if item.parent is not None or item.klass != "New":
+            continue
+        transitions = []
+        for event in item.status_events:
+            if not isinstance(event, Mapping) or event.get("status") != "Building":
+                continue
+            previous = event.get("previous_status") or event.get("previousStatus")
+            if previous == "Building":
+                continue
+            at = event.get("at")
+            if not isinstance(at, datetime):
+                at = parse_time(event.get("created_at") or event.get("createdAt"))
+            if at is not None:
+                transitions.append(at)
+        # A currently Building item can lack a timeline event on its first
+        # status assignment. Its current gate timestamp is still exact. A
+        # Done item has moved past Building, so its current timestamp cannot
+        # stand in for when it started.
+        if not transitions and item.status == "Building" and item.status_since:
+            transitions.append(item.status_since)
+        started_new.extend(transitions)
     days_since_new = (
         (now - max(started_new)).days if started_new else None
     )
@@ -3695,8 +3715,19 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
     return {
         "window_days": MAINTENANCE_WINDOW.days,
         "closed_in_window": len(recent),
+        # Keep the exact numerator beside the displayed share.  A later
+        # rollup cannot recover it from the rounded three-decimal value.
+        "upkeep_projects": len(upkeep),
         "upkeep_share": round(len(upkeep) / len(recent), 3) if recent else None,
         "days_since_anything_new_started": days_since_new,
+        # Preserve the timestamps behind the newest-work signal so an hourly
+        # metrics row can count the events in its own hour without reversing
+        # a rounded age or treating a missing history as zero.
+        "new_started_at": sorted(
+            (stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=timezone.utc))
+            .astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+            for stamp in started_new
+        ),
     }
 
 
@@ -7501,6 +7532,13 @@ def _dashboard_stage_age(item: Item, now: datetime) -> str:
     return humanise(max(timedelta(0), now - since))
 
 
+def _dashboard_stage_wait_seconds(item: Item, now: datetime) -> Optional[float]:
+    since = _dashboard_stage_since(item)
+    if since is None:
+        return None
+    return round(max(0.0, (now - since).total_seconds()), 3)
+
+
 #: Who owes the next move on a ticket, for the dashboard's owner flag. These
 #: are display names for the reader, derived from facts the funnel already
 #: holds: the Needs field, the PR and its verdict, and the risk tier.
@@ -7696,6 +7734,7 @@ def _dashboard_item(
         "class": effective_class(item, by_ref),
         "pinned": bool(item.pinned),
         "waited": _dashboard_stage_age(item, now),
+        "waited_seconds": _dashboard_stage_wait_seconds(item, now),
         "tickets_closed": item.children_done,
         "tickets_total": item.children_total,
         # The owner of the next step in the chain, not every owner on the
@@ -10045,6 +10084,10 @@ def cmd_brief(
             "rejected_merges": rejected,
             "degraded": degraded,
             "timings": timings,
+            # The display snapshot is also the evidence source for the
+            # hourly Execution row.  Keep measured API cost beside timings;
+            # reconstructing GraphQL points from elapsed time is impossible.
+            "api_cost": api_cost(),
             "missing": missing,
         }
         timings["brief_assembly"] = round(

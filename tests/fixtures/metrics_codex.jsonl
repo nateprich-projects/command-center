@@ -1,0 +1,3 @@
+{"run":"run-1","agent":"codex","phase":"start","ts":"2026-09-23T04:10:00Z","job_kind":"implement"}
+{"run":"run-1","agent":"codex","phase":"bind","ts":"2026-09-23T04:10:00Z","do":"ticket","work":"owner/repo#42"}
+{"run":"run-1","agent":"codex","phase":"finish","ts":"2026-09-23T04:20:00Z","outcome":"done","api_cost":{"graphql_points":5,"gh_calls":3},"input_usage":{"total_input_tokens":120,"fresh_input_tokens":40}}

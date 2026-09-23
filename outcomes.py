@@ -227,20 +227,28 @@ def _merged_without_approval(
 def _reopened_after_merge(
     events: object, merged_prs: Sequence[Mapping[str, object]]
 ) -> bool:
+    return _reopened_after_merge_at(events, merged_prs) is not None
+
+
+def _reopened_after_merge_at(
+    events: object, merged_prs: Sequence[Mapping[str, object]]
+) -> Optional[datetime]:
+    """Return the earliest recorded reopen after a merge, when observable."""
     merge_times = [
         _timestamp(row.get("mergedAt"))
         for row in merged_prs
         if _timestamp(row.get("mergedAt")) is not None
     ]
     if not merge_times or not isinstance(events, list):
-        return False
+        return None
+    reopened = []
     for event in events:
         if not isinstance(event, Mapping) or event.get("event") != "reopened":
             continue
         reopened_at = _timestamp(event.get("created_at") or event.get("createdAt"))
         if reopened_at is not None and any(reopened_at > merged for merged in merge_times):
-            return True
-    return False
+            reopened.append(reopened_at)
+    return min(reopened) if reopened else None
 
 
 def _record_pr(row: Mapping[str, object]) -> Dict[str, object]:
@@ -250,6 +258,7 @@ def _record_pr(row: Mapping[str, object]) -> Dict[str, object]:
         "number": number,
         "state": row.get("state"),
         "url": row.get("url"),
+        "head_ref_name": row.get("headRefName"),
         "created_at": _timestamp_text(row.get("createdAt")),
         "closed_at": _timestamp_text(row.get("closedAt")),
         "merged_at": _timestamp_text(row.get("mergedAt")),
@@ -524,6 +533,19 @@ def derive_outcome(
         _merged_without_approval(row, verdicts_by_pr.get(_pr_number(row), []))
         for row in merged_rows
     )
+    recorded_prs = []
+    for row in pr_rows:
+        recorded = _record_pr(row)
+        verdicts = verdicts_by_pr.get(_pr_number(row) or 0, [])
+        first_verdict = verdicts[0] if verdicts else None
+        recorded["first_review_result"] = (
+            first_verdict.get("verdict") if first_verdict else None
+        )
+        recorded["first_reviewed_at"] = (
+            _timestamp_text(first_verdict.get("at")) if first_verdict else None
+        )
+        recorded_prs.append(recorded)
+    reopened_at = _reopened_after_merge_at(issue_events, merged_rows)
 
     # The latest structured verdict is the ticket's final review result. Turns
     # deliberately stays null when no PR has a parseable verdict comment: a
@@ -558,9 +580,10 @@ def derive_outcome(
         "review_result": latest_verdict,
         "merged": bool(merged_rows),
         "merged_prs": merged_pr_numbers,
-        "reopened_after_merge": _reopened_after_merge(issue_events, merged_rows),
+        "reopened_after_merge": reopened_at is not None,
+        "reopened_at": _timestamp_text(reopened_at),
         "human_intervention_required": bool(intervention),
-        "prs": [_record_pr(row) for row in pr_rows],
+        "prs": recorded_prs,
         # Raw per-run usage is intentionally retained beside the aggregate.
         # #165 prices these timestamped observations; this ticket does not
         # invent a dollar value or reuse heartbeat's provider quota meter.

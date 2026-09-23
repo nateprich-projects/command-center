@@ -75,6 +75,37 @@ def test_recorded_cause_regressions_ignores_prose_references():
     assert report["count"] == 0
 
 
+def test_maintenance_load_exposes_project_counts_not_ticket_counts():
+    broken = _item(
+        20, "Closed broken project", klass="Broken", state="CLOSED",
+        closed_at=NOW - timedelta(days=1),
+    )
+    new = _item(
+        21, "Closed new project", klass="New", state="CLOSED",
+        closed_at=NOW - timedelta(days=2),
+    )
+    investigate = _item(
+        23, "Closed investigation", klass="Investigate", state="CLOSED",
+        closed_at=NOW - timedelta(days=2),
+    )
+    unclassed = _item(
+        24, "Closed unclassed project", klass=None, state="CLOSED",
+        closed_at=NOW - timedelta(days=3),
+    )
+    child_ticket = _item(
+        22, "Maintenance ticket", klass="Maintenance", parent=broken.ref,
+        state="CLOSED", closed_at=NOW - timedelta(days=1),
+    )
+
+    report = funnel.maintenance_load(
+        [broken, new, investigate, unclassed, child_ticket], NOW
+    )
+
+    assert report["closed_in_window"] == 4
+    assert report["upkeep_projects"] == 2
+    assert report["upkeep_share"] == 0.5
+
+
 def test_command_center_ticket_pr_share_counts_all_recent_merged_prs(monkeypatch):
     rows = [
         {

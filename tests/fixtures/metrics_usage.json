@@ -1,0 +1,16 @@
+{
+  "muse": {
+    "source": "muse",
+    "pace_band": "ok",
+    "windows": {"seven_day": {"used_percent": 34.0, "daily_rate_dollars": 7.0, "resets_at": 1790308800, "rolling": true}}
+  },
+  "codex": {
+    "source": "openai",
+    "windows": {"seven_day": {"used_percent": 21.0, "resets_at": 1790308800}},
+    "thread_source_split": {
+      "value": {"funnel_tokens": 140, "personal_tokens": 30, "funnel_sessions": 1, "personal_sessions": 1, "unit": "tokens", "window_start": "2026-09-18T04:00:00Z", "window_end": "2026-09-23T04:30:00Z"},
+      "source": "fixture Codex rollout token usage split"
+    }
+  },
+  "claude": {"source": "anthropic", "windows": {"five_hour": {"used_percent": 8.0, "resets_at": 1790200000}, "seven_day": {"used_percent": 30.0, "resets_at": 1790308800}}}
+}

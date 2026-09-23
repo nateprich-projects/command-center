@@ -264,6 +264,14 @@ def _recent_outcomes(
     return heartbeat.one_record_per_run(found)
 
 
+def _runtime_head(row: Dict) -> Optional[str]:
+    runtime = row.get("runtime")
+    if not isinstance(runtime, dict):
+        return None
+    head = runtime.get("head")
+    return head.strip() if isinstance(head, str) and head.strip() else None
+
+
 def assess(
     agent: str,
     rows: List[Dict],
@@ -280,6 +288,7 @@ def assess(
     week: Optional[int] = None,
     error_threshold: Optional[int] = None,
     hold_until: Optional[float] = None,
+    regressions_only: bool = False,
 ) -> List[str]:
     """Return raised conditions in the watchdog's existing wording.
 
@@ -296,6 +305,11 @@ def assess(
 
     Every other condition is unchanged by a hold. A park explains a gap in
     records; it does not explain a run that died or three that errored.
+
+    ``regressions_only`` is used by the brief: it suppresses floor and
+    unclassified finishes and requires the recorded runtime head so every
+    surfaced regression can be traced to its code revision. The watchdog keeps
+    the default all-error assessment.
     """
     normal_percentile = (
         NORMAL_PERCENTILE if normal_percentile is None else normal_percentile
@@ -452,14 +466,34 @@ def assess(
         )
 
     errored = _recent_outcomes(rows, now, "errored", week)
+    if regressions_only:
+        errored = [
+            row for row in errored
+            if row.get("error_class") == "regression"
+            and _runtime_head(row) is not None
+        ]
     if len(errored) >= error_threshold:
-        notes = [r.get("note") for r in errored[-3:] if r.get("note")]
-        problems.append(
-            "`{}` errored {} times this week.{}".format(
-                agent, len(errored),
-                (" Most recent: " + "; ".join(notes)) if notes else "",
+        if regressions_only:
+            details = []
+            for row in errored[-3:]:
+                detail = "head {}".format(_runtime_head(row))
+                note = row.get("note")
+                if isinstance(note, str) and note.strip():
+                    detail += ": " + note.strip()
+                details.append(detail)
+            problems.append(
+                "`{}` had {} regression errors this week. Latest: {}".format(
+                    agent, len(errored), "; ".join(details)
+                )
             )
-        )
+        else:
+            notes = [r.get("note") for r in errored[-3:] if r.get("note")]
+            problems.append(
+                "`{}` errored {} times this week.{}".format(
+                    agent, len(errored),
+                    (" Most recent: " + "; ".join(notes)) if notes else "",
+                )
+            )
 
     drifted = _recent_outcomes(
         rows, now, CONFIG_DRIFT_OUTCOME, CONFIG_DRIFT_WINDOW)

@@ -89,6 +89,22 @@ def _answer(**overrides):
     return json.dumps(data)
 
 
+def _requirements_answer(*requirements):
+    """The lister's answer (#1241): the canonical requirement list.
+
+    Strings, not the judging schema's per-requirement objects: this call
+    enumerates what the diff must do and judges none of it.
+    """
+    if not requirements:
+        requirements = ("thing.py prints the thing the ticket asks for",)
+    return json.dumps({"requirements": list(requirements)})
+
+
+def _review_answers(*answers):
+    """One live review's model answers: the lister's list, then the judge's."""
+    return (_requirements_answer(),) + tuple(answers)
+
+
 def _issue_begin(job):
     ref = BREAKDOWN_REF if job == "breakdown" else SHAPE_REF
     return {"agent": "muse", "run": "engine-run", "gate": "ok",
@@ -429,6 +445,10 @@ MUSE_STUB = (
     "    if [[ -n \"$(find \"$run_dir\" -maxdepth 0 -perm 700 2>/dev/null)\" ]]\n"
     "    then printf 'owner_only yes\\n'; else printf 'owner_only no\\n'; fi\n"
     "    for entry in \"$run_dir\"/*; do printf 'entry %s\\n' \"${entry##*/}\"; done\n"
+    # #1241: what the lister left for the judges, as the judging call sees it.
+    "    if [[ -r \"$run_dir/requirements.json\" ]]; then\n"
+    "      printf 'requirements %s\\n' \"$(tr '\\n' ' ' < \"$run_dir/requirements.json\")\"\n"
+    "    fi\n"
     "  } >> \"$MUSE_RUNDIR_PROBE\"\n"
     "fi\n"
     "if [[ -n \"${MUSE_SLEEP:-}\" ]]; then exec sleep \"$MUSE_SLEEP\"; fi\n"
@@ -965,11 +985,13 @@ def test_an_unknown_rerun_action_finishes_errored(tmp_path):
 
 def test_an_approval_is_applied_and_finished_done(tmp_path):
     proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), answers=(_answer(),))
+        tmp_path, _begin(), _packet(), answers=_review_answers(_answer()))
 
     assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 1
-    prompt = (repo / "muse.prompt.1").read_text()
+    # Two calls since #1241: the lister enumerates the requirements, then the
+    # judge answers the review question with them already listed.
+    assert _muse_calls(repo) == 2
+    prompt = (repo / "muse.prompt.2").read_text()
     assert "Does this diff do what the ticket and the plan say" in prompt
     assert "PACKET_JSON" not in prompt
     assert "print('the thing')" in prompt
@@ -993,8 +1015,9 @@ def test_an_approval_is_applied_and_finished_done(tmp_path):
 def test_a_rejection_records_the_model_blocking_list(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(),
-        answers=(_answer(verdict="rejected",
-                         blocking=["the diff ignores the plan"]),))
+        answers=_review_answers(
+            _answer(verdict="rejected",
+                    blocking=["the diff ignores the plan"])))
 
     assert proc.returncode == 0, proc.stderr
     applied = json.loads((repo / "apply.answer").read_text())
@@ -1009,23 +1032,28 @@ def test_a_rejection_records_the_model_blocking_list(tmp_path):
 def test_the_model_call_carries_the_exact_no_tool_shape(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(), args=("standard", "high"),
-        answers=(_answer(),))
+        answers=_review_answers(_answer()))
 
     assert proc.returncode == 0, proc.stderr
-    invoked = (repo / "muse.args.1").read_text().splitlines()
-    assert invoked[0] == "exec"
-    assert invoked[invoked.index("--model") + 1] == "muse-spark-1.3"
-    assert invoked[invoked.index("--reasoning-effort") + 1] == "high"
-    assert "--disable-shell" in invoked
-    assert "--disable-write" in invoked
-    assert "--disable-web-tools" in invoked
-    assert invoked[invoked.index("--max-model-steps") + 1] == "60"
-    assert "--no-foreign-personal-context" in invoked
-    assert "--workspace" in invoked
-    assert "--prompt-file" in invoked
-    assert "--sandbox-network" not in invoked
-    assert "--json" not in invoked
-    assert "--approval-mode" not in invoked
+    # Both calls. The lister is a model call like any other, and a flag that
+    # reached only the judge would leave the lister reading a private diff
+    # with tools in hand.
+    assert _muse_calls(repo) == 2
+    for call in (1, 2):
+        invoked = (repo / "muse.args.{}".format(call)).read_text().splitlines()
+        assert invoked[0] == "exec"
+        assert invoked[invoked.index("--model") + 1] == "muse-spark-1.3"
+        assert invoked[invoked.index("--reasoning-effort") + 1] == "high"
+        assert "--disable-shell" in invoked
+        assert "--disable-write" in invoked
+        assert "--disable-web-tools" in invoked
+        assert invoked[invoked.index("--max-model-steps") + 1] == "60"
+        assert "--no-foreign-personal-context" in invoked
+        assert "--workspace" in invoked
+        assert "--prompt-file" in invoked
+        assert "--sandbox-network" not in invoked
+        assert "--json" not in invoked
+        assert "--approval-mode" not in invoked
     calls = (repo / "funnel.calls").read_text()
     # Standard asks begin for breakdown work too (#811); escalated reviews
     # never wait behind it.
@@ -1036,11 +1064,11 @@ def test_the_model_call_carries_the_exact_no_tool_shape(tmp_path):
 def test_a_malformed_first_answer_retries_once_with_the_parse_error(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(),
-        answers=("{not json", _answer()))
+        answers=_review_answers("{not json", _answer()))
 
     assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 2
-    retry_prompt = (repo / "muse.prompt.2").read_text()
+    assert _muse_calls(repo) == 3
+    retry_prompt = (repo / "muse.prompt.3").read_text()
     assert "Your previous answer could not be parsed" in retry_prompt
     assert "invalid JSON" in retry_prompt
     assert "Reply again with exactly one JSON object" in retry_prompt
@@ -1054,10 +1082,11 @@ def test_a_malformed_first_answer_retries_once_with_the_parse_error(tmp_path):
 
 def test_a_malformed_final_answer_records_rejected_and_errors(tmp_path):
     proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), answers=("{not json", "still not"))
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers("{not json", "still not"))
 
     assert proc.returncode == 1
-    assert _muse_calls(repo) == 2
+    assert _muse_calls(repo) == 3
     assert len(_apply_calls(repo)) == 2
     assert _heartbeat(repo) == (
         "finish --agent muse --run engine-run --outcome errored "
@@ -1068,7 +1097,7 @@ def test_a_malformed_final_answer_records_rejected_and_errors(tmp_path):
 
 def test_a_muse_failure_finishes_errored_without_applying(tmp_path):
     proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), answers=(_answer(),),
+        tmp_path, _begin(), _packet(), answers=_review_answers(_answer()),
         extra_env={"MUSE_STATUS": "1", "MUSE_STDERR": "provider outage"})
 
     assert proc.returncode == 1
@@ -1083,7 +1112,7 @@ def test_a_muse_failure_finishes_errored_without_applying(tmp_path):
 
 def test_a_moved_head_refusal_finishes_errored(tmp_path):
     proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), answers=(_answer(),),
+        tmp_path, _begin(), _packet(), answers=_review_answers(_answer()),
         extra_env={"APPLY_REFUSE": "1"})
 
     assert proc.returncode == 1
@@ -1095,7 +1124,7 @@ def test_a_moved_head_refusal_finishes_errored(tmp_path):
 
 def test_a_run_past_the_bound_is_killed_and_finished_errored(tmp_path):
     proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), answers=(_answer(),),
+        tmp_path, _begin(), _packet(), answers=_review_answers(_answer()),
         bound_seconds=1, extra_env={"MUSE_SLEEP": "30"}, timeout=60)
 
     assert proc.returncode == 124
@@ -1191,7 +1220,7 @@ def test_escalated_tier_reviews_without_breakdown(tmp_path):
     """Breakdown rides the standard tier only, so rare risky reviews never
     wait behind it."""
     proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), answers=(_answer(),))
+        tmp_path, _begin(), _packet(), answers=_review_answers(_answer()))
 
     assert proc.returncode == 0, proc.stderr
     assert "--breakdown" not in (repo / "funnel.calls").read_text()
@@ -1441,7 +1470,7 @@ def test_a_review_of_a_formerly_cleared_repo_uses_the_private_model(
         _begin(work={"pr": PR, "repo": subject,
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
-        answers=[_answer()])
+        answers=_review_answers(_answer()))
 
     assert proc.returncode == 0, proc.stderr
     assert _engine_model(repo) == "muse-spark-1.3"
@@ -1457,7 +1486,7 @@ def test_a_review_of_an_allowlisted_repo_carries_the_contributor_model(
         _begin(work={"pr": PR, "repo": subject,
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
-        answers=[_answer()],
+        answers=_review_answers(_answer()),
         muse_model_body=resolver_clearing("The-League"))
 
     assert proc.returncode == 0, proc.stderr
@@ -1479,7 +1508,7 @@ def test_a_review_of_an_excluded_repo_uses_the_private_model(
         _begin(work={"pr": PR, "repo": subject,
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
-        answers=[_answer()],
+        answers=_review_answers(_answer()),
         muse_model_body=resolver_clearing("command-center", "FF-Weekly-Start-Sit", "The-League"))
 
     assert proc.returncode == 0, proc.stderr
@@ -1488,7 +1517,7 @@ def test_a_review_of_an_excluded_repo_uses_the_private_model(
 
 def test_a_review_of_an_unknown_repo_uses_the_private_model(tmp_path):
     proc, repo = _stubbed_runner(
-        tmp_path, _begin(), _packet(), answers=[_answer()])
+        tmp_path, _begin(), _packet(), answers=_review_answers(_answer()))
 
     assert proc.returncode == 0, proc.stderr
     assert _engine_model(repo) == "muse-spark-1.3"
@@ -1502,7 +1531,7 @@ def test_a_broken_resolver_still_names_the_private_model(tmp_path):
         _begin(work={"pr": PR, "repo": subject,
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
-        answers=[_answer()],
+        answers=_review_answers(_answer()),
         muse_model_body="raise SystemExit('resolver is broken')\n")
 
     assert proc.returncode == 0, proc.stderr
@@ -1561,7 +1590,7 @@ def test_a_resolver_printing_junk_still_names_the_private_model(tmp_path):
         _begin(work={"pr": PR, "repo": subject,
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
-        answers=[_answer()],
+        answers=_review_answers(_answer()),
         muse_model_body="print('not-a-model-at-all')\n")
 
     assert proc.returncode == 0, proc.stderr
@@ -1575,7 +1604,7 @@ def test_a_resolver_printing_nothing_still_names_the_private_model(tmp_path):
         _begin(work={"pr": PR, "repo": subject,
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
-        answers=[_answer()],
+        answers=_review_answers(_answer()),
         muse_model_body="pass\n")
 
     assert proc.returncode == 0, proc.stderr
@@ -1591,12 +1620,12 @@ def test_the_retry_reuses_the_model_it_resolved(tmp_path, resolver_clearing):
         _begin(work={"pr": PR, "repo": subject,
                      "ref": subject + "#6", "tier": "escalated"}),
         _packet(repo=subject),
-        answers=["not json at all", _answer()],
+        answers=_review_answers("not json at all", _answer()),
         muse_model_body=resolver_clearing("The-League"))
 
     assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 2
-    for attempt in (1, 2):
+    assert _muse_calls(repo) == 3
+    for attempt in (1, 2, 3):
         args = (repo / "muse.args.{}".format(attempt)).read_text().splitlines()
         assert args[args.index("--model") + 1] == "muse-spark-1.3-contributor"
 
@@ -1619,6 +1648,8 @@ def _probe(tmp_path, repo):
         "dirs": [tail for key, _, tail in lines if key == "dir"],
         "owner_only": [tail for key, _, tail in lines if key == "owner_only"],
         "entries": sorted({tail for key, _, tail in lines if key == "entry"}),
+        "requirements": [tail for key, _, tail in lines
+                         if key == "requirements"],
         "raw": text,
     }
 
@@ -1636,17 +1667,22 @@ def _with_probe(tmp_path, **kwargs):
 
 def test_every_scratch_file_lives_in_one_run_directory(tmp_path):
     proc, repo = _with_probe(
-        tmp_path, begin=_begin(), packet=_packet(), answers=(_answer(),))
+        tmp_path, begin=_begin(), packet=_packet(), answers=_review_answers(_answer()))
 
     assert proc.returncode == 0, proc.stderr
     probe = _probe(tmp_path, repo)
-    assert len(probe["dirs"]) == 1
+    # One directory seen by every model call of the run, not one per call:
+    # the lister and the judge share the assembled packet (#1240, #1241).
+    assert len(set(probe["dirs"])) == 1, probe["raw"]
     run_dir = pathlib.Path(probe["dirs"][0])
     assert run_dir.parent == tmp_path, run_dir
     assert run_dir.name.startswith("muse-review-engine."), run_dir.name
     # The packet among them: a judge in #1233 reads this path, not GitHub.
     assert "packet.json" in probe["entries"]
     assert "prompt.txt" in probe["entries"]
+    # And the lister's list, written before the judging call and read by
+    # every judge #1242 adds (#1241).
+    assert "requirements.json" in probe["entries"]
 
 
 def test_the_run_directory_is_readable_only_by_its_owner(tmp_path):
@@ -1655,7 +1691,7 @@ def test_the_run_directory_is_readable_only_by_its_owner(tmp_path):
     # out 700 directories and the old runner inherited that by accident.
     tmp_path.chmod(0o755)
     proc, repo = _with_probe(
-        tmp_path, begin=_begin(), packet=_packet(), answers=(_answer(),))
+        tmp_path, begin=_begin(), packet=_packet(), answers=_review_answers(_answer()))
 
     assert proc.returncode == 0, proc.stderr
     # Not a tidiness check. The packet holds the diff, ticket and plan of a
@@ -1663,13 +1699,16 @@ def test_the_run_directory_is_readable_only_by_its_owner(tmp_path):
     # per-file 600 left the name, size and timing of every review legible to
     # any other account on the machine.
     probe = _probe(tmp_path, repo)
-    assert probe["owner_only"] == ["yes"], probe["raw"]
+    # Every model call of the run, not just the first: the lister writes the
+    # requirement list into the same directory the packet is in.
+    assert probe["owner_only"] and set(probe["owner_only"]) == {"yes"}, \
+        probe["raw"]
     assert pathlib.Path(probe["dirs"][0]) != tmp_path
 
 
 def test_the_run_directory_and_the_packet_are_gone_when_the_run_ends(tmp_path):
     proc, repo = _with_probe(
-        tmp_path, begin=_begin(), packet=_packet(), answers=(_answer(),))
+        tmp_path, begin=_begin(), packet=_packet(), answers=_review_answers(_answer()))
 
     assert proc.returncode == 0, proc.stderr
     run_dir = pathlib.Path(_probe(tmp_path, repo)["dirs"][0])
@@ -1699,7 +1738,7 @@ def test_a_killed_model_call_leaves_nothing_behind_either(tmp_path):
 ])
 def test_the_packet_is_fetched_exactly_once_whatever_the_job(
         tmp_path, begin, args):
-    answers = (_answer(),) if begin["do"] == "review" else (
+    answers = _review_answers(_answer()) if begin["do"] == "review" else (
         _breakdown_answer() if begin["do"] == "breakdown"
         else _shape_answer(),)
     proc, repo = _stubbed_runner(
@@ -1772,3 +1811,125 @@ def test_a_failed_fetch_does_not_burn_the_one_assembly(tmp_path):
     assert "first=1" in proc.stdout, proc.stdout
     assert "second=0" in proc.stdout, proc.stdout
     assert "already assembled" not in proc.stderr
+
+
+# -- #1241: one lister call emits the review's requirements --------------------
+# The first half of #1233's split. One small question enumerates what the diff
+# must do and must avoid; #1242's judges each answer a few of them against the
+# same cached packet, and none of them derives its own list.
+
+
+def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    lister = (repo / "muse.prompt.1").read_text()
+    # The framing is generated in the runner and prepended to the routine's
+    # own prompt: the routine file is frozen ground while #794 lands.
+    assert "This call is not the review" in lister
+    assert "judge nothing" in lister.lower()
+    assert '{"requirements": [' in lister
+    # It still carries the packet, because that is what it enumerates from.
+    assert "print('the thing')" in lister
+    assert '"head_sha": "{}"'.format(HEAD) in lister
+    assert "PACKET_JSON" not in lister
+
+    judge = (repo / "muse.prompt.2").read_text()
+    # And the framing does not survive into the call that records a verdict:
+    # a judge told to judge nothing would approve everything.
+    assert "This call is not the review" not in judge
+    assert "Does this diff do what the ticket and the plan say" in judge
+
+
+def test_the_requirement_list_is_kept_where_the_judges_will_read_it(tmp_path):
+    proc, repo = _with_probe(
+        tmp_path, begin=_begin(), packet=_packet(),
+        answers=(_requirements_answer("  the runner writes the list  ",
+                                      "no prompt file is edited"),
+                 _answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    probe = _probe(tmp_path, repo)
+    # One line, from the judging call: the file does not exist yet when the
+    # lister itself is called.
+    assert len(probe["requirements"]) == 1, probe["raw"]
+    # The lister's own strings, whitespace-trimmed, in its own order — not
+    # the judging schema's objects, and not re-derived from the packet.
+    assert json.loads(probe["requirements"][0]) == [
+        "the runner writes the list",
+        "no prompt file is edited",
+    ]
+
+
+def test_a_malformed_requirement_list_retries_once_and_then_lists(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=("{not json", _requirements_answer("one requirement"),
+                 _answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 3
+    retry = (repo / "muse.prompt.2").read_text()
+    assert "Your previous answer could not be parsed" in retry
+    assert "invalid JSON" in retry
+    assert "Reply again with exactly one JSON object" in retry
+    # The retry is still the lister's question, not the judge's.
+    assert "This call is not the review" in retry
+    # And the review still happened, with one apply on the judge's answer.
+    assert len(_apply_calls(repo)) == 1
+    assert (repo / "applied.marker").exists()
+    assert _heartbeat(repo).endswith("--review-result approved\n")
+
+
+@pytest.mark.parametrize("answer,reason", [
+    ("{not json", "invalid JSON"),
+    ("", "empty answer"),
+    ('["a requirement"]', "must be a JSON object"),
+    ('{"verdict": "approved"}', "missing required key 'requirements'"),
+    ('{"requirements": "one requirement"}', "must be a list"),
+    ('{"requirements": [3]}', "must be a string"),
+    ('{"requirements": ["   "]}', "must not be blank"),
+    # The judging schema's own shape: entries there are objects carrying a
+    # status. A lister that accepted them would be taking a judgement.
+    ('{"requirements": [{"requirement": "x", "status": "met"}]}',
+     "must be a string"),
+    # An empty list is a failure, not an approval: under #1242 every judge
+    # would have nothing to answer and the derived verdict would be an
+    # approval nobody checked.
+    ('{"requirements": []}', "at least one requirement"),
+])
+def test_a_malformed_requirement_list_twice_fails_the_run(
+        tmp_path, answer, reason):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), answers=(answer, answer, _answer()))
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 2
+    # Nothing is judged and nothing is recorded: no verdict, no merge, and the
+    # PR stays in the review queue for the next run rather than being rejected
+    # for the model's formatting.
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "could not list the requirements for PR #7 in owner/repo" in \
+        heartbeat
+    assert reason in heartbeat
+
+
+def test_a_lister_call_past_the_bound_is_killed_like_any_other(tmp_path):
+    """The bound covers the new call too: #1233 exists because `max` goes
+    silent, and a lister that hung would hold the escalated queue exactly
+    the way the single call did."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), bound_seconds=1,
+        extra_env={"MUSE_SLEEP": "30"}, timeout=60)
+
+    assert proc.returncode == 124
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "killed after 0 minutes" in heartbeat
+    assert "#392" in heartbeat

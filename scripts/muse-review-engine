@@ -147,6 +147,9 @@ PACKET_FILE="$RUN_DIR/packet.json"
 PROMPT_FILE="$RUN_DIR/prompt.txt"
 ANSWER_FILE="$RUN_DIR/answer.json"
 DECISION_FILE="$RUN_DIR/decision.json"
+# The lister's canonical requirement list (#1241). One file per run, read
+# by every judge that follows; never re-derived from the packet.
+REQUIREMENTS_FILE="$RUN_DIR/requirements.json"
 # The helper is a sibling of this runner, not part of the maintained clone's
 # protocol surface: it ships and moves with the script that sources it.
 MUSE_QUOTA_HOLD_LIB="${BASH_SOURCE[0]%/*}/muse-quota-hold.sh"
@@ -894,6 +897,140 @@ fi
 # can outgrow the argument limit.
 PACKET_JSON="$(cat "$PACKET_FILE")"
 PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$PACKET_JSON}"
+
+# --- the lister call (#1241) -------------------------------------------------
+#
+# One small question first: what does this diff have to do, and what must it
+# avoid? The answer is a flat list of requirements drawn from the ticket, its
+# parent plan and the repository's rules, and it judges nothing. #1242 splits
+# the judging into calls of at most three requirements each, and every one of
+# them reads this list rather than deriving its own — one canonical list is
+# what keeps two judges of the same PR asking the same questions.
+#
+# Why a call of its own, when the judging prompt already asks the model to walk
+# the requirements: difficulty, not size, is what silences `max` (#1233,
+# measured 2026-09-21 — a terse format scored 0 of 3, a trimmed packet 0 of 3).
+# Enumerating what a ticket asks for is the easy half of the old single call,
+# and separating it is what leaves the hard half small enough to finish.
+#
+# The framing below is generated here and prepended to the routine's own
+# prompt, which carries the packet. The routine file is frozen ground while
+# #794 lands, and #794 is moving this prose into the runner anyway, so the
+# lister composes rather than edits.
+lister_header() {
+  cat <<'HEADER'
+This call is not the review. Record no verdict and judge nothing: do not say
+whether the diff meets anything, and do not comment on its quality.
+
+List what this diff must do and what it must avoid — the requirements the
+ticket, its parent plan, and the repository's stated rules place on it. One
+checkable claim per entry, in the words of the ticket or the plan wherever it
+states one. Every later judge reads this list and nothing else, so a
+requirement missing here is never checked, and a vague one cannot be answered.
+
+Answer with exactly one JSON object and nothing else:
+
+{"requirements": ["the first requirement", "the second requirement"]}
+
+The text after this paragraph is the review question, included for the packet
+it carries. Read its packet; ignore its instructions about verdicts and about
+the shape of your answer, which this paragraph replaces.
+HEADER
+}
+
+# Validate the lister's answer and keep the list. Exit 3 on every malformed
+# shape, which is the retryable status review-apply already uses, so the one
+# retry below reads the same way as the judging retry.
+parse_requirements() {
+  python3 - "$ANSWER_FILE" "$REQUIREMENTS_FILE" <<'PY'
+import json
+import sys
+
+answer_path, out_path = sys.argv[1], sys.argv[2]
+
+
+def malformed(reason):
+    sys.stderr.write(reason + "\n")
+    raise SystemExit(3)
+
+
+raw = open(answer_path).read()
+if not raw.strip():
+    malformed("empty answer: expected a JSON object")
+try:
+    answer = json.loads(raw)
+except ValueError as exc:
+    malformed("invalid JSON: {}".format(exc))
+if not isinstance(answer, dict):
+    malformed("answer must be a JSON object, got {}".format(
+        type(answer).__name__))
+if "requirements" not in answer:
+    malformed("missing required key 'requirements'")
+values = answer["requirements"]
+if not isinstance(values, list):
+    malformed("'requirements' must be a list, got {}".format(
+        type(values).__name__))
+requirements = []
+for index, value in enumerate(values):
+    if not isinstance(value, str):
+        malformed("'requirements'[{}] must be a string, got {}".format(
+            index, type(value).__name__))
+    text = value.strip()
+    if not text:
+        malformed("'requirements'[{}] must not be blank".format(index))
+    requirements.append(text)
+if not requirements:
+    # Fail rather than proceed. An empty list is not "nothing to object to":
+    # under #1242 every judge would have nothing to answer and the derived
+    # verdict would be an approval nobody checked.
+    malformed("'requirements' must name at least one requirement")
+with open(out_path, "w") as handle:
+    json.dump(requirements, handle, indent=2)
+PY
+}
+
+# The lister call and its one retry. Returns non-zero only after the run has
+# been finished as errored: no verdict is recorded, so the PR stays in the
+# review queue for the next run rather than being rejected for the model's
+# formatting.
+list_requirements() {
+  local attempt=1
+  local parse_err
+  local muse_status
+  local parse_status
+  printf '%s\n\n%s' "$(lister_header)" "$PROMPT" >"$PROMPT_FILE"
+  while true; do
+    call_muse
+    muse_status=$?
+    if (( muse_status != 0 )); then
+      muse_failed "$muse_status"
+    fi
+    # Read the status directly, for the same reason the judging loop does:
+    # `$?` inside an `if !` branch is the negated condition's status.
+    parse_requirements 2>"$DIAG_FILE"
+    parse_status=$?
+    if (( parse_status == 0 )); then
+      return 0
+    fi
+    parse_err="$(cat "$DIAG_FILE")"
+    if (( attempt == 1 )); then
+      printf '%s\n\n%s\n\nYour previous answer could not be parsed: %s\nReply again with exactly one JSON object and nothing else.' \
+        "$(lister_header)" "$PROMPT" "$parse_err" >"$PROMPT_FILE"
+      attempt=2
+      continue
+    fi
+    echo "muse-review-engine: the requirement list could not be parsed: $parse_err" >&2
+    failure "could not list the requirements for PR #$BEGIN_PR in $BEGIN_REPO: $parse_err" || true
+    return 1
+  done
+}
+
+if ! list_requirements; then
+  exit 1
+fi
+# Back to the routine's own text for the call that records a verdict: the
+# lister's framing tells the model to judge nothing, and it must not survive
+# into the judging prompt.
 printf '%s' "$PROMPT" >"$PROMPT_FILE"
 
 # The recorded verdict word, read back from review-apply's own report — never

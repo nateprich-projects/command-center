@@ -6,6 +6,9 @@
 
 Shape one idea into a plan; you have no tools.
 
+The shape runner selects by tier: the escalated Muse schedule shapes escalated ideas,
+and the standard Muse schedule shapes standard ideas.
+
 ## The question
 
 What is the plan, what is settled, and what may only Nate decide?

@@ -30,6 +30,17 @@ decides what to start. Where order genuinely matters, record the dependency
 on the ticket so the queue can enforce it. If *every* ticket is chained,
 the plan was sliced into stages, not broken up — look for a different cut.
 
+When a ticket cannot start before a calendar date, keep the plain-language
+`Not before YYYY-MM-DD` sentence in its body, give it the `blocked` label,
+and post a comment in the canonical form `**Blocked until YYYY-MM-DD:**`.
+Set the comment date to one day after the date in the sentence. Use a native
+`blocked-by` edge when a ticket is waiting for another ticket; represent a
+calendar date with the label and comment instead.
+
+**Example:** For #1138, whose body says `Not before 2026-10-03`, keep that
+sentence in the body, add the `blocked` label, and comment
+`**Blocked until 2026-10-04:**`.
+
 ## Coverage
 
 Cover the plan's stated outcome, not its headings. Reread the plan, trace

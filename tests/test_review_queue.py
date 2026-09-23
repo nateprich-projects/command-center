@@ -185,7 +185,65 @@ def test_a_rollup_with_no_checks_is_still_offered(monkeypatch):
     """No checks at all is an answer, and must stay visible as a refusal."""
     _wire(monkeypatch, [_rollup_row(10, 1, "2026-09-15T23:10:00Z", [])])
 
-    assert [e["pr"] for e in funnel.review_queue([_ticket(1)])] == [10]
+    queue = funnel.review_queue([_ticket(1)])
+    assert [e["pr"] for e in queue] == [10]
+    assert "blocking" not in queue[0]
+
+
+def test_conflict_with_an_empty_rollup_returns_the_conflict_blocker(monkeypatch):
+    row = _rollup_row(10, 1, "2026-09-15T23:10:00Z", [])
+    row["mergeable"] = "CONFLICTING"
+    _wire(monkeypatch, [row])
+
+    queue = funnel.review_queue([_ticket(1)])
+
+    assert queue[0]["blocking"] == [
+        "branch 'ticket/1'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    ]
+
+
+def test_dirty_merge_state_outweighs_pending_ci(monkeypatch):
+    row = _rollup_row(10, 1, "2026-09-15T23:10:00Z", RUNNING)
+    row.update(mergeable="UNKNOWN", mergeStateStatus="DIRTY")
+    _wire(monkeypatch, [row])
+
+    queue = funnel.review_queue([_ticket(1)])
+
+    assert queue[0]["blocking"] == [
+        "branch 'ticket/1'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    ]
+
+
+def test_ci_unknown_rejection_at_a_conflicting_head_is_requeued_for_repair(
+        monkeypatch):
+    row = _rollup_row(10, 1, "2026-09-15T23:10:00Z", [])
+    row["mergeable"] = "CONFLICTING"
+    _wire(monkeypatch, [row], verdicts={10: {
+        "verdict": "rejected",
+        "ci": "unknown",
+        "head_sha": "abc",
+        "blocking": ["ci: CI not green (state unknown)"],
+    }})
+
+    queue = funnel.review_queue([_ticket(1)])
+
+    assert queue[0]["blocking"] == [
+        "branch 'ticket/1'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    ]
+
+
+def test_canonical_conflict_rejection_is_not_reoffered(monkeypatch):
+    row = _rollup_row(10, 1, "2026-09-15T23:10:00Z", [])
+    row["mergeable"] = "CONFLICTING"
+    reason = "branch 'ticket/1'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    _wire(monkeypatch, [row], verdicts={10: {
+        "verdict": "rejected",
+        "ci": "unknown",
+        "head_sha": "abc",
+        "blocking": [reason],
+    }})
+
+    assert funnel.review_queue([_ticket(1)]) == []
 
 
 def test_one_pending_pr_does_not_hold_back_the_rest(monkeypatch):

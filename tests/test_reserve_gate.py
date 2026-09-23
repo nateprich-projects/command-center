@@ -63,12 +63,31 @@ def test_a_run_with_nothing_to_do_is_not_relabelled_a_budget_decline():
 
 
 def test_the_floor_is_loads_remaining_not_a_fixed_point_count():
-    """#272 is about to cut per-load cost ~6x; a hardcoded number would rot."""
-    spend(cost=100, remaining=1500)
-    assert funnel._reserve_verdict("breakdown") is not None, "20 x 100 = 2000"
+    """Higher load costs still scale until the point ceiling is reached."""
+    spend(cost=100, remaining=824)
+    assert funnel._reserve_verdict("breakdown") is not None, (
+        "20 x 100 = 2000, capped at 826"
+    )
 
-    spend(cost=12, remaining=1500)
+    spend(cost=12, remaining=800)
     assert funnel._reserve_verdict("breakdown") is None, "20 x 12 = 240"
+
+
+def test_the_proportional_floor_is_bounded_by_the_point_ceiling():
+    """The calibrated product is 840 before the configured ceiling applies."""
+    assert funnel.ENGINEERING_RESERVE_LOADS * 42 == 840
+    assert funnel.ENGINEERING_RESERVE_LOADS * 81 == 1620
+    assert funnel._reserve_floor(funnel.ENGINEERING_RESERVE_LOADS, 42) == 826
+    assert funnel._reserve_floor(funnel.ENGINEERING_RESERVE_LOADS, 81) == 826
+    assert funnel._reserve_floor(funnel.REVIEW_RESERVE_LOADS, 81) == 405
+    assert funnel.GRAPHQL_RESERVE_POINT_CEILING < 5000
+
+
+def test_measured_stand_down_budgets_clear_the_capped_engineering_floor():
+    for remaining in (1259, 826):
+        spend(cost=81, remaining=remaining)
+        assert funnel._reserve_verdict("breakdown") is None
+        assert funnel._reserve_verdict("shape") is None
 
 
 def test_the_decline_outcome_is_in_the_skipped_family():

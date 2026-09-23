@@ -355,8 +355,7 @@ def test_main_stands_down_before_loading_the_project_when_reserve_is_low(
         return {
             "rateLimit": {
                 "cost": 1,
-                "remaining": funnel.ENGINEERING_RESERVE_LOADS
-                * funnel.BEGIN_PROJECT_LOAD_COST - 1,
+                "remaining": funnel.GRAPHQL_RESERVE_POINT_CEILING - 1,
                 "resetAt": "later",
             },
         }
@@ -389,6 +388,18 @@ def test_main_stands_down_before_loading_the_project_when_reserve_is_low(
         ("codex", "run-id", "skipped-api-reserve", {"note": result["why"]}),
     ]
     assert "funnel: skipped-api-reserve:" in captured.err
+
+
+def test_begin_preflight_uses_the_capped_engineering_floor(monkeypatch):
+    monkeypatch.setattr(
+        funnel,
+        "gh_graphql",
+        lambda query: {"rateLimit": {"remaining": 826}},
+    )
+
+    assert funnel._begin_api_reserve_preflight(
+        "codex", "standard", None
+    ) is None
 
 
 def test_main_treats_a_structured_empty_window_as_a_clean_reserve_stop(

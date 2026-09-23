@@ -93,6 +93,12 @@ def codex_settings_match(monkeypatch):
     real = funnel._codex_settings_check
     monkeypatch.setattr(funnel, "_codex_settings_check",
                         lambda: dict(CODEX_SETTINGS_MATCH))
+    # A passing check against fixture roots can name this machine's real
+    # automation directory; the suite must never reset its memory file.
+    # Tests of the reset call codex_run.reset_memory on temporary
+    # directories, or put the seam back themselves.
+    monkeypatch.setattr(funnel, "_codex_memory_reset",
+                        lambda directory: "skipped: stubbed in tests")
     yield real
 
 @pytest.fixture

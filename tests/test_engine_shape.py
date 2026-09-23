@@ -878,8 +878,8 @@ def test_apply_holds_an_escalated_plan_at_shaped(monkeypatch, capsys):
 
 def test_apply_holds_a_declared_risk_with_a_clean_scan(
         monkeypatch, capsys):
-    # #1034: the declaration reaches the live path through preview_decision,
-    # so a clean-worded plan the model flags still holds at Shaped.
+    # #1034: a clean-worded plan the model flags stays at Shaped, and the
+    # declared risk remains visible to a later self-approval sweep.
     item = idea(42)
     stub_gh(monkeypatch, item)
     assert shape.apply_shape(
@@ -889,6 +889,9 @@ def test_apply_holds_a_declared_risk_with_a_clean_scan(
              "why": "backfills the ledger table"}]),
         run="shape-run", agent="muse") == 0
     assert item.status == "Shaped"
+    assert "Risk: escalated — data-migration: backfills the ledger table" \
+        in item.body
+    assert funnel.plan_is_escalated(item.body)
     assert "escalated risk (data-migration)" in capsys.readouterr().out
 
 

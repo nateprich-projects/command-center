@@ -2743,3 +2743,94 @@ def test_begin_completes_without_loading_any_reporting_section(
     assert result["do"] == "ticket"
     assert result["work"]["ref"] == ticket.ref
     assert [ref for ref, value in writes if value] == [ticket.ref]
+
+
+def _shaped_plan(number, *, status="Shaped", open_need=False,
+                 escalated=False, labels=None):
+    body = "# Plan\n\nProposed class: Broken\n\n"
+    if escalated:
+        body += "Risk: escalated — destructive\n\n"
+    needs = {
+        "Exposure": "Which credentials should be used?"
+        if open_need else "nothing outstanding. No new credentials.",
+        "Gates": "nothing outstanding. No gate changes.",
+        "Scope and priority": "nothing outstanding. Scope is bounded.",
+        "Preference": "nothing outstanding. No user-facing choice.",
+    }
+    body += "## Needs Nate\n\n{}\n".format("\n".join(
+        "- {}: {}".format(category, answer)
+        for category, answer in needs.items()
+    ))
+    body += "\n" + funnel.origin_block(
+        "agent", at=NOW, run="shape-run", agent="claude"
+    )
+    return funnel.Item(
+        repo="nateprich/example",
+        number=number,
+        title="Project {}".format(number),
+        url="https://github.com/nateprich/example/issues/{}".format(number),
+        state="OPEN",
+        body=body,
+        status=status,
+        klass="Broken",
+        labels=labels or [],
+        item_id="project-item-{}".format(number),
+    )
+
+
+def test_shape_lane_rechecks_stranded_self_approvals_before_new_ideas(
+    monkeypatch, capsys
+):
+    stranded = _shaped_plan(300)
+    open_question = _shaped_plan(301, open_need=True)
+    escalated = _shaped_plan(302, escalated=True)
+    blocked_question = _shaped_plan(303, labels=["blocked"])
+    already_ready = _shaped_plan(304, status="Ready")
+    writes = []
+    comments = []
+
+    def write_status(item, status, now):
+        writes.append((item.ref, status))
+        item.status = status
+        return None
+
+    def run_gh(argv, **kwargs):
+        if argv[:3] == ["gh", "issue", "comment"]:
+            comments.append(argv[-1])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "_write_status", write_status)
+    monkeypatch.setattr(funnel, "_run_gh", run_gh)
+
+    result = _reviewer_begin(
+        monkeypatch,
+        capsys,
+        [stranded, open_question, escalated, blocked_question, already_ready],
+    )
+
+    assert writes == [(stranded.ref, "Ready")]
+    assert stranded.status == "Ready"
+    assert open_question.status == "Shaped"
+    assert escalated.status == "Shaped"
+    assert blocked_question.status == "Shaped"
+    assert already_ready.status == "Ready"
+    assert funnel.awaiting_decision([open_question]) == [open_question]
+    assert result["shaped_self_approvals"] == [
+        {"ref": stranded.ref, "status": "Ready"}
+    ]
+    assert len(comments) == 1
+    marker = funnel.parse_self_approval(comments[0])
+    assert marker is not None
+    assert "needs_nate all null; class Broken self-approvable" in marker
+    assert "no escalated risk" in marker
+
+
+def test_plan_needs_nate_fails_closed_when_a_category_is_missing():
+    body = (
+        "## Needs Nate\n\n"
+        "- Exposure: nothing outstanding. No new credentials.\n"
+        "- Gates: nothing outstanding. No gate changes.\n"
+        "- Preference: nothing outstanding. No user-facing choice.\n"
+    )
+
+    assert funnel.plan_needs_nate(body) is True

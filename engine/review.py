@@ -52,8 +52,9 @@ RESOLVED_PATH_MARKER = "/Volumes/"
 CI_SUCCESS = funnel.CI_SUCCESS_CONCLUSIONS
 CI_PENDING = funnel.CI_PENDING_STATES
 
-#: Path prefixes the #794 freeze covers. A diff touching these fails the
-#: freeze row unless the ticket's parent is #794 or #1044.
+#: Path prefixes the #794 freeze covered. The review-side freeze row was
+#: retired when #794 closed (#1362); these lists stay only because
+#: ``funnel._canonical_freeze_lists`` still parses them, and go with it.
 FROZEN_PATHS = ("routines/", "skills/")
 
 #: Parser constants scheduled for deletion by the #794 project: the union of
@@ -116,6 +117,183 @@ CI_RUN_SCAN_LIMIT = 20
 #: run rather than the branch head. Only these runs can cover an overlap:
 #: a push run on the head never saw main at all.
 CI_COVERING_EVENT = "pull_request"
+
+# The escalated reviewer keeps each max call small enough to finish. The
+# lister's output is canonical; judges receive slices of this list and never
+# derive requirements of their own (#1233, #1242).
+MAX_JUDGE_REQUIREMENTS = 3
+JUDGE_REQUIREMENT_STATUSES = ("met", "unmet", "unsure")
+
+
+class ReviewJudgeError(ValueError):
+    """A judge answer could not be tied safely to its assigned requirements."""
+
+
+def _canonical_requirements(requirements: Sequence[str]) -> List[str]:
+    if isinstance(requirements, (str, bytes)) or not isinstance(
+            requirements, (list, tuple)):
+        raise ReviewJudgeError("requirements must be a list of strings")
+    shaped = []
+    for index, requirement in enumerate(requirements):
+        if not isinstance(requirement, str) or not requirement.strip():
+            raise ReviewJudgeError(
+                "requirements[{}] must be a non-empty string".format(index))
+        shaped.append(requirement.strip())
+    return shaped
+
+
+def chunk_requirements(requirements: Sequence[str],
+                       chunk_size: int = MAX_JUDGE_REQUIREMENTS
+                       ) -> List[List[str]]:
+    """Split the lister's canonical requirements into bounded judge calls."""
+    if (not isinstance(chunk_size, int) or isinstance(chunk_size, bool)
+            or not 1 <= chunk_size <= MAX_JUDGE_REQUIREMENTS):
+        raise ReviewJudgeError(
+            "chunk_size must be between 1 and {}".format(
+                MAX_JUDGE_REQUIREMENTS))
+    canonical = _canonical_requirements(requirements)
+    return [canonical[start:start + chunk_size]
+            for start in range(0, len(canonical), chunk_size)]
+
+
+def parse_judge_answer(raw: str,
+                       expected_requirements: Sequence[str]
+                       ) -> List[Dict[str, str]]:
+    """Validate one judge's statuses and return them in canonical order.
+
+    A judge may answer only the requirements assigned to it. Missing,
+    duplicated, extra, or malformed entries make the whole chunk unusable so
+    the runner can retry once and then fail closed for that chunk.
+    """
+    expected = _canonical_requirements(expected_requirements)
+    if not expected:
+        raise ReviewJudgeError("a judge must receive at least one requirement")
+    if len(expected) > MAX_JUDGE_REQUIREMENTS:
+        raise ReviewJudgeError(
+            "a judge may receive at most {} requirements".format(
+                MAX_JUDGE_REQUIREMENTS))
+    if not (raw or "").strip():
+        raise ReviewJudgeError("empty answer: expected a JSON object")
+    try:
+        answer = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise ReviewJudgeError("invalid JSON: {}".format(exc))
+    if not isinstance(answer, dict):
+        raise ReviewJudgeError("answer must be a JSON object")
+    if set(answer) != {"requirements"}:
+        raise ReviewJudgeError(
+            "answer must contain only the 'requirements' key")
+    entries = answer["requirements"]
+    if not isinstance(entries, list):
+        raise ReviewJudgeError("'requirements' must be a list")
+    shaped = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or set(entry) != {
+                "requirement", "status", "evidence"}:
+            raise ReviewJudgeError(
+                "'requirements'[{}] must contain requirement, status, and "
+                "evidence only".format(index))
+        requirement = entry["requirement"]
+        status = entry["status"]
+        evidence = entry["evidence"]
+        if not isinstance(requirement, str) or not requirement.strip():
+            raise ReviewJudgeError(
+                "'requirements'[{}].requirement must be a non-empty string"
+                .format(index))
+        if status not in JUDGE_REQUIREMENT_STATUSES:
+            raise ReviewJudgeError(
+                "'requirements'[{}].status must be one of {}".format(
+                    index, list(JUDGE_REQUIREMENT_STATUSES)))
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise ReviewJudgeError(
+                "'requirements'[{}].evidence must be a non-empty string"
+                .format(index))
+        shaped.append({"requirement": requirement,
+                       "status": status,
+                       "evidence": evidence.strip()})
+
+    if len(shaped) != len(expected):
+        raise ReviewJudgeError(
+            "judge returned {} requirement result(s) for {} assigned"
+            .format(len(shaped), len(expected)))
+    remaining = list(shaped)
+    ordered = []
+    for requirement in expected:
+        matches = [entry for entry in remaining
+                   if entry["requirement"] == requirement]
+        if len(matches) != 1:
+            raise ReviewJudgeError(
+                "judge must answer {!r} exactly once".format(requirement))
+        entry = matches[0]
+        remaining.remove(entry)
+        ordered.append(entry)
+    if remaining:
+        raise ReviewJudgeError("judge returned an unassigned requirement")
+    return ordered
+
+
+def uncertain_judge_results(requirements: Sequence[str],
+                             evidence: str) -> List[Dict[str, str]]:
+    """Represent a failed judge call as an unsure result for its whole chunk."""
+    canonical = _canonical_requirements(requirements)
+    detail = ((evidence or "").strip()
+              or "judge call failed without diagnostic details")
+    return [{"requirement": requirement, "status": "unsure",
+             "evidence": detail}
+            for requirement in canonical]
+
+
+def derive_judge_answer(requirements: Sequence[str],
+                        results: Sequence[dict]) -> Dict[str, object]:
+    """Build the apply answer in code; any uncertainty rejects the review.
+
+    Results arrive in chunk order. If the runner ever loses or corrupts an
+    entry, that requirement becomes unsure instead of disappearing from the
+    review. Extra entries also force rejection.
+    """
+    canonical = _canonical_requirements(requirements)
+    if not canonical:
+        raise ReviewJudgeError("cannot derive a verdict without requirements")
+    if isinstance(results, (str, bytes)) or not isinstance(results, (list, tuple)):
+        results = []
+    records = list(results)
+    shaped = []
+    for index, requirement in enumerate(canonical):
+        entry = records[index] if index < len(records) else None
+        if (not isinstance(entry, dict)
+                or set(entry) != {"requirement", "status", "evidence"}
+                or entry.get("requirement") != requirement
+                or entry.get("status") not in JUDGE_REQUIREMENT_STATUSES
+                or not isinstance(entry.get("evidence"), str)
+                or not entry.get("evidence", "").strip()):
+            shaped.append({
+                "requirement": requirement,
+                "status": "unsure",
+                "evidence": (
+                    "No valid judge result was recorded for this requirement"
+                ),
+            })
+        else:
+            shaped.append({
+                "requirement": requirement,
+                "status": entry["status"],
+                "evidence": entry["evidence"].strip(),
+            })
+    extra_count = max(0, len(records) - len(canonical))
+    blocking = [
+        "requirement {}: {} -- {}".format(
+            entry["status"], entry["requirement"], entry["evidence"])
+        for entry in shaped if entry["status"] != "met"
+    ]
+    if extra_count:
+        blocking.append(
+            "unexpected extra judge result(s): {}".format(extra_count))
+    return {
+        "verdict": "rejected" if blocking else "approved",
+        "blocking": blocking,
+        "unsure": [],
+        "requirements": shaped,
+    }
 
 
 def ci_state(checks: Sequence[dict]) -> str:
@@ -700,28 +878,6 @@ def precheck_pr_open(packet: dict) -> List[str]:
         state, timestamp_name, timestamp)]
 
 
-def precheck_freeze(packet: dict) -> List[str]:
-    """Row 2: frozen ground needs a ticket under #794 or #1044."""
-    touches = freeze_touches(packet.get("changed_files"), packet.get("diff"))
-    frozen = touches["paths"] + touches["parsers"]
-    if not frozen:
-        return []
-    ticket = packet.get("ticket") or {}
-    parent = ticket.get("parent") or {}
-    if parent.get("number") in FREEZE_PARENT_NUMBERS:
-        return []
-    if ticket.get("number") is None:
-        where = "the PR has no ticket"
-    elif parent.get("number") is None:
-        where = "ticket {} has no parent".format(ticket.get("ref"))
-    else:
-        where = "ticket {} is under #{}".format(
-            ticket.get("ref"), parent.get("number"))
-    allowed = ", ".join("#{}".format(n) for n in FREEZE_PARENT_NUMBERS)
-    return ["freeze: {} touched but {}; frozen while #794 lands "
-            "(exempt parents: {})".format(", ".join(frozen), where, allowed)]
-
-
 def precheck_ci(packet: dict) -> List[str]:
     """Row 3: green passes; pending/red fail; startup stops stand down."""
     ci = packet.get("ci") or {}
@@ -822,9 +978,13 @@ def precheck_repo_rules(packet: dict) -> List[str]:
 
 
 def precheck(packet: dict) -> Dict[str, object]:
-    """All eight rows in ticket order. Any reason fails the packet."""
+    """All seven rows in ticket order. Any reason fails the packet.
+
+    The freeze row was retired when #794 closed (#1362); the queue-side
+    predicate had already gone inert with it.
+    """
     reasons: List[str] = []
-    for row in (precheck_pr_open, precheck_freeze, precheck_ci,
+    for row in (precheck_pr_open, precheck_ci,
                 precheck_verdict,
                 precheck_merged_overlap, precheck_protected, precheck_stop,
                 precheck_repo_rules):

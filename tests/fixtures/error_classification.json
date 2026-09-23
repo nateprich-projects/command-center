@@ -1,0 +1,47 @@
+{
+  "runtime": {
+    "head": "0123456789ab"
+  },
+  "cases": [
+    {
+      "name": "rate limit",
+      "note": "API rate limit already exceeded",
+      "expected": "floor"
+    },
+    {
+      "name": "provider refusal",
+      "note": "provider refused the request",
+      "expected": "floor"
+    },
+    {
+      "name": "timeout",
+      "note": "the GitHub request timed out",
+      "expected": "floor"
+    },
+    {
+      "name": "ambiguous timeout",
+      "note": "the operation timed out",
+      "expected": "unclassified"
+    },
+    {
+      "name": "failed tests",
+      "note": "tests failed: tests/test_heartbeat.py::test_finish_record",
+      "expected": "regression"
+    },
+    {
+      "name": "missing test dependency",
+      "note": "tests failed: No module named pytest",
+      "expected": "unclassified"
+    },
+    {
+      "name": "unmatched note",
+      "note": "runner stopped with an unfamiliar failure",
+      "expected": "unclassified"
+    },
+    {
+      "name": "missing note",
+      "note": "",
+      "expected": "unclassified"
+    }
+  ]
+}

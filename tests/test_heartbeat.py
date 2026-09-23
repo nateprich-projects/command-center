@@ -12,6 +12,7 @@ So the tests are as much about refusing to guess as about resolving correctly.
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import sys
 
@@ -30,6 +31,9 @@ spec.loader.exec_module(watchdog)
 
 NOW = 1_788_600_000.0
 MIN = 60
+ERROR_CLASS_FIXTURE = (
+    pathlib.Path(__file__).parent / "fixtures" / "error_classification.json"
+)
 
 
 def start(run, at, ticket=1):
@@ -272,6 +276,47 @@ def test_finish_accepts_skipped_human_step(monkeypatch):
     assert records[0]["outcome"] == "skipped-human-step"
 
 
+def test_error_classification_fixture_fails_unmatched_notes_to_unclassified():
+    fixture = json.loads(ERROR_CLASS_FIXTURE.read_text())
+    runtime = fixture["runtime"]
+
+    for case in fixture["cases"]:
+        assert heartbeat.classify_error(case["note"], runtime) == case["expected"], (
+            case["name"]
+        )
+
+    assert heartbeat.classify_error(
+        "API rate limit exceeded", None
+    ) == "unclassified"
+
+
+def test_errored_finish_records_its_class_and_runtime_head(monkeypatch):
+    records = []
+    runtime = {"root": "/runtime/checkout", "head": "0123456789ab"}
+    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "runtime_state", lambda: runtime)
+    monkeypatch.setattr(heartbeat, "token_usage_for_run", lambda *args: None)
+    monkeypatch.setattr(heartbeat, "api_cost_for_run", lambda *args: None)
+    monkeypatch.setattr(heartbeat, "input_usage", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(
+        heartbeat,
+        "append",
+        lambda agent, record: records.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    assert heartbeat.main([
+        "finish", "--agent", "codex", "--run", "run-id",
+        "--outcome", "errored", "--note", "tests failed: test_checkout",
+    ]) == 0
+
+    assert records[0]["error_class"] == "regression"
+    assert records[0]["runtime"] == runtime
+
+
 def test_finish_records_input_usage_when_harness_exposes_both_counts(monkeypatch):
     records = []
     monkeypatch.setattr(heartbeat, "read", lambda agent: [])
@@ -304,6 +349,7 @@ def test_finish_records_input_usage_when_harness_exposes_both_counts(monkeypatch
         "ratio": 4.0,
     }
     assert records[0]["runtime"]["head"] == "0123456789ab"
+    assert "error_class" not in records[0]
 
 
 def test_finish_omits_input_usage_when_harness_does_not_expose_both_counts(

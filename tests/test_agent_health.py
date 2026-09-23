@@ -61,20 +61,37 @@ def _error_rows():
             "ts": NOW.timestamp() - (i + 1) * 3600,
             "agent": "muse",
             "outcome": "errored",
+            "error_class": "regression",
             "note": "boom {}".format(i),
+            "runtime": {"head": "0123456789ab"},
         }
         for i in range(3)
     ]
 
 
-def test_agent_health_names_the_agent_and_preserves_watchdog_wording(monkeypatch):
+def test_brief_lists_regressions_with_the_runtime_head(monkeypatch):
     monkeypatch.setattr(heartbeat, "PROVIDERS", {"muse": "meta"})
     monkeypatch.setattr(heartbeat, "read", lambda agent: _error_rows())
 
     assert funnel.agent_health(NOW) == [{
         "agent": "muse",
-        "condition": "`muse` errored 3 times this week. Most recent: boom 0; boom 1; boom 2",
+        "condition": (
+            "`muse` had 3 regression errors this week. Latest: "
+            "head 0123456789ab: boom 0; head 0123456789ab: boom 1; "
+            "head 0123456789ab: boom 2"
+        ),
     }]
+
+
+def test_brief_omits_floor_and_unclassified_errors(monkeypatch):
+    rows = [
+        dict(row, error_class="floor")
+        for row in _error_rows()[:2]
+    ] + [dict(_error_rows()[2], error_class="unclassified")]
+    monkeypatch.setattr(heartbeat, "PROVIDERS", {"muse": "meta"})
+    monkeypatch.setattr(heartbeat, "read", lambda agent: rows)
+
+    assert funnel.agent_health(NOW) == []
 
 
 def test_healthy_heartbeat_rows_render_no_agent_health(monkeypatch):

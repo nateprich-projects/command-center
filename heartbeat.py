@@ -101,6 +101,54 @@ OUTCOMES = [
 #: never turn an unreadable value into zero.
 API_COST_FIELDS = ("graphql_points", "gh_calls")
 
+# These are the note signatures the execution plan can currently distinguish.
+# Anything outside these explicit rules stays unclassified; the runtime head is
+# required as the code revision that was active when the finish was written.
+FLOOR_ERROR_MARKERS = (
+    "rate limit",
+    "rate-limit",
+    "rate_limit",
+    "ratelimit",
+    "provider refused",
+    "provider refusal",
+    "provider quota",
+    "quota exhausted",
+    "request timed out",
+    "connection timed out",
+    "gateway timeout",
+    "context deadline exceeded",
+    "tls handshake timeout",
+    "i/o timeout",
+)
+REGRESSION_ERROR_MARKERS = ("tests failed:",)
+UNCLASSIFIED_ERROR_MARKERS = (
+    "could not derive a test command",
+    "no module named pytest",
+    "requires python ",
+)
+
+
+def classify_error(note: Optional[str], runtime: Optional[Dict]) -> str:
+    """Classify a failed finish from its note and runtime code revision.
+
+    The classifier is deliberately a small explicit lookup. Missing evidence
+    and notes with no matching rule are ``unclassified`` rather than weather.
+    """
+    head = runtime.get("head") if isinstance(runtime, dict) else None
+    if not isinstance(head, str) or not head.strip():
+        return "unclassified"
+    if not isinstance(note, str) or not note.strip():
+        return "unclassified"
+
+    normalized = note.casefold()
+    if any(marker in normalized for marker in FLOOR_ERROR_MARKERS):
+        return "floor"
+    if any(marker in normalized for marker in UNCLASSIFIED_ERROR_MARKERS):
+        return "unclassified"
+    if any(marker in normalized for marker in REGRESSION_ERROR_MARKERS):
+        return "regression"
+    return "unclassified"
+
 
 def _non_negative_int(value: str) -> int:
     """Parse a structured count without admitting booleans or negatives."""
@@ -1438,6 +1486,7 @@ def main(argv=None) -> int:
                 file=sys.stderr,
             )
         finished_at = time.time()
+        runtime = runtime_state()
         record = {
             "run": run_id,
             "agent": args.agent,
@@ -1456,13 +1505,15 @@ def main(argv=None) -> int:
             "review_result": args.review_result,
             "human_intervention_required": args.human_intervention or None,
             "repo": repo_state(),
-            "runtime": runtime_state(),
+            "runtime": runtime,
             "token_usage": token_usage_for_run(
                 args.agent, records, run_id, finished_at
             ),
             "api_cost": api_cost_for_run(records, run_id),
             **detect_model(args.agent),
         }
+        if args.outcome == "errored":
+            record["error_class"] = classify_error(args.note, runtime)
         if args.shape_status is not None:
             record["shape_status"] = args.shape_status
         if args.ticket_count is not None:

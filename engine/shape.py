@@ -359,6 +359,7 @@ def decide(answer: Dict, *,
            origin_voice: Optional[str],
            override_target: Optional[str] = None,
            escalation_reasons: Sequence[str] = (),
+           escalation_matches: Sequence[Dict[str, Optional[str]]] = (),
            state: Optional[str] = None) -> Tuple[str, str]:
     """Apply the self-approval rule to validated fields. Pure: no IO.
 
@@ -373,8 +374,9 @@ def decide(answer: Dict, *,
     declaration and the wording scan passed as ``escalation_reasons``
     (#1034): either one holding is enough, so a plan-worded risk the
     scan misses still holds, and a scan hit the model omitted still
-    holds. There is no standard override: an empty declaration never
-    clears a scan hit.
+    holds. Matching lines from ``escalation_matches`` are included in
+    the explanation for scan hits. There is no standard override: an
+    empty declaration never clears a scan hit.
 
     Sequencing dependencies never hold (#1053): a plan that waits on
     a named sibling but asks Nate nothing self-approves, and the
@@ -384,6 +386,14 @@ def decide(answer: Dict, *,
                 if isinstance(entry, dict)
                 and isinstance(entry.get("reason"), str)]
     reasons = sorted(set(escalation_reasons or ()) | set(declared))
+    matched_lines = {
+        entry.get("reason"): entry.get("line")
+        for entry in escalation_matches or ()
+        if isinstance(entry, dict)
+        and isinstance(entry.get("reason"), str)
+        and isinstance(entry.get("line"), str)
+        and entry.get("line").strip()
+    }
     open_categories = open_need_categories(answer)
     if funnel.self_approval_eligible(
             klass, origin_voice, override_target,
@@ -410,7 +420,12 @@ def decide(answer: Dict, *,
     failed.extend("open question under {}".format(category)
                   for category in open_categories)
     if reasons:
-        failed.append("escalated risk ({})".format(", ".join(reasons)))
+        described = [
+            "{}: {}".format(reason, matched_lines[reason])
+            if reason in matched_lines else reason
+            for reason in reasons
+        ]
+        failed.append("escalated risk ({})".format(", ".join(described)))
     return "Shaped", "; ".join(failed)
 
 
@@ -438,14 +453,15 @@ def preview_decision(items: list, item, answer: Dict) -> Tuple[str, str]:
     # wording scan here so the durable Risk line added by `render_plan` does
     # not report the same declaration twice.
     scan_answer["escalated_risk"] = []
+    matches = funnel.plan_escalation_matches(render_plan(scan_answer))
     return decide(
         answer,
         klass=effective_klass,
         origin_voice=origin_voice,
         override_target=override_target,
-        escalation_reasons=funnel.plan_is_escalated(
-            render_plan(scan_answer)
-        ),
+        escalation_reasons=[entry["reason"] for entry in matches
+                            if isinstance(entry.get("reason"), str)],
+        escalation_matches=matches,
         state=item.state,
     )
 

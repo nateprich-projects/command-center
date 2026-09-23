@@ -75,56 +75,95 @@ def test_recorded_cause_regressions_ignores_prose_references():
     assert report["count"] == 0
 
 
-def test_command_center_ticket_pr_share_counts_all_recent_merged_prs(monkeypatch):
+def _recent_merged_prs(rows, calls):
+    rows = list(rows)
+
+    def gh_graphql(query, **variables):
+        calls.append((query, variables))
+        offset = 100 if variables.get("cursor") == "cursor-1" else 0
+        page = rows[offset:offset + 100]
+        has_next = offset + len(page) < len(rows)
+        return {
+            "rateLimit": {
+                "cost": 1, "remaining": 4999 - len(calls), "resetAt": "later"
+            },
+            "repo0": {
+                "pullRequests": {
+                    "nodes": page,
+                    "pageInfo": {
+                        "hasNextPage": has_next,
+                        "endCursor": "cursor-1" if has_next else None,
+                    },
+                },
+            },
+        }
+
+    return gh_graphql
+
+
+@pytest.mark.parametrize(
+    ("row_count", "ticket_count", "expected_calls"),
+    [(100, 50, 1), (101, 51, 2)],
+)
+def test_command_center_ticket_pr_share_pages_recent_merged_prs(
+    monkeypatch, row_count, ticket_count, expected_calls
+):
     rows = [
         {
             "state": "MERGED",
-            "mergedAt": "2026-09-13T10:00:00Z",
-            "headRefName": "ticket/1",
-        },
-        {
-            "state": "MERGED",
-            "mergedAt": "2026-09-12T10:00:00+00:00",
-            "headRefName": "main",
-        },
-        {
-            "state": "OPEN",
-            "mergedAt": None,
-            "headRefName": "ticket/2",
-        },
-        {
-            "state": "MERGED",
-            "mergedAt": "2026-07-01T10:00:00Z",
-            "headRefName": "ticket/3",
-        },
+            "mergedAt": (NOW - timedelta(hours=1)).isoformat(),
+            "updatedAt": (NOW - timedelta(hours=1)).isoformat(),
+            "headRefName": (
+                "ticket/{}".format(number)
+                if number % 2
+                else "main"
+            ),
+        }
+        for number in range(1, row_count + 1)
     ]
-    monkeypatch.setattr(
-        funnel,
-        "ticket_pr_index",
-        lambda repo: (funnel.TicketPRIndex(all_rows=rows), False),
-    )
+    calls = []
+    monkeypatch.setattr(funnel, "gh_graphql", _recent_merged_prs(rows, calls))
 
     report = funnel.command_center_ticket_pr_share([], NOW)
 
     assert report["status"] == "available"
-    assert report["merged_prs"] == 2
-    assert report["ticket_merged_prs"] == 1
-    assert report["share"] == 0.5
-    assert report["value"] == 0.5
+    assert report["merged_prs"] == row_count
+    assert report["ticket_merged_prs"] == ticket_count
+    assert report["share"] == round(ticket_count / row_count, 3)
+    assert report["value"] == round(ticket_count / row_count, 3)
+    assert len(calls) == expected_calls
+    assert sum(1 for _query, _variables in calls) <= 2
+    assert all("rateLimit { cost remaining resetAt }" in query
+               for query, _variables in calls)
+    assert all("states: [MERGED]" in query for query, _variables in calls)
+    assert all("statusCheckRollup" not in query
+               for query, _variables in calls)
 
 
-def test_command_center_ticket_pr_share_refuses_truncated_scan(monkeypatch):
-    monkeypatch.setattr(
-        funnel,
-        "ticket_pr_index",
-        lambda repo: (funnel.TicketPRIndex(all_rows=[]), True),
-    )
+def test_command_center_ticket_pr_share_stops_after_window(monkeypatch):
+    rows = [
+        {
+            "state": "MERGED",
+            "mergedAt": (NOW - timedelta(hours=1)).isoformat(),
+            "updatedAt": (NOW - timedelta(hours=1)).isoformat(),
+            "headRefName": "ticket/{}".format(number),
+        }
+        for number in range(1, 101)
+    ] + [{
+        "state": "MERGED",
+        "mergedAt": (NOW - timedelta(days=31)).isoformat(),
+        "updatedAt": (NOW - timedelta(days=31)).isoformat(),
+        "headRefName": "ticket/old",
+    }]
+    calls = []
+    monkeypatch.setattr(funnel, "gh_graphql", _recent_merged_prs(rows, calls))
 
     report = funnel.command_center_ticket_pr_share([], NOW)
 
-    assert report["status"] == "unavailable"
-    assert report["share"] is None
-    assert "truncated" in report["reason"]
+    assert report["status"] == "available"
+    assert report["merged_prs"] == 100
+    assert report["ticket_merged_prs"] == 100
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize("value", ["", "notes", "owner/repo"])

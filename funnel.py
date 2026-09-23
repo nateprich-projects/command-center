@@ -375,6 +375,18 @@ GH_API_CACHE_DURATION = "5m"
 ENGINEERING_RESERVE_LOADS = 20
 REVIEW_RESERVE_LOADS = 5
 
+# The hourly GraphQL window is 5,000 points. The ticket leaves the exact cap
+# unstated; 826 is the highest whole-point floor that clears the observed
+# false stand-down at 826 points, while preserving the 42-point calculation
+# before the cap is applied.
+GRAPHQL_RESERVE_POINT_CEILING = 826
+
+
+def _reserve_floor(loads: int, load_cost: object) -> int:
+    """Return the proportional reserve, bounded by the hourly point ceiling."""
+    return min(loads * int(load_cost), GRAPHQL_RESERVE_POINT_CEILING)
+
+
 # #1047 measured the direct GraphQL cost of one disposable begin session's
 # Project load at 42 points, including the member-repository and paged item
 # reads.  The rate-limit-only pre-read below must reserve that known load before
@@ -388,6 +400,19 @@ REGRESSION_PREFIX = "Regression from PR #"
 #: Reasons are durable parking artifacts. The sibling brief command reads this
 #: fixed marker back from issue comments, so it is a shared contract.
 PARK_COMMENT_PREFIX = "**Parked:** "
+
+#: A dated park records the prior Project Status on its own fixed header line.
+#: The brief and the future wake path share this parser contract.
+PARK_WAKE_PREFIX = "**Parked wake:** "
+PARK_WAKE_STATUSES = frozenset(status for status in STAGES if status != "Parked")
+_PARK_WAKE_STATUS_PATTERN = "|".join(
+    re.escape(status) for status in STAGES if status != "Parked"
+)
+PARK_WAKE_RE = re.compile(
+    r"\A" + re.escape(PARK_WAKE_PREFIX)
+    + r"date=(?P<wake_date>[0-9]{4}-[0-9]{2}-[0-9]{2}) "
+    + r"status=(?P<prior_status>" + _PARK_WAKE_STATUS_PATTERN + r")\Z"
+)
 
 #: A project the funnel closes after its last upkeep ticket lands carries this
 #: fixed prefix. The brief uses it to distinguish funnel-closed work from a
@@ -565,7 +590,10 @@ BRIEF_SECTION_BUDGETS = {
     # One `gh issue list` per member repo. Sized like the other live scans.
     "member_issues_without_project_items": 8.0,
     "outcome_signals": 3.0,
-    "portfolio_metrics": 3.0,
+    # 10 s, not 3 s: the ticket-PR share pages every merged PR in the window
+    # (#1286). Measured 2026-09-23 on 476 merges (5 pages): 2.27 s, 2.62 s,
+    # 2.97 s, so 3 s degraded about one read in three, and the window grows.
+    "portfolio_metrics": 10.0,
     "rejected_merges": 0.25,
 }
 
@@ -1191,9 +1219,10 @@ def asserted_text(text: str) -> str:
     return "\n".join(kept)
 
 
-def escalation_reasons(title: str, body: str,
-                       failed_before: bool = False) -> List[str]:
-    """Why the cheap default engineer must not take this ticket.
+def escalation_matches(title: str, body: str,
+                       failed_before: bool = False
+                       ) -> List[Dict[str, Optional[str]]]:
+    """Return escalation reasons with the line that supports each one.
 
     An explicit `Risk:` marker wins outright, in both directions — a ticket that
     says `Risk: standard` is standard even if its prose mentions a race
@@ -1208,21 +1237,49 @@ def escalation_reasons(title: str, body: str,
     the regex in both directions. Nate answered the gate question on
     2026-09-21, having been shown the cost: a plan that describes its real risk
     only inside a code fence would drop to the standard lane.
+
+    Each matched reason carries its first matching line, trimmed. The synthetic
+    "prior attempt failed" reason has no matching line.
     """
     text = asserted_text("{}\n{}".format(title or "", body or ""))
     marker = RISK_LINE.search(text)
     if marker:
         if marker.group(1).lower() == "standard":
-            return ["prior attempt failed"] if failed_before else []
+            return ([{"reason": "prior attempt failed", "line": None}]
+                    if failed_before else [])
         stated = marker.group(2).strip(" —-:").strip()
-        reasons = ["declared: " + stated] if stated else ["declared"]
-        return reasons + (["prior attempt failed"] if failed_before else [])
+        found = [{
+            "reason": "declared: " + stated if stated else "declared",
+            "line": marker.group(0).strip(),
+        }]
+        if failed_before:
+            found.append({"reason": "prior attempt failed", "line": None})
+        return found
 
-    found = [name for name, pattern in sorted(ESCALATION_PATTERNS.items())
-             if re.search(pattern, text, re.IGNORECASE)]
+    found: List[Dict[str, Optional[str]]] = []
+    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.start())
+        if line_end < 0:
+            line_end = len(text)
+        found.append({
+            "reason": name,
+            "line": text[line_start:line_end].strip(),
+        })
     if failed_before:
-        found.append("prior attempt failed")
+        found.append({"reason": "prior attempt failed", "line": None})
     return found
+
+
+def escalation_reasons(title: str, body: str,
+                       failed_before: bool = False) -> List[str]:
+    """Return the stable list of escalation reason names."""
+    return [entry["reason"] for entry in
+            escalation_matches(title, body, failed_before)
+            if isinstance(entry.get("reason"), str)]
 
 
 NEEDS_NATE_PATTERNS = {
@@ -1292,6 +1349,12 @@ def plan_is_escalated(plan_body: str) -> List[str]:
     used by the self-approval condition.
     """
     return escalation_reasons("", plan_body)
+
+
+def plan_escalation_matches(plan_body: str
+                            ) -> List[Dict[str, Optional[str]]]:
+    """Return plan escalation reasons together with their matching lines."""
+    return escalation_matches("", plan_body)
 
 
 def plan_needs_nate(plan_body: str) -> bool:
@@ -4054,13 +4117,107 @@ def recorded_cause_regressions(
     }
 
 
+def _recent_merged_pr_rows(
+    repo: str, cutoff: datetime
+) -> List[Dict[str, object]]:
+    """Read merged PRs updated within the window using a light paged query.
+
+    The portfolio metric only needs the branch and merge timestamps. Reusing
+    ``ticket_pr_index`` would also request CI rollups and scan every PR state;
+    the brief's 100-row bound can also hide valid merges. Merged PRs sort by
+    ``updatedAt``, so the first row older than the cutoff proves that later
+    rows cannot have merged in the window.
+    """
+    try:
+        owner, name = repo.split("/", 1)
+    except ValueError:
+        raise GitHubError("invalid repository ref {}".format(repo))
+
+    query = """query($cursor: String) {{
+  rateLimit {{ cost remaining resetAt }}
+  repo0: repository(owner: {owner}, name: {name}) {{
+    pullRequests(
+      first: {page_size}, after: $cursor, states: [MERGED],
+      orderBy: {{field: UPDATED_AT, direction: DESC}}
+    ) {{
+      nodes {{ state headRefName mergedAt updatedAt }}
+      pageInfo {{ hasNextPage endCursor }}
+    }}
+  }}
+}}""".format(
+        owner=json.dumps(owner),
+        name=json.dumps(name),
+        page_size=PR_GRAPHQL_PAGE_SIZE,
+    )
+
+    rows: List[Dict[str, object]] = []
+    cursor: Optional[str] = None
+    while True:
+        variables = {"cursor": cursor} if cursor is not None else {}
+        data = gh_graphql(query, **variables)
+        if not isinstance(data, dict):
+            raise GitHubError("merged PR response was not an object")
+        repository = data.get("repo0")
+        if not isinstance(repository, dict):
+            raise GitHubError(
+                "could not read repository {} in merged PR response".format(
+                    repo
+                )
+            )
+        pull_requests = repository.get("pullRequests")
+        if not isinstance(pull_requests, dict):
+            raise GitHubError(
+                "invalid merged pull-request response for {}".format(repo)
+            )
+        nodes = pull_requests.get("nodes")
+        page_info = pull_requests.get("pageInfo")
+        if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            raise GitHubError(
+                "invalid merged pull-request page for {}".format(repo)
+            )
+
+        for node in nodes:
+            if not isinstance(node, dict):
+                raise GitHubError("invalid merged pull-request row")
+            updated_at = _metric_time(node.get("updatedAt"))
+            if updated_at is None:
+                raise GitHubError(
+                    "merged pull request has no parseable updatedAt"
+                )
+            if updated_at < cutoff:
+                return rows
+            rows.append({
+                "state": node.get("state"),
+                "headRefName": node.get("headRefName"),
+                "mergedAt": node.get("mergedAt"),
+            })
+
+        if not page_info.get("hasNextPage"):
+            return rows
+        next_cursor = page_info.get("endCursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            raise GitHubError(
+                "merged pull-request page for {} has no next cursor".format(
+                    repo
+                )
+            )
+        if next_cursor == cursor:
+            raise GitHubError(
+                "merged pull-request page for {} repeated its cursor".format(
+                    repo
+                )
+            )
+        cursor = next_cursor
+
+
 def command_center_ticket_pr_share(
     items: Iterable[Item], now: datetime
 ) -> Dict[str, object]:
     """Report the fraction of recent command-center merges on ticket branches."""
-    del items  # The bounded repository scan is the source of PR truth.
+    del items  # The command-center repository is the source of PR truth.
+    cutoff = now - MAINTENANCE_WINDOW
     try:
-        index, truncated = ticket_pr_index(REPO)
+        rows = _recent_merged_pr_rows(REPO, cutoff)
     except Exception as exc:
         return {
             "window_days": MAINTENANCE_WINDOW.days,
@@ -4076,27 +4233,6 @@ def command_center_ticket_pr_share(
                 _brief_error(exc)
             ),
         }
-
-    rows = list(getattr(index, "all_rows", ()) or ())
-    if not rows:
-        rows = list(index.values())
-    if truncated:
-        return {
-            "window_days": MAINTENANCE_WINDOW.days,
-            "definition": (
-                "merged command-center PRs in the last 30 days whose branch "
-                "is ticket/<number>"
-            ),
-            "status": "unavailable",
-            "available": False,
-            "value": None,
-            "share": None,
-            "reason": (
-                "bounded command-center PR scan was truncated at {} rows"
-            ).format(MERGED_PR_SCAN_LIMIT),
-        }
-
-    cutoff = now - MAINTENANCE_WINDOW
     merged = 0
     ticket_merged = 0
     unknown_timestamps = 0
@@ -7781,7 +7917,8 @@ def _dashboard_ticket(
             block_reason = "project blocked: " + parent_block
     body = item.body or ""
     needs = item.needs
-    tier = "escalated" if escalation_reasons(item.title, body) else "standard"
+    matches = escalation_matches(item.title, body)
+    tier = "escalated" if matches else "standard"
 
     pr_state = str((pr_fact or {}).get("state") or "").upper()
     pr_number = (pr_fact or {}).get("number")
@@ -7844,6 +7981,7 @@ def _dashboard_ticket(
         "pr": pr,
         "pr_number": pr_number if isinstance(pr_number, int) else None,
         "tier": tier,
+        "escalation_matches": matches,
         "owner": owner,
         "blocked": blocked,
         "human_step": needs if needs in ("human", "claude-code-environment") else None,
@@ -8402,6 +8540,44 @@ def parked_items(items: Iterable[Item]) -> List[Item]:
     return sorted((i for i in items if i.status == "Parked"), key=key)
 
 
+def parse_park_comment(body: str) -> Optional[Dict[str, object]]:
+    """Read a durable park reason and its optional wake record.
+
+    A dated park starts with one strict, machine-readable header line, followed
+    by the same reason line used by an ordinary park. The provenance trailer is
+    invisible to this contract and is removed before parsing.
+    """
+    if not isinstance(body, str):
+        return None
+    visible = _visible_comment(body)
+    wake_date = None
+    prior_status = None
+
+    if visible.startswith(PARK_WAKE_PREFIX):
+        header, separator, reason_line = visible.partition("\n")
+        match = PARK_WAKE_RE.fullmatch(header)
+        if match is not None:
+            try:
+                parsed_date = date.fromisoformat(match.group("wake_date"))
+            except ValueError:
+                parsed_date = None
+            if parsed_date is not None:
+                wake_date = parsed_date
+                prior_status = match.group("prior_status")
+        if not separator:
+            return None
+    else:
+        reason_line = visible
+
+    if not reason_line.startswith(PARK_COMMENT_PREFIX):
+        return None
+    return {
+        "reason": reason_line[len(PARK_COMMENT_PREFIX):].strip(),
+        "wake_date": wake_date,
+        "prior_status": prior_status,
+    }
+
+
 def _parked_item_json(item: Item) -> Dict[str, object]:
     """Render one parked item and read its durable reason comment.
 
@@ -8410,20 +8586,24 @@ def _parked_item_json(item: Item) -> Dict[str, object]:
     comment request for every issue.
     """
     comments = _issue_comments(item)
-    reason = None
+    parsed = None
     for comment in reversed(comments):
         body = comment.get("body") or ""
-        if body.startswith(PARK_COMMENT_PREFIX):
-            reason = body[len(PARK_COMMENT_PREFIX):].strip()
+        parsed = parse_park_comment(body)
+        if parsed is not None:
             break
 
-    return {
+    rendered = {
         "ref": item.ref,
         "title": item.title,
         "url": item.url,
         "parked_at": item.status_since.isoformat() if item.status_since else None,
-        "reason": reason,
+        "reason": parsed["reason"] if parsed is not None else None,
     }
+    if parsed is not None and parsed["wake_date"] is not None:
+        rendered["wake_date"] = parsed["wake_date"].isoformat()
+        rendered["wake_status"] = parsed["prior_status"]
+    return rendered
 
 
 def parked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
@@ -10573,11 +10753,25 @@ def _option_id(field_id: str, name: str) -> str:
 
 
 def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
-             run: Optional[str] = None, agent: Optional[str] = None) -> int:
+             run: Optional[str] = None, agent: Optional[str] = None,
+             wake_date: Optional[date] = None) -> int:
     """Park a project with its durable reason attached to the issue."""
     item = find(items, ref)
     if not item.item_id:
         raise GitHubError("{} is not in the Project".format(item.ref))
+    if wake_date is not None:
+        if wake_date <= _block_condition_date(now):
+            raise GitHubError("wake date must be after today's UTC date")
+        if item.status not in PARK_WAKE_STATUSES:
+            raise GitHubError(
+                "a wake date requires a recorded Project Status before parking"
+            )
+
+    park_comment = PARK_COMMENT_PREFIX + reason
+    if wake_date is not None:
+        park_comment = "{}date={} status={}\n{}".format(
+            PARK_WAKE_PREFIX, wake_date.isoformat(), item.status, park_comment
+        )
 
     # Done and Parked must remain distinguishable. Set the Project status first,
     # then close with NOT_PLANNED, then leave the reason where it can be read
@@ -10601,14 +10795,14 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
     comment = _run_gh(
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
          "--body", append_provenance(
-             PARK_COMMENT_PREFIX + reason, "nate-relayed", at=now,
+             park_comment, "nate-relayed", at=now,
              run=run, agent=agent)],
         capture_output=True, text=True,
     )
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
 
-    print("{} → Parked\n{}{}".format(item.ref, PARK_COMMENT_PREFIX, reason))
+    print("{} → Parked\n{}".format(item.ref, park_comment))
     return 0
 
 
@@ -12792,15 +12986,16 @@ def _begin_api_reserve_preflight(
                    "read its budget does not work",
         }
 
-    floor = loads * BEGIN_PROJECT_LOAD_COST
+    floor = _reserve_floor(loads, BEGIN_PROJECT_LOAD_COST)
     if remaining < floor:
         return {
             "gate": "reserve",
             "do": "stop",
             "why": "GraphQL budget {} is below the {} floor of {} "
-                   "({} loads at {} points)".format(
+                   "({} loads at {} points; ceiling {} points)".format(
                        remaining, lane, floor, loads,
-                       BEGIN_PROJECT_LOAD_COST),
+                       BEGIN_PROJECT_LOAD_COST,
+                       GRAPHQL_RESERVE_POINT_CEILING),
         }
     return None
 
@@ -13482,15 +13677,16 @@ def _reserve_verdict_for_remaining(
 
     loads = (REVIEW_RESERVE_LOADS if do == "review"
              else ENGINEERING_RESERVE_LOADS)
-    floor = loads * int(load_cost)
+    floor = _reserve_floor(loads, load_cost)
     if remaining < floor:
         return {
             "gate": "reserve",
             "do": "stop",
             "why": "GraphQL budget {} is below the {} floor of {} "
-                   "({} loads at {} points)".format(
+                   "({} loads at {} points; ceiling {} points)".format(
                        remaining, "review" if do == "review"
-                       else "engineering", floor, loads, load_cost),
+                       else "engineering", floor, loads, load_cost,
+                       GRAPHQL_RESERVE_POINT_CEILING),
         }
     return None
 
@@ -14385,6 +14581,23 @@ def _parking_reason(value: str) -> str:
     return reason
 
 
+def _parking_wake_date(value: str) -> date:
+    """Require a future calendar date before loading or writing to GitHub."""
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        raise argparse.ArgumentTypeError("wake date must use YYYY-MM-DD")
+    try:
+        wake_date = date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "wake date must be a valid YYYY-MM-DD calendar date"
+        )
+    if wake_date <= _block_condition_date():
+        raise argparse.ArgumentTypeError(
+            "wake date must be after today's UTC date"
+        )
+    return wake_date
+
+
 def _comment_reason(value: str) -> str:
     """Reject blank reasons for canonical blocked comments during parsing."""
     reason = value.strip()
@@ -14547,6 +14760,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
     park.add_argument(
         "--reason", required=True, type=_parking_reason,
         help="why this project is being stopped (required)",
+    )
+    park.add_argument(
+        "--wake-date", type=_parking_wake_date, default=None,
+        help="future YYYY-MM-DD date to restore the prior Project Status",
     )
     park.add_argument(
         "--run", default=None,
@@ -14823,7 +15040,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                              args.run, args.agent)
         if args.command == "park":
             return cmd_park(items, now, args.ref, args.reason,
-                            args.run, args.agent)
+                            args.run, args.agent, args.wake_date)
         if args.command == "answer-gates":
             return cmd_answer_gates(items, now, args.ref, args.answer,
                                     args.decider, args.run, args.agent)

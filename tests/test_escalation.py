@@ -23,7 +23,8 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from funnel import escalation_reasons, plan_is_escalated, required_tier  # noqa: E402
+from funnel import (escalation_matches, escalation_reasons,
+                    plan_is_escalated, required_tier)  # noqa: E402
 
 
 # -- the marker is authoritative ----------------------------------------------
@@ -129,6 +130,35 @@ def test_a_failure_adds_to_declared_reasons_rather_than_replacing_them():
     reasons = escalation_reasons("x", "Risk: escalated — concurrency",
                                  failed_before=True)
     assert reasons == ["declared: concurrency", "prior attempt failed"]
+
+
+def test_a_single_matching_sentence_returns_its_reason_and_line():
+    sentence = "Migrate the ledger schema in place."
+    assert escalation_matches("", sentence) == [
+        {"reason": "data-migration", "line": sentence},
+    ]
+
+
+def test_escalation_matches_return_the_matching_line_per_reason():
+    body = (
+        "Read credentials from the environment.\n"
+        "Migrate the ledger schema in place.\n"
+    )
+    assert escalation_matches("", body) == [
+        {"reason": "credentials",
+         "line": "Read credentials from the environment."},
+        {"reason": "data-migration",
+         "line": "Migrate the ledger schema in place."},
+    ]
+
+
+def test_an_explicit_risk_match_reports_the_marker_line():
+    assert escalation_matches(
+        "", "Risk: escalated — destructive\nRun the operation.\n"
+    ) == [{
+        "reason": "declared: destructive",
+        "line": "Risk: escalated — destructive",
+    }]
 
 
 def test_an_unmarked_ordinary_ticket_is_standard():

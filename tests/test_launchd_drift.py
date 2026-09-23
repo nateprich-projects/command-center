@@ -44,14 +44,20 @@ PUBLISHER_NAME = "com.nateprich.command-center-funnel-publisher.plist"
 DEPLOY_NAME = "com.nateprich.command-center-funnel-deploy.plist"
 # The FF runtime poller; a ten-minute deploy window matches its fastest tick.
 FF_DEPLOY_NAME = "com.nateprich.command-center-ff-deploy.plist"
+# League and career pollers deploy member main to the checkouts their jobs read.
+RUNTIME_DEPLOY_NAMES = [
+    "com.nateprich.command-center-league-deploy.plist",
+    "com.nateprich.command-center-career-deploy.plist",
+]
 #: The daily outcome-record derivation (#1288). A once-a-day Python run, not a
 #: routine schedule; outcomes.py had no scheduler at all before it.
 OUTCOMES_NAME = "com.nateprich.command-center-outcomes-derive.plist"
 NAMES = MUSE_SCHEDULE_NAMES + [
     KEEPER_NAME, REMOTE_CONTROL_NAME, PUBLISHER_NAME, DEPLOY_NAME,
-    FF_DEPLOY_NAME, OUTCOMES_NAME]
+    FF_DEPLOY_NAME, *RUNTIME_DEPLOY_NAMES, OUTCOMES_NAME]
 INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [
-    KEEPER_NAME, PUBLISHER_NAME, DEPLOY_NAME, FF_DEPLOY_NAME, OUTCOMES_NAME]
+    KEEPER_NAME, PUBLISHER_NAME, DEPLOY_NAME, FF_DEPLOY_NAME,
+    *RUNTIME_DEPLOY_NAMES, OUTCOMES_NAME]
 
 
 def console_reload_hint(name):
@@ -277,6 +283,29 @@ def test_the_ff_deployer_polls_every_ten_minutes_from_the_stable_checkout():
     assert plist["ProgramArguments"][:2] == ["/bin/sh", "-c"]
     command = plist["ProgramArguments"][2]
     assert '"$HOME/.claude/command-center-run/ff_deploy.py"' in command
+    assert "/Users/" not in command
+    assert "launchctl" not in command
+    assert "StartCalendarInterval" not in plist
+
+
+@pytest.mark.parametrize(
+    ("name", "script"),
+    [
+        (RUNTIME_DEPLOY_NAMES[0], "league_deploy.py"),
+        (RUNTIME_DEPLOY_NAMES[1], "career_deploy.py"),
+    ],
+)
+def test_runtime_deployers_poll_every_ten_minutes_from_stable_checkout(name, script):
+    import plistlib
+
+    with (ROOT / "launchd" / name).open("rb") as handle:
+        plist = plistlib.load(handle)
+
+    assert plist["StartInterval"] == 600
+    assert plist["RunAtLoad"] is True
+    assert plist["ProgramArguments"][:2] == ["/bin/sh", "-c"]
+    command = plist["ProgramArguments"][2]
+    assert '"$HOME/.claude/command-center-run/{}"'.format(script) in command
     assert "/Users/" not in command
     assert "launchctl" not in command
     assert "StartCalendarInterval" not in plist

@@ -13751,7 +13751,6 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
                     "ci": ci,
                     "head_sha": sha,
                 },
-                items=load_items(),
             )
             return 0
 
@@ -13816,7 +13815,6 @@ def _is_conflicting_branch_blocker(reason: str) -> bool:
 def _record_unmergeable_rejection(
     repo: str, pr: int, pr_fact: Optional[Mapping[str, object]] = None,
     *, candidate_verdict: Optional[Mapping[str, object]] = None,
-    items: Optional[Sequence[Item]] = None,
 ) -> None:
     """Record a deterministic rejection for a conflicting current head.
 
@@ -13862,14 +13860,6 @@ def _record_unmergeable_rejection(
             repo, pr, sha, "rejected", "unknown", [reason], None,
             agent=MERGE_GATE_AGENT,
         )
-
-    if items is None:
-        items = load_items()
-    ref = ticket_ref_from_branch(repo, str(data.get("headRefName") or ""))
-    ticket = next((item for item in items if item.ref == ref), None)
-    if ticket is not None and ticket.in_motion_since is not None:
-        write_lock(ticket, "")
-        ticket.in_motion_since = None
 
 
 def ticket_ref_from_branch(repo: str, branch: str) -> Optional[str]:
@@ -14253,9 +14243,7 @@ def cmd_merge(
     )
     if why:
         if any(_is_conflicting_branch_blocker(reason) for reason in why):
-            _record_unmergeable_rejection(
-                repo, pr, pr_fact=gate_fact, items=items
-            )
+            _record_unmergeable_rejection(repo, pr, pr_fact=gate_fact)
         print("refusing to merge PR #{}:".format(pr), file=sys.stderr)
         for reason in why:
             print("  - " + reason, file=sys.stderr)

@@ -988,8 +988,8 @@ def awaiting_breakdown(items: Iterable[Item]) -> List[Item]:
 #: its own tier in its prompt.
 TIERS = ("standard", "escalated")
 
-#: Capabilities belong to roles, not harness names. Keeping both agent names in
-#: this one registry prevents a second inline literal from drifting.
+#: Capabilities belong to roles, not harness names. Keeping every implementer
+#: in this one registry prevents a second inline literal from drifting.
 #:
 #: From 2026-09-18 to 2026-09-22 Muse implemented both tiers too, while
 #: Codex's Plus week was nearly spent.
@@ -7553,7 +7553,7 @@ def _dashboard_rework_owner(
     Rework follows the same implementation registry used by ``begin``:
     Codex implements both tiers since #1322, so Muse-authored rework goes to
     Codex too, unless Muse is put back on the roster.
-    Standard work that was authored by Claude stays with Claude, whether its
+    Work that was authored by Claude stays with Claude, at either tier, whether its
     provenance came from a heartbeat-bound funnel run or the Claude Code PR
     footer used by interactive and funnel-watch sessions. Everything else is
     Codex-owned, including unreadable or conflicting attribution.

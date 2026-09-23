@@ -375,6 +375,18 @@ GH_API_CACHE_DURATION = "5m"
 ENGINEERING_RESERVE_LOADS = 20
 REVIEW_RESERVE_LOADS = 5
 
+# The hourly GraphQL window is 5,000 points. The ticket leaves the exact cap
+# unstated; 826 is the highest whole-point floor that clears the observed
+# false stand-down at 826 points, while preserving the 42-point calculation
+# before the cap is applied.
+GRAPHQL_RESERVE_POINT_CEILING = 826
+
+
+def _reserve_floor(loads: int, load_cost: object) -> int:
+    """Return the proportional reserve, bounded by the hourly point ceiling."""
+    return min(loads * int(load_cost), GRAPHQL_RESERVE_POINT_CEILING)
+
+
 # #1047 measured the direct GraphQL cost of one disposable begin session's
 # Project load at 42 points, including the member-repository and paged item
 # reads.  The rate-limit-only pre-read below must reserve that known load before
@@ -12962,15 +12974,16 @@ def _begin_api_reserve_preflight(
                    "read its budget does not work",
         }
 
-    floor = loads * BEGIN_PROJECT_LOAD_COST
+    floor = _reserve_floor(loads, BEGIN_PROJECT_LOAD_COST)
     if remaining < floor:
         return {
             "gate": "reserve",
             "do": "stop",
             "why": "GraphQL budget {} is below the {} floor of {} "
-                   "({} loads at {} points)".format(
+                   "({} loads at {} points; ceiling {} points)".format(
                        remaining, lane, floor, loads,
-                       BEGIN_PROJECT_LOAD_COST),
+                       BEGIN_PROJECT_LOAD_COST,
+                       GRAPHQL_RESERVE_POINT_CEILING),
         }
     return None
 
@@ -13652,15 +13665,16 @@ def _reserve_verdict_for_remaining(
 
     loads = (REVIEW_RESERVE_LOADS if do == "review"
              else ENGINEERING_RESERVE_LOADS)
-    floor = loads * int(load_cost)
+    floor = _reserve_floor(loads, load_cost)
     if remaining < floor:
         return {
             "gate": "reserve",
             "do": "stop",
             "why": "GraphQL budget {} is below the {} floor of {} "
-                   "({} loads at {} points)".format(
+                   "({} loads at {} points; ceiling {} points)".format(
                        remaining, "review" if do == "review"
-                       else "engineering", floor, loads, load_cost),
+                       else "engineering", floor, loads, load_cost,
+                       GRAPHQL_RESERVE_POINT_CEILING),
         }
     return None
 

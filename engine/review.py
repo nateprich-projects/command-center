@@ -880,6 +880,10 @@ def precheck_pr_open(packet: dict) -> List[str]:
 
 def precheck_ci(packet: dict) -> List[str]:
     """Row 3: green passes; pending/red fail; startup stops stand down."""
+    if _conflicting_branch_reason(packet) is not None:
+        # The branch conflict explains why this head has no usable CI signal.
+        # Keep the same mechanical blocker as the queue and merge gate.
+        return []
     ci = packet.get("ci") or {}
     if ci.get("state") in ("green", funnel.CI_COULD_NOT_RUN):
         # ``could-not-run`` is not approval evidence, but it is also not a
@@ -894,8 +898,25 @@ def precheck_ci(packet: dict) -> List[str]:
     return ["ci: CI not green (state {}){}".format(ci.get("state"), detail)]
 
 
+def _conflicting_branch_reason(packet: dict) -> Optional[str]:
+    """Use funnel's shared conflict wording for an assembled review packet."""
+    return funnel._conflicting_branch_blocker({
+        "headRefName": packet.get("branch"),
+        "mergeable": packet.get("mergeable"),
+        "merge_state_status": packet.get("merge_state_status"),
+    })
+
+
+def precheck_conflicting_branch(packet: dict) -> List[str]:
+    """Row 2: an established conflict outranks an empty or pending CI rollup."""
+    reason = _conflicting_branch_reason(packet)
+    return [reason] if reason is not None else []
+
+
 def precheck_verdict(packet: dict) -> List[str]:
     """Row 4: a verdict already covering this head needs no new review."""
+    if _conflicting_branch_reason(packet) is not None:
+        return []
     if packet.get("verdict") is None:
         return []
     if packet.get("verdict_head_sha") != packet.get("head_sha"):
@@ -978,14 +999,20 @@ def precheck_repo_rules(packet: dict) -> List[str]:
 
 
 def precheck(packet: dict) -> Dict[str, object]:
-    """All seven rows in ticket order. Any reason fails the packet.
+    """Run the eight deterministic rows, with conflict taking precedence.
 
     The freeze row was retired when #794 closed (#1362); the queue-side
-    predicate had already gone inert with it.
+    predicate had already gone inert with it. An established conflict is
+    conclusive on its own, so return it before an empty CI rollup or any later
+    row can add a misleading reason.
     """
-    reasons: List[str] = []
-    for row in (precheck_pr_open, precheck_ci,
-                precheck_verdict,
+    reasons = precheck_pr_open(packet or {})
+    if reasons:
+        return {"pass": False, "reasons": reasons}
+    reasons = precheck_conflicting_branch(packet or {})
+    if reasons:
+        return {"pass": False, "reasons": reasons}
+    for row in (precheck_ci, precheck_verdict,
                 precheck_merged_overlap, precheck_protected, precheck_stop,
                 precheck_repo_rules):
         reasons.extend(row(packet or {}))
@@ -1068,6 +1095,7 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "merged_at": pr_view.get("mergedAt") or pr_view.get("merged_at"),
         "closed_at": pr_view.get("closedAt") or pr_view.get("closed_at"),
         "mergeable": pr_view.get("mergeable"),
+        "merge_state_status": pr_view.get("mergeStateStatus"),
         "head_sha": pr_view.get("headRefOid"),
         "head_date": head,
         "ticket": ticket_packet,
@@ -1122,7 +1150,7 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
     data = funnel._gh_json(
         "gh", "pr", "view", str(pr_number), "--repo", repo, "--json",
         "number,title,headRefName,headRefOid,baseRefName,baseRefOid,state,"
-        "mergeable,"
+        "mergeable,mergeStateStatus,"
         "mergedAt,closedAt,"
         "statusCheckRollup,commits,files,closingIssuesReferences")
     if not data:

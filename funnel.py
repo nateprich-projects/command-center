@@ -2211,10 +2211,6 @@ CONFLICTING_BRANCH_SUFFIX = (
     " is conflicting with the base — an engineer rebase is required"
 )
 
-#: A gate-authored verdict records only what the gate mechanically established.
-#: It did not inspect the diff and must not imply that it did.
-UNMERGEABLE_REJECTION_BLOCKING = "branch could not merge at this head"
-
 #: A reviewer that writes prose and then acts leaves nothing a later step can
 #: check. That is how a merge became something a model simply decided to do, and
 #: how a PR with requested changes ended up owned by nobody (#39).
@@ -3195,7 +3191,7 @@ def approved_conflicting_current_head(
         return False
     if str(pr.get("state") or "").upper() != "OPEN":
         return False
-    if str(pr.get("mergeable") or "").upper() != "CONFLICTING":
+    if _conflicting_branch_blocker(pr) is None:
         return False
     verdict = pr.get("verdict")
     return (
@@ -11517,7 +11513,7 @@ def _batched_pr_query(
         lines.append("      nodes {")
         lines.append(
             "        number title state url headRefName headRefOid "
-            "mergeable mergedAt createdAt closedAt"
+            "mergeable mergeStateStatus mergedAt createdAt closedAt"
         )
         if include_body:
             lines.append("        body")
@@ -11585,7 +11581,8 @@ def _normalise_pr_node(node: object) -> Optional[Dict[str, object]]:
         name: node.get(name)
         for name in (
             "number", "title", "state", "url", "headRefName",
-            "headRefOid", "mergeable", "mergedAt", "createdAt", "closedAt",
+            "headRefOid", "mergeable", "mergeStateStatus", "mergedAt",
+            "createdAt", "closedAt",
         )
     }
     if "body" in node:
@@ -12032,12 +12029,12 @@ def review_queue(
     matched to the work the same way an engine is: the expensive judgement is
     spent where the ticket says the stakes are, and nowhere else.
 
-    A PR whose checks are still running is not offered at all. The review
-    pre-check rejects anything that is not green, and a recorded rejection
-    covers that head for good, so offering a PR seconds after a push produced
-    a permanent rejection of a commit whose CI went on to pass (#900). Red CI
-    and a rollup with no checks in it are still offered: those are answers,
-    not a signal that has yet to arrive.
+    A PR whose checks are still running is not offered unless GitHub has
+    already established a branch conflict: that is a deterministic blocker,
+    and its reason takes precedence over an empty or pending CI rollup. A
+    recorded verdict covers a head for good unless it is the CI-unknown
+    rejection a conflict can replace. Red CI and a normal empty rollup remain
+    visible to the review pre-check.
     """
     if pr_facts is None:
         pr_facts = ticket_pr_facts(items)
@@ -12052,7 +12049,10 @@ def review_queue(
             head = row.get("headRefName") or ""
             if not head.startswith("ticket/"):
                 continue
-            if checks_still_running(row.get("statusCheckRollup")):
+            conflict = _conflicting_branch_blocker(row)
+            if conflict is None and checks_still_running(
+                row.get("statusCheckRollup")
+            ):
                 # The checks have not reported yet, so the only answer a
                 # reviewer could record is "CI not green (state unknown)" —
                 # and that rejection then covers this head, locking the PR
@@ -12061,17 +12061,29 @@ def review_queue(
                 continue
             verdict = _row_verdict(row, repo)
             if verdict_covers_head(verdict, row.get("headRefOid")):
-                continue  # this exact diff has already been judged
+                # A conflicting approved head is handled by the merge gate;
+                # an already-canonical rejection is complete. Only the old
+                # CI-unknown rejection needs this deterministic repair pass.
+                if conflict is None or not (
+                    verdict
+                    and verdict.get("verdict") == "rejected"
+                    and verdict.get("ci") == "unknown"
+                    and conflict not in (verdict.get("blocking") or [])
+                ):
+                    continue
             needed = required_tier(
                 ticket.title, _loaded_item_body(ticket)
             )
             if tier and needed != tier:
                 continue
-            found.append({"pr": row.get("number"), "repo": repo,
-                          "ref": ticket.ref,
-                          "tier": needed, "url": ticket.url,
-                          "title": ticket.title,
-                          "opened": row.get("createdAt") or ""})
+            candidate = {"pr": row.get("number"), "repo": repo,
+                         "ref": ticket.ref,
+                         "tier": needed, "url": ticket.url,
+                         "title": ticket.title,
+                         "opened": row.get("createdAt") or ""}
+            if conflict is not None:
+                candidate["blocking"] = [conflict]
+            found.append(candidate)
     # Oldest first. `gh pr list` returns newest first, and handing a reviewer
     # `queue[0]` from that order starved the oldest PR indefinitely: on
     # 2026-09-09 four PRs opened before 11:00 were still unreviewed at 15:17
@@ -13527,6 +13539,26 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
     if not sha:
         raise GitHubError("could not read the head commit of PR #{}".format(pr))
 
+    if verdict == "rejected" and ci == "unknown":
+        fact = _pr_fact_for_number(repo, pr, include_comments=True) or {}
+        if (
+            fact.get("state") == "OPEN"
+            and fact.get("headRefOid") == sha
+            and _conflicting_branch_blocker(fact) is not None
+        ):
+            _record_unmergeable_rejection(
+                repo,
+                pr,
+                pr_fact=fact,
+                candidate_verdict={
+                    "verdict": verdict,
+                    "ci": ci,
+                    "head_sha": sha,
+                },
+                items=load_items(),
+            )
+            return 0
+
     return _write_verdict(
         repo, pr, sha, verdict, ci, blocking, note, run=run, agent=agent
     )
@@ -13564,9 +13596,15 @@ def _write_verdict(repo: str, pr: int, sha: str, verdict: str, ci: str,
     return 0
 
 
-def _conflicting_branch_blocker(data: Dict) -> Optional[str]:
+def _conflicting_branch_blocker(
+    data: Mapping[str, object],
+) -> Optional[str]:
     """The mechanical conflict reason, or None for every other branch state."""
-    if str(data.get("mergeable") or "").upper() != "CONFLICTING":
+    mergeable = str(data.get("mergeable") or "").upper()
+    merge_state = str(
+        data.get("mergeStateStatus") or data.get("merge_state_status") or ""
+    ).upper()
+    if mergeable != "CONFLICTING" and merge_state != "DIRTY":
         return None
     return "branch {!r}{}".format(
         data.get("headRefName") or "", CONFLICTING_BRANCH_SUFFIX
@@ -13580,15 +13618,17 @@ def _is_conflicting_branch_blocker(reason: str) -> bool:
 
 
 def _record_unmergeable_rejection(
-    repo: str, pr: int, pr_fact: Optional[Mapping[str, object]] = None
+    repo: str, pr: int, pr_fact: Optional[Mapping[str, object]] = None,
+    *, candidate_verdict: Optional[Mapping[str, object]] = None,
+    items: Optional[Sequence[Item]] = None,
 ) -> None:
-    """Reject an approved current head that the live merge gate finds conflicting.
+    """Record a deterministic rejection for a conflicting current head.
 
-    Re-reading the head and mergeability keeps the verdict tied to the fact the
-    gate actually observed. Requiring an approval at that exact SHA excludes the
-    two self-resolving refusal shapes: no verdict and a verdict for an older head.
-    It also makes retries idempotent, because the newest verdict is then already
-    the gate-authored rejection rather than an approval.
+    The gate replaces either an approval it can no longer merge or a CI-unknown
+    rejection that mistook a conflict for absent CI. The optional incoming
+    verdict lets ``cmd_review`` take this path before it writes a less-specific
+    rejection. In every case the current head and conflict state come from the
+    same PR fact used to write the canonical blocker.
     """
     data = dict(pr_fact) if isinstance(pr_fact, Mapping) else None
     if data is None:
@@ -13600,19 +13640,40 @@ def _record_unmergeable_rejection(
     if not sha or reason is None:
         return
 
-    verdict = _row_verdict(data, repo)
-    if (
-        verdict is None
-        or verdict.get("verdict") != "approved"
-        or verdict.get("head_sha") != sha
-    ):
+    current = _row_verdict(data, repo)
+    verdict = (
+        dict(candidate_verdict)
+        if isinstance(candidate_verdict, Mapping) else current
+    )
+    if not isinstance(verdict, dict) or verdict.get("head_sha") != sha:
+        return
+    eligible = verdict.get("verdict") == "approved" or (
+        verdict.get("verdict") == "rejected"
+        and verdict.get("ci") == "unknown"
+    )
+    if not eligible:
         return
 
-    _write_verdict(
-        repo, pr, sha, "rejected", "unknown",
-        [UNMERGEABLE_REJECTION_BLOCKING], None,
-        agent=MERGE_GATE_AGENT,
+    already_canonical = (
+        isinstance(current, dict)
+        and current.get("verdict") == "rejected"
+        and current.get("ci") == "unknown"
+        and current.get("head_sha") == sha
+        and current.get("blocking") == [reason]
     )
+    if not already_canonical:
+        _write_verdict(
+            repo, pr, sha, "rejected", "unknown", [reason], None,
+            agent=MERGE_GATE_AGENT,
+        )
+
+    if items is None:
+        items = load_items()
+    ref = ticket_ref_from_branch(repo, str(data.get("headRefName") or ""))
+    ticket = next((item for item in items if item.ref == ref), None)
+    if ticket is not None and ticket.in_motion_since is not None:
+        write_lock(ticket, "")
+        ticket.in_motion_since = None
 
 
 def ticket_ref_from_branch(repo: str, branch: str) -> Optional[str]:
@@ -13996,7 +14057,9 @@ def cmd_merge(
     )
     if why:
         if any(_is_conflicting_branch_blocker(reason) for reason in why):
-            _record_unmergeable_rejection(repo, pr, pr_fact=gate_fact)
+            _record_unmergeable_rejection(
+                repo, pr, pr_fact=gate_fact, items=items
+            )
         print("refusing to merge PR #{}:".format(pr), file=sys.stderr)
         for reason in why:
             print("  - " + reason, file=sys.stderr)

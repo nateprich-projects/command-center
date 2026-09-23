@@ -172,6 +172,37 @@ def test_ci_row_passes_a_green_rollup():
     assert packet()["precheck"] == {"pass": True, "reasons": []}
 
 
+def test_conflict_blocker_precedes_an_empty_ci_rollup():
+    found = packet(pr_view=pr_view(
+        mergeable="CONFLICTING", statusCheckRollup=[]
+    ))
+
+    assert found["ci"]["state"] == "unknown"
+    assert found["precheck"]["reasons"] == [
+        "branch 'ticket/9'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    ]
+
+
+def test_dirty_merge_state_uses_the_same_conflict_blocker():
+    found = packet(pr_view=pr_view(
+        mergeable="UNKNOWN", mergeStateStatus="DIRTY",
+        statusCheckRollup=[],
+    ))
+
+    assert found["precheck"]["reasons"] == [
+        "branch 'ticket/9'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    ]
+
+
+def test_normal_empty_ci_rollup_keeps_the_unknown_ci_refusal():
+    found = packet(pr_view=pr_view(statusCheckRollup=[]))
+
+    assert found["ci"]["state"] == "unknown"
+    assert found["precheck"]["reasons"] == [
+        "ci: CI not green (state unknown)"
+    ]
+
+
 # -- row 4: verdict coverage --------------------------------------------------
 
 def test_verdict_row_fails_when_a_verdict_covers_this_head():
@@ -285,7 +316,7 @@ def test_merged_row_rejects_a_conflicting_overlap_despite_a_new_green_run():
     rows = [merged(5, NEWER, "funnel.py")]
     found = packet(pr_view=view, merged_prs=rows, ci_runs=[ci_run(COVERING)])
     assert found["precheck"]["reasons"] == [
-        "merged-overlap: PR #5 merged at {} touches funnel.py".format(NEWER)]
+        "branch 'ticket/9'" + funnel.CONFLICTING_BRANCH_SUFFIX]
     assert found["ci_rerun"] is None
 
 

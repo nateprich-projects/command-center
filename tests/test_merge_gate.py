@@ -303,7 +303,9 @@ def test_conflicting_approved_head_writes_one_gate_rejection_and_hands_back(
     assert len(posted) == 1
     rejection = funnel.parse_verdict(posted[0])
     assert rejection == {
-        "blocking": ["branch could not merge at this head"],
+        "blocking": [
+            "branch 'ticket/9'" + funnel.CONFLICTING_BRANCH_SUFFIX
+        ],
         "ci": "unknown",
         "head_sha": SHA,
         "reviewed_at": rejection["reviewed_at"],
@@ -320,6 +322,71 @@ def test_conflicting_approved_head_writes_one_gate_rejection_and_hands_back(
 
     assert funnel.cmd_merge(items(), NOW, REPO, 5, False) == 1
     assert len(posted) == 1
+
+
+def test_ci_unknown_conflict_rejection_is_repaired_and_releases_claim(
+        monkeypatch):
+    legacy = verdict(
+        verdict="rejected", ci="unknown",
+        blocking=["ci: CI not green (state unknown)"],
+    )
+    posted = _gate_rejection_wired(
+        monkeypatch,
+        pr(mergeable="CONFLICTING", statusCheckRollup=[]),
+        [legacy],
+    )
+    rows = items()
+    ticket = rows[1]
+    ticket.item_id = "ticket-item"
+    ticket.in_motion_since = NOW
+    lock_writes = []
+    monkeypatch.setattr(
+        funnel, "write_lock",
+        lambda item, value: lock_writes.append((item.ref, value)),
+    )
+
+    assert funnel.cmd_merge(rows, NOW, REPO, 5, False) == 1
+
+    rejection = funnel.parse_verdict(posted[0])
+    assert rejection["blocking"] == [
+        "branch 'ticket/9'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    ]
+    assert funnel.parse_provenance(posted[0])["agent"] == funnel.MERGE_GATE_AGENT
+    assert lock_writes == [(REPO + "#9", "")]
+    assert ticket.in_motion_since is None
+
+
+def test_unknown_ci_review_on_conflict_uses_gate_path_without_duplicate_comment(
+        monkeypatch):
+    posted = _gate_rejection_wired(
+        monkeypatch,
+        pr(mergeable="CONFLICTING", statusCheckRollup=[]),
+        [],
+    )
+    rows = items()
+    ticket = rows[1]
+    ticket.item_id = "ticket-item"
+    ticket.in_motion_since = NOW
+    lock_writes = []
+    monkeypatch.setattr(funnel, "load_items", lambda: rows)
+    monkeypatch.setattr(
+        funnel, "write_lock",
+        lambda item, value: lock_writes.append((item.ref, value)),
+    )
+
+    assert funnel.cmd_review(
+        REPO, 5, "rejected", "unknown",
+        ["ci: CI not green (state unknown)"], None,
+    ) == 0
+
+    assert len(posted) == 1
+    rejection = funnel.parse_verdict(posted[0])
+    assert rejection["blocking"] == [
+        "branch 'ticket/9'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    ]
+    assert funnel.parse_provenance(posted[0])["agent"] == funnel.MERGE_GATE_AGENT
+    assert lock_writes == [(REPO + "#9", "")]
+    assert ticket.in_motion_since is None
 
 
 def test_no_verdict_refusal_does_not_write_a_gate_rejection(monkeypatch):

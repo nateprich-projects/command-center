@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import pathlib
 import sys
 
@@ -59,11 +60,16 @@ def _muse_model_record(at, run_id, model_id):
     }
 
 
-def _muse_fixture(tmp_path, monkeypatch, records):
+def _muse_fixture(tmp_path, monkeypatch, records, mtime=None):
     session = tmp_path / "2026" / "09" / "18" / "session"
     session.mkdir(parents=True)
-    (session / "session.jsonl").write_text(
+    journal = session / "session.jsonl"
+    journal.write_text(
         "".join(json.dumps(record) + "\n" for record in records))
+    if mtime is not None:
+        # The reader skips a journal last written before the window opened,
+        # so a reading dated after today needs a journal dated with it.
+        os.utime(journal, (mtime, mtime))
     monkeypatch.setattr(
         usage, "MUSE_SESSIONS", str(tmp_path / "*/*/*/*/session.jsonl")
     )
@@ -186,10 +192,11 @@ def test_muse_reader_reports_spend_over_the_weekly_cap(tmp_path, monkeypatch):
     assert usage.pace(reading, NOW, provider="meta")["over_pace"]
 
 
-def _projected(tmp_path, monkeypatch, *, spent, trailing, days_left):
+def _projected(tmp_path, monkeypatch, *, spent, trailing, days_left, at=NOW):
     """A Muse reading with `spent` dollars in the window, `trailing` dollars in
-    the last 72 hours, read `days_left` days before the reset."""
-    window_start = usage.muse_window_start(NOW)
+    the last 72 hours, read `days_left` days before the reset of the window
+    holding `at`."""
+    window_start = usage.muse_window_start(at)
     now = window_start + usage.SEVEN_DAY - days_left * 86400.0
     records = []
     older = spent - min(spent, trailing)
@@ -208,7 +215,7 @@ def _projected(tmp_path, monkeypatch, *, spent, trailing, days_left):
             now - usage.MUSE_RATE_LOOKBACK + 3600,
             input_tokens=int(before_window / 1.25 * 1_000_000),
             usage_id="before-window"))
-    _muse_fixture(tmp_path, monkeypatch, records)
+    _muse_fixture(tmp_path, monkeypatch, records, mtime=now)
     reading = usage.read_agent("muse", now)
     return reading, usage.pace(reading, now, provider="meta"), now
 
@@ -288,6 +295,128 @@ def test_the_flat_ceiling_still_stops_whatever_the_projection(tmp_path, monkeypa
         tmp_path, monkeypatch, spent=196.0, trailing=0.0, days_left=1.0)
     assert verdict["band"] == "over"
     assert verdict["over_pace"]
+
+
+# A literal, not read from the override: emptying the override to end it
+# early should fail the tests below, not the collection of this module.
+OVERRIDE_RESET = 1790553600.0  # 2026-09-28 00:00 UTC
+IN_OVERRIDE = OVERRIDE_RESET - 3 * 86400.0
+
+
+def test_the_override_names_the_window_resetting_sunday_2026_09_27():
+    """#1341: Sunday 17:00 PDT is Monday 00:00 UTC, on the provider's lattice."""
+    assert usage.MUSE_PACE_OVERRIDE["resets_at"] == OVERRIDE_RESET
+    reset = datetime.datetime.fromtimestamp(
+        OVERRIDE_RESET, datetime.timezone.utc)
+    assert (reset.year, reset.month, reset.day, reset.hour) == (2026, 9, 28, 0)
+    assert usage.muse_window_start(IN_OVERRIDE) + usage.SEVEN_DAY == OVERRIDE_RESET
+
+
+def test_the_override_prices_the_window_from_the_panel(tmp_path, monkeypatch):
+    """#1341: the panel read 70% while the meter held $89.38, so the same
+    spend reads 70% here. At the implement-era rate the projection passes
+    100%, and is reported rather than banded."""
+    reading, verdict, _ = _projected(
+        tmp_path, monkeypatch, spent=89.38, trailing=89.38, days_left=4.8,
+        at=IN_OVERRIDE)
+    window = reading["windows"]["seven_day"]
+    assert reading["cap_dollars"] == pytest.approx(127.69)
+    assert window["cap_dollars"] == pytest.approx(127.69)
+    assert window["used_percent"] == pytest.approx(70.0, abs=0.01)
+    # 70 + 100 * $29.79/day * 4.8 days / $127.69: priced against the panel
+    # cap, not the $200 one, which would read 141.5.
+    assert window["projected_percent"] == pytest.approx(182.0, abs=0.05)
+    assert window["override"] == {"issue": 1341, "until": OVERRIDE_RESET}
+
+    weekly = verdict["windows"][0]
+    assert verdict["band"] == "ok"
+    assert not verdict["over_pace"]
+    assert weekly["allowed_percent"] == 95.0
+    assert weekly["reserve"] == pytest.approx(3.52)
+    assert weekly["runs_out_at"] is not None
+    assert weekly["override"]["issue"] == 1341
+
+
+@pytest.mark.parametrize("spent, over", [(116.0, False), (117.0, True)])
+def test_the_override_stops_at_95_less_one_session(tmp_path, monkeypatch,
+                                                    spent, over):
+    """Used plus $4.50 of $127.69 (3.52%) against 95: $116 reads 90.85% and
+    is admitted, $117 reads 91.63% and is not."""
+    _, verdict, _ = _projected(
+        tmp_path, monkeypatch, spent=spent, trailing=0.0, days_left=2.0,
+        at=IN_OVERRIDE)
+    assert verdict["over_pace"] is over
+    assert verdict["band"] == ("over" if over else "ok")
+
+
+def test_the_override_lapses_at_the_reset(tmp_path, monkeypatch):
+    """The next window reads against $200, and `tight` is back."""
+    assert usage.muse_pace_override(OVERRIDE_RESET, OVERRIDE_RESET) is None
+    after = OVERRIDE_RESET + 3 * 86400.0
+    reading, verdict, _ = _projected(
+        tmp_path, monkeypatch, spent=44.0, trailing=93.0, days_left=6.0,
+        at=after)
+    window = reading["windows"]["seven_day"]
+    assert reading["cap_dollars"] == 200.0
+    assert "policy" not in window and "override" not in window
+    assert window["projected_percent"] == pytest.approx(115.0)
+    assert verdict["band"] == "tight"
+    assert verdict["windows"][0]["allowed_percent"] == 100.0
+    assert "override" not in verdict["windows"][0]
+
+
+def test_the_window_before_the_override_is_untouched(tmp_path, monkeypatch):
+    before = OVERRIDE_RESET - usage.SEVEN_DAY - 86400.0
+    assert usage.muse_pace_override(
+        OVERRIDE_RESET - usage.SEVEN_DAY, before) is None
+    reading, verdict, _ = _projected(
+        tmp_path, monkeypatch, spent=44.0, trailing=93.0, days_left=6.0,
+        at=before)
+    assert reading["cap_dollars"] == 200.0
+    assert verdict["band"] == "tight"
+
+
+def test_begin_runs_on_the_reading_that_stopped_it_tight(tmp_path, monkeypatch):
+    """#1341 through `begin`'s own preflight. The 21:32 PDT reading on
+    2026-09-22 — $89.38 in the window, all of it in the last 72 hours, 4.8
+    days left — stopped every lane as `tight` at 116% projected. Under the
+    override it passes; the same reading a window later stops again."""
+    import funnel
+
+    monkeypatch.setattr(funnel, "_start_begin_heartbeat",
+                        lambda agent, tier=None: "run-id")
+
+    def preflight(root, at):
+        _, _, now = _projected(root, monkeypatch, spent=89.38,
+                               trailing=89.38, days_left=4.8, at=at)
+        return funnel._begin_preflight(
+            datetime.datetime.fromtimestamp(now, datetime.timezone.utc),
+            "muse", False)
+
+    out, reading = preflight(tmp_path / "override", IN_OVERRIDE)
+    assert out["gate"] == "ok" and out["budget_band"] == "ok"
+    assert reading is not None
+
+    out, reading = preflight(tmp_path / "after", OVERRIDE_RESET + 3 * 86400.0)
+    assert out["gate"] == "tight" and out["do"] == "stop"
+    assert out["budget"]["projected_percent"] == pytest.approx(116.2, abs=0.1)
+    assert reading is None
+
+
+def test_a_window_policy_is_read_before_the_providers():
+    """`pace` takes a ceiling or reserve the window carries; without one the
+    provider's policy stands, as it does for every other reader."""
+    window = {"used_percent": 60.0, "resets_at": NOW + 86400.0,
+              "rolling": True}
+    carried = dict(window, policy={"weekly_target": 62.0,
+                                   "weekly_reserve": 3.0})
+    assert usage.pace({"windows": {"seven_day": carried}}, NOW,
+                      provider="meta")["over_pace"]
+    plain = usage.pace({"windows": {"seven_day": window}}, NOW,
+                       provider="meta")
+    assert not plain["over_pace"]
+    assert plain["windows"][0]["allowed_percent"] == 100.0
+    assert plain["windows"][0]["reserve"] == pytest.approx(2.25)
 
 
 def test_no_recent_spend_is_ok_with_no_run_out_time(tmp_path, monkeypatch):

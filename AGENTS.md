@@ -230,6 +230,12 @@ wrong.
   alone, and said of the existing policy: "Don't just read the pace policy. If that
   policy sucks then make a good one." The design above is the agent's answer to that.
   _(agent rule, unconfirmed — advisory)_
+  **The window that resets Sunday 2026-09-27 17:00 PDT runs under a dated override
+  (#1341).** Its projection is reported but never bands `tight`, and its flat ceiling
+  is priced from the account panel: 70% there against $89.38 here puts the provider's
+  100% near $127.69, and the gate stops at 95% of it, less one session's reserve.
+  `usage.MUSE_PACE_OVERRIDE` names the window, so the override lapses at that reset
+  with nothing to clear. _(Nate, 2026-09-22.)_
 - **No Copilot automation.** Those are employer-provided tokens; personal use stays
   one-off and manual.
 - **Every routine starts, reads fresh usage, and exits immediately if over the pace

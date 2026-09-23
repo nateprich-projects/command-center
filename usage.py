@@ -316,6 +316,56 @@ MUSE_WEEKLY_RESERVE = round(
     100.0 * MUSE_SESSION_RESERVE_DOLLARS / MUSE_WEEKLY_CAP_DOLLARS, 2
 )
 
+#: Nate's dated release of the Muse pace brake (#1341), for the one window that
+#: resets on Sunday 2026-09-27 at 17:00 PDT. It names that window by its reset
+#: time, so it lapses there by construction: the next window reads against the
+#: $200 cap with the projection banding again, and nothing has to be cleared.
+#:
+#: Inside the window two things change. **The projection stops banding
+#: `tight`.** Its 72-hour rate is the Muse implement runs that #1315 moved to
+#: Codex and #1323 retired on 2026-09-22, a spend the lanes no longer make; it
+#: is still computed and reported. **The flat ceiling is priced from the
+#: account panel.** At 21:32 PDT on 2026-09-22 the panel read 70% used while
+#: this meter held $89.38, so the provider's 100% sits near $127.69 of
+#: standard-card compute here, well under the $200 the 2026-09-19 refusal
+#: calibrated. The window is gated at 95% of that, less one session's reserve.
+#: A fresh panel reading is a new pairing here; AGENTS.md and
+#: tests/test_muse.py quote these figures. _(Nate, 2026-09-22: "Dated
+#: override, calibrated stop".)_
+MUSE_PACE_OVERRIDE = {
+    "issue": 1341,
+    "resets_at": 1790553600.0,  # 2026-09-28 00:00 UTC, Sunday 17:00 PDT
+    "panel_used_percent": 70.0,
+    "meter_dollars": 89.38,
+    "ceiling_percent": 95.0,
+}
+
+
+def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
+    """The override in force for the Muse window resetting at ``resets_at``.
+
+    None for any other window, the one after the reset included, and None
+    from the reset on. Otherwise the panel-calibrated cap, the ceiling, and
+    the session reserve as a share of that cap: the reserve is dollars, so
+    a smaller cap makes it a larger share.
+    """
+    override = MUSE_PACE_OVERRIDE
+    if not override:
+        return None
+    until = float(override["resets_at"])
+    if now >= until or float(resets_at) != until:
+        return None
+    cap = round(float(override["meter_dollars"]) * 100.0
+                / float(override["panel_used_percent"]), 2)
+    return {
+        "issue": override["issue"],
+        "until": until,
+        "cap_dollars": cap,
+        "weekly_target": float(override["ceiling_percent"]),
+        "weekly_reserve": round(
+            100.0 * MUSE_SESSION_RESERVE_DOLLARS / cap, 2),
+    }
+
 
 #: The provider's weekly window opens on the same lattice every week: Monday
 #: 00:00 UTC, which the account panel shows as Sunday 5:00 PM local. Three
@@ -723,19 +773,21 @@ def read_muse(now: float) -> Optional[Dict]:
 
     spent = round(spent, 6)
     trailing = round(trailing, 6)
-    used_percent = round(100.0 * spent / MUSE_WEEKLY_CAP_DOLLARS, 2)
     resets_at = cutoff + SEVEN_DAY
+    # #1341: one window is priced from the account panel instead of the card.
+    override = muse_pace_override(resets_at, now)
+    cap = override["cap_dollars"] if override else MUSE_WEEKLY_CAP_DOLLARS
+    used_percent = round(100.0 * spent / cap, 2)
     daily_rate = round(trailing / (MUSE_RATE_LOOKBACK / 86400.0), 6)
     days_left = max(0.0, resets_at - now) / 86400.0
     projected_percent = round(
-        used_percent
-        + 100.0 * daily_rate * days_left / MUSE_WEEKLY_CAP_DOLLARS, 2
+        used_percent + 100.0 * daily_rate * days_left / cap, 2
     )
-    return {
+    reading = {
         "source": "muse",
         "captured_at": now,
         "spent_dollars": spent,
-        "cap_dollars": MUSE_WEEKLY_CAP_DOLLARS,
+        "cap_dollars": cap,
         "windows": {
             "seven_day": {
                 "used_percent": used_percent,
@@ -754,7 +806,7 @@ def read_muse(now: float) -> Optional[Dict]:
                 # read it.
                 "rolling": True,
                 "spent_dollars": spent,
-                "cap_dollars": MUSE_WEEKLY_CAP_DOLLARS,
+                "cap_dollars": cap,
                 "calls": calls,
             }
         },
@@ -793,6 +845,15 @@ def read_muse(now: float) -> Optional[Dict]:
             if model_id != MUSE_MODEL_UNKNOWN
             and model_id not in muse_model.RATE_CARDS),
     }
+    if override:
+        # The window carries its own ceiling and reserve, which `pace` reads
+        # before the provider's, and the marker `_projection_band` reads.
+        seven = reading["windows"]["seven_day"]
+        seven["policy"] = {"weekly_target": override["weekly_target"],
+                           "weekly_reserve": override["weekly_reserve"]}
+        seven["override"] = {"issue": override["issue"],
+                             "until": override["until"]}
+    return reading
 
 
 def _find_rate_limits(node):
@@ -1029,24 +1090,30 @@ def pace(reading: Dict, now: float, provider: Optional[str] = None) -> Dict:
             # is meaningless — it would read "0% allowed" forever. A rolling
             # total gets a flat ceiling instead.
             elapsed_fraction = None
-            allowed = policy(provider, "weekly_target", WEEKLY_TARGET)
+            allowed = _window_policy(seven, provider, "weekly_target",
+                                     WEEKLY_TARGET)
         else:
             remaining = max(0.0, float(seven["resets_at"]) - now)
             elapsed_fraction = max(0.0, min(1.0, 1.0 - remaining / SEVEN_DAY))
-            weekly_floor = policy(provider, "weekly_floor", WEEKLY_FLOOR)
-            weekly_target = policy(provider, "weekly_target", WEEKLY_TARGET)
+            weekly_floor = _window_policy(seven, provider, "weekly_floor",
+                                          WEEKLY_FLOOR)
+            weekly_target = _window_policy(seven, provider, "weekly_target",
+                                           WEEKLY_TARGET)
             allowed = weekly_floor + (weekly_target - weekly_floor) * elapsed_fraction
+        reserve = _window_policy(seven, provider, "weekly_reserve",
+                                 WEEKLY_RESERVE)
         weekly = {
             "window": "seven_day",
             "used_percent": seven["used_percent"],
-            "reserve": policy(provider, "weekly_reserve", WEEKLY_RESERVE),
+            "reserve": reserve,
             "allowed_percent": round(allowed, 1),
             "elapsed_fraction": (
                 round(elapsed_fraction, 3) if elapsed_fraction is not None else None
             ),
-            "over": seven["used_percent"] + policy(
-                provider, "weekly_reserve", WEEKLY_RESERVE) > allowed,
+            "over": seven["used_percent"] + reserve > allowed,
         }
+        if seven.get("override"):
+            weekly["override"] = seven["override"]
         weekly.update(_projection_band(seven, weekly["over"], now))
         verdicts.append(weekly)
 
@@ -1082,6 +1149,9 @@ def _projection_band(window: Dict, over: bool, now: float) -> Dict:
     ``over`` is the flat ceiling, unchanged, and wins. ``tight`` means the
     projection passes 100 percent. ``runs_out_at`` is when the cap would be
     reached at that rate, so a dark weekend is visible days ahead.
+
+    A window under Nate's dated override (#1341) never bands ``tight``: its
+    projection is still reported, and only the flat ceiling stops the lanes.
     """
     projected = window.get("projected_percent")
     if projected is None:
@@ -1092,8 +1162,9 @@ def _projection_band(window: Dict, over: bool, now: float) -> Dict:
     runs_out_at = None
     if rate > 0 and cap > 0 and projected > 100.0:
         runs_out_at = round(now + max(0.0, cap - spent) / rate * 86400.0, 0)
+    tight = projected > 100.0 and not window.get("override")
     return {
-        "band": "over" if over else "tight" if projected > 100.0 else "ok",
+        "band": "over" if over else "tight" if tight else "ok",
         "projected_percent": projected,
         "daily_rate_dollars": rate,
         "runs_out_at": runs_out_at,
@@ -1285,6 +1356,20 @@ PROVIDER_POLICY = {
 
 def policy(provider: Optional[str], name: str, default: float) -> float:
     return (PROVIDER_POLICY.get(provider or "", {}) or {}).get(name, default)
+
+
+def _window_policy(window: Dict, provider: Optional[str], name: str,
+                   default: float) -> float:
+    """A policy value the window carries for itself, else the provider's.
+
+    Only a dated override sets one: Muse's panel calibration (#1341) moves
+    one window's ceiling and session reserve. Every caller of ``pace`` —
+    ``begin``, the dashboard row, shaping headroom — then reads one number.
+    """
+    carried = window.get("policy")
+    if isinstance(carried, dict) and carried.get(name) is not None:
+        return float(carried[name])
+    return policy(provider, name, default)
 
 
 def provider_of(agent: str) -> Optional[str]:

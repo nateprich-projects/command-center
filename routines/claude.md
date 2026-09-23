@@ -39,8 +39,8 @@ python3 /Users/nateprich/.claude/command-center-run/funnel.py merge <pr> --yes
 
 ## 3. Shape one escalated idea
 
-While this Claude routine is off, the escalated Muse schedule carries escalated idea
-shaping.
+While this Claude routine is off, the escalated Muse schedule carries escalated-tier
+idea shaping.
 
 **Do not grill**: settle what precedent covers, cite
 the source, open questions in `Needs you`:

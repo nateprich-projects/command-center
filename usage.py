@@ -329,8 +329,9 @@ MUSE_WEEKLY_RESERVE = round(
 #: this meter held $89.38, so the provider's 100% sits near $127.69 of
 #: standard-card compute here, well under the $200 the 2026-09-19 refusal
 #: calibrated. The window is gated at 95% of that, less one session's reserve.
-#: A fresh panel reading is an update to the pairing, nothing more. _(Nate,
-#: 2026-09-22: "Dated override, calibrated stop".)_
+#: A fresh panel reading is a new pairing here; AGENTS.md and
+#: tests/test_muse.py quote these figures. _(Nate, 2026-09-22: "Dated
+#: override, calibrated stop".)_
 MUSE_PACE_OVERRIDE = {
     "issue": 1341,
     "resets_at": 1790553600.0,  # 2026-09-28 00:00 UTC, Sunday 17:00 PDT

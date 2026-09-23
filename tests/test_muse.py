@@ -297,12 +297,15 @@ def test_the_flat_ceiling_still_stops_whatever_the_projection(tmp_path, monkeypa
     assert verdict["over_pace"]
 
 
-OVERRIDE_RESET = usage.MUSE_PACE_OVERRIDE["resets_at"]
+# A literal, not read from the override: emptying the override to end it
+# early should fail the tests below, not the collection of this module.
+OVERRIDE_RESET = 1790553600.0  # 2026-09-28 00:00 UTC
 IN_OVERRIDE = OVERRIDE_RESET - 3 * 86400.0
 
 
 def test_the_override_names_the_window_resetting_sunday_2026_09_27():
     """#1341: Sunday 17:00 PDT is Monday 00:00 UTC, on the provider's lattice."""
+    assert usage.MUSE_PACE_OVERRIDE["resets_at"] == OVERRIDE_RESET
     reset = datetime.datetime.fromtimestamp(
         OVERRIDE_RESET, datetime.timezone.utc)
     assert (reset.year, reset.month, reset.day, reset.hour) == (2026, 9, 28, 0)
@@ -320,7 +323,9 @@ def test_the_override_prices_the_window_from_the_panel(tmp_path, monkeypatch):
     assert reading["cap_dollars"] == pytest.approx(127.69)
     assert window["cap_dollars"] == pytest.approx(127.69)
     assert window["used_percent"] == pytest.approx(70.0, abs=0.01)
-    assert window["projected_percent"] > 100.0
+    # 70 + 100 * $29.79/day * 4.8 days / $127.69: priced against the panel
+    # cap, not the $200 one, which would read 141.5.
+    assert window["projected_percent"] == pytest.approx(182.0, abs=0.05)
     assert window["override"] == {"issue": 1341, "until": OVERRIDE_RESET}
 
     weekly = verdict["windows"][0]

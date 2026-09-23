@@ -602,6 +602,112 @@ def test_unreadable_create_output_is_a_github_error():
         raise AssertionError("{!r} must not parse".format(bad))
 
 
+def create_subissue_with_freeze_state(monkeypatch, *, freeze_state="OPEN",
+                                      repo=funnel.REPO, parent=1164, body=None,
+                                      blocked_by=()):
+    """Run the real breakdown create path against a tiny gh fixture."""
+    calls = []
+
+    def fake_bounded(command, **kwargs):
+        calls.append(list(command))
+        if command[1:3] == ["issue", "view"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"state": freeze_state}),
+                stderr="",
+            )
+        if command[1:3] == ["issue", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/{}/issues/901\n".format(repo),
+                stderr="",
+            )
+        raise AssertionError("unexpected gh command: {!r}".format(command))
+
+    monkeypatch.setattr(funnel, "_run_bounded_subprocess", fake_bounded)
+    funnel.reset_api_usage()
+    ticket_body = body or (
+        "Parent: #{}\n\nWhat: update routines/muse.md.\n\n"
+        "Accept: the new rule is present."
+    ).format(parent)
+    result = breakdown.create_ticket(
+        repo, parent,
+        {"title": "update frozen work", "body": ticket_body,
+         "risk": "standard"},
+        blocked_by,
+    )
+    return calls, result
+
+
+@pytest.mark.parametrize(("section", "marker_kind"), [
+    ("What", "path"),
+    ("Accept", "parser"),
+])
+def test_frozen_breakdown_ticket_is_emitted_blocked_on_794(
+        monkeypatch, section, marker_kind):
+    if marker_kind == "path":
+        marker = "routines/muse.md"
+    else:
+        _paths, parsers, _exempt = funnel._canonical_freeze_lists()
+        marker = parsers[0]
+    if section == "What":
+        body = ("Parent: #1164\n\nWhat: update {}.\n\n"
+                "Accept: the new behavior is present.").format(marker)
+    else:
+        body = ("Parent: #1164\n\nWhat: update the parser.\n\n"
+                "Accept: preserve the {} parser behavior.").format(marker)
+    calls, result = create_subissue_with_freeze_state(
+        monkeypatch, body=body,
+    )
+
+    assert result[0] == 901
+    assert calls[0] == [
+        "gh", "issue", "view", "794", "--repo", funnel.REPO,
+        "--json", "state",
+    ]
+    created = calls[1]
+    blocker_index = created.index("--blocked-by")
+    assert created[blocker_index + 1] == "794"
+    body_text = created[created.index("--body") + 1]
+    assert funnel.FREEZE_BLOCKER_SENTENCE in body_text
+    assert marker in body_text
+    # The dependency note stays before the code-owned Risk line.
+    assert body_text.endswith("Risk: standard")
+
+
+@pytest.mark.parametrize("parent", [794, 1044])
+def test_exempt_parent_breakdown_tickets_bypass_the_freeze_guard(
+        monkeypatch, parent):
+    calls, _result = create_subissue_with_freeze_state(
+        monkeypatch, parent=parent)
+
+    assert len(calls) == 1
+    assert calls[0][1:3] == ["issue", "create"]
+    assert "--blocked-by" not in calls[0]
+    assert funnel.FREEZE_BLOCKER_SENTENCE not in calls[0][calls[0].index("--body") + 1]
+
+
+def test_frozen_breakdown_guard_goes_inert_when_794_is_closed(monkeypatch):
+    calls, _result = create_subissue_with_freeze_state(
+        monkeypatch, freeze_state="CLOSED")
+
+    assert calls[0][1:3] == ["issue", "view"]
+    assert "--blocked-by" not in calls[1]
+    assert funnel.FREEZE_BLOCKER_SENTENCE not in calls[1][calls[1].index("--body") + 1]
+
+
+def test_non_frozen_breakdown_ticket_does_not_read_the_freeze(monkeypatch):
+    calls, _result = create_subissue_with_freeze_state(
+        monkeypatch,
+        body=("Parent: #1164\n\nWhat: update funnel.py.\n\n"
+              "Accept: the change is covered by tests."),
+    )
+
+    assert len(calls) == 1
+    assert calls[0][1:3] == ["issue", "create"]
+    assert "--blocked-by" not in calls[0]
+
+
 # -- apply ---------------------------------------------------------------------
 
 def stub_apply(monkeypatch, **kw):

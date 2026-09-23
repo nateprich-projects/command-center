@@ -475,6 +475,10 @@ PROVENANCE_VOICES = ("nate-direct", "nate-relayed", "agent")
 ORIGIN_MARKER = "<!-- command-center-origin -->"
 ORIGIN_VOICES = ("nate-relayed", "agent")
 
+# Analysis projects deliver findings for Nate to read and judge; unlike upkeep
+# work, they must reach the human acceptance gate regardless of Class or origin.
+ANALYSIS_MARKER = "<!-- command-center-analysis -->"
+
 # A capture may carry the earlier PR or ticket that caused the idea. Keep this
 # separate from capture origin: origin says who raised it, while this marker
 # says what the work is a response to. The brief uses the marker as durable
@@ -2656,6 +2660,21 @@ def parse_origin(body: str) -> Optional[Dict]:
     if found is None or found.get("voice") not in ORIGIN_VOICES:
         return None
     return found
+
+
+def parse_analysis_marker(body: str) -> Optional[bool]:
+    """Return marker validity, or None when the analysis marker is absent.
+
+    A valid marker carries ``{"analysis": true}``. Any marker occurrence that
+    cannot be read in that shape is malformed and still opts into the safe
+    outcome: wait for Nate rather than silently closing the project.
+    """
+    found = _marked_json(body, ANALYSIS_MARKER)
+    if found is not None:
+        return found.get("analysis") is True
+    if isinstance(body, str) and ANALYSIS_MARKER in body:
+        return False
+    return None
 
 
 def parse_caused_by(body: str) -> List[str]:
@@ -9542,18 +9561,24 @@ def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
 def _can_close_itself(item: Item) -> bool:
     """Whether a finished project may close without Nate's acceptance.
 
+    An analysis marker always keeps the human acceptance gate, including when
+    the marker is malformed. Otherwise the existing class/origin rules apply.
+
     The upkeep classes are safe to close regardless of who raised them. An
     ``Improve`` project is safe only when its effective shape owner is the
     agents, using the same origin and authorised override reading as the
     unattended shaping predicate. Missing or malformed origin therefore
     resolves to Nate and fails closed.
     """
+    body = item.body if isinstance(item.body, str) else ""
+    if parse_analysis_marker(body) is not None:
+        return False
+
     if item.klass in {"Investigate", "Broken", "Maintenance"}:
         return True
     if item.klass != "Improve":
         return False
 
-    body = item.body if isinstance(item.body, str) else ""
     override = parse_origin_override(body)
     return effective_shape_owner(
         item.origin,

@@ -83,6 +83,16 @@ def test_the_proportional_floor_is_bounded_by_the_point_ceiling():
     assert funnel.GRAPHQL_RESERVE_POINT_CEILING < 5000
 
 
+def test_a_lower_measured_load_cost_lowers_the_engineering_floor():
+    """One fewer point per load moves the calibrated floor below its cap."""
+    calibrated = funnel._reserve_floor(funnel.ENGINEERING_RESERVE_LOADS, 42)
+    reduced = funnel._reserve_floor(funnel.ENGINEERING_RESERVE_LOADS, 41)
+
+    assert calibrated == 826
+    assert reduced == 820
+    assert reduced < calibrated
+
+
 def test_measured_stand_down_budgets_clear_the_capped_engineering_floor():
     for remaining in (1259, 826):
         spend(cost=81, remaining=remaining)

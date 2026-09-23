@@ -27,6 +27,7 @@ def test_every_read_query_requests_rate_limit():
         funnel.REPO_QUERY,
         funnel.ITEM_QUERY,
         funnel.ITEM_DETAILS_QUERY,
+        funnel.ITEM_TIMELINE_DETAILS_QUERY,
         funnel.SUB_ISSUES,
     ]
     batch_query, _ = funnel._batched_pr_query(
@@ -105,10 +106,15 @@ def test_gh_graphql_encodes_list_variables_as_graphql_array_fields(monkeypatch):
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
 
-    funnel.gh_graphql(funnel.ITEM_DETAILS_QUERY, ids=["item-1", "item-2"])
+    funnel.gh_graphql(
+        funnel.ITEM_DETAILS_QUERY,
+        ids=["item-1", "item-2"],
+        childIds=["child-1"],
+    )
 
-    assert calls[0][-4:] == [
+    assert calls[0][-6:] == [
         "-F", "ids[]=item-1", "-F", "ids[]=item-2",
+        "-F", "childIds[]=child-1",
     ]
 
 

@@ -3676,24 +3676,36 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
     recent = [
         i
         for i in items
-        if i.parent is None
-        and i.closed_at
+        if i.parent is None and i.closed_at
         and i.closed_at >= cutoff
-        and i.state_reason != "NOT_PLANNED"
     ]
     # The Execution metrics plan defines upkeep as these three project
     # classes.  Keep this reporting definition separate from PREEMPTING,
     # which controls ticket ordering and intentionally has different scope.
     upkeep = [i for i in recent if i.klass in {"Broken", "Maintenance", "Investigate"}]
 
-    started_new = [
-        i.status_since
-        for i in items
-        if i.parent is None
-        and i.klass == "New"
-        and i.status_since
-        and i.status in ("Building", "Done")
-    ]
+    started_new = []
+    for item in items:
+        if item.parent is not None or item.klass != "New":
+            continue
+        transitions = []
+        for event in item.status_events:
+            if not isinstance(event, Mapping) or event.get("status") != "Building":
+                continue
+            previous = event.get("previous_status") or event.get("previousStatus")
+            if previous == "Building":
+                continue
+            at = event.get("at")
+            if not isinstance(at, datetime):
+                at = parse_time(event.get("created_at") or event.get("createdAt"))
+            if at is not None:
+                transitions.append(at)
+        # A current Building item can lack a timeline event on its first
+        # status assignment. A Done item's current timestamp is its exit from
+        # Building, so it cannot stand in for when the project started.
+        if not transitions and item.status == "Building" and item.status_since:
+            transitions.append(item.status_since)
+        started_new.extend(transitions)
     days_since_new = (
         (now - max(started_new)).days if started_new else None
     )
@@ -7518,6 +7530,13 @@ def _dashboard_stage_age(item: Item, now: datetime) -> str:
     return humanise(max(timedelta(0), now - since))
 
 
+def _dashboard_stage_wait_seconds(item: Item, now: datetime) -> Optional[float]:
+    since = _dashboard_stage_since(item)
+    if since is None:
+        return None
+    return round(max(0.0, (now - since).total_seconds()), 3)
+
+
 #: Who owes the next move on a ticket, for the dashboard's owner flag. These
 #: are display names for the reader, derived from facts the funnel already
 #: holds: the Needs field, the PR and its verdict, and the risk tier.
@@ -7713,6 +7732,7 @@ def _dashboard_item(
         "class": effective_class(item, by_ref),
         "pinned": bool(item.pinned),
         "waited": _dashboard_stage_age(item, now),
+        "waited_seconds": _dashboard_stage_wait_seconds(item, now),
         "tickets_closed": item.children_done,
         "tickets_total": item.children_total,
         # The owner of the next step in the chain, not every owner on the

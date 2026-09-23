@@ -85,6 +85,34 @@ def _count(value: object, source: str, reason: str = "source value is missing") 
     return {"value": rendered, "source": source}
 
 
+def _signed_count(
+    value: object, source: str, reason: str = "source value is missing"
+) -> Dict:
+    """Keep signed count-like values such as net open growth intact."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return {"value": None, "source": source, "gap": reason}
+    number = float(value)
+    if not math.isfinite(number):
+        return {"value": None, "source": source, "gap": reason}
+    rendered = int(number) if number.is_integer() else number
+    return {"value": rendered, "source": source}
+
+
+def _sum_count(
+    values: object,
+    source: str,
+    reason: str = "no observations are available",
+) -> Dict:
+    if not isinstance(values, list) or not values:
+        return {"sum": None, "count": None, "source": source, "gap": reason}
+    numbers = [_number(value) for value in values]
+    if any(value is None for value in numbers):
+        return {"sum": None, "count": None, "source": source, "gap": reason}
+    total = sum(numbers)
+    rendered = int(total) if total.is_integer() else round(total, 3)
+    return {"sum": rendered, "count": len(numbers), "source": source}
+
+
 def _fact(value: object, source: str, reason: str = "source value is missing") -> Dict:
     if value is None:
         return {"value": None, "source": source, "gap": reason}
@@ -188,11 +216,13 @@ def _outcome_prs(
     records: Optional[Sequence[Mapping[str, object]]],
     start: datetime,
     end: datetime,
-) -> Tuple[Optional[List[Dict]], Optional[str]]:
+) -> Tuple[Optional[List[Dict]], Optional[str], Optional[str]]:
     if records is None or not records:
-        return None, "outcomes.jsonl is unavailable or empty"
+        reason = "outcomes.jsonl is unavailable or empty"
+        return None, reason, reason
     found: List[Dict] = []
-    unknown_branch = False
+    unknown_merged_branch = False
+    unknown_review_branch = False
     for record in records:
         if not isinstance(record, Mapping):
             continue
@@ -207,10 +237,19 @@ def _outcome_prs(
                 continue
             merged_at = _in_interval(pr.get("merged_at") or pr.get("mergedAt"), start, end)
             created_at = _in_interval(pr.get("created_at") or pr.get("createdAt"), start, end)
-            first_reviewed_at = _in_interval(pr.get("first_reviewed_at"), start, end)
+            raw_reviewed_at = pr.get("first_reviewed_at")
+            first_reviewed_at = _in_interval(raw_reviewed_at, start, end)
             branch = pr.get("head_ref_name") or pr.get("headRefName")
-            if merged_at is not None and not isinstance(branch, str):
-                unknown_branch = True
+            if (
+                pr.get("first_review_result") is not None
+                and (raw_reviewed_at is None or _timestamp(raw_reviewed_at) is None)
+            ):
+                unknown_review_branch = True
+            if not isinstance(branch, str):
+                if merged_at is not None:
+                    unknown_merged_branch = True
+                if first_reviewed_at is not None:
+                    unknown_review_branch = True
             if isinstance(branch, str) and branch == "ticket/{}".format(number):
                 found.append({
                     "repo": repo,
@@ -219,7 +258,7 @@ def _outcome_prs(
                     "created_at": pr.get("created_at") or pr.get("createdAt"),
                     "merged_at": pr.get("merged_at") or pr.get("mergedAt"),
                     "first_review_result": pr.get("first_review_result"),
-                    "first_reviewed_at": pr.get("first_reviewed_at"),
+                    "first_reviewed_at": raw_reviewed_at,
                     "reopened_at": record.get("reopened_at"),
                     "in_hour": {
                         "created_at": created_at is not None,
@@ -227,7 +266,15 @@ def _outcome_prs(
                         "first_reviewed_at": first_reviewed_at is not None,
                     },
                 })
-    return found, ("a merged PR in this hour lacks its branch name" if unknown_branch else None)
+    merged_gap = (
+        "a merged PR in this hour lacks its branch name"
+        if unknown_merged_branch else None
+    )
+    review_gap = (
+        "a reviewed PR in this hour lacks its branch or timestamp"
+        if unknown_review_branch else None
+    )
+    return found, merged_gap, review_gap
 
 
 def _finish_rows(
@@ -277,9 +324,14 @@ def _all_finishes(
     if rows_by_agent is None:
         return found
     for agent, rows in rows_by_agent.items():
+        seen = set()
         for row in rows:
             if row.get("phase") == "finish":
-                found.append(dict(row, agent=agent))
+                item = dict(row, agent=agent)
+                identity = json.dumps(item, sort_keys=True, separators=(",", ":"), default=str)
+                if identity not in seen:
+                    seen.add(identity)
+                    found.append(item)
     found.sort(key=lambda row: (_timestamp(row.get("ts")) or datetime.min.replace(
         tzinfo=timezone.utc
     ), str(row.get("run") or "")))
@@ -322,8 +374,12 @@ def _count_in_hour(
     count = 0
     for row in rows:
         if not isinstance(row, Mapping):
-            continue
-        stamp = next((_timestamp(row.get(field)) for field in fields if row.get(field) is not None), None)
+            return None
+        stamp = None
+        for field in fields:
+            if row.get(field) is not None:
+                stamp = _timestamp(row.get(field))
+                break
         if stamp is None:
             return None
         if start <= stamp < end:
@@ -331,12 +387,31 @@ def _count_in_hour(
     return count
 
 
+def _count_timestamps(
+    values: object,
+    start: datetime,
+    end: datetime,
+    source: str,
+    reason: str,
+) -> Dict:
+    if not isinstance(values, list):
+        return _count(None, source, reason)
+    count = 0
+    for value in values:
+        stamp = _timestamp(value)
+        if stamp is None:
+            return _count(None, source, reason)
+        if start <= stamp < end:
+            count += 1
+    return _count(count, source, reason)
+
+
 def _hold_seconds(
     finishes: Sequence[Mapping[str, object]],
     start: datetime,
     end: datetime,
     now: datetime,
-) -> Dict[str, float]:
+) -> Dict[str, Dict[str, float]]:
     reasons = {
         "skipped-over-pace": "over_pace",
         "skipped-api-reserve": "api_reserve",
@@ -348,8 +423,11 @@ def _hold_seconds(
         agent = row.get("agent")
         if at is not None and isinstance(agent, str):
             by_agent.setdefault(agent, []).append(row)
-    totals = {value: 0.0 for value in reasons.values()}
-    for rows in by_agent.values():
+    totals = {
+        agent: {value: 0.0 for value in reasons.values()}
+        for agent in AGENTS
+    }
+    for agent, rows in by_agent.items():
         rows.sort(key=lambda row: _timestamp(row.get("ts")) or start)
         for index, row in enumerate(rows):
             reason = reasons.get(str(row.get("outcome") or ""))
@@ -362,8 +440,13 @@ def _hold_seconds(
             stopped = min(next_at or now, end, now)
             began = max(began, start)
             if stopped > began:
-                totals[reason] += (stopped - began).total_seconds()
-    return {key: round(value, 3) for key, value in totals.items()}
+                totals.setdefault(agent, {value: 0.0 for value in reasons.values()})[
+                    reason
+                ] += (stopped - began).total_seconds()
+    return {
+        agent: {key: round(value, 3) for key, value in values.items()}
+        for agent, values in totals.items()
+    }
 
 
 def _latency_sums(
@@ -378,43 +461,86 @@ def _latency_sums(
         str(row.get("ticket")): row for row in outcome_records
         if isinstance(row, Mapping) and isinstance(row.get("ticket"), str)
     }
-    claim_to_pr = {"sum_seconds": 0.0, "count": 0}
-    pr_to_merge = {"sum_seconds": 0.0, "count": 0}
-    for rows in rows_by_agent.values():
-        bindings: Dict[str, Mapping[str, object]] = {}
+    bindings_by_ticket: Dict[str, List[Dict[str, object]]] = {}
+    for agent, rows in rows_by_agent.items():
+        job_kinds = _run_job_kinds(rows)
         for row in rows:
-            if row.get("phase") == "bind" and row.get("do") == "ticket" and isinstance(row.get("run"), str):
-                bindings[row["run"]] = row
-        for binding in bindings.values():
-            ticket = binding.get("work")
-            bound_at = _timestamp(binding.get("ts"))
-            if not isinstance(ticket, str) or bound_at is None:
+            run = row.get("run")
+            ticket = row.get("work")
+            bound_at = _timestamp(row.get("ts"))
+            if (
+                row.get("phase") != "bind"
+                or row.get("do") != "ticket"
+                or not isinstance(run, str)
+                or not isinstance(ticket, str)
+                or bound_at is None
+            ):
                 continue
-            outcome = outcomes_by_ticket.get(ticket)
-            prs = outcome.get("prs") if isinstance(outcome, Mapping) else None
-            if not isinstance(prs, list):
+            bindings_by_ticket.setdefault(ticket, []).append({
+                "run": run,
+                "agent": agent,
+                "job": job_kinds.get(run, "implement"),
+                "at": bound_at,
+            })
+
+    grouped: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
+    observed = False
+    for ticket, bindings in bindings_by_ticket.items():
+        outcome = outcomes_by_ticket.get(ticket)
+        prs = outcome.get("prs") if isinstance(outcome, Mapping) else None
+        if not isinstance(prs, list):
+            continue
+        bindings.sort(key=lambda row: row["at"])
+        number_text = ticket.rsplit("#", 1)[-1]
+        number = int(number_text) if number_text.isdigit() else None
+        for pr in prs:
+            if not isinstance(pr, Mapping):
                 continue
-            for pr in prs:
-                if not isinstance(pr, Mapping):
-                    continue
-                branch = pr.get("head_ref_name") or pr.get("headRefName")
-                number = None
-                if "#" in ticket:
-                    suffix = ticket.rsplit("#", 1)[1]
-                    number = int(suffix) if suffix.isdigit() else None
-                if number is not None and branch != "ticket/{}".format(number):
-                    continue
-                created = _timestamp(pr.get("created_at") or pr.get("createdAt"))
-                merged = _timestamp(pr.get("merged_at") or pr.get("mergedAt"))
-                if created is not None and start <= created < end and created >= bound_at:
-                    claim_to_pr["sum_seconds"] += (created - bound_at).total_seconds()
-                    claim_to_pr["count"] += 1
-                if created is not None and merged is not None and start <= merged < end and merged >= created:
-                    pr_to_merge["sum_seconds"] += (merged - created).total_seconds()
-                    pr_to_merge["count"] += 1
-    if not claim_to_pr["count"] and not pr_to_merge["count"]:
+            branch = pr.get("head_ref_name") or pr.get("headRefName")
+            created = _timestamp(pr.get("created_at") or pr.get("createdAt"))
+            merged = _timestamp(pr.get("merged_at") or pr.get("mergedAt"))
+            if not isinstance(branch, str) and (
+                (created is not None and start <= created < end)
+                or (merged is not None and start <= merged < end)
+            ):
+                return None, "ticket PR in this hour lacks its branch name"
+            if number is None or branch != "ticket/{}".format(number):
+                continue
+            if created is None:
+                continue
+            eligible = [binding for binding in bindings if binding["at"] <= created]
+            if not eligible:
+                continue
+            binding = eligible[-1]
+            agent = str(binding["agent"])
+            job = str(binding["job"])
+            bucket = grouped.setdefault(agent, {}).setdefault(job, {
+                "claim_to_pr": {"sum_seconds": 0.0, "count": 0},
+                "pr_to_merge": {"sum_seconds": 0.0, "count": 0},
+            })
+            if start <= created < end:
+                bucket["claim_to_pr"]["sum_seconds"] += (
+                    created - binding["at"]
+                ).total_seconds()
+                bucket["claim_to_pr"]["count"] += 1
+                observed = True
+            if merged is not None and start <= merged < end and merged >= created:
+                bucket["pr_to_merge"]["sum_seconds"] += (
+                    merged - created
+                ).total_seconds()
+                bucket["pr_to_merge"]["count"] += 1
+                observed = True
+    if not observed:
         return None, "no claim-to-PR or PR-to-merge observations in this hour"
-    return {"claim_to_pr": claim_to_pr, "pr_to_merge": pr_to_merge}, None
+    for agents in grouped.values():
+        for jobs in agents.values():
+            for pair in jobs.values():
+                if pair["count"]:
+                    pair["sum_seconds"] = round(pair["sum_seconds"], 3)
+                else:
+                    pair["sum_seconds"] = None
+                    pair["gap"] = "no observation in this UTC hour"
+    return {"by_agent_and_job": grouped}, None
 
 
 def derive_row(
@@ -437,7 +563,9 @@ def derive_row(
         wrapper.get("generated_at") or brief.get("generated_at")
     )
     captured_at = _iso(snapshot_at) if snapshot_at is not None else None
-    outcomes_prs, outcomes_gap = _outcome_prs(outcome_records, start, end)
+    outcomes_prs, merged_pr_gap, review_pr_gap = _outcome_prs(
+        outcome_records, start, end
+    )
     rows_by_agent, heartbeat_gap = _finish_rows(ledgers)
     finishes = _all_finishes(rows_by_agent)
     in_hour_finishes = [
@@ -447,9 +575,9 @@ def derive_row(
     metrics: Dict[str, Dict] = {key: {} for key in "ABCDEF"}
 
     # A — Output
-    if outcomes_prs is None or outcomes_gap:
+    if outcomes_prs is None or merged_pr_gap:
         metrics["A"]["A1"] = _fact(
-            None, "outcomes.jsonl.prs", outcomes_gap or "outcome records unavailable"
+            None, "outcomes.jsonl.prs", merged_pr_gap or "outcome records unavailable"
         )
     else:
         by_repo: Dict[str, int] = {}
@@ -480,11 +608,10 @@ def derive_row(
         maintenance_gap or "exact upkeep numerator is not present in this snapshot",
     )
     metrics["A"]["A4"] = {
-        "new_projects_started": _count(
-            sum(
-                1 for stamp in maintenance.get("new_started_at", [])
-                if _in_interval(stamp, start, end) is not None
-            ) if maintenance and isinstance(maintenance.get("new_started_at"), list) else None,
+        "new_projects_started": _count_timestamps(
+            maintenance.get("new_started_at") if maintenance else None,
+            start,
+            end,
             "brief.maintenance_load.new_started_at",
             maintenance_gap or "new work start timestamps are unavailable",
         ),
@@ -502,8 +629,13 @@ def derive_row(
             "brief.disposal.{}".format(key),
             disposal_gap or "disposal is unavailable",
         )
-        for key in ("done", "parked", "net_open_growth")
+        for key in ("done", "parked")
     }
+    metrics["A"]["A5"]["net_open_growth"] = _signed_count(
+        disposal.get("net_open_growth") if disposal else None,
+        "brief.disposal.net_open_growth",
+        disposal_gap or "disposal is unavailable",
+    )
     reopens = [
         row for row in (outcome_records or [])
         if isinstance(row, Mapping)
@@ -527,7 +659,7 @@ def derive_row(
 
     # B — Quality
     first_approvals = first_reviewed = 0
-    first_review_available = outcomes_prs is not None and outcomes_gap is None
+    first_review_problem = review_pr_gap
     for row in outcomes_prs or []:
         if not row["in_hour"]["first_reviewed_at"]:
             continue
@@ -535,11 +667,14 @@ def derive_row(
         if verdict in ("approved", "rejected"):
             first_reviewed += 1
             first_approvals += int(verdict == "approved")
+        else:
+            first_review_problem = "a first verdict in this hour is missing or unrecognized"
+    first_review_available = outcomes_prs is not None and first_review_problem is None
     metrics["B"]["B1"] = _rate_pair(
         first_approvals if first_review_available else None,
         first_reviewed if first_review_available else None,
         "outcomes.jsonl.prs.first_review_result/first_reviewed_at",
-        outcomes_gap or "first verdict evidence is unavailable",
+        first_review_problem or "first verdict evidence is unavailable",
     )
     signal, signal_gap = _section(brief, "outcome_signals", "brief.outcome_signals")
     rework = None
@@ -590,7 +725,9 @@ def derive_row(
         metrics["C"]["C5"] = _fact(None, "heartbeat ledgers finish rows", heartbeat_gap or "ledgers unavailable")
     else:
         grouped: Dict[Tuple[str, str], Dict[str, int]] = {
-            (agent, kind): {name: 0 for name in FINISH_OUTCOMES + ("finishes",)}
+            (agent, kind): {
+                name: 0 for name in FINISH_OUTCOMES + ("other", "finishes")
+            }
             for agent in AGENTS
             for kind in ("implement", "review", "shape", "breakdown", "unknown")
         }
@@ -599,12 +736,14 @@ def derive_row(
             for agent in AGENTS
         }
         error_classes: Dict[str, Dict[str, int]] = {}
+        error_classes_by_job: Dict[str, Dict[str, Dict[str, int]]] = {}
         claim_losses: Dict[str, Dict[str, int]] = {
             agent: {
                 "reconciled_claims": 0, "wall_clock_kills": 0, "re_begins": 0,
             }
             for agent in AGENTS
         }
+        claim_losses_by_job: Dict[str, Dict[str, Dict[str, int]]] = {}
         for row in in_hour_finishes:
             agent = str(row.get("agent") or "unknown")
             run = row.get("run")
@@ -613,11 +752,15 @@ def derive_row(
                 kind = _run_job_kinds(rows_by_agent.get(agent, ())).get(run, "unknown")
             outcome = str(row.get("outcome") or "unknown")
             bucket = grouped.setdefault(
-                (agent, kind), {name: 0 for name in FINISH_OUTCOMES + ("finishes",)}
+                (agent, kind), {
+                    name: 0 for name in FINISH_OUTCOMES + ("other", "finishes")
+                }
             )
             bucket["finishes"] += 1
             if outcome in bucket:
                 bucket[outcome] += 1
+            else:
+                bucket["other"] += 1
             outcome_key = outcome if outcome in FINISH_OUTCOMES else "other"
             by_outcome[agent][outcome_key] += 1
             if outcome == "errored":
@@ -625,21 +768,48 @@ def derive_row(
                 if error_class not in ("floor", "regression"):
                     error_class = "unclassified"
                 error_classes.setdefault(agent, {})[error_class] = error_classes.setdefault(agent, {}).get(error_class, 0) + 1
+                error_class_bucket = error_classes_by_job.setdefault(agent, {}).setdefault(
+                    kind, {"floor": 0, "regression": 0, "unclassified": 0}
+                )
+                error_class_bucket[error_class] += 1
             losses = claim_losses.setdefault(agent, {
                 "reconciled_claims": 0, "wall_clock_kills": 0, "re_begins": 0,
             })
-            losses["reconciled_claims"] += int(bool(row.get("reconciled_claim")))
-            note = str(row.get("note") or "").lower()
-            losses["wall_clock_kills"] += int(
-                outcome == "errored" and bool(re.search(r"wall[- ]clock|killed after \d+ minutes|timed out after \d+ minutes", note))
+            job_losses = claim_losses_by_job.setdefault(agent, {}).setdefault(
+                kind, {"reconciled_claims": 0, "wall_clock_kills": 0, "re_begins": 0}
             )
+            losses["reconciled_claims"] += int(bool(row.get("reconciled_claim")))
+            job_losses["reconciled_claims"] += int(bool(row.get("reconciled_claim")))
+            note = str(row.get("note") or "").lower()
+            wall_clock_kill = int(
+                outcome == "errored" and bool(re.search(
+                    r"wall[- ]clock|killed after \d+ minutes|timed out after \d+ minutes",
+                    note,
+                ))
+            )
+            losses["wall_clock_kills"] += wall_clock_kill
+            job_losses["wall_clock_kills"] += wall_clock_kill
             try:
                 import heartbeat
-                losses["re_begins"] += int(heartbeat.is_rebegin_finish(dict(row)))
+                rebegin = int(heartbeat.is_rebegin_finish(dict(row)))
             except Exception:
-                losses["re_begins"] += int(bool(row.get("re_begun_by")))
+                rebegin = int(bool(row.get("re_begun_by")))
+            losses["re_begins"] += rebegin
+            job_losses["re_begins"] += rebegin
+        by_agent_and_job = {}
+        for (agent, kind), values in sorted(grouped.items()):
+            by_agent_and_job.setdefault(agent, {})[kind] = {
+                name: values[name]
+                for name in FINISH_OUTCOMES + ("other", "finishes")
+            }
         metrics["C"]["C1"] = {
-            "value": {agent: dict(sorted(values.items())) for agent, values in sorted(by_outcome.items())},
+            "value": {
+                "by_agent": {
+                    agent: dict(sorted(values.items()))
+                    for agent, values in sorted(by_outcome.items())
+                },
+                "by_agent_and_job": by_agent_and_job,
+            },
             "source": "heartbeat ledgers finish.outcome within this UTC hour",
         }
         productive = _rate_map(grouped, "done", ("finishes",), "heartbeat finish.outcome")
@@ -648,12 +818,18 @@ def derive_row(
         engaged = _rate_map(grouped, "errored", ("done", "errored"), "heartbeat finish.outcome")
         metrics["C"]["C3"] = {"error_rate_by_agent_and_job": engaged}
         metrics["C"]["C4"] = {
-            "value": error_classes,
+            "value": {
+                "by_agent": error_classes,
+                "by_agent_and_job": error_classes_by_job,
+            },
             "source": "heartbeat.finish.error_class",
             "gap": "error_class is not recorded yet; missing classes remain unclassified",
         }
         metrics["C"]["C5"] = {
-            "value": claim_losses,
+            "value": {
+                "by_agent": claim_losses,
+                "by_agent_and_job": claim_losses_by_job,
+            },
             "source": "heartbeat.finish.reconciled_claim, re_begun_by, and note",
         }
     if heartbeat_gap:
@@ -661,7 +837,7 @@ def derive_row(
     else:
         latency, latency_gap = _latency_sums(rows_by_agent, outcome_records, start, end)
     metrics["C"]["C6"] = _fact(
-        latency, "heartbeat.bind.ts and outcomes.jsonl.prs.created_at/merged_at",
+        latency, "heartbeat.bind.ts and outcomes.jsonl.prs.created_at/merged_at by agent and job",
         latency_gap or "no claim-to-PR or PR-to-merge observations in this hour",
     )
 
@@ -700,25 +876,53 @@ def derive_row(
     codex_split = (
         codex.get("thread_source_split") if isinstance(codex, Mapping) else None
     )
+    thread_split = (
+        codex_split.get("value") if isinstance(codex_split, Mapping) else None
+    )
+    thread_source = (
+        str(codex_split.get("source"))
+        if isinstance(codex_split, Mapping) and codex_split.get("source")
+        else "~/.codex/sessions token_usage_record grouped by session_meta.thread_source"
+    )
+    thread_gap = (
+        str(codex_split.get("gap"))
+        if isinstance(codex_split, Mapping) and codex_split.get("gap")
+        else "Codex rollout usage split is unavailable"
+    )
+    funnel_tokens = thread_split.get("funnel_tokens") if isinstance(thread_split, Mapping) else None
+    personal_tokens = thread_split.get("personal_tokens") if isinstance(thread_split, Mapping) else None
+    total_tokens = (
+        _number(funnel_tokens) + _number(personal_tokens)
+        if _number(funnel_tokens) is not None and _number(personal_tokens) is not None
+        else None
+    )
     metrics["D"]["D2"] = {
         "weekly_used_percent": _count(
             codex_week.get("used_percent") if codex_week else None,
             "usage.py codex windows.seven_day.used_percent",
             "Codex usage reading is unavailable",
         ),
-        "funnel_vs_personal": _fact(
-            codex_split.get("value") if isinstance(codex_split, Mapping) else None,
-            (
-                str(codex_split.get("source"))
-                if isinstance(codex_split, Mapping) and codex_split.get("source")
-                else "~/.codex/sessions token_usage_record grouped by session_meta.thread_source"
+        "funnel_vs_personal": {
+            "value": thread_split,
+            "funnel_tokens": _count(
+                funnel_tokens, thread_source + ".automation.total_tokens", thread_gap
             ),
-            (
-                str(codex_split.get("gap"))
-                if isinstance(codex_split, Mapping) and codex_split.get("gap")
-                else "Codex rollout usage split is unavailable"
+            "personal_tokens": _count(
+                personal_tokens, thread_source + ".other_thread_sources.total_tokens", thread_gap
             ),
-        ),
+            "total_tokens": _count(
+                total_tokens, thread_source + ".total_tokens", thread_gap
+            ),
+            "funnel_share": _rate_pair(
+                funnel_tokens, total_tokens, thread_source + ".automation/total_tokens", thread_gap
+            ),
+            "personal_share": _rate_pair(
+                personal_tokens, total_tokens,
+                thread_source + ".other_thread_sources/total_tokens", thread_gap,
+            ),
+            "source": thread_source,
+            **({"gap": thread_gap} if thread_split is None else {}),
+        },
     }
     claude = readings.get("claude") if isinstance(readings, Mapping) else None
     claude_windows = {}
@@ -726,8 +930,16 @@ def derive_row(
         for name, window in claude["windows"].items():
             if isinstance(window, Mapping):
                 claude_windows[name] = {
-                    "used_percent": window.get("used_percent"),
-                    "resets_at": window.get("resets_at"),
+                    "used_percent": _count(
+                        window.get("used_percent"),
+                        "usage.py claude windows.{}.used_percent".format(name),
+                        "Claude usage percentage is unavailable",
+                    ),
+                    "resets_at": _fact(
+                        window.get("resets_at"),
+                        "usage.py claude windows.{}.resets_at".format(name),
+                        "Claude reset time is unavailable",
+                    ),
                 }
     metrics["D"]["D3"] = _fact(
         claude_windows if claude_windows else None,
@@ -749,33 +961,51 @@ def derive_row(
                 "denominator": lane.get("merged_prs"),
                 "source": "brief.outcome_signals.signals.cost_per_merged_pr.by_lane",
             })
+    cost_gap = (
+        cost.get("reason") if isinstance(cost, Mapping) else None
+    ) or signal_gap or "outcomes cost join is unavailable"
+    if isinstance(cost, Mapping) and cost.get("status") == "partial":
+        cost_gap = "outcomes cost join is partial; some merged tickets lack priced usage"
     metrics["D"]["D4"] = _fact(
         cost_lanes if cost_lanes else None,
         "brief.outcome_signals.signals.cost_per_merged_pr.by_lane",
-        str(cost.get("reason") if isinstance(cost, Mapping) else signal_gap or "cost join is unavailable"),
+        str(cost_gap),
     )
-    api_by_run: List[Dict] = []
+    if cost_lanes and isinstance(cost, Mapping) and cost.get("status") == "partial":
+        metrics["D"]["D4"]["gap"] = str(cost_gap)
+    api_by_agent: Dict[str, Dict] = {}
     resend_by_agent: Dict[str, Dict] = {}
     for agent in (rows_by_agent or {}):
-        total_input = fresh_input = 0
-        have_resend = False
-        for row in in_hour_finishes:
-            if row.get("agent") != agent:
-                continue
+        agent_finishes = [row for row in in_hour_finishes if row.get("agent") == agent]
+        points = calls = total_input = fresh_input = 0
+        points_complete = calls_complete = bool(agent_finishes)
+        input_complete = bool(agent_finishes)
+        by_run = {}
+        for index, row in enumerate(agent_finishes, 1):
+            run = row.get("run")
+            run_id = run if isinstance(run, str) and run else "unattributed-{}".format(index)
             api = row.get("api_cost")
             api = api if isinstance(api, Mapping) else {}
-            api_by_run.append({
-                "run": row.get("run"),
-                "agent": agent,
+            point_value = api.get("graphql_points")
+            call_value = api.get("gh_calls")
+            by_run[run_id] = {
                 "graphql_points": _count(
-                    api.get("graphql_points"), "heartbeat.finish.api_cost.graphql_points",
-                    "run did not record GraphQL points",
+                    point_value, "heartbeat.finish.api_cost.graphql_points",
+                    "this run's GraphQL point count is unavailable",
                 ),
                 "gh_calls": _count(
-                    api.get("gh_calls"), "heartbeat.finish.api_cost.gh_calls",
-                    "run did not record GitHub calls",
+                    call_value, "heartbeat.finish.api_cost.gh_calls",
+                    "this run's gh call count is unavailable",
                 ),
-            })
+            }
+            if isinstance(point_value, int) and not isinstance(point_value, bool) and point_value >= 0:
+                points += point_value
+            else:
+                points_complete = False
+            if isinstance(call_value, int) and not isinstance(call_value, bool) and call_value >= 0:
+                calls += call_value
+            else:
+                calls_complete = False
             usage = row.get("input_usage")
             if isinstance(usage, Mapping):
                 total = usage.get("total_input_tokens")
@@ -787,16 +1017,32 @@ def derive_row(
                 ):
                     total_input += total
                     fresh_input += fresh
-                    have_resend = True
+                else:
+                    input_complete = False
+            else:
+                input_complete = False
+        api_by_agent[agent] = {
+            "graphql_points": _count(
+                points if points_complete else None,
+                "heartbeat.finish.api_cost.graphql_points",
+                "one or more run point counts are unavailable",
+            ),
+            "gh_calls": _count(
+                calls if calls_complete else None,
+                "heartbeat.finish.api_cost.gh_calls",
+                "one or more run call counts are unavailable",
+            ),
+            "by_run": by_run,
+        }
         resend_by_agent[agent] = _pair(
-            total_input if have_resend else None,
-            fresh_input if have_resend else None,
+            total_input if input_complete else None,
+            fresh_input if input_complete else None,
             "heartbeat.finish.input_usage.total_input_tokens/fresh_input_tokens",
-            "input usage is unavailable for this agent in this hour",
+            "one or more run input-usage readings are unavailable",
         )
     metrics["D"]["D5"] = {
         "graphql_points_per_run": {
-            "value": api_by_run if rows_by_agent is not None else None,
+            "value": api_by_agent if rows_by_agent is not None else None,
             "source": "heartbeat.finish.api_cost.graphql_points/gh_calls",
             **({"gap": heartbeat_gap} if heartbeat_gap else {}),
         },
@@ -834,12 +1080,17 @@ def derive_row(
         )
     held = _hold_seconds(finishes, start, end, observed_at)
     metrics["D"]["D6"] = {
-        "held_seconds_by_reason": (
-            {key: _count(value, "heartbeat skipped finish timestamps") for key, value in held.items()}
-            if not heartbeat_gap else
-            {key: _count(None, "heartbeat skipped finish timestamps", heartbeat_gap)
-             for key in held}
-        ),
+        "held_hours_by_agent_and_reason": {
+            agent: {
+                reason: _count(
+                    seconds / 3600.0 if not heartbeat_gap else None,
+                    "heartbeat finish timestamps; held interval until next finish",
+                    heartbeat_gap or "held interval is unavailable",
+                )
+                for reason, seconds in values.items()
+            }
+            for agent, values in held.items()
+        },
         **({"gap": heartbeat_gap} if heartbeat_gap else {}),
     }
 
@@ -850,18 +1101,27 @@ def derive_row(
     columns = board.get("columns") if isinstance(board, Mapping) else None
     gate_dwell = None
     if isinstance(columns, list):
-        gate_dwell = {"Shaped": [], "Ready": []}
+        gate_dwell = {}
+        seen_gates = set()
         for column in columns:
-            if not isinstance(column, Mapping) or column.get("stage") not in gate_dwell:
+            if not isinstance(column, Mapping) or column.get("stage") not in ("Shaped", "Ready"):
                 continue
             items = column.get("items")
             if not isinstance(items, list):
                 gate_dwell = None
                 break
-            gate_dwell[column["stage"]] = [
-                row.get("waited") for row in items
-                if isinstance(row, Mapping) and isinstance(row.get("waited"), str)
+            seen_gates.add(column["stage"])
+            waited_seconds = [
+                row.get("waited_seconds") if isinstance(row, Mapping) else None
+                for row in items
             ]
+            gate_dwell[column["stage"]] = _sum_count(
+                waited_seconds,
+                "snapshot.board.columns.items.waited_seconds.{}".format(column["stage"]),
+                "gate wait seconds are missing or no items were observed",
+            )
+        if gate_dwell is not None and seen_gates != {"Shaped", "Ready"}:
+            gate_dwell = None
     metrics["E"]["E1"] = {
         "total_needing_nate": _count(
             brief.get("total_needing_nate"), "brief.total_needing_nate",
@@ -873,58 +1133,68 @@ def derive_row(
         ),
         "gate_dwell": _fact(
             gate_dwell, "snapshot.board.columns.items.waited for Shaped and Ready",
-            "the brief snapshot does not include gate dwell values",
+            "the brief snapshot does not include numeric gate dwell values",
         ),
     }
     human_steps = brief.get("human_steps")
     blocked_human_steps = brief.get("blocked_human_steps")
+    human_steps_gap = (
+        _section_gap(brief, "human_steps")
+        or _section_gap(brief, "blocked_human_steps")
+    )
     metrics["E"]["E2"] = {
         "outstanding": _count(
             (len(human_steps) + len(blocked_human_steps))
-            if isinstance(human_steps, list) and isinstance(blocked_human_steps, list)
+            if (
+                isinstance(human_steps, list)
+                and isinstance(blocked_human_steps, list)
+                and human_steps_gap is None
+            )
             else None,
             "brief.human_steps and brief.blocked_human_steps",
-            "human-step lists are unavailable",
+            human_steps_gap or "human-step lists are unavailable",
         ),
         "opened_this_hour": _count(
-            _count_in_hour(
-                (human_steps or []) + (blocked_human_steps or [])
-                if isinstance(human_steps, list) and isinstance(blocked_human_steps, list)
-                else None,
-                start, end, ("created_at", "createdAt", "opened_at", "openedAt"),
-            ),
-            "brief.human_steps timestamps",
-            "the brief does not retain human-step opening history",
+            None,
+            "brief.human_steps and brief.blocked_human_steps",
+            human_steps_gap or "the brief lists outstanding steps but has no complete opening history",
         ),
     }
     approvals = brief.get("unattended_approvals")
     merges = brief.get("unattended_merges")
+    approvals_gap = _section_gap(brief, "unattended_approvals")
+    merges_gap = _section_gap(brief, "unattended_merges")
     metrics["E"]["E3"] = {
         "approvals_this_hour": _count(
-            _count_in_hour(approvals, start, end, ("at", "created_at", "createdAt", "approved_at")),
+            _count_in_hour(approvals, start, end, ("at", "created_at", "createdAt", "approved_at"))
+            if isinstance(approvals, list) and approvals_gap is None else None,
             "brief.unattended_approvals timestamps",
-            "approval timestamps are unavailable",
+            approvals_gap or "approval timestamps are unavailable",
         ),
         "merges_this_hour": _count(
-            _count_in_hour(merges, start, end, ("at", "merged_at", "mergedAt")),
+            _count_in_hour(merges, start, end, ("at", "merged_at", "mergedAt"))
+            if isinstance(merges, list) and merges_gap is None else None,
             "brief.unattended_merges timestamps",
-            "merge timestamps are unavailable",
+            merges_gap or "merge timestamps are unavailable",
         ),
     }
     watch_actions = 0
-    if rows_by_agent is not None:
+    claude_available = rows_by_agent is not None and "claude" in rows_by_agent
+    if claude_available:
         for row in in_hour_finishes:
             note = str(row.get("note") or "").lower()
             if row.get("agent") == "claude" and re.search(r"check[- ]in\s+#?684", note) and re.search(r"unwedge|override|reconcil", note):
                 watch_actions += 1
     metrics["E"]["E4"] = _count(
-        watch_actions if rows_by_agent is not None else None,
+        watch_actions if claude_available else None,
         "claude heartbeat finish notes for check-in #684 actions",
-        heartbeat_gap or "Claude heartbeat ledger is unavailable",
+        "Claude heartbeat ledger is unavailable" if not claude_available else "no matching check-in action",
     )
     metrics["E"]["E5"] = {
         "stranded": _count(
-            len(brief["stranded"]) if isinstance(brief.get("stranded"), list) else None,
+            len(brief["stranded"])
+            if isinstance(brief.get("stranded"), list) and _section_gap(brief, "stranded") is None
+            else None,
             "brief.stranded", _section_gap(brief, "stranded") or "stranded is unavailable",
         ),
         "degraded_sections": _count(
@@ -933,13 +1203,15 @@ def derive_row(
         ),
         "status_state_mismatches": _count(
             len(brief["status_state_mismatches"])
-            if isinstance(brief.get("status_state_mismatches"), list) else None,
+            if isinstance(brief.get("status_state_mismatches"), list)
+            and _section_gap(brief, "status_state_mismatches") is None else None,
             "brief.status_state_mismatches",
             _section_gap(brief, "status_state_mismatches") or "status mismatch data is unavailable",
         ),
         "stale_locks_taken_over": _count(
             len(brief["stale_locks_taken_over"])
-            if isinstance(brief.get("stale_locks_taken_over"), list) else None,
+            if isinstance(brief.get("stale_locks_taken_over"), list)
+            and _section_gap(brief, "stale_locks_taken_over") is None else None,
             "brief.stale_locks_taken_over",
             _section_gap(brief, "stale_locks_taken_over") or "stale lock data is unavailable",
         ),
@@ -1149,6 +1421,7 @@ def read_codex_thread_source_split(
     readable = 0
     unreadable = 0
     incomplete = 0
+    unclassified = 0
     for path in paths:
         try:
             if os.path.getmtime(path) < start.timestamp():
@@ -1156,25 +1429,33 @@ def read_codex_thread_source_split(
                 continue
             token_total = 0
             has_tokens = False
-            thread_source = None
+            thread_sources = set()
             with open(path, encoding="utf-8") as stream:
                 for line in stream:
                     try:
                         record = json.loads(line)
                     except ValueError:
+                        incomplete += 1
                         continue
                     if not isinstance(record, Mapping):
                         continue
+                    record_type = record.get("type")
                     payload = record.get("payload")
+                    if record_type == "session_meta":
+                        value = payload.get("thread_source") if isinstance(payload, Mapping) else None
+                        if isinstance(value, str) and value:
+                            thread_sources.add(value)
+                        continue
+                    if record_type != "token_usage_record":
+                        continue
                     if not isinstance(payload, Mapping):
+                        incomplete += 1
                         continue
-                    if record.get("type") == "session_meta":
-                        value = payload.get("thread_source")
-                        thread_source = value if isinstance(value, str) else None
+                    stamp = _timestamp(record.get("timestamp"))
+                    if stamp is None:
+                        incomplete += 1
                         continue
-                    if record.get("type") != "token_usage_record":
-                        continue
-                    if _in_interval(record.get("timestamp"), start, end) is None:
+                    if not start <= stamp < end:
                         continue
                     usage = payload.get("turn_token_usage") or payload.get("usage")
                     amount = _number(usage.get("total_tokens")) if isinstance(usage, Mapping) else None
@@ -1184,17 +1465,24 @@ def read_codex_thread_source_split(
                     token_total += int(amount)
                     has_tokens = True
             readable += 1
-            group = "funnel" if thread_source == "automation" else "personal"
-            totals[group] += token_total
-            sessions[group] += int(has_tokens)
         except OSError:
             unreadable += 1
-    if unreadable or incomplete:
+            continue
+        if has_tokens and len(thread_sources) != 1:
+            unclassified += 1
+            continue
+        if has_tokens:
+            group = "funnel" if next(iter(thread_sources)) == "automation" else "personal"
+            totals[group] += token_total
+            sessions[group] += 1
+    if unreadable or incomplete or unclassified:
         reason = []
         if unreadable:
             reason.append("{} candidate rollout(s) could not be read".format(unreadable))
         if incomplete:
-            reason.append("{} token record(s) lacked total_tokens".format(incomplete))
+            reason.append("{} token record(s) were incomplete".format(incomplete))
+        if unclassified:
+            reason.append("{} rollout(s) with token use lacked one thread_source".format(unclassified))
         return {"value": None, "source": source, "gap": "; ".join(reason)}
     if readable == 0:
         return {"value": None, "source": source, "gap": "no Codex session rollouts are readable"}

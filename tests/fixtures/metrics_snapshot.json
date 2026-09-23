@@ -56,7 +56,7 @@
   },
   "board": {
     "columns": [
-      {"stage": "Shaped", "items": [{"waited": "3 days"}]},
+      {"stage": "Shaped", "items": [{"waited": "3 days", "waited_seconds": 259200}]},
       {"stage": "Ready", "items": []}
     ]
   }

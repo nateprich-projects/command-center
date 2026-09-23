@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -71,13 +71,15 @@ def test_derive_row_covers_plan_metrics_and_preserves_rate_pairs():
     assert row["metrics"]["B"]["B1"]["denominator"] == 1
     assert row["metrics"]["B"]["B2"]["numerator"] == 2
     assert row["metrics"]["B"]["B2"]["denominator"] == 8
-    assert row["metrics"]["C"]["C1"]["value"]["codex"]["done"] == 1
+    assert row["metrics"]["C"]["C1"]["value"]["by_agent"]["codex"]["done"] == 1
+    assert row["metrics"]["C"]["C1"]["value"]["by_agent_and_job"]["codex"]["implement"]["finishes"] == 1
     assert row["metrics"]["C"]["C2"]["productive_share"]["codex"]["implement"] == {
         "numerator": 1, "denominator": 1, "source": "heartbeat finish.outcome"
     }
     assert row["metrics"]["C"]["C3"]["error_rate_by_agent_and_job"]["codex"]["implement"]["numerator"] == 0
     assert row["metrics"]["C"]["C4"]["gap"]
-    assert row["metrics"]["C"]["C6"]["value"]["claim_to_pr"] == {
+    assert row["metrics"]["C"]["C4"]["value"]["by_agent_and_job"]["muse"]["review"]["unclassified"] == 1
+    assert row["metrics"]["C"]["C6"]["value"]["by_agent_and_job"]["codex"]["implement"]["claim_to_pr"] == {
         "sum_seconds": 480.0, "count": 1
     }
     assert row["metrics"]["A"]["A6"]["reverts_by_repo"]["value"][
@@ -86,11 +88,19 @@ def test_derive_row_covers_plan_metrics_and_preserves_rate_pairs():
     assert row["metrics"]["D"]["D4"]["value"] is None
     assert row["metrics"]["D"]["D4"]["gap"]
     assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["value"]["funnel_tokens"] == 140
-    assert row["metrics"]["D"]["D5"]["graphql_points_per_run"]["value"][0]["graphql_points"]["value"] == 5
+    assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["funnel_share"]["numerator"] == 140
+    assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["funnel_share"]["denominator"] == 170
+    assert row["metrics"]["D"]["D5"]["graphql_points_per_run"]["value"]["codex"]["graphql_points"]["value"] == 5
+    assert row["metrics"]["D"]["D6"]["held_hours_by_agent_and_reason"]["muse"]["over_pace"]["value"] == 1200 / 3600.0
     assert row["metrics"]["D"]["D5"]["points_per_brief"]["value"] == 21
-    assert row["metrics"]["E"]["E1"]["gate_dwell"]["value"] == {
-        "Shaped": ["3 days"], "Ready": []
-    }
+    gate_dwell = row["metrics"]["E"]["E1"]["gate_dwell"]["value"]
+    assert gate_dwell["Shaped"]["sum"] == 259200
+    assert gate_dwell["Shaped"]["count"] == 1
+    assert gate_dwell["Ready"]["sum"] is None
+    assert gate_dwell["Ready"]["gap"]
+    assert row["metrics"]["E"]["E2"]["outstanding"]["value"] == 0
+    assert row["metrics"]["E"]["E2"]["opened_this_hour"]["value"] is None
+    assert row["metrics"]["E"]["E2"]["opened_this_hour"]["gap"]
     assert row["metrics"]["F"]["F2"]["value"] == 1234
 
 
@@ -110,6 +120,17 @@ def test_missing_inputs_remain_gaps_instead_of_becoming_zero():
     assert row["metrics"]["D"]["D1"]["window_used_percent"]["gap"]
 
 
+def test_negative_net_open_growth_is_preserved():
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    snapshot["brief"]["disposal"]["net_open_growth"] = -2
+
+    row = metrics.derive_row(
+        snapshot, ledgers, usage, outcomes, NOW, commits, lines
+    )
+
+    assert row["metrics"]["A"]["A5"]["net_open_growth"]["value"] == -2
+
+
 def test_codex_rollout_split_groups_automation_and_personal_tokens():
     split = metrics.read_codex_thread_source_split(
         {"resets_at": 1790308800},
@@ -123,6 +144,28 @@ def test_codex_rollout_split_groups_automation_and_personal_tokens():
     assert split["value"]["funnel_tokens"] == 140
     assert split["value"]["personal_tokens"] == 30
     assert split["value"]["unit"] == "tokens"
+
+
+def test_codex_rollout_without_thread_source_is_a_gap(tmp_path, monkeypatch):
+    rollout = tmp_path / "unknown-source.jsonl"
+    rollout.write_text(
+        json.dumps({
+            "type": "token_usage_record",
+            "timestamp": "2026-09-23T04:10:00Z",
+            "payload": {"turn_token_usage": {"total_tokens": 30}},
+        }) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(metrics.os.path, "getmtime", lambda _path: NOW.timestamp())
+
+    split = metrics.read_codex_thread_source_split(
+        {"resets_at": (NOW + timedelta(days=1)).timestamp()},
+        NOW,
+        [str(rollout)],
+    )
+
+    assert split["value"] is None
+    assert "thread_source" in split["gap"]
 
 
 def test_derive_command_accepts_committed_snapshot_and_ledgers(capsys):
@@ -143,7 +186,7 @@ def test_derive_command_accepts_committed_snapshot_and_ledgers(capsys):
     output = json.loads(capsys.readouterr().out)
     assert result == 0
     assert output["hour"] == "2026-09-23T04:00:00Z"
-    assert output["metrics"]["C"]["C1"]["value"]["codex"]["done"] == 1
+    assert output["metrics"]["C"]["C1"]["value"]["by_agent"]["codex"]["done"] == 1
 
 
 def test_append_is_idempotent_and_jsonl_round_trips():

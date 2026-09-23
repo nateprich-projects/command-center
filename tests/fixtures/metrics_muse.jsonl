@@ -1,1 +1,4 @@
-
+{"run":"muse-skip","phase":"bind","ts":"2026-09-23T04:00:00Z","do":"review"}
+{"run":"muse-skip","phase":"finish","ts":"2026-09-23T04:05:00Z","outcome":"skipped-over-pace"}
+{"run":"muse-error","phase":"bind","ts":"2026-09-23T04:20:00Z","do":"review"}
+{"run":"muse-error","phase":"finish","ts":"2026-09-23T04:25:00Z","outcome":"errored","note":"timed out after 5 minutes"}

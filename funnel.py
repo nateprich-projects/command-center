@@ -1176,6 +1176,10 @@ _FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 #: A block quote is a line whose first non-space character is ``>``.
 _QUOTE_RE = re.compile(r"^\s*>")
 
+#: A single-backtick code span must open and close on the same line. Runs of
+#: multiple backticks and unmatched delimiters remain part of the scan.
+_INLINE_CODE_RE = re.compile(r"(?<!`)`(?!`)[^`\n]*`(?!`)")
+
 
 
 def asserted_text(text: str) -> str:
@@ -1183,21 +1187,19 @@ def asserted_text(text: str) -> str:
 
     Fenced blocks and block quotes are things the item is *showing*: a pasted
     log line, a job name, an error string, an alternative a plan records that
-    it will not take. They are not statements about what the work will do, and
+    it will not take. Paired single-backtick spans on one line quote the same
+    kind of evidence. They are not statements about what the work will do, and
     scanning them is how a report about a deadlock became a ticket with a
     concurrency risk.
 
-    Lines are blanked rather than deleted so that anything anchored to a line
-    start still behaves the same, and so a marker cannot be joined to the
-    sentence above it.
+    Lines are blanked rather than deleted, and inline spans are replaced with
+    same-width spaces, so anchors and word boundaries keep their positions and
+    a marker cannot be joined to the sentence above it. Unclosed or multiline
+    backtick runs stay searchable because they do not prove a quoted span.
 
-    Two regions and no more: everything outside a fence or a block quote is
-    scanned exactly as it was. An inline code span is arguably the same class
-    of text — `Resource deadlock avoided`, quoted from an OS error in #1167's
-    own report, matches the concurrency pattern from inside one — but the
-    plan authorises fences and block quotes, and widening a safety gate's
-    blind spot past what was approved is not this ticket's to do. Captured
-    separately.
+    Fences and block quotes are removed first; then only paired single-backtick
+    spans contained on each remaining line are blanked. Everything else is
+    scanned exactly as before.
     """
     if not text:
         return text or ""
@@ -1216,7 +1218,10 @@ def asserted_text(text: str) -> str:
             kept.append("")
             continue
         kept.append("" if _QUOTE_RE.match(line) else line)
-    return "\n".join(kept)
+    return "\n".join(
+        _INLINE_CODE_RE.sub(lambda span: " " * len(span.group(0)), line)
+        for line in kept
+    )
 
 
 def escalation_matches(title: str, body: str,
@@ -1229,14 +1234,11 @@ def escalation_matches(title: str, body: str,
     condition, because the person who wrote the plan knew what it meant and a
     regex does not.
 
-    Only asserted prose is scanned. Quoted evidence — fenced blocks and block
-    quotes — is excluded (#1167): six false escalations in four days came from
-    words the item was reporting on rather than words describing its work, and
-    this issue's own report scored four risks on the four words in its list of
-    past false positives. No pattern is removed, and the marker still outranks
-    the regex in both directions. Nate answered the gate question on
-    2026-09-21, having been shown the cost: a plan that describes its real risk
-    only inside a code fence would drop to the standard lane.
+    Only asserted prose is scanned. Quoted evidence — fenced blocks, block
+    quotes, and paired single-backtick spans on one line — is excluded: words
+    the item was reporting on rather than words describing its work must not
+    change its tier. No pattern is removed, and the marker still outranks the
+    regex in both directions.
 
     Each matched reason carries its first matching line, trimmed. The synthetic
     "prior attempt failed" reason has no matching line.

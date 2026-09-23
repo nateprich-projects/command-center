@@ -73,6 +73,10 @@ portfolio signals: Broken numerator and denominator; ticket-branch numerator,
 merged-PR denominator and percentage. `unavailable`, `partial` and
 `insufficient_data` are unknown, never zero.
 
+Then `api_cost` as this brief's API-use measurement: report `gh_calls` and
+`graphql_points` when measured; null means unobserved, never zero. It feeds the
+Execution metrics, not a lane decision.
+
 Then `main_ci`, whenever non-empty: each red member-repo `main` with its
 `repo`, `sha`, failing `job` and `verdict`. An `infra` verdict is a run that
 never really ran and is worth a rerun; `real` needs a person. A `null`

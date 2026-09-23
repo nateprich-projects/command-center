@@ -32,6 +32,7 @@ If the command fails, show the error. Do not query GitHub yourself.
 | `human_steps` | Tickets waiting on Nate to go and do the declared `reason`; outside `total_needing_nate`, their only surface |
 | `machine_local_steps` | Tickets waiting on a Claude Code session to go and do the declared `reason`; never folded into decisions or the total |
 | `unattended_merges` | Agent merges without him (`pr`, `at`, `note`, `agent`; retired agents excluded); call `self_reviewed: true` self-reviewed |
+| `api_cost` | This brief's GitHub API measurements; null `graphql_points` or `gh_calls` means unobserved, never zero |
 
 The code template documents these: `generated_at`, `counts_by_gate`,
 `items`, `waiting_on`, `waited`, `class`, `pinned`, `needs_class`,
@@ -44,6 +45,7 @@ The code template documents these: `generated_at`, `counts_by_gate`,
 `prose_dependencies`, `unattended_approvals`, `run_summary`, `agent_health`,
 `rejected_merges`, `status_state_mismatches`, `main_ci`,
 `closed_with_access_vocabulary`, `member_issues_without_project_items`, `missing`, `timings`,
+`api_cost`,
 `degraded`.
 
 ## How to render it

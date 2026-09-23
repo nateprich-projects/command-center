@@ -1116,13 +1116,16 @@ def test_upkeep_share_counts_only_completed_work_in_the_window():
     assert load["upkeep_share"] == round(2 / 3, 3)
 
 
-def test_parked_work_is_not_counted_as_a_run():
-    """Parking is a decision, not work done."""
+def test_parked_projects_remain_in_the_maintenance_denominator():
+    """The upkeep rate uses all closed projects, including parked projects."""
     items = [
         item(1, "Parked", "New", state="CLOSED", state_reason="NOT_PLANNED", closed_at=at(1)),
         item(2, "Done", "Broken", state="CLOSED", state_reason="COMPLETED", closed_at=at(1)),
     ]
-    assert maintenance_load(items, NOW)["closed_in_window"] == 1
+    load = maintenance_load(items, NOW)
+    assert load["closed_in_window"] == 2
+    assert load["upkeep_projects"] == 1
+    assert load["upkeep_share"] == 0.5
 
 
 def test_upkeep_share_is_none_rather_than_zero_when_nothing_closed():

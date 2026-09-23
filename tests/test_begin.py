@@ -1006,6 +1006,27 @@ def test_begin_reconciles_completed_parented_item_and_records_marker(
     ]
 
 
+def test_begin_preserves_parentless_project_reconciliation_and_marker(
+    monkeypatch, capsys
+):
+    items = _completed_project(206, parent=None)
+
+    result, calls, _graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert items[0].parent is None
+    assert result["auto_closed"] == [items[0].ref]
+    assert items[0].state == "CLOSED"
+    assert items[0].status == "Done"
+    comments = [
+        call[-1] for call in calls
+        if call[:3] == ["gh", "issue", "comment"]
+    ]
+    assert len(comments) == 1
+    assert comments[0].startswith(funnel.CLOSED_ITSELF_PREFIX)
+
+
 def test_begin_leaves_a_parented_leaf_ticket_for_finish_ticket(
     monkeypatch, capsys
 ):

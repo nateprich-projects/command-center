@@ -14,7 +14,7 @@ import metrics  # noqa: E402
 
 
 FIXTURES = ROOT / "tests" / "fixtures"
-NOW = datetime(2026, 9, 23, 4, 30, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 23, 5, 30, tzinfo=timezone.utc)
 
 
 def _json(name):
@@ -67,6 +67,7 @@ def test_derive_row_covers_plan_metrics_and_preserves_rate_pairs():
     assert row["metrics"]["A"]["A3"]["numerator"] == 3
     assert row["metrics"]["A"]["A3"]["denominator"] == 4
     assert row["metrics"]["A"]["A4"]["new_projects_started"]["value"] == 1
+    assert row["metrics"]["A"]["A6"]["reopened_tickets"]["value"] == 0
     assert row["metrics"]["B"]["B1"]["numerator"] == 1
     assert row["metrics"]["B"]["B1"]["denominator"] == 1
     assert row["metrics"]["B"]["B2"]["numerator"] == 2
@@ -93,6 +94,7 @@ def test_derive_row_covers_plan_metrics_and_preserves_rate_pairs():
     assert row["metrics"]["D"]["D5"]["graphql_points_per_run"]["value"]["codex"]["graphql_points"]["value"] == 5
     assert row["metrics"]["D"]["D6"]["held_hours_by_agent_and_reason"]["muse"]["over_pace"]["value"] == 1200 / 3600.0
     assert row["metrics"]["D"]["D5"]["points_per_brief"]["value"] == 21
+    assert row["metrics"]["D"]["D5"]["gh_calls_per_brief"]["value"] == 8
     gate_dwell = row["metrics"]["E"]["E1"]["gate_dwell"]["value"]
     assert gate_dwell["Shaped"]["sum"] == 259200
     assert gate_dwell["Shaped"]["count"] == 1
@@ -179,7 +181,7 @@ def test_derive_command_accepts_committed_snapshot_and_ledgers(capsys):
         "--usage", str(FIXTURES / "metrics_usage.json"),
         "--commits", str(FIXTURES / "metrics_commits.json"),
         "--line-count", "1234",
-        "--now", "2026-09-23T04:30:00Z",
+        "--now", "2026-09-23T05:30:00Z",
         "--dry-run",
     ])
 
@@ -187,6 +189,63 @@ def test_derive_command_accepts_committed_snapshot_and_ledgers(capsys):
     assert result == 0
     assert output["hour"] == "2026-09-23T04:00:00Z"
     assert output["metrics"]["C"]["C1"]["value"]["by_agent"]["codex"]["done"] == 1
+
+
+def test_stale_outcomes_leave_hourly_counts_as_gaps():
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    outcomes[0]["derived_at"] = "2026-09-23T04:59:59Z"
+
+    row = metrics.derive_row(
+        snapshot, ledgers, usage, outcomes, NOW, commits, lines
+    )
+
+    metrics_by_group = row["metrics"]
+    assert metrics_by_group["A"]["A1"]["value"] is None
+    assert metrics_by_group["A"]["A1"]["gap"]
+    assert metrics_by_group["A"]["A6"]["reopened_tickets"]["value"] is None
+    assert metrics_by_group["A"]["A6"]["reopened_tickets"]["gap"]
+    assert metrics_by_group["B"]["B1"]["numerator"] is None
+    assert metrics_by_group["B"]["B1"]["denominator"] is None
+    assert metrics_by_group["B"]["B1"]["gap"]
+    assert metrics_by_group["C"]["C6"]["value"] is None
+    assert metrics_by_group["C"]["C6"]["gap"]
+
+
+def test_old_snapshot_leaves_in_hour_counts_as_gaps():
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    snapshot["generated_at"] = "2026-09-23T04:59:59Z"
+    snapshot["brief"]["generated_at"] = "2026-09-23T04:59:59Z"
+    snapshot["brief"]["unattended_approvals"] = [{"at": "2026-09-23T04:20:00Z"}]
+    snapshot["brief"]["unattended_merges"] = [{"merged_at": "2026-09-23T04:30:00Z"}]
+
+    row = metrics.derive_row(
+        snapshot, ledgers, usage, outcomes, NOW, commits, lines
+    )
+
+    new_starts = row["metrics"]["A"]["A4"]["new_projects_started"]
+    approvals = row["metrics"]["E"]["E3"]["approvals_this_hour"]
+    merges = row["metrics"]["E"]["E3"]["merges_this_hour"]
+    assert new_starts["value"] is None and new_starts["gap"]
+    assert approvals["value"] is None and approvals["gap"]
+    assert merges["value"] is None and merges["gap"]
+
+
+def test_fixture_inputs_imply_dry_run(capsys, monkeypatch):
+    monkeypatch.setattr(
+        metrics, "append_remote",
+        lambda _row: pytest.fail("fixture mode must not append"),
+    )
+
+    result = metrics.main([
+        "derive",
+        "--snapshot", str(FIXTURES / "metrics_snapshot.json"),
+        "--outcomes", str(FIXTURES / "metrics_outcomes.jsonl"),
+        "--now", "2026-09-23T05:30:00Z",
+    ])
+
+    output = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert output["hour"] == "2026-09-23T04:00:00Z"
 
 
 def test_append_is_idempotent_and_jsonl_round_trips():

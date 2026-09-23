@@ -1,7 +1,7 @@
 {
-  "generated_at": "2026-09-23T04:25:00Z",
+  "generated_at": "2026-09-23T05:25:00Z",
   "brief": {
-    "generated_at": "2026-09-23T04:25:00Z",
+    "generated_at": "2026-09-23T05:25:00Z",
     "total_needing_nate": 1,
     "counts_by_gate": {"Ready": 1},
     "maintenance_load": {
@@ -43,7 +43,11 @@
       {"repo": "owner/infra", "sha": "a1b2c3d", "verdict": "infra"},
       {"repo": "owner/product", "sha": "d4e5f6a", "verdict": "real"}
     ],
-    "timings": {"project_load": 12.5},
+    "timings": {
+      "project_load": 12.5,
+      "api_cost.graphql_points": 21,
+      "api_cost.gh_calls": 8
+    },
     "degraded": [],
     "stranded": [],
     "status_state_mismatches": [],
@@ -51,8 +55,7 @@
     "human_steps": [],
     "blocked_human_steps": [],
     "unattended_approvals": [],
-    "unattended_merges": [],
-    "api_cost": {"graphql_points": 21, "gh_calls": 8}
+    "unattended_merges": []
   },
   "board": {
     "columns": [

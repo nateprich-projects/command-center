@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Derive and append one hourly execution-metrics row.
+"""Derive and append one completed-hour execution-metrics row.
 
 ``metrics.jsonl`` is an append-only projection on the heartbeat branch.  Rows
 keep source facts (and numerator/denominator pairs for rates) so the later
 series reader can roll up days without averaging rounded daily percentages.
 Missing evidence stays ``null`` with a source and reason; an empty observation
 is represented by a real zero only when the source was readable.
+
+Each row has ``schema_version``, the start of its completed UTC hour, the time
+it was derived, and metric groups ``A`` through ``F`` containing the plan's
+stable ``A1``–``F3`` keys. Every leaf names its source; rates retain their raw
+numerator and denominator. Outcome and brief inputs must be fresh through the
+hour's end before in-hour counts can be recorded.
 """
 
 from __future__ import annotations
@@ -186,9 +192,9 @@ def _section(
 
 def _interval(now: datetime) -> Tuple[datetime, datetime, str]:
     current = now.astimezone(timezone.utc)
-    start_epoch = int(current.timestamp()) // HOUR_SECONDS * HOUR_SECONDS
-    start = datetime.fromtimestamp(start_epoch, tz=timezone.utc)
-    end = start + timedelta(hours=1)
+    end_epoch = int(current.timestamp()) // HOUR_SECONDS * HOUR_SECONDS
+    end = datetime.fromtimestamp(end_epoch, tz=timezone.utc)
+    start = end - timedelta(hours=1)
     return start, end, _iso(start)
 
 
@@ -275,6 +281,27 @@ def _outcome_prs(
         if unknown_review_branch else None
     )
     return found, merged_gap, review_gap
+
+
+def _outcomes_freshness_gap(
+    records: Optional[Sequence[Mapping[str, object]]],
+    hour_end: datetime,
+) -> Optional[str]:
+    """Fail closed unless outcomes were derived after the measured hour."""
+    if not records:
+        return "outcomes.jsonl is unavailable or empty"
+    derived_at = [
+        parsed
+        for row in records
+        if isinstance(row, Mapping)
+        for parsed in [_timestamp(row.get("derived_at"))]
+        if parsed is not None
+    ]
+    if not derived_at:
+        return "outcomes.jsonl has no parseable derived_at timestamp"
+    if max(derived_at) < hour_end:
+        return "outcomes.jsonl is stale; newest derived_at precedes this hour's end"
+    return None
 
 
 def _finish_rows(
@@ -563,6 +590,12 @@ def derive_row(
         wrapper.get("generated_at") or brief.get("generated_at")
     )
     captured_at = _iso(snapshot_at) if snapshot_at is not None else None
+    snapshot_gap = (
+        None
+        if snapshot_at is not None and snapshot_at >= end
+        else "brief snapshot does not cover the complete UTC hour"
+    )
+    outcomes_gap = _outcomes_freshness_gap(outcome_records, end)
     outcomes_prs, merged_pr_gap, review_pr_gap = _outcome_prs(
         outcome_records, start, end
     )
@@ -575,9 +608,11 @@ def derive_row(
     metrics: Dict[str, Dict] = {key: {} for key in "ABCDEF"}
 
     # A — Output
-    if outcomes_prs is None or merged_pr_gap:
+    if outcomes_gap or outcomes_prs is None or merged_pr_gap:
         metrics["A"]["A1"] = _fact(
-            None, "outcomes.jsonl.prs", merged_pr_gap or "outcome records unavailable"
+            None,
+            "outcomes.jsonl.prs",
+            outcomes_gap or merged_pr_gap or "outcome records unavailable",
         )
     else:
         by_repo: Dict[str, int] = {}
@@ -609,11 +644,12 @@ def derive_row(
     )
     metrics["A"]["A4"] = {
         "new_projects_started": _count_timestamps(
-            maintenance.get("new_started_at") if maintenance else None,
+            maintenance.get("new_started_at")
+            if maintenance and snapshot_gap is None else None,
             start,
             end,
             "brief.maintenance_load.new_started_at",
-            maintenance_gap or "new work start timestamps are unavailable",
+            snapshot_gap or maintenance_gap or "new work start timestamps are unavailable",
         ),
         "days_since_last_new_started": _count(
             maintenance.get("days_since_anything_new_started") if maintenance else None,
@@ -651,15 +687,15 @@ def derive_row(
             "member-repository commit activity is unavailable",
         ),
         "reopened_tickets": _count(
-            len(reopens) if outcome_records else None,
+            len(reopens) if outcomes_gap is None else None,
             "outcomes.jsonl.reopened_at",
-            "outcomes.jsonl is unavailable",
+            outcomes_gap or "outcomes.jsonl is unavailable",
         ),
     }
 
     # B — Quality
     first_approvals = first_reviewed = 0
-    first_review_problem = review_pr_gap
+    first_review_problem = outcomes_gap or review_pr_gap
     for row in outcomes_prs or []:
         if not row["in_hour"]["first_reviewed_at"]:
             continue
@@ -834,6 +870,8 @@ def derive_row(
         }
     if heartbeat_gap:
         latency, latency_gap = None, heartbeat_gap
+    elif outcomes_gap:
+        latency, latency_gap = None, outcomes_gap
     else:
         latency, latency_gap = _latency_sums(rows_by_agent, outcome_records, start, end)
     metrics["C"]["C6"] = _fact(
@@ -1040,6 +1078,7 @@ def derive_row(
             "heartbeat.finish.input_usage.total_input_tokens/fresh_input_tokens",
             "one or more run input-usage readings are unavailable",
         )
+    brief_timings = brief.get("timings")
     metrics["D"]["D5"] = {
         "graphql_points_per_run": {
             "value": api_by_agent if rows_by_agent is not None else None,
@@ -1047,15 +1086,15 @@ def derive_row(
             **({"gap": heartbeat_gap} if heartbeat_gap else {}),
         },
         "points_per_brief": _count(
-            (brief.get("api_cost") or {}).get("graphql_points")
-            if isinstance(brief.get("api_cost"), Mapping) else None,
-            "brief.api_cost.graphql_points",
+            brief_timings.get("api_cost.graphql_points")
+            if isinstance(brief_timings, Mapping) else None,
+            "brief.timings.api_cost.graphql_points",
             "the brief did not record a complete GraphQL point total",
         ),
         "gh_calls_per_brief": _count(
-            (brief.get("api_cost") or {}).get("gh_calls")
-            if isinstance(brief.get("api_cost"), Mapping) else None,
-            "brief.api_cost.gh_calls",
+            brief_timings.get("api_cost.gh_calls")
+            if isinstance(brief_timings, Mapping) else None,
+            "brief.timings.api_cost.gh_calls",
             "the brief did not record a gh call total",
         ),
         "api_reserve_skips": _count(
@@ -1167,15 +1206,15 @@ def derive_row(
     metrics["E"]["E3"] = {
         "approvals_this_hour": _count(
             _count_in_hour(approvals, start, end, ("at", "created_at", "createdAt", "approved_at"))
-            if isinstance(approvals, list) and approvals_gap is None else None,
+            if isinstance(approvals, list) and approvals_gap is None and snapshot_gap is None else None,
             "brief.unattended_approvals timestamps",
-            approvals_gap or "approval timestamps are unavailable",
+            approvals_gap or snapshot_gap or "approval timestamps are unavailable",
         ),
         "merges_this_hour": _count(
             _count_in_hour(merges, start, end, ("at", "merged_at", "mergedAt"))
-            if isinstance(merges, list) and merges_gap is None else None,
+            if isinstance(merges, list) and merges_gap is None and snapshot_gap is None else None,
             "brief.unattended_merges timestamps",
-            merges_gap or "merge timestamps are unavailable",
+            merges_gap or snapshot_gap or "merge timestamps are unavailable",
         ),
     }
     watch_actions = 0
@@ -1663,12 +1702,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     now = _parse_now(args.now) or datetime.now(timezone.utc)
     try:
         snapshot = _read_snapshot(args.snapshot)
-        if args.snapshot or args.ledger or args.outcomes or args.usage or args.commits or args.line_count is not None:
+        fixture_mode = bool(
+            args.snapshot or args.ledger or args.outcomes or args.usage
+            or args.commits or args.line_count is not None
+        )
+        if fixture_mode:
             ledgers, readings, records, activity, line_count = _load_fixture_inputs(args)
         else:
             ledgers, readings, records, activity, line_count = _live_inputs(now)
         row = derive_row(snapshot, ledgers, readings, records, now, activity, line_count)
-        if args.dry_run:
+        if args.dry_run or fixture_mode:
             print(json.dumps(row, indent=2, sort_keys=True))
             return 0
         appended = append_remote(row)

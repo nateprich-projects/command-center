@@ -3916,8 +3916,9 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
     recent = [
         i
         for i in items
-        if i.parent is None and i.closed_at
+        if i.parent is None and i.klass is not None and i.closed_at
         and i.closed_at >= cutoff
+        and i.state_reason != "NOT_PLANNED"
     ]
     # The Execution metrics plan defines upkeep as these three project
     # classes.  Keep this reporting definition separate from PREEMPTING,
@@ -10392,6 +10393,15 @@ def cmd_brief(
                 "error": "; ".join(blocked_comment_errors),
             })
 
+        api = api_cost()
+        # The rendered brief already exposes the documented timings map. Keep
+        # API counters there so the hourly metrics can read them without
+        # adding an undocumented top-level brief field.
+        for name in ("graphql_points", "gh_calls"):
+            value = api.get(name)
+            if isinstance(value, int) and not isinstance(value, bool):
+                timings["api_cost." + name] = value
+
         assembly_started = time.perf_counter()
         brief = {
             "generated_at": now.isoformat(),
@@ -10439,10 +10449,6 @@ def cmd_brief(
             "rejected_merges": rejected,
             "degraded": degraded,
             "timings": timings,
-            # The display snapshot is also the evidence source for the
-            # hourly Execution row.  Keep measured API cost beside timings;
-            # reconstructing GraphQL points from elapsed time is impossible.
-            "api_cost": api_cost(),
             "missing": missing,
         }
         timings["brief_assembly"] = round(

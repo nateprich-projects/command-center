@@ -681,9 +681,7 @@ def test_brief_does_not_fetch_comments_for_unparked_items(monkeypatch, capsys):
     assert calls == []
 
 
-def test_parked_items_stay_out_of_gate_counts_but_remain_in_maintenance_load(
-    monkeypatch, capsys
-):
+def test_parked_items_stay_out_of_gate_counts_and_maintenance_load(monkeypatch, capsys):
     items = fixture_items()
     monkeypatch.setattr(funnel, "_gh_json", lambda *args: {"comments": []})
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
@@ -695,10 +693,7 @@ def test_parked_items_stay_out_of_gate_counts_but_remain_in_maintenance_load(
     assert brief["counts_by_gate"]["Parked"] == 0
     assert brief["total_needing_nate"] == len(funnel.awaiting_decision(without_parked))
     assert all(item["ref"] != "nateprich/beta#15" for item in brief["items"])
-    assert brief["maintenance_load"] == funnel.maintenance_load(items, NOW)
-    assert brief["maintenance_load"]["closed_in_window"] == (
-        funnel.maintenance_load(without_parked, NOW)["closed_in_window"] + 1
-    )
+    assert brief["maintenance_load"] == funnel.maintenance_load(without_parked, NOW)
 
 
 def test_brief_reports_disposal_next_to_maintenance_load(monkeypatch, capsys):
@@ -1217,6 +1212,25 @@ def test_brief_emits_elapsed_seconds_for_each_section(monkeypatch, capsys):
     assert brief["timings"]["unattended_merges"] == pytest.approx(0.1)
     assert brief["timings"]["brief_assembly"] == pytest.approx(0.1)
     assert all(value >= 0 for value in brief["timings"].values())
+
+
+def test_brief_places_measured_api_cost_in_documented_timings_map(monkeypatch, capsys):
+    item = funnel.Item(
+        repo="nateprich/beta", number=94, title="API metrics project",
+        url="https://example.invalid/94", state="OPEN", status="Ready",
+        status_since=NOW,
+    )
+    monkeypatch.setattr(
+        funnel, "api_cost",
+        lambda: {"graphql_points": 23, "gh_calls": 7},
+    )
+
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["timings"]["api_cost.graphql_points"] == 23
+    assert brief["timings"]["api_cost.gh_calls"] == 7
+    assert "api_cost" not in brief
 
 
 def test_brief_timings_identify_a_slow_stage_without_changing_payload(

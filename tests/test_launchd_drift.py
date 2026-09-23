@@ -276,7 +276,7 @@ def test_the_ff_deployer_polls_every_ten_minutes_from_the_stable_checkout():
     assert plist["StartInterval"] == 600
     assert plist["ProgramArguments"][:2] == ["/bin/sh", "-c"]
     command = plist["ProgramArguments"][2]
-    assert '"$HOME/.claude/command-center/ff_deploy.py"' in command
+    assert '"$HOME/.claude/command-center-run/ff_deploy.py"' in command
     assert "/Users/" not in command
     assert "launchctl" not in command
     assert "StartCalendarInterval" not in plist

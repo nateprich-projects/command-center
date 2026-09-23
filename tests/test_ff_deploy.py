@@ -59,6 +59,10 @@ def make_runtime(tmp_path: pathlib.Path):
     git(source, "commit", "-m", "initial")
     git(source, "remote", "add", "origin", str(remote))
     git(source, "push", "-u", "origin", "main")
+    subprocess.run(
+        ["git", "--git-dir", str(remote), "symbolic-ref", "HEAD", "refs/heads/main"],
+        capture_output=True, text=True, check=True,
+    )
     checkout.parent.mkdir(parents=True)
     subprocess.run(["git", "clone", str(remote), str(checkout)],
                    capture_output=True, text=True, check=True)
@@ -180,8 +184,10 @@ def test_success_fast_forwards_swaps_after_tick_exits_and_records_verification(
     assert events.count("pgrep") == 2
     record = read_record(record_path)
     assert record["status"] == "deployed"
+    assert record["timestamp"].endswith("Z")
     assert record["checkout_head_before"] == old_head
     assert record["checkout_head_after"] == new_head
+    assert record["main_head"] == new_head
     assert record["pin_reinstall_result"]["status"] == "installed"
     assert record["verify_result"] == {"status": "passed", "returncode": 0}
 

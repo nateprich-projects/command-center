@@ -9,7 +9,7 @@
     <array>
         <string>/bin/sh</string>
         <string>-c</string>
-        <string>exec /usr/bin/env python3.12 "$HOME/.claude/command-center/ff_deploy.py"</string>
+        <string>exec /usr/bin/env python3.12 "$HOME/.claude/command-center-run/ff_deploy.py"</string>
     </array>
 
     <key>StartInterval</key>

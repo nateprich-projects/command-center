@@ -639,16 +639,25 @@ def create_subissue_with_freeze_state(monkeypatch, *, freeze_state="OPEN",
     return calls, result
 
 
-@pytest.mark.parametrize("work", [
-    "update routines/muse.md",
-    "remove PLAN_HEADING from the parser",
+@pytest.mark.parametrize(("section", "marker_kind"), [
+    ("What", "path"),
+    ("Accept", "parser"),
 ])
 def test_frozen_breakdown_ticket_is_emitted_blocked_on_794(
-        monkeypatch, work):
+        monkeypatch, section, marker_kind):
+    if marker_kind == "path":
+        marker = "routines/muse.md"
+    else:
+        _paths, parsers, _exempt = funnel._canonical_freeze_lists()
+        marker = parsers[0]
+    if section == "What":
+        body = ("Parent: #1164\n\nWhat: update {}.\n\n"
+                "Accept: the new behavior is present.").format(marker)
+    else:
+        body = ("Parent: #1164\n\nWhat: update the parser.\n\n"
+                "Accept: preserve the {} parser behavior.").format(marker)
     calls, result = create_subissue_with_freeze_state(
-        monkeypatch,
-        body=("Parent: #1164\n\nWhat: {}.\n\n"
-              "Accept: the new behavior is present.").format(work),
+        monkeypatch, body=body,
     )
 
     assert result[0] == 901
@@ -661,7 +670,7 @@ def test_frozen_breakdown_ticket_is_emitted_blocked_on_794(
     assert created[blocker_index + 1] == "794"
     body_text = created[created.index("--body") + 1]
     assert funnel.FREEZE_BLOCKER_SENTENCE in body_text
-    assert "routines/muse.md" in body_text or "PLAN_HEADING" in body_text
+    assert marker in body_text
     # The dependency note stays before the code-owned Risk line.
     assert body_text.endswith("Risk: standard")
 

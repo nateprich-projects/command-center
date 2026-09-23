@@ -137,14 +137,28 @@ wrong.
   be versioned and drift-checked, unlike zcode's prompt, which lives in an app UI where
   nothing can see it (#52).
 
-  **Muse implements both tiers since 2026-09-18** (Nate's instruction). Codex's weekly
-  usage was nearly spent and competing with his own, while Muse had ample headroom. The
-  standard tier runs as its own job, `command-center-muse-implement-standard`, every ten
-  minutes beside the escalated `command-center-muse-implement`. The Codex app automation
-  `command-center-tickets-hourly` is paused, not deleted, and Codex keeps both tiers in
-  `AGENTS_BY_ROLE`, so switching back is a status flip in the Codex app. Reversing the
-  switch also removes `codex` from `RETIRED_AGENTS` in `heartbeat.py`, so its silence
-  alarms again.
+  **Codex implements both tiers and Muse judges, since 2026-09-22** (Nate, #1315).
+  Codex works tickets from its in-app automations on GPT-6 Luna at `max`:
+  `command-center-tickets-hourly` (standard, every ten minutes) and
+  `command-center-tickets-weekday-mornings` (escalated, hourly; the keeper reads its
+  `BYHOUR=` rule as the escalated tier). The other three escalated windows are retired
+  and stay paused. Muse runs review, breakdown and shape on `muse-spark-1.3` at `max` and
+  implements nothing: `AGENTS_BY_ROLE` names Codex alone, and `begin` refuses an implement
+  caller the roster does not name. Two checks watch the app-held state:
+  - every Codex run checks its own model, effort and sandbox against `codex_run.py` and
+    stops on any difference (`config-drift`);
+  - `funnel doctor` checks the automation files themselves.
+
+  The way back is a change in the repository, not a file copy:
+  - put `muse` back on the roster;
+  - restore the two implement plists to `launchd/` and `scripts/install.sh` from git
+    history, and drop the test that pins their absence.
+
+  `scripts/muse-implement` is unchanged. The copies in `~/Library/LaunchAgents-retired/`
+  are only a local record: jobs copied back from there would not be refreshed or
+  drift-checked by the keeper. From
+  2026-09-18 to 2026-09-22 Muse implemented both tiers, because Codex's Plus week was
+  nearly spent. _(confirmed by Nate 2026-09-22)_
 
   **`--approval-mode never` is not a guard.** Measured 2026-09-07: it does **not** fail
   closed. It means *never ask*, and it auto-approved a shell command with no prompt.

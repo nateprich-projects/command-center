@@ -127,81 +127,26 @@ def test_pr_open_row_leaves_an_open_pr_unchanged():
         "pass": True, "reasons": []}
 
 
-# -- row 2: the freeze ------------------------------------------------------
+# -- the retired freeze row ----------------------------------------------------
 
-def test_freeze_rejects_a_routines_diff_under_another_parent():
-    view = pr_view(files=[{"path": "routines/muse.md"}])
-    found = packet(pr_view=view)
-    assert found["precheck"]["pass"] is False
-    # The protected row fires on the same file behind it; the freeze row
-    # leads because it runs first.
-    reason = found["precheck"]["reasons"][0]
-    assert reason.startswith("freeze:")
-    assert "routines/muse.md" in reason
-    assert "#1" in reason and "#794" in reason
-
-
-def test_freeze_passes_the_same_diff_under_794():
-    view = pr_view(files=[{"path": "routines/muse.md"}])
-    mine = ticket(body="Parent: #794.\n\nWhat: trim routines/muse.md.\n\n"
-                       "Risk: escalated",
-                  parent={"number": 794, "title": "the engine plan"})
+def test_frozen_ground_no_longer_fails_the_precheck():
+    """#794 closed, so a skills/ diff under any parent passes (#1362)."""
+    view = pr_view(files=[{"path": "skills/breakdown/SKILL.md"}])
+    mine = ticket(body="Parent: #1161.\n\nWhat: add the start-date rule to "
+                       "skills/breakdown/SKILL.md.\n\nRisk: standard",
+                  parent={"number": 1161, "title": "dated tickets"})
     assert packet(pr_view=view, ticket=mine)["precheck"] == {
         "pass": True, "reasons": []}
 
 
-def test_freeze_passes_the_same_diff_under_1044():
-    view = pr_view(files=[{"path": "routines/muse.md"}])
-    mine = ticket(body="Parent: #1044.\n\nWhat: record the live verdict in "
-                       "routines/muse.md.\n\nRisk: escalated",
-                  parent={"number": 1044, "title": "measure the cutover"})
-    assert packet(pr_view=view, ticket=mine)["precheck"] == {
-        "pass": True, "reasons": []}
-
-
-def test_freeze_rejection_names_both_exempt_parents():
-    view = pr_view(files=[{"path": "routines/muse.md"}])
-    reason = packet(pr_view=view)["precheck"]["reasons"][0]
-    assert reason.startswith("freeze:")
-    assert "#794" in reason and "#1044" in reason
-
-
-def test_freeze_rejects_a_skills_diff():
-    view = pr_view(files=[{"path": "skills/shape/SKILL.md"}])
-    reasons = packet(pr_view=view)["precheck"]["reasons"]
-    assert reasons[0].startswith("freeze:")
-    assert "skills/shape/SKILL.md" in reasons[0]
-
-
-def test_freeze_rejects_a_diff_changing_a_doomed_parser():
+def test_a_doomed_parser_name_no_longer_fails_the_precheck():
     diff = ("diff --git a/funnel.py b/funnel.py\n"
             "@@ -1 +1 @@\n"
             "-found = OLD_SEARCH(body)\n"
             "+found = PROSE_DEPENDENCY_RE.search(body)\n")
     view = pr_view(files=[{"path": "funnel.py"}])
-    reasons = packet(pr_view=view, diff=diff)["precheck"]["reasons"]
-    assert len(reasons) == 1 and reasons[0].startswith("freeze:")
-    assert "PROSE_DEPENDENCY_RE" in reasons[0]
-
-
-def test_freeze_ignores_a_parser_named_only_in_context():
-    diff = ("diff --git a/funnel.py b/funnel.py\n"
-            "@@ -1,2 +1,2 @@\n"
-            " PROSE_DEPENDENCY_RE = re.compile(\n"
-            "-old = 1\n"
-            "+new = 1\n")
-    view = pr_view(files=[{"path": "funnel.py"}])
     assert packet(pr_view=view, diff=diff)["precheck"] == {
         "pass": True, "reasons": []}
-
-
-def test_freeze_rejects_frozen_ground_with_no_ticket():
-    view = pr_view(files=[{"path": "routines/muse.md"},
-                          {"path": "funnel.py"}],
-                   headRefName="docs/drive-by")
-    reasons = packet(pr_view=view, ticket=None)["precheck"]["reasons"]
-    assert any(r.startswith("freeze:") and "no ticket" in r
-               for r in reasons)
 
 
 # -- row 3: CI ---------------------------------------------------------------
@@ -582,7 +527,7 @@ def test_reasons_come_out_in_row_order():
     reasons = packet(repo=WORKBENCH,
                      pr_view=view)["precheck"]["reasons"]
     assert [reason.split(":")[0] for reason in reasons] == [
-        "freeze", "ci", "protected", "repo-rules"]
+        "ci", "protected", "repo-rules"]
 
 
 def test_a_clean_packet_passes_with_no_reasons():
@@ -644,4 +589,4 @@ def test_cli_packet_carries_a_failing_precheck(monkeypatch, capsys):
     assert review.main(["7", "--repo", REPO]) == 0
     found = json.loads(capsys.readouterr().out)
     assert found["precheck"]["pass"] is False
-    assert found["precheck"]["reasons"][0].startswith("freeze:")
+    assert found["precheck"]["reasons"][0].startswith("protected:")

@@ -132,6 +132,13 @@ def test_a_failure_adds_to_declared_reasons_rather_than_replacing_them():
     assert reasons == ["declared: concurrency", "prior attempt failed"]
 
 
+def test_a_single_matching_sentence_returns_its_reason_and_line():
+    sentence = "Migrate the ledger schema in place."
+    assert escalation_matches("", sentence) == [
+        {"reason": "data-migration", "line": sentence},
+    ]
+
+
 def test_escalation_matches_return_the_matching_line_per_reason():
     body = (
         "Read credentials from the environment.\n"

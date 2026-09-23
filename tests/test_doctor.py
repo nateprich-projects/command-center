@@ -37,6 +37,11 @@ def stub_heartbeat_checks(monkeypatch):
             "codex empty runs", True, "ok", ""),
     )
     monkeypatch.setattr(
+        funnel, "check_codex_automations",
+        lambda root=None: funnel.Check(
+            "codex automations", True, "ok", ""),
+    )
+    monkeypatch.setattr(
         funnel, "check_repository_drift",
         lambda checkout_root=None: funnel.Check(
             "repository drift", True, "", ""),
@@ -108,7 +113,7 @@ def test_all_local_checks_pass_and_discover_every_skill(tmp_path, monkeypatch):
     assert [check.name for check in checks] == [
         "install symlinks", "checkout staleness", "repository drift", "settings.json", "process table", "gh auth", "Project fields",
         "command-center topic", "member repo owner/repo", "muse model pins", "usage cache",
-        "heartbeat branch", "codex empty runs",
+        "heartbeat branch", "codex empty runs", "codex automations",
     ]
     assert all(check.ok for check in checks)
     assert "3 links" in checks[0].found
@@ -282,7 +287,7 @@ def test_doctor_does_not_require_a_self_referential_checkout_link(tmp_path, monk
 
     checks = funnel.doctor_checks(claude_dir=claude, checkout_root=checkout)
 
-    assert len(checks) == 13
+    assert len(checks) == 14
     assert checks[0].ok
     assert checks[2].ok
 

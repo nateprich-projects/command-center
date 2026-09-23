@@ -858,7 +858,7 @@ def test_begin_reconcile_is_idempotent_when_the_pr_is_no_longer_open(
 
 
 def _completed_project(number, *, klass="Improve", children_done=2,
-                      carried_human_step=False, origin="agent"):
+                      carried_human_step=False, origin="agent", parent=None):
     repo = "nateprich/example"
     body = (
         funnel.origin_block(origin, at=NOW, run="reconcile-run", agent="codex")
@@ -873,6 +873,7 @@ def _completed_project(number, *, klass="Improve", children_done=2,
         body=body,
         status="Building",
         klass=klass,
+        parent=parent,
         item_id="project-{}".format(number),
         children_total=2,
         children_done=children_done,
@@ -978,6 +979,117 @@ def test_begin_reconciles_a_completed_upkeep_project_and_records_marker(
     }
 
 
+def test_begin_reconciles_completed_parented_item_and_records_marker(
+    monkeypatch, capsys
+):
+    items = _completed_project(205, parent="nateprich/example#204")
+
+    result, calls, _graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert result["auto_closed"] == [items[0].ref]
+    assert items[0].state == "CLOSED"
+    assert items[0].status == "Done"
+    comments = [
+        call[-1] for call in calls
+        if call[:3] == ["gh", "issue", "comment"]
+    ]
+    assert len(comments) == 1
+    assert comments[0].startswith(funnel.CLOSED_ITSELF_PREFIX)
+    payload = json.loads(
+        comments[0].split("```json\n", 1)[1].rsplit("\n```", 1)[0]
+    )
+    assert payload["tickets"] == [
+        {"ref": items[1].ref, "title": items[1].title},
+        {"ref": items[2].ref, "title": items[2].title},
+    ]
+
+
+def test_begin_preserves_parentless_project_reconciliation_and_marker(
+    monkeypatch, capsys
+):
+    items = _completed_project(206, parent=None)
+
+    result, calls, _graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert items[0].parent is None
+    assert result["auto_closed"] == [items[0].ref]
+    assert items[0].state == "CLOSED"
+    assert items[0].status == "Done"
+    comments = [
+        call[-1] for call in calls
+        if call[:3] == ["gh", "issue", "comment"]
+    ]
+    assert len(comments) == 1
+    assert comments[0].startswith(funnel.CLOSED_ITSELF_PREFIX)
+
+
+def test_begin_leaves_a_parented_leaf_ticket_for_finish_ticket(
+    monkeypatch, capsys
+):
+    leaf = funnel.Item(
+        repo="nateprich/example",
+        number=230,
+        title="Leaf ticket",
+        url="https://github.com/nateprich/example/issues/230",
+        state="OPEN",
+        body=funnel.origin_block(
+            "agent", at=NOW, run="reconcile-run", agent="codex"
+        ),
+        status="Building",
+        klass="Broken",
+        parent="nateprich/example#229",
+        item_id="project-230",
+        children_total=0,
+        children_done=0,
+    )
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, [leaf]
+    )
+
+    assert "auto_closed" not in result
+    assert leaf.state == "OPEN"
+    assert leaf.status == "Building"
+    assert not [
+        call for call in calls
+        if call[:3] in (["gh", "issue", "close"], ["gh", "issue", "comment"])
+    ]
+    assert not [
+        call for call in graphql_calls
+        if call[1].get("item") == "project-230"
+    ]
+
+
+@pytest.mark.parametrize("klass", ["New", "Replace"])
+def test_begin_leaves_a_nonqualifying_parented_item_at_building_gate(
+    monkeypatch, capsys, klass
+):
+    items = _completed_project(
+        240, klass=klass, parent="nateprich/example#239"
+    )
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert funnel.gate_question(items[0]) == "Accept it?"
+    assert "auto_closed" not in result
+    assert items[0].state == "OPEN"
+    assert items[0].status == "Building"
+    assert not [
+        call for call in calls
+        if call[:3] in (["gh", "issue", "close"], ["gh", "issue", "comment"])
+    ]
+    assert not [
+        call for call in graphql_calls
+        if call[1].get("item") == "project-240"
+    ]
+
+
 @pytest.mark.parametrize(
     "klass,carried_human_step,children_done,origin",
     [
@@ -1014,14 +1126,18 @@ def test_begin_leaves_non_reconcilable_projects_untouched(
     ]
 
 
-def test_begin_reconciles_broken_project_with_human_step_and_nate_origin(
-    monkeypatch, capsys
+@pytest.mark.parametrize("klass", ["Broken", "Investigate", "Maintenance"])
+@pytest.mark.parametrize("origin", ["agent", "nate-direct", "nate-relayed"])
+@pytest.mark.parametrize("carried_human_step", [False, True])
+def test_begin_reconciles_parented_upkeep_items_regardless_of_origin_or_human_step(
+    monkeypatch, capsys, klass, origin, carried_human_step
 ):
     items = _completed_project(
         211,
-        klass="Broken",
-        carried_human_step=True,
-        origin="nate-relayed",
+        klass=klass,
+        carried_human_step=carried_human_step,
+        origin=origin,
+        parent="nateprich/example#210",
     )
 
     result, calls, _graphql_calls = _begin_with_reconcile_wired(
@@ -1030,10 +1146,54 @@ def test_begin_reconciles_broken_project_with_human_step_and_nate_origin(
 
     assert result["auto_closed"] == [items[0].ref]
     assert items[0].state == "CLOSED"
+    assert items[0].status == "Done"
     assert [
-        "gh", "issue", "close", "211", "--repo", "nateprich/example",
+        "gh", "issue", "close", str(items[0].number), "--repo",
+        "nateprich/example",
         "--reason", "completed",
     ] in calls
+    comments = [
+        call[-1] for call in calls
+        if call[:3] == ["gh", "issue", "comment"]
+    ]
+    assert len(comments) == 1
+    assert comments[0].startswith(funnel.CLOSED_ITSELF_PREFIX)
+
+
+@pytest.mark.parametrize(
+    "origin", ["nate-direct", "nate-relayed", None, "malformed"]
+)
+def test_begin_keeps_parented_improve_items_without_agent_origin_at_accept_gate(
+    monkeypatch, capsys, origin
+):
+    items = _completed_project(
+        212,
+        klass="Improve",
+        origin=None if origin == "malformed" else origin,
+        parent="nateprich/example#210",
+    )
+    if origin == "malformed":
+        items[0].body = (
+            funnel.ORIGIN_MARKER + "\n\n```json\nnot json\n```"
+        )
+
+    assert funnel.gate_question(items[0]) == "Accept it?"
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert "auto_closed" not in result
+    assert items[0].state == "OPEN"
+    assert items[0].status == "Building"
+    assert not [
+        call for call in calls
+        if call[:3] in (["gh", "issue", "close"], ["gh", "issue", "comment"])
+    ]
+    assert not [
+        call for call in graphql_calls
+        if call[1].get("item") == "project-212"
+    ]
 
 
 def test_begin_reconcile_is_idempotent(monkeypatch, capsys):

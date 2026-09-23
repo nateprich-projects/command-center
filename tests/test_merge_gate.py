@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -293,12 +293,19 @@ def _gate_rejection_wired(monkeypatch, pr_json, comments):
     return posted
 
 
-def test_conflicting_approved_head_writes_one_gate_rejection(monkeypatch):
+def test_conflicting_approved_head_releases_claim_for_rebase(monkeypatch):
+    rows = items()
+    rows[1].item_id = "ticket-project-item"
+    rows[1].in_motion_since = NOW
+    pr_json = pr(mergeable="CONFLICTING")
     posted = _gate_rejection_wired(
-        monkeypatch, pr(mergeable="CONFLICTING"), [verdict()]
+        monkeypatch, pr_json, [verdict()]
     )
 
-    assert funnel.cmd_merge(items(), NOW, REPO, 5, False) == 1
+    assert funnel.cmd_merge(rows, NOW, REPO, 5, False) == 1
+    assert pr_json["state"] == "OPEN"
+    assert rows[1].in_motion_since is None
+    assert funnel.cmd_claim(rows, NOW, REPO + "#9") == 0
     assert len(posted) == 1
     rejection = funnel.parse_verdict(posted[0])
     assert rejection == {
@@ -314,13 +321,33 @@ def test_conflicting_approved_head_writes_one_gate_rejection(monkeypatch):
     assert provenance["voice"] == "agent"
     assert provenance["agent"] == funnel.MERGE_GATE_AGENT
 
-    blocked = funnel.awaiting_review(items())
+    blocked = funnel.awaiting_review(rows)
     assert [item.ref for item in funnel.startable(
-        items(), awaiting_review=blocked
+        rows, awaiting_review=blocked
     )] == [REPO + "#9"]
 
-    assert funnel.cmd_merge(items(), NOW, REPO, 5, False) == 1
+    assert funnel.cmd_merge(rows, NOW, REPO, 5, False) == 1
     assert len(posted) == 1
+
+
+def test_existing_conflict_rejection_preserves_a_new_rebase_claim(monkeypatch):
+    blocker = "branch 'ticket/9'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    prior = verdict(
+        verdict="rejected",
+        ci="unknown",
+        blocking=[blocker],
+        reviewed_at=(NOW - timedelta(seconds=1)).isoformat(),
+    )
+    rows = items()
+    rows[1].item_id = "ticket-project-item"
+    rows[1].in_motion_since = NOW
+    posted = _gate_rejection_wired(
+        monkeypatch, pr(mergeable="CONFLICTING"), [prior]
+    )
+
+    assert funnel.cmd_merge(rows, NOW, REPO, 5, False) == 1
+    assert posted == []
+    assert rows[1].in_motion_since == NOW
 
 
 def test_ci_unknown_conflict_rejection_is_repaired(monkeypatch):
@@ -343,6 +370,9 @@ def test_ci_unknown_conflict_rejection_is_repaired(monkeypatch):
 
 
 def test_unknown_ci_review_on_conflict_writes_canonical_blocker(monkeypatch):
+    rows = items()
+    rows[1].item_id = "ticket-project-item"
+    rows[1].in_motion_since = NOW
     posted = _gate_rejection_wired(
         monkeypatch,
         pr(mergeable="CONFLICTING", statusCheckRollup=[]),
@@ -351,8 +381,10 @@ def test_unknown_ci_review_on_conflict_writes_canonical_blocker(monkeypatch):
     assert funnel.cmd_review(
         REPO, 5, "rejected", "unknown",
         ["ci: CI not green (state unknown)"], None,
+        items=rows,
     ) == 0
 
+    assert rows[1].in_motion_since is None
     assert len(posted) == 1
     rejection = funnel.parse_verdict(posted[0])
     assert rejection["blocking"] == [

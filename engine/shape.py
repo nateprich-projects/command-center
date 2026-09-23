@@ -19,6 +19,7 @@ Two entry points share this module: ``shape-packet`` is read-only, while
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import pathlib
@@ -103,6 +104,44 @@ ALL_CLEAR = {
     "Preference": "nothing outstanding. "
                   "No user-facing choice remains.",
 }
+
+#: The runner's conditional review policy for the false-hold family in
+#: #1359. It rides in the packet so the shaping model sees the rule at
+#: the point where it chooses signals; ``review_agent_broken_output``
+#: enforces the narrow false-positive cases before they are recorded.
+AGENT_BROKEN_OUTPUT_REVIEW = {
+    "scope": (
+        "For agent-origin Broken work, ask Scope and priority only for a "
+        "concrete unresolved stakeholder tradeoff. Do not ask generic "
+        "permission to implement the repair."),
+    "escalated_risk": (
+        "Declare risk only from actions the proposed plan actually takes. "
+        "A hypothetical implementation bug or its possible consequences "
+        "are test concerns, not plan risks."),
+    "preserve": (
+        "Keep genuine Exposure and Gates questions, concrete Scope "
+        "tradeoffs, and risks from proposed escalated actions."),
+}
+
+_GENERIC_FIX_PERMISSION_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE)
+                                        for pattern in (
+    r"\Ashould\s+(?:we|i)\s+(?:build|fix|repair|implement|ship|work\s+on)"
+    r"\s+(?:this|it|the\s+(?:fix|repair|work|project|idea))"
+    r"\s*[?.!]*\Z",
+    r"\Ashould\s+(?:this|the)\s+"
+    r"(?:(?:agent[- ]origin|broken)\s+){0,2}"
+    r"(?:fix|repair|issue|idea|project|plan)\s+be\s+"
+    r"(?:built|fixed|repaired|implemented|shipped)\s*[?.!]*\Z",
+))
+
+_HYPOTHETICAL_IMPLEMENTATION_RISK = re.compile(
+    r"\b(?:hypothetical(?:ly)?\s+(?:implementation[- ]?)?bug|"
+    r"(?:a|the|any)\s+bug\s+in\s+(?:the\s+)?(?:implementation|code|"
+    r"fix|repair|path)|buggy\s+implementation|misimplement\w*|"
+    r"implementation[- ](?:bug|error|failure|defect)|"
+    r"arbitrary\s+implementation[- ]bug)\b",
+    re.IGNORECASE,
+)
 
 
 def _require_text(value: object, where: str) -> str:
@@ -354,6 +393,46 @@ def needs_nate_open(answer: Dict) -> bool:
     return bool(open_need_categories(answer))
 
 
+def review_agent_broken_output(
+        answer: Dict, *, klass: Optional[str],
+        origin_voice: Optional[str]) -> Tuple[Dict, List[str]]:
+    """Review the two false-hold signals specific to agent Broken plans.
+
+    A generic yes/no permission question does not become a stakeholder
+    tradeoff by being placed under Scope. Likewise, a failure mode that
+    exists only if an implementation is buggy is not an action in the
+    proposed plan. Drop those signals before rendering or deciding, while
+    preserving concrete scope questions, the other Needs Nate categories,
+    and risks grounded in proposed actions. This is a shaping-output review;
+    the shared self-approval predicate remains the sole gate.
+    """
+    reviewed = copy.deepcopy(answer)
+    rejected = []
+    if klass != "Broken" or origin_voice != "agent":
+        return reviewed, rejected
+
+    scope_questions = reviewed["needs_nate"]["scope"]
+    if scope_questions is not None:
+        kept = [question for question in scope_questions
+                if not any(pattern.fullmatch(question)
+                           for pattern in _GENERIC_FIX_PERMISSION_PATTERNS)]
+        if len(kept) != len(scope_questions):
+            reviewed["needs_nate"]["scope"] = kept or None
+            rejected.append(
+                "generic Scope permission to implement an agent-origin "
+                "Broken repair")
+
+    risks = reviewed["escalated_risk"]
+    kept_risks = [entry for entry in risks
+                  if not _HYPOTHETICAL_IMPLEMENTATION_RISK.search(
+                      entry["why"])]
+    if len(kept_risks) != len(risks):
+        reviewed["escalated_risk"] = kept_risks
+        rejected.append(
+            "escalated risk based only on a hypothetical implementation bug")
+    return reviewed, rejected
+
+
 def decide(answer: Dict, *,
            klass: Optional[str],
            origin_voice: Optional[str],
@@ -466,6 +545,26 @@ def preview_decision(items: list, item, answer: Dict) -> Tuple[str, str]:
     )
 
 
+def review_shape_output_for_item(items: list, item, answer: Dict
+                                 ) -> Tuple[Dict, List[str]]:
+    """Apply the output review using the same effective class as shaping."""
+    origin = funnel.parse_origin(item.body or "")
+    origin_voice = origin["voice"] if origin is not None else None
+    by_ref = {candidate.ref: candidate for candidate in items}
+    effective_klass = funnel.effective_class(item, by_ref)
+    if item.klass not in funnel.LADDER and origin_voice == "agent":
+        effective_klass = answer["proposed_class"]
+    return review_agent_broken_output(
+        answer, klass=effective_klass, origin_voice=origin_voice)
+
+
+def report_output_review(rejected: Sequence[str]) -> None:
+    """Make any runner-side signal corrections visible to the caller."""
+    if rejected:
+        print("shape-apply output review rejected: {}".format(
+            "; ".join(rejected)), file=sys.stderr)
+
+
 def issue_url(ref: str) -> str:
     """Render an owner/repo#n ref as the issue URL `gh` takes for edges."""
     match = REF_RE.match(ref.strip())
@@ -573,7 +672,7 @@ def build_packet(*, repo: str, idea: Dict,
     the idea, its origin, the repo's plan.md and AGENTS.md, and the
     sibling plans the model cites as precedent.
     """
-    return {
+    packet = {
         "repo": repo,
         "idea": dict(idea),
         "origin": {
@@ -587,6 +686,9 @@ def build_packet(*, repo: str, idea: Dict,
         "sibling_plans": [dict(row) for row in siblings],
         "collected_at": collected_at,
     }
+    if origin_voice == "agent" and idea.get("klass") == "Broken":
+        packet["output_review"] = dict(AGENT_BROKEN_OUTPUT_REVIEW)
+    return packet
 
 
 def collect(repo: Optional[str], idea_number: int, *,
@@ -659,6 +761,9 @@ def apply_shape(items: list, now: datetime, ref: str,
     """
     item = funnel.find(items, ref)
     answer = validate_answer(answer_data)
+    answer, rejected_signals = review_shape_output_for_item(
+        items, item, answer)
+    report_output_review(rejected_signals)
 
     original_body = item.body or ""
     origin = funnel.parse_origin(original_body)
@@ -832,6 +937,9 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
         ref = "{}#{}".format(resolved, args.idea)
         if args.validate_only:
             item = funnel.find(items, ref)
+            answer, rejected_signals = review_shape_output_for_item(
+                items, item, answer)
+            report_output_review(rejected_signals)
             status, reason = preview_decision(items, item, answer)
             print(json.dumps({"status": status, "reason": reason,
                               "answer": answer},

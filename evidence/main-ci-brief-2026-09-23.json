@@ -1,0 +1,19 @@
+{
+  "command": "python3 funnel.py brief",
+  "captured_at": "2026-09-23T16:26:45.936291+00:00",
+  "stdout_excerpt": {
+    "main_ci": [],
+    "missing": [],
+    "degraded": [
+      {
+        "section": "closed_with_access_vocabulary",
+        "elapsed_seconds": 0.297796,
+        "budget_seconds": 0.25,
+        "reason": "section exceeded its time budget"
+      }
+    ],
+    "timings": {
+      "main_ci": 6.583693
+    }
+  }
+}

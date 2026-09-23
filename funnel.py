@@ -585,8 +585,16 @@ BRIEF_SECTION_BUDGETS = {
     # Pure over the items already loaded: no read of its own to time out.
     "status_state_mismatches": 0.25,
     # One REST read per member repo for main's head, plus a bounded follow-up
-    # only where that head's run failed. Sized like the other small live reads.
-    "main_ci": 3.0,
+    # only where that head's run failed. Six direct main_ci_json passes across
+    # 2026-09-22/23: 5.92, 6.30, 7.11, 7.5276, 6.6979, 7.7154 s
+    # (5.92–7.7154 s; 1.7954 s spread). Brief runs
+    # at 2026-09-22 14:27Z and 2026-09-23 13:37Z timed out at 3.0177 and
+    # 3.0112 s. 10 s leaves 2.2846 s (29.6%) above the measured direct tail;
+    # the 2026-09-23 13:42Z brief completed in 6.9585 s and returned []. A
+    # captured 2026-09-23 16:26Z brief stdout excerpt is in
+    # evidence/main-ci-brief-2026-09-23.json: main_ci was [], missing was [],
+    # and the only degraded section was closed_with_access_vocabulary.
+    "main_ci": 10.0,
     # One `gh issue list` per member repo. Sized like the other live scans.
     "member_issues_without_project_items": 8.0,
     "outcome_signals": 3.0,
@@ -12303,12 +12311,11 @@ def review_queue(
     matched to the work the same way an engine is: the expensive judgement is
     spent where the ticket says the stakes are, and nowhere else.
 
-    A PR whose checks are still running is not offered unless GitHub has
-    already established a branch conflict: that is a deterministic blocker,
-    and its reason takes precedence over an empty or pending CI rollup. A
-    recorded verdict covers a head for good unless it is the CI-unknown
-    rejection a conflict can replace. Red CI and a normal empty rollup remain
-    visible to the review pre-check.
+    A PR whose checks are still running is not offered. A ticket branch that
+    GitHub reports as conflicting is rejected mechanically at its current
+    head and never offered for model review; repeated queue reads leave that
+    canonical rejection in place until the engineer pushes a new head. Red CI
+    and a normal empty rollup remain visible to the review pre-check.
     """
     if pr_facts is None:
         pr_facts = ticket_pr_facts(items)
@@ -12324,9 +12331,26 @@ def review_queue(
             if not head.startswith("ticket/"):
                 continue
             conflict = _conflicting_branch_blocker(row)
-            if conflict is None and checks_still_running(
-                row.get("statusCheckRollup")
-            ):
+            if conflict is not None:
+                # Conflict is a complete, deterministic rejection. Record it
+                # against this snapshot's head before it can reach a model
+                # reviewer. The gate helper makes repeat ticks idempotent and
+                # replaces any less-specific verdict on the same head.
+                head_sha = row.get("headRefOid")
+                number = row.get("number")
+                if head_sha and number is not None:
+                    _record_unmergeable_rejection(
+                        repo,
+                        number,
+                        pr_fact=row,
+                        candidate_verdict={
+                            "verdict": "rejected",
+                            "ci": "unknown",
+                            "head_sha": head_sha,
+                        },
+                    )
+                continue
+            if checks_still_running(row.get("statusCheckRollup")):
                 # The checks have not reported yet, so the only answer a
                 # reviewer could record is "CI not green (state unknown)" —
                 # and that rejection then covers this head, locking the PR
@@ -12335,16 +12359,7 @@ def review_queue(
                 continue
             verdict = _row_verdict(row, repo)
             if verdict_covers_head(verdict, row.get("headRefOid")):
-                # A conflicting approved head is handled by the merge gate;
-                # an already-canonical rejection is complete. Only the old
-                # CI-unknown rejection needs this deterministic repair pass.
-                if conflict is None or not (
-                    verdict
-                    and verdict.get("verdict") == "rejected"
-                    and verdict.get("ci") == "unknown"
-                    and conflict not in (verdict.get("blocking") or [])
-                ):
-                    continue
+                continue  # this exact diff has already been judged
             needed = required_tier(
                 ticket.title, _loaded_item_body(ticket)
             )
@@ -12355,8 +12370,6 @@ def review_queue(
                          "tier": needed, "url": ticket.url,
                          "title": ticket.title,
                          "opened": row.get("createdAt") or ""}
-            if conflict is not None:
-                candidate["blocking"] = [conflict]
             found.append(candidate)
     # Oldest first. `gh pr list` returns newest first, and handing a reviewer
     # `queue[0]` from that order starved the oldest PR indefinitely: on
@@ -13798,7 +13811,8 @@ def cmd_next_review(
 
 def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
                blocking: List[str], note: Optional[str],
-               run: Optional[str] = None, agent: Optional[str] = None) -> int:
+               run: Optional[str] = None, agent: Optional[str] = None,
+               items: Optional[Sequence[Item]] = None) -> int:
     """Record a structured review verdict on a PR.
 
     The reviewer's judgement is the part only a model can do. Writing it as
@@ -13831,6 +13845,7 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
                     "ci": ci,
                     "head_sha": sha,
                 },
+                items=items,
             )
             return 0
 
@@ -13895,14 +13910,16 @@ def _is_conflicting_branch_blocker(reason: str) -> bool:
 def _record_unmergeable_rejection(
     repo: str, pr: int, pr_fact: Optional[Mapping[str, object]] = None,
     *, candidate_verdict: Optional[Mapping[str, object]] = None,
+    items: Optional[Sequence[Item]] = None,
 ) -> None:
     """Record a deterministic rejection for a conflicting current head.
 
-    The gate replaces either an approval it can no longer merge or a CI-unknown
-    rejection that mistook a conflict for absent CI. The optional incoming
-    verdict lets ``cmd_review`` take this path before it writes a less-specific
-    rejection. In every case the current head and conflict state come from the
-    same PR fact used to write the canonical blocker.
+    The merge gate and review queue use this path when the conflict itself is
+    the complete mechanical answer, replacing a less-specific verdict or
+    recording one before review. The optional incoming verdict lets
+    ``cmd_review`` supply the current head before it writes a weaker rejection.
+    In every case the current head and conflict state come from the same PR
+    fact used to write the canonical blocker.
     """
     data = dict(pr_fact) if isinstance(pr_fact, Mapping) else None
     if data is None:
@@ -13941,6 +13958,36 @@ def _record_unmergeable_rejection(
             agent=MERGE_GATE_AGENT,
         )
 
+    # Hand the ticket back when this head is rejected for its conflict. If a
+    # canonical rejection was written by an earlier run, clear only the claim
+    # that predates it; a newer claim belongs to the engineer rebasing the PR.
+    if items is not None:
+        ref = ticket_ref_from_branch(repo, str(data.get("headRefName") or ""))
+        ticket = next((item for item in items if item.ref == ref), None)
+        if ticket is not None and ticket.in_motion_since is not None:
+            prior_rejection = None
+            if already_canonical:
+                stamp = current.get("reviewed_at") if isinstance(current, dict) else None
+                if isinstance(stamp, str):
+                    try:
+                        prior_rejection = datetime.fromisoformat(
+                            stamp.replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        pass
+                    if prior_rejection is not None and prior_rejection.tzinfo is None:
+                        prior_rejection = prior_rejection.replace(tzinfo=timezone.utc)
+                # Lock timestamps have one-second precision. Treat a claim in
+                # the same second as the rejection as newer, since its order is
+                # ambiguous and clearing it could interrupt a rebase.
+                if (
+                    prior_rejection is None
+                    or ticket.in_motion_since >= prior_rejection.replace(microsecond=0)
+                ):
+                    return
+            write_lock(ticket, "")
+            ticket.in_motion_since = None
+
 
 def ticket_ref_from_branch(repo: str, branch: str) -> Optional[str]:
     """The ticket a `ticket/<n>` branch belongs to, or None.
@@ -13972,16 +14019,15 @@ def closed_itself_comment(tickets: Sequence[Item], drift: Sequence[str]) -> str:
 
 def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
                             ) -> bool:
-    """Whether a project has earned the funnel's unattended close.
+    """Whether an item has earned the funnel's unattended close.
 
     ``funnel merge`` sees the Project summary before GitHub closes the ticket,
     so it supplies the post-merge child count. Every other caller uses the
-    count already loaded on the project.
+    count already loaded on the item.
     """
     completed = item.children_done if children_done is None else children_done
     return (
-        item.parent is None
-        and item.state == "OPEN"
+        item.state == "OPEN"
         and item.status == "Building"
         and _could_carry_closed_itself_marker(
             item, children_done=completed
@@ -13992,7 +14038,7 @@ def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
 def _close_auto_closeable_project(items: Sequence[Item], project: Item,
                                   *, children_done: Optional[int] = None
                                   ) -> bool:
-    """Move one eligible project to Done, close it, and record its marker."""
+    """Move one eligible item to Done, close it, and record its marker."""
     if not _auto_closeable_project(project, children_done=children_done):
         return False
     if not project.item_id:
@@ -14046,7 +14092,7 @@ def _close_auto_closeable_project(items: Sequence[Item], project: Item,
 
 
 def reconcile_auto_closeable_projects(items: Sequence[Item]) -> List[str]:
-    """Close every already-finished upkeep project before queue selection."""
+    """Close every eligible item with finished children before queue selection."""
     closed: List[str] = []
     projects = sorted(
         (item for item in items if _auto_closeable_project(item)),
@@ -14323,7 +14369,9 @@ def cmd_merge(
     )
     if why:
         if any(_is_conflicting_branch_blocker(reason) for reason in why):
-            _record_unmergeable_rejection(repo, pr, pr_fact=gate_fact)
+            _record_unmergeable_rejection(
+                repo, pr, pr_fact=gate_fact, items=items
+            )
         print("refusing to merge PR #{}:".format(pr), file=sys.stderr)
         for reason in why:
             print("  - " + reason, file=sys.stderr)
@@ -15159,7 +15207,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_next_review(items, args.tier)
         if args.command == "review":
             return cmd_review(args.repo, args.pr, args.verdict, args.ci,
-                              args.blocking, args.note, args.run, args.agent)
+                              args.blocking, args.note, args.run, args.agent,
+                              items=items)
         if args.command == "merge":
             return cmd_merge(items, now, args.repo, args.pr, args.confirmed)
         if args.command == "next":

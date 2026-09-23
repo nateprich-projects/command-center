@@ -245,13 +245,14 @@ def test_sparse_silence_floor_reaches_the_watchdog_issue_body(monkeypatch):
     calls = []
 
     monkeypatch.setattr(watchdog.time, "time", lambda: now)
+    # zcode is the retired control since Codex came back (#1325).
     monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {
-        "codex": "openai",
+        "zcode": watchdog.heartbeat.PROVIDERS["zcode"],
         "muse": "meta",
     })
     monkeypatch.setattr(
         watchdog, "records",
-        lambda agent: silent if agent in ("codex", "muse") else [],
+        lambda agent: silent if agent in ("zcode", "muse") else [],
     )
     monkeypatch.setattr(
         watchdog, "existing_issue", lambda: {"number": 160}
@@ -269,7 +270,7 @@ def test_sparse_silence_floor_reaches_the_watchdog_issue_body(monkeypatch):
         if argument.startswith("body=")
     )
     assert "- `muse`: absolute silence floor 6h exceeded." in body
-    assert "codex" not in body
+    assert "zcode" not in body
     assert "normal gap" not in body
 
 

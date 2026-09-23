@@ -129,10 +129,11 @@ PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
 #: not read their silence as a run that died. zcode was retired on 2026-09-09
 #: by Nate's decision: measured over 24h it did work in 18 of 93 runs and was
 #: refused on the z.ai pace line in 63, while Muse carried every job it had on
-#: the separate Meta pool (#431). codex was retired on 2026-09-18 by Nate's
-#: decision: the Codex app automation is paused on purpose and Muse implements
-#: both tiers, so Codex recording nothing new is the pause working (#1106).
-RETIRED_AGENTS = frozenset({"zcode", "codex"})
+#: the separate Meta pool (#431). codex was retired from 2026-09-18 to
+#: 2026-09-22, while Muse implemented both tiers (#1106). It returned when its
+#: automations went live again (Nate, #1315, #1325): Codex implements both
+#: tiers, so its silence is a lane that stopped, not the pause working.
+RETIRED_AGENTS = frozenset({"zcode"})
 
 #: Which application ran it. Distinct from provider and model: one provider can
 #: be reached through more than one harness, and harnesses differ in ways that

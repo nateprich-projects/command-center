@@ -172,15 +172,17 @@ def test_sparse_history_uses_the_absolute_silence_floor_and_reaches_the_brief(
     assert "absolute silence floor 6h exceeded" in conditions[0]
     assert "Nothing recorded for 1d8h1m" in conditions[0]
     assert "normal gap" not in conditions[0]
-    assert assess("codex", silent, now.timestamp()) == []
+    # The retired agent stays quiet on the same silence. zcode, since Codex
+    # came back off the retired list (#1325).
+    assert assess("zcode", silent, now.timestamp()) == []
 
     monkeypatch.setattr(heartbeat, "PROVIDERS", {
-        "codex": "openai",
+        "zcode": heartbeat.PROVIDERS["zcode"],
         "muse": "meta",
     })
     monkeypatch.setattr(
         funnel, "_brief_heartbeat_rows",
-        lambda agent: silent if agent in ("codex", "muse") else [],
+        lambda agent: silent if agent in ("zcode", "muse") else [],
     )
     monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])

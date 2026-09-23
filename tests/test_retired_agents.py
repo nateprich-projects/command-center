@@ -29,10 +29,11 @@ def _quiet_after_a_busy_cadence(agent, minutes_silent=90, every=15, count=40):
     return rows
 
 
-def test_codex_and_zcode_are_retired_and_the_others_are_not():
-    assert {"codex", "zcode"} <= heartbeat.RETIRED_AGENTS
+def test_zcode_is_retired_and_codex_is_live_again():
+    """Codex implements both tiers since #1315; its silence must alarm."""
+    assert heartbeat.RETIRED_AGENTS == {"zcode"}
     assert heartbeat.RETIRED_AGENTS < set(heartbeat.PROVIDERS)
-    assert not {"claude", "muse"} & heartbeat.RETIRED_AGENTS
+    assert not {"claude", "codex", "muse"} & heartbeat.RETIRED_AGENTS
 
 
 def test_the_same_silence_alarms_for_a_live_agent(monkeypatch):
@@ -50,19 +51,17 @@ def test_the_brief_skips_a_retired_agent_but_not_a_live_one(monkeypatch):
     assert {c["agent"] for c in found} == {"muse"}
 
 
-def test_the_brief_skips_paused_codex_but_not_a_live_agent_with_the_same_gap(
-    monkeypatch,
-):
-    """Codex is paused on purpose (#1106): its silence is not a dying run,
-    while the identical gap still alarms for an agent that is meant to run."""
+def test_codex_silence_alarms_again_once_it_implements(monkeypatch):
+    """Codex was retired while Muse implemented (#1106) and is live again
+    since #1325: the same gap now alarms for it as for any running lane."""
     rows = _quiet_after_a_busy_cadence("codex")
     spools = {"codex": rows, "muse": [dict(row) for row in rows]}
     monkeypatch.setattr(heartbeat, "read", lambda agent: spools.get(agent, []))
 
     found = funnel.agent_health(NOW)
 
-    assert {c["agent"] for c in found} == {"muse"}
-    assert any("Nothing recorded" in c["condition"] for c in found)
+    assert {c["agent"] for c in found} == {"codex", "muse"}
+    assert all("Nothing recorded" in c["condition"] for c in found)
 
 
 def test_the_watchdog_skips_retired_agents(monkeypatch, capsys):
@@ -78,5 +77,4 @@ def test_the_watchdog_skips_retired_agents(monkeypatch, capsys):
     watchdog.main()
 
     assert "zcode" not in seen
-    assert "codex" not in seen
-    assert {"muse", "claude"} <= set(seen)
+    assert {"muse", "claude", "codex"} <= set(seen)

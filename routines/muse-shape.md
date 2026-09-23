@@ -4,10 +4,9 @@
 
 ---
 
-Shape one idea into a plan; you have no tools.
+Shape one idea into a plan.
 
-The shape runner selects by tier: the escalated Muse schedule shapes escalated ideas,
-and the standard Muse schedule shapes standard ideas.
+Muse's standard schedule shapes standard ideas; Muse's escalated schedule shapes escalated ideas.
 
 ## The question
 

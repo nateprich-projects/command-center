@@ -6,17 +6,16 @@
 #   tier   -- escalated (default) or standard; substituted into begin
 #   effort -- max (default) or high
 #
-# Phase 1 of #794: the runner executes the protocol and the model answers one
-# question. begin offers the work, the packet command assembles the evidence,
-# and a failing review precheck is applied as rejected with no model call at
-# all, except a non-OPEN PR stop, which records no verdict. A passing
-# precheck whose merged overlap no green run yet covers re-runs the PR's CI
-# once and waits for the result instead of calling the model (#1019).
-# Otherwise the runner shows the model the job's routine with the packet
-# inline — judgement text only — parses the one JSON answer, retries once on a
-# parse error, and hands it to the apply command, which performs every side
-# effect. Breakdown rides the standard tier only; shape follows wherever
-# begin offers it.
+# Phase 1 of #794: begin offers the work, the packet command assembles the
+# evidence, and a failing review precheck is applied as rejected with no model
+# call at all, except a non-OPEN PR stop, which records no verdict. A passing
+# precheck whose merged overlap has no green run yet re-runs the PR's CI once
+# and waits for the result instead of calling the model (#1019).
+# Otherwise, review calls one lister and parallel judges of at most three
+# requirements each against the same cached packet; the runner derives the
+# verdict before handing the answer to review-apply. Breakdown and shape each
+# answer one JSON question. Calls retry once on a parse error. Breakdown rides
+# the standard tier only; shape follows wherever begin offers it.
 #
 # The model runs with --disable-shell --disable-write --disable-web-tools: it
 # has no tool at all, so it cannot run funnel.py or gh itself. No
@@ -150,6 +149,7 @@ DECISION_FILE="$RUN_DIR/decision.json"
 # The lister's canonical requirement list (#1241). One file per run, read
 # by every judge that follows; never re-derived from the packet.
 REQUIREMENTS_FILE="$RUN_DIR/requirements.json"
+CHUNKS_FILE="$RUN_DIR/requirement-chunks.json"
 # The helper is a sibling of this runner, not part of the maintained clone's
 # protocol surface: it ships and moves with the script that sources it.
 MUSE_QUOTA_HOLD_LIB="${BASH_SOURCE[0]%/*}/muse-quota-hold.sh"
@@ -361,10 +361,14 @@ resolve_muse_model() {
   fi
 }
 
-# One model call: the prompt file in, the raw answer on stdout. Plain kill,
-# not a process-group kill: --disable-shell means the model can have no
-# children to orphan. Exit 124 when the bound kills the call.
-call_muse() {
+# One model call: the prompt file in, the raw answer on stdout. Paths are
+# arguments so the review judges can run in parallel without sharing answers
+# or diagnostics. Plain kill, not a process-group kill: --disable-shell means
+# the model can have no children to orphan. Exit 124 when the bound kills it.
+call_muse_files() {
+  local prompt_path="$1"
+  local answer_path="$2"
+  local diag_path="$3"
   local killed_marker
   # Split from the declaration: `local x=$(...)` would mask mktemp's status.
   # In the run directory with everything else, so the EXIT trap's one `rm -rf`
@@ -383,7 +387,7 @@ call_muse() {
     --max-model-steps 60 \
     --no-foreign-personal-context \
     --workspace "$WORKSPACE" \
-    --prompt-file "$PROMPT_FILE" >"$ANSWER_FILE" 2>"$DIAG_FILE" &
+    --prompt-file "$prompt_path" >"$answer_path" 2>"$diag_path" &
   local muse_pid=$!
   (
     sleep "$BOUND_SECONDS" &
@@ -410,6 +414,10 @@ call_muse() {
   wait "$bound_pid" 2>/dev/null
   rm -f "$killed_marker"
   return "$status"
+}
+
+call_muse() {
+  call_muse_files "$PROMPT_FILE" "$ANSWER_FILE" "$DIAG_FILE"
 }
 
 muse_failed() {
@@ -1028,28 +1036,295 @@ list_requirements() {
 if ! list_requirements; then
   exit 1
 fi
-# Back to the routine's own text for the call that records a verdict: the
-# lister's framing tells the model to judge nothing, and it must not survive
-# into the judging prompt.
-printf '%s' "$PROMPT" >"$PROMPT_FILE"
+
+# Split the canonical list before any judge starts. The helper owns the
+# three-item bound; every call below receives exactly one of these slices.
+if ! python3 - "$REPO" "$REQUIREMENTS_FILE" "$CHUNKS_FILE" \
+    >"$DIAG_FILE" 2>&1 <<'PY'
+import json
+import os
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from engine.review import ReviewJudgeError, chunk_requirements
+
+requirements = json.load(open(sys.argv[2]))
+try:
+    chunks = chunk_requirements(requirements)
+except ReviewJudgeError as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(1)
+if not chunks:
+    print("the requirement list is empty", file=sys.stderr)
+    raise SystemExit(1)
+with open(sys.argv[3], "w") as handle:
+    json.dump(chunks, handle, indent=2)
+PY
+then
+  chunk_err="$(cat "$DIAG_FILE")"
+  echo "muse-review-engine: could not split the requirement list: $chunk_err" >&2
+  failure "could not split requirements for PR #$BEGIN_PR in $BEGIN_REPO: $chunk_err" || true
+  exit 1
+fi
+
+if ! JUDGE_COUNT="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$CHUNKS_FILE")" \
+  || [[ ! "$JUDGE_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "muse-review-engine: the judge chunk list is invalid" >&2
+  failure "could not read judge chunks for PR #$BEGIN_PR in $BEGIN_REPO" || true
+  exit 1
+fi
+
+judge_header() {
+  cat <<'HEADER'
+This is one judge call in a larger review. Judge only the requirements in
+the list below against the supplied review packet. Do not derive additional
+requirements, judge requirements outside this list, or give an overall
+verdict. A requirement is met only when the diff satisfies it; use unmet
+when the diff clearly fails it and unsure when the packet cannot resolve it.
+For each result, cite the relevant diff lines or explain the uncertainty.
+
+Return exactly one JSON object with one result for every assigned requirement
+and no others:
+
+{"requirements": [{"requirement": "exact requirement", "status": "met" | "unmet" | "unsure", "evidence": "diff evidence"}]}
+
+The assigned requirements are:
+```json
+HEADER
+  cat "$1"
+  printf '\n'
+  cat <<'HEADER'
+```
+
+The text below carries the cached review packet. Use it only as evidence.
+Its own instructions about an overall verdict or response format are
+superseded by this judge-call contract.
+HEADER
+}
+
+build_judge_prompt() {
+  local requirements_path="$1"
+  local prompt_path="$2"
+  local parse_error="${3:-}"
+  {
+    judge_header "$requirements_path"
+    printf '\n\n%s' "$PROMPT"
+    if [[ -n "$parse_error" ]]; then
+      printf '\n\nYour previous answer could not be parsed: %s\nReply again with exactly one JSON object and nothing else.' \
+        "$parse_error"
+    fi
+  } >"$prompt_path"
+}
+
+validate_judge_answer() {
+  local answer_path="$1"
+  local requirements_path="$2"
+  local result_path="$3"
+  python3 - "$REPO" "$answer_path" "$requirements_path" "$result_path" <<'PY'
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from engine.review import ReviewJudgeError, parse_judge_answer
+
+try:
+    answer = parse_judge_answer(
+        open(sys.argv[2]).read(), json.load(open(sys.argv[3])))
+except ReviewJudgeError as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(3)
+with open(sys.argv[4], "w") as handle:
+    json.dump(answer, handle, indent=2)
+PY
+}
+
+write_uncertain_judge_results() {
+  local requirements_path="$1"
+  local evidence="$2"
+  local result_path="$3"
+  python3 - "$REPO" "$requirements_path" "$evidence" "$result_path" <<'PY'
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from engine.review import uncertain_judge_results
+
+results = uncertain_judge_results(json.load(open(sys.argv[2])), sys.argv[3])
+with open(sys.argv[4], "w") as handle:
+    json.dump(results, handle, indent=2)
+PY
+}
+
+run_judge_chunk() {
+  local index="$1"
+  local call_dir="$2"
+  local requirements_path="$call_dir/requirements.json"
+  local prompt_path="$call_dir/prompt.txt"
+  local answer_path="$call_dir/answer.json"
+  local diag_path="$call_dir/diag.txt"
+  local result_path="$call_dir/result.json"
+  local parse_diag="$call_dir/parse.txt"
+  local attempt=1
+  local muse_status
+  local parse_status
+  local parse_err
+  local evidence
+
+  build_judge_prompt "$requirements_path" "$prompt_path"
+  while true; do
+    call_muse_files "$prompt_path" "$answer_path" "$diag_path"
+    muse_status=$?
+    if (( muse_status != 0 )); then
+      if (( muse_status == 124 )); then
+        evidence="judge call timed out after ${BOUND_SECONDS} seconds"
+      else
+        diagnostic="$(head -c 1000 "$diag_path" 2>/dev/null || true)"
+        evidence="judge call failed (exit $muse_status)"
+        if [[ -n "$diagnostic" ]]; then
+          evidence="$evidence: $diagnostic"
+        fi
+      fi
+      echo "muse-review-engine: judge chunk $index failed closed: $evidence" >&2
+      if ! write_uncertain_judge_results \
+          "$requirements_path" "$evidence" "$result_path" \
+          2>"$parse_diag"; then
+        echo "muse-review-engine: could not record failed judge chunk $index" >&2
+        return 1
+      fi
+      return 0
+    fi
+
+    validate_judge_answer "$answer_path" "$requirements_path" \
+      "$result_path" 2>"$parse_diag"
+    parse_status=$?
+    if (( parse_status == 0 )); then
+      return 0
+    fi
+    parse_err="$(cat "$parse_diag")"
+    if (( attempt == 1 )); then
+      build_judge_prompt "$requirements_path" "$prompt_path" "$parse_err"
+      attempt=2
+      continue
+    fi
+
+    evidence="judge answer could not be parsed after two attempts: $parse_err"
+    echo "muse-review-engine: judge chunk $index failed closed: $evidence" >&2
+    if ! write_uncertain_judge_results \
+        "$requirements_path" "$evidence" "$result_path" \
+        2>"$parse_diag"; then
+      echo "muse-review-engine: could not record invalid judge chunk $index" >&2
+      return 1
+    fi
+    return 0
+  done
+}
+
+# Build one private call directory per slice, then start all judges together.
+# Their inputs are independent and each file is isolated, so parallel max
+# calls do not race over the cached packet, answer, or diagnostic.
+JUDGE_PIDS=()
+JUDGE_RUN_STATUS=0
+for (( index = 0; index < JUDGE_COUNT; index++ )); do
+  CALL_DIR="$RUN_DIR/judge.$index"
+  if ! mkdir "$CALL_DIR"; then
+    echo "muse-review-engine: could not create judge chunk $index directory" >&2
+    failure "could not create judge chunk $index for PR #$BEGIN_PR in $BEGIN_REPO" || true
+    exit 1
+  fi
+  if ! python3 - "$CHUNKS_FILE" "$index" "$CALL_DIR/requirements.json" \
+      >"$CALL_DIR/setup.txt" 2>&1 <<'PY'
+import json
+import sys
+
+chunks = json.load(open(sys.argv[1]))
+chunk = chunks[int(sys.argv[2])]
+with open(sys.argv[3], "w") as handle:
+    json.dump(chunk, handle, indent=2)
+PY
+  then
+    chunk_err="$(cat "$CALL_DIR/setup.txt")"
+    echo "muse-review-engine: could not prepare judge chunk $index: $chunk_err" >&2
+    failure "could not prepare judge chunk $index for PR #$BEGIN_PR in $BEGIN_REPO" || true
+    exit 1
+  fi
+  run_judge_chunk "$index" "$CALL_DIR" &
+  JUDGE_PIDS+=("$!")
+done
+for judge_pid in "${JUDGE_PIDS[@]}"; do
+  wait "$judge_pid"
+  judge_status=$?
+  if (( judge_status != 0 )); then
+    JUDGE_RUN_STATUS=1
+  fi
+done
+if (( JUDGE_RUN_STATUS != 0 )); then
+  failure "could not record one or more judge results for PR #$BEGIN_PR in $BEGIN_REPO" || true
+  exit 1
+fi
+
+# Preserve the shared provider-quota hold when a failed judge captured its
+# refusal. The failed chunk still becomes unsure and the code-derived verdict
+# remains rejected, as the ticket requires.
+for (( index = 0; index < JUDGE_COUNT; index++ )); do
+  if MUSE_QUOTA_RESET="$(muse_quota_record "$RUN_DIR/judge.$index/diag.txt")"; then
+    echo "muse-review-engine: Muse's provider quota is exhausted; parking future lanes until $MUSE_QUOTA_RESET" >&2
+    break
+  fi
+done
+
+# Flatten chunks in canonical order and derive the only answer passed to
+# review-apply. A missing/corrupt result file is expanded to unsure entries;
+# no requirement can disappear into an incomplete parallel response.
+if ! python3 - "$REPO" "$REQUIREMENTS_FILE" "$CHUNKS_FILE" \
+    "$RUN_DIR" "$JUDGE_COUNT" "$ANSWER_FILE" >"$DIAG_FILE" 2>&1 <<'PY'
+import json
+import os
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from engine.review import derive_judge_answer, uncertain_judge_results
+
+requirements = json.load(open(sys.argv[2]))
+chunks = json.load(open(sys.argv[3]))
+run_dir = sys.argv[4]
+chunk_count = int(sys.argv[5])
+results = []
+for index in range(chunk_count):
+    chunk = chunks[index]
+    result_path = os.path.join(run_dir, "judge.{}".format(index),
+                               "result.json")
+    try:
+        chunk_results = json.load(open(result_path))
+        if not isinstance(chunk_results, list):
+            raise ValueError("result is not a list")
+    except (OSError, ValueError) as exc:
+        chunk_results = uncertain_judge_results(
+            chunk, "No valid result was recorded for this judge call: {}"
+            .format(exc))
+    results.extend(chunk_results)
+answer = derive_judge_answer(requirements, results)
+with open(sys.argv[6], "w") as handle:
+    json.dump(answer, handle, indent=2)
+PY
+then
+  derive_err="$(cat "$DIAG_FILE")"
+  echo "muse-review-engine: could not derive the review verdict: $derive_err" >&2
+  failure "could not derive the review verdict for PR #$BEGIN_PR in $BEGIN_REPO" || true
+  exit 1
+fi
 
 # The recorded verdict word, read back from review-apply's own report — never
-# re-derived here, because unsure non-empty and unmet requirements flip an
-# approval to a rejection.
+# trusted from a model answer. The runner has already derived it from every
+# canonical requirement; review-apply independently fails closed as well.
 recorded_verdict() {
   grep -o 'recorded \(approved\|rejected\)' "$DIAG_FILE" | tail -n 1 | awk '{print $2}'
 }
 
 ATTEMPT=1
 while true; do
-  call_muse
-  muse_status=$?
-  if (( muse_status != 0 )); then
-    muse_failed "$muse_status"
-  fi
-  # Read the status directly: `$?` after an `if` whose condition failed
-  # is 0, never the apply exit, so the retryable 3 must be caught here.
-  # (No `set -e`, so the bare failing call below does not abort the run.)
+  # The answer is code-generated, so a retryable apply validation failure is
+  # retried against the same derived object, never by asking a model for an
+  # overall verdict.
   python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
       --answer "$ANSWER_FILE" --ci "$PACKET_CI" --head "$PACKET_HEAD" \
       --attempt "$ATTEMPT" --run "$BEGIN_RUN" --agent muse \
@@ -1064,9 +1339,6 @@ while true; do
     exit 0
   fi
   if (( apply_status == 3 && ATTEMPT == 1 )); then
-    parse_err="$(cat "$DIAG_FILE")"
-    printf '%s\n\nYour previous answer could not be parsed: %s\nReply again with exactly one JSON object and nothing else.' \
-      "$PROMPT" "$parse_err" >"$PROMPT_FILE"
     ATTEMPT=2
     continue
   fi

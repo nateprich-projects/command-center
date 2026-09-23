@@ -117,6 +117,183 @@ CI_RUN_SCAN_LIMIT = 20
 #: a push run on the head never saw main at all.
 CI_COVERING_EVENT = "pull_request"
 
+# The escalated reviewer keeps each max call small enough to finish. The
+# lister's output is canonical; judges receive slices of this list and never
+# derive requirements of their own (#1233, #1242).
+MAX_JUDGE_REQUIREMENTS = 3
+JUDGE_REQUIREMENT_STATUSES = ("met", "unmet", "unsure")
+
+
+class ReviewJudgeError(ValueError):
+    """A judge answer could not be tied safely to its assigned requirements."""
+
+
+def _canonical_requirements(requirements: Sequence[str]) -> List[str]:
+    if isinstance(requirements, (str, bytes)) or not isinstance(
+            requirements, (list, tuple)):
+        raise ReviewJudgeError("requirements must be a list of strings")
+    shaped = []
+    for index, requirement in enumerate(requirements):
+        if not isinstance(requirement, str) or not requirement.strip():
+            raise ReviewJudgeError(
+                "requirements[{}] must be a non-empty string".format(index))
+        shaped.append(requirement.strip())
+    return shaped
+
+
+def chunk_requirements(requirements: Sequence[str],
+                       chunk_size: int = MAX_JUDGE_REQUIREMENTS
+                       ) -> List[List[str]]:
+    """Split the lister's canonical requirements into bounded judge calls."""
+    if (not isinstance(chunk_size, int) or isinstance(chunk_size, bool)
+            or not 1 <= chunk_size <= MAX_JUDGE_REQUIREMENTS):
+        raise ReviewJudgeError(
+            "chunk_size must be between 1 and {}".format(
+                MAX_JUDGE_REQUIREMENTS))
+    canonical = _canonical_requirements(requirements)
+    return [canonical[start:start + chunk_size]
+            for start in range(0, len(canonical), chunk_size)]
+
+
+def parse_judge_answer(raw: str,
+                       expected_requirements: Sequence[str]
+                       ) -> List[Dict[str, str]]:
+    """Validate one judge's statuses and return them in canonical order.
+
+    A judge may answer only the requirements assigned to it. Missing,
+    duplicated, extra, or malformed entries make the whole chunk unusable so
+    the runner can retry once and then fail closed for that chunk.
+    """
+    expected = _canonical_requirements(expected_requirements)
+    if not expected:
+        raise ReviewJudgeError("a judge must receive at least one requirement")
+    if len(expected) > MAX_JUDGE_REQUIREMENTS:
+        raise ReviewJudgeError(
+            "a judge may receive at most {} requirements".format(
+                MAX_JUDGE_REQUIREMENTS))
+    if not (raw or "").strip():
+        raise ReviewJudgeError("empty answer: expected a JSON object")
+    try:
+        answer = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise ReviewJudgeError("invalid JSON: {}".format(exc))
+    if not isinstance(answer, dict):
+        raise ReviewJudgeError("answer must be a JSON object")
+    if set(answer) != {"requirements"}:
+        raise ReviewJudgeError(
+            "answer must contain only the 'requirements' key")
+    entries = answer["requirements"]
+    if not isinstance(entries, list):
+        raise ReviewJudgeError("'requirements' must be a list")
+    shaped = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict) or set(entry) != {
+                "requirement", "status", "evidence"}:
+            raise ReviewJudgeError(
+                "'requirements'[{}] must contain requirement, status, and "
+                "evidence only".format(index))
+        requirement = entry["requirement"]
+        status = entry["status"]
+        evidence = entry["evidence"]
+        if not isinstance(requirement, str) or not requirement.strip():
+            raise ReviewJudgeError(
+                "'requirements'[{}].requirement must be a non-empty string"
+                .format(index))
+        if status not in JUDGE_REQUIREMENT_STATUSES:
+            raise ReviewJudgeError(
+                "'requirements'[{}].status must be one of {}".format(
+                    index, list(JUDGE_REQUIREMENT_STATUSES)))
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise ReviewJudgeError(
+                "'requirements'[{}].evidence must be a non-empty string"
+                .format(index))
+        shaped.append({"requirement": requirement,
+                       "status": status,
+                       "evidence": evidence.strip()})
+
+    if len(shaped) != len(expected):
+        raise ReviewJudgeError(
+            "judge returned {} requirement result(s) for {} assigned"
+            .format(len(shaped), len(expected)))
+    remaining = list(shaped)
+    ordered = []
+    for requirement in expected:
+        matches = [entry for entry in remaining
+                   if entry["requirement"] == requirement]
+        if len(matches) != 1:
+            raise ReviewJudgeError(
+                "judge must answer {!r} exactly once".format(requirement))
+        entry = matches[0]
+        remaining.remove(entry)
+        ordered.append(entry)
+    if remaining:
+        raise ReviewJudgeError("judge returned an unassigned requirement")
+    return ordered
+
+
+def uncertain_judge_results(requirements: Sequence[str],
+                             evidence: str) -> List[Dict[str, str]]:
+    """Represent a failed judge call as an unsure result for its whole chunk."""
+    canonical = _canonical_requirements(requirements)
+    detail = ((evidence or "").strip()
+              or "judge call failed without diagnostic details")
+    return [{"requirement": requirement, "status": "unsure",
+             "evidence": detail}
+            for requirement in canonical]
+
+
+def derive_judge_answer(requirements: Sequence[str],
+                        results: Sequence[dict]) -> Dict[str, object]:
+    """Build the apply answer in code; any uncertainty rejects the review.
+
+    Results arrive in chunk order. If the runner ever loses or corrupts an
+    entry, that requirement becomes unsure instead of disappearing from the
+    review. Extra entries also force rejection.
+    """
+    canonical = _canonical_requirements(requirements)
+    if not canonical:
+        raise ReviewJudgeError("cannot derive a verdict without requirements")
+    if isinstance(results, (str, bytes)) or not isinstance(results, (list, tuple)):
+        results = []
+    records = list(results)
+    shaped = []
+    for index, requirement in enumerate(canonical):
+        entry = records[index] if index < len(records) else None
+        if (not isinstance(entry, dict)
+                or set(entry) != {"requirement", "status", "evidence"}
+                or entry.get("requirement") != requirement
+                or entry.get("status") not in JUDGE_REQUIREMENT_STATUSES
+                or not isinstance(entry.get("evidence"), str)
+                or not entry.get("evidence", "").strip()):
+            shaped.append({
+                "requirement": requirement,
+                "status": "unsure",
+                "evidence": (
+                    "No valid judge result was recorded for this requirement"
+                ),
+            })
+        else:
+            shaped.append({
+                "requirement": requirement,
+                "status": entry["status"],
+                "evidence": entry["evidence"].strip(),
+            })
+    extra_count = max(0, len(records) - len(canonical))
+    blocking = [
+        "requirement {}: {} -- {}".format(
+            entry["status"], entry["requirement"], entry["evidence"])
+        for entry in shaped if entry["status"] != "met"
+    ]
+    if extra_count:
+        blocking.append(
+            "unexpected extra judge result(s): {}".format(extra_count))
+    return {
+        "verdict": "rejected" if blocking else "approved",
+        "blocking": blocking,
+        "unsure": [],
+        "requirements": shaped,
+    }
+
 
 def ci_state(checks: Sequence[dict]) -> str:
     """Derive the shared CI state from a statusCheckRollup list.

@@ -28,6 +28,7 @@ import glob
 import json
 import os
 import re
+import tempfile
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 #: The model and effort every Command Center Codex run uses (Nate,
@@ -349,12 +350,13 @@ def check(cwd: Optional[str] = None, *,
     """Whether this run is the run the manifest describes.
 
     Returns ``ok``, the ``rollout`` it read, the ``effective`` model and
-    effort when they could be read, each ``drift`` line, and one ``why``
-    sentence for the refusal.
+    effort when they could be read, the run's own ``automation`` directory
+    when it passed, each ``drift`` line, and one ``why`` sentence for the
+    refusal.
     """
     cwd = cwd or os.getcwd()
     result: Dict = {"ok": False, "rollout": None, "effective": None,
-                    "drift": []}
+                    "automation": None, "drift": []}
     run = thread_id(environ)
     if run is None:
         result["drift"] = ["no Codex thread id in the environment ({})".format(
@@ -380,6 +382,8 @@ def check(cwd: Optional[str] = None, *,
                 if settings is not None:
                     result["effective"] = {"model": settings.get("model"),
                                            "effort": settings.get("effort")}
+                    if not result["drift"]:
+                        result["automation"] = own_automation(settings)
     result["ok"] = not result["drift"]
     result["why"] = (
         "" if result["ok"] else
@@ -402,6 +406,73 @@ def _rollout_drift(run: str, cwd: str, meta: Optional[Dict],
     if settings is None:
         return ["no turn_context in the rollout for thread {}".format(run)]
     return drift(settings, session_cwd)
+
+
+# --- automation memory (#1317) ----------------------------------------------
+
+#: The file the app's developer message tells every automation run to read
+#: first and to summarise into before returning. The model does both (see
+#: LEARNINGS.md, 2026-09-22). The standard automation's copy had reached 401
+#: KB of run notes, read back by nearly every later run as guidance.
+MEMORY_FILE = "memory.md"
+
+#: What `begin` leaves in that file. Deliberately short, and naming no file:
+#: a path here would invite an extra read on every run. Each run's history
+#: lives in the heartbeat and on GitHub. Nothing here should read as advice.
+MEMORY_STUB = """# Automation memory
+
+Reset by `funnel.py begin` on every Command Center run (#1317). Notes
+written here are cleared when the next run starts; what earlier runs did
+is on GitHub and in the heartbeat.
+"""
+
+
+def own_automation(settings: Optional[Mapping]) -> Optional[str]:
+    """The run's own automation directory, from its writable roots.
+
+    The app grants each automation run exactly its own directory, for the
+    memory file. None when there is not exactly one, as for a session Nate
+    started by hand: then no memory file is touched.
+    """
+    if not isinstance(settings, Mapping):
+        return None
+    sandbox = settings.get("sandbox_policy")
+    roots = sandbox.get("writable_roots") if isinstance(sandbox, dict) else None
+    if not isinstance(roots, list):
+        return None
+    found = sorted({os.path.normpath(root) for root in roots
+                    if isinstance(root, str) and not _has_parent_segment(root)
+                    and os.path.isabs(root) and _automation_dir(root)})
+    return found[0] if len(found) == 1 else None
+
+
+def reset_memory(directory: Optional[str]) -> str:
+    """Replace ``directory``'s memory file with the stub; say what happened.
+
+    Written to a uniquely named temporary file and moved into place, so a
+    run that reads the file at the same moment sees the old notes or the
+    stub, never half of each, and two resets at once cannot trip over one
+    temporary name. A failure is reported, not raised: the settings check
+    has already passed, and memory is not a safety boundary.
+    """
+    if not directory:
+        return "skipped: no automation directory"
+    target = os.path.join(directory, MEMORY_FILE)
+    temporary = None
+    try:
+        handle, temporary = tempfile.mkstemp(
+            dir=directory, prefix=MEMORY_FILE + ".", suffix=".reset")
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            stream.write(MEMORY_STUB)
+        os.replace(temporary, target)
+    except OSError as exc:
+        if temporary:
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+        return "failed: {}".format(exc)
+    return "reset"
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

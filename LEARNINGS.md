@@ -8,6 +8,37 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### A Codex automation's memory file is fed back into every run
+
+**2026-09-22 · Codex desktop · measured**
+
+The Codex app's developer message tells every automation run to read
+`~/.codex/automations/<id>/memory.md` first, if present, and to write a
+summary there before returning. The model does both. The app itself never
+runs or parses the file (the "last run" time comes from its database). A
+first draft of this entry said the app ran the read as a startup step. It
+does not: the `unified_exec_startup` label marks every command in a
+rollout, not an app step.
+
+Across 1,352 September automation rollouts, 1,333 read the file:
+1,261 with `sed -n '1,240p'`, and the rest 160 to 260 lines or all of
+it with `cat`. 19 never read it. In 53 runs the read and `begin` shared
+one tool call: 40 as a single shell command that read the file first,
+13 in parallel. The standard automation's copy had grown to
+401 KB, 2,854 lines of run notes, including per-ticket advice such as
+"Do not retry this finish".
+
+So text a model wrote about one ticket was read back as guidance by
+nearly every later run, empty ones included, from a file the repository
+neither versions nor checks. That is the prose-as-protocol failure #794
+replaced with runner-owned protocol. #1317 has `begin` reset the
+launching automation's file to a fixed stub once the run's settings
+check passes. That bounds the notes, though not to one run. Standard-lane
+runs overlap (438 of 1,229 started while an earlier one was still
+active), and an overlapping run can write its summary after the next run
+has reset the file. Replaying 873 real timelines under the reset rule,
+14.5% of runs would read notes from two to five runs.
+
 ### A Codex rollout records the settings its run actually got
 
 **2026-09-22 · Codex desktop · measured**

@@ -13892,16 +13892,15 @@ def closed_itself_comment(tickets: Sequence[Item], drift: Sequence[str]) -> str:
 
 def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
                             ) -> bool:
-    """Whether a project has earned the funnel's unattended close.
+    """Whether an item has earned the funnel's unattended close.
 
     ``funnel merge`` sees the Project summary before GitHub closes the ticket,
     so it supplies the post-merge child count. Every other caller uses the
-    count already loaded on the project.
+    count already loaded on the item.
     """
     completed = item.children_done if children_done is None else children_done
     return (
-        item.parent is None
-        and item.state == "OPEN"
+        item.state == "OPEN"
         and item.status == "Building"
         and _could_carry_closed_itself_marker(
             item, children_done=completed
@@ -13912,7 +13911,7 @@ def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
 def _close_auto_closeable_project(items: Sequence[Item], project: Item,
                                   *, children_done: Optional[int] = None
                                   ) -> bool:
-    """Move one eligible project to Done, close it, and record its marker."""
+    """Move one eligible item to Done, close it, and record its marker."""
     if not _auto_closeable_project(project, children_done=children_done):
         return False
     if not project.item_id:
@@ -13966,7 +13965,7 @@ def _close_auto_closeable_project(items: Sequence[Item], project: Item,
 
 
 def reconcile_auto_closeable_projects(items: Sequence[Item]) -> List[str]:
-    """Close every already-finished upkeep project before queue selection."""
+    """Close every eligible item with finished children before queue selection."""
     closed: List[str] = []
     projects = sorted(
         (item for item in items if _auto_closeable_project(item)),

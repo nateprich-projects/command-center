@@ -22,9 +22,10 @@ ticket carries ``title``, ``body``, ``risk``, ``depends_on`` (sibling
 indices or ``owner/repo#n``), and ``needs``. Validation is total before the
 first mutation: at least one ticket or a question but never both, both enums
 exact, every dependency resolving to a sibling index or an existing open
-issue, and no dependency cycles. The create path makes sub-issues with
-native blocked-by edges, writes the Needs field and a code-owned ``Risk:``
-line, and posts the coverage comment; the question path posts the
+issue, and no dependency cycles. The apply path resumes matching sub-issues
+from GitHub by title, creates missing ones with native blocked-by edges,
+writes the Needs field and a code-owned ``Risk:`` line, and posts the
+coverage comment; the question path posts the
 needs-decision comment and labels the project blocked — unless the plan
 body already carries a valid answered-Gates marker (#1274), in which case
 the question is settled and nothing is posted or labelled.
@@ -727,26 +728,61 @@ def apply_blocked_label(repo: str, number: int) -> None:
                 repo, number, (proc.stderr or "").strip()))
 
 
+def match_existing_siblings(tickets: Sequence[dict],
+                            siblings: Sequence[dict]) -> Dict[int, dict]:
+    """Match a planned ticket to its existing child only by an unambiguous title.
+
+    Titles that occur more than once in either list are left unmatched rather
+    than guessed by position. A dependency on one of those existing issues
+    can still name its explicit ``owner/repo#n`` ref in the answer.
+    """
+    planned_by_title: Dict[str, List[int]] = {}
+    existing_by_title: Dict[str, List[dict]] = {}
+    for index, ticket in enumerate(tickets):
+        planned_by_title.setdefault(ticket["title"], []).append(index)
+    for sibling in siblings:
+        title = sibling.get("title")
+        if isinstance(title, str):
+            existing_by_title.setdefault(title, []).append(sibling)
+
+    matched = {}
+    for title, indexes in planned_by_title.items():
+        candidates = existing_by_title.get(title, [])
+        if len(indexes) == 1 and len(candidates) == 1:
+            matched[indexes[0]] = candidates[0]
+    return matched
+
+
 def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
                  run: Optional[str] = None,
                  agent: Optional[str] = None) -> List[dict]:
-    """Create every ticket with its edges and fields, then cover the parent.
+    """Resume or create each ticket, then cover the parent.
 
     Blockers go first, so every native edge points at an issue that already
-    exists. The returned rows follow creation order, so the coverage comment
-    lists each blocker before its dependents. A failure names the tickets
-    already created, so the next attempt starts from GitHub's truth rather
-    than this run's memory.
+    exists. Existing children are matched by unique title from GitHub; their
+    Project add and Needs write are repeated so a later attempt repairs a
+    half-applied sequence. The returned rows follow creation order, so the
+    coverage comment lists each blocker before its dependents. A failure
+    names the issues already present, so the next attempt starts from
+    GitHub's truth rather than this run's memory.
     """
     created_numbers: Dict[int, int] = {}
     created_refs: Dict[int, str] = {}
     order = creation_order(tickets)
+    existing = match_existing_siblings(
+        tickets, fetch_siblings(repo, parent_number))
     try:
         for index in order:
             ticket = tickets[index]
-            number, ref, url = create_ticket(
-                repo, parent_number, ticket,
-                blocked_by_values(ticket, created_numbers))
+            sibling = existing.get(index)
+            if sibling is None:
+                number, ref, url = create_ticket(
+                    repo, parent_number, ticket,
+                    blocked_by_values(ticket, created_numbers))
+            else:
+                number = sibling["number"]
+                ref = sibling["ref"]
+                url = issue_url(ref)
             created_numbers[index] = number
             created_refs[index] = ref
             write_needs(add_to_project(url), ticket["needs"], ref)

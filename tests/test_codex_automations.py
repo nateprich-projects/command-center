@@ -195,6 +195,12 @@ def test_a_field_written_twice_is_drift(tmp_path):
                      "than once"]
 
 
+def test_a_raw_tab_does_not_hide_a_field(tmp_path):
+    fields = codex_run.automation_fields('rrule = "RRULE:FREQ=DAILY;\tBYHOUR=1"\n')
+
+    assert fields == {"rrule": "RRULE:FREQ=DAILY;\tBYHOUR=1"}
+
+
 def test_a_file_that_is_not_utf8_is_unreadable_not_fatal(tmp_path):
     """One bad file names itself; the other automations are still read."""
     _manifest_set(tmp_path, **{

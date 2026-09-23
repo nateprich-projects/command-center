@@ -523,7 +523,9 @@ def automation_fields(text: str) -> Dict[str, str]:
         if key in fields:
             raise DuplicateField(key)
         try:
-            value = json.loads(raw)
+            # Not strict: a raw tab must not drop a field silently, and with
+            # it the duplicate check on that field.
+            value = json.loads(raw, strict=False)
         except ValueError:
             continue
         if isinstance(value, str):
@@ -593,7 +595,7 @@ def automation_findings(root: Optional[str] = None) -> Dict[str, List[str]]:
                 drift.append("{}: escalated, but its rrule has no {} so the "
                              "keeper installs it as standard".format(
                                  name, BYHOUR))
-        memory = os.path.join(root, name, "memory.md")
+        memory = os.path.join(root, name, MEMORY_FILE)
         try:
             size = "{:,} bytes".format(os.path.getsize(memory))
         except OSError:

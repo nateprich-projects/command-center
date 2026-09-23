@@ -20,6 +20,7 @@ ticket, its parent plan, the newest verdict's blocking list, and the
 prior-run digest. Judge from the packet; the workspace root is a clone of
 `packet.repo` already on `ticket/<number>`. Keep the checkout, scratch
 files, and build output inside the workspace.
+Packet `agents_md` is canonical for target-repo rules; this prompt is runner-specific guidance.
 
 Implement only what the ticket and the plan require, and address every
 blocking item. Do not change project `Status` or `Class`, do not merge,

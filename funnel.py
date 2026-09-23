@@ -6866,9 +6866,32 @@ query($login: String!, $number: Int!, $cursor: String) {
 PROJECT_ITEM_DETAIL_BATCH_SIZE = 100
 
 ITEM_DETAILS_QUERY = """
-query($ids: [ID!]!) {
+query($ids: [ID!]!, $childIds: [ID!]!) {
   rateLimit { cost remaining resetAt }
-  nodes(ids: $ids) {
+  history: nodes(ids: $ids) {
+    ... on ProjectV2Item {
+      id
+      content {
+        ... on Issue {
+          timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
+            nodes {
+              __typename
+              ... on ProjectV2ItemStatusChangedEvent {
+                createdAt previousStatus status project { number }
+              }
+              ... on LabeledEvent {
+                createdAt label { name }
+              }
+              ... on UnlabeledEvent {
+                createdAt label { name }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  children: nodes(ids: $childIds) {
     ... on ProjectV2Item {
       id
       content {
@@ -6876,6 +6899,25 @@ query($ids: [ID!]!) {
           subIssues(first: 50) {
             nodes { createdAt closedAt }
           }
+        }
+      }
+    }
+  }
+}
+"""
+
+# GitHub's CLI does not pass an empty list variable, so a detail batch with no
+# child-bearing rows uses this timeline-only form instead of sending an invalid
+# required ``childIds`` variable. It preserves the full timeline query above
+# without asking for child timestamp connections that cannot contribute.
+ITEM_TIMELINE_DETAILS_QUERY = """
+query($ids: [ID!]!) {
+  rateLimit { cost remaining resetAt }
+  nodes(ids: $ids) {
+    ... on ProjectV2Item {
+      id
+      content {
+        ... on Issue {
           timelineItems(last: 60, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT, LABELED_EVENT, UNLABELED_EVENT]) {
             nodes {
               __typename
@@ -7510,22 +7552,32 @@ def resolve_repo(repo: Optional[str]) -> str:
     )
 
 
-def _apply_item_detail_fields(item: Item, content: dict) -> None:
-    """Apply the two history-shaped fields from a targeted Project read."""
-    child_times = []
-    child_close_times = []
-    for child in ((content.get("subIssues") or {}).get("nodes") or []):
-        if not isinstance(child, dict):
-            continue
-        created_at = parse_time(child.get("createdAt"))
-        if created_at is not None:
-            child_times.append(created_at)
-        closed_at = parse_time(child.get("closedAt"))
-        if closed_at is not None:
-            child_close_times.append(closed_at)
+def _apply_item_detail_fields(
+    item: Item,
+    content: dict,
+    *,
+    include_children: bool = True,
+    include_timeline: bool = True,
+) -> None:
+    """Apply child timestamps and timeline history from targeted Project reads."""
+    if include_children:
+        child_times = []
+        child_close_times = []
+        for child in ((content.get("subIssues") or {}).get("nodes") or []):
+            if not isinstance(child, dict):
+                continue
+            created_at = parse_time(child.get("createdAt"))
+            if created_at is not None:
+                child_times.append(created_at)
+            closed_at = parse_time(child.get("closedAt"))
+            if closed_at is not None:
+                child_close_times.append(closed_at)
 
-    item.first_child_created_at = min(child_times) if child_times else None
-    item.last_child_closed_at = max(child_close_times) if child_close_times else None
+        item.first_child_created_at = min(child_times) if child_times else None
+        item.last_child_closed_at = max(child_close_times) if child_close_times else None
+    if not include_timeline:
+        return
+
     item.status_events = []
     item.status_since = None
     item.blocked_since = None
@@ -7628,6 +7680,7 @@ def hydrate_item_details(
     }
     selected = list(items if candidates is None else candidates)
     ids = []
+    child_ids = []
     seen: Set[str] = set()
     for item in selected:
         item_id = item.item_id
@@ -7638,22 +7691,49 @@ def hydrate_item_details(
         ):
             ids.append(item_id)
             seen.add(item_id)
+            if item.children_total > 0:
+                child_ids.append(item_id)
     if not ids:
         return
 
     for start in range(0, len(ids), PROJECT_ITEM_DETAIL_BATCH_SIZE):
         batch = ids[start:start + PROJECT_ITEM_DETAIL_BATCH_SIZE]
-        data = gh_graphql(ITEM_DETAILS_QUERY, ids=batch)
-        nodes = data.get("nodes") if isinstance(data, dict) else None
-        if not isinstance(nodes, list):
+        child_batch = child_ids[start:start + PROJECT_ITEM_DETAIL_BATCH_SIZE]
+        if child_batch:
+            data = gh_graphql(
+                ITEM_DETAILS_QUERY,
+                ids=batch,
+                childIds=child_batch,
+            )
+            timeline_nodes = data.get("history") if isinstance(data, dict) else None
+            child_nodes = data.get("children") if isinstance(data, dict) else None
+        else:
+            data = gh_graphql(ITEM_TIMELINE_DETAILS_QUERY, ids=batch)
+            timeline_nodes = data.get("nodes") if isinstance(data, dict) else None
+            child_nodes = []
+        if (
+            not isinstance(timeline_nodes, list)
+            or not isinstance(child_nodes, list)
+        ):
             raise GitHubError("Project item detail response was malformed")
-        for node in nodes:
+        for node in timeline_nodes:
             if not isinstance(node, dict):
                 continue
             item = by_id.get(node.get("id"))
             content = node.get("content")
             if item is not None and isinstance(content, dict):
-                _apply_item_detail_fields(item, content)
+                _apply_item_detail_fields(
+                    item, content, include_children=False
+                )
+        for node in child_nodes:
+            if not isinstance(node, dict):
+                continue
+            item = by_id.get(node.get("id"))
+            content = node.get("content")
+            if item is not None and isinstance(content, dict):
+                _apply_item_detail_fields(
+                    item, content, include_timeline=False
+                )
 
 
 def load_items(include_details: bool = True) -> List[Item]:

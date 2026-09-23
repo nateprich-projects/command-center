@@ -1,0 +1,63 @@
+{
+  "generated_at": "2026-09-23T04:25:00Z",
+  "brief": {
+    "generated_at": "2026-09-23T04:25:00Z",
+    "total_needing_nate": 1,
+    "counts_by_gate": {"Ready": 1},
+    "maintenance_load": {
+      "closed_in_window": 4,
+      "upkeep_projects": 3,
+      "upkeep_share": 0.75,
+      "days_since_anything_new_started": 2,
+      "new_started_at": ["2026-09-23T04:05:00Z"]
+    },
+    "disposal": {"done": 2, "parked": 1, "net_open_growth": 1},
+    "command_center_ticket_pr_share": {
+      "status": "unavailable",
+      "available": false,
+      "ticket_merged_prs": null,
+      "merged_prs": null,
+      "reason": "bounded command-center PR scan was truncated"
+    },
+    "recorded_cause_regressions": {
+      "status": "available",
+      "with_recorded_cause": 1,
+      "broken_projects": 4
+    },
+    "outcome_signals": {
+      "signals": {
+        "rework_rate": {
+          "status": "available",
+          "rework_attempts": 2,
+          "merged_prs": 8,
+          "reason": null
+        },
+        "cost_per_merged_pr": {
+          "status": "insufficient_data",
+          "by_lane": [],
+          "reason": "no ticket has a complete priced cost"
+        }
+      }
+    },
+    "main_ci": [
+      {"repo": "owner/infra", "sha": "a1b2c3d", "verdict": "infra"},
+      {"repo": "owner/product", "sha": "d4e5f6a", "verdict": "real"}
+    ],
+    "timings": {"project_load": 12.5},
+    "degraded": [],
+    "stranded": [],
+    "status_state_mismatches": [],
+    "stale_locks_taken_over": [],
+    "human_steps": [],
+    "blocked_human_steps": [],
+    "unattended_approvals": [],
+    "unattended_merges": [],
+    "api_cost": {"graphql_points": 21, "gh_calls": 8}
+  },
+  "board": {
+    "columns": [
+      {"stage": "Shaped", "items": [{"waited": "3 days", "waited_seconds": 259200}]},
+      {"stage": "Ready", "items": []}
+    ]
+  }
+}

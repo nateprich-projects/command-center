@@ -93,6 +93,10 @@ def test_attempts_and_turns_cover_every_pr_on_one_ticket_branch():
     assert record["merged"] is True
     assert record["merged_prs"] == [11]
     assert [row["number"] for row in record["prs"]] == [10, 11]
+    assert record["prs"][0]["head_ref_name"] == "ticket/42"
+    assert record["prs"][0]["first_review_result"] == "rejected"
+    assert record["prs"][0]["first_reviewed_at"] == "2026-09-10T08:30:00Z"
+    assert record["prs"][1]["first_review_result"] == "approved"
 
 
 def test_latest_verdict_is_chronological_not_pr_list_order():
@@ -151,6 +155,7 @@ def test_reopen_after_a_merge_is_derived_from_issue_events():
     )
 
     assert record["reopened_after_merge"] is True
+    assert record["reopened_at"] == "2026-09-10T09:30:00Z"
 
 
 def test_direct_nate_comment_counts_but_agent_comment_under_his_login_does_not():

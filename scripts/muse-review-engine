@@ -198,6 +198,18 @@ fi
 exec 3<&-
 export FUNNEL_SESSION
 
+# Bind the heartbeat start to the Muse session that the runner will launch.
+# The same caller-supplied id is passed to every `muse exec` retry below.
+if ! MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"; then
+  echo "muse-review-engine: could not create a Muse session id" >&2
+  exit 1
+fi
+if [[ -z "$MUSE_SESSION_ID" ]]; then
+  echo "muse-review-engine: could not create a Muse session id" >&2
+  exit 1
+fi
+export MUSE_SESSION_ID
+
 cleanup() {
   python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
   # The directory, not the files: a later call that adds a scratch file must
@@ -372,6 +384,7 @@ call_muse() {
   fi
   rm -f "$killed_marker"
   "$MUSE_BIN" exec \
+    --session-id "$MUSE_SESSION_ID" \
     --model "$MUSE_MODEL" \
     --reasoning-effort "$EFFORT" \
     --disable-shell \

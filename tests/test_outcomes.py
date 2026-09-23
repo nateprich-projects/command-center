@@ -274,7 +274,47 @@ def test_ticket_runs_prefer_the_durable_finish_token_snapshot(monkeypatch):
     }
 
 
-def test_ticket_run_with_unreadable_session_is_unknown_not_free(monkeypatch):
+def test_ticket_run_recovers_an_all_null_durable_snapshot_from_its_session(
+        monkeypatch):
+    rows = {
+        "muse": [
+            {"run": "run-1", "phase": "start", "ts": 100,
+             "session_id": "muse-session"},
+            {"run": "run-1", "phase": "bind", "ts": 101,
+             "do": "ticket", "work": "owner/repo#42"},
+            {"run": "run-1", "phase": "finish", "ts": 110,
+             "outcome": "done", "token_usage": {
+                 "fresh_input_tokens": None,
+                 "cache_read_input_tokens": None,
+                 "cache_write_input_tokens": None,
+                 "output_tokens": None,
+             }},
+        ],
+    }
+    expected = {
+        "fresh_input_tokens": 100,
+        "cache_read_input_tokens": 20,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 10,
+    }
+    seen = []
+    monkeypatch.setattr(
+        outcomes.session_usage,
+        "usage_for_session",
+        lambda agent, session_id, **kwargs:
+            seen.append((agent, session_id)) or expected,
+    )
+
+    runs = outcomes._ticket_runs("owner/repo#42", rows)
+    record = outcomes.derive_outcome(ticket(), run_observations=runs, now=NOW)
+
+    assert seen == [("muse", "muse-session")]
+    assert runs[0]["token_usage"] == expected
+    assert record["token_usage"] == expected
+
+
+def test_ticket_run_with_unreadable_session_and_all_null_snapshot_stays_unknown(
+        monkeypatch):
     rows = {
         "codex": [
             {"run": "run-1", "phase": "start", "ts": 100,
@@ -282,7 +322,12 @@ def test_ticket_run_with_unreadable_session_is_unknown_not_free(monkeypatch):
             {"run": "run-1", "phase": "bind", "ts": 101,
              "do": "ticket", "work": "owner/repo#42"},
             {"run": "run-1", "phase": "finish", "ts": 110,
-             "outcome": "done"},
+             "outcome": "done", "token_usage": {
+                 "fresh_input_tokens": None,
+                 "cache_read_input_tokens": None,
+                 "cache_write_input_tokens": None,
+                 "output_tokens": None,
+             }},
         ],
     }
     monkeypatch.setattr(outcomes.session_usage, "usage_for_session", lambda *a, **k: None)

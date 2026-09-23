@@ -19,6 +19,7 @@ import os
 import pathlib
 import stat
 import subprocess
+import uuid
 
 import pytest
 
@@ -160,7 +161,7 @@ def _issue_answer(job, **overrides):
 
 
 FUNNEL_STUB = (
-    "import pathlib, sys\n"
+    "import os, pathlib, sys\n"
     "root = pathlib.Path(__file__).parent\n"
     "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
     "with (root / 'funnel.calls').open('a') as fh:\n"
@@ -168,6 +169,7 @@ FUNNEL_STUB = (
     "if command == 'session-server':\n"
     "    print('127.0.0.1:1:stub', flush=True)\n"
     "elif command == 'begin':\n"
+    "    (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
     "    print((root / 'begin.json').read_text(), end='')\n"
     "elif command == 'session-stop':\n"
     "    pass\n"
@@ -1014,6 +1016,9 @@ def test_the_model_call_carries_the_exact_no_tool_shape(tmp_path):
     assert proc.returncode == 0, proc.stderr
     invoked = (repo / "muse.args.1").read_text().splitlines()
     assert invoked[0] == "exec"
+    session_id = (repo / "begin.session_id").read_text()
+    assert str(uuid.UUID(session_id)) == session_id
+    assert invoked[invoked.index("--session-id") + 1] == session_id
     assert invoked[invoked.index("--model") + 1] == "muse-spark-1.3"
     assert invoked[invoked.index("--reasoning-effort") + 1] == "high"
     assert "--disable-shell" in invoked

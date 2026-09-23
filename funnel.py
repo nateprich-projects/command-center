@@ -2645,12 +2645,13 @@ def parse_analysis_marker(body: str) -> Optional[bool]:
     cannot be read in that shape is malformed and still opts into the safe
     outcome: wait for Nate rather than silently closing the project.
     """
+    if not isinstance(body, str) or ANALYSIS_MARKER not in body:
+        return None
+
     found = _marked_json(body, ANALYSIS_MARKER)
     if found is not None:
         return found.get("analysis") is True
-    if isinstance(body, str) and ANALYSIS_MARKER in body:
-        return False
-    return None
+    return False
 
 
 def parse_caused_by(body: str) -> List[str]:

@@ -467,6 +467,20 @@ def test_escalated_risk_holds():
         "Shaped", "escalated risk (credentials)")
 
 
+def test_a_scan_match_line_is_in_the_escalation_explanation():
+    status, reason = shape.decide(
+        shape.validate_answer(answer()),
+        klass="Improve", origin_voice="agent",
+        escalation_reasons=["credentials"],
+        escalation_matches=[{
+            "reason": "credentials",
+            "line": "Read credentials from the environment.",
+        }])
+    assert (status, reason) == (
+        "Shaped",
+        "escalated risk (credentials: Read credentials from the environment.)")
+
+
 def test_a_declared_risk_holds_with_a_clean_scan():
     # #1034: the model judges the plan, not its wording — a declared
     # data-migration with no scan hit still holds.
@@ -873,7 +887,8 @@ def test_apply_holds_an_escalated_plan_at_shaped(monkeypatch, capsys):
         answer(plan_markdown="# Plan\n\nRotate the api-key monthly.\n"),
         run="shape-run", agent="muse") == 0
     assert item.status == "Shaped"
-    assert "escalated risk (credentials)" in capsys.readouterr().out
+    assert "escalated risk (credentials: Rotate the api-key monthly.)" \
+        in capsys.readouterr().out
 
 
 def test_apply_holds_a_declared_risk_with_a_clean_scan(

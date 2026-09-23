@@ -6019,12 +6019,13 @@ def check_codex_automations(root: Optional[str] = None) -> Check:
                      "could not read the Codex automations ({})".format(
                          str(exc) or type(exc).__name__),
                      CODEX_AUTOMATIONS_FIX)
-    notes = "\n".join("  " + note for note in findings["notes"])
     if findings["drift"]:
+        # Drift lines only: the doctor appends the fix to every line of a
+        # failing row, and a status note is not something to fix.
         return Check(name, False, "\n".join(
-            ["  " + line for line in findings["drift"]]
-            + ([notes] if notes else [])), CODEX_AUTOMATIONS_FIX)
-    return Check(name, True, notes, "")
+            "  " + line for line in findings["drift"]), CODEX_AUTOMATIONS_FIX)
+    return Check(name, True, "\n".join(
+        "  " + note for note in findings["notes"]), "")
 
 
 def check_member_repos(repos: Optional[Iterable[str]] = None) -> List[Check]:

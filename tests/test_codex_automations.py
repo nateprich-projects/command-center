@@ -86,9 +86,8 @@ def test_the_fields_are_read_from_the_flat_file(tmp_path):
     fields = codex_run.automation_fields(
         (directory / "automation.toml").read_text())
 
-    assert fields == {"name": "Command Center tickets", "status": "ACTIVE",
-                      "rrule": ALL_DAY, "model": "gpt-6-luna",
-                      "reasoning_effort": "max"}
+    assert fields == {"status": "ACTIVE", "rrule": ALL_DAY,
+                      "model": "gpt-6-luna", "reasoning_effort": "max"}
 
 
 def test_the_prompt_is_never_read_as_a_field():
@@ -183,6 +182,41 @@ def test_an_unreadable_file_is_drift(tmp_path):
                for line in drift), drift
 
 
+def test_a_field_written_twice_is_drift(tmp_path):
+    """A hand edit that appends a corrected line under a stale one must not
+    read clean: TOML forbids it, and the keeper reads the first `rrule`."""
+    _manifest_set(tmp_path)
+    toml = tmp_path / "command-center-tickets-hourly" / "automation.toml"
+    toml.write_text(toml.read_text() + 'model = "gpt-6-luna"\n')
+
+    drift = codex_run.automation_findings(str(tmp_path))["drift"]
+
+    assert drift == ["command-center-tickets-hourly: `model` is written more "
+                     "than once"]
+
+
+def test_a_file_that_is_not_utf8_is_unreadable_not_fatal(tmp_path):
+    """One bad file names itself; the other automations are still read."""
+    _manifest_set(tmp_path, **{
+        "command-center-tickets-weekday-mornings": {"effort": "high"}})
+    toml = tmp_path / "command-center-tickets-hourly" / "automation.toml"
+    toml.write_bytes(toml.read_bytes() + b"\xff\n")
+
+    drift = codex_run.automation_findings(str(tmp_path))["drift"]
+
+    assert any(line.startswith("command-center-tickets-hourly: unreadable")
+               for line in drift), drift
+    assert any("weekday-mornings: effort expected max" in line
+               for line in drift), drift
+
+
+def test_a_retired_automation_that_is_gone_is_not_drift(tmp_path):
+    _manifest_set(tmp_path, **{
+        "command-center-tickets-sun-thu-late-night": {"absent": True}})
+
+    assert codex_run.automation_findings(str(tmp_path))["drift"] == []
+
+
 def test_no_automations_directory_is_drift(tmp_path):
     drift = codex_run.automation_findings(str(tmp_path / "missing"))["drift"]
 
@@ -224,6 +258,7 @@ def test_drift_fails_with_the_edit_procedure(tmp_path):
 
     assert check.ok is False
     assert "model expected gpt-6-luna, found gpt-5.6-luna" in check.found
+    assert "memory" not in check.found  # notes are not things to fix
     assert check.fix == funnel.CODEX_AUTOMATIONS_FIX
     assert "quit the ChatGPT app" in check.fix
 

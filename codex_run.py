@@ -416,9 +416,9 @@ AUTOMATIONS_EXPECTED = {
     "command-center-tickets-weekday-mornings": "escalated",
 }
 
-#: Retired by #1315 and kept on disk, paused. It is not established that the
-#: app tolerates an automation directory removed by hand, so they stay, and
-#: one turned back on is drift.
+#: Retired by #1315. Kept on disk, paused, because it is not established
+#: that the app tolerates an automation directory removed by hand. One that
+#: is present must not be active; one that is gone is not drift.
 AUTOMATIONS_RETIRED = frozenset({
     "command-center-tickets-mon-fri-after-midnight",
     "command-center-tickets-sun-thu-late-night",
@@ -431,14 +431,26 @@ BYHOUR = "BYHOUR="
 #: One `key = "value"` line of an automation file. The app writes flat TOML
 #: and this machine's python3 has no `tomllib`, so the fields read here are
 #: taken the way the run-keeper takes the prompt: one anchored line each.
-_FIELD = re.compile(r'^(model|reasoning_effort|status|rrule|name) = (".*")$',
+_FIELD = re.compile(r'^(model|reasoning_effort|status|rrule) = (".*")$',
                     re.MULTILINE)
 
 
+class DuplicateField(ValueError):
+    """A field the manifest reads appears more than once in one file."""
+
+
 def automation_fields(text: str) -> Dict[str, str]:
-    """The flat string fields of one automation file that the manifest reads."""
+    """The flat string fields of one automation file that the manifest reads.
+
+    A field written twice is refused, not resolved. TOML forbids it, the
+    run-keeper reads the first `rrule` and this reader would read the last,
+    and a hand edit that appends `model = "gpt-6-luna"` under a stale line
+    would otherwise read clean.
+    """
     fields: Dict[str, str] = {}
     for key, raw in _FIELD.findall(text):
+        if key in fields:
+            raise DuplicateField(key)
         try:
             value = json.loads(raw)
         except ValueError:
@@ -463,15 +475,22 @@ def automation_findings(root: Optional[str] = None) -> Dict[str, List[str]]:
         return {"drift": ["no automations directory at {}".format(root)],
                 "notes": notes}
     found: Dict[str, Dict[str, str]] = {}
+    unreadable = set()
     for path in sorted(glob.glob(os.path.join(
             root, AUTOMATION_PREFIX + "*", "automation.toml"))):
         name = os.path.basename(os.path.dirname(path))
         try:
             with open(path, encoding="utf-8") as handle:
                 found[name] = automation_fields(handle.read())
-        except OSError as exc:
+        except DuplicateField as exc:
+            drift.append("{}: `{}` is written more than once".format(
+                name, exc))
+            found[name] = {}
+            unreadable.add(name)
+        except (OSError, UnicodeDecodeError) as exc:
             drift.append("{}: unreadable ({})".format(name, exc))
             found[name] = {}
+            unreadable.add(name)
     for name in sorted(set(found) - set(AUTOMATIONS_EXPECTED)
                        - AUTOMATIONS_RETIRED):
         drift.append("{}: not in the manifest".format(name))
@@ -479,7 +498,9 @@ def automation_findings(root: Optional[str] = None) -> Dict[str, List[str]]:
         drift.append("{}: missing".format(name))
     for name, fields in sorted(found.items()):
         status = fields.get("status")
-        if name in AUTOMATIONS_RETIRED:
+        if name in unreadable:
+            pass
+        elif name in AUTOMATIONS_RETIRED:
             if status != "PAUSED":
                 drift.append("{}: retired, but status is {}".format(
                     name, status))

@@ -59,6 +59,10 @@ non-empty; say "closed itself cleanly" when empty.
 Then `cleared_blocks`, newest first: ticket, conditions found closed, clear
 time. A mechanical record, never added to the total.
 
+Then `pending_wakes`, whenever non-empty: each parked issue as a link, its
+`wake_date`, and its recorded `wake_status`. Items that have resumed are no
+longer parked and therefore no longer appear here.
+
 Then `unattended_approvals`, newest first: issue, transition time, stated
 `basis`. A record to read at will, not a notification or review request.
 

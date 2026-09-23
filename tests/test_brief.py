@@ -568,8 +568,58 @@ def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
         "parked_at": "2026-09-03T00:00:00+00:00",
         "reason": "The rewrite no longer earns its maintenance cost.",
     }]
+    assert brief["pending_wakes"] == []
     assert len(calls) == 1
     assert calls[0][3] == "15"
+
+
+def test_brief_reports_wakes_for_parked_items_until_they_resume(
+    monkeypatch, capsys
+):
+    future = funnel.Item(
+        repo="nateprich/beta", number=31, title="Resume the study",
+        url="https://example.invalid/31", state="CLOSED", status="Parked",
+        status_since=NOW,
+    )
+    no_wake = funnel.Item(
+        repo="nateprich/beta", number=32, title="Keep this parked",
+        url="https://example.invalid/32", state="CLOSED", status="Parked",
+        status_since=NOW - timedelta(days=1),
+    )
+    resumed = funnel.Item(
+        repo="nateprich/beta", number=33, title="Already resumed",
+        url="https://example.invalid/33", state="OPEN", status="Ready",
+        status_since=NOW,
+    )
+    comment_bodies = {
+        31: "{}date=2026-09-10 status=Building\n{}Resume the study".format(
+            funnel.PARK_WAKE_PREFIX, funnel.PARK_COMMENT_PREFIX
+        ),
+        32: "{}Keep this parked".format(funnel.PARK_COMMENT_PREFIX),
+        33: "{}date=2026-09-01 status=Ready\n{}Already resumed".format(
+            funnel.PARK_WAKE_PREFIX, funnel.PARK_COMMENT_PREFIX
+        ),
+    }
+    comment_reads = []
+
+    def issue_comments(item):
+        comment_reads.append(item.number)
+        return [{"body": comment_bodies[item.number]}]
+
+    monkeypatch.setattr(funnel, "_issue_comments", issue_comments)
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([future, no_wake, resumed], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["pending_wakes"] == [{
+        "ref": future.ref,
+        "title": future.title,
+        "url": future.url,
+        "wake_date": "2026-09-10",
+        "wake_status": "Building",
+    }]
+    assert comment_reads == [31, 32]
 
 
 def test_brief_does_not_treat_ready_as_a_human_decision(monkeypatch, capsys):
@@ -1480,6 +1530,7 @@ def test_a_timed_out_parked_section_reads_as_unread_not_empty(
     brief = json.loads(capsys.readouterr().out)
 
     assert brief["parked"] is None
+    assert brief["pending_wakes"] is None
     assert [row["section"] for row in brief["missing"]] == ["parked"]
     assert "not an empty one" in brief["missing"][0]["error"]
     assert any(row["section"] == "parked" for row in brief["degraded"])
@@ -1502,6 +1553,7 @@ def test_both_sections_still_read_as_lists_when_they_succeed(capsys):
     brief = json.loads(capsys.readouterr().out)
 
     assert brief["parked"] == []
+    assert brief["pending_wakes"] == []
     assert brief["cleared_blocks"] == []
     assert brief["missing"] == []
 

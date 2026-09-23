@@ -18,6 +18,8 @@ different fixes:
 - **Config drift.** A Codex run refused in the last day because its model,
   effort or sandbox differed from `codex_run.py` (#1316). One is enough: the
   refusal repeats on every run until someone fixes the automation.
+- **Unreadable.** A heartbeat file the watchdog could not read. Reading it as
+  empty would pass an agent it cannot see as one that never ran (#1335).
 
 Deliberately *not* reported: any `skipped-*` outcome and `nothing-to-do`. Those
 are the system working, and paging on them would train the alert to be ignored.
@@ -210,11 +212,32 @@ def _runtime_lag_problem(agent: str, rows: List[Dict], now: float) -> Optional[s
 
 
 def records(agent: str) -> List[Dict]:
+    """Every heartbeat record for ``agent`` on the heartbeat branch.
+
+    Above 1 MB the Contents API returns metadata only, with `encoding: "none"`
+    and no `content`, which is what `heartbeat._fetch` found for the writer
+    (#949). The body is then re-read with the raw media type. Read as the empty
+    string, a large file is an agent that never ran, and this alarm was blind
+    to Muse that way (#1335).
+
+    A missing file is an agent that has not run yet, and reads as no rows. Any
+    other failure raises: an agent the watchdog cannot see must be reported,
+    not passed as silent.
+    """
+    path = "repos/{}/contents/{}.jsonl?ref={}".format(REPO, agent, BRANCH)
     try:
-        raw = gh("api", "repos/{}/contents/{}.jsonl?ref={}".format(REPO, agent, BRANCH))
-    except RuntimeError:
-        return []
-    content = base64.b64decode(json.loads(raw).get("content", "")).decode("utf-8", "replace")
+        raw = gh("api", path)
+    except RuntimeError as exc:
+        if "HTTP 404" in str(exc):
+            return []
+        raise
+    payload = json.loads(raw)
+    if payload.get("encoding") == "none" or (
+            payload.get("size") and not payload.get("content")):
+        content = gh("api", path, "-H", "Accept: application/vnd.github.raw")
+    else:
+        content = base64.b64decode(payload.get("content", "")).decode(
+            "utf-8", "replace")
     out = []
     for line in content.splitlines():
         try:
@@ -319,7 +342,12 @@ def main() -> int:
     for agent in sorted(heartbeat.PROVIDERS):
         if agent in getattr(heartbeat, "RETIRED_AGENTS", ()):
             continue  # a stopped schedule is not a dying one (#431)
-        rows = records(agent)
+        try:
+            rows = records(agent)
+        except (RuntimeError, ValueError) as exc:
+            problems.append("`{}`: heartbeat unreadable ({}).".format(
+                agent, str(exc) or type(exc).__name__))
+            continue
         problems += assess(agent, rows, now)
         info = note(agent, rows, now)
         if info:

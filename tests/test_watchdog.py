@@ -908,3 +908,112 @@ def test_an_api_reserve_decline_is_not_an_alarm():
     """Coasting to a stop on budget is the design working, not a fault (#273)."""
     rows = [start("a", 1), finish("a", 1, "skipped-api-reserve")]
     assert watchdog.assess("codex", rows, NOW) == []
+
+
+
+# --- reading large heartbeat files (#1335) -----------------------------------
+
+
+def _gh_answering(responses, calls):
+    """A `gh` double: the answer for each call is chosen by its arguments."""
+    def gh(*args):
+        calls.append(args)
+        for match, answer in responses:
+            if match(args):
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+        raise AssertionError("unexpected gh call: {}".format(args))
+    return gh
+
+
+def _lines(*records):
+    return "".join(json.dumps(record) + "\n" for record in records)
+
+
+def test_a_small_heartbeat_file_decodes_as_before(monkeypatch):
+    import base64 as b64
+
+    body = _lines({"run": "a", "phase": "start", "ts": 1})
+    calls = []
+    monkeypatch.setattr(watchdog, "gh", _gh_answering([
+        (lambda a: "-H" not in a, json.dumps({
+            "encoding": "base64", "size": len(body),
+            "content": b64.b64encode(body.encode()).decode()})),
+    ], calls))
+
+    assert watchdog.records("codex") == [{"run": "a", "phase": "start", "ts": 1}]
+    assert len(calls) == 1
+
+
+def test_a_file_over_one_megabyte_is_read_raw(monkeypatch):
+    """Above 1 MB the Contents API answers with metadata only; muse.jsonl
+    was 4.75 MB and read as an agent that never ran."""
+    body = _lines({"run": "a", "phase": "start", "ts": 1},
+                  {"run": "a", "phase": "finish", "ts": 2,
+                   "outcome": "done"})
+    calls = []
+    monkeypatch.setattr(watchdog, "gh", _gh_answering([
+        (lambda a: "Accept: application/vnd.github.raw" in a, body),
+        (lambda a: True, json.dumps({
+            "encoding": "none", "size": 4_750_000, "content": ""})),
+    ], calls))
+
+    rows = watchdog.records("muse")
+
+    assert [row["phase"] for row in rows] == ["start", "finish"]
+    assert len(calls) == 2
+
+
+def test_a_missing_heartbeat_file_is_an_agent_that_has_not_run(monkeypatch):
+    monkeypatch.setattr(watchdog, "gh", _gh_answering([
+        (lambda a: True, RuntimeError("gh: Not Found (HTTP 404)")),
+    ], []))
+
+    assert watchdog.records("claude") == []
+
+
+@pytest.mark.parametrize("failing", ["first", "raw"])
+def test_a_failed_read_raises(monkeypatch, failing):
+    responses = []
+    if failing == "first":
+        responses.append((lambda a: True, RuntimeError("HTTP 502")))
+    else:
+        responses += [
+            (lambda a: "Accept: application/vnd.github.raw" in a,
+             RuntimeError("HTTP 502")),
+            (lambda a: True, json.dumps({"encoding": "none", "size": 2_000_000,
+                                         "content": ""})),
+        ]
+    monkeypatch.setattr(watchdog, "gh", _gh_answering(responses, []))
+
+    with pytest.raises(RuntimeError):
+        watchdog.records("muse")
+
+
+def test_an_unreadable_heartbeat_is_a_problem_the_issue_names(monkeypatch):
+    """Blind is not healthy: the issue is filed, and a readable agent is
+    still assessed beside it."""
+    now = time.time()
+    posted = []
+
+    def records(agent):
+        if agent == "muse":
+            raise RuntimeError("HTTP 502 from the contents API")
+        return []
+
+    monkeypatch.setattr(watchdog, "records", records)
+    monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS",
+                        {"muse": "meta", "claude": "anthropic"})
+    monkeypatch.setattr(watchdog, "existing_issue", lambda: {})
+    monkeypatch.setattr(watchdog, "gh",
+                        lambda *args: posted.append(args) or json.dumps(
+                            {"number": 1, "html_url": "https://x/1"}))
+
+    watchdog.main()
+
+    bodies = [arg for call in posted for arg in call
+              if isinstance(arg, str) and arg.startswith("body=")]
+    assert bodies, posted
+    assert "`muse`: heartbeat unreadable (HTTP 502 from the contents API)." \
+        in bodies[0]

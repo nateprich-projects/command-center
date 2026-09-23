@@ -965,6 +965,49 @@ def test_a_file_over_one_megabyte_is_read_raw(monkeypatch):
     assert len(calls) == 2
 
 
+def test_a_size_without_content_is_read_raw(monkeypatch):
+    """The other metadata-only shape: no `encoding` field, a size, no content."""
+    body = _lines({"run": "a", "phase": "start", "ts": 1})
+    calls = []
+    monkeypatch.setattr(watchdog, "gh", _gh_answering([
+        (lambda a: "Accept: application/vnd.github.raw" in a, body),
+        (lambda a: True, json.dumps({"size": 1_200_000})),
+    ], calls))
+
+    assert watchdog.records("codex") == [{"run": "a", "phase": "start", "ts": 1}]
+
+
+def test_one_transient_failure_is_retried(monkeypatch):
+    import base64 as b64
+
+    body = _lines({"run": "a", "phase": "start", "ts": 1})
+    answers = [RuntimeError("HTTP 502: Bad Gateway"), json.dumps({
+        "encoding": "base64", "size": len(body),
+        "content": b64.b64encode(body.encode()).decode()})]
+
+    def gh(*args):
+        answer = answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(watchdog, "gh", gh)
+
+    assert watchdog.records("codex") == [{"run": "a", "phase": "start", "ts": 1}]
+
+
+def test_a_missing_heartbeat_branch_raises(monkeypatch):
+    """Every agent would read as never run, and a real alarm would close
+    itself as healthy."""
+    monkeypatch.setattr(watchdog, "gh", _gh_answering([
+        (lambda a: True, RuntimeError(
+            "gh: No commit found for the ref heartbeat (HTTP 404)")),
+    ], []))
+
+    with pytest.raises(RuntimeError):
+        watchdog.records("muse")
+
+
 def test_a_missing_heartbeat_file_is_an_agent_that_has_not_run(monkeypatch):
     monkeypatch.setattr(watchdog, "gh", _gh_answering([
         (lambda a: True, RuntimeError("gh: Not Found (HTTP 404)")),

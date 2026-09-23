@@ -3,7 +3,7 @@
 
 Runs in GitHub Actions, outside the machine it watches.
 
-It reports three distinct conditions, because they have different causes and
+It reports six distinct conditions, because they have different causes and
 different fixes:
 
 - **Silent.** No record at all within the window. The watchdog can report that
@@ -211,6 +211,20 @@ def _runtime_lag_problem(agent: str, rows: List[Dict], now: float) -> Optional[s
     ).format(agent, lag_by, unit)
 
 
+def _read(path: str, *extra: str) -> str:
+    """One `gh api` read, retried once unless GitHub answered 404.
+
+    A single transient 502 would otherwise open an issue that closes itself
+    on the next run, hours later on GitHub's actual schedule.
+    """
+    try:
+        return gh("api", path, *extra)
+    except RuntimeError as exc:
+        if "HTTP 404" in str(exc):
+            raise
+        return gh("api", path, *extra)
+
+
 def records(agent: str) -> List[Dict]:
     """Every heartbeat record for ``agent`` on the heartbeat branch.
 
@@ -220,21 +234,24 @@ def records(agent: str) -> List[Dict]:
     string, a large file is an agent that never ran, and this alarm was blind
     to Muse that way (#1335).
 
-    A missing file is an agent that has not run yet, and reads as no rows. Any
-    other failure raises: an agent the watchdog cannot see must be reported,
-    not passed as silent.
+    A missing file is an agent that has not run yet, and reads as no rows. A
+    missing branch is not: every agent would then read as never run, and the
+    watchdog would close a real alarm as healthy. Any other failure raises
+    after one retry, because an agent the watchdog cannot see must be
+    reported, not passed as silent.
     """
     path = "repos/{}/contents/{}.jsonl?ref={}".format(REPO, agent, BRANCH)
     try:
-        raw = gh("api", path)
+        raw = _read(path)
     except RuntimeError as exc:
-        if "HTTP 404" in str(exc):
+        message = str(exc)
+        if "HTTP 404" in message and "No commit found" not in message:
             return []
         raise
     payload = json.loads(raw)
     if payload.get("encoding") == "none" or (
             payload.get("size") and not payload.get("content")):
-        content = gh("api", path, "-H", "Accept: application/vnd.github.raw")
+        content = _read(path, "-H", "Accept: application/vnd.github.raw")
     else:
         content = base64.b64decode(payload.get("content", "")).decode(
             "utf-8", "replace")
@@ -373,8 +390,8 @@ def main() -> int:
         + ["- " + p for p in problems]
         + ["", "Healthy outcomes — any `skipped-*` result or `nothing-to-do` — "
            "are not reported here by design. This issue is only raised for "
-              "silence, dying runs, repeated errors, or a stale "
-              "runtime checkout.",
+              "silence, dying runs, repeated errors, a stale runtime "
+              "checkout, config drift, or an unreadable heartbeat.",
            "", "It closes itself once the heartbeats recover."]
     )
 

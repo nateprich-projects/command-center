@@ -278,14 +278,30 @@ def test_a_block_quote_is_not_scanned():
     ) == []
 
 
-def test_everything_outside_those_two_regions_is_scanned_as_before():
-    """The authorised narrowing is fences and block quotes, and no more. An
-    inline code span holds the same kind of evidence and is deliberately still
-    scanned; widening a safety gate's blind spot past what was approved is not
-    this change's to do."""
+def test_a_paired_inline_code_span_is_not_scanned():
+    body = "The OS error was `Resource deadlock avoided`, not ours.\n"
+
+    assert scan_everything(body) == ["concurrency"]
+    assert funnel.escalation_reasons("x", body) == []
+    assert funnel.required_tier("x", body) == "standard"
+    assert funnel.plan_is_escalated(body) == []
+
+
+def test_unclosed_or_multiline_inline_backticks_stay_searchable():
+    unclosed = "The OS error was `Resource deadlock avoided, not ours.\n"
+    multiline = "The OS error was `Resource deadlock\navoided`, not ours.\n"
+
+    assert funnel.escalation_reasons("x", unclosed) == ["concurrency"]
+    assert funnel.escalation_reasons("x", multiline) == ["concurrency"]
+
+
+def test_real_prose_risk_outside_inline_code_still_matches():
     assert funnel.escalation_reasons(
-        "x", "The OS error was `Resource deadlock avoided`, not ours.\n"
+        "x", "The worker can hit a race condition.\n"
     ) == ["concurrency"]
+
+
+def test_everything_else_outside_the_three_regions_is_scanned_as_before():
     assert funnel.escalation_reasons(
         "x", "This step will migrate the schema in place.\n"
     ) == ["data-migration"]

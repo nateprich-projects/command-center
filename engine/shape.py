@@ -287,7 +287,8 @@ def validate_answer(data: object) -> Dict:
 def render_plan(answer: Dict) -> str:
     """Render the issue body from validated answer fields.
 
-    The plan narrative and its proposed class come first, then the
+    The plan narrative and proposed class come first, followed by a
+    durable Risk line when the model declared a risk, then the
     runner-owned decision record: what precedent settled, what the
     agent decided itself, the sequencing dependencies where any wait
     (#1053), and the four Needs Nate categories (each open list joined
@@ -296,8 +297,17 @@ def render_plan(answer: Dict) -> str:
     validated answer; ``apply_shape`` validates before calling.
     """
     lines = [answer["plan_markdown"].rstrip(), "",
-             "Proposed class: {}".format(answer["proposed_class"]), "",
-             "## Decided from precedent", ""]
+             "Proposed class: {}".format(answer["proposed_class"]), ""]
+    if answer["escalated_risk"]:
+        # The sweep must be able to re-run the exact self-approval condition
+        # after the typed answer is gone. Keep a model-declared risk visible in
+        # the durable plan so the shared plan scan continues to hold it.
+        declared = "; ".join(
+            "{}: {}".format(entry["reason"], entry["why"])
+            for entry in answer["escalated_risk"]
+        )
+        lines.extend(["Risk: escalated — {}".format(declared), ""])
+    lines.extend(["## Decided from precedent", ""])
     precedent = answer["decided_from_precedent"]
     if precedent:
         for entry in precedent:
@@ -423,12 +433,19 @@ def preview_decision(items: list, item, answer: Dict) -> Tuple[str, str]:
     effective_klass = funnel.effective_class(item, by_ref)
     if item.klass not in funnel.LADDER and origin_voice == "agent":
         effective_klass = answer["proposed_class"]
+    scan_answer = dict(answer)
+    # `decide` consumes the typed declaration separately. Keep it out of the
+    # wording scan here so the durable Risk line added by `render_plan` does
+    # not report the same declaration twice.
+    scan_answer["escalated_risk"] = []
     return decide(
         answer,
         klass=effective_klass,
         origin_voice=origin_voice,
         override_target=override_target,
-        escalation_reasons=funnel.plan_is_escalated(render_plan(answer)),
+        escalation_reasons=funnel.plan_is_escalated(
+            render_plan(scan_answer)
+        ),
         state=item.state,
     )
 

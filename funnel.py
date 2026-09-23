@@ -1294,6 +1294,58 @@ def plan_is_escalated(plan_body: str) -> List[str]:
     return escalation_reasons("", plan_body)
 
 
+def plan_needs_nate(plan_body: str) -> bool:
+    """Whether a rendered plan has any unanswered Needs Nate category.
+
+    The shape answer is the authoritative typed record while the plan is
+    being written. A later lane only has the rendered issue body, so read the
+    same four categories back from its stable section. Missing, duplicate, or
+    unrecognised categories fail closed: absence is not an all-clear.
+    """
+    text = plan_body or ""
+    headings = list(re.finditer(
+        r"(?im)^##[ \t]+Needs[ \t]+(?:Nate|you)[ \t]*$", text
+    ))
+    if len(headings) != 1:
+        return True
+
+    section_start = headings[0].end()
+    section_boundary = re.search(
+        r"(?m)^#{1,6}[ \t]+|^[ \t]*<!-- command-center-[\w-]+ -->[ \t]*$",
+        text[section_start:],
+    )
+    section_end = (
+        section_start + section_boundary.start()
+        if section_boundary else len(text)
+    )
+    section = text[section_start:section_end]
+    category_line = re.compile(
+        r"(?im)^[ \t]*(?:-[ \t]*)?"
+        r"(?P<category>Exposure|Gates|Scope(?:[ \t]+and[ \t]+priority)?|"
+        r"Preference)[ \t]*:[ \t]*(?P<answer>.*?)\s*$"
+    )
+    answers: Dict[str, str] = {}
+    for line in section.splitlines():
+        if not line.strip():
+            continue
+        match = category_line.fullmatch(line)
+        if match is None:
+            return True
+        category = match.group("category").casefold()
+        category = "scope" if category.startswith("scope") else category
+        if category in answers:
+            return True
+        answers[category] = match.group("answer").strip()
+
+    required = {"exposure", "gates", "scope", "preference"}
+    if answers.keys() != required:
+        return True
+    return any(
+        not re.match(r"(?i)^nothing outstanding\b", answer)
+        for answer in answers.values()
+    )
+
+
 SHAPING_PLAN_STATUSES = frozenset(("Shaped", "Ready", "Building"))
 
 
@@ -11938,6 +11990,103 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     return None
 
 
+def shaped_self_approvable(item: Item,
+                           by_ref: Dict[str, Item]) -> bool:
+    """Re-evaluate one Shaped plan with the existing self-approval rule."""
+    body = _loaded_item_body(item)
+    origin = parse_origin(body)
+    origin_voice = origin["voice"] if origin is not None else None
+    override = parse_origin_override(body)
+    override_target = override["target"] if override is not None else None
+    return self_approval_eligible(
+        effective_class(item, by_ref),
+        origin_voice,
+        override_target,
+        needs_nate=plan_needs_nate(body),
+        escalated=bool(plan_is_escalated(body)),
+        state=item.state,
+    )
+
+
+def sweep_shaped_self_approvals(
+    items: Sequence[Item], now: datetime,
+    run: Optional[str] = None, agent: Optional[str] = None,
+) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
+    """Advance stranded Shaped plans using the normal Status and marker writes.
+
+    The Shaped gate is re-checked by the same predicate used when a plan is
+    first written. Other live questions, such as an unblock question, remain
+    owned by their existing gate and are not swept.
+    """
+    by_ref = {item.ref: item for item in items}
+    advanced: List[Dict[str, str]] = []
+    errors: List[Dict[str, str]] = []
+    for item in items:
+        if item.state != "OPEN" or item.status != "Shaped":
+            continue
+        question = gate_question(item)
+        if question is not None and question != GATES["Shaped"]:
+            continue
+        if not shaped_self_approvable(item, by_ref):
+            continue
+
+        body = _loaded_item_body(item)
+        origin = parse_origin(body)
+        origin_voice = origin["voice"] if origin is not None else None
+        klass = effective_class(item, by_ref)
+        owner_basis = (
+            "origin agent" if origin_voice == "agent"
+            else "origin override to agents"
+        )
+        reason = "needs_nate all null; class {} self-approvable; {}".format(
+            klass, owner_basis
+        )
+
+        try:
+            status_error = _write_status(item, "Ready", now)
+        except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+            status_error = str(exc)
+        if status_error is not None:
+            errors.append({"ref": item.ref, "error": status_error})
+            continue
+
+        basis = "{}; no escalated risk".format(reason)
+        authority_signals = needs_nate_signals(body)
+        if authority_signals:
+            basis += "; authority signals: {}".format(
+                ", ".join(authority_signals)
+            )
+        try:
+            comment = _run_gh(
+                ["gh", "issue", "comment", str(item.number),
+                 "--repo", item.repo,
+                 "--body", self_approval_comment(
+                     basis, at=now, run=run, agent=agent
+                 )],
+                capture_output=True, text=True,
+            )
+        except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+            errors.append({
+                "ref": item.ref,
+                "error": (
+                    "Ready was written but the Self-approved marker failed: {}"
+                    .format(exc)
+                ),
+            })
+            continue
+        if comment.returncode != 0:
+            errors.append({
+                "ref": item.ref,
+                "error": (
+                    "Ready was written but the Self-approved marker failed: {}"
+                    .format(comment.stderr.strip())
+                ),
+            })
+            continue
+        advanced.append({"ref": item.ref, "status": "Ready"})
+    return advanced, errors
+
+
 def approved_merge_candidates(
     items: Sequence[Item],
     pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
@@ -12964,6 +13113,17 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         if entry_item is None:
             return None
         return effective_class(entry_item, by_ref)
+
+    # Finish plans that already qualify for unattended approval before the
+    # shape queue looks for another Idea. Updating the shared Items first also
+    # lets the Ready plan enter this pass's breakdown queue.
+    self_approved, self_approval_errors = sweep_shaped_self_approvals(
+        items, now, run=out.get("run"), agent=agent
+    )
+    if self_approved:
+        out["shaped_self_approvals"] = self_approved
+    if self_approval_errors:
+        out["shaped_self_approval_errors"] = self_approval_errors
 
     pending = awaiting_breakdown(items) if breakdown else []
     shape_item = shapeable_idea(items, tier, reading)

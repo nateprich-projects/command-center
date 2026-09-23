@@ -42,14 +42,16 @@ REMOTE_CONTROL_NAME = "com.nateprich.command-center-remote-control.plist"
 PUBLISHER_NAME = "com.nateprich.command-center-funnel-publisher.plist"
 #: The dashboard auto-deploy (#653). A five-minute poll in the keeper mould.
 DEPLOY_NAME = "com.nateprich.command-center-funnel-deploy.plist"
+# The FF runtime poller; a ten-minute deploy window matches its fastest tick.
+FF_DEPLOY_NAME = "com.nateprich.command-center-ff-deploy.plist"
 #: The daily outcome-record derivation (#1288). A once-a-day Python run, not a
 #: routine schedule; outcomes.py had no scheduler at all before it.
 OUTCOMES_NAME = "com.nateprich.command-center-outcomes-derive.plist"
 NAMES = MUSE_SCHEDULE_NAMES + [
     KEEPER_NAME, REMOTE_CONTROL_NAME, PUBLISHER_NAME, DEPLOY_NAME,
-    OUTCOMES_NAME]
+    FF_DEPLOY_NAME, OUTCOMES_NAME]
 INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [
-    KEEPER_NAME, PUBLISHER_NAME, DEPLOY_NAME, OUTCOMES_NAME]
+    KEEPER_NAME, PUBLISHER_NAME, DEPLOY_NAME, FF_DEPLOY_NAME, OUTCOMES_NAME]
 
 
 def console_reload_hint(name):
@@ -262,6 +264,21 @@ def test_the_publisher_polls_every_minute():
         plist = plistlib.load(handle)
 
     assert plist["StartInterval"] == 60
+
+
+def test_the_ff_deployer_polls_every_ten_minutes_from_the_stable_checkout():
+    """The FF deployer follows the runtime cadence without a machine path."""
+    import plistlib
+
+    with (ROOT / "launchd" / FF_DEPLOY_NAME).open("rb") as handle:
+        plist = plistlib.load(handle)
+
+    assert plist["StartInterval"] == 600
+    assert plist["ProgramArguments"][:2] == ["/bin/sh", "-c"]
+    command = plist["ProgramArguments"][2]
+    assert '"$HOME/.claude/command-center-run/ff_deploy.py"' in command
+    assert "/Users/" not in command
+    assert "launchctl" not in command
     assert "StartCalendarInterval" not in plist
 
 

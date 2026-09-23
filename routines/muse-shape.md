@@ -6,7 +6,7 @@
 
 Shape one idea into a plan.
 
-The standard Muse schedule shapes standard-tier ideas; the escalated Muse schedule shapes escalated-tier ideas.
+Standard Muse schedule shapes standard ideas; escalated Muse schedule shapes escalated ideas.
 
 ## The question
 

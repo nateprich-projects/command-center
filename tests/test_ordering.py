@@ -174,6 +174,37 @@ def test_building_gate_and_close_share_class_origin_policy(
     assert funnel._auto_closeable_project(finished) is can_close
 
 
+@_pytest.mark.parametrize(
+    ("klass", "origin", "marker", "can_close"),
+    [
+        (
+            "Maintenance", None,
+            funnel.ANALYSIS_MARKER + '\n\n```json\n{"analysis": true}\n```',
+            False,
+        ),
+        ("Maintenance", None, None, True),
+        (
+            "Maintenance", None,
+            funnel.ANALYSIS_MARKER + "\n\n```json\n{not json}\n```",
+            False,
+        ),
+        ("Improve", "agent", None, True),
+    ],
+)
+def test_analysis_marker_waits_and_preserves_other_close_rules(
+    klass, origin, marker, can_close
+):
+    body = _completion_policy_body(origin)
+    if marker is not None:
+        body = "\n\n".join(part for part in (body, marker) if part)
+    finished = project(
+        1, "Building", klass, children=1, done=1, body=body,
+    )
+
+    assert funnel._can_close_itself(finished) is can_close
+    assert gate_question(finished) == (None if can_close else "Accept it?")
+
+
 def test_new_replace_and_unset_class_still_wait_for_acceptance():
     for number, klass in enumerate(("New", "Replace", None), start=1):
         finished = project(number, "Building", klass, children=1, done=1)

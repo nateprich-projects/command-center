@@ -389,6 +389,19 @@ REGRESSION_PREFIX = "Regression from PR #"
 #: fixed marker back from issue comments, so it is a shared contract.
 PARK_COMMENT_PREFIX = "**Parked:** "
 
+#: A dated park records the prior Project Status on its own fixed header line.
+#: The brief and the future wake path share this parser contract.
+PARK_WAKE_PREFIX = "**Parked wake:** "
+PARK_WAKE_STATUSES = frozenset(status for status in STAGES if status != "Parked")
+_PARK_WAKE_STATUS_PATTERN = "|".join(
+    re.escape(status) for status in STAGES if status != "Parked"
+)
+PARK_WAKE_RE = re.compile(
+    r"\A" + re.escape(PARK_WAKE_PREFIX)
+    + r"date=(?P<wake_date>[0-9]{4}-[0-9]{2}-[0-9]{2}) "
+    + r"status=(?P<prior_status>" + _PARK_WAKE_STATUS_PATTERN + r")\Z"
+)
+
 #: A project the funnel closes after its last upkeep ticket lands carries this
 #: fixed prefix. The brief uses it to distinguish funnel-closed work from a
 #: project Nate accepted at the gate; the JSON block after it carries the
@@ -8443,6 +8456,44 @@ def parked_items(items: Iterable[Item]) -> List[Item]:
     return sorted((i for i in items if i.status == "Parked"), key=key)
 
 
+def parse_park_comment(body: str) -> Optional[Dict[str, object]]:
+    """Read a durable park reason and its optional wake record.
+
+    A dated park starts with one strict, machine-readable header line, followed
+    by the same reason line used by an ordinary park. The provenance trailer is
+    invisible to this contract and is removed before parsing.
+    """
+    if not isinstance(body, str):
+        return None
+    visible = _visible_comment(body)
+    wake_date = None
+    prior_status = None
+
+    if visible.startswith(PARK_WAKE_PREFIX):
+        header, separator, reason_line = visible.partition("\n")
+        match = PARK_WAKE_RE.fullmatch(header)
+        if match is not None:
+            try:
+                parsed_date = date.fromisoformat(match.group("wake_date"))
+            except ValueError:
+                parsed_date = None
+            if parsed_date is not None:
+                wake_date = parsed_date
+                prior_status = match.group("prior_status")
+        if not separator:
+            return None
+    else:
+        reason_line = visible
+
+    if not reason_line.startswith(PARK_COMMENT_PREFIX):
+        return None
+    return {
+        "reason": reason_line[len(PARK_COMMENT_PREFIX):].strip(),
+        "wake_date": wake_date,
+        "prior_status": prior_status,
+    }
+
+
 def _parked_item_json(item: Item) -> Dict[str, object]:
     """Render one parked item and read its durable reason comment.
 
@@ -8451,20 +8502,24 @@ def _parked_item_json(item: Item) -> Dict[str, object]:
     comment request for every issue.
     """
     comments = _issue_comments(item)
-    reason = None
+    parsed = None
     for comment in reversed(comments):
         body = comment.get("body") or ""
-        if body.startswith(PARK_COMMENT_PREFIX):
-            reason = body[len(PARK_COMMENT_PREFIX):].strip()
+        parsed = parse_park_comment(body)
+        if parsed is not None:
             break
 
-    return {
+    rendered = {
         "ref": item.ref,
         "title": item.title,
         "url": item.url,
         "parked_at": item.status_since.isoformat() if item.status_since else None,
-        "reason": reason,
+        "reason": parsed["reason"] if parsed is not None else None,
     }
+    if parsed is not None and parsed["wake_date"] is not None:
+        rendered["wake_date"] = parsed["wake_date"].isoformat()
+        rendered["wake_status"] = parsed["prior_status"]
+    return rendered
 
 
 def parked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
@@ -10614,11 +10669,25 @@ def _option_id(field_id: str, name: str) -> str:
 
 
 def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
-             run: Optional[str] = None, agent: Optional[str] = None) -> int:
+             run: Optional[str] = None, agent: Optional[str] = None,
+             wake_date: Optional[date] = None) -> int:
     """Park a project with its durable reason attached to the issue."""
     item = find(items, ref)
     if not item.item_id:
         raise GitHubError("{} is not in the Project".format(item.ref))
+    if wake_date is not None:
+        if wake_date <= _block_condition_date(now):
+            raise GitHubError("wake date must be after today's UTC date")
+        if item.status not in PARK_WAKE_STATUSES:
+            raise GitHubError(
+                "a wake date requires a recorded Project Status before parking"
+            )
+
+    park_comment = PARK_COMMENT_PREFIX + reason
+    if wake_date is not None:
+        park_comment = "{}date={} status={}\n{}".format(
+            PARK_WAKE_PREFIX, wake_date.isoformat(), item.status, park_comment
+        )
 
     # Done and Parked must remain distinguishable. Set the Project status first,
     # then close with NOT_PLANNED, then leave the reason where it can be read
@@ -10642,14 +10711,14 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
     comment = _run_gh(
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
          "--body", append_provenance(
-             PARK_COMMENT_PREFIX + reason, "nate-relayed", at=now,
+             park_comment, "nate-relayed", at=now,
              run=run, agent=agent)],
         capture_output=True, text=True,
     )
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
 
-    print("{} → Parked\n{}{}".format(item.ref, PARK_COMMENT_PREFIX, reason))
+    print("{} → Parked\n{}".format(item.ref, park_comment))
     return 0
 
 
@@ -14359,6 +14428,23 @@ def _parking_reason(value: str) -> str:
     return reason
 
 
+def _parking_wake_date(value: str) -> date:
+    """Require a future calendar date before loading or writing to GitHub."""
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        raise argparse.ArgumentTypeError("wake date must use YYYY-MM-DD")
+    try:
+        wake_date = date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "wake date must be a valid YYYY-MM-DD calendar date"
+        )
+    if wake_date <= _block_condition_date():
+        raise argparse.ArgumentTypeError(
+            "wake date must be after today's UTC date"
+        )
+    return wake_date
+
+
 def _comment_reason(value: str) -> str:
     """Reject blank reasons for canonical blocked comments during parsing."""
     reason = value.strip()
@@ -14521,6 +14607,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
     park.add_argument(
         "--reason", required=True, type=_parking_reason,
         help="why this project is being stopped (required)",
+    )
+    park.add_argument(
+        "--wake-date", type=_parking_wake_date, default=None,
+        help="future YYYY-MM-DD date to restore the prior Project Status",
     )
     park.add_argument(
         "--run", default=None,
@@ -14797,7 +14887,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                              args.run, args.agent)
         if args.command == "park":
             return cmd_park(items, now, args.ref, args.reason,
-                            args.run, args.agent)
+                            args.run, args.agent, args.wake_date)
         if args.command == "answer-gates":
             return cmd_answer_gates(items, now, args.ref, args.answer,
                                     args.decider, args.run, args.agent)

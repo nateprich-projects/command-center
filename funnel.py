@@ -585,8 +585,13 @@ BRIEF_SECTION_BUDGETS = {
     # Pure over the items already loaded: no read of its own to time out.
     "status_state_mismatches": 0.25,
     # One REST read per member repo for main's head, plus a bounded follow-up
-    # only where that head's run failed. Sized like the other small live reads.
-    "main_ci": 3.0,
+    # only where that head's run failed. Six direct main_ci_json passes across
+    # 2026-09-22/23: 5.92, 6.30, 7.11, 7.5276, 6.6979, 7.7154 s
+    # (5.92–7.7154 s; 1.7954 s spread). Brief runs
+    # at 2026-09-22 14:27Z and 2026-09-23 13:37Z timed out at 3.0177 and
+    # 3.0112 s. 10 s leaves 2.2846 s (29.6%) above the measured direct tail;
+    # the 2026-09-23 13:42Z brief completed in 6.9585 s and returned [].
+    "main_ci": 10.0,
     # One `gh issue list` per member repo. Sized like the other live scans.
     "member_issues_without_project_items": 8.0,
     "outcome_signals": 3.0,

@@ -232,6 +232,7 @@ def test_usage_snapshot_records_the_muse_cost_window(monkeypatch):
         "source": "muse", "captured_at": now,
         "windows": {"seven_day": {
             "used_percent": 12.5, "resets_at": now + usage.SEVEN_DAY,
+            "spent_dollars": 3.75,
             "rolling": True,
         }},
     }
@@ -239,8 +240,53 @@ def test_usage_snapshot_records_the_muse_cost_window(monkeypatch):
     monkeypatch.setattr(usage, "read_muse", lambda timestamp: reading)
 
     assert heartbeat.usage_snapshot("muse") == {
-        "seven_day": {"used_percent": 12.5, "resets_at": now + usage.SEVEN_DAY}
+        "seven_day": {
+            "used_percent": 12.5,
+            "resets_at": now + usage.SEVEN_DAY,
+            "spent_dollars": 3.75,
+        }
     }
+
+
+def test_muse_window_consumption_anchors_to_reset_and_counts_runs_once():
+    reset_a = 1_800_000_000.0
+    reset_b = reset_a + 7 * 86400
+
+    def reading(run, phase, at, reset, spent):
+        return {
+            "run": run,
+            "agent": "muse",
+            "phase": phase,
+            "ts": at,
+            "usage": {"seven_day": {
+                "resets_at": reset,
+                "spent_dollars": spent,
+            }},
+        }
+
+    first_start = reading("first", "start", 10, reset_a, 4.0)
+    first_finish = reading("first", "finish", 20, reset_a, 5.25)
+    second_start = reading("second", "start", 30, reset_a, 5.25)
+    second_finish = reading("second", "finish", 40, reset_a, 8.0)
+    next_window_start = reading("next", "start", 50, reset_b, 1.0)
+    next_window_finish = reading("next", "finish", 60, reset_b, 4.5)
+    crossed_start = reading("crossed", "start", 70, reset_a, 8.0)
+    crossed_finish = reading("crossed", "finish", 80, reset_b, 2.0)
+
+    rows = [
+        first_start, first_finish,
+        second_start, second_finish,
+        next_window_start, next_window_finish,
+        crossed_start, crossed_finish,
+        # Re-reading rows, including repeated copies of one run, must not
+        # multiply either its dollars or its sample count.
+        first_start, first_finish, second_start, second_finish,
+    ]
+
+    assert heartbeat.muse_window_consumption(rows) == [
+        {"resets_at": reset_b, "consumed_dollars": 3.5, "runs": 1},
+        {"resets_at": reset_a, "consumed_dollars": 4.0, "runs": 2},
+    ]
 
 
 def test_usage_snapshot_fails_closed_for_unreadable_or_unknown_usage(

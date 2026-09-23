@@ -590,7 +590,10 @@ BRIEF_SECTION_BUDGETS = {
     # (5.92–7.7154 s; 1.7954 s spread). Brief runs
     # at 2026-09-22 14:27Z and 2026-09-23 13:37Z timed out at 3.0177 and
     # 3.0112 s. 10 s leaves 2.2846 s (29.6%) above the measured direct tail;
-    # the 2026-09-23 13:42Z brief completed in 6.9585 s and returned [].
+    # the 2026-09-23 13:42Z brief completed in 6.9585 s and returned []. A
+    # captured 2026-09-23 16:26Z brief stdout excerpt is in
+    # evidence/main-ci-brief-2026-09-23.json: main_ci was [], missing was [],
+    # and the only degraded section was closed_with_access_vocabulary.
     "main_ci": 10.0,
     # One `gh issue list` per member repo. Sized like the other live scans.
     "member_issues_without_project_items": 8.0,

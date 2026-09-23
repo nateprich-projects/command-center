@@ -369,6 +369,63 @@ def test_timeline_only_detail_query_handles_batches_without_children(
     assert all(item.status_since is not None for item in items)
 
 
+def test_time_at_gate_uses_latest_current_project_status_event(monkeypatch):
+    node = _node(1)
+    node["id"] = "project-item-1"
+    item = funnel._from_node(node)
+    events = [
+        {
+            "__typename": "ProjectV2ItemStatusChangedEvent",
+            "createdAt": "2026-09-11T00:00:00Z",
+            "previousStatus": "Ready",
+            "status": "Building",
+            "project": {"number": funnel.PROJECT_NUMBER + 1},
+        },
+        {
+            "__typename": "ProjectV2ItemStatusChangedEvent",
+            "createdAt": "2026-09-08T00:00:00Z",
+            "previousStatus": "Ready",
+            "status": "Building",
+            "project": {"number": funnel.PROJECT_NUMBER},
+        },
+        {
+            "__typename": "ProjectV2ItemStatusChangedEvent",
+            "createdAt": "2026-09-10T00:00:00Z",
+            "previousStatus": "Building",
+            "status": "Ready",
+            "project": {"number": funnel.PROJECT_NUMBER},
+        },
+        {
+            "__typename": "ProjectV2ItemStatusChangedEvent",
+            "createdAt": "2026-09-09T00:00:00Z",
+            "previousStatus": "Ready",
+            "status": "Building",
+            "project": {"number": funnel.PROJECT_NUMBER},
+        },
+    ]
+
+    def graphql(query, **variables):
+        assert query == funnel.ITEM_TIMELINE_DETAILS_QUERY
+        assert variables["ids"] == ["project-item-1"]
+        return {
+            "nodes": [{
+                "id": "project-item-1",
+                "content": {"timelineItems": {"nodes": events}},
+            }]
+        }
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    funnel.hydrate_item_details([item])
+
+    assert item.status_since == funnel.parse_time("2026-09-09T00:00:00Z")
+    assert [event["at"] for event in item.status_events] == [
+        funnel.parse_time("2026-09-08T00:00:00Z"),
+        funnel.parse_time("2026-09-10T00:00:00Z"),
+        funnel.parse_time("2026-09-09T00:00:00Z"),
+    ]
+
+
 def test_load_items_follows_the_cursor_after_a_full_page(monkeypatch):
     """The larger page does not drop items when the Project still continues."""
     funnel.reset_api_usage()

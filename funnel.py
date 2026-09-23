@@ -7556,6 +7556,46 @@ def resolve_repo(repo: Optional[str]) -> str:
     )
 
 
+def _apply_item_timeline_fields(item: Item, content: dict) -> None:
+    """Apply status and blocking history from a targeted Project read."""
+    item.status_events = []
+    item.status_since = None
+    item.blocked_since = None
+    item.blocked_cleared_at = None
+    matching_status_times = []
+
+    timeline_nodes = ((content.get("timelineItems") or {}).get("nodes") or [])
+    for event in timeline_nodes:
+        if not isinstance(event, dict):
+            continue
+        label = (event.get("label") or {}).get("name")
+        if label == "blocked" and event.get("__typename") == "LabeledEvent":
+            item.blocked_since = parse_time(event.get("createdAt"))
+            continue
+        if label == "blocked" and event.get("__typename") == "UnlabeledEvent":
+            item.blocked_cleared_at = parse_time(event.get("createdAt"))
+            continue
+        if (event.get("project") or {}).get("number") != PROJECT_NUMBER:
+            continue
+        if event.get("__typename") == "ProjectV2ItemStatusChangedEvent":
+            at = parse_time(event.get("createdAt"))
+            if at is not None:
+                item.status_events.append({
+                    "previous_status": event.get("previousStatus"),
+                    "status": event.get("status"),
+                    "at": at,
+                })
+                if item.status is not None and event.get("status") == item.status:
+                    matching_status_times.append(at)
+
+    # Gate age uses the newest transition into the current status in this
+    # Project. Select by timestamp so correctness does not depend on connection
+    # ordering, and exclude matching status events from other Projects above.
+    item.status_since = (
+        max(matching_status_times) if matching_status_times else None
+    )
+
+
 def _apply_item_detail_fields(
     item: Item,
     content: dict,
@@ -7579,41 +7619,8 @@ def _apply_item_detail_fields(
 
         item.first_child_created_at = min(child_times) if child_times else None
         item.last_child_closed_at = max(child_close_times) if child_close_times else None
-    if not include_timeline:
-        return
-
-    item.status_events = []
-    item.status_since = None
-    item.blocked_since = None
-    item.blocked_cleared_at = None
-
-    # Time at the current gate: the last status change into the status the item
-    # actually holds, in *this* project. Events arrive oldest-first, and an
-    # issue may sit in several projects — filtering on the project is what
-    # stops time-at-gate being silently wrong.
-    timeline_nodes = ((content.get("timelineItems") or {}).get("nodes") or [])
-    for event in timeline_nodes:
-        if not event:
-            continue
-        label = (event.get("label") or {}).get("name")
-        if label == "blocked" and event.get("__typename") == "LabeledEvent":
-            item.blocked_since = parse_time(event.get("createdAt"))
-            continue
-        if label == "blocked" and event.get("__typename") == "UnlabeledEvent":
-            item.blocked_cleared_at = parse_time(event.get("createdAt"))
-            continue
-        if (event.get("project") or {}).get("number") != PROJECT_NUMBER:
-            continue
-        if event.get("__typename") == "ProjectV2ItemStatusChangedEvent":
-            at = parse_time(event.get("createdAt"))
-            if at is not None:
-                item.status_events.append({
-                    "previous_status": event.get("previousStatus"),
-                    "status": event.get("status"),
-                    "at": at,
-                })
-        if event.get("status") == item.status:
-            item.status_since = parse_time(event.get("createdAt"))
+    if include_timeline:
+        _apply_item_timeline_fields(item, content)
 
 
 def _from_node(node: dict) -> Optional[Item]:

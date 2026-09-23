@@ -1064,11 +1064,12 @@ def test_begin_leaves_a_parented_leaf_ticket_for_finish_ticket(
     ]
 
 
+@pytest.mark.parametrize("klass", ["New", "Replace"])
 def test_begin_leaves_a_nonqualifying_parented_item_at_building_gate(
-    monkeypatch, capsys
+    monkeypatch, capsys, klass
 ):
     items = _completed_project(
-        240, klass="New", parent="nateprich/example#239"
+        240, klass=klass, parent="nateprich/example#239"
     )
 
     result, calls, graphql_calls = _begin_with_reconcile_wired(
@@ -1125,14 +1126,18 @@ def test_begin_leaves_non_reconcilable_projects_untouched(
     ]
 
 
-def test_begin_reconciles_broken_project_with_human_step_and_nate_origin(
-    monkeypatch, capsys
+@pytest.mark.parametrize("klass", ["Broken", "Investigate", "Maintenance"])
+@pytest.mark.parametrize("origin", ["agent", "nate-direct", "nate-relayed"])
+@pytest.mark.parametrize("carried_human_step", [False, True])
+def test_begin_reconciles_parented_upkeep_items_regardless_of_origin_or_human_step(
+    monkeypatch, capsys, klass, origin, carried_human_step
 ):
     items = _completed_project(
         211,
-        klass="Broken",
-        carried_human_step=True,
-        origin="nate-relayed",
+        klass=klass,
+        carried_human_step=carried_human_step,
+        origin=origin,
+        parent="nateprich/example#210",
     )
 
     result, calls, _graphql_calls = _begin_with_reconcile_wired(
@@ -1141,10 +1146,54 @@ def test_begin_reconciles_broken_project_with_human_step_and_nate_origin(
 
     assert result["auto_closed"] == [items[0].ref]
     assert items[0].state == "CLOSED"
+    assert items[0].status == "Done"
     assert [
-        "gh", "issue", "close", "211", "--repo", "nateprich/example",
+        "gh", "issue", "close", str(items[0].number), "--repo",
+        "nateprich/example",
         "--reason", "completed",
     ] in calls
+    comments = [
+        call[-1] for call in calls
+        if call[:3] == ["gh", "issue", "comment"]
+    ]
+    assert len(comments) == 1
+    assert comments[0].startswith(funnel.CLOSED_ITSELF_PREFIX)
+
+
+@pytest.mark.parametrize(
+    "origin", ["nate-direct", "nate-relayed", None, "malformed"]
+)
+def test_begin_keeps_parented_improve_items_without_agent_origin_at_accept_gate(
+    monkeypatch, capsys, origin
+):
+    items = _completed_project(
+        212,
+        klass="Improve",
+        origin=None if origin == "malformed" else origin,
+        parent="nateprich/example#210",
+    )
+    if origin == "malformed":
+        items[0].body = (
+            funnel.ORIGIN_MARKER + "\n\n```json\nnot json\n```"
+        )
+
+    assert funnel.gate_question(items[0]) == "Accept it?"
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert "auto_closed" not in result
+    assert items[0].state == "OPEN"
+    assert items[0].status == "Building"
+    assert not [
+        call for call in calls
+        if call[:3] in (["gh", "issue", "close"], ["gh", "issue", "comment"])
+    ]
+    assert not [
+        call for call in graphql_calls
+        if call[1].get("item") == "project-212"
+    ]
 
 
 def test_begin_reconcile_is_idempotent(monkeypatch, capsys):

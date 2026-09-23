@@ -189,6 +189,19 @@ fi
 exec 3<&-
 export FUNNEL_SESSION
 
+# Muse's session id is selected by the caller, so bind the upcoming run to one
+# before `begin` writes its heartbeat start. Pass the same id to `muse exec`
+# below so the finish and local journal refer to the same session.
+if ! MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"; then
+  echo "muse-implement: could not create a Muse session id" >&2
+  exit 1
+fi
+if [[ -z "$MUSE_SESSION_ID" ]]; then
+  echo "muse-implement: could not create a Muse session id" >&2
+  exit 1
+fi
+export MUSE_SESSION_ID
+
 cleanup() {
   python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
   if [[ -n "$MUSE_STDERR_FILE" && -f "$MUSE_STDERR_FILE" ]]; then
@@ -468,6 +481,7 @@ printf '%s' "$PROMPT" >"$PROMPT_FILE"
 # `perl setpgrp` gives Muse and every shell child its own process group, so the
 # wall-clock bound can kill the entire tree without killing this runner.
 perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "$MUSE_BIN" exec \
+  --session-id "$MUSE_SESSION_ID" \
   --model "$MUSE_MODEL" \
   --reasoning-effort "$EFFORT" \
   --sandbox-network enabled \

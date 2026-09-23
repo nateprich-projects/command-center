@@ -18,6 +18,7 @@ import os
 import pathlib
 import stat
 import subprocess
+import uuid
 
 import pytest
 
@@ -184,7 +185,7 @@ def _issue_answer(job, **overrides):
 
 
 FUNNEL_STUB = (
-    "import pathlib, sys\n"
+    "import os, pathlib, sys\n"
     "CI_SUCCESS_CONCLUSIONS = ('SUCCESS', 'NEUTRAL', 'SKIPPED')\n"
     "CI_PENDING_STATES = ('EXPECTED', 'QUEUED', 'IN_PROGRESS', 'PENDING', 'WAITING')\n"
     "if __name__ == '__main__':\n"
@@ -195,6 +196,7 @@ FUNNEL_STUB = (
     "    if command == 'session-server':\n"
     "        print('127.0.0.1:1:stub', flush=True)\n"
     "    elif command == 'begin':\n"
+    "        (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
     "        print((root / 'begin.json').read_text(), end='')\n"
     "    elif command == 'session-stop':\n"
     "        pass\n"
@@ -1175,9 +1177,12 @@ def test_the_model_call_carries_the_exact_no_tool_shape(tmp_path):
     # reached only the judge would leave the lister reading a private diff
     # with tools in hand.
     assert _muse_calls(repo) == 2
+    session_id = (repo / "begin.session_id").read_text()
+    assert str(uuid.UUID(session_id)) == session_id
     for call in (1, 2):
         invoked = (repo / "muse.args.{}".format(call)).read_text().splitlines()
         assert invoked[0] == "exec"
+        assert invoked[invoked.index("--session-id") + 1] == session_id
         assert invoked[invoked.index("--model") + 1] == "muse-spark-1.3"
         assert invoked[invoked.index("--reasoning-effort") + 1] == "high"
         assert "--disable-shell" in invoked

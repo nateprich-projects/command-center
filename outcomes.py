@@ -343,9 +343,10 @@ def _durable_token_usage(
 ) -> object:
     """Read the token snapshot captured by a heartbeat finish.
 
-    The field is present, including when every value is null, once #164 is in
-    effect. A missing field identifies a pre-#164 record and is the only case
-    where the legacy transcript fallback remains appropriate.
+    A missing field identifies a pre-#164 record. An all-null snapshot also
+    carries no observation, so the legacy transcript fallback can recover it
+    when the session journal is still available. Any known token count makes
+    the durable snapshot authoritative.
     """
     if finish is None or "token_usage" not in finish:
         return _NO_DURABLE_TOKEN_USAGE
@@ -361,6 +362,8 @@ def _durable_token_usage(
             or (isinstance(value, int) and not isinstance(value, bool) and value >= 0)
             else None
         )
+    if all(value is None for value in found.values()):
+        return _NO_DURABLE_TOKEN_USAGE
     return found
 
 

@@ -19,6 +19,7 @@ import os
 import pathlib
 import stat
 import subprocess
+import uuid
 
 import pytest
 
@@ -64,7 +65,7 @@ ANSWER = json.dumps({"done": True, "summary": "Did the thing.",
                      "departures": ["Did not do the other thing."]})
 
 FUNNEL_STUB = (
-    "import pathlib, sys\n"
+    "import os, pathlib, sys\n"
     "root = pathlib.Path(__file__).parent\n"
     "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
     "with (root / 'funnel.calls').open('a') as fh:\n"
@@ -72,6 +73,7 @@ FUNNEL_STUB = (
     "if command == 'session-server':\n"
     "    print('127.0.0.1:1:stub', flush=True)\n"
     "elif command == 'begin':\n"
+    "    (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
     "    print((root / 'begin.json').read_text(), end='')\n"
     "elif command == 'session-stop':\n"
     "    pass\n"
@@ -296,6 +298,9 @@ def test_the_happy_path_runs_packet_model_and_finish_in_order(tmp_path):
     # flags — and no positional prompt, so a plan cannot outgrow argv.
     args = (repo / "muse.args.1").read_text().splitlines()
     assert args[0] == "exec"
+    session_id = (repo / "begin.session_id").read_text()
+    assert str(uuid.UUID(session_id)) == session_id
+    assert args[args.index("--session-id") + 1] == session_id
     assert args[args.index("--model") + 1] == "muse-spark-1.3"
     assert args[args.index("--reasoning-effort") + 1] == "max"
     assert args[args.index("--sandbox-network") + 1] == "enabled"

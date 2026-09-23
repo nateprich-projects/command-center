@@ -5875,6 +5875,124 @@ def check_muse_model_pins(
     )
 
 
+#: Nate keeps the Codex standard automation at every ten minutes until the
+#: backlog starts clearing (2026-09-22, #1315). The share of its runs that
+#: find the queue empty is that signal, read directly.
+CODEX_EMPTY_SHARE_LIMIT = 0.5
+CODEX_EMPTY_MIN_RUNS = 12
+CODEX_EMPTY_WINDOW_SECONDS = 24 * 60 * 60
+CODEX_EMPTY_READ_TIMEOUT = 30
+CODEX_EMPTY_RUNS_FIX = (
+    "move command-center-tickets-hourly to every 20 minutes (#1315)")
+
+#: The slower cadence the fix names, and the spacing between standard-lane
+#: starts that counts as already there. Once the lane runs at twenty minutes
+#: the share can stay high with nothing left to change, so the row stops
+#: asking. The cadence is read from the most recent gaps only, so the row
+#: notices a change within hours rather than a day.
+CODEX_SLOW_CADENCE_SECONDS = 20 * 60
+CODEX_SLOWED_GAP_SECONDS = 15 * 60
+CODEX_CADENCE_GAPS = 12
+
+
+def codex_empty_run_share(records: Iterable[object],
+                          now: float) -> Dict[str, object]:
+    """How many of the standard lane's recent runs found the queue empty.
+
+    Counted in runs, not rows (``heartbeat.one_record_per_run`` is the
+    canonical rule; a run can carry several records). A run is standard
+    when its start record says so; starts written before #1320 carry no
+    tier and are left out rather than guessed at.
+
+    Neither side reads the finish, which the routine can file as
+    ``nothing-to-do`` for a GitHub failure or a held lock. A run *worked*
+    when ``begin`` bound a ticket to it; a run *found nothing* when
+    ``begin`` recorded ``queue: empty``. Everything else, budget gates,
+    errors, locks and withheld work, is neither and is left out.
+
+    The cadence is the median of the most recent spacings between
+    standard-lane starts, so the row can tell whether its own fix has been
+    applied.
+    """
+    rows = [row for row in records if isinstance(row, dict)]
+
+    def recent(row):
+        stamp = row.get("ts")
+        return (not isinstance(stamp, bool)
+                and isinstance(stamp, (int, float))
+                and now - stamp <= CODEX_EMPTY_WINDOW_SECONDS)
+
+    standard = {row.get("run") for row in rows
+                if row.get("phase") == "start" and row.get("run")
+                and row.get("tier") == "standard"}
+    worked = {row.get("run") for row in rows
+              if row.get("phase") == "bind" and row.get("do") == "ticket"
+              and row.get("run") in standard and recent(row)}
+    empty = {row.get("run") for row in rows
+             if row.get("phase") == "event"
+             and row.get("outcome") == "nothing-to-do"
+             and row.get("queue") == "empty"
+             and row.get("run") in standard and recent(row)} - worked
+    counted = len(worked | empty)
+
+    starts = sorted({float(row["ts"]) for row in rows
+                     if row.get("phase") == "start"
+                     and row.get("run") in standard and recent(row)})
+    gaps = [later - earlier for earlier, later in zip(starts, starts[1:])]
+    gaps = gaps[-CODEX_CADENCE_GAPS:]
+    cadence = None
+    if gaps:
+        ordered = sorted(gaps)
+        middle = len(ordered) // 2
+        cadence = (ordered[middle] if len(ordered) % 2
+                   else (ordered[middle - 1] + ordered[middle]) / 2)
+    return {"runs": counted, "empty": len(empty),
+            "share": (len(empty) / counted) if counted else None,
+            "cadence_seconds": cadence}
+
+
+def check_codex_empty_runs(records: Optional[Iterable[object]] = None,
+                           now: Optional[float] = None) -> Check:
+    """Report when the Codex standard lane mostly finds its queue empty.
+
+    A signal for a cadence decision, not a health check: an unreadable
+    heartbeat, odd records or a thin window pass with a note, because the
+    heartbeat's own row reports whether it can be read. It asks for the
+    slower cadence only while the lane is still faster than that.
+    """
+    name = "codex empty runs"
+    now = time.time() if now is None else now
+    try:
+        if records is None:
+            import heartbeat
+
+            records = _call_with_optional_keyword(
+                heartbeat.read, "timeout", CODEX_EMPTY_READ_TIMEOUT, "codex")
+        stats = codex_empty_run_share(list(records or []), now)
+    except Exception as exc:
+        return Check(name, True,
+                     "codex heartbeat could not be read ({}); no cadence "
+                     "signal this run".format(str(exc) or type(exc).__name__),
+                     "")
+    if stats["runs"] < CODEX_EMPTY_MIN_RUNS:
+        return Check(name, True,
+                     "{} standard-lane run(s) in 24 hours reached the queue, "
+                     "too few to judge the cadence".format(stats["runs"]), "")
+    found = ("{} of {} standard-lane runs in 24 hours found the queue empty "
+             "({:.0%})".format(stats["empty"], stats["runs"], stats["share"]))
+    cadence = stats["cadence_seconds"]
+    if cadence is not None:
+        found += "; starts every {:.0f} min".format(cadence / 60)
+    if stats["share"] < CODEX_EMPTY_SHARE_LIMIT:
+        return Check(name, True, found, "")
+    if cadence is not None and cadence >= CODEX_SLOWED_GAP_SECONDS:
+        return Check(name, True,
+                     found + "; already at the slower cadence", "")
+    return Check(name, False,
+                 found + "; the backlog has cleared enough to slow the lane",
+                 CODEX_EMPTY_RUNS_FIX)
+
+
 def check_member_repos(repos: Optional[Iterable[str]] = None) -> List[Check]:
     """Return one readiness check for every topic-bearing member repository."""
     try:
@@ -6126,6 +6244,7 @@ def doctor_checks(claude_dir: Optional[os.PathLike] = None,
         check_muse_model_pins(),
         check_usage_cache(cache_path=usage_cache),
         check_heartbeat(spool_dir=heartbeat_spool),
+        check_codex_empty_runs(),
     ]
     if items is not None:
         items = list(items)
@@ -12068,14 +12187,22 @@ def reconcile_approved_merges(
     return results
 
 
-def _start_begin_heartbeat(agent: str) -> Optional[str]:
-    """Start the run used by ``begin`` and remember it for error recovery."""
+def _start_begin_heartbeat(agent: str,
+                           tier: Optional[str] = None) -> Optional[str]:
+    """Start the run used by ``begin`` and remember it for error recovery.
+
+    The tier goes on the start record so a reader can tell one lane's runs
+    from another's; the Codex empty-run share is taken over the standard
+    lane alone (#1320).
+    """
     global _ACTIVE_HEARTBEAT_RUN, _ACTIVE_HEARTBEAT_AGENT
 
-    run = _run_bounded_subprocess(
-        [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                      "heartbeat.py"), "start", "--agent", agent],
-        capture_output=True, text=True)
+    command = [sys.executable,
+               os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "heartbeat.py"), "start", "--agent", agent]
+    if tier in TIERS:
+        command += ["--tier", tier]
+    run = _run_bounded_subprocess(command, capture_output=True, text=True)
     run_id = ((run.stdout or "").strip().splitlines()[-1]
               if run.stdout else None)
     _ACTIVE_HEARTBEAT_RUN = run_id
@@ -12189,7 +12316,7 @@ def begin_detail_candidates(
 
 
 def _begin_preflight(
-    now: datetime, agent: str, idle: bool
+    now: datetime, agent: str, idle: bool, tier: Optional[str] = None
 ) -> Tuple[Dict[str, object], Optional[Dict[str, object]]]:
     """Start a run and apply the local gates before reading Project state.
 
@@ -12204,7 +12331,8 @@ def _begin_preflight(
     import usage
 
     out: Dict[str, object] = {"agent": agent}
-    out["run"] = _start_begin_heartbeat(agent)
+    out["run"] = _call_with_optional_keyword(
+        _start_begin_heartbeat, "tier", tier, agent)
 
     if agent == "codex":
         # Before the usage read: a run on the wrong model or with a wider
@@ -12329,6 +12457,29 @@ def _begin_api_reserve_preflight(
                        BEGIN_PROJECT_LOAD_COST),
         }
     return None
+
+
+def _record_queue_empty(agent: str, run: Optional[str],
+                        tier: Optional[str]) -> None:
+    """Record, from ``begin`` itself, that this run found no work waiting.
+
+    The routine files every stop that is not a named budget gate as
+    ``nothing-to-do``: a GitHub failure, the WIP cap and a held lock
+    included. #1216 measured 160 such finishes during a 504 outage, the same
+    picture an empty funnel makes. This event is written only on the branch
+    where the queue for the tier was genuinely empty, so readers that need
+    "was there work?" never have to trust the finish (#1320).
+    """
+    if not run:
+        return
+    try:
+        import heartbeat
+
+        heartbeat.record_event(agent, run, "nothing-to-do", queue="empty",
+                               tier=tier)
+    except Exception:
+        # Instrumentation must not gate the thing it instruments.
+        pass
 
 
 def _codex_settings_check() -> Dict[str, object]:
@@ -12473,7 +12624,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     import heartbeat
 
     if _preflight is None:
-        _preflight = _begin_preflight(now, agent, idle)
+        _preflight = _begin_preflight(now, agent, idle, tier)
     out, reading = _preflight
     if reading is None:
         print(json.dumps(out, indent=2))
@@ -12649,6 +12800,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 out["withheld"] = withheld
             if frozen:
                 out["freeze_withheld"] = frozen
+            # Empty means nothing can start because the work is done or is
+            # waiting on someone else. The lane's own brakes holding work it
+            # has not implemented, the WIP cap, a backoff, readiness, the
+            # freeze or an earlier stop, are not an empty queue (#1320).
+            # A claim in motion alone is not a brake below the cap.
+            queue_empty = not (
+                out.get("why") or out.get("backed_off") or withheld
+                or frozen or at_capacity(items, now, pr_facts=pr_facts))
             if out.get("why"):
                 why = str(out["why"])
             elif holder is not None:
@@ -12668,6 +12827,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
             else:
                 why = "nothing to do"
             out.update(do="stop", why=why)
+            if queue_empty:
+                out["queue"] = "empty"
+                _record_queue_empty(agent, out.get("run"), tier)
         else:
             if _detail_loader is not None:
                 _detail_loader([ticket])
@@ -14146,7 +14308,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
     # must not spend the full Project read merely to learn that it cannot run.
     begin_preflight = None
     if args.command == "begin":
-        begin_preflight = _begin_preflight(now, args.agent, args.idle)
+        begin_preflight = _begin_preflight(
+            now, args.agent, args.idle, args.tier)
         if begin_preflight[1] is None:
             print(json.dumps(begin_preflight[0], indent=2))
             return 0

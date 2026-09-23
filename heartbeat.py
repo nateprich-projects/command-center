@@ -1319,6 +1319,10 @@ def main(argv=None) -> int:
                        help="which attempt at this ticket this run is, from 1")
     start.add_argument("--escalated-from", default=None,
                        help="the model this run escalated from, if any")
+    start.add_argument("--tier", default=None,
+                       choices=("standard", "escalated"),
+                       help="the queue this run serves, when begin knows it; "
+                            "lets a reader tell a lane's runs apart (#1320)")
 
     finish = sub.add_parser("finish", help="record how a run ended")
     finish.add_argument("--agent", required=True, choices=sorted(PROVIDERS))
@@ -1386,6 +1390,7 @@ def main(argv=None) -> int:
                 "usage": usage_snapshot(args.agent),
                 "attempt": args.attempt,
                 "escalated_from": args.escalated_from,
+                "tier": args.tier,
                 "repo": repo_state(),
                 "runtime": runtime_state(),
                 **detect_model(args.agent),

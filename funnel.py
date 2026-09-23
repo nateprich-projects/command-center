@@ -3916,8 +3916,7 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
     recent = [
         i
         for i in items
-        if i.parent is None
-        and i.closed_at
+        if i.parent is None and i.closed_at
         and i.closed_at >= cutoff
     ]
     # The Execution metrics plan defines upkeep as these three project
@@ -3941,10 +3940,9 @@ def maintenance_load(items: Iterable[Item], now: datetime) -> Dict[str, object]:
                 at = parse_time(event.get("created_at") or event.get("createdAt"))
             if at is not None:
                 transitions.append(at)
-        # A currently Building item can lack a timeline event on its first
-        # status assignment. Its current gate timestamp is still exact. A
-        # Done item has moved past Building, so its current timestamp cannot
-        # stand in for when it started.
+        # A current Building item can lack a timeline event on its first
+        # status assignment. A Done item's current timestamp is its exit from
+        # Building, so it cannot stand in for when the project started.
         if not transitions and item.status == "Building" and item.status_since:
             transitions.append(item.status_since)
         started_new.extend(transitions)

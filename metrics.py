@@ -68,11 +68,11 @@ def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _number(value: object, allow_negative: bool = False) -> Optional[float]:
+def _number(value: object) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     number = float(value)
-    if not math.isfinite(number) or (number < 0 and not allow_negative):
+    if not math.isfinite(number) or number < 0:
         return None
     return number
 
@@ -88,8 +88,11 @@ def _count(value: object, source: str, reason: str = "source value is missing") 
 def _signed_count(
     value: object, source: str, reason: str = "source value is missing"
 ) -> Dict:
-    number = _number(value, allow_negative=True)
-    if number is None:
+    """Keep signed count-like values such as net open growth intact."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return {"value": None, "source": source, "gap": reason}
+    number = float(value)
+    if not math.isfinite(number):
         return {"value": None, "source": source, "gap": reason}
     rendered = int(number) if number.is_integer() else number
     return {"value": rendered, "source": source}
@@ -101,14 +104,10 @@ def _sum_count(
     reason: str = "no observations are available",
 ) -> Dict:
     if not isinstance(values, list) or not values:
-        return {
-            "sum": None, "count": None, "source": source, "gap": reason,
-        }
+        return {"sum": None, "count": None, "source": source, "gap": reason}
     numbers = [_number(value) for value in values]
     if any(value is None for value in numbers):
-        return {
-            "sum": None, "count": None, "source": source, "gap": reason,
-        }
+        return {"sum": None, "count": None, "source": source, "gap": reason}
     total = sum(numbers)
     rendered = int(total) if total.is_integer() else round(total, 3)
     return {"sum": rendered, "count": len(numbers), "source": source}
@@ -325,23 +324,14 @@ def _all_finishes(
     if rows_by_agent is None:
         return found
     for agent, rows in rows_by_agent.items():
-        newest: Dict[str, Tuple[datetime, int, Dict]] = {}
-        unattributed = []
-        for index, row in enumerate(rows):
+        seen = set()
+        for row in rows:
             if row.get("phase") == "finish":
                 item = dict(row, agent=agent)
-                run = item.get("run")
-                if not isinstance(run, str) or not run:
-                    unattributed.append(item)
-                    continue
-                stamp = _timestamp(item.get("ts")) or datetime.min.replace(
-                    tzinfo=timezone.utc
-                )
-                current = newest.get(run)
-                if current is None or (stamp, index) >= (current[0], current[1]):
-                    newest[run] = (stamp, index, item)
-        found.extend(item for _stamp, _index, item in newest.values())
-        found.extend(unattributed)
+                identity = json.dumps(item, sort_keys=True, separators=(",", ":"), default=str)
+                if identity not in seen:
+                    seen.add(identity)
+                    found.append(item)
     found.sort(key=lambda row: (_timestamp(row.get("ts")) or datetime.min.replace(
         tzinfo=timezone.utc
     ), str(row.get("run") or "")))
@@ -371,96 +361,6 @@ def _usage_window(reading: object, name: str) -> Optional[Mapping]:
         return None
     window = windows.get(name)
     return window if isinstance(window, Mapping) else None
-
-
-def read_codex_thread_source_usage(
-    now: datetime, codex_reading: object
-) -> Tuple[Optional[Dict[str, int]], Optional[str]]:
-    """Attribute weekly Codex token usage to automation or other sessions."""
-    window = _usage_window(codex_reading, "seven_day")
-    reset_at = _timestamp(window.get("resets_at")) if window else None
-    if reset_at is None:
-        return None, "Codex weekly reset time is unavailable"
-    start = reset_at - timedelta(days=7)
-    if start > now:
-        return None, "Codex weekly reset window is inconsistent"
-
-    totals = {"funnel_tokens": 0, "personal_tokens": 0, "total_tokens": 0}
-    incomplete = False
-    seen_records = set()
-    paths = glob.glob(os.path.expanduser("~/.codex/sessions/*/*/*/*.jsonl"))
-    for path in paths:
-        try:
-            modified = os.path.getmtime(path)
-        except OSError:
-            incomplete = True
-            continue
-        if modified < start.timestamp():
-            continue
-        thread_source = None
-        source_conflict = False
-        events = []
-        try:
-            with open(path, encoding="utf-8", errors="replace") as handle:
-                for line in handle:
-                    if "token_usage_record" not in line and "session_meta" not in line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except ValueError:
-                        if "token_usage_record" in line:
-                            incomplete = True
-                        continue
-                    payload = record.get("payload")
-                    payload = payload if isinstance(payload, Mapping) else record
-                    if record.get("type") == "session_meta":
-                        source = payload.get("thread_source") or payload.get("threadSource")
-                        if isinstance(source, str) and source:
-                            if thread_source is not None and thread_source != source:
-                                source_conflict = True
-                            thread_source = source
-                    elif record.get("type") == "token_usage_record":
-                        at = _timestamp(record.get("timestamp"))
-                        if at is None:
-                            incomplete = True
-                        elif start <= at <= now:
-                            events.append((record, payload))
-        except OSError:
-            incomplete = True
-            continue
-
-        if source_conflict and events:
-            incomplete = True
-        for record, payload in events:
-            if not isinstance(thread_source, str) or not thread_source:
-                incomplete = True
-                continue
-            identity = json.dumps(record, sort_keys=True, separators=(",", ":"))
-            if identity in seen_records:
-                continue
-            seen_records.add(identity)
-            raw_usage = payload.get("usage")
-            usage = raw_usage if isinstance(raw_usage, Mapping) else {}
-            quantity = usage.get("total_tokens")
-            if isinstance(quantity, bool) or not isinstance(quantity, int) or quantity < 0:
-                input_tokens = usage.get("input_tokens")
-                output_tokens = usage.get("output_tokens")
-                if (
-                    isinstance(input_tokens, bool) or not isinstance(input_tokens, int)
-                    or input_tokens < 0
-                    or isinstance(output_tokens, bool) or not isinstance(output_tokens, int)
-                    or output_tokens < 0
-                ):
-                    incomplete = True
-                    continue
-                quantity = input_tokens + output_tokens
-            category = "funnel_tokens" if thread_source == "automation" else "personal_tokens"
-            totals[category] += quantity
-            totals["total_tokens"] += quantity
-
-    if incomplete:
-        return None, "one or more Codex session usage records are incomplete"
-    return totals, None
 
 
 def _count_in_hour(
@@ -734,7 +634,7 @@ def derive_row(
     metrics["A"]["A5"]["net_open_growth"] = _signed_count(
         disposal.get("net_open_growth") if disposal else None,
         "brief.disposal.net_open_growth",
-        disposal_gap or "net open growth is unavailable",
+        disposal_gap or "disposal is unavailable",
     )
     reopens = [
         row for row in (outcome_records or [])
@@ -751,7 +651,7 @@ def derive_row(
             "member-repository commit activity is unavailable",
         ),
         "reopened_tickets": _count(
-        len(reopens) if outcome_records else None,
+            len(reopens) if outcome_records else None,
             "outcomes.jsonl.reopened_at",
             "outcomes.jsonl is unavailable",
         ),
@@ -821,10 +721,7 @@ def derive_row(
         metrics["C"]["C1"] = _fact(None, "heartbeat ledgers finish rows", heartbeat_gap or "ledgers unavailable")
         metrics["C"]["C2"] = _fact(None, "heartbeat ledgers finish rows", heartbeat_gap or "ledgers unavailable")
         metrics["C"]["C3"] = _fact(None, "heartbeat ledgers finish rows", heartbeat_gap or "ledgers unavailable")
-        metrics["C"]["C4"] = _fact(
-            None, "heartbeat.finish.error_class",
-            heartbeat_gap or "error_class is not recorded yet",
-        )
+        metrics["C"]["C4"] = _fact(None, "heartbeat.finish.error_class", "error_class is not recorded yet")
         metrics["C"]["C5"] = _fact(None, "heartbeat ledgers finish rows", heartbeat_gap or "ledgers unavailable")
     else:
         grouped: Dict[Tuple[str, str], Dict[str, int]] = {
@@ -840,7 +737,6 @@ def derive_row(
         }
         error_classes: Dict[str, Dict[str, int]] = {}
         error_classes_by_job: Dict[str, Dict[str, Dict[str, int]]] = {}
-        error_class_gap = not in_hour_finishes
         claim_losses: Dict[str, Dict[str, int]] = {
             agent: {
                 "reconciled_claims": 0, "wall_clock_kills": 0, "re_begins": 0,
@@ -856,7 +752,9 @@ def derive_row(
                 kind = _run_job_kinds(rows_by_agent.get(agent, ())).get(run, "unknown")
             outcome = str(row.get("outcome") or "unknown")
             bucket = grouped.setdefault(
-                (agent, kind), {name: 0 for name in FINISH_OUTCOMES + ("finishes",)}
+                (agent, kind), {
+                    name: 0 for name in FINISH_OUTCOMES + ("other", "finishes")
+                }
             )
             bucket["finishes"] += 1
             if outcome in bucket:
@@ -869,12 +767,11 @@ def derive_row(
                 error_class = row.get("error_class")
                 if error_class not in ("floor", "regression"):
                     error_class = "unclassified"
-                    error_class_gap = True
                 error_classes.setdefault(agent, {})[error_class] = error_classes.setdefault(agent, {}).get(error_class, 0) + 1
-                class_bucket = error_classes_by_job.setdefault(agent, {}).setdefault(
+                error_class_bucket = error_classes_by_job.setdefault(agent, {}).setdefault(
                     kind, {"floor": 0, "regression": 0, "unclassified": 0}
                 )
-                class_bucket[error_class] += 1
+                error_class_bucket[error_class] += 1
             losses = claim_losses.setdefault(agent, {
                 "reconciled_claims": 0, "wall_clock_kills": 0, "re_begins": 0,
             })
@@ -926,8 +823,7 @@ def derive_row(
                 "by_agent_and_job": error_classes_by_job,
             },
             "source": "heartbeat.finish.error_class",
-            **({"gap": "one or more errors lack a recognized error_class"}
-               if error_class_gap else {}),
+            "gap": "error_class is not recorded yet; missing classes remain unclassified",
         }
         metrics["C"]["C5"] = {
             "value": {
@@ -977,24 +873,28 @@ def derive_row(
     }
     codex = readings.get("codex") if isinstance(readings, Mapping) else None
     codex_week = _usage_window(codex, "seven_day")
-    thread_reading = (
-        readings.get("codex_thread_source_usage")
-        if isinstance(readings, Mapping) else None
+    codex_split = (
+        codex.get("thread_source_split") if isinstance(codex, Mapping) else None
     )
-    thread_totals = (
-        thread_reading.get("value")
-        if isinstance(thread_reading, Mapping) else None
-    )
-    thread_totals = thread_totals if isinstance(thread_totals, Mapping) else None
-    thread_gap = (
-        str(thread_reading.get("gap"))
-        if isinstance(thread_reading, Mapping) and thread_reading.get("gap")
-        else "Codex session source data is unavailable"
+    thread_split = (
+        codex_split.get("value") if isinstance(codex_split, Mapping) else None
     )
     thread_source = (
-        str(thread_reading.get("source"))
-        if isinstance(thread_reading, Mapping) and thread_reading.get("source")
-        else "~/.codex/sessions session_meta.thread_source and token_usage_record"
+        str(codex_split.get("source"))
+        if isinstance(codex_split, Mapping) and codex_split.get("source")
+        else "~/.codex/sessions token_usage_record grouped by session_meta.thread_source"
+    )
+    thread_gap = (
+        str(codex_split.get("gap"))
+        if isinstance(codex_split, Mapping) and codex_split.get("gap")
+        else "Codex rollout usage split is unavailable"
+    )
+    funnel_tokens = thread_split.get("funnel_tokens") if isinstance(thread_split, Mapping) else None
+    personal_tokens = thread_split.get("personal_tokens") if isinstance(thread_split, Mapping) else None
+    total_tokens = (
+        _number(funnel_tokens) + _number(personal_tokens)
+        if _number(funnel_tokens) is not None and _number(personal_tokens) is not None
+        else None
     )
     metrics["D"]["D2"] = {
         "weekly_used_percent": _count(
@@ -1003,35 +903,25 @@ def derive_row(
             "Codex usage reading is unavailable",
         ),
         "funnel_vs_personal": {
+            "value": thread_split,
             "funnel_tokens": _count(
-                thread_totals.get("funnel_tokens") if thread_totals else None,
-                thread_source + ".automation.total_tokens",
-                thread_gap,
+                funnel_tokens, thread_source + ".automation.total_tokens", thread_gap
             ),
             "personal_tokens": _count(
-                thread_totals.get("personal_tokens") if thread_totals else None,
-                thread_source + ".other_thread_sources.total_tokens",
-                thread_gap,
+                personal_tokens, thread_source + ".other_thread_sources.total_tokens", thread_gap
             ),
             "total_tokens": _count(
-                thread_totals.get("total_tokens") if thread_totals else None,
-                thread_source + ".total_tokens",
-                thread_gap,
+                total_tokens, thread_source + ".total_tokens", thread_gap
             ),
             "funnel_share": _rate_pair(
-                thread_totals.get("funnel_tokens") if thread_totals else None,
-                thread_totals.get("total_tokens") if thread_totals else None,
-                thread_source + ".automation/total_tokens",
-                thread_gap,
+                funnel_tokens, total_tokens, thread_source + ".automation/total_tokens", thread_gap
             ),
             "personal_share": _rate_pair(
-                thread_totals.get("personal_tokens") if thread_totals else None,
-                thread_totals.get("total_tokens") if thread_totals else None,
-                thread_source + ".other_thread_sources/total_tokens",
-                thread_gap,
+                personal_tokens, total_tokens,
+                thread_source + ".other_thread_sources/total_tokens", thread_gap,
             ),
             "source": thread_source,
-            **({"gap": thread_gap} if thread_totals is None else {}),
+            **({"gap": thread_gap} if thread_split is None else {}),
         },
     }
     claude = readings.get("claude") if isinstance(readings, Mapping) else None
@@ -1067,24 +957,26 @@ def derive_row(
                 continue
             cost_lanes.append({
                 "lane": lane.get("lane"), "unit": lane.get("unit"),
-                **_rate_pair(
-                    lane.get("total_cost"), lane.get("merged_prs"),
-                    "brief.outcome_signals.signals.cost_per_merged_pr.by_lane",
-                    str(cost.get("reason") or "cost numerator or denominator is unavailable")
-                    if isinstance(cost, Mapping) else "cost source is unavailable",
-                ),
+                "numerator": lane.get("total_cost"),
+                "denominator": lane.get("merged_prs"),
+                "source": "brief.outcome_signals.signals.cost_per_merged_pr.by_lane",
             })
+    cost_gap = (
+        cost.get("reason") if isinstance(cost, Mapping) else None
+    ) or signal_gap or "outcomes cost join is unavailable"
+    if isinstance(cost, Mapping) and cost.get("status") == "partial":
+        cost_gap = "outcomes cost join is partial; some merged tickets lack priced usage"
     metrics["D"]["D4"] = _fact(
         cost_lanes if cost_lanes else None,
         "brief.outcome_signals.signals.cost_per_merged_pr.by_lane",
-        str(cost.get("reason") if isinstance(cost, Mapping) else signal_gap or "cost join is unavailable"),
+        str(cost_gap),
     )
+    if cost_lanes and isinstance(cost, Mapping) and cost.get("status") == "partial":
+        metrics["D"]["D4"]["gap"] = str(cost_gap)
     api_by_agent: Dict[str, Dict] = {}
     resend_by_agent: Dict[str, Dict] = {}
-    for agent in AGENTS:
-        agent_finishes = [
-            row for row in in_hour_finishes if row.get("agent") == agent
-        ]
+    for agent in (rows_by_agent or {}):
+        agent_finishes = [row for row in in_hour_finishes if row.get("agent") == agent]
         points = calls = total_input = fresh_input = 0
         points_complete = calls_complete = bool(agent_finishes)
         input_complete = bool(agent_finishes)
@@ -1093,17 +985,16 @@ def derive_row(
             run = row.get("run")
             run_id = run if isinstance(run, str) and run else "unattributed-{}".format(index)
             api = row.get("api_cost")
-            point_value = api.get("graphql_points") if isinstance(api, Mapping) else None
-            call_value = api.get("gh_calls") if isinstance(api, Mapping) else None
+            api = api if isinstance(api, Mapping) else {}
+            point_value = api.get("graphql_points")
+            call_value = api.get("gh_calls")
             by_run[run_id] = {
                 "graphql_points": _count(
-                    point_value,
-                    "heartbeat.finish.api_cost.graphql_points",
+                    point_value, "heartbeat.finish.api_cost.graphql_points",
                     "this run's GraphQL point count is unavailable",
                 ),
                 "gh_calls": _count(
-                    call_value,
-                    "heartbeat.finish.api_cost.gh_calls",
+                    call_value, "heartbeat.finish.api_cost.gh_calls",
                     "this run's gh call count is unavailable",
                 ),
             }
@@ -1301,7 +1192,9 @@ def derive_row(
     )
     metrics["E"]["E5"] = {
         "stranded": _count(
-            len(brief["stranded"]) if isinstance(brief.get("stranded"), list) else None,
+            len(brief["stranded"])
+            if isinstance(brief.get("stranded"), list) and _section_gap(brief, "stranded") is None
+            else None,
             "brief.stranded", _section_gap(brief, "stranded") or "stranded is unavailable",
         ),
         "degraded_sections": _count(
@@ -1310,13 +1203,15 @@ def derive_row(
         ),
         "status_state_mismatches": _count(
             len(brief["status_state_mismatches"])
-            if isinstance(brief.get("status_state_mismatches"), list) else None,
+            if isinstance(brief.get("status_state_mismatches"), list)
+            and _section_gap(brief, "status_state_mismatches") is None else None,
             "brief.status_state_mismatches",
             _section_gap(brief, "status_state_mismatches") or "status mismatch data is unavailable",
         ),
         "stale_locks_taken_over": _count(
             len(brief["stale_locks_taken_over"])
-            if isinstance(brief.get("stale_locks_taken_over"), list) else None,
+            if isinstance(brief.get("stale_locks_taken_over"), list)
+            and _section_gap(brief, "stale_locks_taken_over") is None else None,
             "brief.stale_locks_taken_over",
             _section_gap(brief, "stale_locks_taken_over") or "stale lock data is unavailable",
         ),
@@ -1499,6 +1394,112 @@ def _read_jsonl(path: str) -> List[Dict]:
     return rows
 
 
+def read_codex_thread_source_split(
+    weekly_window: Optional[Mapping],
+    now: datetime,
+    paths: Optional[Sequence[str]] = None,
+) -> Dict:
+    """Sum Codex turn tokens in its current weekly window by rollout source."""
+    source = "~/.codex/sessions token_usage_record.turn_token_usage grouped by session_meta.thread_source"
+    reset = _timestamp(weekly_window.get("resets_at")) if isinstance(weekly_window, Mapping) else None
+    if reset is None:
+        return {"value": None, "source": source, "gap": "Codex weekly reset time is unavailable"}
+    observed_at = now.astimezone(timezone.utc)
+    start = reset - timedelta(days=7)
+    end = min(observed_at, reset)
+    if paths is None:
+        try:
+            import usage
+            paths = glob.glob(usage.CODEX_SESSIONS)
+        except Exception as exc:
+            return {"value": None, "source": source, "gap": "could not locate Codex rollouts: {}".format(exc)}
+    if not paths:
+        return {"value": None, "source": source, "gap": "no Codex session rollouts are readable"}
+
+    totals = {"funnel": 0, "personal": 0}
+    sessions = {"funnel": 0, "personal": 0}
+    readable = 0
+    unreadable = 0
+    incomplete = 0
+    unclassified = 0
+    for path in paths:
+        try:
+            if os.path.getmtime(path) < start.timestamp():
+                readable += 1
+                continue
+            token_total = 0
+            has_tokens = False
+            thread_sources = set()
+            with open(path, encoding="utf-8") as stream:
+                for line in stream:
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        incomplete += 1
+                        continue
+                    if not isinstance(record, Mapping):
+                        continue
+                    record_type = record.get("type")
+                    payload = record.get("payload")
+                    if record_type == "session_meta":
+                        value = payload.get("thread_source") if isinstance(payload, Mapping) else None
+                        if isinstance(value, str) and value:
+                            thread_sources.add(value)
+                        continue
+                    if record_type != "token_usage_record":
+                        continue
+                    if not isinstance(payload, Mapping):
+                        incomplete += 1
+                        continue
+                    stamp = _timestamp(record.get("timestamp"))
+                    if stamp is None:
+                        incomplete += 1
+                        continue
+                    if not start <= stamp < end:
+                        continue
+                    usage = payload.get("turn_token_usage") or payload.get("usage")
+                    amount = _number(usage.get("total_tokens")) if isinstance(usage, Mapping) else None
+                    if amount is None or not amount.is_integer():
+                        incomplete += 1
+                        continue
+                    token_total += int(amount)
+                    has_tokens = True
+            readable += 1
+        except OSError:
+            unreadable += 1
+            continue
+        if has_tokens and len(thread_sources) != 1:
+            unclassified += 1
+            continue
+        if has_tokens:
+            group = "funnel" if next(iter(thread_sources)) == "automation" else "personal"
+            totals[group] += token_total
+            sessions[group] += 1
+    if unreadable or incomplete or unclassified:
+        reason = []
+        if unreadable:
+            reason.append("{} candidate rollout(s) could not be read".format(unreadable))
+        if incomplete:
+            reason.append("{} token record(s) were incomplete".format(incomplete))
+        if unclassified:
+            reason.append("{} rollout(s) with token use lacked one thread_source".format(unclassified))
+        return {"value": None, "source": source, "gap": "; ".join(reason)}
+    if readable == 0:
+        return {"value": None, "source": source, "gap": "no Codex session rollouts are readable"}
+    return {
+        "value": {
+            "funnel_tokens": totals["funnel"],
+            "personal_tokens": totals["personal"],
+            "funnel_sessions": sessions["funnel"],
+            "personal_sessions": sessions["personal"],
+            "unit": "tokens",
+            "window_start": _iso(start),
+            "window_end": _iso(end),
+        },
+        "source": source,
+    }
+
+
 def _live_inputs(now: datetime) -> Tuple[Dict, Dict, List, Dict, Optional[int]]:
     import heartbeat
     import outcomes
@@ -1516,14 +1517,13 @@ def _live_inputs(now: datetime) -> Tuple[Dict, Dict, List, Dict, Optional[int]]:
         agent: _safe_usage_read(usage, agent, now.timestamp())
         for agent in ("muse", "claude", "codex")
     }
-    thread_totals, thread_gap = read_codex_thread_source_usage(
-        now, usage_readings.get("codex")
+    codex = usage_readings.get("codex")
+    codex_split = read_codex_thread_source_split(
+        _usage_window(codex, "seven_day"), now
     )
-    usage_readings["codex_thread_source_usage"] = {
-        "value": thread_totals,
-        "source": "~/.codex/sessions session_meta.thread_source and token_usage_record",
-        **({"gap": thread_gap} if thread_gap else {}),
-    }
+    codex = dict(codex) if isinstance(codex, Mapping) else {}
+    codex["thread_source_split"] = codex_split
+    usage_readings["codex"] = codex
     try:
         outcome_records = outcomes.read_records()
     except Exception:
@@ -1575,9 +1575,22 @@ def read_commit_activity(now: datetime) -> Dict:
             page += 1
         if page > 100:
             raise MetricsError("commit scan for {} exceeded 10,000 rows".format(repo))
-        commits_by_repo[repo] = len(rows_for_repo)
-        reverts = 0
+        in_hour_rows = []
         for row in rows_for_repo:
+            commit = row.get("commit")
+            committer = commit.get("committer") if isinstance(commit, Mapping) else None
+            author = commit.get("author") if isinstance(commit, Mapping) else None
+            stamp = _timestamp(
+                (committer.get("date") if isinstance(committer, Mapping) else None)
+                or (author.get("date") if isinstance(author, Mapping) else None)
+            )
+            if stamp is None:
+                raise MetricsError("commit timestamp is missing for {}".format(repo))
+            if start <= stamp < end:
+                in_hour_rows.append(row)
+        commits_by_repo[repo] = len(in_hour_rows)
+        reverts = 0
+        for row in in_hour_rows:
             commit = row.get("commit")
             message = commit.get("message") if isinstance(commit, Mapping) else ""
             if re.search(

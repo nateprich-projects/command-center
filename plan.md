@@ -660,10 +660,6 @@ freeze would block the measurement of the freeze's own project. This is not a
 general second lane: any other parent still fails, and the freeze row's message
 names both exempt parents.
 
-**Status, 2026-09-23:** Nate accepted and closed #794. While #794 remains closed,
-the queue-side predicate is inert; PR #1364 (#1362) retired the review freeze
-row. The freeze above is inactive.
-
 ## Sequencing
 
 1. New private repo `nateprich-projects/command-center`.

@@ -164,6 +164,13 @@ def test_the_tier_comes_from_the_ticket_body():
                   ticket(12)], None)
     tiers = {t["number"]: t["tier"] for t in found[0]["tickets"]}
     assert tiers == {11: "escalated", 12: "standard"}
+    matches = {t["number"]: t["escalation_matches"]
+               for t in found[0]["tickets"]}
+    assert matches[11] == [{
+        "reason": "declared: concurrency",
+        "line": "Risk: escalated — concurrency",
+    }]
+    assert matches[12] == []
 
 
 def test_a_board_without_pr_facts_still_renders_rows():

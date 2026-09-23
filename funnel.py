@@ -1191,9 +1191,10 @@ def asserted_text(text: str) -> str:
     return "\n".join(kept)
 
 
-def escalation_reasons(title: str, body: str,
-                       failed_before: bool = False) -> List[str]:
-    """Why the cheap default engineer must not take this ticket.
+def escalation_matches(title: str, body: str,
+                       failed_before: bool = False
+                       ) -> List[Dict[str, Optional[str]]]:
+    """Return escalation reasons with the line that supports each one.
 
     An explicit `Risk:` marker wins outright, in both directions — a ticket that
     says `Risk: standard` is standard even if its prose mentions a race
@@ -1208,21 +1209,49 @@ def escalation_reasons(title: str, body: str,
     the regex in both directions. Nate answered the gate question on
     2026-09-21, having been shown the cost: a plan that describes its real risk
     only inside a code fence would drop to the standard lane.
+
+    Each matched reason carries its first matching line, trimmed. The synthetic
+    "prior attempt failed" reason has no matching line.
     """
     text = asserted_text("{}\n{}".format(title or "", body or ""))
     marker = RISK_LINE.search(text)
     if marker:
         if marker.group(1).lower() == "standard":
-            return ["prior attempt failed"] if failed_before else []
+            return ([{"reason": "prior attempt failed", "line": None}]
+                    if failed_before else [])
         stated = marker.group(2).strip(" —-:").strip()
-        reasons = ["declared: " + stated] if stated else ["declared"]
-        return reasons + (["prior attempt failed"] if failed_before else [])
+        found = [{
+            "reason": "declared: " + stated if stated else "declared",
+            "line": marker.group(0).strip(),
+        }]
+        if failed_before:
+            found.append({"reason": "prior attempt failed", "line": None})
+        return found
 
-    found = [name for name, pattern in sorted(ESCALATION_PATTERNS.items())
-             if re.search(pattern, text, re.IGNORECASE)]
+    found: List[Dict[str, Optional[str]]] = []
+    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.start())
+        if line_end < 0:
+            line_end = len(text)
+        found.append({
+            "reason": name,
+            "line": text[line_start:line_end].strip(),
+        })
     if failed_before:
-        found.append("prior attempt failed")
+        found.append({"reason": "prior attempt failed", "line": None})
     return found
+
+
+def escalation_reasons(title: str, body: str,
+                       failed_before: bool = False) -> List[str]:
+    """Return the stable list of escalation reason names."""
+    return [entry["reason"] for entry in
+            escalation_matches(title, body, failed_before)
+            if isinstance(entry.get("reason"), str)]
 
 
 NEEDS_NATE_PATTERNS = {
@@ -1292,6 +1321,12 @@ def plan_is_escalated(plan_body: str) -> List[str]:
     used by the self-approval condition.
     """
     return escalation_reasons("", plan_body)
+
+
+def plan_escalation_matches(plan_body: str
+                            ) -> List[Dict[str, Optional[str]]]:
+    """Return plan escalation reasons together with their matching lines."""
+    return escalation_matches("", plan_body)
 
 
 def plan_needs_nate(plan_body: str) -> bool:
@@ -7665,7 +7700,8 @@ def _dashboard_ticket(
             block_reason = "project blocked: " + parent_block
     body = item.body or ""
     needs = item.needs
-    tier = "escalated" if escalation_reasons(item.title, body) else "standard"
+    matches = escalation_matches(item.title, body)
+    tier = "escalated" if matches else "standard"
 
     pr_state = str((pr_fact or {}).get("state") or "").upper()
     pr_number = (pr_fact or {}).get("number")
@@ -7728,6 +7764,7 @@ def _dashboard_ticket(
         "pr": pr,
         "pr_number": pr_number if isinstance(pr_number, int) else None,
         "tier": tier,
+        "escalation_matches": matches,
         "owner": owner,
         "blocked": blocked,
         "human_step": needs if needs in ("human", "claude-code-environment") else None,

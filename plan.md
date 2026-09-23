@@ -645,20 +645,26 @@ bootstrap reserves above. Actions is the right home precisely because the
 watchdog cannot live inside the thing it watches: an app that quit is invisible to
 every other signal on a machine that is otherwise fine.
 
-**Routine freeze while #794 lands.** `routines/`, `skills/`, and the parser
-constants #794 deletes are frozen ground: a diff touching them fails the review
-runner's freeze row unless its ticket sits under #794. The freeze exists because
-#794 replaces the prose those files hold with runner code; a concurrent
-behaviour change to the same files would be built on text about to be deleted,
-and a run on the stale copy would re-trigger the defect.
+**Routine freeze while #794 landed — lifted 2026-09-23.** The freeze ended
+when #794 closed (2026-09-23 06:22Z). #1362 (PR #1364) retired the review
+runner's freeze row, and the queue-side predicate went inert with #794's
+close. **`routines/`, `skills/`, and the parser constants are no longer frozen.**
+No review row or queue predicate enforces the freeze, and no ticket needs a
+#794 or #1044 parent to touch those files. The paragraphs below are the record
+of what applied while it lasted. They are not a live requirement.
 
-Exemption, Nate 2026-09-18 (#1090): tickets under #1044 may also touch frozen
-ground. #1044 exists only to measure #794's cutover, and its routine edits are
+While #794 was open, `routines/`, `skills/`, and the parser constants #794
+deleted were frozen ground: a diff touching them failed the review runner's
+freeze row unless its ticket sat under #794. The freeze existed because #794
+replaced the prose those files held with runner code; a concurrent behaviour
+change to the same files would have been built on text about to be deleted,
+and a run on the stale copy would have re-triggered the defect.
+
+Exemption, Nate 2026-09-18 (#1090): tickets under #1044 could also touch frozen
+ground. #1044 existed only to measure #794's cutover, and its routine edits were
 recording instructions for the shadow comparison — such as the live reviewer
 recording its verdict — rather than behaviour changes, so holding them to the
-freeze would block the measurement of the freeze's own project. This is not a
-general second lane: any other parent still fails, and the freeze row's message
-names both exempt parents.
+freeze would have blocked the measurement of the freeze's own project.
 
 ## Sequencing
 

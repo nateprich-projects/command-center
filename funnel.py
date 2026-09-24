@@ -8291,6 +8291,9 @@ def _dashboard_ticket(
         blocked and parent_block is None
         and _blocked_only_by(item, siblings)
     )
+    sibling_blockers = [
+        ref for ref in _block_refs(item) if ref in siblings
+    ] if blocked else []
     block_reason = _dashboard_block_reason(item)
     if block_reason is None and parent_block is not None:
         if not parent_block:
@@ -8372,8 +8375,26 @@ def _dashboard_ticket(
         "owner": owner,
         "blocked": blocked,
         "blocked_by_siblings": blocked_by_siblings,
+        # The tickets under the same parent this one waits on, which is what
+        # lines the bar's blocked segments up behind their blockers.
+        "sibling_blockers": sibling_blockers,
         "human_step": needs if needs in ("human", "claude-code-environment") else None,
     }
+
+
+def _block_refs(item: Item) -> List[Optional[str]]:
+    """Every ticket ``item``'s block names: native edges, and the block
+    comment's refs when it carries the label. ``None`` is an unresolvable
+    ref; duplicates are dropped, first mention kept."""
+    values = list(item.open_blockers)
+    if item.is_blocked:
+        values += list(item.block_references)
+    refs: List[Optional[str]] = []
+    for value in values:
+        ref = _dependency_ref(item, value)
+        if ref not in refs:
+            refs.append(ref)
+    return refs
 
 
 def _blocked_only_by(item: Item, refs: Collection[str]) -> bool:
@@ -8384,12 +8405,9 @@ def _blocked_only_by(item: Item, refs: Collection[str]) -> bool:
     """
     if item.blocked_until is not None:
         return False
-    values = list(item.open_blockers)
-    if item.is_blocked:
-        if not item.block_references:
-            return False
-        values += list(item.block_references)
-    resolved = [_dependency_ref(item, value) for value in values]
+    if item.is_blocked and not item.block_references:
+        return False
+    resolved = _block_refs(item)
     return bool(resolved) and all(ref in refs for ref in resolved)
 
 
@@ -8431,13 +8449,13 @@ def _dashboard_item(
 
 #: Progress order for the sub-issue bar: finished work fills from the left,
 #: the way a progress bar reads, whatever order the tickets are queued in.
-#: Open work sits left of blocked work, and a ticket waiting only on its
-#: siblings sits left of one blocked from outside the project (Nate,
-#: 2026-09-24).
+#: Open work sits left of blocked work (Nate, 2026-09-24). The two blocked
+#: states share one run, ordered by ``_dashboard_pip_order``.
 PIP_PROGRESS_ORDER = (
     "closed", "approved", "changes-requested", "submitted", "unknown",
     "open", "blocked-sibling", "blocked",
 )
+_PIP_BLOCKED_STATES = ("blocked-sibling", "blocked")
 
 
 def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
@@ -8466,6 +8484,56 @@ def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
 PIP_SEGMENTS = 12
 
 
+def _dashboard_pip_order(
+    tickets: Sequence[Mapping[str, object]]
+) -> List[str]:
+    """One state per ticket, in bar order.
+
+    Blocked tickets line up behind whatever blocks them, so the bar shows
+    who is blocking whom (Nate, 2026-09-24). A blocked ticket's depth is 0
+    unless a sibling it waits on is itself blocked, then one more than the
+    deepest such sibling. The run sorts by depth; at equal depth a ticket
+    waiting on a sibling leads one blocked from outside, so it sits nearer
+    the open work that frees it. Otherwise the tickets keep queue order.
+    """
+    states = [_dashboard_pip_state(ticket) for ticket in tickets]
+    state_of = {
+        ticket.get("ref"): state for ticket, state in zip(tickets, states)
+    }
+    waits_on = {
+        ticket.get("ref"): [
+            ref for ref in (ticket.get("sibling_blockers") or ())
+            if state_of.get(ref) in _PIP_BLOCKED_STATES
+        ]
+        for ticket in tickets
+    }
+    depths: Dict[object, int] = {}
+
+    def depth(ref: object, seen: Tuple[object, ...] = ()) -> int:
+        if ref in depths:
+            return depths[ref]
+        found = 0
+        for blocker in waits_on.get(ref, ()):
+            if blocker in seen or blocker == ref:
+                continue  # a cycle adds no depth
+            found = max(found, 1 + depth(blocker, seen + (ref,)))
+        depths[ref] = found
+        return found
+
+    def key(index: int):
+        state = states[index]
+        if state not in _PIP_BLOCKED_STATES:
+            return (PIP_PROGRESS_ORDER.index(state), 0, 0, index)
+        return (
+            PIP_PROGRESS_ORDER.index(_PIP_BLOCKED_STATES[0]),
+            depth(tickets[index].get("ref")),
+            _PIP_BLOCKED_STATES.index(state),
+            index,
+        )
+
+    return [states[i] for i in sorted(range(len(states)), key=key)]
+
+
 def _dashboard_pips(
     tickets: Sequence[Mapping[str, object]]
 ) -> List[str]:
@@ -8475,14 +8543,16 @@ def _dashboard_pips(
     states are scaled to that many segments by largest remainder, and any
     state with at least one ticket keeps at least one segment: three submitted
     PRs among forty-four tickets must still be visible, and they sit at the
-    end of the coloured run where the work actually is.
+    end of the coloured run where the work actually is. A scaled bar cannot
+    keep each blocked ticket behind its blocker, so its two blocked states
+    appear in the order they first do in the full bar.
     """
-    states = [_dashboard_pip_state(ticket) for ticket in tickets]
+    states = _dashboard_pip_order(tickets)
     if len(states) <= PIP_SEGMENTS:
-        return sorted(states, key=PIP_PROGRESS_ORDER.index)
+        return states
 
     counts = {state: states.count(state) for state in PIP_PROGRESS_ORDER}
-    present = [state for state in PIP_PROGRESS_ORDER if counts[state]]
+    present = list(dict.fromkeys(states))
     total = len(states)
     exact = {state: counts[state] * PIP_SEGMENTS / total for state in present}
     share = {state: max(1, int(exact[state])) for state in present}
@@ -8499,7 +8569,7 @@ def _dashboard_pips(
         share[state] -= 1
 
     bar: List[str] = []
-    for state in PIP_PROGRESS_ORDER:
+    for state in present:
         bar.extend([state] * share.get(state, 0))
     return bar
 

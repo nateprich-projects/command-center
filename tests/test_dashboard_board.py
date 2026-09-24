@@ -425,6 +425,64 @@ def test_a_block_from_outside_the_project_keeps_the_blocked_pip(blocked_ticket):
     assert row["pips"] == ["open", "blocked"]
 
 
+def test_blocked_pips_line_up_behind_their_blockers():
+    """Nate, 2026-09-24, on a project whose sibling-blocked tickets wait on
+    tickets blocked from outside: the bar should show who blocks whom."""
+    outside = [REPO + "#225"]
+    row = _building_row([
+        project(children_total=8),
+        ticket(260, open_blockers=outside),
+        ticket(261, open_blockers=outside),
+        ticket(262, open_blockers=outside),
+        ticket(263, open_blockers=[REPO + "#261", REPO + "#260", REPO + "#262"]),
+        ticket(264, open_blockers=outside),
+        ticket(265, state="CLOSED"),
+        ticket(266, open_blockers=[REPO + "#264"]),
+        ticket(267, open_blockers=[REPO + "#266", REPO + "#264"]),
+    ])
+    by_number = {t["number"]: t for t in row["tickets"]}
+    assert by_number[267]["sibling_blockers"] == [REPO + "#266", REPO + "#264"]
+    assert by_number[260]["sibling_blockers"] == []
+    assert row["pips"] == (
+        ["closed"] + ["blocked"] * 4 + ["blocked-sibling"] * 3
+    )
+
+
+def test_a_chain_from_open_work_leads_a_chain_from_outside():
+    row = _building_row([
+        project(children_total=4),
+        ticket(11),
+        ticket(12, open_blockers=[REPO + "#11"]),
+        ticket(13, labels=["blocked"], block_reason="Waiting on Nate."),
+        ticket(14, open_blockers=[REPO + "#13"]),
+        ticket(15, open_blockers=[REPO + "#14"]),
+    ])
+    assert row["pips"] == [
+        "open", "blocked-sibling", "blocked", "blocked-sibling",
+        "blocked-sibling",
+    ]
+
+
+def test_a_sibling_cycle_still_draws_every_ticket():
+    row = _building_row([
+        project(children_total=2),
+        ticket(11, open_blockers=[REPO + "#12"]),
+        ticket(12, open_blockers=[REPO + "#11"]),
+    ])
+    assert row["pips"] == ["blocked-sibling", "blocked-sibling"]
+
+
+def test_a_scaled_bar_keeps_the_blocked_states_in_first_seen_order():
+    outside = [REPO + "#999"]
+    items = [project(children_total=20)]
+    items += [ticket(n, state="CLOSED") for n in range(11, 21)]
+    items += [ticket(n, open_blockers=outside) for n in range(21, 26)]
+    items += [ticket(n, open_blockers=[REPO + "#21"]) for n in range(26, 31)]
+    bar = _building_row(items)["pips"]
+    assert len(bar) == funnel.PIP_SEGMENTS
+    assert bar.index("blocked") < bar.index("blocked-sibling")
+
+
 def test_a_blocked_projects_tickets_are_blocked_from_outside():
     row = _building_row([
         project(children_total=2, labels=["blocked"], block_references=["#794"]),

@@ -1136,6 +1136,14 @@ def write_declined_needs(url: str, ref: str) -> None:
     breakdown_engine.write_needs(item_id, "agent", ref)
 
 
+def write_declined_human_needs(url: str, ref: str) -> None:
+    """Route an unhandled decline to Nate so its block cannot be stranded."""
+    from engine import breakdown as breakdown_engine
+
+    item_id = breakdown_engine.add_to_project(url)
+    breakdown_engine.write_needs(item_id, "human", ref)
+
+
 def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = None,
                         cwd: pathlib.Path) -> None:
     """Label one ticket blocked, with the native edge when one exists."""
@@ -1227,15 +1235,86 @@ def _is_defer_note_proof_reason(reason: str) -> bool:
     return all(pattern.search(reason or "") for pattern in _DEFER_NOTE_REASON)
 
 
+DECLINE_REVIEW_ROUTING_MARKER = "<!-- command-center-review-routing -->"
+_DECLINED_CONFLICT_POINTER = re.compile(
+    r"(?<![A-Za-z0-9_./-])"
+    r"(?P<path>(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\."
+    r"(?:md|rst|py|yml|yaml|toml|json|txt))"
+    r"(?P<anchor>(?:#(?:L[1-9][0-9]*|[A-Za-z0-9][A-Za-z0-9-]*))"
+    r"|(?::L?[1-9][0-9]*))"
+    r"(?![A-Za-z0-9_-])",
+    re.IGNORECASE,
+)
+_DECLINED_CONFLICT_WORDS = (
+    r"conflict(?:s|ed|ing)?|contradict(?:s|ed|ion|ory)?|"
+    r"inconsisten(?:t|cy)|stale|outdated|superseded"
+)
+_DECLINED_ACCEPT_BODY_WORDS = (
+    r"accept(?:ance)?|body|ticket|issue|plan|repo(?:sitory)?|rule(?:s)?"
+)
+_DECLINED_ACCEPT_BODY_CONFLICT = re.compile(
+    r"(?:\b(?:" + _DECLINED_ACCEPT_BODY_WORDS + r")\b.{0,180}\b(?:"
+    + _DECLINED_CONFLICT_WORDS + r")\b|\b(?:"
+    + _DECLINED_CONFLICT_WORDS + r")\b.{0,180}\b(?:"
+    + _DECLINED_ACCEPT_BODY_WORDS + r")\b)",
+    re.IGNORECASE | re.DOTALL,
+)
+_DECLINED_STALE_ROUTINE_FREEZE = re.compile(
+    r"(?P<issue>#[1-9][0-9]*)\s+routine\s+freeze"
+    r"(?=.{0,240}\bverdict\s+confirms\s+the\s+conflict\b)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _declined_conflict_pointer(reason: str) -> Optional[str]:
+    """Return one specific repository text pointer from a body conflict."""
+    text = reason or ""
+    if _DECLINED_ACCEPT_BODY_CONFLICT.search(text):
+        pointers = set()
+        for match in _DECLINED_CONFLICT_POINTER.finditer(text):
+            path = match.group("path")
+            if path.startswith("/") or any(
+                    part in (".", "..") for part in path.split("/")):
+                continue
+            pointers.add(path + match.group("anchor"))
+        if len(pointers) == 1:
+            return next(iter(pointers))
+
+    # The 2026-09-23 #1257 decline predates an explicit conflict pointer.
+    # Its distinctive stale-freeze wording still identifies the exact plan
+    # section, so preserve that shape without treating every plan
+    # disagreement as a route.
+    legacy = _DECLINED_STALE_ROUTINE_FREEZE.search(text)
+    if legacy is not None:
+        number = legacy.group("issue").lstrip("#")
+        return "plan.md#routine-freeze-while-{}-lands".format(number)
+    return None
+
+
+def _declined_review_routing_comment(reason: str, pointer: str) -> str:
+    """Render the stable machine-readable handoff for an Accept conflict."""
+    excerpt = (reason or "").strip()
+    if len(excerpt) > 1200:
+        excerpt = excerpt[:1197].rstrip() + "..."
+    record = {
+        "type": "accept-body-conflict",
+        "decline_excerpt": excerpt,
+        "conflict_pointer": pointer,
+    }
+    return "\n".join((
+        "**Review routing: Accept/body conflict**",
+        "",
+        DECLINE_REVIEW_ROUTING_MARKER,
+        "```json",
+        json.dumps(record, ensure_ascii=False, indent=2),
+        "```",
+    ))
+
+
 def classify_decline_reason(reason: str, ticket_repo: str,
                             ticket_body: str = ""
                             ) -> Tuple[str, Optional[str]]:
-    """Recognize supported decline shapes from the reason and ticket contract.
-
-    Bare prerequisite issue numbers resolve against the declined ticket's
-    repository. A defer note is accepted only when the ticket body explicitly
-    allows it as proof and the reason records the no-code deferral.
-    """
+    """Classify prerequisite, Accept/body conflict, and accepted defer proof."""
     found = {
         match.group("ref")
         for pattern in _DECLINED_PREREQUISITE_PATTERNS
@@ -1243,7 +1322,9 @@ def classify_decline_reason(reason: str, ticket_repo: str,
     }
     if found:
         if len(found) != 1:
-            return "unknown", None
+            pointer = _declined_conflict_pointer(reason)
+            return (("accept-body-conflict", pointer)
+                    if pointer else ("unknown", None))
         raw_ref = next(iter(found))
         match = re.fullmatch(
             r"(?:(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?"
@@ -1251,15 +1332,24 @@ def classify_decline_reason(reason: str, ticket_repo: str,
             raw_ref,
         )
         if match is None:
-            return "unknown", None
+            pointer = _declined_conflict_pointer(reason)
+            return (("accept-body-conflict", pointer)
+                    if pointer else ("unknown", None))
         repo = match.group("repo") or ticket_repo
         if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is None:
-            return "unknown", None
+            pointer = _declined_conflict_pointer(reason)
+            return (("accept-body-conflict", pointer)
+                    if pointer else ("unknown", None))
         ref = "{}#{}".format(repo, match.group("number"))
         if shape.REF_RE.fullmatch(ref) is None:
-            return "unknown", None
+            pointer = _declined_conflict_pointer(reason)
+            return (("accept-body-conflict", pointer)
+                    if pointer else ("unknown", None))
         return "prerequisite-ticket", ref
 
+    pointer = _declined_conflict_pointer(reason)
+    if pointer is not None:
+        return "accept-body-conflict", pointer
     if (_is_defer_note_proof_reason(reason)
             and _accepts_defer_note_proof(ticket_body)):
         return "defer-note-proof", None
@@ -1583,6 +1673,8 @@ def finish_declined(
         block_effect: Callable[..., None] = mark_ticket_blocked,
         comment_effect: Callable[..., None] = post_agent_comment,
         needs_effect: Callable[[str, str], None] = write_declined_needs,
+        human_needs_effect: Callable[[str, str], None]
+        = write_declined_human_needs,
         prerequisite_open_effect: Callable[[str], bool]
         = declined_prerequisite_is_open,
         prerequisite_edge_effect: Callable[..., None]
@@ -1590,12 +1682,12 @@ def finish_declined(
         defer_note_close_effect: Callable[..., None]
         = close_declined_defer_note_proof,
         extra_note: Optional[str] = None) -> dict:
-    """Record the decline, routing supported proof and prerequisite shapes."""
+    """Record the decline and route only verified, parseable reasons."""
     context = checkout_context(cwd)
     resolved = resolve_checkout_repo(context["root"], repo)
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
-    decline_class, prerequisite = classify_decline_reason(
+    decline_class, decline_target = classify_decline_reason(
         reason, resolved, ticket.get("body") or "")
     if decline_class == "defer-note-proof":
         defer_note_close_effect(
@@ -1608,13 +1700,18 @@ def finish_declined(
             note += "; " + extra_note.strip()
         heartbeat_finish(agent, run, "done", note, ref)
         return {"ticket": ref, "declined": reason}
-
+    accept_conflict_routed = (
+        decline_class == "accept-body-conflict" and decline_target is not None
+    )
     prerequisite_recorded = False
-    if decline_class == "prerequisite-ticket" and prerequisite is not None:
+    if accept_conflict_routed:
+        # Keep this in an agent lane so review and shaping can see the ticket.
+        needs_effect(ticket["url"], ref)
+    elif decline_class == "prerequisite-ticket" and decline_target is not None:
         try:
-            if prerequisite_open_effect(prerequisite):
+            if prerequisite_open_effect(decline_target):
                 prerequisite_edge_effect(
-                    resolved, context["number"], prerequisite,
+                    resolved, context["number"], decline_target,
                     cwd=context["root"],
                 )
                 prerequisite_recorded = True
@@ -1622,17 +1719,37 @@ def finish_declined(
                 OSError, subprocess.SubprocessError):
             # A failed lookup or edge write keeps today's visible block.
             prerequisite_recorded = False
-    if not prerequisite_recorded:
-        needs_effect(ticket["url"], ref)
+    if not prerequisite_recorded and not accept_conflict_routed:
+        # Unknown declines and failed prerequisite handoffs have no machine-
+        # readable condition that can clear them. Ask Nate instead of leaving
+        # a blocked ticket in the silent Needs=agent lane.
+        human_needs_effect(ticket["url"], ref)
         block_effect(resolved, context["number"], cwd=context["root"])
     comment_effect(resolved, context["number"],
                    "{} {}".format(funnel.DECLINED_PREFIX, reason),
                    run=run, agent=agent, cwd=context["root"])
+    routing_failed = False
+    if accept_conflict_routed:
+        try:
+            comment_effect(
+                resolved, context["number"],
+                _declined_review_routing_comment(reason, decline_target),
+                run=run, agent=agent, cwd=context["root"],
+            )
+        except (funnel.GitHubError, OSError, subprocess.SubprocessError):
+            # An unposted handoff must not leave a false unblocked ticket.
+            human_needs_effect(ticket["url"], ref)
+            block_effect(resolved, context["number"], cwd=context["root"])
+            routing_failed = True
     release(ref)
     first = reason.splitlines()[0] if reason else "no reason given"
     if len(first) > 200:
         first = first[:197].rstrip() + "..."
     note = "declined: {}".format(first)
+    if accept_conflict_routed and not routing_failed:
+        note += "; routed to review for Accept/body conflict"
+    elif routing_failed:
+        note += "; review routing failed; ticket left blocked"
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-blocked", note, ref)

@@ -112,7 +112,7 @@ def test_prose_inventory_contains_only_bodies_that_will_be_edited():
     ]
 
 
-def test_incident_replays_1401_1402_1403_use_canonical_fields():
+def test_incident_replays_1401_1402_and_unconditioned_1403():
     false_risk = item(
         number=1401, status="Shaped", origin="agent", risk="standard",
         needs="none",
@@ -127,7 +127,7 @@ def test_incident_replays_1401_1402_1403_use_canonical_fields():
 
     assert funnel.gate_question(false_risk) is None
     assert funnel.gate_question(scheduling) is None
-    assert funnel.gate_question(external_wait) is None
+    assert funnel.gate_question(external_wait) == "Unblock or park?"
 
 
 def test_trim_removes_routing_copies_but_keeps_the_actual_question():

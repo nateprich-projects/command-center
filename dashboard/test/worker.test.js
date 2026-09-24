@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync, createSign } from "node:crypto";
 import test from "node:test";
 
-import worker, { REFRESH_KEY, verifyAccessJwt } from "../worker.js";
+import worker, { METRICS_KEY, REFRESH_KEY, verifyAccessJwt } from "../worker.js";
 
 function encodeJson(value) {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
@@ -97,6 +97,54 @@ test("an authorized request reads the snapshot without changing its order", asyn
 
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), snapshot);
+});
+
+test("an authorized metrics request reads the separate metrics key", async () => {
+  const fixture = accessFixture();
+  const metrics = {
+    schema_version: 1,
+    days: ["2026-09-24"],
+    metrics: { A: { A1: { total: { daily: [3] } } } },
+  };
+  const env = {
+    ACCESS_TEAM_DOMAIN: fixture.teamDomain,
+    ACCESS_AUD: fixture.audience,
+    ACCESS_JWKS_FETCH: fixture.fetchImpl,
+    FUNNEL_SNAPSHOT: {
+      async get(key, options) {
+        assert.equal(key, METRICS_KEY);
+        assert.deepEqual(options, { type: "json" });
+        return metrics;
+      },
+    },
+  };
+  const response = await worker.fetch(new Request("https://funnel.nateprich.com/api/metrics", {
+    headers: { "Cf-Access-Jwt-Assertion": fixture.sign() },
+  }), env);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), metrics);
+});
+
+test("the metrics endpoint is read-only and reports a missing series", async () => {
+  const fixture = accessFixture();
+  const env = {
+    ACCESS_TEAM_DOMAIN: fixture.teamDomain,
+    ACCESS_AUD: fixture.audience,
+    ACCESS_JWKS_FETCH: fixture.fetchImpl,
+    FUNNEL_SNAPSHOT: { async get() { return null; } },
+  };
+  const headers = { "Cf-Access-Jwt-Assertion": fixture.sign() };
+  const write = await worker.fetch(new Request("https://funnel.nateprich.com/api/metrics", {
+    method: "POST", headers,
+  }), env);
+  const missing = await worker.fetch(new Request("https://funnel.nateprich.com/api/metrics", {
+    headers,
+  }), env);
+
+  assert.equal(write.status, 405);
+  assert.deepEqual(await missing.json(), { error: "metrics unavailable" });
+  assert.equal(missing.status, 503);
 });
 
 test("refresh records one KV flag after authorization", async () => {

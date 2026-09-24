@@ -1,4 +1,5 @@
 const SNAPSHOT_KEY = "snapshot";
+const METRICS_KEY = "metrics";
 const REFRESH_KEY = "refresh-requested";
 const WEBHOOK_PATH = "/api/github-webhook";
 
@@ -265,6 +266,17 @@ async function handleRequest(request, env) {
     return jsonResponse(snapshot);
   }
 
+  if (url.pathname === "/api/metrics") {
+    if (request.method !== "GET") {
+      return jsonResponse({ error: "method not allowed" }, 405);
+    }
+    const metrics = await env.FUNNEL_SNAPSHOT.get(METRICS_KEY, { type: "json" });
+    if (!metrics) {
+      return jsonResponse({ error: "metrics unavailable" }, 503);
+    }
+    return jsonResponse(metrics);
+  }
+
   if (url.pathname === "/api/refresh") {
     if (request.method !== "POST") {
       return jsonResponse({ error: "method not allowed" }, 405);
@@ -284,4 +296,4 @@ async function handleRequest(request, env) {
 }
 
 export default { fetch: handleRequest };
-export { REFRESH_KEY, SNAPSHOT_KEY };
+export { METRICS_KEY, REFRESH_KEY, SNAPSHOT_KEY };

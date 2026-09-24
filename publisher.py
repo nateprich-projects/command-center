@@ -1,4 +1,4 @@
-"""Push funnel spool snapshots to Cloudflare KV and honour refresh taps.
+"""Push the funnel snapshot and execution metrics series to Cloudflare KV.
 
 Ticket #652, step 3 of the #643 dashboard plan. A launchd job runs one tick
 every minute on the Mac that holds the only Cloudflare credential:
@@ -6,7 +6,10 @@ every minute on the Mac that holds the only Cloudflare credential:
 1. Push the newest spool entry to the ``snapshot`` KV key when it is not
    already published there. The Worker in ``dashboard/worker.js`` reads that
    key; this script is its only writer.
-2. Read the ``refresh-requested`` flag the page's refresh button sets. When the
+2. Render ``metrics.py series`` and publish the result to the separate
+   ``metrics`` KV key when it changes. The series is a rendering of the
+   heartbeat branch's append-only ``metrics.jsonl`` facts.
+3. Read the ``refresh-requested`` flag the page's refresh button sets. When the
    flag is set and the newest snapshot is older than 10 minutes, run
    ``funnel.py brief`` from the run clone once, then clear the flag when it
    produces a publishable JSON snapshot. A set flag on a fresh snapshot is
@@ -74,6 +77,7 @@ except ImportError:  # pragma: no cover - the schedule Mac and CI are Unix
     fcntl = None  # type: ignore
 
 SNAPSHOT_KEY = "snapshot"
+METRICS_KEY = "metrics"
 REFRESH_KEY = "refresh-requested"
 KV_BINDING = "FUNNEL_SNAPSHOT"
 STALE_AFTER_SECONDS = 600
@@ -89,6 +93,7 @@ REFRESH_FLOOR_SECONDS = 90
 SCHEDULED_AFTER_SECONDS = 1800
 KV_TIMEOUT_SECONDS = 30.0
 DEFAULT_BRIEF_TIMEOUT_SECONDS = 600.0
+DEFAULT_METRICS_TIMEOUT_SECONDS = 120.0
 DEFAULT_API_BASE = "https://api.cloudflare.com/client/v4"
 TOKEN_ENV = "CLOUDFLARE_API_TOKEN"
 ACCOUNT_ENV = "CLOUDFLARE_ACCOUNT_ID"
@@ -529,10 +534,60 @@ def _resolve_brief_timeout(cli_value: Optional[float]) -> float:
     return timeout
 
 
+def _metrics_series_bytes(metrics_py: Path) -> bytes:
+    """Run the read-only series command and validate its JSON envelope."""
+    try:
+        result = subprocess.run(
+            [sys.executable, str(metrics_py), "series"],
+            capture_output=True,
+            text=True,
+            timeout=DEFAULT_METRICS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise PublisherError(
+            "metrics.py series timed out after {}s".format(
+                DEFAULT_METRICS_TIMEOUT_SECONDS
+            )
+        )
+    except OSError as exc:
+        raise PublisherError("could not run metrics.py series: {}".format(exc))
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "series command failed").strip()
+        raise PublisherError("metrics.py series failed: {}".format(detail[-2000:]))
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, ValueError) as exc:
+        raise PublisherError("metrics.py series returned invalid JSON: {}".format(exc))
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != 1
+        or not isinstance(payload.get("days"), list)
+        or not isinstance(payload.get("metrics"), dict)
+    ):
+        raise PublisherError("metrics.py series returned an invalid schema")
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def publish_metrics_series(kv: KVClient, metrics_py: Path) -> None:
+    """Publish the separate metrics projection without blocking snapshots."""
+    try:
+        payload = _metrics_series_bytes(metrics_py)
+        current = kv.get(METRICS_KEY)
+        if current == payload:
+            log("metrics series is already published")
+            return
+        kv.put(METRICS_KEY, payload)
+        log("published metrics series ({} bytes)".format(len(payload)))
+    except (PublisherError, KVError) as exc:
+        # Metrics are an independent read path. A stale series must not stop
+        # the Funnel snapshot or refresh behavior from completing.
+        log("warning: metrics series was not published: {}".format(exc))
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="publisher.py",
-        description="Push the newest funnel spool snapshot to Cloudflare KV "
+        description="Push funnel snapshot and metrics series to Cloudflare KV "
                     "and run one brief per refresh flag.",
     )
     parser.add_argument("--spool-dir", default=None)
@@ -543,6 +598,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--account-id", default=None)
     parser.add_argument("--api-base", default=None)
     parser.add_argument("--funnel-py", default=None)
+    parser.add_argument("--metrics-py", default=None)
     parser.add_argument("--lock-file", default=None)
     parser.add_argument("--brief-timeout", type=float, default=None)
     return parser.parse_args(argv)
@@ -561,6 +617,7 @@ def _remote_epoch(remote: bytes) -> Optional[float]:
 def tick(spool_dir: Path, env_file: Path, wrangler_toml: Path,
          namespace_id: Optional[str], account_id: Optional[str],
          api_base: str, funnel_py: Path, brief_timeout: float,
+         metrics_py: Path,
          deploy_state_file: Optional[Path] = None) -> int:
     dotenv = parse_dotenv(env_file)
     token = os.environ.get(TOKEN_ENV) or dotenv.get(TOKEN_ENV)
@@ -603,6 +660,8 @@ def tick(spool_dir: Path, env_file: Path, wrangler_toml: Path,
                 kv.put(SNAPSHOT_KEY, entry.data)
                 log("published {} ({} bytes)".format(
                     entry.name, len(entry.data)))
+
+    publish_metrics_series(kv, metrics_py)
 
     flag = kv.get(REFRESH_KEY)
     requested = (
@@ -679,6 +738,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.funnel_py, "COMMAND_CENTER_DASHBOARD_FUNNEL_PY",
         str(_repo_root() / "funnel.py"),
     )).expanduser()
+    metrics_py = Path(_option(
+        args.metrics_py, "COMMAND_CENTER_DASHBOARD_METRICS_PY",
+        str(_repo_root() / "metrics.py"),
+    )).expanduser()
     lock_file = Path(_option(
         args.lock_file, "COMMAND_CENTER_DASHBOARD_LOCK",
         str(Path.home() / ".claude" / "funnel-publisher.lock"),
@@ -706,6 +769,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             api_base=api_base,
             funnel_py=funnel_py,
             brief_timeout=brief_timeout,
+            metrics_py=metrics_py,
             deploy_state_file=deploy_state_file,
         )
     except (PublisherError, KVError) as exc:

@@ -439,6 +439,24 @@ BLOCK_COMMENT_RE = re.compile(
       r"(?: on (?P<references>#[0-9]+(?: and #[0-9]+)*))?:\*\*"
 )
 
+#: A blocked ticket may wait on the one event kind the queue understands.
+#: The body after this header must be a strict fenced JSON spec.
+BLOCK_EVENT_COMMENT_PREFIX = "**Blocked until event:**"
+BLOCK_EVENT_COMMENT_RE = re.compile(
+    r"\A" + re.escape(BLOCK_EVENT_COMMENT_PREFIX)
+    + r"[ \t]*\r?\n(?:[ \t]*\r?\n)?[ \t]*```json[ \t]*\r?\n"
+      r"(?P<event_spec>.*?)\r?\n[ \t]*```[ \t]*(?:\r?\n|$)",
+    re.DOTALL,
+)
+BLOCK_EVENT_KIND_HEADER_RE = re.compile(
+    r"\A\*\*Blocked until (?P<kind>[^:\r\n]+):\*\*"
+)
+BLOCK_FENCED_PAYLOAD_RE = re.compile(
+    r"\A[ \t]*\r?\n(?:[ \t]*\r?\n)?[ \t]*```[^\r\n]*\r?\n"
+    r".*?\r?\n[ \t]*```[ \t]*(?:\r?\n|$)",
+    re.DOTALL,
+)
+
 #: A breakdown can leave a project waiting on Nate's answer. The header is
 #: deliberately strict and anchored just like the ordinary block header so a
 #: quoted or embedded sentence cannot become a gate question by accident.
@@ -690,6 +708,7 @@ class Item:
     blocked_since: Optional[datetime] = None
     blocked_cleared_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
+    block_event: Optional[Dict[str, str]] = None
 
     @property
     def ref(self) -> str:
@@ -872,7 +891,7 @@ def gate_question(item: Item) -> Optional[str]:
     if item.state != "OPEN":
         return None
     if item.is_blocked:
-        if item.needs in ("agent", "external-event"):
+        if item.needs == "agent":
             return None
         # A named condition is knowable work for the system, not a question for
         # Nate. A silent block still needs his attention, but only a project
@@ -880,7 +899,14 @@ def gate_question(item: Item) -> Optional[str]:
         # A valid date condition is also machine-readable. Both future and
         # passed dates stay out of the question queue; the begin path clears a
         # passed condition before selecting work.
-        if item.block_references or _item_blocked_until(item) is not None:
+        # A well-formed event spec is also a named condition. Needs:
+        # external-event routes the ticket, but cannot suppress the question
+        # without that condition attached.
+        if (
+            item.block_event is not None
+            or item.block_references
+            or _item_blocked_until(item) is not None
+        ):
             return None
         if item.parent is None and item.needs_decision:
             # An answered Gates question is settled, whatever the comment
@@ -2894,23 +2920,101 @@ def answered_gates_body(body: str, answer: str, decider: str,
     return updated
 
 
+def _unique_json_object(pairs: List[Tuple[str, object]]) -> Dict[str, object]:
+    """Reject ambiguous JSON objects instead of silently taking the last key."""
+    result: Dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _parse_block_event_spec(raw: str) -> Optional[Dict[str, str]]:
+    """Return the one supported event spec, or None for malformed input."""
+    try:
+        spec = json.loads(raw, object_pairs_hook=_unique_json_object)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(spec, dict) or set(spec) != {
+        "agent", "job", "outcome", "after"
+    }:
+        return None
+    if (
+        not isinstance(spec["agent"], str)
+        or not spec["agent"].strip()
+        or not isinstance(spec["job"], str)
+        or not spec["job"].strip()
+        or spec["outcome"] != "errored"
+        or not isinstance(spec["after"], str)
+        or parse_time(spec["after"]) is None
+    ):
+        return None
+    return spec
+
+
+def _unconditioned_event_reason(body: str) -> Optional[str]:
+    """Keep malformed or unknown event forms as unconditioned block reasons."""
+    header = BLOCK_EVENT_KIND_HEADER_RE.match(body)
+    if header is None:
+        return None
+    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", header.group("kind")):
+        return None
+    suffix = body[header.end():]
+    payload = BLOCK_FENCED_PAYLOAD_RE.match(suffix)
+    if payload is not None:
+        suffix = suffix[payload.end():]
+    return suffix.strip()
+
+
 def _parse_block_comment_header(
     body: str,
-) -> Optional[Tuple[re.Match, Optional[date]]]:
-    """Return a block-header match and its validated date, if present."""
+) -> Optional[Tuple[re.Match, Optional[date], Optional[Dict[str, str]]]]:
+    """Return a block header and its validated date or event condition."""
+    event_match = BLOCK_EVENT_COMMENT_RE.match(body)
+    if event_match is not None:
+        event = _parse_block_event_spec(event_match.group("event_spec"))
+        if event is None:
+            return None
+        return event_match, None, event
+
     match = BLOCK_COMMENT_RE.match(body)
     if match is None:
         return None
     raw_date = match.group("blocked_until")
     if raw_date is None:
-        return match, None
+        return match, None, None
     try:
         blocked_until = date.fromisoformat(raw_date)
     except ValueError:
         # The regex establishes the shape; the date parser establishes that
         # the calendar date actually exists (for example, no February 30).
         return None
-    return match, blocked_until
+    return match, blocked_until, None
+
+
+def _parse_block_comment_details(
+    bodies: Iterable[str],
+) -> Optional[Tuple[List[str], Optional[date], str, Optional[Dict[str, str]]]]:
+    """Return the newest parseable block's refs, date, reason and event."""
+    for body in reversed(list(bodies)):
+        if not isinstance(body, str):
+            continue
+        parsed_header = _parse_block_comment_header(body)
+        if parsed_header is None:
+            reason = _unconditioned_event_reason(body)
+            if reason is not None:
+                return [], None, reason, None
+            continue
+        match, blocked_until, event = parsed_header
+        references = match.groupdict().get("references")
+        return (
+            references.split(" and ") if references else [],
+            blocked_until,
+            body[match.end():].strip(),
+            event,
+        )
+    return None
 
 
 def parse_block_comment(
@@ -2921,20 +3025,8 @@ def parse_block_comment(
     The header is deliberately strict and anchored at the start of the body so
     an old or embedded mention cannot accidentally become a condition.
     """
-    for body in reversed(list(bodies)):
-        if not isinstance(body, str):
-            continue
-        parsed_header = _parse_block_comment_header(body)
-        if parsed_header is None:
-            continue
-        match, blocked_until = parsed_header
-        references = match.group("references")
-        return (
-            references.split(" and ") if references else [],
-            blocked_until,
-            body[match.end():].strip(),
-        )
-    return None
+    parsed = _parse_block_comment_details(bodies)
+    return parsed[:3] if parsed is not None else None
 
 
 def parse_decline_comment(bodies: Iterable[str]) -> Optional[str]:
@@ -10099,11 +10191,11 @@ def unclearable_block(item: Item) -> bool:
 
     ``clear_satisfied_blocks`` lifts only a parsed reference or date, and a
     native edge lifts itself. ``gate_question`` stays silent for Needs
-    ``agent`` and ``external-event`` (#1405), and the funnel watch works
+    ``agent`` and a well-formed event spec; ``Needs: external-event`` alone
+    asks the existing unblock question. The funnel watch works
     ``claude-code-environment``. A block outside all of those waits forever
     and is seen by no one: a Codex decline (Needs ``agent``, a
-    ``**Declined:**`` comment) and a reason-only event wait both land here
-    (#1432).
+    ``**Declined:**`` comment) lands here (#1432).
     """
     if item.state != "OPEN" or not item.is_blocked:
         return False
@@ -12745,12 +12837,14 @@ def _load_block_comment(item: Item) -> None:
         if isinstance(comment, dict)
     ]
     item.unparseable_block_comments = unparseable_block_comment_lines(bodies)
-    parsed = parse_block_comment(bodies)
+    item.block_event = None
+    parsed = _parse_block_comment_details(bodies)
     if parsed is not None:
         (
             item.block_references,
             item.blocked_until,
             item.block_reason,
+            item.block_event,
         ) = parsed
     item.needs_decision = parse_needs_decision_comment(bodies)
     item.decline_reason = parse_decline_comment(bodies)

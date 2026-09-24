@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -20,11 +23,40 @@ def resolve_paths(
     record_relative: Path,
 ) -> tuple[Path, Path]:
     """Resolve one runtime's checkout and append-only record under ``~/.local``."""
-    import os
-
     configured = runtime_root or os.environ.get(root_env)
     root = Path(configured).expanduser() if configured else Path.home() / ".local"
     return root / checkout_relative, root / record_relative
+
+
+def copy_runtime_entrypoint(checkout: Path, relative_path: Path) -> None:
+    """Atomically copy a checked-out job entrypoint onto the path launchd reads."""
+    entrypoint = checkout / relative_path
+    if not entrypoint.is_file():
+        raise core.DeployError(
+            "runtime entrypoint is missing: {}".format(relative_path),
+            code="runtime_file_missing",
+        )
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".{}.".format(entrypoint.name), dir=str(entrypoint.parent),
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        shutil.copy2(entrypoint, temporary)
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, entrypoint)
+    except OSError as exc:
+        raise core.DeployError(
+            "copying runtime entrypoint {} failed ({})".format(relative_path, exc),
+            code="runtime_file_copy_failed",
+        ) from exc
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def tick(
@@ -33,14 +65,23 @@ def tick(
     health_check: HealthCheck,
     *,
     runtime_name: str,
+    runtime_entrypoint: Path,
 ) -> int:
-    """Fast-forward one runtime, verify it, and append the FF-compatible record."""
+    """Fast-forward, copy the runtime entrypoint, verify, and append the FF record."""
     record = core.new_deploy_record()
     record["pin_reinstall_result"] = {"status": "not_applicable", "items": []}
-    record["operator_swap_result"] = {"status": "not_applicable"}
     returncode = 1
     try:
         moved = core.fast_forward_checkout(checkout, record)
+        if moved:
+            try:
+                copy_runtime_entrypoint(checkout, runtime_entrypoint)
+            except core.DeployError:
+                record["operator_swap_result"] = {"status": "failed"}
+                raise
+            record["operator_swap_result"] = {"status": "updated"}
+        else:
+            record["operator_swap_result"] = {"status": "unchanged"}
         verification = health_check(checkout)
         record["verify_result"] = {
             "status": "passed" if verification.returncode == 0 else "failed",

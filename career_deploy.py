@@ -16,6 +16,7 @@ import runtime_deploy
 RUNTIME_ROOT_ENV = "COMMAND_CENTER_CAREER_RUNTIME_ROOT"
 CHECKOUT_RELATIVE = Path("share/career-agent/checkout")
 RECORD_RELATIVE = Path("share/career-agent/deploy.jsonl")
+RUNTIME_ENTRYPOINT_RELATIVE = Path("scripts/nightly.sh")
 RUNTIME_NAME = "Career"
 
 
@@ -59,7 +60,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     checkout, record = resolve_paths(args.runtime_root)
     return runtime_deploy.tick(
-        checkout, record, runtime_health_check, runtime_name=RUNTIME_NAME,
+        checkout, record, runtime_health_check,
+        runtime_name=RUNTIME_NAME,
+        runtime_entrypoint=RUNTIME_ENTRYPOINT_RELATIVE,
     )
 
 

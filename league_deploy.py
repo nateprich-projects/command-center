@@ -14,6 +14,7 @@ import runtime_deploy
 RUNTIME_ROOT_ENV = "COMMAND_CENTER_LEAGUE_RUNTIME_ROOT"
 CHECKOUT_RELATIVE = Path("share/the-league/checkout")
 RECORD_RELATIVE = Path("share/the-league/deploy.jsonl")
+RUNTIME_ENTRYPOINT_RELATIVE = Path("scripts/daily-snapshot.sh")
 RUNTIME_NAME = "League"
 
 
@@ -55,7 +56,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     checkout, record = resolve_paths(args.runtime_root)
     return runtime_deploy.tick(
-        checkout, record, runtime_health_check, runtime_name=RUNTIME_NAME,
+        checkout, record, runtime_health_check,
+        runtime_name=RUNTIME_NAME,
+        runtime_entrypoint=RUNTIME_ENTRYPOINT_RELATIVE,
     )
 
 

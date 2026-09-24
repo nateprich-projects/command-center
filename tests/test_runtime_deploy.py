@@ -76,6 +76,7 @@ def test_runtime_tick_fast_forwards_verifies_and_writes_ff_schema(tmp_path):
 
     assert runtime_deploy.tick(
         checkout, record_path, verify, runtime_name="Test",
+        runtime_entrypoint=pathlib.Path("runtime.txt"),
     ) == 0
 
     record = read_record(record_path)
@@ -89,8 +90,9 @@ def test_runtime_tick_fast_forwards_verifies_and_writes_ff_schema(tmp_path):
     assert record["pin_reinstall_result"] == {
         "status": "not_applicable", "items": [],
     }
-    assert record["operator_swap_result"] == {"status": "not_applicable"}
+    assert record["operator_swap_result"] == {"status": "updated"}
     assert record["verify_result"] == {"status": "passed", "returncode": 0}
+    assert (checkout / "runtime.txt").read_text(encoding="utf-8") == "version 2\n"
 
 
 def test_runtime_tick_appends_current_health_record_without_moving_head(tmp_path):
@@ -99,7 +101,7 @@ def test_runtime_tick_appends_current_health_record_without_moving_head(tmp_path
 
     assert runtime_deploy.tick(
         checkout, record_path, lambda _path: ff_deploy.CommandResult(0),
-        runtime_name="Test",
+        runtime_name="Test", runtime_entrypoint=pathlib.Path("runtime.txt"),
     ) == 0
 
     record = read_record(record_path)
@@ -107,6 +109,7 @@ def test_runtime_tick_appends_current_health_record_without_moving_head(tmp_path
     assert record["checkout_head_before"] == head
     assert record["checkout_head_after"] == head
     assert record["main_head"] == head
+    assert record["operator_swap_result"] == {"status": "unchanged"}
 
 
 def test_runtime_tick_records_health_failure_after_fast_forward(tmp_path):
@@ -117,13 +120,14 @@ def test_runtime_tick_records_health_failure_after_fast_forward(tmp_path):
     assert runtime_deploy.tick(
         checkout, record_path,
         lambda _path: ff_deploy.CommandResult(1, stderr="not healthy"),
-        runtime_name="Test",
+        runtime_name="Test", runtime_entrypoint=pathlib.Path("runtime.txt"),
     ) == 1
 
     record = read_record(record_path)
     assert git(checkout, "rev-parse", "HEAD") == after
     assert record["status"] == "failed"
     assert record["error_code"] == "verification_failed"
+    assert record["operator_swap_result"] == {"status": "updated"}
     assert record["verify_result"] == {"status": "failed", "returncode": 1}
 
 
@@ -134,7 +138,7 @@ def test_runtime_tick_refuses_dirty_checkout_and_records_the_failure(tmp_path):
 
     assert runtime_deploy.tick(
         checkout, record_path, lambda _path: ff_deploy.CommandResult(0),
-        runtime_name="Test",
+        runtime_name="Test", runtime_entrypoint=pathlib.Path("runtime.txt"),
     ) == 1
 
     record = read_record(record_path)
@@ -142,23 +146,28 @@ def test_runtime_tick_refuses_dirty_checkout_and_records_the_failure(tmp_path):
     assert (checkout / "local.txt").read_text(encoding="utf-8") == "preserve me\n"
     assert record["status"] == "refused"
     assert record["error_code"] == "checkout_dirty"
+    assert record["operator_swap_result"] == {"status": "not_run"}
 
 
 @pytest.mark.parametrize(
-    ("adapter", "checkout_relative", "record_relative"),
+    ("adapter", "checkout_relative", "record_relative", "runtime_entrypoint"),
     [
         (league_deploy, pathlib.Path("share/the-league/checkout"),
-         pathlib.Path("share/the-league/deploy.jsonl")),
+         pathlib.Path("share/the-league/deploy.jsonl"),
+         pathlib.Path("scripts/daily-snapshot.sh")),
         (career_deploy, pathlib.Path("share/career-agent/checkout"),
-         pathlib.Path("share/career-agent/deploy.jsonl")),
+         pathlib.Path("share/career-agent/deploy.jsonl"),
+         pathlib.Path("scripts/nightly.sh")),
     ],
 )
 def test_adapter_paths_can_be_relocated(tmp_path, adapter,
-                                        checkout_relative, record_relative):
+                                        checkout_relative, record_relative,
+                                        runtime_entrypoint):
     checkout, record = adapter.resolve_paths(tmp_path)
 
     assert checkout == tmp_path / checkout_relative
     assert record == tmp_path / record_relative
+    assert adapter.RUNTIME_ENTRYPOINT_RELATIVE == runtime_entrypoint
 
 
 def test_league_health_check_uses_venv_and_daily_snapshot_verifier(

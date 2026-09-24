@@ -879,11 +879,17 @@ def derive_row(
         latency_gap or "no claim-to-PR or PR-to-merge observations in this hour",
     )
 
-    # D — Budget. Usage snapshots are gauges; token and API rates remain raw pairs.
+    # D — Budget. Usage snapshots are gauges; rates retain raw numerator/denominator pairs.
     readings = usage_readings or {}
     muse = readings.get("muse") if isinstance(readings, Mapping) else None
     muse_week = _usage_window(muse, "seven_day")
     pace_band = muse.get("pace_band") if isinstance(muse, Mapping) else None
+    muse_rate_days = None
+    try:
+        import usage
+        muse_rate_days = usage.MUSE_RATE_LOOKBACK / 86400.0
+    except Exception:
+        pass
     if pace_band is None and isinstance(muse, Mapping):
         try:
             import usage
@@ -893,10 +899,11 @@ def derive_row(
         except Exception:
             pace_band = None
     metrics["D"]["D1"] = {
-        "dollars_per_day": _count(
-            muse_week.get("daily_rate_dollars") if muse_week else None,
-            "usage.py read_muse windows.seven_day.daily_rate_dollars",
-            "Muse usage reading is unavailable",
+        "dollars_per_day": _rate_pair(
+            muse_week.get("trailing_72h_dollars") if muse_week else None,
+            muse_rate_days,
+            "usage.py read_muse windows.seven_day.trailing_72h_dollars / (MUSE_RATE_LOOKBACK / 86400)",
+            "Muse trailing-spend amount or lookback window is unavailable",
         ),
         "window_used_percent": _count(
             muse_week.get("used_percent") if muse_week else None,

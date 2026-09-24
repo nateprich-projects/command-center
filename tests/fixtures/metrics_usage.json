@@ -2,7 +2,7 @@
   "muse": {
     "source": "muse",
     "pace_band": "ok",
-    "windows": {"seven_day": {"used_percent": 34.0, "daily_rate_dollars": 7.0, "resets_at": 1790308800, "rolling": true}}
+    "windows": {"seven_day": {"used_percent": 34.0, "daily_rate_dollars": 7.0, "trailing_72h_dollars": 21.0, "resets_at": 1790308800, "rolling": true}}
   },
   "codex": {
     "source": "openai",

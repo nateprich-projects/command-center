@@ -88,6 +88,12 @@ def test_derive_row_covers_plan_metrics_and_preserves_rate_pairs():
     ] == 1
     assert row["metrics"]["D"]["D4"]["value"] is None
     assert row["metrics"]["D"]["D4"]["gap"]
+    assert row["metrics"]["D"]["D1"]["dollars_per_day"]["numerator"] == 21
+    assert row["metrics"]["D"]["D1"]["dollars_per_day"]["denominator"] == 3
+    assert row["metrics"]["D"]["D1"]["dollars_per_day"]["source"] == (
+        "usage.py read_muse windows.seven_day.trailing_72h_dollars / "
+        "(MUSE_RATE_LOOKBACK / 86400)"
+    )
     assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["value"]["funnel_tokens"] == 140
     assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["funnel_share"]["numerator"] == 140
     assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["funnel_share"]["denominator"] == 170
@@ -120,6 +126,23 @@ def test_missing_inputs_remain_gaps_instead_of_becoming_zero():
     assert upkeep["gap"]
     assert row["metrics"]["D"]["D1"]["window_used_percent"]["value"] is None
     assert row["metrics"]["D"]["D1"]["window_used_percent"]["gap"]
+    assert row["metrics"]["D"]["D1"]["dollars_per_day"]["numerator"] is None
+    assert row["metrics"]["D"]["D1"]["dollars_per_day"]["denominator"] is None
+    assert row["metrics"]["D"]["D1"]["dollars_per_day"]["gap"]
+
+
+def test_muse_dollar_rate_gaps_without_raw_trailing_spend():
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    del usage["muse"]["windows"]["seven_day"]["trailing_72h_dollars"]
+
+    row = metrics.derive_row(
+        snapshot, ledgers, usage, outcomes, NOW, commits, lines
+    )
+
+    rate = row["metrics"]["D"]["D1"]["dollars_per_day"]
+    assert rate["numerator"] is None
+    assert rate["denominator"] is None
+    assert rate["gap"]
 
 
 def test_negative_net_open_growth_is_preserved():

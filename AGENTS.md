@@ -248,6 +248,7 @@ wrong.
   "Reading usage".
 - **Missing usage data fails closed.** A run that cannot read its budget does not work.
 
+- **Analysis waits for Nate by default:** projects whose tickets change no behaviour never close themselves, whatever their class, and reach `Accept it?` only after findings are posted on the parent issue; see `plan.md`, "Building completion and automatic acceptance", rule 5.
 
 ## Repository hygiene is yours, not his
 

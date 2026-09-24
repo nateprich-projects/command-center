@@ -1,4 +1,4 @@
-"""Every key `funnel brief` emits must be documented in the /funnel skill.
+"""Every key `funnel brief` emits must have rendering instructions.
 
 The defect this guards against is a producer/consumer split: #147 added
 `human_steps` to the brief and nothing taught `skills/funnel/SKILL.md` to render
@@ -6,8 +6,10 @@ it, so the data was correct and invisible for as long as anyone looked. That
 mattered because #141 had just removed the only other way a human-step ticket
 surfaced — being handed to an engineer run that wedged on it.
 
-Seven keys were undocumented when this test was written, not one, so the split
-is structural rather than a single oversight.
+The rendering moved into `funnel_render.py` in #825. The skill keeps the
+field table for fields that need user-facing definitions; the delegated code
+template owns the instructions for displaying the complete brief, including
+machine-readable sections such as pending wakes.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
+import funnel_render  # noqa: E402
 
 SKILL = pathlib.Path(__file__).resolve().parent.parent / "skills" / "funnel" / "SKILL.md"
 
@@ -57,17 +60,18 @@ def brief_keys() -> set:
     return keys
 
 
-def test_every_brief_key_is_documented_in_the_skill():
-    documented = SKILL.read_text()
+def test_every_brief_key_has_rendering_instructions():
+    documented = SKILL.read_text() + funnel_render.render_template()
     missing = sorted(
         key for key in brief_keys()
         if "`{}`".format(key) not in documented
     )
     assert not missing, (
-        "these keys are emitted by `funnel brief` and never mentioned in "
-        "skills/funnel/SKILL.md, so nothing renders them:\n  "
+        "these keys are emitted by `funnel brief` and have no rendering "
+        "instructions in the skill or code template:\n  "
         + "\n  ".join(missing)
-        + "\n\nDocument each in the field table and say when to surface it."
+        + "\n\nDocument each in the skill or code template and say when "
+        "to surface it."
     )
 
 

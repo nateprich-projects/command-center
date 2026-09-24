@@ -8708,6 +8708,34 @@ def parked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
     return [_parked_item_json(item) for item in parked_items(items)]
 
 
+def pending_wakes_json(
+        parked: Optional[Sequence[Dict[str, object]]]
+) -> Optional[List[Dict[str, object]]]:
+    """Derive the wake list from the parked rows already read for the brief.
+
+    The wake date and destination Status come from the durable comment header
+    parsed by ``_parked_item_json``. Reusing those rows avoids a second comment
+    read, and an item disappears as soon as its Project Status leaves Parked.
+    """
+    if parked is None:
+        return None
+
+    wakes = []
+    for item in parked:
+        wake_date = item.get("wake_date")
+        wake_status = item.get("wake_status")
+        if not isinstance(wake_date, str) or not isinstance(wake_status, str):
+            continue
+        wakes.append({
+            "ref": item["ref"],
+            "title": item["title"],
+            "url": item["url"],
+            "wake_date": wake_date,
+            "wake_status": wake_status,
+        })
+    return wakes
+
+
 def closed_itself_items(items: Iterable[Item], now: datetime) -> List[Item]:
     """Closed projects recent enough to plausibly carry a funnel-close record."""
     cutoff = now - CLOSED_ITSELF_WINDOW
@@ -10343,6 +10371,7 @@ def cmd_brief(
             [],
         )
         parked = named_section("parked", lambda: parked_json(items))
+        pending_wakes = pending_wakes_json(parked)
         closed_itself = section(
             "closed_itself",
             lambda: closed_itself_json(items, now, brief_cache=cache),
@@ -10451,6 +10480,7 @@ def cmd_brief(
             "counts_by_gate": counts,
             "items": decision_rows,
             "parked": parked,
+            "pending_wakes": pending_wakes,
             "closed_itself": closed_itself,
             "cleared_blocks": cleared_blocks,
             "blocked": blocked,

@@ -252,8 +252,6 @@ def base_argv(tmp_path, kv, spool_dir):
             str(fake_brief),
             "--metrics-py",
             str(fake_metrics),
-            "--lock-file",
-            str(tmp_path / "publisher.lock"),
             "--deploy-state-file",
             str(tmp_path / "deploy-state.json"),
         ],
@@ -284,7 +282,6 @@ def run_publisher(argv, monkeypatch, capsys, with_metrics=False):
         "COMMAND_CENTER_DASHBOARD_API_BASE",
         "COMMAND_CENTER_DASHBOARD_FUNNEL_PY",
         "COMMAND_CENTER_DASHBOARD_METRICS_PY",
-        "COMMAND_CENTER_DASHBOARD_LOCK",
         "COMMAND_CENTER_DASHBOARD_DEPLOY_STATE_FILE",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -479,7 +476,9 @@ def test_a_webhook_refresh_past_the_floor_runs_one_brief(
 ):
     spool = tmp_path / "spool"
     spool.mkdir()
-    write_spool_entry(spool, "entry.json", seconds_ago=2 * 60)
+    write_spool_entry(
+        spool, "entry.json", seconds_ago=publisher.STALE_AFTER_SECONDS + 1
+    )
     kv.values["refresh-requested"] = iso().encode()
     argv, fake_brief = base_argv(tmp_path, kv, spool)
 
@@ -488,6 +487,52 @@ def test_a_webhook_refresh_past_the_floor_runs_one_brief(
     assert code == 0
     assert brief_run_count(fake_brief) == 1
     assert len(kv.deletes_of("refresh-requested")) == 1
+
+
+def test_refresh_floor_uses_the_shared_regeneration_interval(monkeypatch):
+    monkeypatch.setattr(publisher, "STALE_AFTER_SECONDS", 900)
+    now = 10_000.0
+
+    assert publisher.brief_reason(now - 899, now, flagged=True) is None
+    assert publisher.brief_reason(now - 901, now, flagged=True) == "refresh"
+
+
+def test_five_minute_refresh_bursts_follow_the_configured_interval(
+    tmp_path, kv, monkeypatch, capsys
+):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    start = 1_800_000_000.0
+    now = [start]
+    monkeypatch.setattr(publisher.time, "time", lambda: now[0])
+    write_spool_entry(
+        spool, "entry.json", seconds_ago=publisher.STALE_AFTER_SECONDS + 1
+    )
+    argv, fake_brief = base_argv(tmp_path, kv, spool)
+    regeneration_times = []
+    last_run_count = 0
+
+    for minutes in range(0, 31, 5):
+        now[0] = start + minutes * 60
+        kv.values["refresh-requested"] = iso().encode()
+        code, _, _ = run_publisher(argv, monkeypatch, capsys)
+
+        assert code == 0
+        run_count = brief_run_count(fake_brief)
+        if run_count > last_run_count:
+            regeneration_times.append(now[0])
+            write_spool_entry(spool, "entry.json", seconds_ago=0)
+            last_run_count = run_count
+
+    assert [when - regeneration_times[0] for when in regeneration_times] == [
+        0,
+        15 * 60,
+        30 * 60,
+    ]
+    assert all(
+        later - earlier >= publisher.STALE_AFTER_SECONDS
+        for earlier, later in zip(regeneration_times, regeneration_times[1:])
+    )
 
 
 def test_no_flag_and_a_recent_snapshot_runs_no_brief(
@@ -635,35 +680,6 @@ def test_token_reaches_cloudflare_but_never_the_log(
     assert FAKE_TOKEN not in err
 
 
-def test_overlapping_tick_skips_quietly(tmp_path, kv, monkeypatch, capsys):
-    spool = tmp_path / "spool"
-    spool.mkdir()
-    write_spool_entry(spool, "entry.json", seconds_ago=11 * 60)
-    kv.values["refresh-requested"] = iso().encode()
-    argv, fake_brief = base_argv(tmp_path, kv, spool)
-    lock_path = argv[argv.index("--lock-file") + 1]
-    holder = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "import fcntl, time; fh = open(%r, 'w'); "
-            "fcntl.flock(fh, fcntl.LOCK_EX); time.sleep(30)" % lock_path,
-        ]
-    )
-    try:
-        time.sleep(0.5)
-        code, _, err = run_publisher(argv, monkeypatch, capsys)
-    finally:
-        holder.terminate()
-        holder.wait(timeout=5)
-
-    assert code == 0
-    assert "already running" in err
-    assert kv.puts_to("snapshot") == []
-    assert brief_run_count(fake_brief) == 0
-    assert "refresh-requested" in kv.values
-
-
 def test_brief_timeout_kills_the_run_and_clears_the_flag(
     tmp_path, kv, monkeypatch, capsys
 ):
@@ -726,10 +742,11 @@ def test_parse_generated_at_accepts_worker_and_python_shapes():
     assert publisher.parse_generated_at(12345) is None
 
 
-def test_is_stale_uses_a_strict_ten_minutes():
+def test_is_stale_uses_the_configured_regeneration_interval():
     now = 1_000_000.0
-    assert publisher.is_stale(now - 600, now) is False
-    assert publisher.is_stale(now - 601, now) is True
+    interval = publisher.STALE_AFTER_SECONDS
+    assert publisher.is_stale(now - interval, now) is False
+    assert publisher.is_stale(now - interval - 1, now) is True
     assert publisher.is_stale(None, now) is True
 
 

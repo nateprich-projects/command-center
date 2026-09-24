@@ -8475,7 +8475,7 @@ def _dashboard_item(
             _dashboard_block_reason(item) if item.is_blocked else None
         ),
         "pips": _dashboard_pips(tickets or ()),
-        "tickets": list(tickets or ()),
+        "tickets": _dashboard_row_order(tickets or ()),
     }
 
 
@@ -8517,10 +8517,11 @@ def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
 PIP_SEGMENTS = 12
 
 
-def _dashboard_pip_order(
+def _dashboard_work_order(
     tickets: Sequence[Mapping[str, object]]
-) -> List[str]:
-    """One state per ticket, in bar order.
+) -> List[Mapping[str, object]]:
+    """The tickets in bar order: finished work, then the order the rest
+    will be worked.
 
     Blocked tickets line up behind whatever blocks them, so the bar shows
     who is blocking whom (Nate, 2026-09-24). A blocked ticket's depth is 0
@@ -8564,7 +8565,32 @@ def _dashboard_pip_order(
             index,
         )
 
-    return [states[i] for i in sorted(range(len(states)), key=key)]
+    return [tickets[i] for i in sorted(range(len(states)), key=key)]
+
+
+def _dashboard_pip_order(
+    tickets: Sequence[Mapping[str, object]]
+) -> List[str]:
+    """One state per ticket, in bar order."""
+    return [
+        _dashboard_pip_state(ticket)
+        for ticket in _dashboard_work_order(tickets)
+    ]
+
+
+def _dashboard_row_order(
+    tickets: Sequence[Mapping[str, object]]
+) -> List[Mapping[str, object]]:
+    """The sub-issue rows: unfinished tickets in the bar's order, so a row
+    and its pip agree, then closed tickets where they already were (Nate,
+    2026-09-24: "I only need the unfinished rows to agree with the pips")."""
+    unfinished = [
+        ticket for ticket in _dashboard_work_order(tickets)
+        if ticket.get("state") == "OPEN"
+    ]
+    return unfinished + [
+        ticket for ticket in tickets if ticket.get("state") != "OPEN"
+    ]
 
 
 def _dashboard_pips(
@@ -8721,7 +8747,9 @@ def dashboard_board(
 
     def ticket_key(child: Item):
         """Next-to-be-taken first, then other actionable open work (in
-        review, a human step), then blocked work, then closed."""
+        review, a human step), then blocked work, then closed. This is the
+        queue order ``next_owner`` reads; the page's rows are re-laid in
+        the bar's order by ``_dashboard_row_order``."""
         rank = queue_rank.get(child.ref)
         if child.state != "OPEN":
             return (3, 0, child.number)

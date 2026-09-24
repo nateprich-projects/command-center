@@ -1,4 +1,3 @@
-{"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 78}, "phase": "api_cost", "run": "333d146bbe47", "ts": 1789735882}
 {"agent": "muse", "do": "review", "phase": "bind", "repo": "nateprich-projects/The-League", "run": "965d348eaeb7", "ts": 1789735887, "work": "230"}
 {"agent": "muse", "api_cost": {"gh_calls": 29, "graphql_points": 78}, "phase": "api_cost", "run": "965d348eaeb7", "ts": 1789735891}
 {"agent": "muse", "api_cost": {"gh_calls": 2, "graphql_points": 0}, "phase": "api_cost", "run": "333d146bbe47", "ts": 1789735945}
@@ -9998,3 +9997,4 @@
 {"agent": "muse", "api_cost": {"gh_calls": 39, "graphql_points": null}, "phase": "api_cost", "run": "717f31d74f2b", "ts": 1790276882}
 {"agent": "muse", "attempt": null, "escalated_from": null, "harness": "muse-code", "model": "muse-spark-1.3", "model_source": "detected", "phase": "start", "provider": "meta", "reasoning_effort": null, "repo": {"dirty": 0, "head": "2893c8db8026"}, "run": "21c6fb9c33e5", "runtime": {"head": "4623759341f7", "root": "/Users/nateprich/.claude/command-center-run"}, "session_id": null, "ticket": null, "tier": "escalated", "ts": 1790277803, "usage": {"seven_day": {"resets_at": 1790553600.0, "spent_dollars": 128.828523, "used_percent": 91.63}}}
 {"agent": "muse", "api_cost": {"gh_calls": 80, "graphql_points": null}, "phase": "api_cost", "run": "21c6fb9c33e5", "ts": 1790277979}
+{"agent": "muse", "attempt": null, "escalated_from": null, "harness": "muse-code", "model": "muse-spark-1.3", "model_source": "detected", "phase": "start", "provider": "meta", "reasoning_effort": null, "repo": {"dirty": 0, "head": "2b72bb344529"}, "run": "7b30b5fc7404", "runtime": {"head": "b7f0a8893ccd", "root": "/Users/nateprich/.claude/command-center-run"}, "session_id": null, "ticket": null, "tier": "escalated", "ts": 1790278890, "usage": {"seven_day": {"resets_at": 1790553600.0, "spent_dollars": 128.828523, "used_percent": 91.63}}}

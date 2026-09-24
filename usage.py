@@ -326,27 +326,41 @@ MUSE_WEEKLY_RESERVE = round(
 #: `tight`.** Its 72-hour rate is the Muse implement runs that #1315 moved to
 #: Codex and #1323 retired on 2026-09-22, a spend the lanes no longer make; it
 #: is still computed and reported. **The flat ceiling is priced from the
-#: account panel.** At 17:26 PDT on 2026-09-23 the panel read 81% used while
-#: this meter held $111.13, so the provider's 100% sits near $137.20 of
-#: standard-card compute here, well under the $200 the 2026-09-19 refusal
-#: calibrated. The window is gated at 95% of that, less one session's reserve.
-#: A fresh panel reading is a new pairing here; AGENTS.md and
-#: tests/test_muse.py quote these figures. _(Nate, 2026-09-22: "Dated
-#: override, calibrated stop".)_
+#: account panel.** At about 23:10 PDT on 2026-09-23 the panel read 86% used;
+#: this meter held $120.91 at 23:02, so the provider's 100% sits near $140.59
+#: of standard-card compute here, well under the $200 the 2026-09-19 refusal
+#: calibrated. The window is gated at 100% of that, less one session's
+#: reserve (3.20%): the first refusal comes at about $136.10 metered. A fresh
+#: panel reading is a new pairing here; AGENTS.md and tests/test_muse.py
+#: quote these figures. _(Nate, 2026-09-22: "Dated override, calibrated
+#: stop"; 2026-09-23, on the ceiling: "I don't use Muse for myself. It's all
+#: for these runs.")_
+#:
+#: **Meeting Meta's wall is not free at 100.** A breakdown, shape or lister
+#: call that is refused finishes `skipped-provider-quota` and parks every
+#: lane until the reset. A review judge that is refused becomes an `unsure`
+#: result, and the runner derives a fail-closed `rejected` verdict on the PR
+#: before the hold parks the later lanes. The $4.50 reserve is one session,
+#: while one review admission runs a judge per three requirements in
+#: parallel, so the last review before the wall can post a false rejection.
+#: The hold makes that at most one per window.
 #:
 #: **One pairing holds only while the workload mix holds (#1396).** The first
 #: pairing, 70% against $89.38 at 21:32 PDT on 2026-09-22, was taken at the
 #: end of four days of Muse implement runs, whose spend moved the panel a
 #: point per $1.15 to $1.62 metered. The review, breakdown and shape runs
 #: after it moved the panel 11 points for $21.75, about $1.98 a point, so by
-#: 2026-09-23 that pairing read 87% against the panel's 81%. The issue
-#: marker stays #1341, because the dated release is still that one.
+#: 2026-09-23 that pairing read 87% against the panel's 81%. The second, 81%
+#: against $111.13 at 17:26 PDT, capped the window at $137.20 and gated it at
+#: 95%. From it to the third (#1409) the panel moved 5 points for $9.78,
+#: about $1.96 a point, the same review-mix rate. The issue marker stays
+#: #1341, because the dated release is still that one.
 MUSE_PACE_OVERRIDE = {
     "issue": 1341,
     "resets_at": 1790553600.0,  # 2026-09-28 00:00 UTC, Sunday 17:00 PDT
-    "panel_used_percent": 81.0,
-    "meter_dollars": 111.13,
-    "ceiling_percent": 95.0,
+    "panel_used_percent": 86.0,
+    "meter_dollars": 120.91,
+    "ceiling_percent": 100.0,
 }
 
 

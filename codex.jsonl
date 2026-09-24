@@ -3198,3 +3198,4 @@
 {"agent": "codex", "api_cost": {"gh_calls": 104, "graphql_points": null}, "phase": "api_cost", "run": "7a752947aedb", "ts": 1790276664}
 {"agent": "codex", "attempt": null, "escalated_from": null, "harness": "codex", "model": "gpt-6-luna", "model_source": "detected", "phase": "start", "provider": "openai", "reasoning_effort": "max", "repo": {"dirty": 0, "head": "2893c8db8026"}, "run": "a28033b03901", "runtime": {"head": "4623759341f7", "root": "/Users/nateprich/.claude/command-center-run"}, "session_id": "01a0d4ce-fe68-71a0-8978-ead552837ffe", "ticket": null, "tier": "escalated", "ts": 1790276752, "usage": {"seven_day": {"resets_at": 1790734287, "used_percent": 31.0}}}
 {"agent": "codex", "outcome": "nothing-to-do", "phase": "event", "queue": "empty", "run": "a28033b03901", "tier": "escalated", "ts": 1790276869}
+{"agent": "codex", "api_cost": {"gh_calls": 101, "graphql_points": 73}, "phase": "api_cost", "run": "a28033b03901", "ts": 1790276873}

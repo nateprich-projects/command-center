@@ -9,13 +9,11 @@ every minute on the Mac that holds the only Cloudflare credential:
 2. Render ``metrics.py series`` and publish the result to the separate
    ``metrics`` KV key when it changes. The series is a rendering of the
    heartbeat branch's append-only ``metrics.jsonl`` facts.
-3. Read the ``refresh-requested`` flag the page's refresh button sets. When the
-   flag is set and the newest snapshot is older than 10 minutes, run
-   ``funnel.py brief`` from the run clone once, then clear the flag when it
-   produces a publishable JSON snapshot. A set flag on a fresh snapshot is
-   cleared without running: the plan says a tap on a fresh snapshot "does
-   nothing", and leaving the flag set would fire a delayed brief for a tap Nate
-   has forgotten about.
+3. Read the ``refresh-requested`` flag the page or GitHub webhook sets. Run
+   ``funnel.py brief`` from the run clone when the newest snapshot is older than
+   the standing regeneration cadence. While the snapshot is younger, serve it
+   and keep the flag for a later tick; after a due brief, keep it only when a
+   successful brief produced a nonpublishable degraded envelope.
 
 Spool contract (shared with the #650 writer): ``COMMAND_CENTER_DASHBOARD_SPOOL``
 holds one JSON object per brief with at least ``generated_at`` (ISO-8601);
@@ -35,7 +33,7 @@ Configuration, in precedence order (flag, environment, file, default):
   ``COMMAND_CENTER_DASHBOARD_DEPLOY_STATE_FILE``, then the deployer's own
   default). Without that fallback the publisher sends Cloudflare the
   placeholder and is rejected on every tick (#895).
-- spool dir, lock file, API base, and funnel.py path each take a ``--`` flag
+- spool dir, API base, and funnel.py path each take a ``--`` flag
   or a ``COMMAND_CENTER_DASHBOARD_*`` variable.
 
 Exit codes: 0 when the tick completed (a failed brief subprocess is logged,
@@ -43,11 +41,9 @@ not propagated, so the publisher never affects any brief exit code); 1 when
 the publisher itself could not do its job; 2 on usage error. Everything is
 logged to stderr, which launchd captures to the publisher's own log file.
 
-A whole-tick lockfile keeps two ticks from overlapping: a brief may run up to
-its 120s budget while ticks fire every 60s, so without the lock one flag could
-run two briefs. A tick that finds the lock held logs one line and exits 0.
-Locking is mandatory: without it the one-brief-per-flag guarantee cannot hold,
-so a tick that cannot lock fails instead of running unlocked.
+Ticks are not serialized. Two concurrent ticks may both see the same stale
+snapshot and run a brief; that bounded duplicate work is accepted so the
+refresh path needs no local lock file.
 
 Runs under the Mac's /usr/bin/python3 (3.9). Keep this module stdlib-only and
 3.9-compatible, and never import funnel or heartbeat here: the publisher must
@@ -57,7 +53,6 @@ not be able to touch agent runs even by accident.
 from __future__ import annotations
 
 import argparse
-import errno
 import json
 import os
 import re
@@ -71,22 +66,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - the schedule Mac and CI are Unix
-    fcntl = None  # type: ignore
-
 SNAPSHOT_KEY = "snapshot"
 METRICS_KEY = "metrics"
 REFRESH_KEY = "refresh-requested"
 KV_BINDING = "FUNNEL_SNAPSHOT"
-STALE_AFTER_SECONDS = 600
-
-#: A refresh flag set by GitHub's webhook (#914) means the board actually
-#: changed, so the ten-minute staleness rule would hold the page back for no
-#: reason. This floor is what stops an event storm from running a brief every
-#: tick: one brief per this many seconds, at most.
-REFRESH_FLOOR_SECONDS = 90
+#: Standing snapshot regeneration cadence. Refresh requests use the same value
+#: as their floor, so changing this cadence does not leave a shorter refresh
+#: interval behind.
+STALE_AFTER_SECONDS = 10 * 60
 
 #: With webhooks delivering, a scheduled brief exists only so a broken or
 #: unconfigured webhook cannot leave the page indefinitely old.
@@ -107,7 +94,7 @@ DEPLOY_STATE_ENV = "COMMAND_CENTER_DASHBOARD_DEPLOY_STATE_FILE"
 
 
 class PublisherError(Exception):
-    """The publisher cannot do its job (config, spool, or lock failure)."""
+    """The publisher cannot do its job (config or spool failure)."""
 
 
 class KVError(Exception):
@@ -280,14 +267,14 @@ def brief_reason(entry_epoch: Optional[float], now: float,
                  flagged: bool) -> Optional[str]:
     """Why this tick should run a brief, or None to publish and stop.
 
-    A refresh — the page's button or GitHub's webhook — runs one as soon as the
-    newest snapshot is older than the floor, so a real change reaches the page
-    in about a minute. Without a refresh, a brief runs only when the snapshot
-    has aged past the scheduled bound, which exists for the case where webhook
-    delivery is broken or was never configured.
+    A refresh — the page or GitHub's webhook — runs one as soon as the newest
+    snapshot is older than the standing regeneration interval. Without a
+    refresh, a brief runs only when the snapshot has aged past the scheduled
+    bound, which exists for the case where webhook delivery is broken or was
+    never configured.
     """
     if flagged:
-        if is_stale(entry_epoch, now, REFRESH_FLOOR_SECONDS):
+        if is_stale(entry_epoch, now, STALE_AFTER_SECONDS):
             return "refresh"
         return None
     if is_stale(entry_epoch, now, SCHEDULED_AFTER_SECONDS):
@@ -412,31 +399,6 @@ class KVClient:
     def delete(self, key: str) -> None:
         status, body = self._request("DELETE", key)
         self._require_success("DELETE", key, status, body)
-
-
-def acquire_lock(lock_path: Path):
-    """Hold an exclusive whole-tick lock, or return None when held.
-
-    Raises when locking itself is unavailable: running unlocked could turn
-    one refresh flag into two briefs, so that fails closed instead.
-    """
-    if fcntl is None:
-        raise PublisherError(
-            "file locking is unavailable here; refusing to run unlocked")
-    try:
-        handle = open(lock_path, "w")
-    except OSError as exc:
-        raise PublisherError(
-            "cannot open lock file {}: {}".format(lock_path, exc))
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as exc:
-        handle.close()
-        if exc.errno in (errno.EACCES, errno.EAGAIN):
-            return None
-        raise PublisherError(
-            "cannot lock {}: {}".format(lock_path, exc))
-    return handle
 
 
 def run_brief(funnel_py: Path, timeout: float) -> BriefResult:
@@ -588,7 +550,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="publisher.py",
         description="Push funnel snapshot and metrics series to Cloudflare KV "
-                    "and run one brief per refresh flag.",
+                    "and run briefs when refresh flags are due.",
     )
     parser.add_argument("--spool-dir", default=None)
     parser.add_argument("--env-file", default=None)
@@ -599,7 +561,6 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument("--api-base", default=None)
     parser.add_argument("--funnel-py", default=None)
     parser.add_argument("--metrics-py", default=None)
-    parser.add_argument("--lock-file", default=None)
     parser.add_argument("--brief-timeout", type=float, default=None)
     return parser.parse_args(argv)
 
@@ -672,9 +633,9 @@ def tick(spool_dir: Path, env_file: Path, wrangler_toml: Path,
     reason = brief_reason(entry_epoch, now, flag is not None)
     if reason is None:
         if flag is not None:
-            log("refresh requested at {} but a brief ran within the last {}s; "
-                "leaving the flag for the next tick".format(
-                    requested, REFRESH_FLOOR_SECONDS))
+            log("refresh requested at {} but the snapshot is younger than "
+                "the {}s regeneration interval; leaving the flag for the "
+                "next tick".format(requested, STALE_AFTER_SECONDS))
         return 0
 
     age = ("no snapshot yet" if entry_epoch is None
@@ -742,23 +703,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.metrics_py, "COMMAND_CENTER_DASHBOARD_METRICS_PY",
         str(_repo_root() / "metrics.py"),
     )).expanduser()
-    lock_file = Path(_option(
-        args.lock_file, "COMMAND_CENTER_DASHBOARD_LOCK",
-        str(Path.home() / ".claude" / "funnel-publisher.lock"),
-    )).expanduser()
     api_base = _option(
         args.api_base, "COMMAND_CENTER_DASHBOARD_API_BASE",
         DEFAULT_API_BASE,
     )
     try:
         brief_timeout = _resolve_brief_timeout(args.brief_timeout)
-        lock = acquire_lock(lock_file)
     except PublisherError as exc:
         log("error: {}".format(exc))
         return 1
-    if lock is None:
-        log("another publisher tick is already running; skipping this one")
-        return 0
     try:
         return tick(
             spool_dir=spool_dir,
@@ -775,8 +728,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     except (PublisherError, KVError) as exc:
         log("error: {}".format(exc))
         return 1
-    finally:
-        lock.close()
 
 
 if __name__ == "__main__":

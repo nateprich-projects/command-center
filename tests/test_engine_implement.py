@@ -708,6 +708,170 @@ def test_finish_declined_labels_comments_releases_and_finishes(
     assert "halfway.txt" in dirty
 
 
+@pytest.mark.parametrize(("reason", "prerequisite"), [
+    (
+        "Unlanded prerequisite #165 (Effective-dated rate table prices each "
+        "outcome record in dollars) is still open.",
+        REPO + "#165",
+    ),
+    (
+        "Ticket #705 names connector skeleton #702 as a prerequisite; #702 "
+        "remains open and its scaffold is absent from origin/main.",
+        REPO + "#702",
+    ),
+])
+def test_finish_declined_open_prerequisite_records_only_native_edge(
+        tmp_path, monkeypatch, reason, prerequisite):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"looked_up": [], "edges": [], "comments": [],
+               "released": [], "finished": []}
+
+    result = implement.finish_declined(
+        reason,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: pytest.fail(
+            "an open prerequisite must not add the blocked label"),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda *args: pytest.fail(
+            "a prerequisite edge must leave Needs unchanged"),
+        prerequisite_open_effect=lambda ref: (
+            effects["looked_up"].append(ref) or True),
+        prerequisite_edge_effect=lambda repo, number, ref, **kwargs:
+            effects["edges"].append((repo, number, ref, kwargs)),
+    )
+
+    assert result == {"ticket": REPO + "#42", "declined": reason}
+    assert effects["looked_up"] == [prerequisite]
+    assert effects["edges"][0][:3] == (REPO, 42, prerequisite)
+    (comment_args, _), = effects["comments"]
+    assert comment_args[2] == "**Declined:** {}".format(reason)
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"] == [
+        ("codex", "run-42", "skipped-blocked",
+         "declined: {}".format(reason), REPO + "#42")
+    ]
+
+
+@pytest.mark.parametrize(("reason", "open_state", "edge_fails"), [
+    ("Unlanded prerequisite #165 is closed.", False, False),
+    ("Unlanded prerequisite #165 is still open.", True, True),
+    ("I need Nate to choose whether this scope is acceptable.", None, False),
+    ("Prerequisite details are missing from the ticket.", None, False),
+])
+def test_finish_declined_falls_back_to_blocked_for_non_prerequisite_cases(
+        tmp_path, monkeypatch, reason, open_state, edge_fails):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"looked_up": [], "edges": [], "blocked": [], "comments": [],
+               "released": [], "finished": [], "needs": []}
+
+    def edge_effect(repo, number, ref, **kwargs):
+        effects["edges"].append((repo, number, ref))
+        if edge_fails:
+            raise funnel.GitHubError("edge write failed")
+
+    implement.finish_declined(
+        reason,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda *args: effects["needs"].append(args),
+        prerequisite_open_effect=lambda ref: (
+            effects["looked_up"].append(ref) or open_state),
+        prerequisite_edge_effect=edge_effect,
+    )
+
+    assert len(effects["blocked"]) == 1
+    ((_, number), kwargs), = effects["blocked"]
+    assert number == 42 and kwargs == {"cwd": clone}
+    assert effects["needs"] == [(ticket()["url"], REPO + "#42")]
+    assert effects["comments"][0][0][2] == "**Declined:** {}".format(reason)
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"] == [
+        ("codex", "run-42", "skipped-blocked",
+         "declined: {}".format(reason), REPO + "#42")
+    ]
+    if open_state is None:
+        assert effects["looked_up"] == []
+        assert effects["edges"] == []
+    elif open_state is False:
+        assert effects["looked_up"] == [REPO + "#165"]
+        assert effects["edges"] == []
+    else:
+        assert effects["looked_up"] == [REPO + "#165"]
+        assert effects["edges"] == [(REPO, 42, REPO + "#165")]
+
+
+@pytest.mark.parametrize(("reason", "ticket_repo", "expected"), [
+    ("Unlanded prerequisite #165 is still open.", REPO,
+     ("prerequisite-ticket", REPO + "#165")),
+    ("The reason names other/tools#9 as a prerequisite.", REPO,
+     ("prerequisite-ticket", "other/tools#9")),
+    ("The account setting still needs a human decision.", REPO,
+     ("unknown", None)),
+])
+def test_classify_decline_reason_uses_only_named_prerequisite_reference(
+        reason, ticket_repo, expected):
+    assert implement.classify_decline_reason(reason, ticket_repo) == expected
+
+
+@pytest.mark.parametrize(("payload", "expected"), [
+    ({"number": 165, "state": "OPEN"}, True),
+    ({"number": 165, "state": "CLOSED"}, False),
+    ({"number": 166, "state": "OPEN"}, False),
+    (None, False),
+])
+def test_declined_prerequisite_verification_requires_open_matching_issue(
+        monkeypatch, payload, expected):
+    calls = []
+    monkeypatch.setattr(
+        funnel, "_gh_json",
+        lambda *args: calls.append(args) or payload,
+    )
+
+    assert implement.declined_prerequisite_is_open(REPO + "#165") is expected
+    assert calls == [(
+        "gh", "issue", "view", "165", "--repo", REPO,
+        "--json", "number,state",
+    )]
+
+
+@pytest.mark.parametrize(("prerequisite", "edge_value"), [
+    (REPO + "#165", "165"),
+    ("other/tools#9", "https://github.com/other/tools/issues/9"),
+])
+def test_add_declined_prerequisite_edge_uses_native_blocked_by(
+        tmp_path, monkeypatch, prerequisite, edge_value):
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(funnel, "_run_gh", fake_run)
+    implement.add_declined_prerequisite_edge(
+        REPO, 42, prerequisite, cwd=tmp_path)
+
+    (args, kwargs), = calls
+    assert args == [
+        "gh", "issue", "edit", "42", "--repo", REPO,
+        "--add-blocked-by", edge_value,
+    ]
+    assert kwargs["cwd"] == str(tmp_path)
+
+
 def test_finish_main_routes_blocked_and_declined_answers(
         tmp_path, monkeypatch, capsys):
     routed = {}

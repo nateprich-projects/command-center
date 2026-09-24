@@ -17,8 +17,11 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shlex
 import stat
 import subprocess
+import sys
+import uuid
 
 import pytest
 
@@ -64,7 +67,7 @@ ANSWER = json.dumps({"done": True, "summary": "Did the thing.",
                      "departures": ["Did not do the other thing."]})
 
 FUNNEL_STUB = (
-    "import pathlib, sys\n"
+    "import os, pathlib, sys\n"
     "root = pathlib.Path(__file__).parent\n"
     "command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
     "with (root / 'funnel.calls').open('a') as fh:\n"
@@ -72,6 +75,7 @@ FUNNEL_STUB = (
     "if command == 'session-server':\n"
     "    print('127.0.0.1:1:stub', flush=True)\n"
     "elif command == 'begin':\n"
+    "    (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
     "    print((root / 'begin.json').read_text(), end='')\n"
     "elif command == 'session-stop':\n"
     "    pass\n"
@@ -154,6 +158,24 @@ MUSE_STUB = (
 def _executable(path, body):
     path.write_text(body)
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+def _python_without_session_id(tmp_path, mode):
+    bin_dir = tmp_path / "python-bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "python3"
+    exit_status = 1 if mode == "failure" else 0
+    _executable(
+        wrapper,
+        "#!/bin/bash\n"
+        "if [[ \"$1\" == \"-c\" && \"$2\" == \"import uuid; print(uuid.uuid4())\" ]]; then\n"
+        "  exit {}\n"
+        "fi\n"
+        "exec {} \"$@\"\n".format(exit_status, shlex.quote(sys.executable)),
+    )
+    return {
+        "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+    }
 
 
 def _run_git(*args, cwd=None):
@@ -296,6 +318,9 @@ def test_the_happy_path_runs_packet_model_and_finish_in_order(tmp_path):
     # flags — and no positional prompt, so a plan cannot outgrow argv.
     args = (repo / "muse.args.1").read_text().splitlines()
     assert args[0] == "exec"
+    session_id = (repo / "begin.session_id").read_text()
+    assert str(uuid.UUID(session_id)) == session_id
+    assert args[args.index("--session-id") + 1] == session_id
     assert args[args.index("--model") + 1] == "muse-spark-1.3"
     assert args[args.index("--reasoning-effort") + 1] == "max"
     assert args[args.index("--sandbox-network") + 1] == "enabled"
@@ -337,6 +362,21 @@ def test_the_happy_path_runs_packet_model_and_finish_in_order(tmp_path):
 
     assert not workspace.exists(), "the disposable clone must be removed after the run"
     assert not list((tmp_path / "workspaces").iterdir())
+
+
+@pytest.mark.parametrize("mode", ("failure", "empty"))
+def test_session_id_setup_failure_does_not_gate_implementation(tmp_path, mode):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), extra_env=_python_without_session_id(tmp_path, mode)
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 1
+    assert (repo / "begin.session_id").read_text() == ""
+    args = (repo / "muse.args.1").read_text().splitlines()
+    assert "--session-id" not in args
+    assert len(_calls(repo, "finish")) == 1
+    assert "continuing without session usage telemetry" in proc.stderr
 
 
 def test_a_remote_ticket_branch_continues_in_place(tmp_path):

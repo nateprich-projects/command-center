@@ -9,6 +9,7 @@ sessions there without anyone choosing it.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 
@@ -151,11 +152,16 @@ def test_the_same_root_twice_reports_each_finding_once(tmp_path):
 
 
 def test_check_passes_when_every_call_site_is_pinned(tmp_path):
-    write(tmp_path, "run.sh", "muse exec --model muse-spark-1.3 --json\n")
-    check = funnel.check_muse_model_pins([tmp_path])
+    write(tmp_path, "run.sh", "muse exec --model fixture-visible-model --json\n")
+    catalog = tmp_path / "model-catalog"
+    catalog.mkdir()
+    (catalog / "fixture.json").write_text(json.dumps({"rows": [{
+        "model_id": "fixture-visible-model", "visibility": "visible",
+    }]}))
+    check = funnel.check_muse_model_pins([tmp_path], catalog_dir=catalog)
     assert check.ok
     assert check.name == "muse model pins"
-    assert check.found == ""
+    assert "1 verified, 0 failed, 0 unknown" in check.found
 
 
 def test_check_names_each_offender_and_carries_a_fix(tmp_path):

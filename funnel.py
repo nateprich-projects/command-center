@@ -674,8 +674,9 @@ class Item:
     risk: Optional[str] = None  # "standard" | "escalated"
     pinned: bool = False
     # The row's Needs single-select. Tickets use it for work ownership;
-    # projects use it for decision routing. ``agent`` and ``external-event``
-    # distinguish blocked work that does not belong in Nate's decision queue.
+    # projects use it for decision routing. ``agent`` owns blocked work;
+    # ``external-event`` suppresses the unblock question only with a parsed
+    # event condition.
     needs: Optional[str] = None
     status_since: Optional[datetime] = None
     # ProjectV2 status history retained from the load query. The brief uses it

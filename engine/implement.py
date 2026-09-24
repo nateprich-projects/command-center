@@ -1152,6 +1152,93 @@ def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = N
                 repo, number, (proc.stderr or "").strip()))
 
 
+_DECLINED_ISSUE_REF = (
+    r"(?P<ref>(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?"
+    r"#[1-9][0-9]*)(?![A-Za-z0-9_])"
+)
+_DECLINED_PREREQUISITE_PATTERNS = (
+    re.compile(
+        r"\bprerequisite(?:\s+(?:ticket|issue))?\s+"
+        + _DECLINED_ISSUE_REF,
+        re.IGNORECASE,
+    ),
+    re.compile(
+        _DECLINED_ISSUE_REF + r"\s+as\s+(?:(?:a|an)\s+)?prerequisite\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def classify_decline_reason(reason: str, ticket_repo: str
+                            ) -> Tuple[str, Optional[str]]:
+    """Recognize a named prerequisite from the reason about to be posted.
+
+    This ticket owns the prerequisite-ticket branch. Other reason classes
+    stay on the existing blocked path until their own tickets add a branch.
+    Bare issue numbers resolve against the declined ticket's repository.
+    """
+    found = {
+        match.group("ref")
+        for pattern in _DECLINED_PREREQUISITE_PATTERNS
+        for match in pattern.finditer(reason or "")
+    }
+    if len(found) != 1:
+        return "unknown", None
+
+    raw_ref = next(iter(found))
+    match = re.fullmatch(
+        r"(?:(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?"
+        r"#(?P<number>[1-9][0-9]*)",
+        raw_ref,
+    )
+    if match is None:
+        return "unknown", None
+    repo = match.group("repo") or ticket_repo
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is None:
+        return "unknown", None
+    ref = "{}#{}".format(repo, match.group("number"))
+    if shape.REF_RE.fullmatch(ref) is None:
+        return "unknown", None
+    return "prerequisite-ticket", ref
+
+
+def declined_prerequisite_is_open(ref: str) -> bool:
+    """Verify that a declined prerequisite exists and is still open."""
+    match = shape.REF_RE.fullmatch(ref)
+    if match is None:
+        return False
+    repo = "{}/{}".format(match.group("owner"), match.group("repo"))
+    data = funnel._gh_json(
+        "gh", "issue", "view", match.group("number"), "--repo", repo,
+        "--json", "number,state",
+    )
+    if not isinstance(data, dict):
+        return False
+    try:
+        number = int(data.get("number"))
+    except (TypeError, ValueError):
+        return False
+    return (number == int(match.group("number"))
+            and str(data.get("state", "")).upper() == "OPEN")
+
+
+def add_declined_prerequisite_edge(repo: str, number: int, prerequisite: str,
+                                   *, cwd: pathlib.Path) -> None:
+    """Add only the native blocked-by edge for a verified prerequisite."""
+    values = shape.blocked_by_values([prerequisite], repo)
+    if len(values) != 1:
+        raise ImplementError("could not resolve declined prerequisite edge")
+    proc = funnel._run_gh(
+        ["gh", "issue", "edit", str(number), "--repo", repo,
+         "--add-blocked-by", values[0]],
+        cwd=str(cwd), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise funnel.GitHubError(
+            "could not add blocked-by edge from {}#{} to {}: {}".format(
+                repo, number, prerequisite, (proc.stderr or "").strip()))
+
+
 def post_agent_comment(repo: str, number: int, body: str, *,
                        run: str, agent: str, cwd: pathlib.Path) -> None:
     """Post one runner-owned comment with the agent voice stamped on it."""
@@ -1413,14 +1500,33 @@ def finish_declined(
         block_effect: Callable[..., None] = mark_ticket_blocked,
         comment_effect: Callable[..., None] = post_agent_comment,
         needs_effect: Callable[[str, str], None] = write_declined_needs,
+        prerequisite_open_effect: Callable[[str], bool]
+        = declined_prerequisite_is_open,
+        prerequisite_edge_effect: Callable[..., None]
+        = add_declined_prerequisite_edge,
         extra_note: Optional[str] = None) -> dict:
-    """Label the declined ticket blocked, record why, release, finish. No PR."""
+    """Record the decline, routing a verified prerequisite as a native edge."""
     context = checkout_context(cwd)
     resolved = resolve_checkout_repo(context["root"], repo)
+    decline_class, prerequisite = classify_decline_reason(reason, resolved)
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
-    needs_effect(ticket["url"], ref)
-    block_effect(resolved, context["number"], cwd=context["root"])
+    prerequisite_recorded = False
+    if decline_class == "prerequisite-ticket" and prerequisite is not None:
+        try:
+            if prerequisite_open_effect(prerequisite):
+                prerequisite_edge_effect(
+                    resolved, context["number"], prerequisite,
+                    cwd=context["root"],
+                )
+                prerequisite_recorded = True
+        except (funnel.GitHubError, ImplementError, shape.ShapeError,
+                OSError, subprocess.SubprocessError):
+            # A failed lookup or edge write keeps today's visible block.
+            prerequisite_recorded = False
+    if not prerequisite_recorded:
+        needs_effect(ticket["url"], ref)
+        block_effect(resolved, context["number"], cwd=context["root"])
     comment_effect(resolved, context["number"],
                    "**Declined:** {}".format(reason),
                    run=run, agent=agent, cwd=context["root"])

@@ -8,6 +8,31 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Muse's `exec --session-id` resumes a used session and refuses one in use
+
+**2026-09-24 · Muse Code CLI · measured**
+
+`muse exec --session-id <id>` does not just label a call. When the id has been used
+before, the call **resumes that session's conversation**. When a call is already running
+under the id, it is **refused**: `session <id> is already in use`, exit 1.
+
+#1345 (2026-09-23 21:33 PDT) passed one id to every model call in a judgement run, and
+both behaviours then showed up in production:
+
+- **Refusal.** Between 22:36 and 23:14 PDT, three multi-chunk reviews ran their judges in
+  parallel on the one id. Every judge but one was refused, each refusal read `unsure`,
+  and each review posted a false `rejected`. That is 27 refusal lines in the standard
+  lane's error log, and none before #1345.
+- **Resume.** Journals written after #1345 hold both the lister prompt and one judge
+  prompt, with the judge's input about twice the lister's: 25,451 then 48,029, and
+  51,297 then 87,637. Before #1345, when Muse assigned the ids, judge input matched
+  lister input (46,931 against 46,944–47,063). So the judge that ran was judging with
+  the lister's conversation replayed into it, and a parse retry resumed the failed
+  attempt.
+
+The stubbed engine tests could not see either behaviour: the stub accepts any id any
+number of times. #1413 binds the id to a run's first call only.
+
 ### Muse's panel is not a fixed price of journal tokens, and agent count does not move it
 
 **2026-09-23 · Muse Code usage · measured (causes `inferred`)**

@@ -275,8 +275,22 @@ export FUNNEL_SESSION
 # The z.ai run gets the same binding under zcode's own variable, which
 # heartbeat reads as that agent's session and zai-exec uses to name its call
 # log, so the run's calls land in one file heartbeat can read back.
+#
+# Only the run's first Muse call carries the id (#1413). `exec --session-id`
+# with an id already used resumes that session's conversation, and one in
+# use is refused. #1345 handed the one id to every call, so from 2026-09-23
+# 21:33 PDT every parallel judge but one failed with "session ... is already
+# in use", read `unsure`, and posted a false `rejected` on member-repo PRs;
+# the one that ran judged with the lister's conversation replayed into it,
+# and a parse retry resumed the failed attempt. The first call is the lister
+# or the issue job's question, always in this shell and before any judge
+# starts. The later calls, the parallel judges and a parse retry, run
+# unbound under ids Muse assigns, so the run's recorded token usage covers
+# the first call only: an undercount, not the whole run (#1413).
+MUSE_SESSION_BOUND=0
 if [[ "$BACKEND" == "muse" ]]; then
   MUSE_EXEC=("$MUSE_BIN" exec)
+  MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec)
   if MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null)" \
     && [[ -n "$MUSE_SESSION_ID" ]]; then
     export MUSE_SESSION_ID
@@ -483,7 +497,15 @@ call_model_files() {
       --prompt-file "$prompt_path" \
       --timeout "$ZAI_TIMEOUT_SECONDS" >"$answer_path" 2>"$diag_path" &
   else
-    "${MUSE_EXEC[@]}" \
+    # The id on the first call only; see the binding above (#1413).
+    local -a muse_exec
+    if (( MUSE_SESSION_BOUND == 0 )); then
+      muse_exec=("${MUSE_EXEC[@]}")
+      MUSE_SESSION_BOUND=1
+    else
+      muse_exec=("${MUSE_EXEC_UNBOUND[@]}")
+    fi
+    "${muse_exec[@]}" \
       --model "$MUSE_MODEL" \
       --reasoning-effort "$EFFORT" \
       --disable-shell \

@@ -368,6 +368,72 @@ def bar_for(closed=0, approved=0, changes_requested=0, submitted=0,
     return next(c for c in board if c["stage"] == "Building")["items"][0]["pips"]
 
 
+def _building_row(items):
+    board = funnel.dashboard_board(items, NOW)["columns"]
+    return next(c for c in board if c["stage"] == "Building")["items"][0]
+
+
+def test_open_work_sits_left_of_blocked_work_in_the_bar():
+    """Nate, 2026-09-24: open pips before blocked pips, and a ticket waiting
+    only on a sibling before one blocked from outside the project."""
+    row = _building_row([
+        project(children_total=4),
+        ticket(11, labels=["blocked"], block_reason="Waiting on Nate."),
+        ticket(12, open_blockers=[REPO + "#13"]),
+        ticket(13),
+        ticket(14, state="CLOSED"),
+    ])
+    assert row["pips"] == ["closed", "open", "blocked-sibling", "blocked"]
+
+
+@pytest.mark.parametrize("blocked_ticket", [
+    dict(open_blockers=[REPO + "#11"]),
+    dict(labels=["blocked"], block_references=["#11"]),
+    dict(open_blockers=[REPO + "#11"], labels=["blocked"],
+         block_references=[REPO + "#11"]),
+])
+def test_a_ticket_blocked_only_by_siblings_reads_apart(blocked_ticket):
+    row = _building_row([
+        project(children_total=2), ticket(11), ticket(12, **blocked_ticket),
+    ])
+    by_number = {t["number"]: t for t in row["tickets"]}
+    assert by_number[12]["blocked"] is True
+    assert by_number[12]["blocked_by_siblings"] is True
+    assert by_number[11]["blocked_by_siblings"] is False
+    assert row["pips"] == ["open", "blocked-sibling"]
+
+
+@pytest.mark.parametrize("blocked_ticket", [
+    # A blocker in another project, or anywhere outside this one.
+    dict(open_blockers=[REPO + "#99"]),
+    # One sibling and one outsider is still blocked from outside.
+    dict(open_blockers=[REPO + "#11", REPO + "#99"]),
+    dict(open_blockers=[REPO + "#11"], labels=["blocked"],
+         block_references=["#99"]),
+    # A reason with no references, or a date hold, names no sibling.
+    dict(open_blockers=[REPO + "#11"], labels=["blocked"],
+         block_reason="Waiting on Nate."),
+    dict(labels=["blocked"], block_references=["#11"],
+         blocked_until=datetime(2026, 10, 1).date()),
+])
+def test_a_block_from_outside_the_project_keeps_the_blocked_pip(blocked_ticket):
+    row = _building_row([
+        project(children_total=2), ticket(11), ticket(12, **blocked_ticket),
+    ])
+    by_number = {t["number"]: t for t in row["tickets"]}
+    assert by_number[12]["blocked_by_siblings"] is False
+    assert row["pips"] == ["open", "blocked"]
+
+
+def test_a_blocked_projects_tickets_are_blocked_from_outside():
+    row = _building_row([
+        project(children_total=2, labels=["blocked"], block_references=["#794"]),
+        ticket(11), ticket(12, open_blockers=[REPO + "#11"]),
+    ])
+    assert [t["blocked_by_siblings"] for t in row["tickets"]] == [False, False]
+    assert row["pips"] == ["blocked", "blocked"]
+
+
 def test_a_large_project_gets_a_proportional_bar_not_one_pip_per_ticket():
     """#902: 44 tickets rendered as one solid block in a 130px column."""
     bar = bar_for(closed=37, open_=7)

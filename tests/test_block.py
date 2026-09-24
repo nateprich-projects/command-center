@@ -595,3 +595,25 @@ def test_a_passed_date_still_waits_on_the_label_being_cleared():
 
     assert len(startable) == 6
     assert dated.ref not in [i.ref for i in startable]
+
+
+def test_a_decline_reason_is_read_and_shown_instead_of_no_reason():
+    """#1432: the dashboard said "blocked, no reason recorded" for FF#289."""
+    bodies = [
+        "**Blocked until 2026-09-01:** old hold.",
+        "**Declined:** The prerequisite has not landed.\n\nMore detail.",
+    ]
+    assert funnel.parse_decline_comment(bodies) == "The prerequisite has not landed."
+    assert funnel.parse_decline_comment(["> **Declined:** quoted"]) is None
+
+    item = funnel.Item(
+        repo="owner/repo", number=289, title="declined", url="",
+        state="OPEN", labels=["blocked"],
+        decline_reason="The prerequisite has not landed.",
+    )
+    assert funnel._dashboard_block_reason(item) == (
+        "declined: The prerequisite has not landed."
+    )
+    # A parseable block written afterwards is the reason that counts.
+    item.block_reason = "Waiting on #304."
+    assert funnel._dashboard_block_reason(item) == "Waiting on #304."

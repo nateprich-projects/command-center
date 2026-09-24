@@ -448,6 +448,11 @@ NEEDS_DECISION_RE = re.compile(
     + r"[ \t]+(?P<question>.+)", flags=re.DOTALL
 )
 
+#: The implement runner's decline record (``finish_declined``). It names a
+#: reason in prose, not a condition the funnel can clear, so readers show it
+#: and ``stranded_items`` flags the block until a parseable one replaces it.
+DECLINED_PREFIX = "**Declined:**"
+
 #: A satisfied block is recorded before its label is removed. The structured
 #: payload makes a partial failure idempotent: the next run can retry the label
 #: write without posting a second provenance comment for the same block.
@@ -659,6 +664,7 @@ class Item:
     block_reason: Optional[str] = None
     blocked_until: Optional[date] = None
     needs_decision: Optional[str] = None
+    decline_reason: Optional[str] = None
     unparseable_block_comments: List[str] = field(default_factory=list)
     block_comments_error: Optional[str] = None
     satisfied_block_record: Optional[Dict[str, object]] = None
@@ -2908,6 +2914,16 @@ def parse_block_comment(
             blocked_until,
             body[match.end():].strip(),
         )
+    return None
+
+
+def parse_decline_comment(bodies: Iterable[str]) -> Optional[str]:
+    """Return the newest decline record's first line of reason, if any."""
+    for body in reversed(list(bodies)):
+        if not isinstance(body, str) or not body.startswith(DECLINED_PREFIX):
+            continue
+        reason = body[len(DECLINED_PREFIX):].strip()
+        return reason.splitlines()[0].strip() if reason else ""
     return None
 
 
@@ -6834,7 +6850,18 @@ def check_block_conditions(
             broken = True
             continue
 
-        if item.block_reason is None:
+        if unclearable_block(item):
+            findings.append("{}: stranded: {}".format(
+                item.ref, _unclearable_block_reason(item)))
+            broken = True
+            continue
+
+        if item.block_reason is None and item.open_blockers:
+            detail = "on {} (native edge)".format(", ".join(
+                _dependency_ref(item, value) or str(value).strip()
+                for value in item.open_blockers
+            ))
+        elif item.block_reason is None:
             detail = "block comment is not parseable"
         else:
             details = []
@@ -8206,6 +8233,11 @@ def _dashboard_block_reason(item: Item) -> Optional[str]:
     """
     if item.block_reason:
         return item.block_reason.strip().splitlines()[0][:120]
+    if item.decline_reason:
+        # A decline records why in prose the parser does not read. Showing it
+        # beats "no reason recorded", which is what FF#289 and
+        # career-toolset#210/#211 looked like on 2026-09-24 (#1432).
+        return "declined: " + item.decline_reason[:110]
     for comment in item.unparseable_block_comments or ():
         text = str(comment).strip()
         if text:
@@ -9811,9 +9843,60 @@ def _dead_dependency_refs(item: Item, by_ref: Dict[str, Item]) -> List[str]:
     for value in list(item.open_blockers) + list(item.block_references):
         ref = _dependency_ref(item, value)
         blocker = by_ref.get(ref or "")
-        if blocker is not None and _never_closing(blocker):
+        if blocker is not None and (
+            _never_closing(blocker)
+            or _abandoned_ticket(blocker, item, by_ref)
+        ):
             refs.add(ref)
     return sorted(refs)
+
+
+def _abandoned_ticket(blocker: Item, dependent: Item,
+                      by_ref: Dict[str, Item]) -> bool:
+    """Whether ``blocker`` is an open ticket whose project will not finish it.
+
+    A ticket under a parked or closed project is never offered to a lane, so
+    nothing that waits on it can move: #227 and #229 waited on #165, a ticket
+    of parked #15 (#1432). A sibling under the same parked project is not
+    stranded by it: parking is a decision, and its tickets are meant to sit.
+    """
+    if blocker.state != "OPEN" or not blocker.parent:
+        return False
+    project = by_ref.get(blocker.parent)
+    if project is None:
+        return False
+    if project.state == "OPEN" and project.status != "Parked":
+        return False
+    return dependent.parent != blocker.parent
+
+
+def unclearable_block(item: Item) -> bool:
+    """Whether a blocked item has no condition that can lift it and no asker.
+
+    ``clear_satisfied_blocks`` lifts only a parsed reference or date, and a
+    native edge lifts itself. ``gate_question`` stays silent for Needs
+    ``agent`` and ``external-event`` (#1405), and the funnel watch works
+    ``claude-code-environment``. A block outside all of those waits forever
+    and is seen by no one: a Codex decline (Needs ``agent``, a
+    ``**Declined:**`` comment) and a reason-only event wait both land here
+    (#1432).
+    """
+    if item.state != "OPEN" or not item.is_blocked:
+        return False
+    if item.block_references or item.open_blockers:
+        return False
+    if _item_blocked_until(item) is not None:
+        return False
+    if item.needs == "claude-code-environment":
+        return False
+    return gate_question(item) is None
+
+
+def _unclearable_block_reason(item: Item) -> str:
+    return (
+        "blocked with no condition that can clear it, and no one is asked "
+        "(Needs: {})".format(item.needs or "unset")
+    )
 
 
 def satisfied_block_refs(
@@ -10178,6 +10261,9 @@ def stranded_items(
                 "blocked on blocker that will never close: {}".format(
                     ", ".join(dead))
             )
+
+        if unclearable_block(item):
+            reasons.append(_unclearable_block_reason(item))
 
         reasons.extend(cycle_reasons.get(item.ref, []))
 
@@ -12438,6 +12524,7 @@ def _load_block_comment(item: Item) -> None:
             item.block_reason,
         ) = parsed
     item.needs_decision = parse_needs_decision_comment(bodies)
+    item.decline_reason = parse_decline_comment(bodies)
     for body in reversed(bodies):
         record = parse_satisfied_block_comment(body)
         if record is not None:

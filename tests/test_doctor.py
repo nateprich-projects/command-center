@@ -1395,3 +1395,37 @@ def test_spool_record_age_does_not_use_file_mtime(tmp_path, monkeypatch):
     assert "1 pending record(s) across 1 file(s)" in result.found
     assert "oldest is 5 minutes" in result.found
     assert "2 days" not in result.found
+
+
+def test_doctor_fails_on_a_block_nothing_can_clear():
+    """#1432: a Codex decline left Needs agent and no parseable condition."""
+    declined = funnel.Item(
+        repo="owner/repo", number=289, title="declined", url="", state="OPEN",
+        labels=["blocked"], needs="agent", parent="owner/repo#276",
+        decline_reason="prerequisite unlanded",
+    )
+
+    result = funnel.check_block_conditions([declined])
+
+    assert not result.ok
+    assert result.found == (
+        "owner/repo#289: stranded: blocked with no condition that can clear "
+        "it, and no one is asked (Needs: agent)"
+    )
+
+
+def test_doctor_names_a_native_edge_rather_than_an_unparseable_comment():
+    waiting = funnel.Item(
+        repo="owner/repo", number=290, title="edge", url="", state="OPEN",
+        open_blockers=["owner/repo#289"],
+    )
+    blocker = funnel.Item(
+        repo="owner/repo", number=289, title="open", url="", state="OPEN",
+    )
+
+    result = funnel.check_block_conditions([waiting, blocker])
+
+    assert result.ok
+    assert result.found == (
+        "owner/repo#290: still-waiting (on owner/repo#289 (native edge))"
+    )

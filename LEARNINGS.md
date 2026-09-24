@@ -8,6 +8,88 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### Muse's panel is not a fixed price of journal tokens, and agent count does not move it
+
+**2026-09-23 · Muse Code usage · measured (causes `inferred`)**
+
+Every Muse panel reading since Nate's 2026-09-10 upgrade (00:45 PDT), set against every
+provider call in `~/.local/share/muse/sessions` priced at the standard card. The upgrade
+kept the week's usage against the larger cap rather than resetting it: the following
+refusal still named the 09-14 reset. `usage.read_muse` reads each session's own
+`session.jsonl`. It never opens `<session>/subagent/<id>/session.jsonl`, and no provider
+`usage_id` appears in both.
+
+| interval (PDT) | panel | main $ | subagent $ | main $ per point | implement share | agents per $ |
+|---|---|---|---|---|---|---|
+| 09-13 17:00 → 09-18 01:18 | 0 → 45 | 128.76 | 25.92 | 2.86 | 39% | 12.2 |
+| 09-18 01:18 → 09-19 18:24 (the 429) | 45 → 100 | 85.26 | 11.53 | 1.55 | 58% | 9.3 |
+| 09-20 17:00 → 21:22 | 0 → 9 | 14.54 | 2.08 | 1.62 | 59% | 8.5 |
+| 09-20 22:30 → 09-21 20:12 | 10 → 70 | 68.87 | 5.03 | 1.15 | 83% | 5.6 |
+| 09-22 21:32 → 09-23 17:26 | 70 → 81 | 21.76 | 2.81 | 1.98 | 0% | 25.8 |
+
+Readings come from Nate's messages (45%, 9% and 81%), #1182 (10% and the first 70%), #1341
+(the second 70%) and the first weekly refusal in the journals, at 18:24:20 PDT on 09-19,
+when the window held exactly the $214.02 the $200 cap was set from. "Implement share" is
+the share of spend in sessions opened by the implement prompt. "Agents" counts main
+sessions plus subagents started in the interval.
+
+- **Agent count does not drive the panel.** When panel points are fitted to dollars plus
+  a per-agent or per-subagent term, the per-agent coefficient comes out negative in every
+  fit. The review-only day had the most agents per dollar, yet it moved the panel less
+  per dollar than any of the three implement-heavy intervals. The implement-heavy 09-21
+  had the fewest agents per dollar and moved the panel most.
+- **Implement-heavy spend moved the panel 1.2 to 1.7 times as fast per metered dollar**
+  as review, breakdown and shape spend: $1.15 to $1.62 a point, against $1.98. Implement
+  share is the best single predictor across the five intervals (correlation +0.70).
+- **No token pricing fits all five intervals.** The 09-13 → 09-18 interval spent more
+  fresh input, cached input and output than 09-18 → 09-19, yet moved the panel 45 points
+  against 55. No non-negative weighting of the three token kinds reproduces both.
+  Something outside the journals' token counts moves the panel. It could be:
+  - how implement runs behave: long sessions that run tools;
+  - Muse spend from another device;
+  - a meter that is not priced by tokens at all.
+
+  This is not settled.
+- **The subagent blind spot is real but small.** There are 3,556 subagent journals, at
+  about one to two cents a subagent, which is 8% of this window ($10.21 of $121.34).
+  Counting them would not remove the drift.
+- **A single panel pairing holds only for the workload it was taken under.** The #1341
+  pairing was taken at the end of the implement runs. By 09-23 it read 87% where the panel
+  read 81%. It was re-paired then (#1396).
+- **The five-hour wall has been hit once in the journals, which begin 2026-09-07.** On
+  2026-09-21, 18 requests were refused between 13:01 and 13:57 PDT (13 in main sessions,
+  5 in subagents), each naming a reset at 13:57:55 PDT. That window opened at 08:57:55 PDT with the first call after a
+  136-minute gap, and it held $31.86 at the standard card when it refused.
+
+### The runner host slept, and a sleeping host looks frozen
+
+**2026-09-23 · mini-PC (Windows 11, Intel N150) · measured**
+
+The 20:13Z `hobby-linux` outage was the host going into S3 sleep, not a crash. The
+System log has Kernel-Power 42 "entering sleep" at 20:03:16Z with `Reason = 0`
+(power or sleep button). Power-Troubleshooter 1 shows the wake at 01:18:46Z with
+"Wake Source: Power Button", which was Nate's press. `LastBootUpTime` stayed at
+09:40Z, so nothing rebooted. The power LED stays lit in S3, which is why it looked
+frozen. Idle sleep was already `Never`; both buttons were set to Sleep. What sent the
+button event at 20:03Z is unknown: nobody is known to have touched it, and a Windows
+preview update (KB5124010) had installed at 09:43Z. The same log signature appeared
+once before, on 2024-12-01. Buttons are now set to shut down and do nothing. GitHub
+marked the in-flight job "lost communication" 10 minutes after the sleep began.
+Nothing alerted: the outage was noticed about 40 minutes later from stalled CI, and
+the Mac mini's `gh` token cannot read org runner status (no `admin:org`).
+
+### GitHub-hosted jobs never start in the org's private repos
+
+**2026-09-24 · GitHub Actions · measured**
+
+`github-runners#2` ran a `ubuntu-latest` job that failed in 2 seconds with no steps.
+Its annotation: "The job was not started because recent account payments have failed
+or your spending limit needs to be increased." The same label runs normally in public
+`command-center` (the hourly watchdog passed at 23:40Z), because public repos do not
+draw on the paid minutes. So a private member repo's hosted CI reports a failure
+without running any code. Member CI therefore runs on the `hobby-*` runners, and
+`AGENTS.md` makes that a blocking onboarding step.
+
 ### A Codex automation's memory file is fed back into every run
 
 **2026-09-22 · Codex desktop · measured**

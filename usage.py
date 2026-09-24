@@ -300,8 +300,9 @@ MUSE_OUTPUT_RATE = (
     muse_model.RATE_CARDS[muse_model.STANDARD_MODEL]["output"] / 1_000_000)
 
 #: The weekly ceiling, calibrated from the wall the provider actually refused
-#: at. The window that ended 2026-09-19 18:14 PDT ran to a 429 at $214.02 of
-#: standard-rate compute (786.6M tokens, priced from the journals), so $200
+#: at. The window that ended 2026-09-20 17:00 PDT ran into a 429 at 18:24 PDT
+#: on 2026-09-19, holding $214.02 of standard-rate compute (786.6M tokens,
+#: priced from the journals), so $200
 #: sits just under it and the gate stops the lanes shortly before Meta does.
 #: It replaces a $20 cap that belonged to the contributor card and would refuse
 #: every fire at these rates. **This is a pacing ceiling, not a bill** — the
@@ -325,18 +326,26 @@ MUSE_WEEKLY_RESERVE = round(
 #: `tight`.** Its 72-hour rate is the Muse implement runs that #1315 moved to
 #: Codex and #1323 retired on 2026-09-22, a spend the lanes no longer make; it
 #: is still computed and reported. **The flat ceiling is priced from the
-#: account panel.** At 21:32 PDT on 2026-09-22 the panel read 70% used while
-#: this meter held $89.38, so the provider's 100% sits near $127.69 of
+#: account panel.** At 17:26 PDT on 2026-09-23 the panel read 81% used while
+#: this meter held $111.13, so the provider's 100% sits near $137.20 of
 #: standard-card compute here, well under the $200 the 2026-09-19 refusal
 #: calibrated. The window is gated at 95% of that, less one session's reserve.
 #: A fresh panel reading is a new pairing here; AGENTS.md and
 #: tests/test_muse.py quote these figures. _(Nate, 2026-09-22: "Dated
 #: override, calibrated stop".)_
+#:
+#: **One pairing holds only while the workload mix holds (#1396).** The first
+#: pairing, 70% against $89.38 at 21:32 PDT on 2026-09-22, was taken at the
+#: end of four days of Muse implement runs, whose spend moved the panel a
+#: point per $1.15 to $1.62 metered. The review, breakdown and shape runs
+#: after it moved the panel 11 points for $21.75, about $1.98 a point, so by
+#: 2026-09-23 that pairing read 87% against the panel's 81%. The issue
+#: marker stays #1341, because the dated release is still that one.
 MUSE_PACE_OVERRIDE = {
     "issue": 1341,
     "resets_at": 1790553600.0,  # 2026-09-28 00:00 UTC, Sunday 17:00 PDT
-    "panel_used_percent": 70.0,
-    "meter_dollars": 89.38,
+    "panel_used_percent": 81.0,
+    "meter_dollars": 111.13,
     "ceiling_percent": 95.0,
 }
 

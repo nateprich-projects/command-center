@@ -3172,3 +3172,4 @@
 {"agent": "codex", "api_cost": {"gh_calls": 65, "graphql_points": null}, "phase": "api_cost", "run": "bedbd0e398dc", "ts": 1790273178}
 {"agent": "codex", "note": "reconciled: released nateprich-projects/The-League#173 after no ticket branch activity within 30 minutes", "outcome": "errored", "phase": "finish", "reconciled_claim": "nateprich-projects/The-League#173", "run": "bedbd0e398dc", "ts": 1790273115}
 {"agent": "codex", "outcome": "nothing-to-do", "phase": "event", "queue": "empty", "run": "9f2a416a4bfb", "tier": "escalated", "ts": 1790273239}
+{"agent": "codex", "api_cost": {"gh_calls": 102, "graphql_points": null}, "phase": "api_cost", "run": "9f2a416a4bfb", "ts": 1790273242}

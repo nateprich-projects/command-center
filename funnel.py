@@ -6008,6 +6008,52 @@ MUSE_MODEL_PIN_FIX = (
     "pass --model explicitly at each call site; "
     "muse-spark-1.3-contributor is the catalog default"
 )
+MUSE_MODEL_CATALOG_FIX = (
+    "replace stale or invalid --model values with a visible model from the "
+    "provider catalog, then rerun funnel doctor"
+)
+# Muse writes its provider-owned catalog here under the current user's home.
+# Keep only the relative suffix in Git; the home directory is machine-specific.
+MUSE_MODEL_CATALOG_RELATIVE = pathlib.Path(".local/share/muse/model-catalog")
+MuseModelInvocation = namedtuple(
+    "MuseModelInvocation", "path line model")
+
+
+def _muse_shell_model_value(statement: str, start: int = 0) -> Optional[str]:
+    """The literal or dynamic value passed after ``--model`` in a shell call.
+
+    The doctor does not execute a runner to resolve shell variables. Those are
+    still reported as dynamic values so the catalog check is explicit about
+    what it could not verify.
+    """
+    tail = statement[start:].replace("\\\n", " ")
+    control = re.search(r"(?:&&|\|\||[;|])", tail)
+    if control is not None:
+        tail = tail[:control.start()]
+    match = re.search(
+        r"(?<![\w-])--model(?:\s*=\s*|\s+)"
+        r'(?:"([^"\n]*)"|\'([^\'\n]*)\'|([^\s\\;|&<>]+))',
+        tail,
+    )
+    if match is None:
+        return None
+    return next(value for value in match.groups() if value is not None)
+
+
+def _muse_shell_invocations(text: str) -> List[Tuple[int, Optional[str]]]:
+    """Return shell Muse call line numbers and their ``--model`` values."""
+    found: List[Tuple[int, Optional[str]]] = []
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        code = _muse_shell_code(line)
+        matches = list(MUSE_EXEC_RE.finditer(code))
+        if not matches:
+            continue
+        statement = _muse_shell_statement(lines, index)
+        for match in matches:
+            found.append((index + 1, _muse_shell_model_value(
+                statement, match.start())))
+    return found
 
 
 def _muse_shell_code(line: str) -> str:
@@ -6044,15 +6090,8 @@ def _muse_shell_statement(lines: Sequence[str], start: int) -> str:
 
 def _muse_shell_findings(text: str) -> List[int]:
     """Line numbers of shell `muse exec` invocations with no ``--model``."""
-    found = []
-    lines = text.splitlines()
-    for index, line in enumerate(lines):
-        if not MUSE_EXEC_RE.search(_muse_shell_code(line)):
-            continue
-        if "--model" in _muse_shell_statement(lines, index):
-            continue
-        found.append(index + 1)
-    return found
+    return [line for line, model in _muse_shell_invocations(text)
+            if model is None]
 
 
 def _muse_string_is_a_command(value: object) -> bool:
@@ -6083,8 +6122,36 @@ def _muse_argv_literals(node: "ast.AST") -> Optional[List[str]]:
     return literals if mentions_muse else None
 
 
-def _muse_python_findings(text: str) -> Optional[List[int]]:
-    """Line numbers of Python `muse exec` calls with no ``--model``.
+def _muse_python_model_value(node: "ast.AST") -> Optional[str]:
+    """The value following ``--model`` in a parsed Muse argv sequence."""
+    if not isinstance(node, (ast.List, ast.Tuple)):
+        return None
+    for index, element in enumerate(node.elts):
+        if not isinstance(element, ast.Constant) \
+                or not isinstance(element.value, str):
+            continue
+        argument = element.value
+        if argument.startswith("--model="):
+            return argument[len("--model="):]
+        if argument != "--model":
+            continue
+        if index + 1 >= len(node.elts):
+            return None
+        value = node.elts[index + 1]
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            return value.value
+        try:
+            expression = ast.unparse(value)
+        except (AttributeError, TypeError, ValueError):
+            expression = type(value).__name__
+        return "<dynamic {}>".format(expression)
+    return None
+
+
+def _muse_python_invocations(
+    text: str,
+) -> Optional[List[Tuple[int, Optional[str]]]]:
+    """Line numbers and model values for Python `muse exec` invocations.
 
     Parsed, not scanned. Every false positive and every laundered finding
     the line-based scanner had in Python came from guessing at structure:
@@ -6099,12 +6166,11 @@ def _muse_python_findings(text: str) -> Optional[List[int]]:
         tree = ast.parse(text)
     except (SyntaxError, ValueError):
         return None
-    found = set()
+    found: Set[Tuple[int, Optional[str]]] = set()
     for node in ast.walk(tree):
         literals = _muse_argv_literals(node)
         if literals is not None:
-            if "--model" not in literals:
-                found.add(node.lineno)
+            found.add((node.lineno, _muse_python_model_value(node)))
             continue
         if not isinstance(node, ast.Call):
             continue
@@ -6114,9 +6180,30 @@ def _muse_python_findings(text: str) -> Optional[List[int]]:
             for inner in ast.walk(argument):
                 if isinstance(inner, ast.Constant) \
                         and _muse_string_is_a_command(inner.value):
-                    if "--model" not in inner.value:
-                        found.add(inner.lineno)
-    return sorted(found)
+                    for line, model in _muse_shell_invocations(inner.value):
+                        found.add((inner.lineno + line - 1, model))
+    return sorted(found, key=lambda item: (item[0], item[1] or ""))
+
+
+def _muse_python_findings(text: str) -> Optional[List[int]]:
+    """Line numbers of Python `muse exec` calls with no ``--model``."""
+    invocations = _muse_python_invocations(text)
+    if invocations is None:
+        return None
+    return [line for line, model in invocations if model is None]
+
+
+def _muse_invocations(
+    path: pathlib.Path, text: str,
+) -> List[Tuple[int, Optional[str]]]:
+    """Parse all Muse invocations from one script-shaped file."""
+    if "exec" not in text:
+        return []
+    if path.suffix == ".py":
+        parsed = _muse_python_invocations(text)
+        if parsed is not None:
+            return parsed
+    return _muse_shell_invocations(text)
 
 
 def _muse_findings(path: pathlib.Path, text: str) -> List[int]:
@@ -6127,16 +6214,30 @@ def _muse_findings(path: pathlib.Path, text: str) -> List[int]:
     than being passed over, because a file this cannot read is exactly
     where an unpinned call would sit unnoticed.
     """
-    if "exec" not in text:
-        # Nothing here can be an invocation, and most files are this.
-        # Parsing every Python file in every checkout to find that out
-        # cost four seconds of `funnel doctor` for no findings.
-        return []
-    if path.suffix == ".py":
-        parsed = _muse_python_findings(text)
-        if parsed is not None:
-            return parsed
-    return _muse_shell_findings(text)
+    return [line for line, model in _muse_invocations(path, text)
+            if model is None]
+
+
+def muse_model_invocations(
+    roots: Optional[Iterable[os.PathLike]] = None,
+) -> List[MuseModelInvocation]:
+    """Every Muse call site and its optional model value in scan roots.
+
+    One walk supplies both the existing missing-pin check and catalog
+    validation, so the two checks cannot silently disagree about which
+    invocation is being inspected.
+    """
+    findings: Set[MuseModelInvocation] = set()
+    for root in _muse_scan_roots(roots):
+        for path in _muse_scan_files(root):
+            try:
+                text = path.read_text(errors="replace")
+            except OSError:
+                continue
+            for number, model in _muse_invocations(path, text):
+                findings.add(MuseModelInvocation(str(path), number, model))
+    return sorted(findings, key=lambda item: (
+        item.path, item.line, item.model or ""))
 
 
 def muse_unpinned_invocations(
@@ -6144,25 +6245,12 @@ def muse_unpinned_invocations(
 ) -> List[str]:
     """Every `muse exec` call site that does not name its model.
 
-    Muse's model catalog marks ``muse-spark-1.3-contributor`` as
-    ``is_default: true``, so an invocation with no ``--model`` resolves to
-    Meta's Discounted Services tier, where submitted content is eligible for
-    product improvement. The unsafe value is the one a caller gets by saying
-    nothing, which is why this looks for the omission rather than checking a
-    value against the allowlist: the allowlist protects the call sites that
-    exist today, and this catches the one added next.
+    This keeps the #1303 omission check available to callers while sharing the
+    same parsed call sites that the doctor uses for catalog validation.
     """
-    findings: List[Tuple[str, int]] = []
-    for root in _muse_scan_roots(roots):
-        for path in _muse_scan_files(root):
-            try:
-                text = path.read_text(errors="replace")
-            except OSError:
-                continue
-            for number in _muse_findings(path, text):
-                findings.append((str(path), number))
-    return ["{}:{}".format(path, number)
-            for path, number in sorted(set(findings))]
+    return ["{}:{}".format(invocation.path, invocation.line)
+            for invocation in muse_model_invocations(roots)
+            if invocation.model is None]
 
 
 def _muse_scan_roots(
@@ -6207,17 +6295,61 @@ def _muse_scan_files(root: pathlib.Path) -> Iterator[pathlib.Path]:
             yield path
 
 
+def _muse_read_model_catalog(
+    catalog_dir: Optional[os.PathLike] = None,
+) -> Tuple[Optional[Dict[str, bool]], Optional[str]]:
+    """Read provider catalog rows from Muse's local cache.
+
+    ``None`` models means the cache could not be checked. The doctor reports
+    that as unknown rather than treating every pin as stale.
+    """
+    directory = (pathlib.Path(catalog_dir) if catalog_dir is not None else
+                 pathlib.Path.home() / MUSE_MODEL_CATALOG_RELATIVE)
+    try:
+        files = sorted(path for path in directory.iterdir()
+                       if path.is_file() and path.suffix == ".json")
+    except OSError:
+        return None, "model-catalog directory is missing or unreadable"
+    if not files:
+        return None, "no model-catalog/*.json files were found"
+
+    visibility: Dict[str, List[bool]] = {}
+    for path in files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return None, "model-catalog file {} is unreadable".format(
+                path.name)
+        rows = data.get("rows") if isinstance(data, dict) else None
+        if not isinstance(rows, list):
+            return None, "model-catalog file {} has no rows list".format(
+                path.name)
+        for row in rows:
+            if not isinstance(row, dict) \
+                    or not isinstance(row.get("model_id"), str) \
+                    or not row["model_id"].strip() \
+                    or not isinstance(row.get("visibility"), str):
+                return None, "model-catalog file {} has an invalid row".format(
+                    path.name)
+            model_id = row["model_id"].strip()
+            visibility.setdefault(model_id, []).append(
+                row["visibility"] == "visible")
+    return {model_id: any(states)
+            for model_id, states in visibility.items()}, None
+
+
+def _muse_dynamic_model(value: str) -> bool:
+    """Whether a parsed model expression needs shell/runtime evaluation."""
+    return value.startswith("<dynamic ") or "$" in value or "`" in value
+
+
 def check_muse_model_pins(
     roots: Optional[Iterable[os.PathLike]] = None,
+    catalog_dir: Optional[os.PathLike] = None,
 ) -> Check:
-    """Report any `muse exec` on this machine that does not name its model.
-
-    This outlives the repository allowlist it ships beside. On 2026-09-22 a
-    scan found 72 sessions on the contributor model from one call site that
-    simply never said which model it wanted (career-toolset#199).
-    """
+    """Check every Muse model pin against the provider's local catalog."""
     try:
-        findings = muse_unpinned_invocations(roots)
+        invocations = muse_model_invocations(roots)
     except OSError as exc:
         return Check(
             "muse model pins", False,
@@ -6225,15 +6357,83 @@ def check_muse_model_pins(
                 str(exc) or "unknown error"),
             MUSE_MODEL_PIN_FIX,
         )
-    if not findings:
-        return Check("muse model pins", True, "", "")
+
+    unpinned = [invocation for invocation in invocations
+                if invocation.model is None]
+    pins = [invocation for invocation in invocations
+            if invocation.model is not None]
+    if not pins:
+        if not unpinned:
+            return Check("muse model pins", True, "", "")
+        return Check(
+            "muse model pins", False,
+            "{} muse exec invocation(s) do not pass --model, so they run on "
+            "the contributor model by default:\n{}".format(
+                len(unpinned), "\n".join(
+                    "  {}:{}".format(item.path, item.line)
+                    for item in unpinned)),
+            MUSE_MODEL_PIN_FIX,
+        )
+
+    catalog, catalog_error = _muse_read_model_catalog(catalog_dir)
+    details: List[str] = []
+    failed = 0
+    unknown = 0
+    verified = 0
+    if catalog_error is not None:
+        unknown = len(pins)
+        details.append(
+            "model catalog unknown ({}): 0 verified, 0 failed, {} unknown"
+            .format(catalog_error, unknown))
+        for invocation in pins:
+            details.append(
+                "  UNKNOWN {} — {}:{} (muse exec --model {}; catalog "
+                "unavailable)".format(
+                    repr(invocation.model), invocation.path, invocation.line,
+                    invocation.model))
+    else:
+        for invocation in pins:
+            model = invocation.model
+            location = "{}:{}".format(invocation.path, invocation.line)
+            if _muse_dynamic_model(model):
+                unknown += 1
+                details.append(
+                    "  UNKNOWN dynamic model value {} — {}:{} (muse exec "
+                    "--model {})".format(
+                        repr(model), invocation.path, invocation.line, model))
+            elif model not in catalog:
+                failed += 1
+                details.append(
+                    "  UNKNOWN/INVALID model id {} — {} (muse exec "
+                    "--model {})".format(repr(model), location, model))
+            elif not catalog[model]:
+                failed += 1
+                details.append(
+                    "  STALE model id {} is not visible — {} (muse exec "
+                    "--model {})".format(repr(model), location, model))
+            else:
+                verified += 1
+                details.append(
+                    "  VERIFIED model id {} — {} (muse exec --model {})"
+                    .format(repr(model), location, model))
+        details.insert(0, "model catalog: {} verified, {} failed, {} unknown"
+                       .format(verified, failed, unknown))
+
+    if unpinned:
+        details.append(
+            "{} muse exec invocation(s) do not pass --model, so they run on "
+            "the contributor model by default:".format(len(unpinned)))
+        details.extend("  {}:{}".format(item.path, item.line)
+                       for item in unpinned)
+
+    fixes = []
+    if unpinned:
+        fixes.append(MUSE_MODEL_PIN_FIX)
+    if failed:
+        fixes.append(MUSE_MODEL_CATALOG_FIX)
     return Check(
-        "muse model pins", False,
-        "{} muse exec invocation(s) do not pass --model, so they run on "
-        "the contributor model by default:\n{}".format(
-            len(findings),
-            "\n".join("  " + finding for finding in findings)),
-        MUSE_MODEL_PIN_FIX,
+        "muse model pins", not (unpinned or failed), "\n".join(details),
+        "; ".join(fixes),
     )
 
 

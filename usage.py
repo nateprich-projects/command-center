@@ -300,8 +300,9 @@ MUSE_OUTPUT_RATE = (
     muse_model.RATE_CARDS[muse_model.STANDARD_MODEL]["output"] / 1_000_000)
 
 #: The weekly ceiling, calibrated from the wall the provider actually refused
-#: at. The window that ended 2026-09-19 18:14 PDT ran to a 429 at $214.02 of
-#: standard-rate compute (786.6M tokens, priced from the journals), so $200
+#: at. The window that ended 2026-09-20 17:00 PDT ran into a 429 at 18:24 PDT
+#: on 2026-09-19, holding $214.02 of standard-rate compute (786.6M tokens,
+#: priced from the journals), so $200
 #: sits just under it and the gate stops the lanes shortly before Meta does.
 #: It replaces a $20 cap that belonged to the contributor card and would refuse
 #: every fire at these rates. **This is a pacing ceiling, not a bill** — the
@@ -335,8 +336,8 @@ MUSE_WEEKLY_RESERVE = round(
 #:
 #: **One pairing holds only while the workload mix holds (#1396).** The first
 #: pairing, 70% against $89.38 at 21:32 PDT on 2026-09-22, was taken at the
-#: end of four days of Muse implement runs, whose spend moved the panel about
-#: one point per $1.15 to $1.28 metered. The review, breakdown and shape runs
+#: end of four days of Muse implement runs, whose spend moved the panel a
+#: point per $1.15 to $1.62 metered. The review, breakdown and shape runs
 #: after it moved the panel 11 points for $21.75, about $1.98 a point, so by
 #: 2026-09-23 that pairing read 87% against the panel's 81%. The issue
 #: marker stays #1341, because the dated release is still that one.

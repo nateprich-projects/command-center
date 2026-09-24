@@ -22,22 +22,25 @@ refusal still named the 09-14 reset. `usage.read_muse` reads each session's own
 | interval (PDT) | panel | main $ | subagent $ | main $ per point | implement share | agents per $ |
 |---|---|---|---|---|---|---|
 | 09-13 17:00 → 09-18 01:18 | 0 → 45 | 128.76 | 25.92 | 2.86 | 39% | 12.2 |
-| 09-18 01:18 → 09-19 18:14 (the 429) | 45 → 100 | 82.97 | 11.53 | 1.51 | 57% | 9.5 |
+| 09-18 01:18 → 09-19 18:24 (the 429) | 45 → 100 | 85.26 | 11.53 | 1.55 | 58% | 9.3 |
 | 09-20 17:00 → 21:22 | 0 → 9 | 14.54 | 2.08 | 1.62 | 59% | 8.5 |
 | 09-20 22:30 → 09-21 20:12 | 10 → 70 | 68.87 | 5.03 | 1.15 | 83% | 5.6 |
 | 09-22 21:32 → 09-23 17:26 | 70 → 81 | 21.76 | 2.81 | 1.98 | 0% | 25.8 |
 
 Readings come from Nate's messages (45%, 9% and 81%), #1182 (10% and the first 70%), #1341
-(the second 70%) and the 09-19 refusal. "Agents" counts main sessions plus subagents
-started in the interval.
+(the second 70%) and the first weekly refusal in the journals, at 18:24:20 PDT on 09-19,
+when the window held exactly the $214.02 the $200 cap was set from. "Implement share" is
+the share of spend in sessions opened by the implement prompt. "Agents" counts main
+sessions plus subagents started in the interval.
 
 - **Agent count does not drive the panel.** When panel points are fitted to dollars plus
   a per-agent or per-subagent term, the per-agent coefficient comes out negative in every
-  fit. The review-only day had the most agents per dollar and moved the panel least per
-  dollar. The implement-heavy 09-21 had the fewest and moved it most.
-- **Implement spend moved the panel about twice as fast per metered dollar** as review,
-  breakdown and shape spend: $1.15 to $1.62 a point, against $1.98. Implement share is the
-  best single predictor across the five intervals (correlation +0.71).
+  fit. The review-only day had the most agents per dollar, yet it moved the panel less
+  per dollar than any of the three implement-heavy intervals. The implement-heavy 09-21
+  had the fewest agents per dollar and moved the panel most.
+- **Implement-heavy spend moved the panel 1.2 to 1.7 times as fast per metered dollar**
+  as review, breakdown and shape spend: $1.15 to $1.62 a point, against $1.98. Implement
+  share is the best single predictor across the five intervals (correlation +0.70).
 - **No token pricing fits all five intervals.** The 09-13 → 09-18 interval spent more
   fresh input, cached input and output than 09-18 → 09-19, yet moved the panel 45 points
   against 55. No non-negative weighting of the three token kinds reproduces both.
@@ -53,8 +56,9 @@ started in the interval.
 - **A single panel pairing holds only for the workload it was taken under.** The #1341
   pairing was taken at the end of the implement runs. By 09-23 it read 87% where the panel
   read 81%. It was re-paired then (#1396).
-- **The five-hour wall has been hit once.** On 2026-09-21, 37 refusals from 13:01 PDT named
-  13:57:55 PDT. That window opened at 08:57:55 PDT with the first call after a
+- **The five-hour wall has been hit once in the journals, which begin 2026-09-07.** On
+  2026-09-21, 18 requests were refused between 13:01 and 13:57 PDT (13 in main sessions,
+  5 in subagents), each naming a reset at 13:57:55 PDT. That window opened at 08:57:55 PDT with the first call after a
   136-minute gap, and it held $31.86 at the standard card when it refused.
 
 ### The runner host slept, and a sleeping host looks frozen

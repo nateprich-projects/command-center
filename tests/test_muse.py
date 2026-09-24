@@ -314,9 +314,9 @@ def test_the_override_names_the_window_resetting_sunday_2026_09_27():
 
 def test_the_override_prices_the_window_from_the_panel(tmp_path, monkeypatch):
     """#1396: the panel read 81% while the meter held $111.13, so the same
-    spend reads 81% here. At the 72-hour rate that reading carried, $106.92
-    ($35.64 a day), the projection passes 100%, and is reported rather than
-    banded."""
+    spend reads 81% here. At the 72-hour rate recorded with it at 17:28 PDT,
+    $106.92 ($35.64 a day), the projection passes 100%, and is reported
+    rather than banded."""
     reading, verdict, _ = _projected(
         tmp_path, monkeypatch, spent=111.13, trailing=106.92, days_left=3.98,
         at=IN_OVERRIDE)

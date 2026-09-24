@@ -68,6 +68,68 @@ def test_explicit_origin_override_settles_a_pre_marker_project():
     assert values["Origin"] == "Nate"
 
 
+def test_backfill_reports_every_unmappable_row():
+    first = item(number=11, body="No origin record.")
+    second = item(number=12, item_id="item-2", body="Also no origin record.")
+
+    with pytest.raises(migrate.MigrationError) as caught:
+        migrate.plan_backfill([first, second], {})
+
+    assert first.ref in str(caught.value)
+    assert second.ref in str(caught.value)
+
+
+def test_backfill_inventory_contains_only_actual_field_writes():
+    unchanged = item(
+        origin="agent", risk="standard", needs="none")
+    changed = item(
+        number=2, item_id="item-2", origin="agent",
+        risk="standard", needs="human")
+    rows = [
+        (unchanged, {
+            "Origin": "agent", "Risk": "standard", "Needs": "none"}),
+        (changed, {
+            "Origin": "agent", "Risk": "escalated", "Needs": "human"}),
+    ]
+
+    writes = migrate.plan_backfill_writes(rows)
+
+    assert [(found.ref, field, value) for found, field, value in writes] == [
+        (changed.ref, "Risk", "escalated"),
+    ]
+
+
+def test_prose_inventory_contains_only_bodies_that_will_be_edited():
+    unchanged = item(body="# Plan\n\nKeep this.\n")
+    changed = item(
+        number=2, item_id="item-2",
+        body="# Plan\n\nKeep this.\n\nRisk: standard\n")
+
+    writes = migrate.plan_prose_writes([unchanged, changed])
+
+    assert [(found.ref, body) for found, body in writes] == [
+        (changed.ref, "# Plan\n\nKeep this.\n"),
+    ]
+
+
+def test_incident_replays_1401_1402_1403_use_canonical_fields():
+    false_risk = item(
+        number=1401, status="Shaped", origin="agent", risk="standard",
+        needs="none",
+        body="Rejected: migrate data. Explicitly not doing credentials.")
+    scheduling = item(
+        number=1402, item_id="item-2", status="Shaped", origin="agent",
+        risk="standard", needs="none",
+        body="Should this land now, or wait for other work?")
+    external_wait = item(
+        number=1403, item_id="item-3", labels=["blocked"],
+        origin="agent", risk="standard", needs="external-event")
+
+    assert funnel.gate_question(false_risk) is None
+    assert funnel.gate_question(scheduling) is None
+    assert funnel.gate_question(external_wait) is None
+
+
 def test_trim_removes_routing_copies_but_keeps_the_actual_question():
     body = "\n\n".join([
         "# Plan\n\nDo it.",

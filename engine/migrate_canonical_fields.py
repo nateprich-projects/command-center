@@ -265,19 +265,39 @@ def plan_backfill(items: Sequence[funnel.Item],
                   origin_overrides: Optional[Dict[str, str]] = None
                   ) -> List[Tuple[funnel.Item, dict]]:
     rows = []
+    failures = []
     for item in items:
         if item.state == "OPEN" and item.item_id:
-            rows.append((item, infer_values(
-                item, needs_overrides, origin_overrides)))
+            try:
+                values = infer_values(
+                    item, needs_overrides, origin_overrides)
+            except MigrationError as exc:
+                failures.append(str(exc))
+                continue
+            rows.append((item, values))
+    if failures:
+        raise MigrationError(
+            "unmappable rows: {}".format("; ".join(failures)))
     return rows
 
 
-def apply_backfill(rows: Sequence[Tuple[funnel.Item, dict]]) -> None:
+def plan_backfill_writes(
+        rows: Sequence[Tuple[funnel.Item, dict]]
+        ) -> List[Tuple[funnel.Item, str, str]]:
+    """Return exactly the field mutations an apply run will issue."""
+    writes = []
     for item, values in rows:
         for field, value in values.items():
             if getattr(item, field.lower()) == value:
                 continue
-            funnel.write_project_select(item.item_id, field, value, item.ref)
+            writes.append((item, field, value))
+    return writes
+
+
+def apply_backfill(
+        writes: Sequence[Tuple[funnel.Item, str, str]]) -> None:
+    for item, field, value in writes:
+        funnel.write_project_select(item.item_id, field, value, item.ref)
 
 
 def verify_backfill(expected: Sequence[Tuple[funnel.Item, dict]]) -> None:
@@ -326,8 +346,11 @@ def trim_routing_prose(body: str) -> str:
     return result + "\n" if result else ""
 
 
-def trim_open_items(items: Sequence[funnel.Item], *, apply: bool) -> List[str]:
-    changed = []
+def plan_prose_writes(
+        items: Sequence[funnel.Item]
+        ) -> List[Tuple[funnel.Item, str]]:
+    """Return exactly the issue-body mutations an apply run will issue."""
+    writes = []
     for item in items:
         if item.state != "OPEN":
             continue
@@ -335,21 +358,27 @@ def trim_open_items(items: Sequence[funnel.Item], *, apply: bool) -> List[str]:
         after = trim_routing_prose(before)
         if after.rstrip() == before.rstrip():
             continue
-        changed.append(item.ref)
-        if apply:
-            _run([
-                "gh", "issue", "edit", str(item.number),
-                "--repo", item.repo, "--body", after,
-            ])
-    return changed
+        writes.append((item, after))
+    return writes
+
+
+def apply_prose_writes(
+        writes: Sequence[Tuple[funnel.Item, str]]) -> None:
+    for item, body in writes:
+        _run([
+            "gh", "issue", "edit", str(item.number),
+            "--repo", item.repo, "--body", body,
+        ])
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true",
                         help="create/extend fields and backfill open rows")
-    parser.add_argument("--trim-prose", action="store_true",
-                        help="remove legacy routing prose from open issues")
+    parser.add_argument(
+        "--trim-prose", action="store_true",
+        help=("include legacy routing-prose edits in the dry-run inventory; "
+              "with --apply, perform them"))
     parser.add_argument("--needs-override", action="append", default=[],
                         metavar="REF=VALUE")
     parser.add_argument("--origin-override", action="append", default=[],
@@ -364,21 +393,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             flag="--origin-override")
         items = funnel.load_items()
         rows = plan_backfill(items, needs_overrides, origin_overrides)
+        backfill_writes = plan_backfill_writes(rows)
+        prose_writes = plan_prose_writes(items) if args.trim_prose else []
         changes = ensure_schema(apply=args.apply)
         print(json.dumps({
             "schema_changes": changes,
             "open_rows": len(rows),
-            "values": {item.ref: values for item, values in rows},
+            "backfill_writes": [
+                {
+                    "ref": item.ref,
+                    "field": field,
+                    "from": getattr(item, field.lower()),
+                    "to": value,
+                }
+                for item, field, value in backfill_writes
+            ],
+            "prose_writes": [item.ref for item, _ in prose_writes],
         }, indent=2, sort_keys=True))
         if args.apply:
-            apply_backfill(rows)
+            apply_backfill(backfill_writes)
             verify_backfill(rows)
-        if args.trim_prose:
-            if not args.apply:
-                raise MigrationError("--trim-prose requires --apply")
-            fresh = funnel.load_items()
-            changed = trim_open_items(fresh, apply=True)
-            print("trimmed routing prose from {} open issues".format(len(changed)))
+            if args.trim_prose:
+                apply_prose_writes(prose_writes)
+                print("trimmed routing prose from {} open issues".format(
+                    len(prose_writes)))
     except (funnel.GitHubError, MigrationError) as exc:
         print("migrate-canonical-fields: {}".format(exc), file=sys.stderr)
         return 1

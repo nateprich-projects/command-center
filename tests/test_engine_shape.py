@@ -58,6 +58,10 @@ def answer(**kw):
         "plan_markdown": "# Plan\n\nDo the thing.\n",
         "escalated_risk": [],
         "depends_on": [],
+        "premises": [
+            {"claim": "reviews stay human-gated",
+             "evidence": "plan.md:42", "label": "documented"},
+        ],
     }
     data.update(kw)
     return data
@@ -131,6 +135,9 @@ def test_a_well_formed_answer_validates():
     assert found["decided_from_precedent"] == [
         {"claim": "reviews stay human-gated",
          "source": "plan.md ladder"}]
+    assert found["premises"] == [
+        {"claim": "reviews stay human-gated",
+         "evidence": "plan.md:42", "label": "documented"}]
 
 
 def test_validation_strips_surrounding_whitespace():
@@ -139,11 +146,19 @@ def test_validation_strips_surrounding_whitespace():
         plan_markdown="\n# Plan\n",
         needs_nate={"exposure": None, "gates": ["  Who decides?  "],
                     "scope": None, "preference": None},
-        depends_on=["  owner/repo#165  "]))
+        depends_on=["  owner/repo#165  "],
+        premises=[{"claim": "  source is verified\n here ",
+                   "evidence": "  command: check\noutput: passed  ",
+                   "label": " measured "}]))
     assert found["proposed_class"] == "Improve"
     assert found["plan_markdown"] == "# Plan"
     assert found["needs_nate"]["gates"] == ["Who decides?"]
     assert found["depends_on"] == ["owner/repo#165"]
+    assert found["premises"] == [{
+        "claim": "source is verified here",
+        "evidence": "command: check output: passed",
+        "label": "measured",
+    }]
 
 
 def test_the_answer_must_be_an_object():
@@ -156,6 +171,10 @@ def test_the_answer_must_be_an_object():
 def test_the_answer_needs_every_key_and_no_extras():
     missing = answer()
     del missing["needs_nate"]
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(missing)
+    missing = answer()
+    del missing["premises"]
     with pytest.raises(shape.ShapeError):
         shape.validate_answer(missing)
     with pytest.raises(shape.ShapeError):
@@ -271,6 +290,39 @@ def test_an_empty_escalated_risk_list_is_honest():
     assert found["escalated_risk"] == []
 
 
+def test_premises_are_a_list_of_claim_evidence_and_label():
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(premises="a factual claim"))
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(premises=[{"claim": "a claim",
+                                               "label": "measured"}]))
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(premises=[{
+            "claim": "a claim", "evidence": "  ", "label": "measured"}]))
+    with pytest.raises(shape.ShapeError):
+        shape.validate_answer(answer(premises=[{
+            "claim": "a claim", "evidence": "plan.md:42",
+            "label": "measured", "extra": "not in the schema"}]))
+
+
+def test_premise_labels_use_the_learnings_scale():
+    for invalid in ("unknown", "Measured", ""):
+        with pytest.raises(shape.ShapeError):
+            shape.validate_answer(answer(premises=[{
+                "claim": "a claim", "evidence": "plan.md:42",
+                "label": invalid}]))
+    found = shape.validate_answer(answer(premises=[
+        {"claim": "seen directly", "evidence": "run output",
+         "label": "measured"},
+        {"claim": "vendor says so", "evidence": "vendor guide:12",
+         "label": "documented"},
+        {"claim": "might be true", "evidence": "rollout abc123",
+         "label": "inferred"},
+    ]))
+    assert [entry["label"] for entry in found["premises"]] == [
+        "measured", "documented", "inferred"]
+
+
 def test_an_answer_missing_depends_on_is_malformed():
     # #1053: the sequencing list is required, even when the plan waits
     # on nothing — an empty list says so honestly.
@@ -336,13 +388,18 @@ def test_needs_nate_rejects_bad_list_entries(bad):
 def test_render_carries_the_plan_and_every_field():
     body = shape.render_plan(shape.validate_answer(answer()))
     assert body.startswith("# Plan\n\nDo the thing.\n")
+    assert "## Premises" in body
+    assert ("- reviews stay human-gated "
+            "(label: documented; evidence: plan.md:42)") in body
     assert "## Decided from precedent" in body
     assert "- reviews stay human-gated (source: plan.md ladder)" in body
     assert "## Decided by the agent" in body
     assert ("- validate strictly (rejected: accept unknown fields; "
             "unknown fields signal a confused model)") in body
     assert "## Needs Nate" not in body
-    assert ("Do the thing.\n\nProposed class: Improve\n\n"
+    assert ("Do the thing.\n\n## Premises\n\n"
+            "- reviews stay human-gated (label: documented; "
+            "evidence: plan.md:42)\n\nProposed class: Improve\n\n"
             "## Decided from precedent") in body
 
 
@@ -362,8 +419,13 @@ def test_render_records_open_questions_verbatim():
 
 def test_render_marks_empty_decision_lists():
     body = shape.render_plan(shape.validate_answer(answer(
-        decided_from_precedent=[], decided_by_agent=[])))
-    assert body.count("None recorded.") == 2
+        decided_from_precedent=[], decided_by_agent=[], premises=[])))
+    assert body.count("None recorded.") == 3
+
+
+def test_render_marks_an_empty_premises_list():
+    body = shape.render_plan(shape.validate_answer(answer(premises=[])))
+    assert "## Premises\n\nNone recorded." in body
 
 
 def test_the_all_clear_render_carries_no_authority_signals():

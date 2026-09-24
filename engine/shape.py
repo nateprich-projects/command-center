@@ -63,7 +63,8 @@ def validation_exit(attempt: Optional[int]) -> int:
 #: the Shape row of #794, plus the model-declared escalated-risk list
 #: (#1034) that the decision unions with the wording scan, plus the
 #: sequencing-dependency list (#1053) that sequencing questions become
-#: instead of Needs Nate entries.
+#: instead of Needs Nate entries, plus the evidence-backed premises list
+#: recorded in the plan body (#1422).
 ANSWER_KEYS = frozenset({
     "decided_from_precedent",
     "decided_by_agent",
@@ -72,7 +73,11 @@ ANSWER_KEYS = frozenset({
     "plan_markdown",
     "escalated_risk",
     "depends_on",
+    "premises",
 })
+
+#: The confidence vocabulary shared with LEARNINGS.md (#1422).
+PREMISE_LABELS = ("measured", "documented", "inferred")
 
 #: A sequencing dependency: owner/repo#n, the only shape accepted
 #: (#1053). The packet's sibling plans carry full refs, so the model
@@ -250,6 +255,34 @@ def _validate_depends_on(entries: object) -> List[str]:
     return validated
 
 
+def _validate_premises(entries: object) -> List[Dict[str, str]]:
+    """Validate the factual premises recorded with a shaped plan (#1422).
+
+    Each premise carries one claim, its evidence pointer, and an honest
+    confidence label. Evidence is kept as a compact line in the plan body;
+    its supported forms are described in skills/shape.
+    """
+    if not isinstance(entries, list):
+        raise ShapeError("premises must be a list")
+    validated = []
+    for index, entry in enumerate(entries):
+        where = "premises[{}]".format(index)
+        _check_keys(entry, ("claim", "evidence", "label"), where)
+        claim = _require_line(entry["claim"], where + ".claim")
+        evidence = _require_line(entry["evidence"], where + ".evidence")
+        label = _require_line(entry["label"], where + ".label")
+        if label not in PREMISE_LABELS:
+            raise ShapeError(
+                "{}.label must be one of {}".format(
+                    where, ", ".join(PREMISE_LABELS)))
+        validated.append({
+            "claim": claim,
+            "evidence": evidence,
+            "label": label,
+        })
+    return validated
+
+
 def _validate_escalated_risk(entries: object) -> List[Dict[str, str]]:
     """Validate the model-declared escalated-risk list (#1034).
 
@@ -307,14 +340,15 @@ def validate_answer(data: object) -> Dict:
         "escalated_risk": _validate_escalated_risk(
             data["escalated_risk"]),
         "depends_on": _validate_depends_on(data["depends_on"]),
+        "premises": _validate_premises(data["premises"]),
     }
 
 
 def render_plan(answer: Dict) -> str:
     """Render the issue body from validated answer fields.
 
-    The plan narrative and proposed class come first, followed by risk
-    rationale when the model declared a risk, then the
+    The plan narrative is followed by its evidence-backed premises and
+    proposed class, risk rationale when the model declared a risk, then the
     runner-owned decision record: what precedent settled, what the
     agent decided itself, the sequencing dependencies where any wait
     (#1053), and only the Needs Nate categories with open questions.
@@ -322,7 +356,16 @@ def render_plan(answer: Dict) -> str:
     validated answer; ``apply_shape`` validates before calling.
     """
     lines = [answer["plan_markdown"].rstrip(), "",
-             "Proposed class: {}".format(answer["proposed_class"]), ""]
+             "## Premises", ""]
+    premises = answer["premises"]
+    if premises:
+        for entry in premises:
+            lines.append("- {} (label: {}; evidence: {})".format(
+                entry["claim"], entry["label"], entry["evidence"]))
+    else:
+        lines.append("None recorded.")
+    lines.extend(["", "Proposed class: {}".format(
+        answer["proposed_class"]), ""])
     if answer["escalated_risk"]:
         lines.extend(["## Risk rationale", ""])
         lines.extend(

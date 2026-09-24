@@ -8,6 +8,35 @@ Label confidence honestly: `measured` means observed with the evidence quoted,
 `documented` means a vendor claims it and it was not verified, `inferred` means it could
 be wrong. Mislabelling `inferred` as `measured` is how a wrong belief becomes permanent.
 
+### The runner host slept, and a sleeping host looks frozen
+
+**2026-09-23 · mini-PC (Windows 11, Intel N150) · measured**
+
+The 20:13Z `hobby-linux` outage was the host going into S3 sleep, not a crash. The
+System log has Kernel-Power 42 "entering sleep" at 20:03:16Z with `Reason = 0`
+(power or sleep button). Power-Troubleshooter 1 shows the wake at 01:18:46Z with
+"Wake Source: Power Button", which was Nate's press. `LastBootUpTime` stayed at
+09:40Z, so nothing rebooted. The power LED stays lit in S3, which is why it looked
+frozen. Idle sleep was already `Never`; both buttons were set to Sleep. What sent the
+button event at 20:03Z is unknown: nobody is known to have touched it, and a Windows
+preview update (KB5124010) had installed at 09:43Z. The same log signature appeared
+once before, on 2024-12-01. Buttons are now set to shut down and do nothing. GitHub
+marked the in-flight job "lost communication" 10 minutes after the sleep began.
+Nothing alerted: the outage was noticed about 40 minutes later from stalled CI, and
+the Mac mini's `gh` token cannot read org runner status (no `admin:org`).
+
+### GitHub-hosted jobs never start in the org's private repos
+
+**2026-09-24 · GitHub Actions · measured**
+
+`github-runners#2` ran a `ubuntu-latest` job that failed in 2 seconds with no steps.
+Its annotation: "The job was not started because recent account payments have failed
+or your spending limit needs to be increased." The same label runs normally in public
+`command-center` (the hourly watchdog passed at 23:40Z), because public repos do not
+draw on the paid minutes. So a private member repo's hosted CI reports a failure
+without running any code. Member CI therefore runs on the `hobby-*` runners, and
+`AGENTS.md` makes that a blocking onboarding step.
+
 ### A Codex automation's memory file is fed back into every run
 
 **2026-09-22 · Codex desktop · measured**

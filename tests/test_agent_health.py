@@ -153,6 +153,47 @@ def test_brief_run_summary_separates_rebegins_from_finishes(monkeypatch):
     }]
 
 
+def test_brief_run_summary_includes_muse_window_consumption(monkeypatch):
+    reset = 1_800_000_000.0
+    rows = [
+        {
+            "run": "muse-run",
+            "phase": "start",
+            "ts": NOW.timestamp() - 120,
+            "agent": "muse",
+            "usage": {"seven_day": {
+                "resets_at": reset,
+                "spent_dollars": 7.5,
+            }},
+        },
+        {
+            "run": "muse-run",
+            "phase": "finish",
+            "ts": NOW.timestamp() - 60,
+            "agent": "muse",
+            "outcome": "done",
+            "usage": {"seven_day": {
+                "resets_at": reset,
+                "spent_dollars": 9.0,
+            }},
+        },
+    ]
+    monkeypatch.setattr(heartbeat, "PROVIDERS", {"muse": "meta"})
+    monkeypatch.setattr(heartbeat, "read", lambda agent: rows)
+
+    assert funnel.agent_run_summary(NOW) == [{
+        "agent": "muse",
+        "starts": 1,
+        "finishes": 1,
+        "re_begins": 0,
+        "window_consumption": [{
+            "resets_at": reset,
+            "consumed_dollars": 1.5,
+            "runs": 1,
+        }],
+    }]
+
+
 def test_retired_prompt_events_raise_no_condition():
     """`prompt-drift` and `prompt-mismatch` left the outcome vocabulary with
     `--routine-sha` (#821). Old rows may still sit in the heartbeat history;

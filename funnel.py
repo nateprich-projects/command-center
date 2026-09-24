@@ -3852,15 +3852,24 @@ def agent_run_summary(now: datetime) -> List[Dict[str, object]]:
         if agent in retired:
             continue  # a stopped schedule is not a dying one (#431)
         try:
+            rows = _brief_heartbeat_rows(agent)
             summary = heartbeat.run_summary(
-                _brief_heartbeat_rows(agent), now=now.timestamp()
+                rows, now=now.timestamp()
             )
         except Exception:
             # This is diagnostic input. A heartbeat read failure must not make
             # the brief fail or turn an unavailable count into zero.
             continue
         if any(summary.values()):
-            found.append({"agent": agent, **summary})
+            row: Dict[str, object] = {"agent": agent, **summary}
+            if agent == "muse":
+                # Start/end usage snapshots carry Muse's standard-rate
+                # dollars and reset stamp. Keep the calibration beside the
+                # run counts so the brief reads one heartbeat history once.
+                consumption = heartbeat.muse_window_consumption(rows)
+                if consumption:
+                    row["window_consumption"] = consumption
+            found.append(row)
     return found
 
 

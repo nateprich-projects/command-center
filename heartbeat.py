@@ -29,6 +29,7 @@ import contextlib
 import json
 import os
 import glob
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
@@ -1188,6 +1189,16 @@ def input_usage(agent: str) -> Optional[Dict[str, Optional[float]]]:
         return None
 
 
+def _finite_number(value) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def usage_snapshot(agent: str) -> Optional[Dict]:
     """Best-effort usage reading. Never fatal — a heartbeat that cannot be
     written because usage was unreadable would hide the very run it documents."""
@@ -1206,15 +1217,119 @@ def usage_snapshot(agent: str) -> Optional[Dict]:
         # Both figures, not just the percentage. `resets_at` is what identifies
         # *which* five-hour window a run belonged to, and the idle gate in
         # usage.py needs that to ask whether this window was already open.
-        return {
-            name: {
+        snapshots = {}
+        for name, window in reading.get("windows", {}).items():
+            snapshot = {
                 "used_percent": window.get("used_percent"),
                 "resets_at": window.get("resets_at"),
             }
-            for name, window in reading.get("windows", {}).items()
-        }
+            # Muse's reader already prices provider usage at the standard
+            # card. Carry that existing value through both heartbeat ends so
+            # readers can measure the run's delta without duplicating rates.
+            if agent == "muse":
+                spent = _finite_number(window.get("spent_dollars"))
+                if spent is not None and spent >= 0:
+                    snapshot["spent_dollars"] = spent
+            snapshots[name] = snapshot
+        return snapshots
     except Exception:
         return None
+
+
+def _record_timestamp(record: Dict) -> Optional[float]:
+    return _finite_number(record.get("ts"))
+
+
+def _muse_window_reading(record: Dict) -> Optional[tuple]:
+    usage = record.get("usage")
+    window = usage.get("seven_day") if isinstance(usage, dict) else None
+    if not isinstance(window, dict):
+        return None
+    reset = _finite_number(window.get("resets_at"))
+    spent = _finite_number(window.get("spent_dollars"))
+    if reset is None or spent is None or reset < 0 or spent < 0:
+        return None
+    return reset, spent
+
+
+def muse_window_consumption(records: List[Dict]) -> List[Dict[str, object]]:
+    """Sum paired Muse usage deltas by the reset stamp both readings share.
+
+    Muse currently resets Monday at 00:00 UTC. The recorded ``resets_at`` is
+    the window identity, rather than a recomputed lattice value, so a future
+    provider shift follows the stamp already carried by each reading.
+    Repeated heartbeat rows and reads count a run once. Pairs that cross a
+    reset, move backwards, or lack a readable standard-rate amount are omitted
+    because their consumption cannot be assigned to one window safely.
+    """
+    starts: Dict[str, List[Dict]] = {}
+    finishes: Dict[str, List[Dict]] = {}
+    for record in distinct_records(records):
+        if not isinstance(record, dict) or record.get("agent") != "muse":
+            continue
+        run = record.get("run")
+        if not isinstance(run, str) or not run:
+            continue
+        phase = record.get("phase")
+        if phase == "start":
+            starts.setdefault(run, []).append(record)
+        elif phase == "finish":
+            finishes.setdefault(run, []).append(record)
+
+    consumed_by_reset: Dict[float, List[float]] = {}
+    for run, run_starts in starts.items():
+        run_finishes = finishes.get(run, [])
+        if not run_finishes:
+            continue
+
+        ordered_starts = sorted(
+            (row for row in run_starts if _record_timestamp(row) is not None),
+            key=lambda row: _record_timestamp(row),
+        )
+        if not ordered_starts:
+            continue
+        start = next(
+            ((row, _muse_window_reading(row)) for row in ordered_starts
+             if _muse_window_reading(row) is not None),
+            None,
+        )
+        if start is None:
+            continue
+        start_row, start_reading = start
+        start_at = _record_timestamp(start_row)
+        if start_at is None or start_reading is None:
+            continue
+
+        ordered_finishes = sorted(
+            (row for row in run_finishes if _record_timestamp(row) is not None),
+            key=lambda row: _record_timestamp(row),
+        )
+        end = next(
+            ((row, _muse_window_reading(row)) for row in ordered_finishes
+             if _record_timestamp(row) >= start_at
+             and _muse_window_reading(row) is not None),
+            None,
+        )
+        if end is None:
+            continue
+        _, end_reading = end
+        if end_reading is None or end_reading[0] != start_reading[0]:
+            continue
+        delta = end_reading[1] - start_reading[1]
+        if delta < 0:
+            continue
+        consumed_by_reset.setdefault(start_reading[0], []).append(delta)
+
+    return [
+        {
+            "resets_at": reset,
+            "consumed_dollars": round(math.fsum(deltas), 6),
+            "runs": len(deltas),
+        }
+        for reset, deltas in sorted(
+            consumed_by_reset.items(), reverse=True
+        )
+    ]
 
 
 def read(agent: str, timeout: Optional[float] = None) -> List[Dict]:

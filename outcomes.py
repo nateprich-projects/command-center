@@ -642,7 +642,14 @@ def _merged_pr_count(row: Mapping[str, object]) -> Optional[int]:
 
 
 def _cost_observation(row: Mapping[str, object]) -> Optional[Tuple[float, str]]:
-    """Read a cost already priced by another producer; never price tokens here."""
+    """Read explicit, already-priced costs; token usage is never priced here.
+
+    Token counts stay a separate observation until a rate table supplies a
+    price. This join accepts only cost fields that already carry a price and
+    unit, so missing prices remain gaps rather than becoming estimates.
+    """
+    # Keep the accepted price inputs visible at the join boundary: raw
+    # ``token_usage`` is deliberately not a cost source.
     for name, unit in (("cost_usd", "USD"), ("credits", "credits")):
         value = _nonnegative_number(row.get(name))
         if value is not None:

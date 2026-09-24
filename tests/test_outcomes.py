@@ -441,6 +441,7 @@ def test_signal_summary_does_not_treat_raw_tokens_as_priced_cost():
         "output_tokens": 5,
     }
 
+    assert outcomes._cost_observation(row) is None
     cost = outcomes.signal_summary([row], now=NOW)["signals"][
         "cost_per_merged_pr"
     ]

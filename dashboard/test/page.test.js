@@ -3,8 +3,9 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
-  STAGES, age, boardColumns, failureState, museUsageText, nextOwner, phoneState,
-  pipState, renderPhoneBoard, rowTier, shortRepo,
+  STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
+  phoneState, pipState, projectBlocked, renderPhoneBoard, repoOf, repoOptions,
+  rowTier, shortRepo, visible,
 } from "../public/app.js";
 
 class TestNode {
@@ -74,6 +75,17 @@ class TestDocument {
   }
 }
 
+// The page's one sort orders the repository dropdown's names, which are not
+// producer rows; its one filter is the viewer's repository choice, in
+// visible(), which keeps producer order (Nate, 2026-09-24). Everything else
+// stays free of client-side ordering.
+function withoutRepoOptions(source) {
+  const start = source.indexOf("function repoOptions(");
+  const body = source.slice(start, source.indexOf("\n}\n", start));
+  assert.match(body, /\.sort\(/);
+  return source.replace(body, "");
+}
+
 test("the board uses payload order within the fixed plan stages", () => {
   const input = [
     { status: "Building", title: "first" },
@@ -138,7 +150,65 @@ test("board repository names omit the owner prefix", () => {
 
 test("page code does not sort, filter, or reverse producer data", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
-  assert.doesNotMatch(source, /\.(?:sort|filter|reverse)\s*\(/);
+  assert.doesNotMatch(withoutRepoOptions(source), /\.(?:sort|filter|reverse)\s*\(/);
+});
+
+test("the repository filter keeps producer order and drops only other repos", () => {
+  const rows = [
+    { ref: "o/b#3", repo: "b" },
+    { ref: "o/a#1", repo: "a" },
+    { ref: "o/b#2" },
+    { ref: "o/a#9", repository: "o/a" },
+  ];
+  assert.deepEqual(visible(rows, "a").map((row) => row.ref), ["o/a#1", "o/a#9"]);
+  assert.deepEqual(visible(rows, "b").map((row) => row.ref), ["o/b#3", "o/b#2"]);
+  assert.equal(visible(rows, null).length, 4);
+  assert.deepEqual(visible(undefined, "a"), []);
+  // Human steps carry only a ref; decisions carry a full repo.
+  assert.equal(repoOf({ ref: "owner/member-repo#12" }), "member-repo");
+  assert.equal(repoOf({ repo: "nateprich-projects/workbench" }), "workbench");
+});
+
+test("the dropdown lists every repository once, alphabetically, and keeps the choice", () => {
+  const snapshot = {
+    board: { columns: [
+      { stage: "Building", items: [{ repo: "zeta" }, { repo: "alpha" }] },
+      { stage: "Done", items: [{ repo: "zeta" }] },
+    ] },
+    brief: {
+      items: [{ repo: "owner/mid" }],
+      human_steps: [{ ref: "owner/beta#4" }],
+    },
+  };
+  assert.deepEqual(repoOptions(snapshot, null), ["alpha", "beta", "mid", "zeta"]);
+  assert.deepEqual(repoOptions(snapshot, "gone"), ["alpha", "beta", "gone", "mid", "zeta"]);
+});
+
+test("the filter sits at the top of the page and lives in the URL", async () => {
+  const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const masthead = html.slice(html.indexOf('<header class="masthead">'), html.indexOf("</header>"));
+  assert.match(masthead, /<select id="repo-filter">/);
+  assert.match(source, /searchParams\.set\("repo", repo\)/);
+  assert.match(source, /get\("repo"\)/);
+});
+
+test("a row nobody can act on says Blocked where the owner would be", () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    assert.equal(ownerCell(null, true).textContent, "Blocked");
+    assert.ok(ownerCell(null, true).className.includes("owner-blocked"));
+    assert.equal(ownerCell(null, false).textContent, "—");
+    assert.equal(ownerCell("Muse", true).textContent, "Muse");
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+  assert.equal(projectBlocked({ next_step_blocked: true, blocked: false }), true);
+  assert.equal(projectBlocked({ next_step_blocked: false, blocked: false }), false);
+  // An older snapshot without the flag falls back to the project's own block.
+  assert.equal(projectBlocked({ blocked: true }), true);
 });
 
 test("the page renders no brief section other than the board and human steps", async () => {
@@ -289,7 +359,7 @@ test("the bar uses the producer's progress order, and the rows keep queue order"
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   assert.match(source, /item\.pips/);
   // Still no client-side ordering: the producer sends both orders.
-  assert.doesNotMatch(source, /\.(?:sort|filter|reverse)\s*\(/);
+  assert.doesNotMatch(withoutRepoOptions(source), /\.(?:sort|filter|reverse)\s*\(/);
 });
 
 test("the refresh button is gone; the webhook and the scheduled brief replace it", async () => {

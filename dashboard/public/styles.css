@@ -116,6 +116,32 @@ a:hover { text-decoration: underline; }
 .snapshot-status { margin: 0; color: var(--ink-dim); font-size: 13px; }
 .snapshot-status.failed { color: var(--danger); }
 
+.repo-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-self: flex-end;
+  min-width: 0;
+}
+.repo-filter-label {
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+#repo-filter {
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--ink);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 14px;
+  max-width: 100%;
+  cursor: pointer;
+}
+#repo-filter:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 2px; }
+
 #refresh {
   border: 1px solid var(--line);
   background: var(--surface-2);
@@ -356,7 +382,7 @@ main {
    both themes without a second set of literals. */
 .chip-tier-escalated,
 .chip-blocked, .chip-pin, .chip-gate, .owner-nate, .owner-claude, .owner-muse,
-.owner-codex, .chip-class-broken, .chip-class-maintenance, .chip-class-improve,
+.owner-codex, .owner-blocked, .chip-class-broken, .chip-class-maintenance, .chip-class-improve,
 .chip-class-new, .chip-class-replace, .chip-class-investigate {
   border-color: color-mix(in srgb, currentColor 48%, transparent);
 }
@@ -372,6 +398,7 @@ main {
 .owner-claude { color: var(--lavender); }
 .owner-muse { color: var(--pip-submitted); }
 .owner-codex { color: var(--green); }
+.owner-blocked { color: var(--pip-blocked-pip); }
 .chip-class { color: var(--ink-dim); }
 .chip-class-broken { color: var(--danger); }
 .chip-class-maintenance { color: var(--pip-blocked); }

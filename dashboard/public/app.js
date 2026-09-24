@@ -1,7 +1,9 @@
 // The dashboard renders exactly what the publisher sent, in the order it sent
 // it: funnel.py owns ordering, and a second opinion here is how two views of
 // the same board drift apart. Nate, 2026-09-15: the page carries the board and
-// human steps, and no other brief section.
+// human steps, and no other brief section. The one thing the page drops is
+// what the viewer's repository filter hides, and it keeps the order of what
+// remains (Nate, 2026-09-24).
 
 
 // Stages that open collapsed: finished and stopped work is reference, not
@@ -16,6 +18,46 @@ const OWNER_CLASS = {
   Muse: "owner-muse",
   Codex: "owner-codex",
 };
+
+// The repository the viewer picked, or null for every repository. It lives in
+// the URL, so a reload or a shared link keeps it.
+let selectedRepo = null;
+
+function repoOf(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  let repo = entry.repo || entry.repository;
+  if (!repo && typeof entry.ref === "string") repo = entry.ref.split("#")[0];
+  return shortRepo(repo);
+}
+
+// The producer's rows the filter keeps, in the producer's order.
+function visible(entries, repo = selectedRepo) {
+  const kept = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!repo || repoOf(entry) === repo) kept.push(entry);
+  }
+  return kept;
+}
+
+// The dropdown's own list, alphabetical: this orders repository names, never
+// producer rows. The current choice stays listed even when nothing in the
+// snapshot names it, so a quiet repository does not reset the filter.
+function repoOptions(snapshot, current = selectedRepo) {
+  const names = new Set();
+  for (const column of boardColumns(snapshot && snapshot.board)) {
+    for (const item of column.items || []) {
+      const name = repoOf(item);
+      if (name) names.add(name);
+    }
+  }
+  const brief = (snapshot && snapshot.brief) || {};
+  for (const entry of [...(brief.items || []), ...(brief.human_steps || [])]) {
+    const name = repoOf(entry);
+    if (name) names.add(name);
+  }
+  if (current) names.add(current);
+  return [...names].sort((a, b) => a.localeCompare(b));
+}
 
 function present(value) {
   if (Array.isArray(value)) return value.length > 0;
@@ -166,9 +208,24 @@ function tierCell(tier) {
   return chip(tier, `chip-tier chip-tier-${tier}`);
 }
 
-function ownerCell(owner) {
+// A row nobody can act on until a block lifts says so where the owner would
+// be, rather than a blank (Nate, 2026-09-24).
+function ownerCell(owner, blocked = false) {
+  if (!owner && blocked) return chip("Blocked", "chip-owner owner-blocked");
   if (!owner) return element("span", "muted", "—");
   return chip(owner, `chip-owner ${OWNER_CLASS[owner] || ""}`);
+}
+
+function ticketBlocked(ticket) {
+  return Boolean(ticket && ticket.state === "OPEN" && ticket.blocked);
+}
+
+// The producer's flag; an older snapshot without it falls back to the
+// project's own block.
+function projectBlocked(item) {
+  if (!item) return false;
+  if (typeof item.next_step_blocked === "boolean") return item.next_step_blocked;
+  return Boolean(item.blocked);
 }
 
 function headerRow() {
@@ -221,7 +278,7 @@ function ticketRow(ticket) {
 
   row.append(cell("cell-repo", element("span", "muted", "")));
   row.append(cell("cell-tier", tierCell(ticket.state === "OPEN" ? ticket.tier : null)));
-  row.append(cell("cell-owner", ownerCell(ticket.owner)));
+  row.append(cell("cell-owner", ownerCell(ticket.owner, ticketBlocked(ticket))));
   row.append(cell("cell-pips", element("span", "muted", "")));
   row.append(cell("cell-class", element("span", "muted", "")));
   row.append(cell("cell-age", element("span", "muted", "")));
@@ -233,9 +290,7 @@ function phoneChildren(item) {
 }
 
 function phoneRepo(item) {
-  let repo = item && (item.repo || item.repository);
-  if (!repo && item && typeof item.ref === "string") repo = item.ref.split("#")[0];
-  return shortRepo(repo) || "";
+  return repoOf(item) || "";
 }
 
 function phoneCounterParts(item, children) {
@@ -314,7 +369,7 @@ function phoneDetails(item, inheritedClass, children) {
   if (project) {
     fields.append(phoneMeta([
       ["Tier", tierCell(rowTier(children))],
-      ["Next step", ownerCell(nextOwner(item))],
+      ["Next step", ownerCell(nextOwner(item), projectBlocked(item))],
       ["Updated", element("span", "age", item.waited || "—")],
     ]));
     if (item.blocked) fields.append(phoneField("Blocked", blockedChip(item)));
@@ -322,7 +377,7 @@ function phoneDetails(item, inheritedClass, children) {
   } else {
     fields.append(phoneMeta([
       ["Tier", tierCell(item.state === "OPEN" ? item.tier : null)],
-      ["Next step", ownerCell(item.owner)],
+      ["Next step", ownerCell(item.owner, ticketBlocked(item))],
     ]));
     if (item.blocked) fields.append(phoneField("Blocked", blockedChip(item)));
     if (children.length || Number.isFinite(item.tickets_total)) {
@@ -382,7 +437,7 @@ function phoneRow(item, inheritedClass) {
 function renderPhoneBoard(columns) {
   const board = element("div", "phone-board");
   for (const column of columns) {
-    const items = Array.isArray(column.items) ? column.items : [];
+    const items = visible(column.items);
     if (!items.length) continue;
     const group = element("details", "phone-group");
     group.open = !COLLAPSED_STAGES.includes(column.stage);
@@ -430,7 +485,7 @@ function projectRow(item) {
 
   row.append(cell("cell-repo", element("span", "repo", shortRepo(item.repo || item.repository) || "")));
   row.append(cell("cell-tier", tierCell(rowTier(tickets))));
-  row.append(cell("cell-owner", ownerCell(nextOwner(item))));
+  row.append(cell("cell-owner", ownerCell(nextOwner(item), projectBlocked(item))));
   row.append(cell("cell-pips", pips(item, tickets, item.tickets_closed, item.tickets_total)));
   row.append(cell("cell-class", item.class
     ? chip(item.class, `chip-class chip-class-${String(item.class).toLowerCase()}`)
@@ -473,7 +528,7 @@ function renderBoard(board) {
   table.append(headerRow());
   let rendered = 0;
   for (const column of columns) {
-    const items = Array.isArray(column.items) ? column.items : [];
+    const items = visible(column.items);
     if (!items.length) continue;
     const collapsed = COLLAPSED_STAGES.includes(column.stage);
     const head = gridRow("button", "group-head");
@@ -502,7 +557,8 @@ function renderBoard(board) {
     });
   }
   if (!rendered) {
-    container.append(element("p", "empty", "The board is empty."));
+    container.append(element("p", "empty", selectedRepo
+      ? `Nothing on the board for ${selectedRepo}.` : "The board is empty."));
     return;
   }
   container.append(table);
@@ -550,9 +606,14 @@ function renderWaiting(brief) {
   const container = document.querySelector("#waiting");
   container.replaceChildren();
   const total = brief.total_needing_nate;
-  const decisions = brief.items || [];
+  const decisions = visible(brief.items);
+  const steps = visible(brief.human_steps);
 
-  if (total === 0 && !present(brief.human_steps)) {
+  if (selectedRepo && !decisions.length && !steps.length) {
+    container.append(element("p", "empty", `Nothing in ${selectedRepo} is waiting on you.`));
+    return;
+  }
+  if (total === 0 && !present(steps)) {
     container.append(document.querySelector("#empty-state").content.cloneNode(true));
     return;
   }
@@ -566,10 +627,9 @@ function renderWaiting(brief) {
       "Decisions waiting on you", decisions.length, decisions.map(decisionRow),
     ));
   }
-  if (present(brief.human_steps)) {
+  if (present(steps)) {
     sections.append(waitingSection(
-      "Actions waiting on you", brief.human_steps.length,
-      brief.human_steps.map(humanStepRow),
+      "Actions waiting on you", steps.length, steps.map(humanStepRow),
     ));
   }
   container.append(sections);
@@ -619,7 +679,52 @@ function renderUsage(usage) {
 }
 
 let lastGeneratedAt = null;
+let lastSnapshot = null;
 let loading = false;
+
+function readRepoFromUrl() {
+  if (typeof window === "undefined" || !window.location) return null;
+  return new URLSearchParams(window.location.search).get("repo") || null;
+}
+
+function writeRepoToUrl(repo) {
+  if (typeof window === "undefined" || !window.history) return;
+  const url = new URL(window.location.href);
+  if (repo) url.searchParams.set("repo", repo);
+  else url.searchParams.delete("repo");
+  window.history.replaceState(null, "", url);
+}
+
+function renderRepoFilter(snapshot) {
+  const select = document.querySelector("#repo-filter");
+  if (!select) return;
+  const options = [element("option", null, "All repositories")];
+  options[0].value = "";
+  for (const name of repoOptions(snapshot)) {
+    const option = element("option", null, name);
+    option.value = name;
+    options.push(option);
+  }
+  select.replaceChildren(...options);
+  select.value = selectedRepo || "";
+}
+
+function renderAll(snapshot) {
+  renderRepoFilter(snapshot);
+  renderWaiting(snapshot.brief || {});
+  renderUsage(snapshot.usage || {});
+  renderBoard(snapshot.board || {});
+}
+
+function bindRepoFilter() {
+  const select = document.querySelector("#repo-filter");
+  if (!select) return;
+  select.addEventListener("change", () => {
+    selectedRepo = select.value || null;
+    writeRepoToUrl(selectedRepo);
+    if (lastSnapshot) renderAll(lastSnapshot);
+  });
+}
 
 // The page polls its own snapshot: a published snapshot is a KV read through
 // the Worker, so this costs no GitHub budget, and it re-renders only when the
@@ -642,9 +747,8 @@ async function loadSnapshot({ force = false } = {}) {
     status.classList.toggle("failed", Boolean(failure));
     if (!force && generatedAt && generatedAt === lastGeneratedAt) return;
     lastGeneratedAt = generatedAt || null;
-    renderWaiting(snapshot.brief || {});
-    renderUsage(snapshot.usage || {});
-    renderBoard(snapshot.board || {});
+    lastSnapshot = snapshot;
+    renderAll(snapshot);
   } finally {
     loading = false;
   }
@@ -663,6 +767,8 @@ function startPolling() {
 }
 
 if (typeof document !== "undefined") {
+  selectedRepo = readRepoFromUrl();
+  bindRepoFilter();
   loadSnapshot({ force: true })
     .then(startPolling)
     .catch((error) => {
@@ -674,6 +780,7 @@ if (typeof document !== "undefined") {
 }
 
 export {
-  STAGES, age, boardColumns, failureState, museUsageText, nextOwner, phoneState,
-  pipState, renderPhoneBoard, rowTier, shortRepo,
+  STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
+  phoneState, pipState, projectBlocked, renderPhoneBoard, repoOf, repoOptions,
+  rowTier, shortRepo, visible,
 };

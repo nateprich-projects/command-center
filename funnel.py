@@ -8090,6 +8090,7 @@ def _dashboard_item(
     now: datetime,
     by_ref: Dict[str, Item],
     tickets: Optional[List[Dict[str, object]]] = None,
+    next_step_blocked: bool = False,
 ) -> Dict[str, object]:
     """Render the small parent-project row consumed by the dashboard page."""
     return {
@@ -8105,6 +8106,10 @@ def _dashboard_item(
         # The owner of the next step in the chain, not every owner on the
         # project: Nate, 2026-09-15, "only the assignment for the next step".
         "next_owner": _dashboard_next_owner(tickets or ()),
+        # Nothing on the project can move until a block lifts, whether the
+        # block is on the project or on every open ticket. The page reads
+        # "Blocked" where the owner would be (Nate, 2026-09-24).
+        "next_step_blocked": bool(next_step_blocked),
         "blocked": bool(item.is_blocked),
         "blockers": list(item.block_references) if item.is_blocked else [],
         "block_reason": (
@@ -8206,10 +8211,17 @@ def dashboard_board(
 
     Rows are ordered by the engineers' own queue, so the board reads as the
     priority it actually is: within a project the next ticket to be taken is
-    first and closed tickets sink to the bottom, and projects are ordered by
-    their best ticket. `Done` is newest-first; every other stage keeps its
-    time-at-gate order for projects with nothing startable. Ordering is
-    `startable()`'s throughout — this function never invents a rank.
+    first, then other work someone can act on, then blocked tickets, and
+    closed tickets sink to the bottom; projects are ordered by their best
+    ticket. `Done` is newest-first; every other stage keeps its
+    time-at-gate order for projects with nothing startable. The queue order
+    is `startable()`'s throughout — this function never invents a rank.
+
+    A project that cannot move until a block lifts never sits above one that
+    can, unless work above it is what lifts the block (Nate, 2026-09-24): it
+    is placed directly under the project on this column whose work frees it,
+    and below everything else when what it waits on is not on the column —
+    a date, a stated reason, or a project in another stage.
     """
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
@@ -8282,14 +8294,25 @@ def dashboard_board(
         found = authoring.get(str(number))
         return found if found is not None else ()
 
+    def ticket_blocked(child: Item) -> bool:
+        """The block ``_dashboard_ticket`` honours, read from the Item."""
+        parent = by_ref.get(child.parent or "")
+        return bool(
+            child.is_blocked or child.open_blockers
+            or (parent is not None and parent.is_blocked)
+        )
+
     def ticket_key(child: Item):
-        """Next-to-be-taken first, then other open work, then closed."""
+        """Next-to-be-taken first, then other actionable open work (in
+        review, a human step), then blocked work, then closed."""
         rank = queue_rank.get(child.ref)
         if child.state != "OPEN":
+            return (3, 0, child.number)
+        if rank is not None:
+            return (0, rank, child.number)
+        if ticket_blocked(child):
             return (2, 0, child.number)
-        if rank is None:
-            return (1, 0, child.number)
-        return (0, rank, child.number)
+        return (1, 0, child.number)
 
     def ticket_rows(parent: Item) -> List[Dict[str, object]]:
         # `startable()` withholds every ticket of a blocked parent, so the
@@ -8361,6 +8384,102 @@ def dashboard_board(
         return (closed is None, -(closed.timestamp() if closed else 0),
                 item.repo, item.number)
 
+    def next_step_blocked(
+        item: Item, tickets: Sequence[Mapping[str, object]]
+    ) -> bool:
+        """True when nothing on the project can move until a block lifts."""
+        if item.is_blocked:
+            return True
+        open_rows = [t for t in tickets if t.get("state") == "OPEN"]
+        return bool(open_rows) and all(t.get("blocked") for t in open_rows)
+
+    def full_ref(ref: str, repo: str) -> str:
+        """A bare ``#123`` from a block comment names an issue in ``repo``."""
+        text = str(ref)
+        return repo + text if text.startswith("#") else text
+
+    def column_order(
+        stage_items: List[Item],
+        tickets_by_ref: Mapping[str, Sequence[Mapping[str, object]]],
+    ) -> List[Item]:
+        """``board_key`` order, with each blocked project moved under the
+        project whose work unblocks it, or to the bottom of the column.
+
+        Each blocked project has one or more routes back to work: the
+        project's own block, or any one open ticket's blockers. A route
+        clears only when every project it names has moved, so it sits under
+        the last of them; the project follows its earliest route. A route
+        naming anything not on this column (a date, a reason, another
+        stage's project) cannot be lifted from here and reads as the bottom.
+        A pin stays Nate's explicit ordering call and is never moved (#902).
+        """
+        ordered = sorted(stage_items, key=board_key)
+        on_column = {item.ref: item for item in ordered}
+        blocked = {
+            item.ref for item in ordered
+            if not item.pinned
+            and next_step_blocked(item, tickets_by_ref.get(item.ref, ()))
+        }
+        free = [item for item in ordered if item.ref not in blocked]
+        place: Dict[str, Tuple[int, ...]] = {
+            item.ref: (index,) for index, item in enumerate(free)
+        }
+        bottom = (len(free),)
+        tiebreak = {item.ref: index for index, item in enumerate(ordered)}
+        resolving: Set[str] = set()
+
+        def holder(ref: str) -> Optional[str]:
+            """The project on this column that holds ``ref``, if any."""
+            if ref in on_column:
+                return ref
+            found = by_ref.get(ref)
+            if found is not None and found.parent in on_column:
+                return found.parent
+            return None
+
+        def routes(item: Item) -> List[List[str]]:
+            if item.is_blocked:
+                return [[full_ref(r, item.repo) for r in item.block_references]]
+            found: List[List[str]] = []
+            for child in children.get(item.ref, ()):
+                if child.state != "OPEN":
+                    continue
+                refs = [
+                    full_ref(r, child.repo)
+                    for r in (child.open_blockers or child.block_references)
+                ]
+                outside = [r for r in refs if holder(r) != item.ref]
+                if refs and not outside:
+                    # Waits on a sibling; the sibling's own route counts.
+                    continue
+                found.append(outside)
+            return found
+
+        def position(item: Item) -> Optional[Tuple[int, ...]]:
+            if item.ref in place:
+                return place[item.ref]
+            if item.ref in resolving:
+                # A dependency cycle: nothing on the column lifts it.
+                return None
+            resolving.add(item.ref)
+            best: Optional[Tuple[int, ...]] = None
+            for route in routes(item):
+                anchors = []
+                for ref in route:
+                    owner = holder(ref)
+                    anchor = position(on_column[owner]) if owner else None
+                    if anchor is None:
+                        anchors = []
+                        break
+                    anchors.append(anchor)
+                if anchors and (best is None or max(anchors) < best):
+                    best = max(anchors)
+            resolving.discard(item.ref)
+            place[item.ref] = (best or bottom) + (tiebreak[item.ref],)
+            return place[item.ref]
+
+        return sorted(ordered, key=position)
+
     def include(item: Item, stage: str) -> bool:
         if item.parent is not None or item.status != stage:
             return False
@@ -8372,21 +8491,25 @@ def dashboard_board(
             and item.closed_at >= done_cutoff
         )
 
-    return {
-        "columns": [
-            {
-                "stage": stage,
-                "items": [
-                    _dashboard_item(item, now, by_ref, ticket_rows(item))
-                    for item in sorted(
-                        (item for item in rows if include(item, stage)),
-                        key=done_key if stage == "Done" else board_key,
-                    )
-                ],
-            }
-            for stage in DASHBOARD_BOARD_STAGES
-        ]
-    }
+    columns: List[Dict[str, object]] = []
+    for stage in DASHBOARD_BOARD_STAGES:
+        stage_items = [item for item in rows if include(item, stage)]
+        tickets_by_ref = {item.ref: ticket_rows(item) for item in stage_items}
+        if stage == "Done":
+            ordered = sorted(stage_items, key=done_key)
+        else:
+            ordered = column_order(stage_items, tickets_by_ref)
+        columns.append({
+            "stage": stage,
+            "items": [
+                _dashboard_item(
+                    item, now, by_ref, tickets_by_ref[item.ref],
+                    next_step_blocked(item, tickets_by_ref[item.ref]),
+                )
+                for item in ordered
+            ],
+        })
+    return {"columns": columns}
 
 
 def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:

@@ -2914,3 +2914,4 @@
 {"agent": "codex", "note": "reconciled: released nateprich-projects/command-center#1382 after no ticket branch activity within 30 minutes", "outcome": "errored", "phase": "finish", "reconciled_claim": "nateprich-projects/command-center#1382", "run": "fa53601acd36", "ts": 1790239242}
 {"agent": "codex", "note": "reconciled: released nateprich-projects/Fantasy-GM#280 after no ticket branch activity within 30 minutes", "outcome": "errored", "phase": "finish", "reconciled_claim": "nateprich-projects/Fantasy-GM#280", "run": "6b89345f7da7", "ts": 1790239242}
 {"agent": "codex", "do": "ticket", "phase": "bind", "run": "dd24e5938a0e", "ts": 1790239364, "work": "nateprich-projects/Fantasy-GM#280"}
+{"agent": "codex", "api_cost": {"gh_calls": 109, "graphql_points": null}, "phase": "api_cost", "run": "dd24e5938a0e", "ts": 1790239369}

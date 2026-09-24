@@ -970,7 +970,7 @@ def test_finish_declined_blocks_same_reason_when_accept_rejects_defer_note(
     )
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: rejected)
     effects = {"closed": [], "blocked": [], "comments": [], "needs": [],
-               "released": [], "finished": []}
+               "human_needs": [], "released": [], "finished": []}
 
     implement.finish_declined(
         DEFER_NOTE_REASON,
@@ -984,13 +984,16 @@ def test_finish_declined_blocks_same_reason_when_accept_rejects_defer_note(
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
         needs_effect=lambda *args: effects["needs"].append(args),
+        human_needs_effect=lambda url, ref: effects["human_needs"].append(
+            (url, ref)),
         defer_note_close_effect=lambda *args, **kwargs:
             effects["closed"].append((args, kwargs)),
     )
 
     assert effects["closed"] == []
     assert len(effects["blocked"]) == 1
-    assert effects["needs"] == [(rejected["url"], REPO + "#42")]
+    assert effects["needs"] == []
+    assert effects["human_needs"] == [(rejected["url"], REPO + "#42")]
     assert effects["comments"][0][0][2] == "**Declined:** {}".format(
         DEFER_NOTE_REASON)
     assert effects["released"] == [REPO + "#42"]

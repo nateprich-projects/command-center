@@ -2888,3 +2888,4 @@
 {"agent": "codex", "do": "ticket", "phase": "bind", "run": "fa53601acd36", "ts": 1790235818, "work": "nateprich-projects/command-center#1382"}
 {"agent": "codex", "api_cost": {"gh_calls": 103, "graphql_points": null}, "phase": "api_cost", "run": "fa53601acd36", "ts": 1790235823}
 {"agent": "codex", "attempt": null, "escalated_from": null, "harness": "codex", "model": "gpt-5.6-sol", "model_source": "detected", "phase": "start", "provider": "openai", "reasoning_effort": "high", "repo": {"dirty": 0, "head": "00c275729796"}, "run": "a03fee572f5d", "runtime": {"head": "9d2081913066", "root": "/Users/nateprich/.claude/command-center-run"}, "session_id": "01a0d264-f713-7130-b127-ccb6e696fd7e", "ticket": null, "tier": "standard", "ts": 1790236253, "usage": {"seven_day": {"resets_at": 1790734287, "used_percent": 24.0}}}
+{"agent": "codex", "do": "ticket", "phase": "bind", "run": "a03fee572f5d", "ts": 1790236355, "work": "nateprich-projects/FF-Weekly-Start-Sit#277"}

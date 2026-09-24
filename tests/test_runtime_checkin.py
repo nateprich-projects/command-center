@@ -41,10 +41,10 @@ def patch_git(monkeypatch, *, checkout_head=HEAD, remote_head=HEAD):
     commands = []
 
     def run(argv, *, cwd=None, timeout=ff_deploy.COMMAND_TIMEOUT_SECONDS):
-        commands.append(tuple(argv[4:]))
-        if argv[4:] == ["rev-parse", "HEAD"]:
+        commands.append(tuple(argv[3:]))
+        if argv[3:] == ["rev-parse", "HEAD"]:
             return ff_deploy.CommandResult(0, checkout_head + "\n")
-        if argv[4:] == ["ls-remote", "--heads", "origin", "refs/heads/main"]:
+        if argv[3:] == ["ls-remote", "--heads", "origin", "refs/heads/main"]:
             return ff_deploy.CommandResult(
                 0, remote_head + "\trefs/heads/main\n")
         return ff_deploy.CommandResult(2, stderr="unexpected git command")

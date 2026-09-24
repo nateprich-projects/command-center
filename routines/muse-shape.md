@@ -17,24 +17,25 @@ What is the plan, what is settled, and what may only Nate decide?
 
 - **Decided from precedent**: anything the packet's rules or a sibling convention settles. Cite each source; cite nothing when nothing settles it.
 - **Decided by the agent**: judgement where precedent settles nothing, each with reasoning and rejected alternative, marked as yours and never as precedent.
-- **Needs Nate**: his questions only — exposure, gates, scope, preference — each null or a small list of single questions. Leave him what agents cannot reach, exposure changes, gates and their writers, scope and priority, and preferences over deductions. Ask each open one.
+- **Needs Nate**: keep only Nate-owned questions about exposure, gates and their writers, scope and priority, or preferences over deductions. Each category is null or a list of single questions.
 - **Escalated risk**: judge the plan, not its wording. Declare each risk — `credentials` (secrets), `authorisation` (permission models), `data-migration` (backfills), `destructive` (deleting), `concurrency` (races) — with a one-line why; `[]` when none. Declaring never clears the scan.
+- **Premises**: list each factual plan claim with a `file:line`, command/output, or rollout/record pointer and an honest label: `measured` (observed), `documented` (unverified vendor claim), or `inferred` (could be wrong). Use `[]` only when there are no factual premises. The runner renders them; omit them from `plan_markdown`.
 
 ## What never reaches him
 
-- **Sequencing.** Ordering against named tickets or a separate pin or activation is a dependency: record each as `owner/repo#n` in `depends_on`. Whether to build it at all stays scope.
-- **Machine-local paths** follow the repo's documented runtime root; keep the exact path out of Git. An owner-only subdirectory gets a reversible default under that root, recorded with its rollback as your decision.
-- **Technical defaults are yours.** Internal namespace, report placement, metric definition, and API or schema placement choose one canonical source with thin adapters; record assumption and rollback as your decision, never a preference question.
-- **Precedent pass first.** Check each candidate against the packet's rules and siblings before asking; an exact answer there moves to decided-from-precedent with its source.
-- **Atomic questions.** Split a compound so a settled half cannot drag its genuine half to him.
+- **Sequencing.** Put named-ticket order, pins, or activations in `depends_on` as `owner/repo#n`; whether to build stays Scope.
+- **Machine-local paths** use the documented runtime root and stay out of Git. Give an owner-only subdirectory a reversible default and record its rollback as your decision.
+- **Technical defaults are yours.** Choose one canonical source with thin adapters; record assumptions and rollback as decisions, not preference questions.
+- **Check precedent first** against packet rules and siblings; cite exact matches instead of asking.
+- **Ask atomically** so settled facts do not travel with open questions.
 
 ## The answer
 
 Reply with exactly one JSON object and nothing else — no prose, no fences:
 
-{"decided_from_precedent": [{"claim": ..., "source": ...}], "decided_by_agent": [{"decision": ..., "alternative": ..., "why": ...}], "needs_nate": {"exposure": null | ["question"], "gates": null | ["question"], "scope": null | ["question"], "preference": null | ["question"]}, "proposed_class": ..., "plan_markdown": ..., "escalated_risk": [{"reason": ..., "why": ...}], "depends_on": ["owner/repo#n"]}
+{"decided_from_precedent": [{"claim": ..., "source": ...}], "decided_by_agent": [{"decision": ..., "alternative": ..., "why": ...}], "needs_nate": {"exposure": null | ["question"], "gates": null | ["question"], "scope": null | ["question"], "preference": null | ["question"]}, "proposed_class": ..., "plan_markdown": ..., "escalated_risk": [{"reason": ..., "why": ...}], "depends_on": ["owner/repo#n"], "premises": [{"claim": ..., "evidence": ..., "label": "measured" | "documented" | "inferred"}]}
 
-- Every claim, source, decision, alternative, reason, why, and question is one non-empty line. `needs_nate` fields are null or non-empty lists of single questions; anything else fails.
+- Every claim, source, decision, alternative, reason, why, evidence, label, and question is one non-empty line. `needs_nate` fields are null or non-empty lists of single questions.
 - `proposed_class` names one ladder class: Investigate, Broken, Maintenance, Improve, New, or Replace. Propose, never gate.
 - `plan_markdown` states what it is, concretely enough to ticket; what was rejected and why; what is undecided; siblings checked and what each means.
 - `escalated_risk` holds `reason` with `why`; `[]` when none. `depends_on` holds `owner/repo#n` refs; `[]` when the plan waits on nothing.

@@ -175,6 +175,9 @@ def _shape_answer(**overrides):
                        "preference": None},
         "proposed_class": "Improve",
         "plan_markdown": "# Plan\n\nRotate the api-key monthly.\n",
+        "premises": [{"claim": "keys rotate monthly",
+                      "evidence": "plan.md:12",
+                      "label": "documented"}],
     }
     data.update(overrides)
     return json.dumps(data)
@@ -405,7 +408,7 @@ SHAPE_APPLY_STUB = (
     "    malformed('invalid JSON: {}'.format(exc))\n"
     "if not isinstance(data, dict):\n"
     "    malformed('the answer must be one JSON object')\n"
-    "for key in ('decided_from_precedent', 'decided_by_agent', 'needs_nate', 'proposed_class', 'plan_markdown'):\n"
+    "for key in ('decided_from_precedent', 'decided_by_agent', 'needs_nate', 'proposed_class', 'plan_markdown', 'premises'):\n"
     "    if key not in data:\n"
     "        malformed('the answer needs {}'.format(key))\n"
     "needs = data.get('needs_nate')\n"
@@ -1395,6 +1398,9 @@ def test_the_shape_prompt_is_judgement_text_under_500_words():
         assert category in normalized
     assert '"proposed_class"' in prompt
     assert '"plan_markdown"' in prompt
+    assert ('"premises": [{"claim": ..., "evidence": ..., "label": '
+            '"measured" | "documented" | "inferred"}]') in prompt
+    assert "omit them from `plan_markdown`" in normalized
     assert "exactly one json object and nothing else" in normalized
     for protocol in ("funnel.py", "heartbeat.py", "shape-apply",
                      "shape-packet", "gh issue", "```bash"):

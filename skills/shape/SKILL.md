@@ -30,6 +30,20 @@ Three separate sections; keep these names stable:
 Never fold the agent's judgement into precedent, and never use decision
 sections for open questions.
 
+## Factual premises
+
+Record each factual claim the plan relies on as a premise, with its evidence
+pointer and an honest label from the `LEARNINGS.md` scale. Evidence points to
+something another reader can inspect: a `file:line`, a command together with
+its output, or a rollout or record reference. Use `measured` for directly
+observed evidence, `documented` for a vendor claim that has not been verified,
+and `inferred` for a claim that could be wrong.
+
+Premises are the structured `premises` answer field defined and validated by
+`engine/shape.py`; the runner renders them into the plan body. Keep them out of
+`plan_markdown` so the record has one copy. Use an empty list only when the
+plan relies on no factual premises.
+
 ## Needs Nate
 
 Leave to Nate, explicitly rather than guessing: anything unreachable, any

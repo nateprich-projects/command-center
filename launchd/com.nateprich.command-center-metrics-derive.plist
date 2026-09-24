@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hourly execution-metrics derivation (#1278, under #1272). Once an hour it
+  derives one row for the last completed UTC hour and appends it to
+  metrics.jsonl on the heartbeat branch (#1276). A second run over the same
+  hour is idempotent, so a late or doubled fire does no harm.
+
+  Why this exists: metrics.py derive has no other scheduler, and a row that
+  is only derived by hand is as stale as whoever last remembered to run it
+  while still reading as current.
+
+  It reads the newest published snapshot (funnel.py snapshot, a local spool
+  read) rather than running a live brief, so it spends no Projects GraphQL
+  budget of its own; only the publisher runs brief.
+
+  A Python script on a timer, not a headless prompt: AGENTS.md's
+  in-app-scheduling rule covers Claude Code and Codex prompt execution and
+  does not reach this, which is the same reading the publisher (#652) and the
+  outcome derivation (#1288) already run under.
+
+  StartCalendarInterval at minute 22, not StartInterval: the row is keyed to
+  a clock hour, so the fire should be too. Minute 22 is off the Muse lanes'
+  :00/:05/:15 slots and the outcome derivation's 03:20, and leaves the
+  completed hour's last finishes time to reach the ledgers.
+
+  The canonical copy lives here in the repo. launchd refuses a symlinked
+  plist (`Bootstrap failed: 5: Input/output error`, measured 2026-09-07), so
+  the installed file is a copy and tests/test_launchd_drift.py compares them.
+  First install is scripts/install.sh plus a console bootstrap; after that
+  the run-keeper refreshes it.
+
+  Note for editors: XML forbids a double hyphen inside a comment. Use an em
+  dash or a semicolon; plutil accepts the double hyphen and plistlib rejects
+  it, so a file can lint clean and still be unparseable.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nateprich.command-center-metrics-derive</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/nateprich/.claude/command-center-run/metrics.py</string>
+        <string>derive</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>22</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-metrics-derive.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nateprich/Library/Logs/command-center-metrics-derive.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/Users/nateprich/.local/bin</string>
+        <key>HOME</key>
+        <string>/Users/nateprich</string>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

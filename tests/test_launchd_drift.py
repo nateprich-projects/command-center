@@ -52,12 +52,15 @@ RUNTIME_DEPLOY_NAMES = [
 #: The daily outcome-record derivation (#1288). A once-a-day Python run, not a
 #: routine schedule; outcomes.py had no scheduler at all before it.
 OUTCOMES_NAME = "com.nateprich.command-center-outcomes-derive.plist"
+#: The hourly execution-metrics derivation (#1278). A Python run on a clock
+#: hour, reading the published snapshot; not a routine schedule.
+METRICS_NAME = "com.nateprich.command-center-metrics-derive.plist"
 NAMES = MUSE_SCHEDULE_NAMES + [
     KEEPER_NAME, REMOTE_CONTROL_NAME, PUBLISHER_NAME, DEPLOY_NAME,
-    FF_DEPLOY_NAME, *RUNTIME_DEPLOY_NAMES, OUTCOMES_NAME]
+    FF_DEPLOY_NAME, *RUNTIME_DEPLOY_NAMES, OUTCOMES_NAME, METRICS_NAME]
 INSTALL_NAMES = MUSE_SCHEDULE_NAMES + [
     KEEPER_NAME, PUBLISHER_NAME, DEPLOY_NAME, FF_DEPLOY_NAME,
-    *RUNTIME_DEPLOY_NAMES, OUTCOMES_NAME]
+    *RUNTIME_DEPLOY_NAMES, OUTCOMES_NAME, METRICS_NAME]
 
 
 def console_reload_hint(name):
@@ -403,4 +406,24 @@ def test_the_outcomes_derivation_runs_daily_and_scans_every_member_repo():
     assert not any(a.startswith("/Volumes/") for a in args), args
 
     assert plist["StartCalendarInterval"] == {"Hour": 3, "Minute": 20}
+    assert "StartInterval" not in plist
+
+
+def test_metrics_derivation_runs_hourly_on_the_clock():
+    """The metrics row is keyed to a UTC clock hour (#1276), so the fire is a
+    calendar minute every hour, not a StartInterval that drifts from whenever
+    launchd last started it. It runs derive with no fixture flags, so it reads
+    the published snapshot and appends for real.
+    """
+    import plistlib
+
+    with (ROOT / "launchd" / METRICS_NAME).open("rb") as handle:
+        plist = plistlib.load(handle)
+
+    assert plist["Label"] == METRICS_NAME[:-len(".plist")]
+    args = plist["ProgramArguments"]
+    assert args[0] == "/usr/bin/python3"
+    assert args[1].endswith("/metrics.py")
+    assert args[2:] == ["derive"]
+    assert plist["StartCalendarInterval"] == {"Minute": 22}
     assert "StartInterval" not in plist

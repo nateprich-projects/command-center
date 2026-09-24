@@ -284,3 +284,49 @@ def test_append_is_idempotent_and_jsonl_round_trips():
     assert duplicate_appended == 0
     assert second == first
     assert metrics._decode_rows(metrics._encode_rows(second)) == second
+
+
+def test_series_builds_daily_rollups_and_weighted_rate_windows(capsys):
+    fixture = FIXTURES / "metrics_series.jsonl"
+
+    result = metrics.main([
+        "series", "--rows", str(fixture), "--now", "2026-09-24T23:00:00Z",
+    ])
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 1
+    assert payload["as_of"] == "2026-09-24"
+    assert payload["start_date"] == "2026-06-27"
+    assert len(payload["days"]) == 90
+
+    tickets = payload["metrics"]["A"]["A1"]["total"]
+    assert tickets["daily"][-28:] == list(range(1, 29))
+    assert tickets["r7"][-1] == 25
+    assert tickets["r28"][-1] == 14.5
+    assert tickets["delta"][-1] == 10.5
+
+    share = payload["metrics"]["A"]["A2"]
+    assert share["numerators"][-7:] == [1] * 7
+    assert share["denominators"][-7:] == [1, 1, 1, 1, 1, 1, 10]
+    assert share["r7"][-1] == 0.4375
+    assert share["r28"][-1] == 0.49
+    assert share["delta"][-1] == -0.0525
+
+    gapped = payload["metrics"]["A"]["A3"]
+    gap_index = payload["days"].index("2026-09-20")
+    assert gapped["daily"][gap_index] is None
+    assert gapped["r7"][-1] is None
+
+
+def test_series_accepts_the_complete_derived_hourly_schema():
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    row = metrics.derive_row(
+        snapshot, ledgers, usage, outcomes, NOW, commits, lines
+    )
+
+    payload = metrics.series_from_rows([row], NOW)
+
+    assert payload["metrics"]["A"]["A2"]["kind"] == "rate"
+    done = payload["metrics"]["C"]["C1"]["by_agent"]["codex"]["done"]
+    assert done["daily"][-1] == 1

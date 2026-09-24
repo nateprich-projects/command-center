@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Derive and append one completed-hour execution-metrics row.
 
-``metrics.jsonl`` is an append-only projection on the heartbeat branch.  Rows
-keep source facts (and numerator/denominator pairs for rates) so the later
-series reader can roll up days without averaging rounded daily percentages.
+``metrics.jsonl`` is an append-only projection on the heartbeat branch. Rows
+keep source facts (and numerator/denominator pairs for rates) so ``series`` can
+roll up days without averaging rounded daily percentages.
 Missing evidence stays ``null`` with a source and reason; an empty observation
 is represented by a real zero only when the source was readable.
 
@@ -36,6 +36,7 @@ BRANCH = "heartbeat"
 METRICS_PATH = "metrics.jsonl"
 AGENTS = ("muse", "claude", "codex")
 HOUR_SECONDS = 60 * 60
+SERIES_DAYS = 90
 STORE_BACKOFF = (1, 3, 7)
 FINISH_OUTCOMES = (
     "done", "nothing-to-do", "errored", "skipped-over-pace",
@@ -1318,6 +1319,379 @@ def _encode_rows(rows: Iterable[Mapping[str, object]]) -> str:
     return "".join(json.dumps(dict(row), sort_keys=True) + "\n" for row in rows)
 
 
+_SERIES_SUM_PREFIXES = (
+    ("A", "A1"),
+    ("A", "A4", "new_projects_started"),
+    ("A", "A5", "done"),
+    ("A", "A5", "parked"),
+    ("A", "A5", "net_open_growth"),
+    ("A", "A6", "reverts_by_repo"),
+    ("A", "A6", "reopened_tickets"),
+    ("C", "C1"),
+    ("C", "C4"),
+    ("C", "C5"),
+    ("D", "D5", "points_per_brief"),
+    ("D", "D5", "gh_calls_per_brief"),
+    ("D", "D5", "api_reserve_skips"),
+    ("D", "D5", "graphql_points_per_run"),
+    ("D", "D6", "held_hours_by_agent_and_reason"),
+    ("E", "E2", "opened_this_hour"),
+    ("E", "E3"),
+    ("E", "E4"),
+    ("F", "F1"),
+)
+_SERIES_IDENTITY_KEYS = ("lane", "repo", "agent", "job", "reason", "stage", "name")
+_SERIES_MISSING = object()
+
+
+def _series_number(value: object, *, signed: bool = False) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or (not signed and number < 0):
+        return None
+    return number
+
+
+def _series_render_number(value: float) -> object:
+    return int(value) if value.is_integer() else round(value, 9)
+
+
+def _series_kind(path: Tuple[str, ...]) -> str:
+    if any(path[:len(prefix)] == prefix for prefix in _SERIES_SUM_PREFIXES):
+        return "sum"
+    return "mean"
+
+
+def _flatten_series_row(row: Mapping[str, object]):
+    """Return numeric/categorical leaves plus code-level gap information."""
+    root = row.get("metrics")
+    if not isinstance(root, Mapping):
+        raise MetricsError("hourly row metrics must be an object")
+    leaves: Dict[Tuple[str, ...], Dict[str, object]] = {}
+    present_codes = set()
+    code_gaps = set()
+
+    def emit(path: Tuple[str, ...], kind: str, source: Optional[str],
+             gap: Optional[str], value: object = _SERIES_MISSING,
+             numerator: object = _SERIES_MISSING,
+             denominator: object = _SERIES_MISSING) -> None:
+        valid = not bool(gap)
+        if kind in ("rate", "weighted_mean"):
+            top = _series_number(numerator, signed=(kind == "weighted_mean"))
+            bottom = _series_number(denominator)
+            valid = valid and top is not None and bottom is not None and bottom > 0
+            numerator, denominator = top, bottom
+        elif kind == "category":
+            valid = valid and isinstance(value, str)
+        else:
+            number = _series_number(
+                value,
+                signed=(path[:3] == ("A", "A5", "net_open_growth")),
+            )
+            valid = valid and number is not None
+            value = number
+        leaves[path] = {
+            "kind": kind,
+            "source": source,
+            "valid": valid,
+            "value": value,
+            "numerator": numerator,
+            "denominator": denominator,
+        }
+
+    def walk(value: object, path: Tuple[str, ...], source: Optional[str] = None,
+             inherited_gap: Optional[str] = None) -> None:
+        if isinstance(value, Mapping):
+            current_source = value.get("source")
+            if not isinstance(current_source, str) or not current_source:
+                current_source = source
+            current_gap = value.get("gap")
+            if not isinstance(current_gap, str) or not current_gap:
+                current_gap = inherited_gap
+            if len(path) == 2 and current_gap:
+                code_gaps.add(path)
+
+            if "numerator" in value or "denominator" in value:
+                emit(path, "rate", current_source, current_gap,
+                     numerator=value.get("numerator"),
+                     denominator=value.get("denominator"))
+                return
+            if "sum_seconds" in value and "count" in value:
+                emit(path, "weighted_mean", current_source, current_gap,
+                     numerator=value.get("sum_seconds"), denominator=value.get("count"))
+                return
+            if "sum" in value or "count" in value:
+                emit(path, "weighted_mean", current_source, current_gap,
+                     numerator=value.get("sum"), denominator=value.get("count"))
+                return
+            if "value" in value and ("source" in value or "gap" in value):
+                payload = value.get("value")
+                if payload is None:
+                    emit(path, _series_kind(path), current_source,
+                         current_gap or "hourly value is unavailable")
+                else:
+                    walk(payload, path, current_source, current_gap)
+                return
+
+            children = [
+                (str(key), child) for key, child in value.items()
+                if key not in ("source", "gap")
+            ]
+            if not children:
+                if current_gap:
+                    emit(path, _series_kind(path), current_source, current_gap)
+                return
+            for key, child in children:
+                walk(child, path + (key,), current_source, current_gap)
+            return
+
+        if isinstance(value, list):
+            for index, child in enumerate(value):
+                if isinstance(child, Mapping):
+                    identity = next(
+                        ((key, child[key]) for key in _SERIES_IDENTITY_KEYS
+                         if isinstance(child.get(key), (str, int))),
+                        None,
+                    )
+                    if identity is not None:
+                        walk(child, path + (identity[0], str(identity[1])),
+                             source, inherited_gap)
+                        continue
+                walk(child, path + (str(index),), source, inherited_gap)
+            return
+
+        if isinstance(value, str):
+            emit(path, "category", source, inherited_gap, value=value)
+        else:
+            emit(path, _series_kind(path), source,
+                 inherited_gap or ("hourly value is unavailable" if value is None else None),
+                 value=value)
+
+    for group, group_metrics in root.items():
+        if not isinstance(group, str) or not isinstance(group_metrics, Mapping):
+            continue
+        for code, value in group_metrics.items():
+            if not isinstance(code, str):
+                continue
+            code_path = (group, code)
+            present_codes.add(code_path)
+            walk(value, code_path)
+    return leaves, present_codes, code_gaps
+
+
+def _daily_series_leaf(path: Tuple[str, ...], kind: str,
+                       hourly: Sequence[Tuple[Dict, set, set]]):
+    """Aggregate one leaf across a UTC day; any explicit gap fails closed."""
+    code = path[:2]
+    values: List[object] = []
+    numerators: List[float] = []
+    denominators: List[float] = []
+    sources: List[str] = []
+    for leaves, present_codes, code_gaps in hourly:
+        if code not in present_codes or code in code_gaps:
+            return None, None, None, None
+        observation = leaves.get(path)
+        if observation is None:
+            if kind == "sum":
+                values.append(0.0)
+                continue
+            return None, None, None, None
+        if observation.get("kind") != kind or not observation.get("valid"):
+            return None, None, None, None
+        source = observation.get("source")
+        if isinstance(source, str) and source:
+            sources.append(source)
+        if kind in ("rate", "weighted_mean"):
+            numerator = observation.get("numerator")
+            denominator = observation.get("denominator")
+            if not isinstance(numerator, (int, float)) or not isinstance(denominator, (int, float)):
+                return None, None, None, None
+            numerators.append(float(numerator))
+            denominators.append(float(denominator))
+        else:
+            values.append(observation.get("value"))
+
+    if not hourly:
+        return None, None, None, None
+    if kind == "sum":
+        value = sum(values)
+        numerator = denominator = None
+    elif kind == "mean":
+        if not values or any(not isinstance(item, (int, float)) for item in values):
+            return None, None, None, None
+        value = sum(values) / len(values)
+        numerator = denominator = None
+    elif kind in ("rate", "weighted_mean"):
+        numerator, denominator = sum(numerators), sum(denominators)
+        if denominator <= 0:
+            return None, None, None, None
+        value = numerator / denominator
+    elif kind == "category":
+        if not values or not isinstance(values[-1], str):
+            return None, None, None, None
+        value = values[-1]
+        numerator = denominator = None
+    else:
+        return None, None, None, None
+    return value, numerator, denominator, (sources[-1] if sources else None)
+
+
+def _rolling_values(kind: str, daily: Sequence[object],
+                    numerators: Sequence[Optional[float]],
+                    denominators: Sequence[Optional[float]], window: int
+                    ) -> List[Optional[float]]:
+    result: List[Optional[float]] = []
+    for index in range(len(daily)):
+        start = index - window + 1
+        if start < 0:
+            result.append(None)
+            continue
+        values = daily[start:index + 1]
+        if any(value is None or not isinstance(value, (int, float)) for value in values):
+            result.append(None)
+            continue
+        if kind in ("rate", "weighted_mean"):
+            top = numerators[start:index + 1]
+            bottom = denominators[start:index + 1]
+            if any(value is None for value in top + bottom):
+                result.append(None)
+                continue
+            denominator = sum(bottom)  # type: ignore[arg-type]
+            result.append(sum(top) / denominator if denominator > 0 else None)  # type: ignore[arg-type]
+        elif kind == "category":
+            result.append(None)
+        else:
+            result.append(sum(values) / window)  # type: ignore[arg-type]
+    return result
+
+
+def _set_series_leaf(tree: Dict[str, object], path: Tuple[str, ...], value: Dict[str, object]) -> None:
+    node: Dict[str, object] = tree
+    for part in path[:-1]:
+        child = node.setdefault(part, {})
+        if not isinstance(child, dict):
+            raise MetricsError("metrics series has conflicting paths at {}".format(part))
+        node = child
+    if not path or path[-1] in node:
+        raise MetricsError("metrics series has a duplicate or empty leaf path")
+    node[path[-1]] = value
+
+
+def series_from_rows(rows: Sequence[Mapping[str, object]],
+                     now: Optional[datetime] = None) -> Dict[str, object]:
+    """Build the 90-day daily series and its R7, R28 and signed delta arrays.
+
+    ``days`` aligns with each leaf's ``daily``, ``r7``, ``r28`` and ``delta``
+    arrays. Event totals sum hourly facts, gauges average them, and rate leaves
+    retain numerator/denominator parts so rolling rates are weighted correctly.
+    A missing observation or source gap remains JSON ``null`` through rollup.
+    """
+    observed_at = now or datetime.now(timezone.utc)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    as_of = observed_at.astimezone(timezone.utc).date()
+    start_day = as_of - timedelta(days=SERIES_DAYS - 1)
+    day_names = [
+        (start_day + timedelta(days=index)).isoformat()
+        for index in range(SERIES_DAYS)
+    ]
+    flattened_by_day: Dict[str, List[Tuple[Dict, set, set]]] = {}
+    kinds: Dict[Tuple[str, ...], str] = {}
+    seen_hours = set()
+    latest_source_at: Optional[datetime] = None
+    in_window: List[Tuple[datetime, str, Tuple[Dict, set, set]]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            raise MetricsError("metrics series contains a non-object row")
+        hour = _timestamp(row.get("hour"))
+        if hour is None:
+            raise MetricsError("metrics series contains a row without a valid hour")
+        hour_key = _iso(hour.replace(minute=0, second=0, microsecond=0))
+        if hour_key in seen_hours:
+            raise MetricsError("metrics series contains duplicate hour {}".format(hour_key))
+        seen_hours.add(hour_key)
+        day_name = hour.date().isoformat()
+        if day_name < day_names[0] or day_name > day_names[-1]:
+            continue
+        flattened = _flatten_series_row(row)
+        for path, observation in flattened[0].items():
+            kind = observation["kind"]
+            prior = kinds.setdefault(path, kind)
+            if prior != kind:
+                raise MetricsError("metrics series changed aggregation kind for {}".format(".".join(path)))
+        in_window.append((hour, day_name, flattened))
+        source_at = _timestamp(row.get("derived_at")) or hour
+        if latest_source_at is None or source_at > latest_source_at:
+            latest_source_at = source_at
+    in_window.sort(key=lambda item: item[0])
+    for _, day_name, flattened in in_window:
+        flattened_by_day.setdefault(day_name, []).append(flattened)
+
+    # Some fields are unavailable for an hour as one code-level gap, while
+    # their normal shape has nested leaves. Keep those gaps on the code state
+    # so every nested leaf stays null, but do not emit a colliding root leaf.
+    for path in list(kinds):
+        if len(path) == 2 and any(
+            other[:2] == path and len(other) > 2 for other in kinds
+        ):
+            del kinds[path]
+
+    series_tree: Dict[str, object] = {}
+    for path in sorted(kinds):
+        kind = kinds[path]
+        daily: List[object] = []
+        daily_numerators: List[Optional[float]] = []
+        daily_denominators: List[Optional[float]] = []
+        sources: List[str] = []
+        for day_name in day_names:
+            hourly = flattened_by_day.get(day_name, [])
+            value, numerator, denominator, source = _daily_series_leaf(path, kind, hourly)
+            daily.append(value)
+            daily_numerators.append(numerator)
+            daily_denominators.append(denominator)
+            if isinstance(source, str) and source:
+                sources.append(source)
+
+        r7 = _rolling_values(kind, daily, daily_numerators, daily_denominators, 7)
+        r28 = _rolling_values(kind, daily, daily_numerators, daily_denominators, 28)
+        delta = [
+            left - right if left is not None and right is not None else None
+            for left, right in zip(r7, r28)
+        ]
+        leaf: Dict[str, object] = {
+            "kind": kind,
+            "daily": [
+                item if item is None or kind == "category" else _series_render_number(float(item))
+                for item in daily
+            ],
+            "r7": [_series_render_number(item) if item is not None else None for item in r7],
+            "r28": [_series_render_number(item) if item is not None else None for item in r28],
+            "delta": [_series_render_number(item) if item is not None else None for item in delta],
+        }
+        if sources:
+            leaf["source"] = sources[-1]
+        if kind in ("rate", "weighted_mean"):
+            leaf["numerators"] = [
+                _series_render_number(item) if item is not None else None
+                for item in daily_numerators
+            ]
+            leaf["denominators"] = [
+                _series_render_number(item) if item is not None else None
+                for item in daily_denominators
+            ]
+        _set_series_leaf(series_tree, path, leaf)
+
+    return {
+        "schema_version": 1,
+        "as_of": as_of.isoformat(),
+        "start_date": day_names[0],
+        "days": day_names,
+        "source_updated_at": _iso(latest_source_at) if latest_source_at else None,
+        "metrics": series_tree,
+    }
+
+
 def append_rows(
     existing: Sequence[Mapping[str, object]], row: Mapping[str, object]
 ) -> Tuple[List[Dict], int]:
@@ -1692,7 +2066,7 @@ def _parse_now(value: Optional[str]) -> Optional[datetime]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Derive and append one hourly metrics row")
+    parser = argparse.ArgumentParser(description="Derive and report execution metrics")
     sub = parser.add_subparsers(dest="command", required=True)
     derive = sub.add_parser("derive", help="derive one UTC-hour metrics row")
     derive.add_argument("--snapshot", help="fixture snapshot JSON; default reads the newest brief")
@@ -1703,11 +2077,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     derive.add_argument("--line-count", type=int, help="fixture funnel.py line count")
     derive.add_argument("--now", help="UTC hour timestamp, for fixture reproduction")
     derive.add_argument("--dry-run", action="store_true", help="print the row without appending")
+    series = sub.add_parser("series", help="roll hourly facts into 90 daily values")
+    series.add_argument("--rows", help="fixture hourly metrics JSONL; default reads the heartbeat branch")
+    series.add_argument("--now", help="UTC timestamp anchoring the 90-day window")
     args = parser.parse_args(argv)
-    if args.command != "derive":
-        parser.error("unknown command")
-    now = _parse_now(args.now) or datetime.now(timezone.utc)
     try:
+        if args.command == "series":
+            now = _parse_now(args.now) or datetime.now(timezone.utc)
+            rows = _read_jsonl(args.rows) if args.rows else _read_remote()[0]
+            result = series_from_rows(rows, now)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+
+        now = _parse_now(args.now) or datetime.now(timezone.utc)
         snapshot = _read_snapshot(args.snapshot)
         fixture_mode = bool(
             args.snapshot or args.ledger or args.outcomes or args.usage

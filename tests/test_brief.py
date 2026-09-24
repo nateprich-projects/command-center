@@ -1273,6 +1273,25 @@ def test_brief_emits_elapsed_seconds_for_each_section(monkeypatch, capsys):
     assert all(value >= 0 for value in brief["timings"].values())
 
 
+def test_brief_places_measured_api_cost_in_documented_timings_map(monkeypatch, capsys):
+    item = funnel.Item(
+        repo="nateprich/beta", number=94, title="API metrics project",
+        url="https://example.invalid/94", state="OPEN", status="Ready",
+        status_since=NOW,
+    )
+    monkeypatch.setattr(
+        funnel, "api_cost",
+        lambda: {"graphql_points": 23, "gh_calls": 7},
+    )
+
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["timings"]["api_cost.graphql_points"] == 23
+    assert brief["timings"]["api_cost.gh_calls"] == 7
+    assert "api_cost" not in brief
+
+
 def test_brief_timings_identify_a_slow_stage_without_changing_payload(
     monkeypatch, capsys
 ):

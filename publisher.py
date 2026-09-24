@@ -53,6 +53,7 @@ not be able to touch agent runs even by accident.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import re
@@ -65,6 +66,11 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - the schedule Mac and CI are Unix
+    fcntl = None  # type: ignore
 
 SNAPSHOT_KEY = "snapshot"
 METRICS_KEY = "metrics"
@@ -399,6 +405,32 @@ class KVClient:
     def delete(self, key: str) -> None:
         status, body = self._request("DELETE", key)
         self._require_success("DELETE", key, status, body)
+
+
+def acquire_lock(lock_path: Path):
+    """Hold an exclusive lock for a caller that needs serialized ticks.
+
+    Raises when locking itself is unavailable: running unlocked could turn a
+    caller's once-only operation into duplicates, so that fails closed
+    instead.
+    """
+    if fcntl is None:
+        raise PublisherError(
+            "file locking is unavailable here; refusing to run unlocked")
+    try:
+        handle = open(lock_path, "w")
+    except OSError as exc:
+        raise PublisherError(
+            "cannot open lock file {}: {}".format(lock_path, exc))
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        handle.close()
+        if exc.errno in (errno.EACCES, errno.EAGAIN):
+            return None
+        raise PublisherError(
+            "cannot lock {}: {}".format(lock_path, exc))
+    return handle
 
 
 def run_brief(funnel_py: Path, timeout: float) -> BriefResult:

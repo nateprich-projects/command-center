@@ -28,7 +28,8 @@ TOKEN_KINDS = (
 SESSION_GLOBS = {
     "claude": "~/.claude/projects/*/*.jsonl",
     "codex": "~/.codex/sessions/*/*/*/*.jsonl",
-    "zcode": "~/.zcode/cli/rollout/*.jsonl",
+    # zai-exec's call log, one file per engine run named by ZCODE_SESSION_ID.
+    "zcode": "~/.local/share/zai-exec/rollout/*.jsonl",
     "muse": "~/.local/share/muse/sessions/.msp-view-v1/*/*",
 }
 
@@ -67,9 +68,9 @@ def _usage(
     ))
     output = _first_number(raw, ("output_tokens", "outputTokens"))
 
-    # Claude exposes uncached input directly.  Codex, Muse and the retired
-    # zcode reader expose total input plus cache-read input, so derive only the
-    # fresh portion that the source makes observable.
+    # Claude exposes uncached input directly.  Codex and Muse expose total
+    # input plus cache-read input, so derive only the fresh portion that the
+    # source makes observable.  zai-exec writes the fresh count itself.
     if fresh is None and input_tokens is not None:
         if agent == "claude":
             fresh = input_tokens
@@ -184,6 +185,17 @@ def _claude_events(row: Mapping[str, object]) -> Iterable[Tuple[Mapping[str, obj
     return ((row, usage),) if isinstance(usage, Mapping) else ()
 
 
+def _zcode_events(row: Mapping[str, object]) -> Iterable[Tuple[Mapping[str, object], Mapping[str, object]]]:
+    """One zai-exec call: its usage is already split into the shared kinds."""
+    if row.get("type") != "model_io":
+        return ()
+    response = row.get("response")
+    if not isinstance(response, Mapping):
+        return ()
+    usage = response.get("usage")
+    return ((row, usage),) if isinstance(usage, Mapping) else ()
+
+
 def _jsonl_events(
     agent: str,
     path: str,
@@ -203,6 +215,7 @@ def _jsonl_events(
                 candidates = (
                     _codex_events(row) if agent == "codex" else
                     _claude_events(row) if agent == "claude" else
+                    _zcode_events(row) if agent == "zcode" else
                     ()
                 )
                 for event_row, raw in candidates:

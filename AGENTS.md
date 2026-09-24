@@ -160,6 +160,33 @@ wrong.
   2026-09-18 to 2026-09-22 Muse implemented both tiers, because Codex's Plus week was
   nearly spent. _(confirmed by Nate 2026-09-22)_
 
+  **z.ai judges the standard tier from 2026-09-23 until 2026-10-07 00:00 PDT, when
+  the z.ai plan expires** (Nate, 2026-09-23). Muse keeps the escalated tier. Muse's
+  week was nearly spent until its Sunday 2026-09-27 17:00 PDT reset, and Nate's z.ai
+  GLM Coding Plan (Lite: 2,000 credits per five hours, 10,000 per week) is cancelled
+  but active until it expires, so its credits are use-it-or-lose-it.
+  `scripts/muse-review-engine` routes on the clock: a `standard` run before 1791356400
+  runs as agent `zcode` and asks GLM-5.3 through `scripts/zai-exec`, one Messages call
+  with no tools offered to z.ai's Anthropic-compatible endpoint, refused unless
+  `glm-5.3` is the model that answered. The same review, breakdown and shape questions,
+  packets and apply steps serve both backends. The plist is unchanged. At the cutoff
+  the standard tier is Muse's again with nothing to undo, and `heartbeat.retired_agents`
+  retires `zcode` at the same instant. Ending at the start of 2026-10-07 is deliberate:
+  it gives up at most one day rather than risk a day of runs erroring on an expired
+  key. A spent z.ai window stops the lane — `skipped-provider-quota`, then `begin`
+  stops on z.ai's own reading — and never falls back to Muse or parks Muse's lanes.
+  The `zai` pace line is off for the duration (floor and target 100, a one-run reserve
+  in each window), because credits left at the expiry are worth nothing.
+
+  **It is his risk call on unread terms, as Muse's is.** This is headless use of a
+  Coding Plan key from launchd, and z.ai's terms have not been read here. Nothing in
+  this paragraph establishes that they permit it; do not upgrade the wording to
+  "permitted" or "sanctioned". The caveat was stated in the option he answered, and
+  the worst case named was losing a subscription he has already cancelled. The
+  in-app-only rule above is specific to Anthropic and OpenAI and decides nothing here
+  either way. For the duration, review and shaping packets — diffs, tickets and plans
+  from private member repositories — go to z.ai. _(Nate, 2026-09-23.)_
+
   **`--approval-mode never` is not a guard.** Measured 2026-09-07: it does **not** fail
   closed. It means *never ask*, and it auto-approved a shell command with no prompt.
 

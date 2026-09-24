@@ -171,17 +171,37 @@ def _optional_text(value: str) -> Optional[str]:
 PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
              "muse": "meta"}
 
-#: Agents whose schedules have been stopped on purpose. Their records stay
-#: readable and every command still accepts them, so re-enabling is a schedule
-#: paste and removing the name here; but the watchdog and `agent_health` must
-#: not read their silence as a run that died. zcode was retired on 2026-09-09
-#: by Nate's decision: measured over 24h it did work in 18 of 93 runs and was
-#: refused on the z.ai pace line in 63, while Muse carried every job it had on
-#: the separate Meta pool (#431). codex was retired from 2026-09-18 to
-#: 2026-09-22, while Muse implemented both tiers (#1106). It returned when its
-#: automations went live again (Nate, #1315, #1325): Codex implements both
-#: tiers, so its silence is a lane that stopped, not the pause working.
-RETIRED_AGENTS = frozenset({"zcode"})
+#: When z.ai stops answering the standard judgement tier: 2026-10-07 00:00
+#: PDT, the start of the day the cancelled z.ai plan expires (Nate,
+#: 2026-09-23). `scripts/muse-review-engine` routes on the same instant and a
+#: test pins the two together.
+ZAI_STANDARD_UNTIL = 1791356400
+
+
+def retired_agents(now: Optional[float] = None) -> frozenset:
+    """Agents whose schedules are stopped on purpose, as of ``now``.
+
+    Their records stay readable and every command still accepts them, but
+    the watchdog and `agent_health` must not read their silence as a run that
+    died. zcode was retired on 2026-09-09 by Nate's decision: measured over
+    24h it did work in 18 of 93 runs and was refused on the z.ai pace line in
+    63, while Muse carried every job it had on the separate Meta pool (#431).
+    It runs again, as the engine's z.ai standard tier, from 2026-09-23 until
+    ``ZAI_STANDARD_UNTIL``, and retires again at that instant by itself, so
+    its silence after the plan expires is not read as a lane that died.
+    codex was retired from 2026-09-18 to 2026-09-22, while Muse implemented
+    both tiers (#1106). It returned when its automations went live again
+    (Nate, #1315, #1325): Codex implements both tiers, so its silence is a
+    lane that stopped, not the pause working.
+    """
+    now = time.time() if now is None else now
+    return frozenset() if now < ZAI_STANDARD_UNTIL else frozenset({"zcode"})
+
+
+#: Read once per process. Every reader is a short-lived command (a brief, a
+#: watchdog pass, one engine run), so the set is current for the run that
+#: reads it and the zcode lapse needs no edit.
+RETIRED_AGENTS = retired_agents()
 
 #: Which application ran it. Distinct from provider and model: one provider can
 #: be reached through more than one harness, and harnesses differ in ways that
@@ -207,7 +227,11 @@ SESSION_ENVS = {
 MODEL_SOURCES = {
     "claude": "~/.claude/projects/*/*.jsonl",
     "codex": "~/.codex/sessions/*/*/*/*.jsonl",
-    "zcode": "~/.zcode/cli/rollout/*.jsonl",
+    # zai-exec's call log since 2026-09-23, in the zcode app's model-io shape.
+    # Not the retired app's own rollout directory: its newest file is from
+    # 2026-09-09, and reading it would stamp that session's model and input
+    # counts onto every engine run.
+    "zcode": "~/.local/share/zai-exec/rollout/*.jsonl",
     # Muse writes whole-file JSON snapshots rather than JSONL, so it is parsed
     # by its own branch below. `HEAD.json` in the same directory carries no
     # model, which is why this globs snapshots specifically.

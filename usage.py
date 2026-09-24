@@ -1257,6 +1257,27 @@ DOWNSTREAM_RESERVE = 20.0
 # this is the half that was missed.
 
 PROVIDER_POLICY = {
+    # **Unpaced from 2026-09-23: spend it before it lapses.** Nate cancelled
+    # the Coding Plan; it stays active until it expires on 2026-10-07, and
+    # the engine's standard judgement tier runs on it until then (AGENTS.md;
+    # `heartbeat.ZAI_STANDARD_UNTIL`). Credits left at the expiry are worth
+    # nothing, so a line that holds the week back for later is holding it
+    # back for no later at all — the same reasoning that took `openai` to a
+    # floor of 100 on 2026-09-07. Floor and target are therefore both 100.
+    #
+    # What still stops `begin` is an actually spent window, in both of the
+    # windows z.ai reports: `used + reserve > 100`. Each reserve is one run,
+    # not a share held back — a real zcode routine run measured ~43 credits
+    # (below), about 2.2% of the five-hour window's 2,000 credits and 0.4%
+    # of the week's 10,000, so 2.5 and 0.5 refuse a run that could not
+    # finish rather than one that merely spends late. z.ai also refuses a
+    # spent window itself; `scripts/zai-exec` reports that as a quota skip,
+    # and the next `begin` stops here on the reading. _(agent rule,
+    # unconfirmed — advisory; Nate chose to use the credits, 2026-09-23.)_
+    #
+    # The history below explains the paced values this replaced, and is
+    # what to restore if the pool is ever bought again rather than run out.
+    #
     # Bought for the automations and used for nothing else, so there is no
     # interactive share to protect. Set to 90 on 2026-09-06 and lowered to 15 the
     # same day, once a real routine run was measured at ~43 credits rather than
@@ -1295,7 +1316,9 @@ PROVIDER_POLICY = {
     # 22 clears the current 19.6% (used + reserve) with a little room. **Restore
     # to 15 once #93 settles the model** — the measured reasoning for 15 is
     # unchanged and is recorded below.
-    "zai": {"weekly_floor": 22.0, "weekly_reserve": 0.5},
+    "zai": {"weekly_floor": 100.0, "weekly_target": 100.0,
+            "weekly_reserve": 0.5,
+            "five_hour_ceiling": 100.0, "five_hour_reserve": 2.5},
 
     # Muse's pool is metered from local session attribution at the standard
     # rate card, counted from the provider's weekly reset (#1190). 100% is the

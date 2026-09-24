@@ -678,7 +678,7 @@ def test_finish_declined_labels_comments_releases_and_finishes(
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
 
     effects = {"blocked": [], "comments": [], "released": [], "finished": [],
-               "needs": []}
+               "needs": [], "human_needs": []}
 
     result = implement.finish_declined(
         "prerequisite has not landed",
@@ -691,7 +691,10 @@ def test_finish_declined_labels_comments_releases_and_finishes(
             (args, kwargs)),
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
-        needs_effect=lambda url, ref: effects["needs"].append((url, ref)),
+        needs_effect=lambda *args: pytest.fail(
+            "an unknown decline must not stay in the agent lane"),
+        human_needs_effect=lambda url, ref: effects["human_needs"].append(
+            (url, ref)),
     )
 
     assert result == {"ticket": REPO + "#42",
@@ -701,7 +704,8 @@ def test_finish_declined_labels_comments_releases_and_finishes(
     (comment_args, _), = effects["comments"]
     assert comment_args[2] == "**Declined:** prerequisite has not landed"
     assert effects["released"] == [REPO + "#42"]
-    assert effects["needs"] == [
+    assert effects["needs"] == []
+    assert effects["human_needs"] == [
         ("https://github.com/{}/issues/42".format(REPO), REPO + "#42")]
     assert effects["finished"] == [
         ("codex", "run-42", "skipped-blocked",
@@ -784,6 +788,8 @@ def test_finish_declined_routes_accept_conflict_to_review_without_blocking(
             (args, kwargs)),
         needs_effect=lambda url, ref: effects["needs"].append(
             ("agent", url, ref)),
+        human_needs_effect=lambda *args: pytest.fail(
+            "a pointed Accept conflict must not ask Nate"),
         prerequisite_open_effect=lambda ref: pytest.fail(
             "an Accept conflict must not be treated as a prerequisite"),
     )
@@ -815,7 +821,7 @@ def test_finish_declined_routes_accept_conflict_to_review_without_blocking(
     }
 
 
-def test_finish_declined_unparseable_conflict_pointer_falls_back_to_blocked(
+def test_finish_declined_unparseable_conflict_pointer_asks_nate_and_blocks(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
@@ -824,7 +830,7 @@ def test_finish_declined_unparseable_conflict_pointer_falls_back_to_blocked(
         "conflict pointer is not parseable."
     )
     effects = {"blocked": [], "comments": [], "released": [], "finished": [],
-               "needs": []}
+               "needs": [], "human_needs": []}
 
     implement.finish_declined(
         reason,
@@ -837,13 +843,17 @@ def test_finish_declined_unparseable_conflict_pointer_falls_back_to_blocked(
             (args, kwargs)),
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
-        needs_effect=lambda url, ref: effects["needs"].append(
-            ("agent", url, ref)),
+        needs_effect=lambda *args: pytest.fail(
+            "an unparseable decline must not stay in the agent lane"),
+        human_needs_effect=lambda url, ref: effects["human_needs"].append(
+            ("human", url, ref)),
     )
 
     assert len(effects["blocked"]) == 1
     assert effects["blocked"][0][0][1] == 42
-    assert effects["needs"] == [("agent", ticket()["url"], REPO + "#42")]
+    assert effects["needs"] == []
+    assert effects["human_needs"] == [
+        ("human", ticket()["url"], REPO + "#42")]
     assert effects["released"] == [REPO + "#42"]
     assert len(effects["comments"]) == 1
     assert effects["comments"][0][0][2] == "{} {}".format(
@@ -856,7 +866,8 @@ def test_finish_declined_failed_review_handoff_falls_back_to_blocked(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
-    effects = {"blocked": [], "comments": [], "released": [], "finished": []}
+    effects = {"blocked": [], "comments": [], "released": [], "finished": [],
+               "human_needs": []}
 
     def comment_effect(repo, number, body, **kwargs):
         effects["comments"].append(body)
@@ -874,6 +885,8 @@ def test_finish_declined_failed_review_handoff_falls_back_to_blocked(
             (args, kwargs)),
         comment_effect=comment_effect,
         needs_effect=lambda *args: None,
+        human_needs_effect=lambda url, ref: effects["human_needs"].append(
+            ("human", url, ref)),
     )
 
     assert len(effects["blocked"]) == 1
@@ -881,6 +894,8 @@ def test_finish_declined_failed_review_handoff_falls_back_to_blocked(
     assert effects["comments"][0] == "{} {}".format(
         funnel.DECLINED_PREFIX, ACCEPT_BODY_CONFLICT_REASON)
     assert implement.DECLINE_REVIEW_ROUTING_MARKER in effects["comments"][1]
+    assert effects["human_needs"] == [
+        ("human", ticket()["url"], REPO + "#42")]
     assert effects["released"] == [REPO + "#42"]
     assert effects["finished"][0][2] == "skipped-blocked"
     assert "review routing failed; ticket left blocked" in effects["finished"][0][3]
@@ -897,7 +912,8 @@ def test_finish_declined_falls_back_to_blocked_for_non_prerequisite_cases(
     _, clone = make_clone(tmp_path)
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
     effects = {"looked_up": [], "edges": [], "blocked": [], "comments": [],
-               "released": [], "finished": [], "needs": []}
+               "released": [], "finished": [], "needs": [],
+               "human_needs": []}
 
     def edge_effect(repo, number, ref, **kwargs):
         effects["edges"].append((repo, number, ref))
@@ -915,7 +931,10 @@ def test_finish_declined_falls_back_to_blocked_for_non_prerequisite_cases(
             (args, kwargs)),
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
-        needs_effect=lambda *args: effects["needs"].append(args),
+        needs_effect=lambda *args: pytest.fail(
+            "a blocked decline without a machine condition must ask Nate"),
+        human_needs_effect=lambda url, ref: effects["human_needs"].append(
+            (url, ref)),
         prerequisite_open_effect=lambda ref: (
             effects["looked_up"].append(ref) or open_state),
         prerequisite_edge_effect=edge_effect,
@@ -924,7 +943,8 @@ def test_finish_declined_falls_back_to_blocked_for_non_prerequisite_cases(
     assert len(effects["blocked"]) == 1
     ((_, number), kwargs), = effects["blocked"]
     assert number == 42 and kwargs == {"cwd": clone}
-    assert effects["needs"] == [(ticket()["url"], REPO + "#42")]
+    assert effects["needs"] == []
+    assert effects["human_needs"] == [(ticket()["url"], REPO + "#42")]
     assert effects["comments"][0][0][2] == "**Declined:** {}".format(reason)
     assert effects["released"] == [REPO + "#42"]
     assert effects["finished"] == [

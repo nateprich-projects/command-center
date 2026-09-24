@@ -1136,6 +1136,14 @@ def write_declined_needs(url: str, ref: str) -> None:
     breakdown_engine.write_needs(item_id, "agent", ref)
 
 
+def write_declined_human_needs(url: str, ref: str) -> None:
+    """Route an unhandled decline to Nate so its block cannot be stranded."""
+    from engine import breakdown as breakdown_engine
+
+    item_id = breakdown_engine.add_to_project(url)
+    breakdown_engine.write_needs(item_id, "human", ref)
+
+
 def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = None,
                         cwd: pathlib.Path) -> None:
     """Label one ticket blocked, with the native edge when one exists."""
@@ -1577,6 +1585,8 @@ def finish_declined(
         block_effect: Callable[..., None] = mark_ticket_blocked,
         comment_effect: Callable[..., None] = post_agent_comment,
         needs_effect: Callable[[str, str], None] = write_declined_needs,
+        human_needs_effect: Callable[[str, str], None]
+        = write_declined_human_needs,
         prerequisite_open_effect: Callable[[str], bool]
         = declined_prerequisite_is_open,
         prerequisite_edge_effect: Callable[..., None]
@@ -1608,7 +1618,10 @@ def finish_declined(
             # A failed lookup or edge write keeps today's visible block.
             prerequisite_recorded = False
     if not prerequisite_recorded and not accept_conflict_routed:
-        needs_effect(ticket["url"], ref)
+        # Unknown declines and failed prerequisite handoffs have no machine-
+        # readable condition that can clear them. Ask Nate instead of leaving
+        # a blocked ticket in the silent Needs=agent lane.
+        human_needs_effect(ticket["url"], ref)
         block_effect(resolved, context["number"], cwd=context["root"])
     comment_effect(resolved, context["number"],
                    "{} {}".format(funnel.DECLINED_PREFIX, reason),
@@ -1623,6 +1636,7 @@ def finish_declined(
             )
         except (funnel.GitHubError, OSError, subprocess.SubprocessError):
             # An unposted handoff must not leave a false unblocked ticket.
+            human_needs_effect(ticket["url"], ref)
             block_effect(resolved, context["number"], cwd=context["root"])
             routing_failed = True
     release(ref)

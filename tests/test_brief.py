@@ -129,7 +129,8 @@ def test_brief_surfaces_unclassed_captures_with_origin_without_counting_them(
     agent_origin = funnel.Item(
         repo="nateprich/beta", number=13, title="Observed idea",
         url="https://example.invalid/13", state="OPEN", status="Ideas",
-        status_since=NOW - timedelta(hours=3),
+            status_since=NOW - timedelta(hours=3),
+            origin="agent", risk="standard", needs="none",
         body=funnel.origin_block(
             "agent", at=NOW, run="agent-run", agent="codex"
         ),
@@ -137,7 +138,8 @@ def test_brief_surfaces_unclassed_captures_with_origin_without_counting_them(
     classed = funnel.Item(
         repo="nateprich/beta", number=14, title="Already classed",
         url="https://example.invalid/14", state="OPEN", status="Ideas",
-        klass="Improve", status_since=NOW - timedelta(hours=2),
+            klass="Improve", status_since=NOW - timedelta(hours=2),
+            origin="agent", risk="standard", needs="none",
         body=funnel.origin_block(
             "agent", at=NOW, run="classed-run", agent="codex"
         ),
@@ -145,7 +147,8 @@ def test_brief_surfaces_unclassed_captures_with_origin_without_counting_them(
     nate_origin = funnel.Item(
         repo="nateprich/beta", number=15, title="Nate's idea",
         url="https://example.invalid/15", state="OPEN", status="Ideas",
-        status_since=NOW - timedelta(hours=1),
+            status_since=NOW - timedelta(hours=1),
+            origin="Nate", risk="standard", needs="none",
         body=funnel.origin_block(
             "nate-relayed", at=NOW, run="nate-run", agent="claude"
         ),
@@ -174,7 +177,7 @@ def test_brief_surfaces_unclassed_captures_with_origin_without_counting_them(
             "ref": nate_origin.ref,
             "title": nate_origin.title,
             "url": nate_origin.url,
-            "origin": "nate-relayed",
+                "origin": "Nate",
         },
         {
             "ref": legacy.ref,
@@ -343,8 +346,9 @@ def test_brief_comment_tail_cache_is_shared_between_sections(monkeypatch):
     item = funnel.Item(
         repo="nateprich/beta", number=85, title="Both markers",
         url="https://example.invalid/85", state="CLOSED", status="Done",
-        body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
-        klass="Improve", children_total=1, children_done=1,
+            body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
+            klass="Improve", origin="agent", risk="standard", needs="none",
+            children_total=1, children_done=1,
         closed_at=NOW - timedelta(hours=1),
         status_events=[{
             "previous_status": "Ideas", "status": "Ready",
@@ -384,8 +388,9 @@ def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
         return funnel.Item(
             repo="nateprich/beta", number=number, title=title,
             url="https://example.invalid/{}".format(number), state="CLOSED",
-            state_reason="COMPLETED", status="Done", klass="Improve",
-            body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
+                state_reason="COMPLETED", status="Done", klass="Improve",
+                origin="agent", risk="standard", needs="none",
+                body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
             children_total=1, children_done=1, closed_at=at,
         )
 
@@ -459,8 +464,9 @@ def test_closed_itself_batch_is_bounded_and_cached_for_one_run(monkeypatch):
         return funnel.Item(
             repo=repo, number=number, title="Upkeep {}".format(number),
             url="https://example.invalid/{}".format(number), state="CLOSED",
-            state_reason="COMPLETED", status="Done", klass="Improve",
-            body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
+                state_reason="COMPLETED", status="Done", klass="Improve",
+                origin="agent", risk="standard", needs="none",
+                body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
             children_total=1, children_done=1, closed_at=at,
         )
 
@@ -514,8 +520,9 @@ def test_closed_itself_candidates_follow_auto_close_eligibility_signal():
 
     plausible = closed(
         110,
-        klass="Improve",
-        body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
+            klass="Improve",
+            origin="agent", risk="standard", needs="none",
+            body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
         children_total=1,
         children_done=1,
     )
@@ -527,8 +534,9 @@ def test_closed_itself_candidates_follow_auto_close_eligibility_signal():
     )
     carried_human_step = closed(
         113, klass="Improve", children_total=1, children_done=1,
-        body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
-        carried_human_step=True,
+            body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
+            origin="agent", risk="standard", needs="none",
+            carried_human_step=True,
     )
 
     assert funnel.closed_itself_items(
@@ -1053,8 +1061,9 @@ def test_brief_surfaces_agent_health_without_counting_it_as_a_decision(
     item = funnel.Item(
         repo="nateprich/beta", number=60, title="A plan with an open question",
         url="https://example.invalid/60", state="OPEN", status="Shaped",
-        klass="Improve", status_since=NOW,
-        body="## Needs you\n\nChoose a direction.\n",
+            klass="Improve", status_since=NOW,
+            origin="Nate", risk="standard", needs="human",
+            body="## Needs you\n\nChoose a direction.\n",
     )
     health = [{
         "agent": "codex",

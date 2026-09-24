@@ -27,6 +27,9 @@ def _item(number, status, *, repo="nateprich-projects/command-center", **kwargs)
         "state": "OPEN",
         "status": status,
         "klass": "New",
+        "origin": "agent",
+        "risk": "standard",
+        "needs": "none",
         "status_since": NOW - timedelta(days=number),
     }
     values.update(kwargs)

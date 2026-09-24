@@ -29,6 +29,14 @@ REPO = "owner/repo"
 NOW = datetime(2026, 9, 14, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def canonical_field_writes(monkeypatch):
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: None,
+    )
+
+
 def answer(**kw):
     data = {
         "decided_from_precedent": [
@@ -68,6 +76,9 @@ def idea(number=42, **kw):
         "state": "OPEN",
         "status": "Ideas",
         "klass": "Improve",
+        "origin": "agent",
+        "risk": "standard",
+        "needs": "none",
         "item_id": "project-item-{}".format(number),
         "body": body,
         "labels": ["needs-shaping"],
@@ -330,21 +341,15 @@ def test_render_carries_the_plan_and_every_field():
     assert "## Decided by the agent" in body
     assert ("- validate strictly (rejected: accept unknown fields; "
             "unknown fields signal a confused model)") in body
-    assert "## Needs Nate" in body
+    assert "## Needs Nate" not in body
     assert ("Do the thing.\n\nProposed class: Improve\n\n"
             "## Decided from precedent") in body
 
 
-def test_render_uses_the_stable_all_clear_lines():
+def test_render_omits_all_clear_needs_boilerplate():
     body = shape.render_plan(shape.validate_answer(answer()))
-    assert ("- Exposure: nothing outstanding. "
-            "No new credentials or reachable surface.") in body
-    assert "- Gates: nothing outstanding. No gate ownership changes." \
-        in body
-    assert ("- Scope and priority: nothing outstanding. "
-            "The scoped change is documented.") in body
-    assert ("- Preference: nothing outstanding. "
-            "No user-facing choice remains.") in body
+    assert "nothing outstanding" not in body
+    assert "## Needs Nate" not in body
 
 
 def test_render_records_open_questions_verbatim():
@@ -352,7 +357,7 @@ def test_render_records_open_questions_verbatim():
         "exposure": None, "gates": ["Who may write Ready?"],
         "scope": None, "preference": None})))
     assert "- Gates: Who may write Ready?" in body
-    assert "- Exposure: nothing outstanding." in body
+    assert "Exposure:" not in body
 
 
 def test_render_marks_empty_decision_lists():
@@ -381,8 +386,7 @@ def test_render_records_sequencing_dependencies():
         depends_on=["owner/repo#165", "other/repo#7"])))
     assert "## Sequencing" in body
     assert "Depends on: owner/repo#165, other/repo#7" in body
-    # Needs stays last in the rendered body.
-    assert body.index("## Sequencing") < body.index("## Needs Nate")
+    assert body.rstrip().endswith("Depends on: owner/repo#165, other/repo#7")
 
 
 def test_render_omits_sequencing_when_nothing_waits():
@@ -820,7 +824,7 @@ def test_apply_advances_an_all_clear_agent_plan_to_ready(
     written = edits[0][1][-1]
     assert written.startswith("# Plan\n\nDo the thing.\n")
     assert "## Decided from precedent" in written
-    assert "## Needs Nate" in written
+    assert "## Needs Nate" not in written
     assert "Proposed class: Improve" in written
     assert funnel.parse_provenance(written) == {
         "agent": "muse", "at": NOW.isoformat(), "run": "shape-run",
@@ -862,7 +866,7 @@ def test_apply_reviews_false_holds_on_an_agent_broken_replay(
 
     assert item.status == "Ready"
     body_write = gh_calls(calls, "gh", "issue", "edit")[0][1][-1]
-    assert "- Scope and priority: nothing outstanding." in body_write
+    assert "## Needs Nate" not in body_write
     assert "Risk: escalated" not in body_write
     diagnostics = capsys.readouterr().err
     assert "generic Scope permission" in diagnostics
@@ -957,7 +961,7 @@ def test_apply_honours_and_carries_an_override_to_agents(
             "nate-relayed", at=NOW, run="shape-run", agent="muse")
         + "\n\n" + override_block)
     assert funnel.parse_origin_override(body)["target"] == "agents"
-    item = idea(42, body=body)
+    item = idea(42, body=body, origin="Nate")
     calls = stub_gh(monkeypatch, item)
     assert shape.apply_shape(
         [item], NOW, item.ref, answer(),
@@ -1009,7 +1013,7 @@ def test_apply_holds_an_escalated_plan_at_shaped(monkeypatch, capsys):
 def test_apply_holds_a_declared_risk_with_a_clean_scan(
         monkeypatch, capsys):
     # #1034: a clean-worded plan the model flags stays at Shaped, and the
-    # declared risk remains visible to a later self-approval sweep.
+    # declared risk is canonical in the Project field; its explanation stays.
     item = idea(42)
     stub_gh(monkeypatch, item)
     assert shape.apply_shape(
@@ -1019,9 +1023,10 @@ def test_apply_holds_a_declared_risk_with_a_clean_scan(
              "why": "backfills the ledger table"}]),
         run="shape-run", agent="muse") == 0
     assert item.status == "Shaped"
-    assert "Risk: escalated — data-migration: backfills the ledger table" \
-        in item.body
-    assert funnel.plan_is_escalated(item.body)
+    assert item.risk == "escalated"
+    assert "- data-migration: backfills the ledger table" in item.body
+    assert "Risk: escalated" not in item.body
+    assert not funnel.plan_is_escalated(item.body)
     assert "escalated risk (data-migration)" in capsys.readouterr().out
 
 

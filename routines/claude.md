@@ -42,17 +42,12 @@ python3 /Users/nateprich/.claude/command-center-run/funnel.py merge <pr> --yes
 While this Claude routine is off, the escalated Muse schedule carries escalated-tier
 idea shaping.
 
-**Do not grill**: settle what precedent covers, cite
-the source, open questions in `Needs you`:
+**Do not grill**: settle what precedent covers, cite the source, and put only
+actual open questions in `Needs Nate`. Null categories stay out of prose and
+produce `Needs: none`.
 
-```text
-- Exposure: nothing outstanding. No new credentials or reachable surface.
-- Gates: nothing outstanding. No gate ownership changes.
-- Scope and priority: nothing outstanding. The scoped change is documented.
-- Preference: nothing outstanding. No user-facing choice remains.
-```
-
-When all four are clear, a self-approvable class with `agent` origin
+When all four categories are null, a self-approvable class with `agent` origin
+and `Risk: standard`
 advances to `Ready` with a `Self-approved:` marker that `funnel brief`
 shows; anything else stays at `Shaped`, with the reason printed. **Shaped
 is not approval.** If the capture origin is `agent` and Class is unset,

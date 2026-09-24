@@ -9,8 +9,8 @@ applies the self-approval rule mechanically.
 
 The decision never parses a Needs section: ``needs_nate``'s four fields
 are the open-question record, and ``decide`` feeds them to the shared
-``self_approval_eligible`` predicate. The rendered body keeps the stable
-four-category section as the human-readable record of those fields.
+``self_approval_eligible`` predicate. The rendered body includes only open
+questions; the Project field is the durable routing record.
 
 Two entry points share this module: ``shape-packet`` is read-only, while
 ``shape-apply`` performs the shaping writes.
@@ -91,19 +91,6 @@ NEEDS_FIELDS = (
     ("scope", "Scope and priority"),
     ("preference", "Preference"),
 )
-
-#: The all-clear rendering per category, verbatim from skills/shape: the
-#: bare answer is ``nothing outstanding`` and the elaboration follows
-#: after a period.
-ALL_CLEAR = {
-    "Exposure": "nothing outstanding. "
-                "No new credentials or reachable surface.",
-    "Gates": "nothing outstanding. No gate ownership changes.",
-    "Scope and priority": "nothing outstanding. "
-                          "The scoped change is documented.",
-    "Preference": "nothing outstanding. "
-                  "No user-facing choice remains.",
-}
 
 #: The runner's conditional review policy for the false-hold family in
 #: #1359. It rides in the packet so the shaping model sees the rule at
@@ -326,26 +313,23 @@ def validate_answer(data: object) -> Dict:
 def render_plan(answer: Dict) -> str:
     """Render the issue body from validated answer fields.
 
-    The plan narrative and proposed class come first, followed by a
-    durable Risk line when the model declared a risk, then the
+    The plan narrative and proposed class come first, followed by risk
+    rationale when the model declared a risk, then the
     runner-owned decision record: what precedent settled, what the
     agent decided itself, the sequencing dependencies where any wait
-    (#1053), and the four Needs Nate categories (each open list joined
-    on one line, the stable all-clear line where null). Needs stays
-    last so the section holds only its category lines. Takes a
+    (#1053), and only the Needs Nate categories with open questions.
+    Canonical Risk and Needs values live in Project fields. Takes a
     validated answer; ``apply_shape`` validates before calling.
     """
     lines = [answer["plan_markdown"].rstrip(), "",
              "Proposed class: {}".format(answer["proposed_class"]), ""]
     if answer["escalated_risk"]:
-        # The sweep must be able to re-run the exact self-approval condition
-        # after the typed answer is gone. Keep a model-declared risk visible in
-        # the durable plan so the shared plan scan continues to hold it.
-        declared = "; ".join(
-            "{}: {}".format(entry["reason"], entry["why"])
+        lines.extend(["## Risk rationale", ""])
+        lines.extend(
+            "- {}: {}".format(entry["reason"], entry["why"])
             for entry in answer["escalated_risk"]
         )
-        lines.extend(["Risk: escalated — {}".format(declared), ""])
+        lines.append("")
     lines.extend(["## Decided from precedent", ""])
     precedent = answer["decided_from_precedent"]
     if precedent:
@@ -366,14 +350,15 @@ def render_plan(answer: Dict) -> str:
     if depends:
         lines.extend(["", "## Sequencing", "",
                       "Depends on: {}".format(", ".join(depends))])
-    lines.extend(["", "## Needs Nate", ""])
     needs = answer["needs_nate"]
-    for field, category in NEEDS_FIELDS:
-        questions = needs[field]
-        lines.append("- {}: {}".format(
-            category,
-            "; ".join(questions)
-            if questions is not None else ALL_CLEAR[category]))
+    open_questions = [
+        (category, needs[field]) for field, category in NEEDS_FIELDS
+        if needs[field] is not None
+    ]
+    if open_questions:
+        lines.extend(["", "## Needs Nate", ""])
+        for category, questions in open_questions:
+            lines.append("- {}: {}".format(category, "; ".join(questions)))
     lines.append("")
     return "\n".join(lines)
 
@@ -519,8 +504,7 @@ def preview_decision(items: list, item, answer: Dict) -> Tuple[str, str]:
     arguments; takes a validated answer.
     """
     original_body = item.body or ""
-    origin = funnel.parse_origin(original_body)
-    origin_voice = origin["voice"] if origin is not None else None
+    origin_voice = item.origin
     override = funnel.parse_origin_override(original_body)
     override_target = override["target"] if override is not None else None
     by_ref = {candidate.ref: candidate for candidate in items}
@@ -548,8 +532,7 @@ def preview_decision(items: list, item, answer: Dict) -> Tuple[str, str]:
 def review_shape_output_for_item(items: list, item, answer: Dict
                                  ) -> Tuple[Dict, List[str]]:
     """Apply the output review using the same effective class as shaping."""
-    origin = funnel.parse_origin(item.body or "")
-    origin_voice = origin["voice"] if origin is not None else None
+    origin_voice = item.origin
     by_ref = {candidate.ref: candidate for candidate in items}
     effective_klass = funnel.effective_class(item, by_ref)
     if item.klass not in funnel.LADDER and origin_voice == "agent":
@@ -698,14 +681,13 @@ def collect(repo: Optional[str], idea_number: int, *,
     resolved = funnel.resolve_repo(repo)
     items = (items_loader or funnel.load_items)()
     idea_item = funnel.find(items, "{}#{}".format(resolved, idea_number))
-    origin = funnel.parse_origin(idea_item.body or "")
     override = funnel.parse_origin_override(idea_item.body or "")
     plan_md, plan_md_missing = fetch_repo_text(resolved, "plan.md")
     agents_md, agents_md_missing = fetch_repo_text(resolved, "AGENTS.md")
     return build_packet(
         repo=resolved,
         idea=_idea_packet(idea_item),
-        origin_voice=origin["voice"] if origin is not None else None,
+        origin_voice=idea_item.origin,
         override_target=(override["target"]
                          if override is not None else None),
         plan_md=plan_md,
@@ -747,12 +729,9 @@ def apply_shape(items: list, now: datetime, ref: str,
     transition. Validation runs before the first write, so a malformed
     answer leaves the idea untouched.
 
-    Two deliberate departures from ``funnel shaped``: the open-question
-    record comes from the needs_nate fields rather than a Needs-section
-    parse, and a manually placed origin-override block is carried over
-    verbatim with the origin block — otherwise the override term of the
-    rule could never fire on this path, and the packet would report an
-    override the apply step ignores.
+    The open-question record comes from the needs_nate fields rather than a
+    Needs-section parse. A manually placed origin-override block is carried
+    over verbatim; Origin itself lives in the Project field.
 
     Sequencing dependencies ride the body write as native blocked-by
     edges (#1053): one ``gh issue edit`` carries the rendered plan and
@@ -766,11 +745,9 @@ def apply_shape(items: list, now: datetime, ref: str,
     report_output_review(rejected_signals)
 
     original_body = item.body or ""
-    origin = funnel.parse_origin(original_body)
-    origin_voice = origin["voice"] if origin is not None else None
+    origin_voice = item.origin
     carried_blocks = []
-    for marker in (funnel.ORIGIN_MARKER,
-                   funnel.ORIGIN_OVERRIDE_MARKER):
+    for marker in (funnel.ORIGIN_OVERRIDE_MARKER,):
         block = funnel._marked_json_block(original_body, marker)
         if block is not None:
             carried_blocks.append(block)
@@ -811,6 +788,15 @@ def apply_shape(items: list, now: datetime, ref: str,
             item=item.item_id, field=funnel.CLASS_FIELD_ID,
             option=funnel._option_id(funnel.CLASS_FIELD_ID,
                                      answer["proposed_class"]))
+    risk = "escalated" if (
+        answer["escalated_risk"]
+        or funnel.plan_escalation_matches(answer["plan_markdown"])
+    ) else "standard"
+    needs = "human" if status == "Shaped" else "none"
+    funnel.write_project_select(item.item_id, "Risk", risk, item.ref)
+    funnel.write_project_select(item.item_id, "Needs", needs, item.ref)
+    item.risk = risk
+    item.needs = needs
     status_error = funnel._write_status(item, status, now)
     if status_error is not None:
         # The body is durable, but the stage is not confirmed. Do not

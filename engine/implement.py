@@ -1068,8 +1068,6 @@ def render_human_step_body(*, parent_number: int, ticket_number: int,
         "",
         "Action Nate must perform: {}".format(doing),
         "",
-        "Risk: standard",
-        "",
     ])
 
 
@@ -1114,7 +1112,7 @@ def create_human_step_issue(repo: str, parent_number: int, title: str,
 
 
 def write_human_step_needs(url: str, ref: str) -> None:
-    """Set Needs=human on a new human-step sub-issue. Two GitHub calls.
+    """Set canonical routing fields on a new human-step sub-issue.
 
     The sub-issue joins the parent's Project automatically with its fields
     blank; ``gh project item-add`` answers its row id whether fresh or
@@ -1125,7 +1123,17 @@ def write_human_step_needs(url: str, ref: str) -> None:
     from engine import breakdown as breakdown_engine
 
     item_id = breakdown_engine.add_to_project(url)
+    funnel.write_project_select(item_id, "Origin", "agent", ref)
+    funnel.write_project_select(item_id, "Risk", "standard", ref)
     breakdown_engine.write_needs(item_id, "human", ref)
+
+
+def write_declined_needs(url: str, ref: str) -> None:
+    """Route a declined implementation back to agents, not Nate."""
+    from engine import breakdown as breakdown_engine
+
+    item_id = breakdown_engine.add_to_project(url)
+    breakdown_engine.write_needs(item_id, "agent", ref)
 
 
 def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = None,
@@ -1404,12 +1412,14 @@ def finish_declined(
         = finish_heartbeat,
         block_effect: Callable[..., None] = mark_ticket_blocked,
         comment_effect: Callable[..., None] = post_agent_comment,
+        needs_effect: Callable[[str, str], None] = write_declined_needs,
         extra_note: Optional[str] = None) -> dict:
     """Label the declined ticket blocked, record why, release, finish. No PR."""
     context = checkout_context(cwd)
     resolved = resolve_checkout_repo(context["root"], repo)
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
+    needs_effect(ticket["url"], ref)
     block_effect(resolved, context["number"], cwd=context["root"])
     comment_effect(resolved, context["number"],
                    "**Declined:** {}".format(reason),

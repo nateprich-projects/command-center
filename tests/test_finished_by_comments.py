@@ -23,13 +23,15 @@ REPO = "nateprich/example"
 def _project(number, status="Building", klass="Investigate"):
     return Item(repo=REPO, number=number, title="Project %d" % number,
                 url="https://github.com/%s/issues/%d" % (REPO, number),
-                state="OPEN", status=status, klass=klass, children_total=1)
+                state="OPEN", status=status, klass=klass, children_total=1,
+                origin="agent", risk="standard", needs="none")
 
 
 def _ticket(number, parent, state="OPEN"):
     return Item(repo=REPO, number=number, title="Ticket %d" % number,
                 url="https://github.com/%s/issues/%d" % (REPO, number),
-                state=state, body="Risk: standard", parent=parent.ref,
+                state=state, parent=parent.ref,
+                origin="agent", risk="standard", needs="none",
                 item_id="item-%d" % number)
 
 

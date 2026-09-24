@@ -543,7 +543,8 @@ def test_human_step_body_carries_the_reason_as_prose(reason):
     )
     assert "Human step: {}".format(reason) in body.splitlines()
     assert body.startswith("Part of #7; discovered while implementing #42.")
-    assert body.rstrip().endswith("Risk: standard")
+    assert "Risk:" not in body
+    assert body.rstrip().endswith("Action Nate must perform: Approve the OAuth app.")
     assert implement.render_human_step_title("Approve the OAuth app") == (
         "Human step: Approve the OAuth app"
     )
@@ -670,7 +671,8 @@ def test_finish_declined_labels_comments_releases_and_finishes(
     (clone / "halfway.txt").write_text("not finished\n")
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
 
-    effects = {"blocked": [], "comments": [], "released": [], "finished": []}
+    effects = {"blocked": [], "comments": [], "released": [], "finished": [],
+               "needs": []}
 
     result = implement.finish_declined(
         "prerequisite has not landed",
@@ -683,6 +685,7 @@ def test_finish_declined_labels_comments_releases_and_finishes(
             (args, kwargs)),
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
+        needs_effect=lambda url, ref: effects["needs"].append((url, ref)),
     )
 
     assert result == {"ticket": REPO + "#42",
@@ -692,6 +695,8 @@ def test_finish_declined_labels_comments_releases_and_finishes(
     (comment_args, _), = effects["comments"]
     assert comment_args[2] == "**Declined:** prerequisite has not landed"
     assert effects["released"] == [REPO + "#42"]
+    assert effects["needs"] == [
+        ("https://github.com/{}/issues/42".format(REPO), REPO + "#42")]
     assert effects["finished"] == [
         ("codex", "run-42", "skipped-blocked",
          "declined: prerequisite has not landed", REPO + "#42")

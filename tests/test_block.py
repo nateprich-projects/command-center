@@ -19,6 +19,7 @@ def comment_item():
     return funnel.Item(
         repo="nateprich/beta", number=42, title="A ticket",
         url="https://github.com/nateprich/beta/issues/42", state="OPEN",
+        item_id="project-item-42", origin="agent", risk="standard", needs="none",
     )
 
 
@@ -101,6 +102,10 @@ def test_passed_date_is_a_satisfied_condition_and_can_be_cleared(monkeypatch):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: None,
+    )
     assert funnel.clear_satisfied_blocks(
         [item], now, run="run-date", agent="codex"
     ) == [{
@@ -266,6 +271,7 @@ def test_an_answered_marker_does_not_answer_nates_own_shaped_gate():
     item = funnel.Item(
         repo="owner/repo", number=1167, title="Scan quoted text", url="",
         state="OPEN", status="Shaped",
+        origin="Nate", risk="standard", needs="human",
         body=_gates_answer_body(VALID_GATES_ANSWER),
     )
 
@@ -374,6 +380,10 @@ def test_comment_posts_needs_decision_and_applies_blocked_label(monkeypatch):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: None,
+    )
 
     assert funnel.main([
         "comment", "42", "--needs-decision", "Where should this live?",
@@ -525,18 +535,21 @@ def _dated_block_queue(blocked_until):
     parent = funnel.Item(
         repo="nateprich/beta", number=1137, title="Start-date parent", url="",
         state="OPEN", status="Ready", klass="Broken", children_total=7,
+        origin="agent", risk="standard", needs="none",
     )
     tickets = [
         funnel.Item(
             repo="nateprich/beta", number=1130 + n,
             title="ticket {}".format(1130 + n), url="", state="OPEN",
             parent="nateprich/beta#1137",
+            origin="agent", risk="standard", needs="none",
         )
         for n in range(6)
     ]
     dated = funnel.Item(
         repo="nateprich/beta", number=1138, title="Start-date ticket", url="",
         state="OPEN", parent="nateprich/beta#1137",
+        origin="agent", risk="standard", needs="none",
         body="Not before 2026-10-03.",
         labels=["blocked"] if blocked_until is not None else [],
         block_reason="Wait for the start date.",

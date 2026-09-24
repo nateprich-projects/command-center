@@ -19,6 +19,14 @@ from funnel import Item  # noqa: E402
 NOW = datetime(2026, 9, 7, tzinfo=timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def canonical_field_writes(monkeypatch):
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: None,
+    )
+
+
 def test_capture_item_add_failure_surfaces_the_error(monkeypatch, capsys):
     calls = []
 
@@ -147,6 +155,7 @@ def test_capture_non_transient_item_add_failure_does_not_retry(monkeypatch):
 )
 def test_capture_records_each_explicit_origin(monkeypatch, origin, klass):
     calls = []
+    field_writes = []
 
     def run(args, capture_output, text=True):
         calls.append(tuple(args))
@@ -165,6 +174,11 @@ def test_capture_records_each_explicit_origin(monkeypatch, origin, klass):
     monkeypatch.setattr(funnel.subprocess, "run", run)
     monkeypatch.setattr(funnel, "_option_id", lambda field_id, name: "ideas-option")
     monkeypatch.setattr(funnel, "gh_graphql", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: field_writes.append(
+            (item_id, field, value, ref)),
+    )
 
     assert funnel.cmd_capture(
         [], NOW, "An idea", "Raw note", "owner/repo",
@@ -172,8 +186,11 @@ def test_capture_records_each_explicit_origin(monkeypatch, origin, klass):
     ) == 0
 
     body = calls[0][calls[0].index("--body") + 1]
-    assert funnel.parse_origin(body)["voice"] == origin
+    assert funnel.parse_origin(body) is None
     assert funnel.parse_provenance(body)["voice"] == "agent"
+    assert ("project-item-42", "Origin",
+            "agent" if origin == "agent" else "Nate",
+            "https://github.com/owner/repo/issues/42") in field_writes
 
 
 def test_capture_records_caused_by_refs(monkeypatch):

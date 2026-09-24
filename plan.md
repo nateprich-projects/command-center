@@ -41,7 +41,7 @@ gate unless an agent is actively working it.
 | Status | Meaning | Needs Nate |
 |---|---|---|
 | Ideas | Captured, undecided. Unbounded and guilt-free. | No |
-| Shaped | Grilled; a plan exists | **Only if the plan holds an open question** |
+| Shaped | Grilled; a plan exists | **When `Needs: human`, `Risk: escalated`, or `Origin: Nate`** |
 | Ready | Broken into issues | No |
 | Building | Codex is working it | Only when all children close and the project is not self-closing |
 | Done | Shipped and accepted (`state_reason: completed`) | No |
@@ -67,9 +67,9 @@ consistently:
   first ticket.
 - **"Is the plan good?" becomes conditional.** A plan produced by grilling Nate, with
   everything else settled from written precedent, is a transcription of answers he already
-  gave — approving it is the same room with a different sign. It waits for him **only when
-  its "Needs you" section holds a question he has not yet answered**; otherwise `Shaped`
-  advances to `Ready` on its own.
+  gave — approving it is the same room with a different sign. The `Origin`, `Risk`, and
+  `Needs` Project fields record the routing terms. Agent-origin, standard-risk plans with
+  `Needs: none` advance to `Ready`; the other combinations stop at `Shaped`.
 - **"Accept it?" remains the human gate** for work whose class and origin make its
   completion a Nate decision. Whether the thing is worth keeping is not checkable,
   and no agent may decide it.
@@ -615,15 +615,13 @@ GitHub. The `shape` skill implements that surface: `funnel ideas` lists what is 
 body and moves the item to `Shaped`.
 
 That last step is not approval in itself. It records that a plan now exists. Whether it
-then waits for Nate depends on the plan: if its "Needs you" section holds a question he has
-not answered, it stops at `Shaped` and the gate *is the plan good?* is his. If nothing is
-open — everything either settled with him during grilling or decided from written precedent
-and cited — `funnel shaped` advances it to `Ready` itself.
+then waits for Nate comes from the canonical routing fields. `Needs: human`,
+`Risk: escalated`, or `Origin: Nate` stops at `Shaped`; an agent-origin, standard-risk
+plan with `Needs: none` advances to `Ready`.
 
 `Ready` remains authorisation to create tickets, and the breakdown routine still treats it
 that way. What changed is who may write it: the funnel may, on the narrow condition above,
-and an agent may never write it to bypass an open question. A plan with an unanswered
-question in it is the one thing that must stop.
+and an agent may never write it to bypass an open question or escalated risk.
 
 `funnel brief` still excludes Ideas from every count — it is unbounded and guilt-free, and
 counting it turns it into pressure — so `funnel ideas` is **asked for, never pushed**.
@@ -779,6 +777,27 @@ shape as `Status`: two fields, one mental model. And it preserves the decision t
 `Class` internal, which was justified by public readability — a stranger browsing a
 public repo gains nothing from seeing `improve`._
 
+### Origin, Risk and Needs are canonical Project fields
+
+Routing facts live in single-select fields, confirmed by Nate on 2026-09-23. `Origin`
+is `agent` or `Nate`; `Risk` is `standard` or `escalated`; `Needs` is `none`, `agent`,
+`human`, `claude-code-environment`, or `external-event`. The fields are the only
+machine-readable copies. Prose keeps the explanation for an escalated risk and the
+actual question for Nate, but does not repeat standard risk, an all-clear Needs list,
+or a capture-origin marker.
+
+`Needs` answers who or what must act next. `agent` and `external-event` keep blocked
+work out of Nate's decision queue; `human` puts it there; `claude-code-environment`
+routes a ticket to that environment. A missing or unknown routing value fails closed.
+The migration preserves the IDs of all existing `Needs` options before adding the two
+new options, because replacing an option identity clears assignments even when its name
+is unchanged.
+
+_Rejected: continuing to encode these facts in prose after fields exist. A sentence is
+easy for a model to invent, omit, or contradict, which is how standard agent repairs were
+manufactured into escalated human decisions. The fields make the state enumerable and
+the prose can return to explaining the work._
+
 ### Stage stays in the Project Status field
 
 `ProjectV2ItemStatusChangedEvent` exists on the issue timeline and carries `createdAt`,
@@ -853,14 +872,10 @@ step, not a decision. Codex works tickets, one per run.
 
 So: **the project-level issue carries `Status` and `Class`. Its sub-issues are tickets and
 carry neither** — they inherit `Class` for ladder ranking, and `Status` does not apply to
-them. This is what keeps the gate count at roughly four decisions per project rather than
-four per ticket.
-
-_Tickets do carry one field of their own: `Needs`, a single-select with `none`, `human`
-and `claude-code-environment`, naming what the ticket needs beyond the standard lane.
-Design amendment, Nate 2026-09-13 (#794): not a label, a field, so the breakdown runner
-can write it and readers need not scan bodies. Until the runner writes it, the
-body-scanning classifiers stay._
+them. Both levels carry the routing fields described above: project fields decide plan
+gates and completion; ticket `Risk` and `Needs` select the work lane and owner. This is
+what keeps the gate count at roughly four decisions per project rather than four per
+ticket.
 
 GitHub adds a sub-issue to its parent's Project automatically, with its fields blank, so
 this shape needs no maintenance. A parentless item with no `Status` at all is therefore

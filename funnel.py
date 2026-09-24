@@ -491,11 +491,10 @@ ORIGIN_OVERRIDE_TARGETS = ("nate", "agents")
 #: instead of each lane scanning prose for an answer-shaped sentence.
 GATES_ANSWER_MARKER = "<!-- command-center-gates-answer -->"
 
-#: The human half of the same record. ``engine/shape.py`` renders the Needs
-#: section as one ``- <Category>: <text>`` line per category, so the Gates
-#: line is addressable on its own. Anchoring on the heading instead would be
-#: wrong about half the time: this tree spells it both "Needs Nate" and
-#: "Needs you", and `skills/shape` treats the two as the same section.
+#: The human half of the same record. ``engine/shape.py`` renders each open
+#: Needs category as ``- <Category>: <text>``, so the Gates line is
+#: addressable on its own. The legacy heading remains readable during the
+#: migration, although new plans use ``Needs Nate`` only.
 GATES_LINE_RE = re.compile(
     r"(?m)^(?P<indent>[ \t]*)-[ \t]+Gates:[ \t]*(?P<text>.*)$"
 )
@@ -641,11 +640,15 @@ class Item:
     state_reason: Optional[str] = None  # COMPLETED | NOT_PLANNED | REOPENED
     status: Optional[str] = None
     klass: Optional[str] = None
+    # Routing policy lives in Project fields. Origin is set on parent ideas;
+    # Risk and Needs are set on every active row. Issue prose may explain a
+    # value, but it is never a second machine-readable copy of one.
+    origin: Optional[str] = None  # "agent" | "Nate"
+    risk: Optional[str] = None  # "standard" | "escalated"
     pinned: bool = False
-    # The ticket's Needs single-select: "none", "human", or
-    # "claude-code-environment", or None when unset. Tickets carry this one
-    # field of their own (Nate 2026-09-13, #794); #826 made it the only
-    # capability signal, replacing the Human step body marker.
+    # The row's Needs single-select. Tickets use it for work ownership;
+    # projects use it for decision routing. ``agent`` and ``external-event``
+    # distinguish blocked work that does not belong in Nate's decision queue.
     needs: Optional[str] = None
     status_since: Optional[datetime] = None
     # ProjectV2 status history retained from the load query. The brief uses it
@@ -859,6 +862,8 @@ def gate_question(item: Item) -> Optional[str]:
     if item.state != "OPEN":
         return None
     if item.is_blocked:
+        if item.needs in ("agent", "external-event"):
+            return None
         # A named condition is knowable work for the system, not a question for
         # Nate. A silent block still needs his attention, but only a project
         # can be parked; a ticket can only be unblocked.
@@ -890,7 +895,15 @@ def gate_question(item: Item) -> Optional[str]:
         # item at Shaped was held and waits on Nate. This reader must not
         # re-derive eligibility from plan prose: re-deriving could only hide
         # an item the writer held.
-        return GATES["Shaped"]
+        waits_for_nate = (
+            item.origin not in ORIGIN_OPTIONS
+            or item.risk not in RISK_OPTIONS
+            or item.needs not in NEEDS_OPTIONS
+            or item.needs == "human"
+            or item.risk == "escalated"
+            or item.origin == "Nate"
+        )
+        return GATES["Shaped"] if waits_for_nate else None
     return None
 
 
@@ -1110,8 +1123,8 @@ def _begin_role_refusal(agent: str, tier: Optional[str],
                "does (#1322)".format(agent, tier or "untiered"),
     }
 
-#: A ticket declares its risk in its body, written by Claude at breakdown when
-#: the plan is in front of it. `funnel.py` reads it; the engineer never decides.
+#: Legacy risk lines remain import evidence for the canonical Risk field and
+#: inputs to capture-time classification. Live routing reads the field only.
 #:
 #:     Risk: standard
 #:     Risk: escalated — concurrency, destructive
@@ -1141,8 +1154,8 @@ def mark_projects_that_carried_human_steps(items: Sequence[Item]) -> None:
         item.carried_human_step = item.ref in parent_refs
 
 
-#: A safety boundary for tickets written before markers existed, or by someone
-#: who forgot. False positives cost one escalated review; false negatives can
+#: A safety boundary for capture and migration. False positives cost one
+#: escalated review; false negatives can
 #: authorise risky work unattended, so these deliberately match the vocabulary
 #: plans use when describing risky actions — including rejected alternatives.
 #: Category names and `lock`, `park`, `close` or `delete` alone stay ordinary
@@ -1237,10 +1250,11 @@ def escalation_matches(title: str, body: str,
                        ) -> List[Dict[str, Optional[str]]]:
     """Return escalation reasons with the line that supports each one.
 
-    An explicit `Risk:` marker wins outright, in both directions — a ticket that
+    A legacy `Risk:` marker wins outright during classification — a ticket that
     says `Risk: standard` is standard even if its prose mentions a race
     condition, because the person who wrote the plan knew what it meant and a
-    regex does not.
+    regex does not. Live queue and gate readers do not call this classifier;
+    they read the canonical Project field.
 
     Only asserted prose is scanned. Quoted evidence — fenced blocks, block
     quotes, and paired single-backtick spans on one line — is excluded: words
@@ -1368,17 +1382,20 @@ def plan_escalation_matches(plan_body: str
 
 
 def plan_needs_nate(plan_body: str) -> bool:
-    """Whether a rendered plan has any unanswered Needs Nate category.
+    """Whether rendered prose retains an unanswered Needs Nate question.
 
-    The shape answer is the authoritative typed record while the plan is
-    being written. A later lane only has the rendered issue body, so read the
-    same four categories back from its stable section. Missing, duplicate, or
-    unrecognised categories fail closed: absence is not an all-clear.
+    Canonical routing reads the Project field. This reader is limited to the
+    sanctioned Gates-answer edit, where it decides whether another visible
+    question remains after replacing that one line. New plans omit null
+    categories and the whole section when all are null. Legacy all-clear
+    lines remain readable until migration prose has been trimmed.
     """
     text = plan_body or ""
     headings = list(re.finditer(
         r"(?im)^##[ \t]+Needs[ \t]+(?:Nate|you)[ \t]*$", text
     ))
+    if not headings:
+        return False
     if len(headings) != 1:
         return True
 
@@ -1410,11 +1427,11 @@ def plan_needs_nate(plan_body: str) -> bool:
             return True
         answers[category] = match.group("answer").strip()
 
-    required = {"exposure", "gates", "scope", "preference"}
-    if answers.keys() != required:
-        return True
     return any(
-        not re.match(r"(?i)^nothing outstanding\b", answer)
+        not (
+            re.match(r"(?i)^nothing outstanding\b", answer)
+            or re.match(r"(?i)^answered\b", answer)
+        )
         for answer in answers.values()
     )
 
@@ -1473,7 +1490,7 @@ def effective_shape_owner(origin_voice: Optional[str],
         return override_target if override_target in ("nate", "agents") else None
     if origin_voice == "agent":
         return "agents"
-    if origin_voice in ("nate-direct", "nate-relayed"):
+    if origin_voice in ("Nate", "nate-direct", "nate-relayed"):
         return "nate"
     return "nate"
 
@@ -1527,6 +1544,7 @@ def _startable_without_repo_readiness(
         or item.is_blocked
         or item.open_blockers
         or item.children_total
+        or needs not in NEEDS_OPTIONS
         # The Needs field is the only capability signal (#826). A
         # claude-code-environment ticket is the middle outcome: Claude Code
         # may work it, while every other requester must leave it in the
@@ -4366,11 +4384,11 @@ query($login: String!, $number: Int!) {
     projectV2(number: $number) {
       fields(first: 100) {
         nodes {
-          ... on ProjectV2Field { name }
-          ... on ProjectV2IterationField { name }
+          ... on ProjectV2Field { id name }
+          ... on ProjectV2IterationField { id name }
           ... on ProjectV2SingleSelectField {
-            name
-            options { name }
+            id name
+            options { id name color description }
           }
         }
       }
@@ -5196,7 +5214,13 @@ def check_project_fields() -> Check:
             by_name.setdefault(str(name), []).append(field)
 
     problems: List[str] = []
-    for field_name, expected_options in (("Status", STAGES), ("Class", LADDER)):
+    for field_name, expected_options in (
+        ("Status", STAGES),
+        ("Class", LADDER),
+        ("Origin", ORIGIN_OPTIONS),
+        ("Risk", RISK_OPTIONS),
+        ("Needs", NEEDS_OPTIONS),
+    ):
         matching = by_name.get(field_name)
         if not matching:
             problems.append("missing field {}".format(field_name))
@@ -5225,8 +5249,8 @@ def check_project_fields() -> Check:
 
     return Check(
         "Project fields", True,
-        "Project {}/{} has Status, Class and {} with the required options".format(
-            PROJECT_OWNER, PROJECT_NUMBER, LOCK_FIELD),
+        "Project {}/{} has Status, Class, Origin, Risk, Needs and {} with "
+        "the required options".format(PROJECT_OWNER, PROJECT_NUMBER, LOCK_FIELD),
         "",
     )
 
@@ -6840,6 +6864,12 @@ query($login: String!, $number: Int!, $cursor: String) {
           class: fieldValueByName(name: "Class") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
+          origin: fieldValueByName(name: "Origin") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
+          risk: fieldValueByName(name: "Risk") {
+            ... on ProjectV2ItemFieldSingleSelectValue { name }
+          }
           pinned: fieldValueByName(name: "Pinned") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
@@ -7645,6 +7675,8 @@ def _from_node(node: dict) -> Optional[Item]:
         created_at=parse_time(content.get("createdAt")),
         status=status,
         klass=(node.get("class") or {}).get("name"),
+        origin=(node.get("origin") or {}).get("name"),
+        risk=(node.get("risk") or {}).get("name"),
         pinned=(node.get("pinned") or {}).get("name") == "Pinned",
         needs=(node.get("needs") or {}).get("name"),
         labels=[n["name"] for n in content["labels"]["nodes"]],
@@ -8012,10 +8044,11 @@ def _dashboard_ticket(
             block_reason = "project blocked " + parent_block
         else:
             block_reason = "project blocked: " + parent_block
-    body = item.body or ""
     needs = item.needs
-    matches = escalation_matches(item.title, body)
-    tier = "escalated" if matches else "standard"
+    tier = item.risk
+    if tier not in RISK_OPTIONS:
+        tier = "escalated"
+    matches: List[Dict[str, Optional[str]]] = []
 
     pr_state = str((pr_fact or {}).get("state") or "").upper()
     pr_number = (pr_fact or {}).get("number")
@@ -8044,6 +8077,8 @@ def _dashboard_ticket(
     if item.state != "OPEN":
         owner: Optional[str] = None
     elif blocked:
+        owner = None
+    elif needs not in NEEDS_OPTIONS:
         owner = None
     elif needs == "claude-code-environment":
         owner = OWNER_CLAUDE
@@ -8770,10 +8805,9 @@ def _can_close_itself(item: Item) -> bool:
         return False
 
     body = item.body if isinstance(item.body, str) else ""
-    origin = parse_origin(body)
     override = parse_origin_override(body)
     return effective_shape_owner(
-        origin.get("voice") if origin is not None else None,
+        item.origin,
         override.get("target") if override is not None else None,
     ) == "agents"
 
@@ -8966,10 +9000,7 @@ def proposed_class_for_approval(
 
 def capture_origin(item: Item) -> str:
     """Return the recorded capture origin, or ``unknown`` when absent."""
-    origin = parse_origin(item.body or "")
-    if origin is None:
-        return "unknown"
-    return origin["voice"]
+    return item.origin or "unknown"
 
 
 def unclassed_capture_items(items: Iterable[Item]) -> List[Item]:
@@ -9412,6 +9443,12 @@ def clear_satisfied_blocks(
                         item.ref, comment.stderr.strip()
                     )
                 )
+
+        if item.needs == "external-event":
+            if not item.item_id:
+                raise GitHubError("{} is not in the Project".format(item.ref))
+            write_project_select(item.item_id, "Needs", "none", item.ref)
+            item.needs = "none"
 
         edit = _run_gh(
             [
@@ -10706,12 +10743,84 @@ CLASS_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhY15k"
 STATUS_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhY1tc"
 PINNED_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhhygHE"
 PINNED_OPTION = "Pinned"
+ORIGIN_OPTIONS = ("agent", "Nate")
+RISK_OPTIONS = ("standard", "escalated")
 # Third Project single-select, decided by Nate 2026-09-13 (#794), created #808.
 NEEDS_FIELD_ID = "PVTSSF_lAHOD7A-N84BihDgzhiOk9Q"
 NEEDS_OPTION_NONE = "259da669"
 NEEDS_OPTION_HUMAN = "cda6f372"
 NEEDS_OPTION_CLAUDE_CODE_ENVIRONMENT = "cffda418"
-NEEDS_OPTIONS = ("none", "human", "claude-code-environment")
+NEEDS_OPTIONS = (
+    "none", "agent", "human", "claude-code-environment", "external-event",
+)
+
+_PROJECT_SELECT_CACHE: Optional[Dict[str, List[dict]]] = None
+
+
+def clear_project_field_cache() -> None:
+    """Discard the process-local view after a schema mutation."""
+    global _PROJECT_SELECT_CACHE
+    _PROJECT_SELECT_CACHE = None
+
+
+def project_single_select(field_name: str) -> dict:
+    """Read one uniquely named Project single-select and all option IDs.
+
+    Field configuration is GitHub state. Writers resolve it at the point of
+    use rather than duplicating newly created field and option IDs in code.
+    Duplicate names and incomplete options fail closed.
+    """
+    global _PROJECT_SELECT_CACHE
+    if _PROJECT_SELECT_CACHE is None:
+        data = gh_graphql(
+            PROJECT_FIELDS_QUERY, login=PROJECT_OWNER, number=PROJECT_NUMBER)
+        fields = _project_fields(data)
+        if fields is None:
+            raise GitHubError(
+                "Project {}/{} is missing or not visible".format(
+                    PROJECT_OWNER, PROJECT_NUMBER))
+        grouped: Dict[str, List[dict]] = {}
+        for field in fields:
+            if isinstance(field.get("options"), list):
+                grouped.setdefault(str(field.get("name")), []).append(field)
+        _PROJECT_SELECT_CACHE = grouped
+    matching = _PROJECT_SELECT_CACHE.get(field_name, [])
+    if len(matching) != 1:
+        raise GitHubError(
+            "Project field {} resolved to {} fields".format(
+                field_name, len(matching)))
+    field = matching[0]
+    options = field.get("options")
+    if not isinstance(field.get("id"), str) or not isinstance(options, list):
+        raise GitHubError("Project field {} is not a single-select".format(
+            field_name))
+    by_name = {
+        option.get("name"): option.get("id")
+        for option in options if isinstance(option, dict)
+    }
+    if len(by_name) != len(options) or any(
+            not isinstance(value, str) or not value for value in by_name.values()):
+        raise GitHubError(
+            "Project field {} has ambiguous or incomplete options".format(
+                field_name))
+    return {"id": field["id"], "options": by_name}
+
+
+def write_project_select(item_id: str, field_name: str, value: str,
+                         ref: str) -> None:
+    """Write and confirm one canonical Project single-select value."""
+    field = project_single_select(field_name)
+    option = field["options"].get(value)
+    if option is None:
+        raise GitHubError(
+            "Project field {} has no option {}".format(field_name, value))
+    response = gh_graphql(
+        SET_FIELD, project=PROJECT_ID, item=item_id,
+        field=field["id"], option=option)
+    if not _status_write_confirmed(response, item_id):
+        raise GitHubError(
+            "GitHub did not confirm the {} update for {} to {}".format(
+                field_name, ref, value))
 
 CLEAR_FIELD = """
 mutation($project: ID!, $item: ID!, $field: ID!) {
@@ -11038,6 +11147,8 @@ def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
             "{} is a ticket; the Gates question belongs to its project "
             "{}".format(item.ref, item.parent)
         )
+    if not item.item_id:
+        raise GitHubError("{} is not in the Project".format(item.ref))
 
     body = answered_gates_body(
         item.body or "", answer, decider, at=now, run=run, agent=agent)
@@ -11051,6 +11162,9 @@ def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
     # The caller may evaluate this item again in the same session; keep it
     # aligned with what GitHub now holds rather than with what it held.
     item.body = body
+    remaining_needs = "human" if plan_needs_nate(body) else "none"
+    write_project_select(item.item_id, "Needs", remaining_needs, item.ref)
+    item.needs = remaining_needs
 
     recorded = parse_gates_answer(body)
     if recorded is None:
@@ -11149,6 +11263,10 @@ def cmd_comment(items: List[Item], now: datetime, ref: str, body: str,
     if comment.returncode != 0:
         raise GitHubError(comment.stderr.strip())
     if apply_blocked:
+        if not item.item_id:
+            raise GitHubError("{} is not in the Project".format(item.ref))
+        write_project_select(item.item_id, "Needs", "human", item.ref)
+        item.needs = "human"
         edit = _run_gh(
             [
                 "gh", "issue", "edit", str(item.number), "--repo", item.repo,
@@ -11344,7 +11462,6 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
         note or "Captured from chat. Not yet thought through.", "agent",
         at=now, run=run, agent=agent,
     )
-    body = append_origin(body, origin, at=now, run=run, agent=agent)
     if caused_by_refs:
         body = append_caused_by(body, caused_by_refs, at=now)
     args = [
@@ -11383,6 +11500,11 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
                 field=CLASS_FIELD_ID,
                 option=_option_id(CLASS_FIELD_ID, klass),
             )
+        write_project_select(
+            item_id, "Origin", "agent" if origin == "agent" else "Nate", url)
+        write_project_select(
+            item_id, "Risk", required_tier(title, note or ""), url)
+        write_project_select(item_id, "Needs", "none", url)
         print("{}  → Ideas (needs-shaping) in {}".format(url, repo))
     else:
         raise GitHubError(_capture_item_add_error(add))
@@ -12477,8 +12599,9 @@ def review_queue(
             verdict = _row_verdict(row, repo)
             if verdict_covers_head(verdict, row.get("headRefOid")):
                 continue  # this exact diff has already been judged
-            needed = required_tier(
-                ticket.title, _loaded_item_body(ticket)
+            recorded_risk = getattr(ticket, "risk", None)
+            needed = (
+                recorded_risk if recorded_risk in RISK_OPTIONS else "escalated"
             )
             if tier and needed != tier:
                 continue
@@ -12519,8 +12642,11 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     for item in ideas(items):
         if "needs-shaping" not in getattr(item, "labels", ()):
             continue
-        body = _loaded_item_body(item)
-        if tier is not None and required_tier(item.title, body) != tier:
+        recorded_risk = getattr(item, "risk", None)
+        needed = (
+            recorded_risk if recorded_risk in RISK_OPTIONS else "escalated"
+        )
+        if tier is not None and needed != tier:
             continue
         return item
     return None
@@ -12530,16 +12656,14 @@ def shaped_self_approvable(item: Item,
                            by_ref: Dict[str, Item]) -> bool:
     """Re-evaluate one Shaped plan with the existing self-approval rule."""
     body = _loaded_item_body(item)
-    origin = parse_origin(body)
-    origin_voice = origin["voice"] if origin is not None else None
     override = parse_origin_override(body)
     override_target = override["target"] if override is not None else None
     return self_approval_eligible(
         effective_class(item, by_ref),
-        origin_voice,
+        item.origin,
         override_target,
-        needs_nate=plan_needs_nate(body),
-        escalated=bool(plan_is_escalated(body)),
+        needs_nate=item.needs == "human",
+        escalated=item.risk != "standard",
         state=item.state,
     )
 
@@ -12567,8 +12691,7 @@ def sweep_shaped_self_approvals(
             continue
 
         body = _loaded_item_body(item)
-        origin = parse_origin(body)
-        origin_voice = origin["voice"] if origin is not None else None
+        origin_voice = item.origin
         klass = effective_class(item, by_ref)
         owner_basis = (
             "origin agent" if origin_voice == "agent"

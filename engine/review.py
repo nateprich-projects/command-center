@@ -953,7 +953,7 @@ def precheck_stop(packet: dict) -> List[str]:
 
 
 def precheck_repo_rules(packet: dict) -> List[str]:
-    """Row 8: per-repo path rules that outrank the ticket's Risk marker."""
+    """Row 8: per-repo path rules that outrank the ticket's Risk field."""
     repo = packet.get("repo")
     changed = packet.get("changed_files") or []
     ticket = packet.get("ticket") or {}
@@ -968,8 +968,9 @@ def precheck_repo_rules(packet: dict) -> List[str]:
             touched = [path for path in changed if path == rule["path"]]
         if not touched:
             continue
-        tier = funnel.required_tier(ticket.get("title") or "",
-                                    ticket.get("body") or "")
+        tier = ticket.get("risk")
+        if tier not in funnel.RISK_OPTIONS:
+            tier = "unset"
         if tier != rule["tier"]:
             reasons.append(
                 "repo-rules: {} in {} is {}-only but the ticket is {} ({})"
@@ -1332,7 +1333,7 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
     if ticket is None:
         return {
             "ref": None, "number": None, "title": None, "url": None,
-            "body": None, "parent": None, "comments": [],
+            "body": None, "risk": None, "parent": None, "comments": [],
         }
     parent = ticket.get("parent")
     if isinstance(parent, dict):
@@ -1344,6 +1345,7 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
         "title": ticket.get("title"),
         "url": ticket.get("url"),
         "body": ticket.get("body"),
+        "risk": ticket.get("risk"),
         "parent": parent,
         "comments": ticket_comments(ticket.get("comments")),
     }
@@ -1598,6 +1600,8 @@ def collect(repo: Optional[str], pr_number: int, *,
     the packet falls back to the PR reads with ``scope_source`` ``"pr"``.
     """
     resolved = funnel.resolve_repo(repo)
+    loaded_items = (items_loader or funnel.load_items)()
+    project_rows = {item.ref: item for item in loaded_items}
     pr_view = fetch_pr(resolved, pr_number)
     ref = funnel.ticket_ref_from_branch(
         resolved, pr_view.get("headRefName") or "")
@@ -1616,6 +1620,9 @@ def collect(repo: Optional[str], pr_number: int, *,
             continue
         seen.add((closing_repo, closing_number))
         tickets.append(fetch_ticket(closing_repo, closing_number))
+    for row in tickets:
+        project_item = project_rows.get(row.get("ref"))
+        row["risk"] = getattr(project_item, "risk", None)
     plan_md, plan_md_missing = fetch_plan_md(resolved)
     branch = pr_view.get("headRefName") or ""
     base_ref = pr_view.get("baseRefName") or ""
@@ -1652,7 +1659,7 @@ def collect(repo: Optional[str], pr_number: int, *,
         merged_prs=fetch_merged_prs(resolved),
         ci_runs=fetch_ci_runs(resolved, branch) if branch else [],
         verdict=fetch_verdict(resolved, pr_number),
-        stop_counter=fetch_stop_counter(items_loader, now),
+        stop_counter=fetch_stop_counter(lambda: loaded_items, now),
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),
     )
 

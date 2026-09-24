@@ -46,7 +46,7 @@ Reply with exactly one JSON object and nothing else — no prose, no fences:
 {"tickets": [{"title": ..., "body": ..., "risk": "standard" | "escalated", "depends_on": [...], "needs": "none" | "human" | "claude-code-environment"}], "needs_decision": null | "question"}
 
 - `title` names the one concern; `body` states the bounded work and
-  its proof. The runner writes the `Risk:` line and edges itself.
+  its proof. The runner writes the `Risk` field and edges itself.
 - `risk` is `escalated` when the ticket needs the expensive reviewer
   — credentials, permissions, migrations, destructive or concurrent
   work — else `standard`. Your line wins over any later scan, so

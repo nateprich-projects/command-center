@@ -21,14 +21,17 @@ def _queue_items():
     parent = funnel.Item(
         repo=REPO, number=10, title="Parent", url="", state="OPEN",
         status="Ready", klass="Broken", children_total=2, status_since=NOW,
+        origin="agent", risk="standard", needs="none",
     )
     in_pr = funnel.Item(
         repo=REPO, number=11, title="Already in a PR", url="", state="OPEN",
-        parent="{}#10".format(REPO),
+        parent="{}#10".format(REPO), origin="agent", risk="standard",
+        needs="none",
     )
     free = funnel.Item(
         repo=REPO, number=12, title="Still to do", url="", state="OPEN",
-        parent="{}#10".format(REPO),
+        parent="{}#10".format(REPO), origin="agent", risk="standard",
+        needs="none",
     )
     return [parent, in_pr, free]
 

@@ -139,20 +139,22 @@ def test_begin_readiness_withholds_affected_repo_but_keeps_other_repos_flowing()
         funnel.Item(
             repo=affected, number=1, title="affected project", url="",
             state="OPEN", status="Building", klass="Improve",
-            children_total=1,
+            children_total=1, origin="agent", risk="standard", needs="none",
         ),
         funnel.Item(
             repo=affected, number=2, title="affected ticket", url="",
             state="OPEN", parent=affected + "#1",
+            origin="agent", risk="standard", needs="none",
         ),
         funnel.Item(
             repo=healthy, number=3, title="healthy project", url="",
             state="OPEN", status="Building", klass="Improve",
-            children_total=1,
+            children_total=1, origin="agent", risk="standard", needs="none",
         ),
         funnel.Item(
             repo=healthy, number=4, title="healthy ticket", url="",
             state="OPEN", parent=healthy + "#3",
+            origin="agent", risk="standard", needs="none",
         ),
     ]
     readiness = {

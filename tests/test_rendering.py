@@ -20,6 +20,9 @@ def item(number, status=None, klass=None, days=1.0, **kw):
     kw.setdefault("url", "https://example.invalid/{}".format(number))
     kw.setdefault("state", "OPEN")
     kw.setdefault("status_since", NOW - timedelta(days=days))
+    kw.setdefault("origin", "agent")
+    kw.setdefault("risk", "standard")
+    kw.setdefault("needs", "none")
     return funnel.Item(
         number=number, status=status, klass=klass, **kw
     )
@@ -29,6 +32,7 @@ def test_queue_renders_classes_in_each_section(capsys):
     waiting = item(
         1, "Building", "Improve", children_total=1, children_done=1,
         body=funnel.origin_block("nate-relayed", at=NOW, run="render-run", agent="codex"),
+        origin="Nate",
         carried_human_step=True,
     )
     unclassed = item(2, "Building", None, children_total=1, children_done=1)
@@ -112,6 +116,7 @@ def test_queue_keeps_single_repo_output_unchanged(capsys):
     waiting = item(
         1, "Building", "Improve", children_total=1, children_done=1,
         body=funnel.origin_block("nate-relayed", at=NOW, run="render-run", agent="codex"),
+        origin="Nate",
         carried_human_step=True,
     )
     parent = item(2, "Ready", "New", children_total=1)

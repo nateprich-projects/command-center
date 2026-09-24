@@ -12,6 +12,8 @@ import json
 import pathlib
 import sys
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -21,6 +23,14 @@ from engine import review  # noqa: E402
 REPO = "owner/repo"
 WORKBENCH = "nateprich-projects/workbench"
 SHA = "abc123def456"
+
+
+@pytest.fixture(autouse=True)
+def project_risk(monkeypatch):
+    monkeypatch.setattr(
+        funnel, "load_items",
+        lambda: [type("Row", (), {"ref": REPO + "#9", "risk": "standard"})()],
+    )
 OTHER_SHA = "7890fedcba98"
 HEAD_DATE = "2026-09-13T12:00:00Z"
 NEWER = "2026-09-13T13:00:00Z"
@@ -57,6 +67,7 @@ def ticket(**kw):
         "title": "the ticket",
         "url": "https://github.com/{}/issues/9".format(REPO),
         "body": "Parent: #1.\n\nWhat: do the thing.\n\nRisk: standard",
+        "risk": "standard",
         "parent": {"number": 1, "title": "another plan", "state": "OPEN",
                    "url": "https://github.com/{}/issues/1".format(REPO)},
     }
@@ -481,8 +492,8 @@ def test_repo_row_fails_a_standard_messages_ticket():
 
 def test_repo_row_passes_an_escalated_messages_ticket():
     view = pr_view(files=[{"path": CONNECTOR}])
-    escalated = ticket(body="Parent: #700.\n\nWhat: change the sender.\n\n"
-                            "Risk: escalated")
+    escalated = ticket(
+        body="Parent: #700.\n\nWhat: change the sender.", risk="escalated")
     found = packet(repo=WORKBENCH, pr_view=view, ticket=escalated)
     assert found["precheck"] == {"pass": True, "reasons": []}
 

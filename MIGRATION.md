@@ -135,10 +135,10 @@ keeps #2 unaccepted — unattended merges that cannot be audited.
       ("Luna-maxing"). Previous config backed up alongside `~/.codex/config.toml`.
 
       **Escalation half built 2026-09-06** (`funnel.py`: `escalation_reasons`,
-      `required_tier`, `funnel next --tier`). A ticket declares `Risk: standard`
-      or `Risk: escalated — <why>` in its body, written by Claude at breakdown;
-      the marker is authoritative and a deliberately narrow pattern list is the
-      safety net for tickets written before markers existed. The patterns are
+      `required_tier`, `funnel next --tier`). Superseded 2026-09-23: the
+      canonical `Risk` Project field now carries `standard` or `escalated`.
+      The old body marker and a deliberately narrow pattern list remain only
+      as migration inputs for tickets written before the field. The patterns are
       narrow on purpose: this repo is *about* locks, gates and destructive
       operations, so a broad list escalates every ticket and the cheap engine
       never runs — the failure that looks like success. `tests/test_escalation.py`
@@ -147,10 +147,9 @@ keeps #2 unaccepted — unattended merges that cannot be audited.
       **Wired 2026-09-06.** `routines/codex-work.md` asks `funnel next --tier
       standard`, so the cheap default walks past work it may not take, with a new
       exit case for "every startable ticket needs the escalated engine" — a
-      healthy skip, not an error. `routines/claude.md` now writes a `Risk:` line
-      into every ticket at breakdown, with the criteria and the reason it is
-      breakdown's job: it has the plan in front of it and the engineer does not.
-      All five automations synced.
+      healthy skip, not an error. The breakdown runner now writes the field on
+      every ticket; classification remains breakdown's job because it has the
+      plan in front of it and the engineer does not. All five automations synced.
 
       **The one part that needs N:** a second Codex schedule on `gpt-5.6-sol`
       passing `--tier escalated`. Until it exists, escalated tickets are correctly

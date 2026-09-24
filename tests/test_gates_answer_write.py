@@ -261,6 +261,8 @@ def _item(body=PLAN, state="OPEN", parent=None, status="Ready"):
         title="The escalation scan reads quoted evidence",
         url="https://github.com/nateprich-projects/command-center/issues/1167",
         state=state, status=status, labels=["blocked"], parent=parent,
+        item_id="project-item-1167", origin="Nate", risk="standard",
+        needs="human",
         needs_decision="Should the connector answer gates on Nate's behalf?",
         body=body,
     )
@@ -274,6 +276,10 @@ def _capture_edits(monkeypatch):
         return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(funnel, "_run_gh", run_gh)
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: None,
+    )
     return calls
 
 

@@ -14,6 +14,14 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import funnel  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def canonical_field_writes(monkeypatch):
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: None,
+    )
+
+
 NOW = datetime(2026, 9, 8, tzinfo=timezone.utc)
 ONE = "owner/one"
 TWO = "owner/two"

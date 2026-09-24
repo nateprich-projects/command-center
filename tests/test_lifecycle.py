@@ -33,6 +33,9 @@ def lifecycle():
         body="## Needs you\n\nWhich repository should this use?\n",
         status="Shaped",
         klass="New",
+        origin="Nate",
+        risk="standard",
+        needs="human",
         status_since=NOW,
         item_id="project-item-1",
         children_total=1,
@@ -44,6 +47,9 @@ def lifecycle():
         url="https://github.com/nateprich/beta/issues/2",
         state="OPEN",
         parent=project.ref,
+        origin="agent",
+        risk="standard",
+        needs="none",
         item_id="ticket-item-2",
     )
     return project, ticket, [project, ticket]

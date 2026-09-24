@@ -28,7 +28,7 @@ def project(**kw):
     values = dict(
         repo=REPO, number=1, title="Project", url="u", state="OPEN",
         status="Building", klass="Improve", children_total=0, children_done=0,
-        status_since=NOW,
+        status_since=NOW, origin="agent", risk="standard", needs="none",
     )
     values.update(kw)
     return Item(**values)
@@ -38,8 +38,11 @@ def ticket(number, **kw):
     values = dict(
         repo=REPO, number=number, title="t{}".format(number), url="u",
         state="OPEN", parent=REPO + "#1", body="Risk: standard",
+        origin="agent", risk="standard", needs="none",
     )
     values.update(kw)
+    if "risk" not in kw and "Risk: escalated" in values.get("body", ""):
+        values["risk"] = "escalated"
     return Item(**values)
 
 
@@ -159,17 +162,14 @@ def test_the_owner_follows_the_needs_field_then_the_pr_then_the_tier():
     }
 
 
-def test_the_tier_comes_from_the_ticket_body():
-    found = rows([project(), ticket(11, body="Risk: escalated — concurrency"),
+def test_the_tier_comes_from_the_risk_field():
+    found = rows([project(), ticket(11, risk="escalated"),
                   ticket(12)], None)
     tiers = {t["number"]: t["tier"] for t in found[0]["tickets"]}
     assert tiers == {11: "escalated", 12: "standard"}
     matches = {t["number"]: t["escalation_matches"]
                for t in found[0]["tickets"]}
-    assert matches[11] == [{
-        "reason": "declared: concurrency",
-        "line": "Risk: escalated — concurrency",
-    }]
+    assert matches[11] == []
     assert matches[12] == []
 
 

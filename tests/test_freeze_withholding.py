@@ -36,6 +36,9 @@ def project(number, status="Building", klass="Improve", **kw) -> funnel.Item:
     kw.setdefault("state", "OPEN")
     kw.setdefault("status_since", NOW - timedelta(days=1))
     kw.setdefault("children_total", 1)
+    kw.setdefault("origin", "agent")
+    kw.setdefault("risk", "standard")
+    kw.setdefault("needs", "none")
     return funnel.Item(number=number, status=status, klass=klass, **kw)
 
 
@@ -44,6 +47,9 @@ def ticket(number, parent, body, **kw) -> funnel.Item:
     kw.setdefault("title", "ticket {}".format(number))
     kw.setdefault("url", "https://example.invalid/{}".format(number))
     kw.setdefault("state", "OPEN")
+    kw.setdefault("origin", "agent")
+    kw.setdefault("risk", "standard")
+    kw.setdefault("needs", "none")
     return funnel.Item(
         number=number, body=body, parent="{}#{}".format(REPO, parent), **kw
     )

@@ -564,6 +564,44 @@ def test_finish_sums_api_cost_events_from_two_funnel_commands(monkeypatch):
         "graphql_points": 12,
         "gh_calls": 5,
     }
+    assert written[0]["graphql_by_caller"] == {
+        "unattributed": {"calls": None, "points": 12, "remaining": None},
+    }
+
+
+def test_finish_aggregates_caller_costs_and_keeps_unknowns_unattributed(
+    monkeypatch,
+):
+    records = [
+        start("run-id", NOW),
+        {
+            "run": "run-id", "agent": "claude", "phase": "api_cost",
+            "ts": int(NOW) + 1,
+            "api_cost": {"graphql_points": 5, "gh_calls": 2},
+            "graphql_by_caller": {
+                "standard": {"calls": 2, "points": 5, "remaining": 100},
+                "unattributed": {"calls": 1, "points": None, "remaining": 90},
+            },
+        },
+        {
+            "run": "run-id", "agent": "claude", "phase": "api_cost",
+            "ts": int(NOW) + 2,
+            "api_cost": {"graphql_points": 7, "gh_calls": 1},
+            "graphql_by_caller": {
+                "standard": {"calls": 1, "points": 7, "remaining": 80},
+                "publisher": {"calls": 1, "points": 3, "remaining": 75},
+                "unattributed": {"calls": 1, "points": None, "remaining": 70},
+            },
+        },
+    ]
+
+    result = heartbeat.graphql_by_caller_for_run(records, "run-id")
+
+    assert result == {
+        "publisher": {"calls": 1, "points": 3, "remaining": 75},
+        "standard": {"calls": 3, "points": 12, "remaining": 80},
+        "unattributed": {"calls": 2, "points": None, "remaining": 70},
+    }
 
 
 def test_finish_reports_null_api_cost_without_funnel_commands(monkeypatch):

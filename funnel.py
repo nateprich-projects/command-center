@@ -7300,6 +7300,18 @@ _GRAPHQL_SPEND: Dict[str, object] = {
     "calls": 0, "cost": 0, "remaining": None, "reset_at": None,
 }
 
+# Caller names are deliberately code-owned so a typo cannot silently create a
+# new accounting lane. Calls without a known caller or a readable cost go in
+# the explicit unattributed bucket.
+GRAPHQL_CALLERS = (
+    "standard", "escalated", "publisher", "watch", "begin", "breakdown",
+)
+GRAPHQL_UNATTRIBUTED = "unattributed"
+_GRAPHQL_CALLER_SPEND: Dict[str, Dict[str, Optional[int]]] = {}
+_ACTIVE_GRAPHQL_CALLER: contextvars.ContextVar = contextvars.ContextVar(
+    "active_graphql_caller", default=GRAPHQL_UNATTRIBUTED
+)
+
 #: Number of Project item list requests and rows in this command. These are
 #: per-process measurements for doctor output, not funnel state.
 _PROJECT_ITEM_PAGE_COUNT = 0
@@ -7488,6 +7500,134 @@ def graphql_spend() -> Dict[str, object]:
     return dict(_GRAPHQL_SPEND)
 
 
+def graphql_caller_spend() -> Dict[str, Dict[str, Optional[int]]]:
+    """Snapshot this process's GraphQL points and headroom by caller."""
+    return {
+        caller: dict(values)
+        for caller, values in _GRAPHQL_CALLER_SPEND.items()
+    }
+
+
+@contextlib.contextmanager
+def graphql_caller(caller: Optional[str]) -> Iterator[None]:
+    """Attribute GraphQL responses inside this scope to one known caller."""
+    selected = caller if caller in GRAPHQL_CALLERS else GRAPHQL_UNATTRIBUTED
+    token = _ACTIVE_GRAPHQL_CALLER.set(selected)
+    try:
+        yield
+    finally:
+        _ACTIVE_GRAPHQL_CALLER.reset(token)
+
+
+def _graphql_tier_caller(tier: Optional[str]) -> str:
+    return tier if tier in ("standard", "escalated") else GRAPHQL_UNATTRIBUTED
+
+
+def _argv_value(argv: Sequence[str], name: str) -> Optional[str]:
+    try:
+        index = list(argv).index(name)
+    except ValueError:
+        return None
+    if index + 1 >= len(argv):
+        return None
+    return argv[index + 1]
+
+
+def graphql_caller_for_run(run: Optional[str],
+                           agent: Optional[str] = None) -> str:
+    """Read a run's lane from its local heartbeat start, without GitHub reads."""
+    run = run or os.environ.get("COMMAND_CENTER_RUN")
+    agent = agent or os.environ.get("COMMAND_CENTER_AGENT")
+    spool = pathlib.Path(
+        os.environ.get("COMMAND_CENTER_HEARTBEAT_SPOOL")
+        or pathlib.Path.home() / ".claude" / "command-center-heartbeat"
+    )
+    starts = {}
+    finishes = set()
+    try:
+        for path in sorted(spool.glob("*.jsonl")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                if row.get("phase") == "start" and row.get("run"):
+                    starts[row["run"]] = row
+                elif row.get("phase") == "finish" and row.get("run"):
+                    finishes.add(row["run"])
+    except (OSError, UnicodeError):
+        return GRAPHQL_UNATTRIBUTED
+    if run is None:
+        open_starts = [
+            key for key, row in starts.items()
+            if key not in finishes and (not agent or row.get("agent") == agent)
+        ]
+        if len(open_starts) != 1:
+            return GRAPHQL_UNATTRIBUTED
+        run = open_starts[0]
+    start = starts.get(run)
+    if start is None or (agent and start.get("agent") != agent):
+        return GRAPHQL_UNATTRIBUTED
+    return _graphql_tier_caller(start.get("tier"))
+
+
+def graphql_caller_for_command(argv: Sequence[str], *,
+                               tier: Optional[str] = None) -> str:
+    """Classify a funnel command using its explicit job or heartbeat lane."""
+    if not argv:
+        return GRAPHQL_UNATTRIBUTED
+    command = argv[0]
+    if command == "begin":
+        return "begin"
+    if command == "brief":
+        return "publisher"
+    if command in ("main-ci", "watch"):
+        return "watch"
+    if command in ("breakdown-packet", "breakdown-apply"):
+        return "breakdown"
+    if command in ("next", "next-review"):
+        command_tier = _argv_value(argv, "--tier") or tier
+        return _graphql_tier_caller(command_tier)
+    command_tier = tier or _argv_value(argv, "--tier")
+    if command_tier is None:
+        command_tier = graphql_caller_for_run(
+            _argv_value(argv, "--run"), _argv_value(argv, "--agent")
+        )
+    return _graphql_tier_caller(command_tier)
+
+
+def _record_graphql_caller_response(block: object) -> None:
+    """Record one response; unreadable costs are never charged to a caller."""
+    values = block if isinstance(block, dict) else {}
+    cost = values.get("cost")
+    cost_readable = (
+        isinstance(cost, int) and not isinstance(cost, bool) and cost >= 0
+    )
+    caller = _ACTIVE_GRAPHQL_CALLER.get()
+    if caller not in GRAPHQL_CALLERS or not cost_readable:
+        caller = GRAPHQL_UNATTRIBUTED
+
+    bucket = _GRAPHQL_CALLER_SPEND.get(caller)
+    if bucket is None:
+        bucket = {"calls": 0, "points": 0, "remaining": None}
+        _GRAPHQL_CALLER_SPEND[caller] = bucket
+    bucket["calls"] = int(bucket.get("calls") or 0) + 1
+    if cost_readable:
+        if bucket.get("points") is not None:
+            bucket["points"] = int(bucket["points"] or 0) + cost
+    else:
+        bucket["points"] = None
+
+    remaining = values.get("remaining")
+    if (isinstance(remaining, int) and not isinstance(remaining, bool)
+            and remaining >= 0):
+        bucket["remaining"] = remaining
+
+
 def _budget_exhaustion_signal() -> Optional[Tuple[int, str]]:
     """Return the structured zero-budget signal, if this run observed it.
 
@@ -7518,6 +7658,7 @@ def reset_api_usage() -> None:
         {"calls": 0, "cost": 0, "remaining": None, "reset_at": None}
     )
     _GRAPHQL_COST_READS = 0
+    _GRAPHQL_CALLER_SPEND.clear()
     _PROJECT_ITEM_PAGE_COUNT = 0
     _PROJECT_ITEM_ROW_COUNT = 0
 
@@ -7665,6 +7806,7 @@ def gh_graphql(query: str, **variables) -> dict:
                 # Keep the GraphQL spend count aligned even when no child
                 # response exists to carry a rate-limit block.
                 _record_graphql_attempt()
+                _record_graphql_caller_response(None)
                 raise
 
             _record_graphql_attempt()
@@ -7677,6 +7819,30 @@ def gh_graphql(query: str, **variables) -> dict:
                 last_request_id = request_id
 
             if proc.returncode != 0:
+                # A failed CLI command can still carry a partial GraphQL
+                # response. Read its rateLimit block when available; otherwise
+                # keep the attempted cost visible under `unattributed`.
+                try:
+                    error_payload = json.loads(stdout)
+                except (TypeError, ValueError):
+                    error_payload = None
+                error_data = (
+                    error_payload.get("data")
+                    if isinstance(error_payload, dict) else None
+                )
+                error_block = (
+                    error_data.get("rateLimit")
+                    if isinstance(error_data, dict) else None
+                )
+                _record_graphql_caller_response(error_block)
+                if isinstance(error_data, dict):
+                    _record_rate_limit(error_block)
+                    if (isinstance(error_block, dict)
+                            and error_block.get("remaining") == 0):
+                        _mark_exhausted(
+                            "rateLimit.remaining is 0",
+                            error_block.get("resetAt"),
+                        )
                 detail = stderr.strip() or _graphql_text(stdout).strip()
                 detail = detail or "gh exited {}".format(proc.returncode)
                 # Rate-limit exhaustion is a deliberate fail-fast path, even
@@ -7700,6 +7866,7 @@ def gh_graphql(query: str, **variables) -> dict:
             try:
                 payload = json.loads(stdout)
             except (TypeError, ValueError) as exc:
+                _record_graphql_caller_response(None)
                 error = GitHubError(
                     "malformed GraphQL response: {}".format(exc),
                     transient=True,
@@ -7711,6 +7878,7 @@ def gh_graphql(query: str, **variables) -> dict:
                 continue
 
             if not isinstance(payload, dict):
+                _record_graphql_caller_response(None)
                 error = GitHubError(
                     "malformed GraphQL response: top-level JSON is not an object",
                     transient=True,
@@ -7727,8 +7895,9 @@ def gh_graphql(query: str, **variables) -> dict:
             # carries the authoritative remaining/resetAt pair. Record it
             # before handling errors so begin can classify that failure
             # without matching prose or an exit code.
+            block = data.get("rateLimit") if isinstance(data, dict) else None
+            _record_graphql_caller_response(block)
             if isinstance(data, dict):
-                block = data.get("rateLimit")
                 _record_rate_limit(block)
                 if isinstance(block, dict) and block.get("remaining") == 0:
                     _mark_exhausted(
@@ -10892,7 +11061,7 @@ def _brief_degraded_record(section: str, elapsed: float, budget: float,
 def _brief_timed(
     section: str,
     reader: Callable[[], object],
-    timings: Dict[str, float],
+    timings: Dict[str, object],
     degraded: Optional[List[Dict[str, object]]] = None,
     *,
     deadline: Optional[float] = None,
@@ -10953,7 +11122,7 @@ def cmd_brief(
     now: datetime,
     pr_facts: Optional[Dict[str, Optional[Dict[str, object]]]] = None,
     missing: Optional[List[Dict[str, str]]] = None,
-    timings: Optional[Dict[str, float]] = None,
+    timings: Optional[Dict[str, object]] = None,
     degraded: Optional[List[Dict[str, object]]] = None,
     deadline: Optional[float] = None,
     brief_cache: Optional[BriefCache] = None,
@@ -11152,6 +11321,11 @@ def cmd_brief(
             value = api.get(name)
             if isinstance(value, int) and not isinstance(value, bool):
                 timings["api_cost." + name] = value
+        for caller, values in graphql_caller_spend().items():
+            for name in ("calls", "points", "remaining"):
+                timings[
+                    "api_cost.graphql_by_caller.{}.{}".format(caller, name)
+                ] = values.get(name)
 
         assembly_started = time.perf_counter()
         brief = {
@@ -15970,7 +16144,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
             print(json.dumps(begin_preflight[0], indent=2))
             return 0
 
-    brief_timings: Optional[Dict[str, float]] = (
+    brief_timings: Optional[Dict[str, object]] = (
         {} if args.command == "brief" else None
     )
     brief_load_token = (
@@ -16576,6 +16750,7 @@ class FunnelSession:
         # infer it again after overlapping sessions have opened.
         self._heartbeat_run: Optional[str] = None
         self._heartbeat_agent: Optional[str] = None
+        self._heartbeat_tier: Optional[str] = None
 
     def _load_items(self) -> List[Item]:
         if self.items is None:
@@ -16596,6 +16771,13 @@ class FunnelSession:
             if not argv or argv[0] != "brief":
                 self._brief_cache.clear()
             cache_token = _ACTIVE_BRIEF_CACHE.set(self._brief_cache)
+            if argv and argv[0] == "begin":
+                self._heartbeat_tier = _argv_value(argv, "--tier")
+            caller_token = _ACTIVE_GRAPHQL_CALLER.set(
+                graphql_caller_for_command(
+                    argv, tier=self._heartbeat_tier
+                )
+            )
             try:
                 # Session servers are created before begin, but tests and
                 # embedded callers can reuse this module after another main()
@@ -16665,6 +16847,7 @@ class FunnelSession:
                     report_api_cost()
                 report_graphql_spend()
                 _ACTIVE_BRIEF_CACHE.reset(cache_token)
+                _ACTIVE_GRAPHQL_CALLER.reset(caller_token)
         return int(code), stdout.getvalue(), stderr.getvalue()
 
 
@@ -17043,7 +17226,9 @@ def report_api_cost(run: Optional[str] = None,
             return
         import heartbeat
 
-        heartbeat.record_api_cost(agent, run, api_cost())
+        measured = api_cost()
+        measured["graphql_by_caller"] = graphql_caller_spend()
+        heartbeat.record_api_cost(agent, run, measured)
     except Exception:
         # Instrumentation must not gate the command it instruments.  The
         # absence of this event is represented by nulls at heartbeat finish.
@@ -17071,18 +17256,24 @@ def report_graphql_spend(stream=None) -> None:
 
 
 if __name__ == "__main__":
-    if os.environ.get(SESSION_ENV) and not os.environ.get(SESSION_SERVER_ENV):
-        code = _session_client(sys.argv[1:])
-    elif os.environ.get(SESSION_SERVER_ENV):
-        # The session server reports each forwarded command itself. Do not let
-        # the normal process-exit hook record the last command a second time.
-        code = main()
-    else:
-        try:
+    caller_token = _ACTIVE_GRAPHQL_CALLER.set(
+        graphql_caller_for_command(sys.argv[1:])
+    )
+    try:
+        if os.environ.get(SESSION_ENV) and not os.environ.get(SESSION_SERVER_ENV):
+            code = _session_client(sys.argv[1:])
+        elif os.environ.get(SESSION_SERVER_ENV):
+            # The session server reports each forwarded command itself. Do not let
+            # the normal process-exit hook record the last command a second time.
             code = main()
-        finally:
-            report_api_cost()
-            # In a `finally` so a run that dies on an exhausted budget still says
-            # what it spent — that run is exactly the one whose numbers matter.
-            report_graphql_spend()
-    sys.exit(code)
+        else:
+            try:
+                code = main()
+            finally:
+                report_api_cost()
+                # In a `finally` so a run that dies on an exhausted budget still says
+                # what it spent — that run is exactly the one whose numbers matter.
+                report_graphql_spend()
+        sys.exit(code)
+    finally:
+        _ACTIVE_GRAPHQL_CALLER.reset(caller_token)

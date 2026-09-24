@@ -1349,6 +1349,9 @@ def release_claim(ref: str) -> None:
 def finish_heartbeat(agent: str, run: str, outcome: str,
                      note: str, work: str) -> None:
     """Finish the exact bound run through heartbeat's validation path."""
+    # Publish this process's GraphQL readings before the finish row aggregates
+    # all per-command events for the run.
+    funnel.report_api_cost(run=run, agent=agent)
     import heartbeat
 
     result = heartbeat.main([
@@ -1656,39 +1659,7 @@ def dry_run_main() -> int:
     return 0
 
 
-def finish_main(argv: Optional[Sequence[str]] = None) -> int:
-    """CLI for one structured answer's finish-ticket effect sequence."""
-    parser = argparse.ArgumentParser(
-        description="publish, block, or decline one ticket, then release "
-                    "and finish its run"
-    )
-    answer_group = parser.add_mutually_exclusive_group()
-    answer_group.add_argument(
-        "--answer", required=False, default=None,
-        help="structured answer as inline JSON, or - for stdin",
-    )
-    answer_group.add_argument(
-        "--answer-file", required=False, default=None,
-        help="path to a file containing the structured answer",
-    )
-    parser.add_argument("--run", required=False, default=None,
-                        help="bound heartbeat run id")
-    parser.add_argument("--agent", default="codex",
-                        choices=("codex", "muse", "zcode", "claude"))
-    parser.add_argument("--repo", default=None,
-                        help="owner/name; normally derived from the checkout")
-    parser.add_argument("--note", default=None,
-                        help="extra run note, such as a stale-claim takeover")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="print the resolved test plan and exit; "
-                             "runs nothing and changes nothing")
-    args = parser.parse_args(argv)
-    if args.dry_run:
-        return dry_run_main()
-    if (args.answer is None and args.answer_file is None) or not args.run:
-        parser.error(
-            "one of --answer/--answer-file and --run are required "
-            "without --dry-run")
+def _finish_ticket(args: argparse.Namespace) -> int:
     try:
         if args.answer_file is not None:
             answer = read_answer(args.answer_file)
@@ -1734,3 +1705,41 @@ def finish_main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     print(json.dumps(result, sort_keys=True))
     return 0
+
+
+def finish_main(argv: Optional[Sequence[str]] = None) -> int:
+    """CLI for one structured answer's finish-ticket effect sequence."""
+    parser = argparse.ArgumentParser(
+        description="publish, block, or decline one ticket, then release "
+                    "and finish its run"
+    )
+    answer_group = parser.add_mutually_exclusive_group()
+    answer_group.add_argument(
+        "--answer", required=False, default=None,
+        help="structured answer as inline JSON, or - for stdin",
+    )
+    answer_group.add_argument(
+        "--answer-file", required=False, default=None,
+        help="path to a file containing the structured answer",
+    )
+    parser.add_argument("--run", required=False, default=None,
+                        help="bound heartbeat run id")
+    parser.add_argument("--agent", default="codex",
+                        choices=("codex", "muse", "zcode", "claude"))
+    parser.add_argument("--repo", default=None,
+                        help="owner/name; normally derived from the checkout")
+    parser.add_argument("--note", default=None,
+                        help="extra run note, such as a stale-claim takeover")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="print the resolved test plan and exit; "
+                             "runs nothing and changes nothing")
+    args = parser.parse_args(argv)
+    if args.dry_run:
+        return dry_run_main()
+    if (args.answer is None and args.answer_file is None) or not args.run:
+        parser.error(
+            "one of --answer/--answer-file and --run are required "
+            "without --dry-run")
+    caller = funnel.graphql_caller_for_run(args.run, args.agent)
+    with funnel.graphql_caller(caller):
+        return _finish_ticket(args)

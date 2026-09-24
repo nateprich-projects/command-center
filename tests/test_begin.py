@@ -102,6 +102,9 @@ def _ticket(number, parent, *, body="Risk: standard", klass="Improve",
         state="OPEN",
         status="Building",
         klass=klass,
+        origin="agent",
+        risk="standard",
+        needs="none",
         children_total=1,
     )
     ticket = funnel.Item(
@@ -111,6 +114,9 @@ def _ticket(number, parent, *, body="Risk: standard", klass="Improve",
         url="https://github.com/nateprich/example/issues/{}".format(number),
         state="OPEN",
         body=body,
+        origin="agent",
+        risk=("escalated" if "Risk: escalated" in body else "standard"),
+        needs="none",
         parent=project.ref,
         item_id="item-{}".format(number),
         in_motion_since=in_motion_since,
@@ -892,6 +898,9 @@ def _completed_project(number, *, klass="Improve", children_done=2,
         body=body,
         status="Building",
         klass=klass,
+        origin=("agent" if origin == "agent" else "Nate"),
+        risk="standard",
+        needs="none",
         parent=parent,
         item_id="project-{}".format(number),
         children_total=2,
@@ -2048,6 +2057,9 @@ def test_begin_offers_shape_when_needs_decision_blocks_breakdown(monkeypatch, ca
         state="OPEN",
         status="Ideas",
         klass="New",
+        origin="agent",
+        risk="standard",
+        needs="none",
         labels=["needs-shaping"],
         body="Risk: standard",
     )
@@ -2098,6 +2110,9 @@ def _idea(number, title, body, klass=None, labels=None):
         url="https://github.com/nateprich-projects/command-center/issues/{}".format(number),
         title=title,
         body=body,
+        origin="agent",
+        risk=("escalated" if "Risk: escalated" in body else "standard"),
+        needs="none",
         klass=klass,
         labels=labels,
     )
@@ -2963,6 +2978,9 @@ def _shaped_plan(number, *, status="Shaped", open_need=False,
         body=body,
         status=status,
         klass="Broken",
+        origin="agent",
+        risk="escalated" if escalated else "standard",
+        needs="human" if open_need else "none",
         labels=labels or [],
         item_id="project-item-{}".format(number),
     )
@@ -3015,7 +3033,7 @@ def test_shape_lane_rechecks_stranded_self_approvals_before_new_ideas(
     assert "no escalated risk" in marker
 
 
-def test_plan_needs_nate_fails_closed_when_a_category_is_missing():
+def test_plan_needs_nate_ignores_omitted_null_categories():
     body = (
         "## Needs Nate\n\n"
         "- Exposure: nothing outstanding. No new credentials.\n"
@@ -3023,4 +3041,15 @@ def test_plan_needs_nate_fails_closed_when_a_category_is_missing():
         "- Preference: nothing outstanding. No user-facing choice.\n"
     )
 
-    assert funnel.plan_needs_nate(body) is True
+    assert funnel.plan_needs_nate(body) is False
+
+
+def test_plan_needs_nate_reads_only_the_visible_open_categories():
+    assert funnel.plan_needs_nate("# Plan\n") is False
+    assert funnel.plan_needs_nate(
+        "## Needs Nate\n\n- Gates: Who may write Ready?\n"
+    ) is True
+    assert funnel.plan_needs_nate(
+        "## Needs Nate\n\n"
+        "- Gates: answered 2026-09-24T06:00:00Z by Nate. Agents may.\n"
+    ) is False

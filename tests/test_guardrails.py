@@ -58,7 +58,6 @@ PLAN_SECTION_NAMES = (
     "Decided by the agent",
     "Needs Nate",
 )
-NEEDS_SECTION_ALIASES = ("Needs Nate", "Needs you")
 
 # Python's default cache location is not writable in the managed checkout.
 # Reject explicit bytecode writers in agent-run documents: py_compile and
@@ -271,10 +270,4 @@ def test_shape_skill_pins_plan_section_names():
     assert not missing, (
         "skills/shape/SKILL.md must keep the plan section names stable; missing: {}"
         .format(", ".join(missing))
-    )
-
-    missing_aliases = [name for name in NEEDS_SECTION_ALIASES if name not in skill]
-    assert not missing_aliases, (
-        "skills/shape/SKILL.md must document both Needs-section spellings; missing: {}"
-        .format(", ".join(missing_aliases))
     )

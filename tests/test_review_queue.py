@@ -14,11 +14,12 @@ import funnel  # noqa: E402
 REPO = "nateprich/beta"
 
 
-def _ticket(number):
+def _ticket(number, risk="standard"):
     return SimpleNamespace(
         ref="{}#{}".format(REPO, number), repo=REPO, number=number,
         title="Ticket {}".format(number),
         url="https://github.com/{}/issues/{}".format(REPO, number),
+        risk=risk,
     )
 
 
@@ -97,14 +98,10 @@ def test_the_tier_filter_still_applies_after_sorting(monkeypatch):
     rows = [_row(20, 2, "2026-09-09T10:47:00Z"),
             _row(10, 1, "2026-09-09T10:25:00Z")]
     _wire(monkeypatch, rows)
-    monkeypatch.setattr(funnel, "required_tier",
-                        lambda title, body, failed_before=False:
-                        "escalated" if "1" in title else "standard")
-
     assert [e["pr"] for e in funnel.review_queue(
-        [_ticket(1), _ticket(2)], tier="standard")] == [20]
+        [_ticket(1, "escalated"), _ticket(2)], tier="standard")] == [20]
     assert [e["pr"] for e in funnel.review_queue(
-        [_ticket(1), _ticket(2)], tier="escalated")] == [10]
+        [_ticket(1, "escalated"), _ticket(2)], tier="escalated")] == [10]
 
 
 def test_ties_on_creation_time_break_by_pr_number(monkeypatch):

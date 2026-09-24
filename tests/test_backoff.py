@@ -104,14 +104,17 @@ def test_startable_withholds_a_backed_off_ticket():
     parent = funnel.Item(
         repo="nateprich/beta", number=10, title="Parent", url="",
         state="OPEN", status="Ready", klass="Broken", children_total=2,
+        origin="agent", risk="standard", needs="none",
     )
     first = funnel.Item(
         repo="nateprich/beta", number=11, title="One", url="",
         state="OPEN", parent="nateprich/beta#10",
+        origin="agent", risk="standard", needs="none",
     )
     second = funnel.Item(
         repo="nateprich/beta", number=12, title="Two", url="",
         state="OPEN", parent="nateprich/beta#10",
+        origin="agent", risk="standard", needs="none",
     )
 
     assert len(funnel.startable([parent, first, second])) == 2

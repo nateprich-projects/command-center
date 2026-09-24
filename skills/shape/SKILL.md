@@ -24,8 +24,8 @@ Three separate sections; keep these names stable:
   a sibling convention, or an obvious technical choice.
 - **Decided by the agent** — the agent's own judgement with reasoning and
   rejected alternative. `decided: SQLite` is not a record.
-- **Needs Nate** (also **Needs you**) — questions only Nate may answer;
-  must be empty for a plan to self-approve.
+- **Needs Nate** — questions only Nate may answer. Omit the section when
+  there are none; `Needs: none` is the canonical all-clear record.
 
 Never fold the agent's judgement into precedent, and never use decision
 sections for open questions.
@@ -34,21 +34,18 @@ sections for open questions.
 
 Leave to Nate, explicitly rather than guessing: anything unreachable, any
 exposure change, any gate change, scope and priority, any encoded
-preference. Put the answer first on each category line; when clear, use this
-exact form:
+preference. Render only categories with an open question:
 
 ```text
-- Exposure: nothing outstanding. No new credentials or reachable surface.
-- Gates: nothing outstanding. No gate ownership changes.
-- Scope and priority: nothing outstanding. The scoped change is documented.
-- Preference: nothing outstanding. No user-facing choice remains.
+- Gates: Who may write Ready?
 ```
 
-The bare answer is `nothing outstanding`; elaboration follows a period. An
-open category carries the question in one sentence; an absent category is
-unanswered, not clear. The verifier checks these claims against the plan.
+The typed shaping answer still carries all four categories as null or a list;
+the runner writes `Needs: human` when any list is open and `Needs: none` when
+all are null.
 
-When all four are clear, a self-approvable Class with `agent` origin
+When all four are null, a self-approvable Class with `agent` origin and
+`Risk: standard`
 advances to `Ready` with a `Self-approved:` marker; anything else stays at
 `Shaped` with the reason printed. Never bypass an open question: `Shaped`
 records a plan, not approval.

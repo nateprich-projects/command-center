@@ -41,14 +41,18 @@ def items(klass="Improve", children_total=1, children_done=0,
     )
     project = Item(repo=REPO, number=1, title="p", url="", state="OPEN",
                    body=body, status="Building", klass=klass,
+                   origin=("agent" if origin == "agent" else "Nate"),
+                   risk="standard", needs="none",
                    item_id="project-id",
                    children_total=children_total, children_done=children_done)
     ticket = Item(repo=REPO, number=9, title="t", url="", state="OPEN",
-                  parent=REPO + "#1")
+                  parent=REPO + "#1", origin="agent", risk="standard",
+                  needs="none")
     rows = [project, ticket]
     if other_ticket:
         rows.append(Item(repo=REPO, number=10, title="other", url="",
-                         state="OPEN", parent=REPO + "#1"))
+                         state="OPEN", parent=REPO + "#1", origin="agent",
+                         risk="standard", needs="none"))
     return rows
 
 

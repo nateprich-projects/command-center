@@ -71,6 +71,15 @@ def item(number, status=None, klass=None, days=1.0, **kw) -> Item:
     kw.setdefault("title", "issue {}".format(number))
     kw.setdefault("url", "https://example.invalid/{}".format(number))
     kw.setdefault("state", "OPEN")
+    body = kw.get("body") or ""
+    legacy_origin = funnel.parse_origin(body)
+    kw.setdefault(
+        "origin",
+        ("agent" if legacy_origin and legacy_origin["voice"] == "agent"
+         else "Nate" if legacy_origin else None),
+    )
+    kw.setdefault("risk", "escalated" if "Risk: escalated" in body else "standard")
+    kw.setdefault("needs", "human" if status == "Shaped" else "none")
     return Item(
         number=number, status=status, klass=klass, status_since=at(days), **kw
     )
@@ -80,7 +89,7 @@ def repo_project(repo, number, status="Building", klass="New") -> Item:
     return Item(
         repo=repo, number=number, title="project {}".format(number), url="",
         state="OPEN", status=status, klass=klass, status_since=at(1),
-        children_total=1,
+        children_total=1, origin="agent", risk="standard", needs="none",
     )
 
 
@@ -88,6 +97,7 @@ def repo_ticket(repo, number, parent) -> Item:
     return Item(
         repo=repo, number=number, title="ticket {}".format(number), url="",
         state="OPEN", parent="{}#{}".format(repo, parent),
+        origin="agent", risk="standard", needs="none",
     )
 
 

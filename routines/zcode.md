@@ -57,13 +57,14 @@ python3 /Users/nateprich/.claude/command-center-run/funnel.py snapshot | jq '.br
 ```
 
 One ticket is one engineer run ending in a PR; split by behaviour. Every
-body carries `Risk: standard` or `Risk: escalated`. **Do not create
+ticket carries the canonical `Risk` Project field. **Do not create
 repositories.** Vague plans get questions posted, not inventions.
 
 ## 4. Shape one standard-tier idea
 
 `begin` named it. **Do not grill** — settle what precedent covers, cite
-the source, open questions in `Needs you`:
+the source, and put only actual open questions in `Needs Nate`. Null
+categories stay out of prose and produce `Needs: none`:
 
 ```bash
 python3 /Users/nateprich/.claude/command-center-run/funnel.py shaped <ref> --plan <file>

@@ -21,6 +21,14 @@ sys.path.insert(0, str(ROOT))
 import funnel  # noqa: E402
 from engine import breakdown  # noqa: E402
 
+
+@pytest.fixture(autouse=True)
+def canonical_field_writes(monkeypatch):
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: None,
+    )
+
 REPO = "owner/repo"
 OTHER = "other/repo"
 
@@ -235,12 +243,6 @@ def test_the_entry_points_are_executable():
 
 def test_the_needs_enum_is_funnels_not_a_second_copy():
     assert breakdown.NEEDS_OPTIONS == funnel.NEEDS_OPTIONS
-    assert breakdown.NEEDS_OPTION_IDS == {
-        "none": funnel.NEEDS_OPTION_NONE,
-        "human": funnel.NEEDS_OPTION_HUMAN,
-        "claude-code-environment":
-            funnel.NEEDS_OPTION_CLAUDE_CODE_ENVIRONMENT,
-    }
 
 
 # -- validation: shape -------------------------------------------------------
@@ -335,7 +337,8 @@ def test_an_unknown_needs_is_rejected():
         {"tickets": [raw_ticket(needs="claude")]})
     assert normalized is None
     assert any("needs 'claude'" in error for error in errors)
-    assert any("none, human, claude-code-environment" in error
+    assert any("none, agent, human, claude-code-environment, external-event"
+               in error
                for error in errors)
 
 
@@ -511,34 +514,6 @@ def test_external_refs_order_nothing():
     assert breakdown.creation_order(tickets) == [0]
 
 
-# -- the code-owned Risk line ----------------------------------------------------------
-
-def test_the_risk_line_is_appended_to_a_plain_body():
-    found = breakdown.with_risk_line("What: do it.", "standard")
-    assert found == "What: do it.\n\nRisk: standard"
-
-
-def test_a_conflicting_model_risk_line_never_wins():
-    found = breakdown.with_risk_line(
-        "What: do it.\n\nRisk: escalated — concurrency", "standard")
-    assert found == "What: do it.\n\nRisk: standard"
-    assert found.count("Risk:") == 1
-
-
-def test_every_model_risk_line_is_removed_before_the_owned_one():
-    found = breakdown.with_risk_line(
-        "Risk: standard\n\nWhat: do it.\n\nRisk: escalated", "escalated")
-    assert found == "What: do it.\n\nRisk: escalated"
-
-
-def test_the_owned_line_survives_funnels_own_parser():
-    found = breakdown.with_risk_line("What: do it.\n\nRisk: standard",
-                                     "escalated")
-    match = funnel.RISK_LINE.search(found)
-    assert match is not None
-    assert match.group(1) == "escalated"
-
-
 # -- dependency rendering ---------------------------------------------------------
 
 def test_issue_url_renders_the_blocked_by_shape():
@@ -671,8 +646,8 @@ def test_frozen_breakdown_ticket_is_emitted_blocked_on_794(
     body_text = created[created.index("--body") + 1]
     assert funnel.FREEZE_BLOCKER_SENTENCE in body_text
     assert marker in body_text
-    # The dependency note stays before the code-owned Risk line.
-    assert body_text.endswith("Risk: standard")
+    assert body_text.endswith(funnel.FREEZE_BLOCKER_SENTENCE)
+    assert "Risk: standard" not in body_text
 
 
 @pytest.mark.parametrize("parent", [794, 1044])
@@ -732,7 +707,7 @@ def stub_apply(monkeypatch, **kw):
         calls["created"].append({
             "repo": repo, "parent": parent, "ticket": ticket,
             "blocked_by": list(blocked_by),
-            "body": breakdown.with_risk_line(ticket["body"], ticket["risk"]),
+            "body": ticket["body"],
             "number": next_number["n"],
         })
         number = next_number["n"]
@@ -799,8 +774,8 @@ def test_the_create_path_writes_every_ticket_in_order(monkeypatch):
     assert calls["created"][0]["parent"] == 1
     assert calls["created"][0]["repo"] == REPO
     # The code-owned Risk line, not the model's conflicting one.
-    assert calls["created"][0]["body"] == "What: base.\n\nRisk: standard"
-    assert calls["created"][1]["body"].endswith("\n\nRisk: escalated")
+    assert calls["created"][0]["body"] == "What: base."
+    assert "Risk:" not in calls["created"][1]["body"]
     assert calls["needs"] == [("item-101", "none", "owner/repo#101"),
                               ("item-102", "human", "owner/repo#102")]
     assert len(calls["comments"]) == 1

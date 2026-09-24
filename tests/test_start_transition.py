@@ -28,6 +28,9 @@ def item(number, status=None, klass=None, parent=None, **kw) -> Item:
     kw.setdefault("url", "https://example.invalid/{}".format(number))
     kw.setdefault("state", "OPEN")
     kw.setdefault("item_id", "PVTI_{}".format(number))
+    kw.setdefault("origin", "agent")
+    kw.setdefault("risk", "standard")
+    kw.setdefault("needs", "none")
     return Item(number=number, status=status, klass=klass, parent=parent,
                 status_since=NOW - timedelta(days=1), **kw)
 

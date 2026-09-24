@@ -12,6 +12,8 @@ import pathlib
 import stat
 import sys
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -21,6 +23,14 @@ from engine import review  # noqa: E402
 REPO = "owner/repo"
 SHA = "abc123def456"
 OTHER_SHA = "7890fedcba98"
+
+
+@pytest.fixture(autouse=True)
+def project_risk(monkeypatch):
+    monkeypatch.setattr(
+        funnel, "load_items",
+        lambda: [type("Row", (), {"ref": REPO + "#9", "risk": "standard"})()],
+    )
 
 
 def pr_view(**kw):
@@ -50,6 +60,7 @@ def ticket(**kw):
         "title": "the ticket",
         "url": "https://github.com/{}/issues/9".format(REPO),
         "body": "Parent: #1.\n\nWhat: do the thing.\n\nRisk: standard",
+        "risk": "standard",
     }
     data.update(kw)
     return data
@@ -427,7 +438,7 @@ def test_packet_without_a_ticket_branch_has_no_ticket_body():
     found = packet(pr_view=view, ticket=None)
     assert found["ticket"] == {
         "ref": None, "number": None, "title": None, "url": None,
-        "body": None, "parent": None, "comments": []}
+        "body": None, "risk": None, "parent": None, "comments": []}
 
 
 def test_packet_marks_a_missing_plan():

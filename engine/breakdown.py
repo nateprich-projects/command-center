@@ -24,7 +24,7 @@ first mutation: at least one ticket or a question but never both, both enums
 exact, every dependency resolving to a sibling index or an existing open
 issue, and no dependency cycles. The apply path resumes matching sub-issues
 from GitHub by title, creates missing ones with native blocked-by edges,
-writes the Needs field and a code-owned ``Risk:`` line, and posts the
+writes the canonical Origin, Risk and Needs fields, and posts the
 coverage comment; the question path posts the
 needs-decision comment and labels the project blocked — unless the plan
 body already carries a valid answered-Gates marker (#1274), in which case
@@ -62,14 +62,6 @@ RISK_OPTIONS = ("standard", "escalated")
 #: The needs enum lives on the Project (Nate 2026-09-13, #794); the schema
 #: reuses funnel's record of it rather than keeping a second copy.
 NEEDS_OPTIONS = funnel.NEEDS_OPTIONS
-
-#: Project option ids recorded in #808, by needs name. Using them directly
-#: saves one field-options lookup per ticket created.
-NEEDS_OPTION_IDS = {
-    "none": funnel.NEEDS_OPTION_NONE,
-    "human": funnel.NEEDS_OPTION_HUMAN,
-    "claude-code-environment": funnel.NEEDS_OPTION_CLAUDE_CODE_ENVIRONMENT,
-}
 
 #: The sizing standard is the judgement slice of the breakdown skill: the
 #: unit and sizing sections, without the protocol the runner now owns.
@@ -399,9 +391,17 @@ def validate_answer(answer: object, issue_state: Callable[[str], Optional[str]]
                 errors.append("{} depends on {!r}; want a sibling index or "
                               "owner/repo#n".format(label, entry))
                 dep_errors += 1
+        clean_body = body
+        if isinstance(body, str):
+            clean_body = funnel.RISK_LINE.sub("", body)
+            clean_body = re.sub(r"\n{3,}", "\n\n", clean_body).strip()
+            if not clean_body:
+                errors.append(
+                    "{} needs body content beyond the canonical Risk field"
+                    .format(label))
         tickets.append({
             "title": title.strip() if isinstance(title, str) else title,
-            "body": body.strip() if isinstance(body, str) else body,
+            "body": clean_body,
             "risk": risk,
             "needs": needs,
             "depends_on": resolved,
@@ -445,19 +445,6 @@ def creation_order(tickets: Sequence[dict]) -> List[int]:
         order.append(ready[0])
         del remaining[ready[0]]
     return order
-
-
-def with_risk_line(body: str, risk: str) -> str:
-    """Return the ticket body with exactly one code-owned ``Risk:`` line.
-
-    The runner owns the line, not the model: any ``Risk:`` line the answer
-    carried is removed first, so a conflicting model value can never win.
-    """
-    scrubbed = funnel.RISK_LINE.sub("", body or "")
-    scrubbed = re.sub(r"\n{3,}", "\n\n", scrubbed).strip()
-    if scrubbed:
-        return "{}\n\nRisk: {}".format(scrubbed, risk)
-    return "Risk: {}".format(risk)
 
 
 def issue_url(ref: str) -> str:
@@ -590,7 +577,7 @@ def create_ticket(repo: str, parent_number: int, ticket: dict,
     Returns the number, the ``owner/repo#n`` ref, and the issue URL the
     Project add takes.
     """
-    body = with_risk_line(ticket.get("body") or "", ticket["risk"])
+    body = ticket.get("body") or ""
     command = ["gh", "issue", "create", "--repo", repo,
                "--parent", str(parent_number)]
     if list(blocked_by):
@@ -683,20 +670,7 @@ def add_to_project(url: str) -> str:
 
 def write_needs(item_id: str, needs: str, ref: str) -> None:
     """Write one ticket's Needs single-select. One mutation."""
-    response = funnel.gh_graphql(
-        funnel.SET_FIELD,
-        project=funnel.PROJECT_ID,
-        item=item_id,
-        field=funnel.NEEDS_FIELD_ID,
-        option=NEEDS_OPTION_IDS[needs],
-    )
-    confirmed = (isinstance(response, dict)
-                 and (response.get("updateProjectV2ItemFieldValue") or {})
-                 .get("projectV2Item", {}).get("id") == item_id)
-    if not confirmed:
-        raise funnel.GitHubError(
-            "GitHub did not confirm the Needs update for {} to {}".format(
-                ref, needs))
+    funnel.write_project_select(item_id, "Needs", needs, ref)
 
 
 def post_comment(repo: str, number: int, body: str, *,
@@ -785,7 +759,10 @@ def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
                 url = issue_url(ref)
             created_numbers[index] = number
             created_refs[index] = ref
-            write_needs(add_to_project(url), ticket["needs"], ref)
+            item_id = add_to_project(url)
+            funnel.write_project_select(item_id, "Origin", "agent", ref)
+            funnel.write_project_select(item_id, "Risk", ticket["risk"], ref)
+            write_needs(item_id, ticket["needs"], ref)
         created = [{
             "ref": created_refs[index],
             "number": created_numbers[index],
@@ -823,6 +800,10 @@ def apply_question(repo: str, parent_number: int, question: str, *,
         repo, parent_number,
         "{} {}".format(funnel.NEEDS_DECISION_PREFIX, question),
         run=run, agent=agent)
+    url = "https://github.com/{}/issues/{}".format(repo, parent_number)
+    funnel.write_project_select(
+        add_to_project(url), "Needs", "human",
+        "{}#{}".format(repo, parent_number))
     apply_blocked_label(repo, parent_number)
 
 

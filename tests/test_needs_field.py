@@ -25,4 +25,6 @@ def test_needs_option_ids_are_distinct():
 
 
 def test_needs_options_match_decided_enum():
-    assert funnel.NEEDS_OPTIONS == ("none", "human", "claude-code-environment")
+    assert funnel.NEEDS_OPTIONS == (
+        "none", "agent", "human", "claude-code-environment", "external-event",
+    )

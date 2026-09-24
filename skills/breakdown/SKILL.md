@@ -6,7 +6,7 @@ description: The sizing standard for breaking an approved Command Center plan in
 # Breaking a plan into tickets
 
 The sizing standard only. The runner creates the tickets, writes the
-`Risk:` lines, and records the dependency edges; nothing here is a command
+canonical Project routing fields, and records the dependency edges; nothing here is a command
 to run. One shared standard keeps the fiftieth breakdown shaped like the first.
 
 ## The unit

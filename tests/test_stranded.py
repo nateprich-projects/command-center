@@ -24,6 +24,9 @@ def issue(number, **kwargs):
         "title": "issue {}".format(number),
         "url": "https://example.invalid/{}".format(number),
         "state": "OPEN",
+        "origin": "agent",
+        "risk": "standard",
+        "needs": "none",
     }
     values.update(kwargs)
     return Item(**values)

@@ -115,6 +115,19 @@ a:hover { text-decoration: underline; }
 .masthead h1 { margin: 2px 0 6px; font-size: 34px; letter-spacing: -0.02em; }
 .snapshot-status { margin: 0; color: var(--ink-dim); font-size: 13px; }
 .snapshot-status.failed { color: var(--danger); }
+.view-nav { display: flex; gap: 6px; margin: 10px 0 8px; }
+.view-tab {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 12px;
+  color: var(--ink-dim);
+  font-size: 13px;
+}
+.view-tab[aria-current="page"] {
+  border-color: var(--accent-ink);
+  color: var(--accent-ink);
+  background: var(--surface-2);
+}
 
 .repo-filter {
   display: flex;
@@ -123,6 +136,7 @@ a:hover { text-decoration: underline; }
   align-self: flex-end;
   min-width: 0;
 }
+.repo-filter[hidden], .snapshot-status[hidden] { display: none; }
 .repo-filter-label {
   font-size: 11px;
   letter-spacing: 0.14em;
@@ -162,6 +176,7 @@ main {
   display: grid;
   gap: 24px;
 }
+main[hidden] { display: none; }
 
 .panel {
   background: var(--surface);
@@ -236,6 +251,64 @@ main {
 .usage-fill.over { background: var(--danger); }
 .usage-percent { font-size: 13px; color: var(--ink-dim); white-space: nowrap; }
 .empty { margin: 0; padding: 18px; color: var(--ink-dim); }
+
+/* The first Execution view is a fixed six-metric summary. Gaps stay visible
+   as gaps so missing observations never read as a zero. */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+}
+.metric-tile {
+  min-width: 0;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.metric-code {
+  margin: 0 0 3px;
+  color: var(--ink-faint);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.metric-title { margin: 0 0 14px; font-size: 14px; line-height: 1.3; }
+.metric-series-row + .metric-series-row {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--row-line);
+}
+.metric-series-label {
+  margin: 0 0 6px;
+  color: var(--ink-dim);
+  font-size: 11px;
+  text-transform: capitalize;
+}
+.metric-values {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  margin: 0;
+}
+.metric-reading { min-width: 0; }
+.metric-reading dt {
+  color: var(--ink-faint);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.metric-reading dd {
+  margin: 2px 0 0;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.metric-reading.metric-delta dd { color: var(--accent-ink); }
+.metric-reading dd.metric-gap { color: var(--ink-faint); font-weight: 400; }
 
 /* Board — one grid template shared by the header, group headers, project rows
    and nested ticket rows, so every column lines up at every depth. */
@@ -419,6 +492,7 @@ main {
 @media (max-width: 1180px) {
   .table { --cols: 26px minmax(200px, 3fr) 92px 104px 124px 100px 84px; }
   .cell-repo { display: none; }
+  .metric-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 900px) {
@@ -435,6 +509,8 @@ main {
 }
 
 @media (max-width: 600px) {
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .metric-tile { padding: 12px; }
   .brief-sections {
     display: grid;
     grid-template-columns: minmax(0, 1fr);

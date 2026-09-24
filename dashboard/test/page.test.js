@@ -115,6 +115,9 @@ test("a pip carries the ticket's furthest state", () => {
   assert.equal(pipState({ state: "OPEN", pr: "changes requested" }), "changes-requested");
   assert.equal(pipState({ state: "OPEN", pr: "submitted" }), "submitted");
   assert.equal(pipState({ state: "OPEN", blocked: true }), "blocked");
+  assert.equal(
+    pipState({ state: "OPEN", blocked: true, blocked_by_siblings: true }), "blocked-sibling",
+  );
   assert.equal(pipState({ state: "OPEN" }), "open");
 });
 
@@ -285,7 +288,10 @@ test("pip collisions use scoped colours and a textured blocked state", async () 
   assert.match(css, /\.chip-tier-escalated \{ color: var\(--pip-blocked\); \}/);
   assert.match(css, /\.chip-class-maintenance \{ color: var\(--pip-blocked\); \}/);
   assert.match(css, /\.chip-class-broken \{ color: var\(--danger\); \}/);
-  assert.match(html, /pip pip-blocked[^<]*<\/i>\s*blocked \(striped\)/);
+  assert.match(css, /\.pip-blocked-sibling \{[\s\S]*repeating-linear-gradient\(\s*135deg,/);
+  assert.match(html, /pip pip-blocked-sibling[^<]*<\/i>\s*waiting on a sibling/);
+  assert.match(html, /pip pip-blocked[^<-]*<\/i>\s*blocked from outside/);
+  assert.doesNotMatch(html, /striped/);
 });
 
 test("the phone progress shows its count once (#994)", async () => {

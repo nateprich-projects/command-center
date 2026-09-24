@@ -325,7 +325,8 @@ main {
   height: 1px;
   background: var(--child-rule);
 }
-.ticket-blocked .ticket-title { color: var(--blocked-title); }
+.ticket-blocked .ticket-title,
+.ticket-blocked-sibling .ticket-title { color: var(--blocked-title); }
 .ticket-title { color: var(--ink-dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
 .ticket-closed .ticket-title { color: var(--ink-faint); text-decoration: line-through; text-decoration-color: var(--ink-muted); }
 .owners { display: inline-flex; gap: 5px; }
@@ -355,6 +356,15 @@ main {
     135deg,
     var(--pip-blocked-pip) 0 3px,
     var(--pip-blocked-pip-stripe) 3px 6px
+  );
+}
+/* Waiting only on a sibling ticket: open work with the blocked stripe, so it
+   reads as next in line rather than stalled. */
+.pip-blocked-sibling {
+  background: repeating-linear-gradient(
+    135deg,
+    var(--pip-open) 0 3px,
+    var(--pip-blocked-pip) 3px 6px
   );
 }
 .owner-more { margin-left: 4px; font-size: 11px; color: var(--ink-faint); }
@@ -548,6 +558,7 @@ main {
   .phone-title .pip { flex: 0 0 auto; }
   .phone-title .phone-title-link { flex: 1 1 auto; min-width: 0; }
   .phone-row-blocked > .phone-summary .phone-title-link { color: var(--blocked-title); }
+  .phone-row-blocked-sibling > .phone-summary .phone-title-link { color: var(--blocked-title); }
   .phone-row-closed > .phone-summary .phone-title { font-weight: 400; }
   .phone-row-closed > .phone-summary .phone-title-link {
     color: var(--ink-faint);

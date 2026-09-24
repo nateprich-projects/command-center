@@ -37,8 +37,8 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
-from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping,
-                    Optional, Sequence, Set, Tuple)
+from typing import (Any, Callable, Collection, Dict, Iterable, Iterator, List,
+                    Mapping, Optional, Sequence, Set, Tuple)
 
 import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
@@ -8266,6 +8266,7 @@ def _dashboard_ticket(
     pr_known: bool = True,
     parent_block: Optional[str] = None,
     authoring_agents: Iterable[str] = (),
+    siblings: Collection[str] = (),
 ) -> Dict[str, object]:
     """One ticket row for the dashboard, with its PR, tier and owner flags.
 
@@ -8278,9 +8279,17 @@ def _dashboard_ticket(
     own label: an open native blocker, or a blocked parent (``parent_block``
     is that parent's reason, "" when it has none). Showing only the label left
     #807 and #702 looking like work an engineer could take (#966).
+
+    ``siblings`` are the refs of the other tickets under the same parent. A
+    block made only of those is the plan's own sequencing, not a stall, and
+    the page draws it apart from a block from outside (Nate, 2026-09-24).
     """
     blocked = bool(
         item.is_blocked or item.open_blockers or parent_block is not None
+    )
+    blocked_by_siblings = bool(
+        blocked and parent_block is None
+        and _blocked_only_by(item, siblings)
     )
     block_reason = _dashboard_block_reason(item)
     if block_reason is None and parent_block is not None:
@@ -8362,8 +8371,26 @@ def _dashboard_ticket(
         "escalation_matches": matches,
         "owner": owner,
         "blocked": blocked,
+        "blocked_by_siblings": blocked_by_siblings,
         "human_step": needs if needs in ("human", "claude-code-environment") else None,
     }
+
+
+def _blocked_only_by(item: Item, refs: Collection[str]) -> bool:
+    """True when every condition on ``item``'s block names one of ``refs``.
+
+    A date hold, or a label with a reason and no references, is a condition
+    outside the set, so either one answers False.
+    """
+    if item.blocked_until is not None:
+        return False
+    values = list(item.open_blockers)
+    if item.is_blocked:
+        if not item.block_references:
+            return False
+        values += list(item.block_references)
+    resolved = [_dependency_ref(item, value) for value in values]
+    return bool(resolved) and all(ref in refs for ref in resolved)
 
 
 def _dashboard_item(
@@ -8404,9 +8431,12 @@ def _dashboard_item(
 
 #: Progress order for the sub-issue bar: finished work fills from the left,
 #: the way a progress bar reads, whatever order the tickets are queued in.
+#: Open work sits left of blocked work, and a ticket waiting only on its
+#: siblings sits left of one blocked from outside the project (Nate,
+#: 2026-09-24).
 PIP_PROGRESS_ORDER = (
     "closed", "approved", "changes-requested", "submitted", "unknown",
-    "blocked", "open",
+    "open", "blocked-sibling", "blocked",
 )
 
 
@@ -8424,6 +8454,8 @@ def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
     if pr == "unknown":
         return "unknown"
     if ticket.get("blocked"):
+        if ticket.get("blocked_by_siblings"):
+            return "blocked-sibling"
         return "blocked"
     return "open"
 
@@ -8609,6 +8641,8 @@ def dashboard_board(
                 "by " + refs if refs
                 else (_dashboard_block_reason(parent) or "")
             )
+        siblings_of = list(children.get(parent.ref, ()))
+        siblings = {child.ref for child in siblings_of}
         return [
             _dashboard_ticket(
                 child,
@@ -8621,8 +8655,9 @@ def dashboard_board(
                 known,
                 parent_block if child.state == "OPEN" else None,
                 authoring_for(facts.get(child.ref)),
+                siblings,
             )
-            for child in sorted(children.get(parent.ref, ()), key=ticket_key)
+            for child in sorted(siblings_of, key=ticket_key)
         ]
 
     def best_rank(item: Item) -> Optional[int]:

@@ -236,6 +236,8 @@ def base_argv(tmp_path, kv, spool_dir):
     env_file = write_env_file(tmp_path / "test.env")
     wrangler = write_wrangler_toml(tmp_path / "wrangler.toml")
     fake_brief = write_fake_brief(tmp_path / "funnel.py")
+    fake_metrics = tmp_path / "metrics-series.py"
+    write_fake_series(fake_metrics, exit_code=1)
     return (
         [
             "--spool-dir",
@@ -248,6 +250,8 @@ def base_argv(tmp_path, kv, spool_dir):
             kv.api_base,
             "--funnel-py",
             str(fake_brief),
+            "--metrics-py",
+            str(fake_metrics),
             "--lock-file",
             str(tmp_path / "publisher.lock"),
             "--deploy-state-file",
@@ -257,7 +261,18 @@ def base_argv(tmp_path, kv, spool_dir):
     )
 
 
-def run_publisher(argv, monkeypatch, capsys):
+def write_fake_series(path, payload=None, exit_code=0):
+    if payload is None:
+        script = "import sys\nprint('series unavailable', file=sys.stderr)\nsys.exit({})\n".format(exit_code)
+    else:
+        script = "import json\nimport sys\nprint(json.dumps({!r}))\nsys.exit({})\n".format(
+            payload, exit_code,
+        )
+    path.write_text(script)
+    return path
+
+
+def run_publisher(argv, monkeypatch, capsys, with_metrics=False):
     """Run one tick with every path overridden; the real Mac is untouched."""
     for name in (
         "CLOUDFLARE_API_TOKEN",
@@ -268,10 +283,16 @@ def run_publisher(argv, monkeypatch, capsys):
         "COMMAND_CENTER_DASHBOARD_WRANGLER_TOML",
         "COMMAND_CENTER_DASHBOARD_API_BASE",
         "COMMAND_CENTER_DASHBOARD_FUNNEL_PY",
+        "COMMAND_CENTER_DASHBOARD_METRICS_PY",
         "COMMAND_CENTER_DASHBOARD_LOCK",
         "COMMAND_CENTER_DASHBOARD_DEPLOY_STATE_FILE",
     ):
         monkeypatch.delenv(name, raising=False)
+    if not with_metrics:
+        # The legacy publisher cases focus on snapshot/refresh behavior. The
+        # new metrics publication path has its own subprocess/KV integration
+        # case below.
+        monkeypatch.setattr(publisher, "publish_metrics_series", lambda *_: None)
     code = publisher.main(argv)
     out, err = capsys.readouterr()
     return code, out, err
@@ -293,6 +314,31 @@ def test_publishes_the_newest_entry_once(tmp_path, kv, monkeypatch, capsys):
     assert len(puts) == 1
     assert json.loads(puts[0][2].decode()) == newest
     assert puts[0][2] == newest_path.read_bytes()
+
+
+def test_publishes_metrics_series_under_its_own_key(
+    tmp_path, kv, monkeypatch, capsys
+):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    entry_path, snapshot = write_spool_entry(spool, "entry.json", seconds_ago=60)
+    argv, _ = base_argv(tmp_path, kv, spool)
+    series = {
+        "schema_version": 1,
+        "as_of": "2026-09-24",
+        "days": ["2026-09-24"],
+        "metrics": {"A": {"A1": {"total": {"daily": [3]}}}},
+    }
+    metrics_path = Path(argv[argv.index("--metrics-py") + 1])
+    write_fake_series(metrics_path, series)
+
+    code, _, err = run_publisher(argv, monkeypatch, capsys, with_metrics=True)
+
+    assert code == 0, err
+    assert json.loads(kv.values["snapshot"]) == snapshot
+    assert kv.values["snapshot"] == entry_path.read_bytes()
+    assert json.loads(kv.values["metrics"]) == series
+    assert len(kv.puts_to("metrics")) == 1
 
 
 def test_skips_publish_when_remote_snapshot_is_current(

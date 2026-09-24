@@ -317,6 +317,12 @@ The onboarding steps are:
   membership state in GitHub; there is no allowlist or denylist for repos.
 - **CI workflow — blocking.** A member repo must have CI, because the merge gate
   refuses to merge work when no CI checks are reported.
+- **CI on the self-hosted runners — blocking.** Every CI job runs on a `hobby-*`
+  runner (`hobby-linux`, `hobby-windows` or `hobby-macos`), never a GitHub-hosted
+  label such as `ubuntu-latest`. The org's Actions spending limit refuses hosted
+  jobs for private repos before they start, so a hosted CI job reports a failure
+  that ran no code (measured 2026-09-24 on `github-runners#2`). A repo arriving with
+  hosted CI is switched over during onboarding. _(confirmed by Nate 2026-09-23)_
 - **Stock GitHub labels deleted — advisory.** Remove the ten stock labels so they do
   not duplicate Command Center's vocabulary, but their presence does not block work.
 - **Dependabot swept — advisory.** Sweep Dependabot during onboarding, but an

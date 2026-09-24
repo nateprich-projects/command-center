@@ -383,7 +383,7 @@ def test_open_work_sits_left_of_blocked_work_in_the_bar():
         ticket(13),
         ticket(14, state="CLOSED"),
     ])
-    assert row["pips"] == ["closed", "open", "blocked-sibling", "blocked"]
+    assert row["pips"] == ["closed", "open", "queued", "blocked"]
 
 
 @pytest.mark.parametrize("blocked_ticket", [
@@ -400,7 +400,7 @@ def test_a_ticket_blocked_only_by_siblings_reads_apart(blocked_ticket):
     assert by_number[12]["blocked"] is True
     assert by_number[12]["blocked_by_siblings"] is True
     assert by_number[11]["blocked_by_siblings"] is False
-    assert row["pips"] == ["open", "blocked-sibling"]
+    assert row["pips"] == ["open", "queued"]
 
 
 @pytest.mark.parametrize("blocked_ticket", [
@@ -444,7 +444,7 @@ def test_blocked_pips_line_up_behind_their_blockers():
     assert by_number[267]["sibling_blockers"] == [REPO + "#266", REPO + "#264"]
     assert by_number[260]["sibling_blockers"] == []
     assert row["pips"] == (
-        ["closed"] + ["blocked"] * 4 + ["blocked-sibling"] * 3
+        ["closed"] + ["blocked"] * 4 + ["queued"] * 3
     )
 
 
@@ -458,8 +458,8 @@ def test_a_chain_from_open_work_leads_a_chain_from_outside():
         ticket(15, open_blockers=[REPO + "#14"]),
     ])
     assert row["pips"] == [
-        "open", "blocked-sibling", "blocked", "blocked-sibling",
-        "blocked-sibling",
+        "open", "queued", "blocked", "queued",
+        "queued",
     ]
 
 
@@ -469,7 +469,7 @@ def test_a_sibling_cycle_still_draws_every_ticket():
         ticket(11, open_blockers=[REPO + "#12"]),
         ticket(12, open_blockers=[REPO + "#11"]),
     ])
-    assert row["pips"] == ["blocked-sibling", "blocked-sibling"]
+    assert row["pips"] == ["queued", "queued"]
 
 
 def test_a_scaled_bar_keeps_the_blocked_states_in_first_seen_order():
@@ -480,7 +480,7 @@ def test_a_scaled_bar_keeps_the_blocked_states_in_first_seen_order():
     items += [ticket(n, open_blockers=[REPO + "#21"]) for n in range(26, 31)]
     bar = _building_row(items)["pips"]
     assert len(bar) == funnel.PIP_SEGMENTS
-    assert bar.index("blocked") < bar.index("blocked-sibling")
+    assert bar.index("blocked") < bar.index("queued")
 
 
 def test_a_blocked_projects_tickets_are_blocked_from_outside():

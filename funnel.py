@@ -8481,13 +8481,14 @@ def _dashboard_item(
 
 #: Progress order for the sub-issue bar: finished work fills from the left,
 #: the way a progress bar reads, whatever order the tickets are queued in.
-#: Open work sits left of blocked work (Nate, 2026-09-24). The two blocked
-#: states share one run, ordered by ``_dashboard_pip_order``.
+#: Open work sits left of blocked work (Nate, 2026-09-24). A ticket waiting
+#: only on its siblings is "queued"; it and "blocked" share one run, ordered
+#: by ``_dashboard_pip_order``.
 PIP_PROGRESS_ORDER = (
     "closed", "approved", "changes-requested", "submitted", "unknown",
-    "open", "blocked-sibling", "blocked",
+    "open", "queued", "blocked",
 )
-_PIP_BLOCKED_STATES = ("blocked-sibling", "blocked")
+_PIP_BLOCKED_STATES = ("queued", "blocked")
 
 
 def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
@@ -8505,7 +8506,7 @@ def _dashboard_pip_state(ticket: Mapping[str, object]) -> str:
         return "unknown"
     if ticket.get("blocked"):
         if ticket.get("blocked_by_siblings"):
-            return "blocked-sibling"
+            return "queued"
         return "blocked"
     return "open"
 

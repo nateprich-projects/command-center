@@ -120,14 +120,14 @@ function shortRepo(value) {
 // A ticket's pip state, which is also its row flag: closed work is solid, a PR
 // waiting on the reviewer is light blue, a rejected current head is danger
 // red, and an approved PR is light purple. A block made only of sibling
-// tickets is the plan's sequencing and reads apart from a block from outside.
+// tickets is the plan's sequencing: that ticket is queued, drawn as open.
 function pipState(ticket) {
   if (!ticket || typeof ticket !== "object") return "open";
   if (ticket.state !== "OPEN") return "closed";
   if (ticket.pr === "approved") return "approved";
   if (ticket.pr === "changes requested") return "changes-requested";
   if (ticket.pr === "submitted" || ticket.pr === "merged") return "submitted";
-  if (ticket.blocked) return ticket.blocked_by_siblings ? "blocked-sibling" : "blocked";
+  if (ticket.blocked) return ticket.blocked_by_siblings ? "queued" : "blocked";
   return "open";
 }
 
@@ -227,15 +227,20 @@ function tierCell(tier) {
 }
 
 // A row nobody can act on until a block lifts says so where the owner would
-// be, rather than a blank (Nate, 2026-09-24).
-function ownerCell(owner, blocked = false) {
-  if (!owner && blocked) return chip("Blocked", "chip-owner owner-blocked");
+// be, rather than a blank: Queued when it waits only on its siblings, Blocked
+// otherwise (Nate, 2026-09-24). ``hold`` is "queued", "blocked", or a
+// boolean, where true means blocked.
+function ownerCell(owner, hold = false) {
+  if (!owner && hold === "queued") return chip("Queued", "chip-owner owner-queued");
+  if (!owner && hold) return chip("Blocked", "chip-owner owner-blocked");
   if (!owner) return element("span", "muted", "—");
   return chip(owner, `chip-owner ${OWNER_CLASS[owner] || ""}`);
 }
 
-function ticketBlocked(ticket) {
-  return Boolean(ticket && ticket.state === "OPEN" && ticket.blocked);
+// What holds an open ticket: "queued" behind its siblings, "blocked", or null.
+function ticketHold(ticket) {
+  if (!ticket || ticket.state !== "OPEN" || !ticket.blocked) return null;
+  return ticket.blocked_by_siblings ? "queued" : "blocked";
 }
 
 // The producer's flag; an older snapshot without it falls back to the
@@ -269,6 +274,9 @@ function headerRow() {
 function blockedChip(ticket) {
   const refs = Array.isArray(ticket.blockers) ? ticket.blockers : [];
   const names = refs.map((ref) => `#${String(ref).split("#").pop()}`);
+  if (names.length && ticket.blocked_by_siblings) {
+    return chip(`queued behind ${names.join(", ")}`, "chip-queued", refs.join(", "));
+  }
   if (names.length) {
     return chip(`blocked by ${names.join(", ")}`, "chip-blocked", refs.join(", "));
   }
@@ -296,7 +304,7 @@ function ticketRow(ticket) {
 
   row.append(cell("cell-repo", element("span", "muted", "")));
   row.append(cell("cell-tier", tierCell(ticket.state === "OPEN" ? ticket.tier : null)));
-  row.append(cell("cell-owner", ownerCell(ticket.owner, ticketBlocked(ticket))));
+  row.append(cell("cell-owner", ownerCell(ticket.owner, ticketHold(ticket))));
   row.append(cell("cell-pips", element("span", "muted", "")));
   row.append(cell("cell-class", element("span", "muted", "")));
   row.append(cell("cell-age", element("span", "muted", "")));
@@ -395,9 +403,12 @@ function phoneDetails(item, inheritedClass, children) {
   } else {
     fields.append(phoneMeta([
       ["Tier", tierCell(item.state === "OPEN" ? item.tier : null)],
-      ["Next step", ownerCell(item.owner, ticketBlocked(item))],
+      ["Next step", ownerCell(item.owner, ticketHold(item))],
     ]));
-    if (item.blocked) fields.append(phoneField("Blocked", blockedChip(item)));
+    if (item.blocked) {
+      const label = ticketHold(item) === "queued" ? "Queued" : "Blocked";
+      fields.append(phoneField(label, blockedChip(item)));
+    }
     if (children.length || Number.isFinite(item.tickets_total)) {
       fields.append(phoneField("Progress", phoneProgress(item, children)));
     }
@@ -809,6 +820,6 @@ if (typeof document !== "undefined") {
 
 export {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
-  phoneState, pipState, projectBlocked, renderPhoneBoard, repoLabels, repoOf,
+  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible,
 };

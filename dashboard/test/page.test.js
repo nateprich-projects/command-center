@@ -4,7 +4,7 @@ import test from "node:test";
 
 import {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
-  phoneState, pipState, projectBlocked, renderPhoneBoard, repoLabels, repoOf,
+  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible,
 } from "../public/app.js";
 
@@ -116,7 +116,7 @@ test("a pip carries the ticket's furthest state", () => {
   assert.equal(pipState({ state: "OPEN", pr: "submitted" }), "submitted");
   assert.equal(pipState({ state: "OPEN", blocked: true }), "blocked");
   assert.equal(
-    pipState({ state: "OPEN", blocked: true, blocked_by_siblings: true }), "blocked-sibling",
+    pipState({ state: "OPEN", blocked: true, blocked_by_siblings: true }), "queued",
   );
   assert.equal(pipState({ state: "OPEN" }), "open");
 });
@@ -217,6 +217,9 @@ test("a row nobody can act on says Blocked where the owner would be", () => {
     assert.ok(ownerCell(null, true).className.includes("owner-blocked"));
     assert.equal(ownerCell(null, false).textContent, "—");
     assert.equal(ownerCell("Muse", true).textContent, "Muse");
+    assert.equal(ownerCell(null, "blocked").textContent, "Blocked");
+    assert.equal(ownerCell(null, "queued").textContent, "Queued");
+    assert.ok(ownerCell(null, "queued").className.includes("owner-queued"));
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;
@@ -225,6 +228,11 @@ test("a row nobody can act on says Blocked where the owner would be", () => {
   assert.equal(projectBlocked({ next_step_blocked: false, blocked: false }), false);
   // An older snapshot without the flag falls back to the project's own block.
   assert.equal(projectBlocked({ blocked: true }), true);
+  // Queued uses the pip's definition: every blocker is a sibling ticket.
+  assert.equal(ticketHold({ state: "OPEN", blocked: true, blocked_by_siblings: true }), "queued");
+  assert.equal(ticketHold({ state: "OPEN", blocked: true }), "blocked");
+  assert.equal(ticketHold({ state: "OPEN", blocked: false }), null);
+  assert.equal(ticketHold({ state: "CLOSED", blocked: true }), null);
 });
 
 test("the page renders no brief section other than the board and human steps", async () => {
@@ -288,9 +296,10 @@ test("pip collisions use scoped colours and a textured blocked state", async () 
   assert.match(css, /\.chip-tier-escalated \{ color: var\(--pip-blocked\); \}/);
   assert.match(css, /\.chip-class-maintenance \{ color: var\(--pip-blocked\); \}/);
   assert.match(css, /\.chip-class-broken \{ color: var\(--danger\); \}/);
-  assert.match(css, /\.pip-blocked-sibling \{[\s\S]*repeating-linear-gradient\(\s*135deg,/);
-  assert.match(html, /pip pip-blocked-sibling[^<]*<\/i>\s*waiting on a sibling/);
-  assert.match(html, /pip pip-blocked[^<-]*<\/i>\s*blocked from outside/);
+  assert.match(css, /\.pip-queued \{ background: var\(--pip-open\); \}/);
+  assert.match(html, /pip pip-open[^<]*<\/i>\s*open or queued/);
+  assert.match(html, /pip pip-blocked[^<]*<\/i>\s*blocked</);
+  assert.doesNotMatch(html, /pip-queued|waiting on a sibling|from outside/);
   assert.doesNotMatch(html, /striped/);
 });
 
@@ -409,7 +418,8 @@ test("a blocked project says so on its own row, wide and narrow", async () => {
   const phone = source.slice(
     source.indexOf("function phoneDetails("), source.indexOf("function phoneRow("),
   );
-  assert.equal((phone.match(/phoneField\("Blocked", blockedChip\(item\)\)/g) || []).length, 2);
+  assert.equal((phone.match(/phoneField\("Blocked", blockedChip\(item\)\)/g) || []).length, 1);
+  assert.match(phone, /phoneField\(label, blockedChip\(item\)\)/);
 });
 
 test("the phone detail view has no PR field and puts the short facts on one row (#990)", async () => {

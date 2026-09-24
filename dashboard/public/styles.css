@@ -325,8 +325,7 @@ main {
   height: 1px;
   background: var(--child-rule);
 }
-.ticket-blocked .ticket-title,
-.ticket-blocked-sibling .ticket-title { color: var(--blocked-title); }
+.ticket-blocked .ticket-title { color: var(--blocked-title); }
 .ticket-title { color: var(--ink-dim); font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
 .ticket-closed .ticket-title { color: var(--ink-faint); text-decoration: line-through; text-decoration-color: var(--ink-muted); }
 .owners { display: inline-flex; gap: 5px; }
@@ -358,15 +357,9 @@ main {
     var(--pip-blocked-pip-stripe) 3px 6px
   );
 }
-/* Waiting only on a sibling ticket: open work with the blocked stripe, so it
-   reads as next in line rather than stalled. */
-.pip-blocked-sibling {
-  background: repeating-linear-gradient(
-    135deg,
-    var(--pip-open) 0 3px,
-    var(--pip-blocked-pip) 3px 6px
-  );
-}
+/* Waiting only on a sibling ticket is queued, and reads as open work
+   (Nate, 2026-09-24). */
+.pip-queued { background: var(--pip-open); }
 .owner-more { margin-left: 4px; font-size: 11px; color: var(--ink-faint); }
 .tier-standard { color: var(--tier-standard); font-size: 11.5px; }
 .pip-count {
@@ -392,7 +385,7 @@ main {
    both themes without a second set of literals. */
 .chip-tier-escalated,
 .chip-blocked, .chip-pin, .chip-gate, .owner-nate, .owner-claude, .owner-muse,
-.owner-codex, .owner-blocked, .chip-class-broken, .chip-class-maintenance, .chip-class-improve,
+.owner-codex, .owner-blocked, .owner-queued, .chip-queued, .chip-class-broken, .chip-class-maintenance, .chip-class-improve,
 .chip-class-new, .chip-class-replace, .chip-class-investigate {
   border-color: color-mix(in srgb, currentColor 48%, transparent);
 }
@@ -400,6 +393,7 @@ main {
 .chip-tier-escalated { color: var(--pip-blocked); }
 .chip-tier-standard { color: var(--ink-faint); }
 .chip-blocked { color: var(--danger); }
+.chip-queued { color: var(--ink-dim); }
 .chip-pin { color: var(--accent-ink); }
 .chip-gate { color: var(--accent-ink); }
 .chip-reason { color: var(--ink-faint); }
@@ -409,6 +403,7 @@ main {
 .owner-muse { color: var(--pip-submitted); }
 .owner-codex { color: var(--green); }
 .owner-blocked { color: var(--pip-blocked-pip); }
+.owner-queued { color: var(--ink-dim); }
 .chip-class { color: var(--ink-dim); }
 .chip-class-broken { color: var(--danger); }
 .chip-class-maintenance { color: var(--pip-blocked); }
@@ -558,7 +553,6 @@ main {
   .phone-title .pip { flex: 0 0 auto; }
   .phone-title .phone-title-link { flex: 1 1 auto; min-width: 0; }
   .phone-row-blocked > .phone-summary .phone-title-link { color: var(--blocked-title); }
-  .phone-row-blocked-sibling > .phone-summary .phone-title-link { color: var(--blocked-title); }
   .phone-row-closed > .phone-summary .phone-title { font-weight: 400; }
   .phone-row-closed > .phone-summary .phone-title-link {
     color: var(--ink-faint);

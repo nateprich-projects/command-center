@@ -62,6 +62,91 @@ def test_cost_is_summed_not_differenced(monkeypatch):
     assert funnel.graphql_spend()["remaining"] == 50
 
 
+def test_cost_and_remaining_accumulate_in_separate_caller_buckets(monkeypatch):
+    reset()
+    responses = [
+        {"data": {"rateLimit": {"cost": 2, "remaining": 100}}},
+        {"data": {"rateLimit": {"cost": 3, "remaining": 80}}},
+        {"data": {"rateLimit": {"cost": 5, "remaining": 70}}},
+    ]
+
+    def run(args, **kwargs):
+        assert args[:3] == ["gh", "api", "graphql"]
+        assert "rate_limit" not in args
+        return Proc(responses.pop(0))
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    with funnel.graphql_caller("standard"):
+        funnel.gh_graphql("{first}")
+        funnel.gh_graphql("{second}")
+    with funnel.graphql_caller("publisher"):
+        funnel.gh_graphql("{third}")
+
+    assert funnel.graphql_caller_spend() == {
+        "standard": {"calls": 2, "points": 5, "remaining": 80},
+        "publisher": {"calls": 1, "points": 5, "remaining": 70},
+    }
+
+
+def test_unreadable_cost_is_kept_under_unattributed(monkeypatch):
+    reset()
+    monkeypatch.setattr(funnel.subprocess, "run", lambda *a, **k: Proc(
+        {"data": {"viewer": {}, "rateLimit": {"remaining": 42}}}
+    ))
+
+    with funnel.graphql_caller("escalated"):
+        funnel.gh_graphql("{viewer{login}}")
+
+    assert funnel.graphql_caller_spend() == {
+        "unattributed": {"calls": 1, "points": None, "remaining": 42},
+    }
+
+
+def test_partial_error_response_still_contributes_its_rate_limit_reading(
+    monkeypatch,
+):
+    reset()
+    response = {
+        "data": {"rateLimit": {"cost": 4, "remaining": 20}},
+        "errors": [{"message": "partial result"}],
+    }
+    monkeypatch.setattr(funnel.subprocess, "run", lambda *a, **k:
+                        SimpleNamespace(
+                            returncode=1, stdout=json.dumps(response),
+                            stderr="partial result",
+                        ))
+
+    with funnel.graphql_caller("watch"):
+        with pytest.raises(funnel.GitHubError, match="partial result"):
+            funnel.gh_graphql("{viewer{login}}")
+
+    assert funnel.graphql_caller_spend() == {
+        "watch": {"calls": 1, "points": 4, "remaining": 20},
+    }
+
+
+def test_command_caller_mapping_covers_the_named_paths():
+    assert funnel.graphql_caller_for_command(
+        ["begin", "--tier", "standard"]
+    ) == "begin"
+    assert funnel.graphql_caller_for_command(["brief"]) == "publisher"
+    assert funnel.graphql_caller_for_command(["main-ci"]) == "watch"
+    assert funnel.graphql_caller_for_command(
+        ["next-review", "--tier", "escalated"]
+    ) == "escalated"
+    assert funnel.graphql_caller_for_command(["breakdown-packet"]) == "breakdown"
+
+
+def test_run_lane_comes_from_the_existing_heartbeat_spool(tmp_path, monkeypatch):
+    (tmp_path / "codex.jsonl").write_text(json.dumps({
+        "run": "run-id", "agent": "codex", "phase": "start",
+        "tier": "standard",
+    }) + "\n")
+    monkeypatch.setenv("COMMAND_CENTER_HEARTBEAT_SPOOL", str(tmp_path))
+
+    assert funnel.graphql_caller_for_run("run-id", "codex") == "standard"
+
+
 def test_a_missing_or_malformed_block_does_not_break_the_call(monkeypatch):
     reset()
     monkeypatch.setattr(funnel.subprocess, "run",
@@ -171,6 +256,9 @@ def test_report_api_cost_attaches_measurement_to_the_resolved_run(monkeypatch):
     funnel._API_USAGE["cli_calls"] = 2
     funnel._GRAPHQL_SPEND.update({"calls": 1, "cost": 7})
     funnel._GRAPHQL_COST_READS = 1
+    funnel._GRAPHQL_CALLER_SPEND["standard"] = {
+        "calls": 1, "points": 7, "remaining": 90,
+    }
     captured = []
 
     monkeypatch.setattr(
@@ -186,7 +274,13 @@ def test_report_api_cost_attaches_measurement_to_the_resolved_run(monkeypatch):
     funnel.report_api_cost(run="run-id", agent="codex")
 
     assert captured == [(
-        "codex", "run-id", {"graphql_points": 7, "gh_calls": 3}
+        "codex", "run-id", {
+            "graphql_points": 7,
+            "gh_calls": 3,
+            "graphql_by_caller": {
+                "standard": {"calls": 1, "points": 7, "remaining": 90},
+            },
+        }
     )]
 
 

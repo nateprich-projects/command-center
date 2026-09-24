@@ -101,6 +101,11 @@ OUTCOMES = [
 #: Keep the names here so finish can aggregate each budget independently and
 #: never turn an unreadable value into zero.
 API_COST_FIELDS = ("graphql_points", "gh_calls")
+GRAPHQL_CALLER_NAMES = frozenset((
+    "standard", "escalated", "publisher", "watch", "begin", "breakdown",
+    "unattributed",
+))
+GRAPHQL_CALLER_COST_FIELDS = ("calls", "points", "remaining")
 
 # These are the note signatures the execution plan can currently distinguish.
 # Anything outside these explicit rules stays unclassified; the runtime head is
@@ -534,6 +539,10 @@ def record_api_cost(agent: str, run: Optional[str], api_cost: Dict) -> str:
             for name in API_COST_FIELDS
         },
     }
+    if isinstance(values.get("graphql_by_caller"), dict):
+        record["graphql_by_caller"] = _clean_graphql_by_caller(
+            values["graphql_by_caller"]
+        )
     kept = append(agent, record)
     _report(kept)
     return kept
@@ -733,6 +742,107 @@ def api_cost_for_run(records: List[Dict], run: Optional[str]) -> Dict[str, Optio
             values.append(value)
         if readable:
             result[name] = sum(values)
+    return result
+
+
+def _clean_graphql_by_caller(value: Dict) -> Dict[str, Dict[str, Optional[int]]]:
+    """Keep only the bounded caller schema and measured non-negative integers."""
+    cleaned: Dict[str, Dict[str, Optional[int]]] = {}
+    for name, entry in value.items():
+        caller = (
+            name if isinstance(name, str) and name in GRAPHQL_CALLER_NAMES
+            else "unattributed"
+        )
+        if not isinstance(entry, dict):
+            entry = {}
+        target = cleaned.setdefault(caller, {
+            "calls": None, "points": None, "remaining": None,
+        })
+        for field in GRAPHQL_CALLER_COST_FIELDS:
+            number = _api_cost_number(entry.get(field))
+            if number is not None:
+                previous = target[field]
+                target[field] = number if previous is None else previous + number
+    return cleaned
+
+
+def graphql_by_caller_for_run(
+        records: List[Dict], run: Optional[str]
+        ) -> Optional[Dict[str, Dict[str, Optional[int]]]]:
+    """Aggregate per-command caller readings without hiding unreadable costs.
+
+    `points` and `calls` sum across this run. `remaining` is the latest valid
+    GraphQL response value for that caller, not a delta against the shared
+    account window. Older api_cost events have no caller map; their known
+    points, or an unreadable value, stay visible under `unattributed`.
+    """
+    if not run:
+        return None
+    events = [
+        record for record in distinct_records(records)
+        if record.get("phase") == "api_cost" and record.get("run") == run
+    ]
+    if not events:
+        return None
+
+    totals: Dict[str, Dict[str, object]] = {}
+    for index, record in enumerate(events):
+        raw = record.get("graphql_by_caller")
+        if not isinstance(raw, dict):
+            api = record.get("api_cost")
+            api = api if isinstance(api, dict) else {}
+            raw = {
+                "unattributed": {
+                    "calls": None,
+                    "points": _api_cost_number(api.get("graphql_points")),
+                    "remaining": None,
+                }
+            }
+        for name, entry in _clean_graphql_by_caller(raw).items():
+            bucket = totals.setdefault(name, {
+                "calls": 0, "points": 0, "remaining": None,
+                "calls_readable": True, "points_readable": True,
+                "remaining_stamp": (float("-inf"), -1),
+            })
+            if not isinstance(entry, dict):
+                entry = {}
+            for field in ("calls", "points"):
+                value = _api_cost_number(entry.get(field))
+                if value is None:
+                    bucket[field + "_readable"] = False
+                elif bucket[field + "_readable"]:
+                    bucket[field] = int(bucket[field]) + value
+            remaining = _api_cost_number(entry.get("remaining"))
+            if remaining is not None:
+                stamp_value = record.get("ts")
+                stamp = (
+                    float(stamp_value)
+                    if isinstance(stamp_value, (int, float))
+                    and not isinstance(stamp_value, bool)
+                    else float("-inf")
+                )
+                if (stamp, index) >= bucket["remaining_stamp"]:
+                    bucket["remaining"] = remaining
+                    bucket["remaining_stamp"] = (stamp, index)
+
+    result: Dict[str, Dict[str, Optional[int]]] = {}
+    caller_order = [*sorted(GRAPHQL_CALLER_NAMES - {"unattributed"}),
+                    "unattributed"]
+    for caller in caller_order:
+        bucket = totals.get(caller)
+        if bucket is None:
+            continue
+        result[caller] = {
+            "calls": (
+                int(bucket["calls"])
+                if bucket["calls_readable"] else None
+            ),
+            "points": (
+                int(bucket["points"])
+                if bucket["points_readable"] else None
+            ),
+            "remaining": bucket["remaining"],
+        }
     return result
 
 
@@ -1665,6 +1775,9 @@ def main(argv=None) -> int:
                 args.agent, records, run_id, finished_at
             ),
             "api_cost": api_cost_for_run(records, run_id),
+            "graphql_by_caller": graphql_by_caller_for_run(
+                records, run_id
+            ),
             **detect_model(args.agent),
         }
         if args.outcome == "errored":

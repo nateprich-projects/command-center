@@ -14,7 +14,16 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import funnel
 from engine.shape import apply_main as main
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    caller = funnel.graphql_caller_for_command(
+        ["shape-apply"] + sys.argv[1:]
+    )
+    with funnel.graphql_caller(caller):
+        try:
+            code = main()
+        finally:
+            funnel.report_api_cost()
+    raise SystemExit(code)

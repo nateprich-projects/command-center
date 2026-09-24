@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -284,3 +288,141 @@ def test_append_is_idempotent_and_jsonl_round_trips():
     assert duplicate_appended == 0
     assert second == first
     assert metrics._decode_rows(metrics._encode_rows(second)) == second
+
+
+def _git_history_commit(repo, committed_at, run_id, *, fixture_inputs=False):
+    repo.mkdir(parents=True, exist_ok=True)
+    if not (repo / ".git").exists():
+        subprocess.run(
+            ["git", "init", "-b", "heartbeat"], cwd=repo, check=True,
+            capture_output=True, text=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Metrics Fixture"], cwd=repo,
+            check=True, capture_output=True, text=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.email", "metrics@example.test"], cwd=repo,
+            check=True, capture_output=True, text=True,
+        )
+    for agent in metrics.AGENTS:
+        rows = _jsonl("metrics_{}.jsonl".format(agent)) if fixture_inputs else []
+        rows.append({"agent": agent, "run": run_id, "phase": "start", "ts": int(NOW.timestamp()) - 7200})
+        (repo / "{}.jsonl".format(agent)).write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+        )
+    if fixture_inputs:
+        (repo / "snapshot.json").write_text(
+            json.dumps(_json("metrics_snapshot.json")), encoding="utf-8"
+        )
+        (repo / "usage.json").write_text(
+            json.dumps(_json("metrics_usage.json")), encoding="utf-8"
+        )
+        (repo / "outcomes.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in _jsonl("metrics_outcomes.jsonl")),
+            encoding="utf-8",
+        )
+        (repo / "commits.json").write_text(
+            json.dumps(_json("metrics_commits.json")), encoding="utf-8"
+        )
+        (repo / "funnel.py").write_text("line\n", encoding="utf-8")
+    else:
+        (repo / ".keep").write_text("fixture\n", encoding="utf-8")
+    (repo / "sample.txt").write_text(
+        "{} {}\n".format(run_id, committed_at.isoformat()), encoding="utf-8"
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+    stamp = committed_at.astimezone(timezone.utc).isoformat()
+    env = dict(os.environ)
+    env["GIT_AUTHOR_DATE"] = stamp
+    env["GIT_COMMITTER_DATE"] = stamp
+    subprocess.run(
+        ["git", "commit", "-m", "fixture {}".format(run_id)], cwd=repo,
+        env=env, check=True, capture_output=True, text=True,
+    )
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+
+def test_backfill_fixture_history_reuses_derive_and_appends_idempotently(tmp_path, monkeypatch):
+    repo = tmp_path / "heartbeat"
+    _git_history_commit(
+        repo, datetime(2026, 9, 23, 4, 30, tzinfo=timezone.utc), "overlap",
+        fixture_inputs=True,
+    )
+    first_sample_sha = _git_history_commit(
+        repo, datetime(2026, 9, 23, 5, 10, tzinfo=timezone.utc), "overlap",
+        fixture_inputs=True,
+    )
+    _git_history_commit(
+        repo, datetime(2026, 9, 23, 6, 10, tzinfo=timezone.utc), "overlap",
+        fixture_inputs=True,
+    )
+    monkeypatch.setattr(
+        metrics, "_gh",
+        lambda *_args, **_kwargs: pytest.fail("C-F history reads must not call the GitHub API"),
+    )
+
+    rows, overlap_count = metrics._build_backfill_rows(
+        repo,
+        "heartbeat",
+        datetime(2026, 9, 23, 4, 0, tzinfo=timezone.utc),
+        datetime(2026, 9, 23, 6, 0, tzinfo=timezone.utc),
+        derived_at=NOW,
+    )
+
+    sample = metrics._load_history_sample(
+        repo,
+        datetime(2026, 9, 23, 4, 0, tzinfo=timezone.utc),
+        metrics._HistoryCommit(
+            first_sample_sha, datetime(2026, 9, 23, 5, 10, tzinfo=timezone.utc)
+        ),
+    )
+    expected = metrics.derive_row(
+        sample.snapshot,
+        sample.ledgers,
+        sample.usage_readings,
+        sample.outcome_records,
+        now=sample.sampled_at,
+        commit_activity=sample.commit_activity,
+        funnel_line_count=sample.funnel_line_count,
+        hour_start=sample.hour_start,
+        derived_at=NOW,
+    )
+    assert rows[0] == expected
+    assert len(rows) == 2
+    assert overlap_count == 1
+
+    appended, count = metrics.append_rows_many([], rows)
+    repeated, repeated_count = metrics.append_rows_many(appended, rows)
+    assert count == 2
+    assert repeated_count == 0
+    assert repeated == appended
+
+
+def test_backfill_rejects_history_stride_that_loses_ledger_overlap(tmp_path):
+    repo = tmp_path / "heartbeat-gap"
+    _git_history_commit(
+        repo, datetime(2026, 9, 23, 4, 30, tzinfo=timezone.utc), "root"
+    )
+    _git_history_commit(
+        repo, datetime(2026, 9, 23, 5, 10, tzinfo=timezone.utc), "first-window"
+    )
+    _git_history_commit(
+        repo, datetime(2026, 9, 23, 7, 0, tzinfo=timezone.utc), "skipped-window"
+    )
+
+    with pytest.raises(metrics.MetricsError, match="do not overlap"):
+        metrics._build_backfill_rows(
+            repo,
+            "heartbeat",
+            datetime(2026, 9, 23, 4, 0, tzinfo=timezone.utc),
+            datetime(2026, 9, 23, 6, 0, tzinfo=timezone.utc),
+            derived_at=NOW,
+        )
+
+
+def test_backfill_rejects_unparseable_boundaries():
+    with pytest.raises(metrics.MetricsError, match="--start"):
+        metrics._parse_backfill_boundary("not-a-time", "start")
+    with pytest.raises(metrics.MetricsError, match="--until"):
+        metrics._parse_backfill_boundary("not-a-time", "until")

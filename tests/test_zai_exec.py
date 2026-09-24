@@ -1,6 +1,6 @@
 """scripts/zai-exec asks GLM-5.3 one tool-less question and fails closed.
 
-The z.ai half of the engine's standard tier until 2026-10-07 00:00 PDT
+The z.ai half of the engine's standard tier until 2026-10-06 09:00 PDT
 (Nate, 2026-09-23). A local HTTP server stands in for z.ai's
 Anthropic-compatible endpoint, so every refusal below is exercised against
 real HTTP status codes and bodies rather than a patched function.
@@ -70,6 +70,17 @@ class _Server:
                     "body": json.loads(self.rfile.read(length)),
                 })
                 status, body = outer.responses.pop(0)
+                if status == "drop":
+                    # Close without a response: the client sees the server
+                    # disconnect mid-exchange (RemoteDisconnected).
+                    self.close_connection = True
+                    return
+                if status == "redirect":
+                    self.send_response(307)
+                    self.send_header("Location", body)
+                    self.send_header("content-length", "0")
+                    self.end_headers()
+                    return
                 raw = (body if isinstance(body, str)
                        else json.dumps(body)).encode("utf-8")
                 self.send_response(status)
@@ -98,14 +109,32 @@ class _Server:
 
 @pytest.fixture
 def run(tmp_path, monkeypatch, capsys):
-    """Run zai-exec in process against a stub server; no sleeping retries."""
+    """Run zai-exec in process against a stub server on a fake clock.
+
+    A retry's wait advances the clock instead of sleeping, so the deadline
+    arithmetic is exercised exactly and the suite stays fast.
+    """
     prompt = tmp_path / "prompt.txt"
     prompt.write_text("Answer with one JSON object: the packet goes here.")
     logs = tmp_path / "logs"
     monkeypatch.setenv("ZAI_API_KEY", "test-key")
     monkeypatch.setenv("ZAI_EXEC_LOG_DIR", str(logs))
     monkeypatch.setenv("ZCODE_SESSION_ID", "session-1")
-    monkeypatch.setattr(zai_exec.time, "sleep", lambda seconds: None)
+
+    class FakeClock:
+        def __init__(self):
+            self.now = 1000.0
+            self.sleeps = []
+
+        def monotonic(self):
+            return self.now
+
+        def sleep(self, seconds):
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+    clock = FakeClock()
+    monkeypatch.setattr(zai_exec, "time", clock)
 
     def invoke(responses, *args):
         with _Server(responses) as server:
@@ -117,6 +146,7 @@ def run(tmp_path, monkeypatch, capsys):
 
     invoke.logs = logs
     invoke.prompt = prompt
+    invoke.clock = clock
     return invoke
 
 
@@ -187,41 +217,72 @@ def test_a_spent_quota_has_its_own_status_and_marker(run, status_code, body):
     assert len(requests) == 1, "a spent window is not retried"
 
 
-def test_a_concurrency_refusal_is_retried_not_judged(run):
-    """The engine's judges run in parallel; a Lite plan's concurrency limit
-    must not turn into an `unsure` requirement."""
-    status, out, err, requests = run([
-        (429, {"error": {"code": "1302", "message": "High concurrency"}}),
+BUSY = (429, {"error": {"code": "1302", "message": "High concurrency"}})
+
+
+def test_a_concurrency_refusal_is_retried_until_the_deadline_not_a_count(run):
+    """#1411: three quick retries (about 65 seconds) could not outlast
+    another GLM-5.3 call holding the Lite plan's slot for minutes. Retries
+    continue, with backoff, for as long as the deadline leaves room."""
+    responses = [BUSY] * 6 + [
         (500, {"error": {"message": "upstream"}}),
+        (429, {"error": {"code": "1305", "message": "overloaded"}}),
         (200, _reply()),
-    ])
+    ]
+    status, out, err, requests = run(responses, "--timeout", "1080")
 
     assert status == 0, err
     assert out == '{"ok": true}'
-    assert len(requests) == 3
+    assert len(requests) == 9
+    assert run.clock.sleeps == [5.0, 10.0, 20.0, 40.0, 60.0, 60.0, 60.0, 60.0]
     assert "retrying" in err
-
-
-def test_a_refusal_that_outlasts_the_retries_fails_without_a_quota_claim(run):
-    busy = (429, {"error": {"code": "1305", "message": "overloaded"}})
-    status, out, err, requests = run(
-        [busy] * (len(zai_exec.RETRY_DELAYS) + 1), "--timeout", "600")
-
-    assert status == 1
-    assert "quota-exhausted" not in err
-    assert len(requests) == len(zai_exec.RETRY_DELAYS) + 1
 
 
 def test_no_retry_waits_past_the_callers_deadline(run):
     """The engine's bound kills a call that outlives it; a retry that would
-    sleep past the deadline stops instead, and says why."""
-    busy = (429, {"error": {"code": "1302", "message": "High concurrency"}})
-    # 30 seconds admits the 5 and 15 second waits and not the 45.
-    status, _, err, requests = run([busy] * 4, "--timeout", "30")
+    leave too little time for the call itself stops instead, and says why."""
+    # 60 seconds: waits of 5 and 10 leave room for a call; 20 more would not.
+    status, _, err, requests = run([BUSY] * 10, "--timeout", "60")
 
     assert status == 1
     assert len(requests) == 3
+    assert run.clock.sleeps == [5.0, 10.0]
     assert "HTTP 429 code 1302" in err
+    assert "no time left to retry" in err
+    assert "quota-exhausted" not in err
+
+
+def test_a_dropped_connection_is_retried_not_a_traceback(run):
+    status, out, err, requests = run(
+        [("drop", None), ("drop", None), (200, _reply())], "--timeout", "600")
+
+    assert status == 0, err
+    assert out == '{"ok": true}'
+    assert len(requests) == 3
+    assert "Traceback" not in err
+    assert "connection failed" in err
+
+
+def test_a_redirect_is_refused_and_the_key_goes_nowhere_else(run):
+    with _Server([(200, _reply())]) as elsewhere:
+        status, out, err, requests = run(
+            [("redirect", elsewhere.url)], "--timeout", "600")
+    assert status == 1
+    assert out == ""
+    assert len(requests) == 1
+    assert elsewhere.requests == [], "x-api-key must not follow a redirect"
+    assert "HTTP 307" in err
+
+
+def test_an_unexpected_error_is_one_line_not_a_traceback(run, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("something odd")
+
+    monkeypatch.setattr(zai_exec, "_post", boom)
+    status, _, err, _ = run([])
+
+    assert status == 1
+    assert err == "zai-exec: unexpected RuntimeError: something odd\n"
 
 
 def test_a_client_error_fails_closed(run):
@@ -275,7 +336,11 @@ def test_no_key_is_a_usage_error_not_a_call(run, monkeypatch):
 
 
 def test_the_call_log_holds_metadata_and_never_the_prompt_or_answer(run):
-    status, _, err, _ = run([(200, _reply(text="the secret answer"))])
+    status, _, err, _ = run([(200, _reply(
+        text="the secret answer",
+        usage={"input_tokens": 27, "output_tokens": 98,
+               "cache_read_input_tokens": 5,
+               "cache_creation_input_tokens": 10}))])
 
     assert status == 0, err
     path = run.logs / "model-io-session-1.jsonl"
@@ -286,13 +351,19 @@ def test_the_call_log_holds_metadata_and_never_the_prompt_or_answer(run):
     row = json.loads(raw)
     assert row["type"] == "model_io"
     assert row["model"] == "glm-5.3"
-    # input_tokens excludes cache reads on this endpoint; the log carries the
-    # total heartbeat's reader expects.
-    assert row["response"]["usage"] == {
-        "total_input_tokens": 32, "fresh_input_tokens": 27,
-        "cache_read_input_tokens": 5, "cache_write_input_tokens": 0,
+    # input_tokens is the uncached input alone on this endpoint; cache reads
+    # and writes sit beside it. The four kinds are disjoint — a cache write is
+    # counted once, not also as fresh input (#1411) — and sum to the total.
+    usage = row["response"]["usage"]
+    assert usage == {
+        "total_input_tokens": 42, "fresh_input_tokens": 27,
+        "cache_read_input_tokens": 5, "cache_write_input_tokens": 10,
         "output_tokens": 98,
     }
+    assert usage["total_input_tokens"] == sum(
+        usage[kind] for kind in ("fresh_input_tokens",
+                                 "cache_read_input_tokens",
+                                 "cache_write_input_tokens"))
 
 
 def test_heartbeat_reads_zcodes_model_and_input_from_the_call_log(
@@ -314,6 +385,31 @@ def test_heartbeat_reads_zcodes_model_and_input_from_the_call_log(
         "fresh_input_tokens": 54, "cache_read_input_tokens": 10,
         "cache_write_input_tokens": 0, "output_tokens": 196,
     }
+
+
+def test_a_run_reads_only_its_own_call_log(run, monkeypatch):
+    """#1411: a run that stopped before any model call must not inherit the
+    previous run's model and tokens from the newest file."""
+    run([(200, _reply(id="msg_earlier"))])            # session-1's call
+    pattern = str(run.logs / "*.jsonl")
+    monkeypatch.setitem(heartbeat.MODEL_SOURCES, "zcode", pattern)
+    monkeypatch.setitem(session_usage.SESSION_GLOBS, "zcode", pattern)
+
+    # A later run, session-2, made no model call: nothing is known.
+    monkeypatch.setenv("ZCODE_SESSION_ID", "session-2")
+    assert heartbeat.detect_model("zcode")["model"] is None
+    assert heartbeat.input_usage("zcode") is None
+    assert session_usage.usage_for_session("zcode", "session-2") is None
+    # A session id that merely contains another's is not that session.
+    assert session_usage.usage_for_session("zcode", "session") is None
+
+    # No session id at all reads as unknown, never as the newest file.
+    monkeypatch.delenv("ZCODE_SESSION_ID")
+    assert heartbeat.detect_model("zcode")["model"] is None
+    assert heartbeat.input_usage("zcode") is None
+
+    monkeypatch.setenv("ZCODE_SESSION_ID", "session-1")
+    assert heartbeat.detect_model("zcode")["model"] == "glm-5.3"
 
 
 def test_zcode_no_longer_reads_the_retired_apps_rollout():

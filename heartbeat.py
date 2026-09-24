@@ -172,10 +172,12 @@ PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
              "muse": "meta"}
 
 #: When z.ai stops answering the standard judgement tier: 2026-10-07 00:00
-#: PDT, the start of the day the cancelled z.ai plan expires (Nate,
-#: 2026-09-23). `scripts/muse-review-engine` routes on the same instant and a
-#: test pins the two together.
-ZAI_STANDARD_UNTIL = 1791356400
+#: in Beijing time (UTC+8), 2026-10-06 09:00 PDT. The cancelled z.ai plan
+#: expires on 2026-10-07 (Nate, 2026-09-23), and z.ai may count that date in
+#: its own zone, so the lane ends at the earliest reading of it rather than
+#: risk runs erroring on an expired key (#1411). `scripts/muse-review-engine`
+#: routes on the same instant and a test pins the two together.
+ZAI_STANDARD_UNTIL = 1791302400
 
 
 def retired_agents(now: Optional[float] = None) -> frozenset:
@@ -886,6 +888,24 @@ def _merged_pr(value):
     return number
 
 
+def _session_files(agent: str) -> List[str]:
+    """The agent's session files, newest first; for zcode, this run's only.
+
+    zai-exec names its call log by `ZCODE_SESSION_ID`, one file per engine
+    run, so zcode need not guess by mtime. It must not: a run that stopped
+    before any model call would otherwise inherit the previous run's model and
+    tokens (#1411). No session id, or no file for it, reads as unknown.
+    """
+    paths = glob.glob(os.path.expanduser(MODEL_SOURCES[agent]))
+    if agent == "zcode":
+        session = session_id("zcode")
+        if not session:
+            return []
+        wanted = "model-io-{}.jsonl".format(session)
+        paths = [path for path in paths if os.path.basename(path) == wanted]
+    return sorted(paths, key=os.path.getmtime, reverse=True)
+
+
 def detect_model(agent: str) -> Dict[str, Optional[str]]:
     """What model is running, from the agent's own session file.
 
@@ -902,8 +922,7 @@ def detect_model(agent: str) -> Dict[str, Optional[str]]:
     found = {"provider": PROVIDERS.get(agent), "harness": HARNESSES.get(agent),
              "model": None, "reasoning_effort": None, "model_source": "detected"}
     try:
-        paths = sorted(glob.glob(os.path.expanduser(MODEL_SOURCES[agent])),
-                       key=os.path.getmtime, reverse=True)
+        paths = _session_files(agent)
         if not paths:
             return found
         if agent == "muse":
@@ -1159,11 +1178,7 @@ def input_usage(agent: str) -> Optional[Dict[str, Optional[float]]]:
     produce no estimate and no heartbeat field.
     """
     try:
-        paths = sorted(
-            glob.glob(os.path.expanduser(MODEL_SOURCES[agent])),
-            key=os.path.getmtime,
-            reverse=True,
-        )
+        paths = _session_files(agent)
         if not paths or agent not in ("codex", "zcode"):
             return None
         if agent == "codex":

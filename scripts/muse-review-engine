@@ -1,7 +1,7 @@
 #!/bin/bash
 # A judgement engine: one review, breakdown, or shape job against its packet,
 # then stop. Muse answers by default; z.ai's GLM-5.3 answers the standard tier
-# until 2026-10-07 00:00 PDT (below).
+# until 2026-10-07 00:00 Beijing time, 2026-10-06 09:00 PDT (below).
 #
 # Usage: muse-review-engine [tier] [reasoning-effort]
 #   tier   -- escalated (default) or standard; substituted into begin
@@ -12,8 +12,9 @@
 # call at all, except a non-OPEN PR stop, which records no verdict. A passing
 # precheck whose merged overlap has no green run yet re-runs the PR's CI once
 # and waits for the result instead of calling the model (#1019).
-# Otherwise, review calls one lister and parallel judges of at most three
-# requirements each against the same cached packet; the runner derives the
+# Otherwise, review calls one lister and judges of at most three
+# requirements each against the same cached packet — in parallel on Muse, one
+# at a time on z.ai (#1411); the runner derives the
 # verdict before handing the answer to review-apply. Breakdown and shape each
 # answer one JSON question. Calls retry once on a parse error. Breakdown rides
 # the standard tier only; shape follows wherever begin offers it.
@@ -34,13 +35,16 @@
 #    tool to disable because none is ever offered, and it refuses any reply
 #    that a model other than glm-5.3 answered (LEARNINGS.md, 2026-09-06).
 #
-# The standard tier routes to z.ai while now < 2026-10-07 00:00 PDT
-# (1791356400), on Nate's decision of 2026-09-23: Muse's week was nearly
-# spent until its Sunday 17:00 PDT reset, and his cancelled z.ai Coding Plan
-# stays active until it expires on 2026-10-07, so its credits are use-it-or-
-# lose-it. Ending at the start of that day gives up at most one day rather
-# than risk a day of runs erroring on an expired key. After it the standard
-# tier is Muse's again with nothing to undo. The escalated tier never routes.
+# The standard tier routes to z.ai while now < 2026-10-07 00:00 Beijing time
+# (1791302400, 2026-10-06 09:00 PDT), on Nate's decision of 2026-09-23:
+# Muse's week was nearly spent until its Sunday 17:00 PDT reset, and his
+# cancelled z.ai Coding Plan stays active until it expires on 2026-10-07, so
+# its credits are use-it-or-lose-it. The cutoff is the start of the expiry day
+# in z.ai's own time zone (UTC+8), the earliest reading of "expires
+# 2026-10-07" (#1411): it gives up most of a day rather than risk runs
+# erroring on an expired key. After it the standard tier is Muse's again with
+# nothing to undo. The escalated tier never routes. heartbeat.py's
+# ZAI_STANDARD_UNTIL is the same instant, and a test pins the two together.
 # AGENTS.md carries the terms caveat: headless use of a Coding Plan key is his
 # risk call on unread terms, as Muse's is.
 #
@@ -91,7 +95,7 @@ esac
 # own five-hour and weekly windows and stops the lane when either is spent.
 # No fallback to Muse on a spent z.ai window: the standard lane records a skip
 # and waits, and Muse's week is left to the escalated tier it was kept for.
-ZAI_STANDARD_UNTIL="${MUSE_REVIEW_ENGINE_ZAI_UNTIL:-1791356400}"
+ZAI_STANDARD_UNTIL="${MUSE_REVIEW_ENGINE_ZAI_UNTIL:-1791302400}"
 BACKEND="muse"
 AGENT="muse"
 if [[ "$TIER" == "standard" && "$ZAI_STANDARD_UNTIL" =~ ^[0-9]+$ ]] \
@@ -522,27 +526,35 @@ call_model() {
   call_model_files "$PROMPT_FILE" "$ANSWER_FILE" "$DIAG_FILE"
 }
 
+# End the whole run as a z.ai quota skip: no verdict, no apply, no errored
+# record, whichever call met the spent window — the lister, a judge, or an
+# issue job's one question (#1411). Nothing is parked: z.ai publishes its
+# windows, so the next `begin --agent zcode` reads the spent one and stops
+# before any Project read, and the reset lifts it by itself. Never Muse's hold
+# file either — a spent z.ai window must not park the escalated tier, which
+# still has Muse's week to spend.
+zai_quota_skip() {
+  local diag_path="$1"
+  local status="$2"
+  local zai_reason
+  zai_reason="$(grep -m 1 'zai-exec: quota-exhausted:' "$diag_path" 2>/dev/null \
+    | sed 's/^zai-exec: quota-exhausted: //')"
+  echo "muse-review-engine: z.ai's quota is exhausted; the standard lane stops until its window resets (${zai_reason:-no reason given})" >&2
+  if [[ -n "${BEGIN_RUN:-}" ]]; then
+    python3 "$REPO/heartbeat.py" finish --agent "$AGENT" --run "$BEGIN_RUN" \
+      --outcome skipped-provider-quota \
+      --note "z.ai quota exhausted: ${zai_reason:-zai-exec exit $status}" >&2 || true
+  fi
+  exit 0
+}
+
 model_failed() {
   local status="$1"
-  local zai_reason
   # A spent provider window is not the subject's failure, on either backend.
-  #
-  # z.ai: zai-exec says so with its own status. Nothing is parked: z.ai
-  # publishes its windows, so the next `begin --agent zcode` reads the spent
-  # one and stops before any Project read, and the reset lifts it by itself.
-  # Never Muse's hold file either — a spent z.ai window must not park the
-  # escalated tier, which still has Muse's week to spend.
+  # z.ai says so with zai-exec's own status.
   if [[ "$BACKEND" == "zai" ]]; then
     if (( status == ZAI_QUOTA_EXIT )); then
-      zai_reason="$(grep -m 1 'zai-exec: quota-exhausted:' "$DIAG_FILE" 2>/dev/null \
-        | sed 's/^zai-exec: quota-exhausted: //')"
-      echo "muse-review-engine: z.ai's quota is exhausted; the standard lane stops until its window resets (${zai_reason:-no reason given})" >&2
-      if [[ -n "${BEGIN_RUN:-}" ]]; then
-        python3 "$REPO/heartbeat.py" finish --agent "$AGENT" --run "$BEGIN_RUN" \
-          --outcome skipped-provider-quota \
-          --note "z.ai quota exhausted: ${zai_reason:-zai-exec exit $status}" >&2 || true
-      fi
-      exit 0
+      zai_quota_skip "$DIAG_FILE" "$status"
     fi
   # Muse: record the hold so every lane waits for the reset instead of
   # retrying on its own schedule.
@@ -1308,6 +1320,15 @@ run_judge_chunk() {
     call_model_files "$prompt_path" "$answer_path" "$diag_path"
     muse_status=$?
     if (( muse_status != 0 )); then
+      # A spent z.ai window is not an answer about these requirements, so it
+      # must not become `unsure` and, through it, a rejection of a PR nobody
+      # judged. Leave the marker and no result; the loop below finishes the
+      # whole run as a quota skip and applies no verdict (#1411).
+      if [[ "$BACKEND" == "zai" ]] && (( muse_status == ZAI_QUOTA_EXIT )); then
+        cp "$diag_path" "$call_dir/quota" 2>/dev/null || : > "$call_dir/quota"
+        echo "muse-review-engine: judge chunk $index met a spent z.ai window" >&2
+        return 0
+      fi
       if (( muse_status == 124 )); then
         evidence="judge call timed out after ${BOUND_SECONDS} seconds"
       else
@@ -1355,6 +1376,13 @@ run_judge_chunk() {
 # Build one private call directory per slice, then start all judges together.
 # Their inputs are independent and each file is isolated, so parallel max
 # calls do not race over the cached packet, answer, or diagnostic.
+#
+# On z.ai, one at a time instead (#1411). The Lite plan refuses concurrent
+# requests (code 1302), and a GLM-5.3 answer takes minutes, so parallel judges
+# past the limit would wait out their retries and read `unsure` — a rejection
+# of a good PR on every review with more than one chunk. Sequential judges
+# also stop at the first spent window instead of spending the rest of the
+# chunks' credits on a run that cannot record a verdict. Muse is unchanged.
 JUDGE_PIDS=()
 JUDGE_RUN_STATUS=0
 for (( index = 0; index < JUDGE_COUNT; index++ )); do
@@ -1380,10 +1408,23 @@ PY
     failure "could not prepare judge chunk $index for PR #$BEGIN_PR in $BEGIN_REPO" || true
     exit 1
   fi
-  run_judge_chunk "$index" "$CALL_DIR" &
-  JUDGE_PIDS+=("$!")
+  if [[ "$BACKEND" == "zai" ]]; then
+    run_judge_chunk "$index" "$CALL_DIR"
+    judge_status=$?
+    if (( judge_status != 0 )); then
+      JUDGE_RUN_STATUS=1
+    fi
+    if [[ -e "$CALL_DIR/quota" ]]; then
+      zai_quota_skip "$CALL_DIR/quota" "$ZAI_QUOTA_EXIT"
+    fi
+  else
+    run_judge_chunk "$index" "$CALL_DIR" &
+    JUDGE_PIDS+=("$!")
+  fi
 done
-for judge_pid in "${JUDGE_PIDS[@]}"; do
+# The `+` guard: bash 3.2, which launchd's /bin/bash is, reads an empty
+# array under `set -u` as unbound, and the z.ai path leaves this one empty.
+for judge_pid in ${JUDGE_PIDS[@]+"${JUDGE_PIDS[@]}"}; do
   wait "$judge_pid"
   judge_status=$?
   if (( judge_status != 0 )); then
@@ -1398,8 +1439,9 @@ fi
 # Preserve the shared provider-quota hold when a failed judge captured its
 # refusal. The failed chunk still becomes unsure and the code-derived verdict
 # remains rejected, as the ticket requires. Muse only: a judge that met a
-# spent z.ai window is handled the same way on the verdict, and the next
-# `begin` reads the window from z.ai, so there is no hold to write.
+# spent z.ai window has already ended the run as a quota skip above, and the
+# next `begin` reads the window from z.ai, so there is no hold to write — and
+# a Muse-shaped refusal in a z.ai judge's diagnostic must never park Muse.
 if [[ "$BACKEND" == "muse" ]]; then
   for (( index = 0; index < JUDGE_COUNT; index++ )); do
     if MUSE_QUOTA_RESET="$(muse_quota_record "$RUN_DIR/judge.$index/diag.txt")"; then

@@ -9,7 +9,7 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -33,12 +33,16 @@ def _quiet_after_a_busy_cadence(agent, minutes_silent=90, every=15, count=40):
     return rows
 
 
-#: 2026-10-07 00:00 PDT, when the z.ai plan expires (Nate, 2026-09-23).
-ZAI_CUTOFF = datetime(2026, 10, 7, 7, 0, tzinfo=timezone.utc).timestamp()
+#: 2026-10-07 00:00 in Beijing time (UTC+8), 2026-10-06 09:00 PDT: the
+#: earliest reading of the z.ai plan's expiry date (Nate, 2026-09-23; #1411).
+ZAI_CUTOFF = datetime(2026, 10, 7, 0, 0,
+                      tzinfo=timezone(timedelta(hours=8))).timestamp()
 
 
-def test_the_zai_cutoff_is_the_start_of_the_expiry_day_in_pacific_time():
-    assert heartbeat.ZAI_STANDARD_UNTIL == ZAI_CUTOFF == 1791356400
+def test_the_zai_cutoff_is_the_start_of_the_expiry_day_in_beijing_time():
+    assert heartbeat.ZAI_STANDARD_UNTIL == ZAI_CUTOFF == 1791302400
+    pacific = datetime.fromtimestamp(ZAI_CUTOFF, timezone(timedelta(hours=-7)))
+    assert (pacific.month, pacific.day, pacific.hour) == (10, 6, 9)
 
 
 def test_zcode_is_live_until_the_zai_cutoff_and_retired_from_it():

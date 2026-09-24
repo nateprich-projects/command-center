@@ -37,7 +37,7 @@ NATE_LOGIN = "nateprich"
 PR_SCAN_LIMIT = 1000
 
 # zcode is read whether or not it is live: its 2026-09 app records are history,
-# and from 2026-09-23 to 2026-10-07 it is the engine's z.ai standard tier.
+# and from 2026-09-23 to 2026-10-06 09:00 PDT it is the engine's z.ai standard tier.
 HEARTBEAT_AGENTS = ("claude", "codex", "muse", "zcode")
 
 STORE_BACKOFF = (1, 3, 7)

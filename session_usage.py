@@ -321,6 +321,10 @@ def _paths(agent: str) -> List[str]:
 
 
 def _matches(agent: str, path: str, session_id: str) -> bool:
+    if agent == "zcode":
+        # zai-exec names each run's log exactly; a substring match could let
+        # one run's id claim another's file.
+        return os.path.basename(path) == "model-io-{}.jsonl".format(session_id)
     if session_id not in path:
         return False
     return True

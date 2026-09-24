@@ -30,6 +30,7 @@ import subprocess
 import datetime
 import sys
 import time
+import urllib.request
 
 import muse_model
 from datetime import timezone
@@ -1047,6 +1048,9 @@ def shaping_allowed(reading: Dict) -> bool:
     """
     if isinstance(reading, dict) and reading.get("unmetered"):
         return True
+    if isinstance(reading, dict) and reading.get("source") == "zai" \
+            and _zai_lane_live(time.time()):
+        return _zai_has_headroom(reading)
     try:
         windows = reading.get("windows") or {}
         five = windows.get("five_hour") or {}
@@ -1059,6 +1063,32 @@ def shaping_allowed(reading: Dict) -> bool:
     except (AttributeError, TypeError, ValueError):
         return False
     return IDLE_WINDOW_START <= used <= IDLE_WINDOW_CEILING
+
+
+def _zai_lane_live(now: float) -> bool:
+    """Whether the engine's z.ai standard tier is still routing (#1411)."""
+    import heartbeat
+
+    return now < heartbeat.ZAI_STANDARD_UNTIL
+
+
+def _zai_has_headroom(reading: Dict) -> bool:
+    """Shaping headroom on the z.ai lane: the pool's own stop, nothing lower.
+
+    The idle rule's 15% five-hour boundary keeps shaping off a window someone
+    may be working in, and keeps the committed review and breakdown jobs'
+    reserve. Neither applies here while the z.ai lane runs: the plan is
+    cancelled, nobody else spends it, and credits left at its expiry are worth
+    nothing, so the pool is unpaced by design (Nate, 2026-09-23). Holding
+    shaping to 15% would leave 85% of every five-hour window to lapse. What
+    still refuses is the pool's own stop — a spent five-hour or weekly window —
+    and a reading `pace` cannot judge. _(agent rule, unconfirmed — advisory.)_
+    """
+    try:
+        verdict = pace(reading, time.time(), "zai")
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+    return bool(verdict.get("known")) and not verdict.get("over_pace")
 
 
 def _rolling_week_has_headroom(reading: Dict, windows: Dict) -> bool:
@@ -1259,8 +1289,9 @@ DOWNSTREAM_RESERVE = 20.0
 PROVIDER_POLICY = {
     # **Unpaced from 2026-09-23: spend it before it lapses.** Nate cancelled
     # the Coding Plan; it stays active until it expires on 2026-10-07, and
-    # the engine's standard judgement tier runs on it until then (AGENTS.md;
-    # `heartbeat.ZAI_STANDARD_UNTIL`). Credits left at the expiry are worth
+    # the engine's standard judgement tier runs on it until the start of that
+    # day in Beijing time (AGENTS.md; `heartbeat.ZAI_STANDARD_UNTIL`). The
+    # idle-window shaping gate is lifted for it too (`_zai_has_headroom`). Credits left at the expiry are worth
     # nothing, so a line that holds the week back for later is holding it
     # back for no later at all — the same reasoning that took `openai` to a
     # floor of 100 on 2026-09-07. Floor and target are therefore both 100.
@@ -1439,6 +1470,32 @@ def _zai_key() -> Optional[str]:
         return None
 
 
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would resend the key to whatever host it names."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def _zai_quota_payload(key: str) -> object:
+    """GET the quota endpoint in process and return its parsed JSON.
+
+    In process on purpose (#1411). This used to run `curl -H
+    "Authorization: <key>"`, which put the key on a command line that every
+    local account can read through `ps`, and this Mac has a second macOS user.
+    A header built here never leaves the process. Raises on any failure; the
+    caller reads that as no reading, which fails the gate closed.
+    """
+    request = urllib.request.Request(ZAI_QUOTA_URL, headers={
+        "Authorization": key,
+        "Accept-Language": "en-US,en",
+        "Content-Type": "application/json",
+    })
+    opener = urllib.request.build_opener(_RefuseRedirect)
+    with opener.open(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def read_zai(now: float) -> Optional[Dict]:
     """Remaining z.ai Coding Plan quota, read rather than estimated.
 
@@ -1452,16 +1509,10 @@ def read_zai(now: float) -> Optional[Dict]:
     if not key:
         return None
     try:
-        out = subprocess.run(
-            ["curl", "-s", "--max-time", "20", ZAI_QUOTA_URL,
-             "-H", "Authorization: " + key,
-             "-H", "Accept-Language: en-US,en",
-             "-H", "Content-Type: application/json"],
-            capture_output=True, text=True, timeout=30)
-        payload = json.loads(out.stdout)
+        payload = _zai_quota_payload(key)
     except Exception:
         return None
-    if not payload.get("success"):
+    if not isinstance(payload, dict) or not payload.get("success"):
         return None
 
     windows = {}

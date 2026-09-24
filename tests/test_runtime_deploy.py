@@ -209,6 +209,24 @@ def test_career_health_check_runs_script_syntax_and_offline_smoke(
 
     assert calls[0][0] == ["/bin/sh", "-n", "scripts/nightly.sh"]
     assert calls[1][0] == [
-        "/usr/bin/python3", "-m", "pytest", "-q", "tests/test_smoke.py",
+        "/usr/bin/python3", "-c", career_deploy.SMOKE_RUNNER,
     ]
     assert all(call[1] == tmp_path for call in calls)
+
+
+def test_career_smoke_runner_needs_no_pytest_and_fails_closed(tmp_path):
+    (tmp_path / "tests").mkdir()
+    smoke = tmp_path / "tests" / "test_smoke.py"
+    python = sys.executable
+
+    smoke.write_text("def test_ok():\n    assert True\n")
+    ok = subprocess.run([python, "-c", career_deploy.SMOKE_RUNNER], cwd=tmp_path)
+    assert ok.returncode == 0
+
+    smoke.write_text("def test_bad():\n    assert False\n")
+    bad = subprocess.run([python, "-c", career_deploy.SMOKE_RUNNER], cwd=tmp_path)
+    assert bad.returncode != 0
+
+    smoke.write_text("x = 1\n")
+    empty = subprocess.run([python, "-c", career_deploy.SMOKE_RUNNER], cwd=tmp_path)
+    assert empty.returncode != 0

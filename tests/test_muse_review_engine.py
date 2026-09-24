@@ -1162,9 +1162,15 @@ def test_seven_requirements_reach_three_parallel_max_judges_once_each(tmp_path):
     assert [item for chunk in chunks for item in chunk] == requirements
     assert len(set(_cached_packet_from_judge_prompt(prompt)
                    for prompt in prompts)) == 1
+    session_id = (repo / "begin.session_id").read_text()
+    lister = (repo / "muse.args.1").read_text().splitlines()
+    assert lister[lister.index("--session-id") + 1] == session_id
     for call in (2, 3, 4):
         args = (repo / "muse.args.{}".format(call)).read_text().splitlines()
         assert args[args.index("--reasoning-effort") + 1] == "max"
+        # Three judges at once on one id is what Muse refuses as "already
+        # in use"; each became `unsure` and a false rejection (#1413).
+        assert "--session-id" not in args
     answer = json.loads((repo / "apply.answer").read_text())
     assert answer["verdict"] == "approved"
     assert [entry["requirement"] for entry in answer["requirements"]] == \
@@ -1219,10 +1225,15 @@ def test_the_model_call_carries_the_exact_no_tool_shape(tmp_path):
     assert _muse_calls(repo) == 2
     session_id = (repo / "begin.session_id").read_text()
     assert str(uuid.UUID(session_id)) == session_id
+    # The id binds the run through its first call only: Muse refuses a
+    # session already in use, so parallel judges sharing it failed (#1413).
+    first = (repo / "muse.args.1").read_text().splitlines()
+    assert first[first.index("--session-id") + 1] == session_id
+    assert "--session-id" not in \
+        (repo / "muse.args.2").read_text().splitlines()
     for call in (1, 2):
         invoked = (repo / "muse.args.{}".format(call)).read_text().splitlines()
         assert invoked[0] == "exec"
-        assert invoked[invoked.index("--session-id") + 1] == session_id
         assert invoked[invoked.index("--model") + 1] == "muse-spark-1.3"
         assert invoked[invoked.index("--reasoning-effort") + 1] == "high"
         assert "--disable-shell" in invoked
@@ -1267,6 +1278,12 @@ def test_a_malformed_first_answer_retries_once_with_the_parse_error(tmp_path):
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 3
+    # A reused id resumes the session, so a retry on it would carry the
+    # failed attempt in its context (#1413): only the lister is bound.
+    assert "--session-id" in (repo / "muse.args.1").read_text().splitlines()
+    for call in (2, 3):
+        assert "--session-id" not in \
+            (repo / "muse.args.{}".format(call)).read_text().splitlines()
     retry_prompt = (repo / "muse.prompt.3").read_text()
     assert "Your previous answer could not be parsed" in retry_prompt
     assert "invalid JSON" in retry_prompt
@@ -1549,6 +1566,10 @@ def test_a_malformed_issue_answer_retries_once_with_the_parse_error(
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 2
+    # The retry must not resume the malformed attempt's session (#1413).
+    assert "--session-id" in (repo / "muse.args.1").read_text().splitlines()
+    assert "--session-id" not in \
+        (repo / "muse.args.2").read_text().splitlines()
     retry_prompt = (repo / "muse.prompt.2").read_text()
     assert "Your previous answer could not be parsed" in retry_prompt
     assert "invalid JSON" in retry_prompt

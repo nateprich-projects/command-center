@@ -20,6 +20,12 @@ from engine import implement  # noqa: E402
 
 
 REPO = "owner/repo"
+ACCEPT_BODY_CONFLICT_REASON = (
+    "The requested edit to routines/muse-implement.md is blocked by the "
+    "plan's active #794 routine freeze. Only tickets under #794 or #1044 "
+    "are exempt; #1257 is under #1251, and the current verdict confirms "
+    "the conflict. No change was made; wait for #794 to land."
+)
 
 
 def ticket(number=42):
@@ -758,6 +764,128 @@ def test_finish_declined_open_prerequisite_records_only_native_edge(
     ]
 
 
+def test_finish_declined_routes_accept_conflict_to_review_without_blocking(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"blocked": [], "comments": [], "released": [], "finished": [],
+               "needs": []}
+
+    result = implement.finish_declined(
+        ACCEPT_BODY_CONFLICT_REASON,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda url, ref: effects["needs"].append(
+            ("agent", url, ref)),
+        prerequisite_open_effect=lambda ref: pytest.fail(
+            "an Accept conflict must not be treated as a prerequisite"),
+    )
+
+    assert result == {"ticket": REPO + "#42",
+                      "declined": ACCEPT_BODY_CONFLICT_REASON}
+    assert effects["blocked"] == []
+    assert effects["needs"] == [
+        ("agent", ticket()["url"], REPO + "#42")]
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][:3] == (
+        "codex", "run-42", "skipped-blocked")
+
+    assert len(effects["comments"]) == 2
+    decline_comment = effects["comments"][0][0][2]
+    assert decline_comment == "{} {}".format(
+        funnel.DECLINED_PREFIX, ACCEPT_BODY_CONFLICT_REASON)
+    route_comment = effects["comments"][1][0][2]
+    assert route_comment.startswith(
+        "**Review routing: Accept/body conflict**\n\n"
+        + implement.DECLINE_REVIEW_ROUTING_MARKER
+        + "\n```json\n")
+    payload = json.loads(route_comment.split("```json\n", 1)[1].split(
+        "\n```", 1)[0])
+    assert payload == {
+        "type": "accept-body-conflict",
+        "decline_excerpt": ACCEPT_BODY_CONFLICT_REASON,
+        "conflict_pointer": "plan.md#routine-freeze-while-794-lands",
+    }
+
+
+def test_finish_declined_unparseable_conflict_pointer_falls_back_to_blocked(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    reason = (
+        "The ticket Accept contradicts the current repo rules, but the "
+        "conflict pointer is not parseable."
+    )
+    effects = {"blocked": [], "comments": [], "released": [], "finished": [],
+               "needs": []}
+
+    implement.finish_declined(
+        reason,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda url, ref: effects["needs"].append(
+            ("agent", url, ref)),
+    )
+
+    assert len(effects["blocked"]) == 1
+    assert effects["blocked"][0][0][1] == 42
+    assert effects["needs"] == [("agent", ticket()["url"], REPO + "#42")]
+    assert effects["released"] == [REPO + "#42"]
+    assert len(effects["comments"]) == 1
+    assert effects["comments"][0][0][2] == "{} {}".format(
+        funnel.DECLINED_PREFIX, reason)
+    assert effects["finished"][0][:3] == (
+        "codex", "run-42", "skipped-blocked")
+
+
+def test_finish_declined_failed_review_handoff_falls_back_to_blocked(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"blocked": [], "comments": [], "released": [], "finished": []}
+
+    def comment_effect(repo, number, body, **kwargs):
+        effects["comments"].append(body)
+        if len(effects["comments"]) == 2:
+            raise funnel.GitHubError("could not post the review handoff")
+
+    implement.finish_declined(
+        ACCEPT_BODY_CONFLICT_REASON,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=comment_effect,
+        needs_effect=lambda *args: None,
+    )
+
+    assert len(effects["blocked"]) == 1
+    assert effects["blocked"][0][0] == (REPO, 42)
+    assert effects["comments"][0] == "{} {}".format(
+        funnel.DECLINED_PREFIX, ACCEPT_BODY_CONFLICT_REASON)
+    assert implement.DECLINE_REVIEW_ROUTING_MARKER in effects["comments"][1]
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][2] == "skipped-blocked"
+    assert "review routing failed; ticket left blocked" in effects["finished"][0][3]
+
+
 @pytest.mark.parametrize(("reason", "open_state", "edge_fails"), [
     ("Unlanded prerequisite #165 is closed.", False, False),
     ("Unlanded prerequisite #165 is still open.", True, True),
@@ -825,6 +953,27 @@ def test_finish_declined_falls_back_to_blocked_for_non_prerequisite_cases(
 def test_classify_decline_reason_uses_only_named_prerequisite_reference(
         reason, ticket_repo, expected):
     assert implement.classify_decline_reason(reason, ticket_repo) == expected
+
+
+@pytest.mark.parametrize(("reason", "expected"), [
+    (
+        ACCEPT_BODY_CONFLICT_REASON,
+        ("accept-body-conflict", "plan.md#routine-freeze-while-794-lands"),
+    ),
+    (
+        "The ticket Accept contradicts current repo rules; conflicting text "
+        "is at plan.md#routine-freeze-while-794-lands.",
+        ("accept-body-conflict", "plan.md#routine-freeze-while-794-lands"),
+    ),
+    (
+        "The ticket Accept contradicts current repo rules, but its conflict "
+        "pointer is not parseable.",
+        ("unknown", None),
+    ),
+])
+def test_classify_decline_reason_routes_only_pointed_accept_conflicts(
+        reason, expected):
+    assert implement.classify_decline_reason(reason, REPO) == expected
 
 
 @pytest.mark.parametrize(("payload", "expected"), [

@@ -1,7 +1,7 @@
 ---
 title: Command Center — Design Record
 tags: [command-center, funnel, design-record, plan]
-last_updated: 2026-09-19
+last_updated: 2026-09-24
 status: Design settled. v0 in progress.
 ---
 
@@ -786,9 +786,12 @@ machine-readable copies. Prose keeps the explanation for an escalated risk and t
 actual question for Nate, but does not repeat standard risk, an all-clear Needs list,
 or a capture-origin marker.
 
-`Needs` answers who or what must act next. `agent` and `external-event` keep blocked
-work out of Nate's decision queue; `human` puts it there; `claude-code-environment`
+`Needs` answers who or what must act next. `agent` keeps blocked work out of Nate's
+decision queue. `external-event` routes a blocked ticket held for a named event, but
+suppresses `Unblock?` only when its block comment carries a well-formed event condition;
+the field alone does not. `human` puts it in Nate's queue; `claude-code-environment`
 routes a ticket to that environment. A missing or unknown routing value fails closed.
+_(agent rule, unconfirmed — advisory)_
 The migration preserves the IDs of all existing `Needs` options before adding the two
 new options, because replacing an option identity clears assignments even when its name
 is unchanged.

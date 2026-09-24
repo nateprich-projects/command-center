@@ -62,6 +62,7 @@ supported event kind; the agent and job must be named and the outcome must be
 `errored`. A missing, malformed, or unknown event form is unconditioned and
 asks `Unblock?`. Set `Needs: external-event` to route the wait, but the field
 alone is not a condition that can keep it out of that question.
+_(agent rule, unconfirmed — advisory)_
 
 ## Coverage
 

@@ -1168,38 +1168,102 @@ _DECLINED_PREREQUISITE_PATTERNS = (
     ),
 )
 
+_DEFER_NOTE_REFERENCE = re.compile(r"\bdefer(?:red)?[- ]notes?\b", re.IGNORECASE)
+_DEFER_NOTE_PERMISSION = re.compile(
+    r"\b(?:explicit(?:ly)?|allow(?:s|ed)?|permit(?:s|ted)?|"
+    r"accept(?:s|ed|able)?|valid|counts as)\b",
+    re.IGNORECASE,
+)
+_DEFER_NOTE_PROOF = re.compile(r"\bproof\b", re.IGNORECASE)
+_DEFER_NOTE_DENIALS = (
+    re.compile(
+        r"\bdefer(?:red)?[- ]notes?\b.{0,50}"
+        r"\b(?:is|are|was|were)?\s*(?:not|never|cannot|can't)\b.{0,50}"
+        r"\b(?:proof|allowed|permitted|accepted|acceptable|valid)\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"\b(?:not|never|cannot|can't|does\s+not|doesn't)\b.{0,50}"
+        r"\b(?:allow|permit|accept)\b.{0,40}"
+        r"\bdefer(?:red)?[- ]notes?\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"\bnot\b.{0,50}"
+        r"\b(?:allowed|permitted|accepted|acceptable|valid|proof)\b.{0,40}"
+        r"\bdefer(?:red)?[- ]notes?\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+)
+_DEFER_NOTE_REASON = (
+    re.compile(r"\bdefer(?:red)?\b", re.IGNORECASE),
+    re.compile(r"\bseparate idea\b", re.IGNORECASE),
+    re.compile(r"\bclose note\b", re.IGNORECASE),
+    re.compile(
+        r"\bno code\b.{0,100}\b(?:changed|written|made|added)\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+)
 
-def classify_decline_reason(reason: str, ticket_repo: str
+
+def _accepts_defer_note_proof(ticket_body: str) -> bool:
+    """Require explicit permission in an Accept or Proof paragraph."""
+    for match in re.finditer(
+            r"\b(accept|proof)\s*:\s*(.*?)(?=\n\s*\n|\Z)",
+            ticket_body or "", re.IGNORECASE | re.DOTALL):
+        heading, paragraph = match.group(1).lower(), match.group(2)
+        if not (_DEFER_NOTE_REFERENCE.search(paragraph)
+                and _DEFER_NOTE_PERMISSION.search(paragraph)):
+            continue
+        if any(pattern.search(paragraph) for pattern in _DEFER_NOTE_DENIALS):
+            continue
+        if heading == "proof" or _DEFER_NOTE_PROOF.search(paragraph):
+            return True
+    return False
+
+
+def _is_defer_note_proof_reason(reason: str) -> bool:
+    """Recognize the written defer-note shape, including the unchanged-code proof."""
+    return all(pattern.search(reason or "") for pattern in _DEFER_NOTE_REASON)
+
+
+def classify_decline_reason(reason: str, ticket_repo: str,
+                            ticket_body: str = ""
                             ) -> Tuple[str, Optional[str]]:
-    """Recognize a named prerequisite from the reason about to be posted.
+    """Recognize supported decline shapes from the reason and ticket contract.
 
-    This ticket owns the prerequisite-ticket branch. Other reason classes
-    stay on the existing blocked path until their own tickets add a branch.
-    Bare issue numbers resolve against the declined ticket's repository.
+    Bare prerequisite issue numbers resolve against the declined ticket's
+    repository. A defer note is accepted only when the ticket body explicitly
+    allows it as proof and the reason records the no-code deferral.
     """
     found = {
         match.group("ref")
         for pattern in _DECLINED_PREREQUISITE_PATTERNS
         for match in pattern.finditer(reason or "")
     }
-    if len(found) != 1:
-        return "unknown", None
+    if found:
+        if len(found) != 1:
+            return "unknown", None
+        raw_ref = next(iter(found))
+        match = re.fullmatch(
+            r"(?:(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?"
+            r"#(?P<number>[1-9][0-9]*)",
+            raw_ref,
+        )
+        if match is None:
+            return "unknown", None
+        repo = match.group("repo") or ticket_repo
+        if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is None:
+            return "unknown", None
+        ref = "{}#{}".format(repo, match.group("number"))
+        if shape.REF_RE.fullmatch(ref) is None:
+            return "unknown", None
+        return "prerequisite-ticket", ref
 
-    raw_ref = next(iter(found))
-    match = re.fullmatch(
-        r"(?:(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+))?"
-        r"#(?P<number>[1-9][0-9]*)",
-        raw_ref,
-    )
-    if match is None:
-        return "unknown", None
-    repo = match.group("repo") or ticket_repo
-    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is None:
-        return "unknown", None
-    ref = "{}#{}".format(repo, match.group("number"))
-    if shape.REF_RE.fullmatch(ref) is None:
-        return "unknown", None
-    return "prerequisite-ticket", ref
+    if (_is_defer_note_proof_reason(reason)
+            and _accepts_defer_note_proof(ticket_body)):
+        return "defer-note-proof", None
+    return "unknown", None
 
 
 def declined_prerequisite_is_open(ref: str) -> bool:
@@ -1237,6 +1301,25 @@ def add_declined_prerequisite_edge(repo: str, number: int, prerequisite: str,
         raise funnel.GitHubError(
             "could not add blocked-by edge from {}#{} to {}: {}".format(
                 repo, number, prerequisite, (proc.stderr or "").strip()))
+
+
+def close_declined_defer_note_proof(
+        repo: str, number: int, reason: str, *, run: str, agent: str,
+        cwd: pathlib.Path) -> None:
+    """Close an explicitly accepted defer-note proof as completed."""
+    comment = funnel.append_provenance(
+        "{} {}".format(funnel.DECLINED_PREFIX, reason), "agent",
+        at=datetime.now(timezone.utc), run=run, agent=agent,
+    )
+    proc = funnel._run_gh(
+        ["gh", "issue", "close", str(number), "--repo", repo,
+         "--reason", "completed", "--comment", comment],
+        cwd=str(cwd), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise funnel.GitHubError(
+            "could not close {}#{} as completed: {}".format(
+                repo, number, (proc.stderr or "").strip()))
 
 
 def post_agent_comment(repo: str, number: int, body: str, *,
@@ -1504,13 +1587,28 @@ def finish_declined(
         = declined_prerequisite_is_open,
         prerequisite_edge_effect: Callable[..., None]
         = add_declined_prerequisite_edge,
+        defer_note_close_effect: Callable[..., None]
+        = close_declined_defer_note_proof,
         extra_note: Optional[str] = None) -> dict:
-    """Record the decline, routing a verified prerequisite as a native edge."""
+    """Record the decline, routing supported proof and prerequisite shapes."""
     context = checkout_context(cwd)
     resolved = resolve_checkout_repo(context["root"], repo)
-    decline_class, prerequisite = classify_decline_reason(reason, resolved)
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
+    decline_class, prerequisite = classify_decline_reason(
+        reason, resolved, ticket.get("body") or "")
+    if decline_class == "defer-note-proof":
+        defer_note_close_effect(
+            resolved, context["number"], reason,
+            run=run, agent=agent, cwd=context["root"],
+        )
+        release(ref)
+        note = "closed as completed: allowed defer-note proof"
+        if extra_note:
+            note += "; " + extra_note.strip()
+        heartbeat_finish(agent, run, "done", note, ref)
+        return {"ticket": ref, "declined": reason}
+
     prerequisite_recorded = False
     if decline_class == "prerequisite-ticket" and prerequisite is not None:
         try:

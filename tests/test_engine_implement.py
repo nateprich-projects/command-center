@@ -758,6 +758,127 @@ def test_finish_declined_open_prerequisite_records_only_native_edge(
     ]
 
 
+def defer_note_proof_ticket(number=42):
+    found = ticket(number)
+    found["body"] = (
+        "Only if ticket 0 shaping instruction edit mechanism also covers it "
+        "with no widened scope: stop narrative repeating runner-owned "
+        "structured sections as in #1268 to single rendering. If not "
+        "covered, make no code change and record deferral as separate idea "
+        "in close note. Proof: single rendering with no scope widening, or "
+        "explicit defer note with no code.\n\nRisk: standard"
+    )
+    return found
+
+
+DEFER_NOTE_REASON = (
+    "Defer narrative dedup as a separate idea in this close note. The named "
+    "condition for including it—coverage by the same shaping edit—is absent "
+    "from merged #1369, whose change reviews Scope and escalated-risk signals "
+    "but does not change narrative rendering. No code changed."
+)
+
+
+def test_finish_declined_closes_allowed_defer_note_proof_as_completed(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: defer_note_proof_ticket(number))
+    effects = {"closed": [], "blocked": [], "comments": [], "needs": [],
+               "released": [], "finished": []}
+
+    result = implement.finish_declined(
+        DEFER_NOTE_REASON,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda *args: effects["needs"].append(args),
+        defer_note_close_effect=lambda repo, number, reason, **kwargs:
+            effects["closed"].append((repo, number, reason, kwargs)),
+    )
+
+    assert result == {"ticket": REPO + "#42", "declined": DEFER_NOTE_REASON}
+    assert effects["closed"][0][:3] == (REPO, 42, DEFER_NOTE_REASON)
+    assert effects["closed"][0][3] == {
+        "run": "run-42", "agent": "codex", "cwd": clone,
+    }
+    assert effects["blocked"] == []
+    assert effects["comments"] == []
+    assert effects["needs"] == []
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"] == [
+        ("codex", "run-42", "done",
+         "closed as completed: allowed defer-note proof", REPO + "#42")
+    ]
+
+
+def test_finish_declined_blocks_same_reason_when_accept_rejects_defer_note(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    rejected = ticket()
+    rejected["body"] = (
+        "Accept: a defer note is not accepted as proof of completion."
+    )
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: rejected)
+    effects = {"closed": [], "blocked": [], "comments": [], "needs": [],
+               "released": [], "finished": []}
+
+    implement.finish_declined(
+        DEFER_NOTE_REASON,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda *args: effects["needs"].append(args),
+        defer_note_close_effect=lambda *args, **kwargs:
+            effects["closed"].append((args, kwargs)),
+    )
+
+    assert effects["closed"] == []
+    assert len(effects["blocked"]) == 1
+    assert effects["needs"] == [(rejected["url"], REPO + "#42")]
+    assert effects["comments"][0][0][2] == "**Declined:** {}".format(
+        DEFER_NOTE_REASON)
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][2] == "skipped-blocked"
+
+
+def test_close_declined_defer_note_proof_uses_completed_closing_comment(
+        monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda argv, **kwargs: calls.append((argv, kwargs))
+        or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
+    )
+
+    implement.close_declined_defer_note_proof(
+        REPO, 42, DEFER_NOTE_REASON, run="run-42", agent="codex",
+        cwd=tmp_path,
+    )
+
+    argv, kwargs = calls[0]
+    assert argv[:8] == [
+        "gh", "issue", "close", "42", "--repo", REPO,
+        "--reason", "completed",
+    ]
+    assert argv[8] == "--comment"
+    assert argv[9].startswith("**Declined:** {}".format(DEFER_NOTE_REASON))
+    assert "command-center-provenance" in argv[9]
+    assert kwargs["cwd"] == str(tmp_path)
+
+
 @pytest.mark.parametrize(("reason", "open_state", "edge_fails"), [
     ("Unlanded prerequisite #165 is closed.", False, False),
     ("Unlanded prerequisite #165 is still open.", True, True),

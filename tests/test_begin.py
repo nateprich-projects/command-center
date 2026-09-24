@@ -3042,3 +3042,14 @@ def test_plan_needs_nate_ignores_omitted_null_categories():
     )
 
     assert funnel.plan_needs_nate(body) is False
+
+
+def test_plan_needs_nate_reads_only_the_visible_open_categories():
+    assert funnel.plan_needs_nate("# Plan\n") is False
+    assert funnel.plan_needs_nate(
+        "## Needs Nate\n\n- Gates: Who may write Ready?\n"
+    ) is True
+    assert funnel.plan_needs_nate(
+        "## Needs Nate\n\n"
+        "- Gates: answered 2026-09-24T06:00:00Z by Nate. Agents may.\n"
+    ) is False

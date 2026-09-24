@@ -335,7 +335,9 @@ def test_ticket_run_with_unreadable_session_and_all_null_snapshot_stays_unknown(
     runs = outcomes._ticket_runs("owner/repo#42", rows)
     record = outcomes.derive_outcome(ticket(), run_observations=runs, now=NOW)
 
-    assert record["runs"][0]["token_usage"] is None
+    assert runs[0]["token_usage"] is None
+    assert outcomes._aggregate_token_usage(runs) is None
+    assert record["runs"] == runs
     assert record["token_usage"] is None
 
 

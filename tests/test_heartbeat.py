@@ -182,6 +182,48 @@ def test_start_records_the_runtime_checkout(monkeypatch):
     }
 
 
+def test_start_and_finish_record_separate_usage_readings(monkeypatch):
+    records = []
+    readings = [
+        {"five_hour": {"used_percent": 10.0, "resets_at": NOW + 100}},
+        {"five_hour": {"used_percent": 12.0, "resets_at": NOW + 100}},
+    ]
+    seen_agents = []
+
+    def usage_read(agent):
+        seen_agents.append(agent)
+        return readings.pop(0)
+
+    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    monkeypatch.setattr(heartbeat, "session_id", lambda agent: "session-1")
+    monkeypatch.setattr(heartbeat, "usage_snapshot", usage_read)
+    monkeypatch.setattr(heartbeat, "close_rebegun_starts", lambda *args: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "runtime_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(heartbeat, "token_usage_for_run", lambda *args: None)
+    monkeypatch.setattr(heartbeat, "api_cost_for_run", lambda *args: None)
+    monkeypatch.setattr(heartbeat, "input_usage", lambda agent: None)
+    monkeypatch.setattr(
+        heartbeat, "append",
+        lambda agent, record: records.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    assert heartbeat.main(["start", "--agent", "codex"]) == 0
+    run = records[0]["run"]
+    assert heartbeat.main([
+        "finish", "--agent", "codex", "--run", run, "--outcome", "done",
+    ]) == 0
+
+    assert [record["phase"] for record in records] == ["start", "finish"]
+    assert [record["usage"] for record in records] == [
+        {"five_hour": {"used_percent": 10.0, "resets_at": NOW + 100}},
+        {"five_hour": {"used_percent": 12.0, "resets_at": NOW + 100}},
+    ]
+    assert seen_agents == ["codex", "codex"]
+
+
 def test_usage_snapshot_reads_the_agent_own_provider(monkeypatch):
     import usage
 

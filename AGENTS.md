@@ -234,13 +234,18 @@ wrong.
   _(agent rule, unconfirmed — advisory)_
   **The window that resets Sunday 2026-09-27 17:00 PDT runs under a dated override
   (#1341).** Its projection is reported but never bands `tight`, and its flat ceiling
-  is priced from the account panel: 81% there against $111.13 here puts the provider's
-  100% near $137.20, and the gate stops at 95% of it, less one session's reserve.
+  is priced from the account panel: 86% there against $120.91 here puts the provider's
+  100% near $140.59, and the gate stops at 100% of it, less one session's reserve.
   `usage.MUSE_PACE_OVERRIDE` names the window, so the override lapses at that reset
   with nothing to clear. _(Nate, 2026-09-22.)_ #1396 re-took the pairing from a new
   panel reading on 2026-09-23, as #1341 anticipated. The first pairing, 70% against
   $89.38, was taken after four days of Muse implement runs, and by then it read 87%
   while the panel read 81%.
+  #1409 re-took it again at 23:10 PDT the same day and raised the ceiling from 95 to
+  100, because Nate uses no Muse himself ("It's all for these runs"). At 100 the
+  last review before Meta's wall can post a fail-closed `rejected` on its PR, since
+  a refused judge reads `unsure`; the provider-quota hold then parks every lane, so
+  that is at most one per window. _(Nate, 2026-09-23.)_
 - **No Copilot automation.** Those are employer-provided tokens; personal use stays
   one-off and manual.
 - **Every routine starts, reads fresh usage, and exits immediately if over the pace

@@ -4,8 +4,8 @@ import test from "node:test";
 
 import {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
-  phoneState, pipState, projectBlocked, renderPhoneBoard, repoOf, repoOptions,
-  rowTier, shortRepo, visible,
+  phoneState, pipState, projectBlocked, renderPhoneBoard, repoLabels, repoOf,
+  repoOptions, rowTier, shortRepo, visible,
 } from "../public/app.js";
 
 class TestNode {
@@ -158,30 +158,43 @@ test("the repository filter keeps producer order and drops only other repos", ()
     { ref: "o/b#3", repo: "b" },
     { ref: "o/a#1", repo: "a" },
     { ref: "o/b#2" },
-    { ref: "o/a#9", repository: "o/a" },
+    { ref: "other/a#4", repo: "a" },
+    { repo: "o/a" },
   ];
-  assert.deepEqual(visible(rows, "a").map((row) => row.ref), ["o/a#1", "o/a#9"]);
-  assert.deepEqual(visible(rows, "b").map((row) => row.ref), ["o/b#3", "o/b#2"]);
-  assert.equal(visible(rows, null).length, 4);
-  assert.deepEqual(visible(undefined, "a"), []);
-  // Human steps carry only a ref; decisions carry a full repo.
-  assert.equal(repoOf({ ref: "owner/member-repo#12" }), "member-repo");
-  assert.equal(repoOf({ repo: "nateprich-projects/workbench" }), "workbench");
+  assert.deepEqual(visible(rows, "o/a").map((row) => row.ref), ["o/a#1", undefined]);
+  assert.deepEqual(visible(rows, "o/b").map((row) => row.ref), ["o/b#3", "o/b#2"]);
+  assert.equal(visible(rows, null).length, 5);
+  assert.deepEqual(visible(undefined, "o/a"), []);
+  // The ref's full owner/repo wins over a board row's short `repo`, so two
+  // owners' same-named repositories stay apart.
+  assert.equal(repoOf({ ref: "owner/member-repo#12", repo: "member-repo" }), "owner/member-repo");
+  assert.equal(repoOf({ repo: "nateprich-projects/workbench" }), "nateprich-projects/workbench");
 });
 
 test("the dropdown lists every repository once, alphabetically, and keeps the choice", () => {
   const snapshot = {
     board: { columns: [
-      { stage: "Building", items: [{ repo: "zeta" }, { repo: "alpha" }] },
-      { stage: "Done", items: [{ repo: "zeta" }] },
+      { stage: "Building", items: [
+        { ref: "owner/zeta#1", repo: "zeta" }, { ref: "owner/Alpha#2", repo: "Alpha" },
+      ] },
+      { stage: "Done", items: [{ ref: "owner/zeta#3", repo: "zeta" }] },
     ] },
     brief: {
-      items: [{ repo: "owner/mid" }],
-      human_steps: [{ ref: "owner/beta#4" }],
+      items: [{ ref: "owner/mid#5", repo: "owner/mid" }],
+      human_steps: [{ ref: "owner/beta#4" }, { ref: "other/beta#6" }],
     },
   };
-  assert.deepEqual(repoOptions(snapshot, null), ["alpha", "beta", "mid", "zeta"]);
-  assert.deepEqual(repoOptions(snapshot, "gone"), ["alpha", "beta", "gone", "mid", "zeta"]);
+  const names = repoOptions(snapshot, null);
+  assert.deepEqual(names, ["owner/Alpha", "other/beta", "owner/beta", "owner/mid", "owner/zeta"]);
+  assert.deepEqual(repoOptions(snapshot, "owner/gone").length, 6);
+  // Short names, unless two owners share one.
+  assert.deepEqual(repoLabels(names).map(([, label]) => label),
+    ["Alpha", "other/beta", "owner/beta", "mid", "zeta"]);
+});
+
+test("the dropdown is rebuilt only when its list changes", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  assert.match(source, /if \(signature !== renderedOptions\)/);
 });
 
 test("the filter sits at the top of the page and lives in the URL", async () => {

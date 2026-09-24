@@ -23,11 +23,15 @@ const OWNER_CLASS = {
 // the URL, so a reload or a shared link keeps it.
 let selectedRepo = null;
 
+// The filter's key is the full owner/repo, read from the ref first: two
+// owners can hold a repository of the same name, and the board row's own
+// `repo` field is only the short name.
 function repoOf(entry) {
   if (!entry || typeof entry !== "object") return null;
-  let repo = entry.repo || entry.repository;
-  if (!repo && typeof entry.ref === "string") repo = entry.ref.split("#")[0];
-  return shortRepo(repo);
+  if (typeof entry.ref === "string" && entry.ref.includes("#")) {
+    return entry.ref.split("#")[0];
+  }
+  return entry.repo || entry.repository || null;
 }
 
 // The producer's rows the filter keeps, in the producer's order.
@@ -56,7 +60,20 @@ function repoOptions(snapshot, current = selectedRepo) {
     if (name) names.add(name);
   }
   if (current) names.add(current);
-  return [...names].sort((a, b) => a.localeCompare(b));
+  return [...names].sort((a, b) => (
+    shortRepo(a).localeCompare(shortRepo(b)) || a.localeCompare(b)
+  ));
+}
+
+// Options as [value, label]: the short name, unless two owners share it.
+function repoLabels(names) {
+  const counts = new Map();
+  for (const name of names) {
+    counts.set(shortRepo(name), (counts.get(shortRepo(name)) || 0) + 1);
+  }
+  return names.map((name) => [
+    name, counts.get(shortRepo(name)) > 1 ? name : shortRepo(name),
+  ]);
 }
 
 function present(value) {
@@ -290,7 +307,7 @@ function phoneChildren(item) {
 }
 
 function phoneRepo(item) {
-  return repoOf(item) || "";
+  return shortRepo(repoOf(item)) || "";
 }
 
 function phoneCounterParts(item, children) {
@@ -558,7 +575,7 @@ function renderBoard(board) {
   }
   if (!rendered) {
     container.append(element("p", "empty", selectedRepo
-      ? `Nothing on the board for ${selectedRepo}.` : "The board is empty."));
+      ? `Nothing on the board for ${shortRepo(selectedRepo)}.` : "The board is empty."));
     return;
   }
   container.append(table);
@@ -610,7 +627,8 @@ function renderWaiting(brief) {
   const steps = visible(brief.human_steps);
 
   if (selectedRepo && !decisions.length && !steps.length) {
-    container.append(element("p", "empty", `Nothing in ${selectedRepo} is waiting on you.`));
+    container.append(element("p", "empty",
+      `Nothing in ${shortRepo(selectedRepo)} is waiting on you.`));
     return;
   }
   if (total === 0 && !present(steps)) {
@@ -695,17 +713,26 @@ function writeRepoToUrl(repo) {
   window.history.replaceState(null, "", url);
 }
 
+// Rebuilt only when the list changes: replacing the options on every poll
+// would close the dropdown under a viewer who is choosing.
+let renderedOptions = null;
+
 function renderRepoFilter(snapshot) {
   const select = document.querySelector("#repo-filter");
   if (!select) return;
-  const options = [element("option", null, "All repositories")];
-  options[0].value = "";
-  for (const name of repoOptions(snapshot)) {
-    const option = element("option", null, name);
-    option.value = name;
-    options.push(option);
+  const labels = repoLabels(repoOptions(snapshot));
+  const signature = JSON.stringify(labels);
+  if (signature !== renderedOptions) {
+    const options = [element("option", null, "All repositories")];
+    options[0].value = "";
+    for (const [value, label] of labels) {
+      const option = element("option", null, label);
+      option.value = value;
+      options.push(option);
+    }
+    select.replaceChildren(...options);
+    renderedOptions = signature;
   }
-  select.replaceChildren(...options);
   select.value = selectedRepo || "";
 }
 
@@ -781,6 +808,6 @@ if (typeof document !== "undefined") {
 
 export {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
-  phoneState, pipState, projectBlocked, renderPhoneBoard, repoOf, repoOptions,
-  rowTier, shortRepo, visible,
+  phoneState, pipState, projectBlocked, renderPhoneBoard, repoLabels, repoOf,
+  repoOptions, rowTier, shortRepo, visible,
 };

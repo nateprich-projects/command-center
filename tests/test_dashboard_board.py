@@ -270,17 +270,38 @@ def test_a_pinned_project_leads_its_stage_even_with_nothing_startable():
     assert [i["title"] for i in column["items"]] == ["pinned", "broken", "improve"]
 
 
-def test_startable_work_still_outranks_the_ladder_for_unpinned_projects():
+def test_the_ladder_outranks_startable_work_for_unpinned_projects():
+    """Nate, 2026-09-24: class first, whoever owns the next step. This test
+    asserted the opposite until then."""
     from datetime import timedelta
     ready = project(number=8, title="has work", klass="Improve",
                     children_total=1, status_since=NOW - timedelta(days=1))
-    stuck = project(number=9, title="stuck broken", klass="Broken",
-                    status_since=NOW - timedelta(days=3))
+    review = project(number=9, title="broken in review", klass="Broken",
+                     status_since=NOW - timedelta(days=3))
+    facts = {REPO + "#31": {"state": "OPEN", "number": 7, "headRefOid": "a"}}
     rows = funnel.dashboard_board(
-        [ready, stuck, ticket(21, parent=ready.ref)], NOW,
+        [ready, review, ticket(21, parent=ready.ref),
+         ticket(31, parent=review.ref)], NOW, pr_facts=facts,
     )["columns"]
     column = next(c for c in rows if c["stage"] == "Building")
-    assert [i["title"] for i in column["items"]] == ["has work", "stuck broken"]
+    assert [i["title"] for i in column["items"]] == [
+        "broken in review", "has work",
+    ]
+    assert [i["next_owner"] for i in column["items"]] == ["Muse", "Codex"]
+
+
+def test_within_a_class_the_engineers_queue_leads_then_gate_age():
+    from datetime import timedelta
+    older = project(number=2, title="older, human step", klass="Improve",
+                    status_since=NOW - timedelta(days=9))
+    startable = project(number=3, title="startable", klass="Improve",
+                        status_since=NOW)
+    found = rows([
+        older, startable,
+        ticket(21, parent=older.ref, needs="human"),
+        ticket(31, parent=startable.ref),
+    ])
+    assert _titles(found) == ["startable", "older, human step"]
 
 
 def test_the_bar_fills_from_the_left_whatever_the_queue_order():
@@ -533,7 +554,7 @@ def test_a_blocked_project_slots_under_the_project_that_unblocks_it():
     second = project(number=3, title="also startable", klass="Improve",
                      status_since=NOW - timedelta(days=1))
     # Waits on a ticket of "startable", so it follows that project directly
-    # and outranks "also startable" and the Nate-owned project below it.
+    # and outranks "also startable"; the Broken human step leads on class.
     waiting = project(number=4, title="waits on first", klass="New",
                       status_since=NOW - timedelta(days=30))
     human = project(number=5, title="human step", klass="Broken",
@@ -546,7 +567,7 @@ def test_a_blocked_project_slots_under_the_project_that_unblocks_it():
         ticket(51, parent=human.ref, needs="human"),
     ])
     assert _titles(found) == [
-        "startable", "waits on first", "also startable", "human step",
+        "human step", "startable", "waits on first", "also startable",
     ]
 
 
@@ -705,3 +726,84 @@ def test_a_ticketless_blocked_project_sinks_in_a_gate_stage():
     found = rows([blocked, waiting], stage="Shaped")
     assert _titles(found) == ["at gate", "blocked"]
     assert [row["next_step_blocked"] for row in found] == [False, True]
+
+
+# Review of PR #1415: every condition on a block has to clear, including the
+# blocker's own block, before a blocked project may sit above workable work.
+
+def test_a_blocker_that_cannot_move_itself_sends_its_dependent_to_the_bottom():
+    x = project(number=2, title="X free", klass="Broken")
+    y = project(number=3, title="Y free", klass="Improve")
+    b = project(number=4, title="B waits on x22", klass="Broken")
+    found = rows([
+        x, y, b,
+        ticket(21, parent=x.ref, needs="human"),
+        ticket(22, parent=x.ref, labels=["blocked"],
+               blocked_until=datetime(2026, 12, 1).date()),
+        ticket(41, parent=b.ref, open_blockers=[REPO + "#22"]),
+    ])
+    assert _titles(found) == ["X free", "Y free", "B waits on x22"]
+
+
+@pytest.mark.parametrize("blocked_project, blocked_ticket", [
+    # A project block naming X's ticket, but also a date.
+    (dict(labels=["blocked"], block_references=[REPO + "#61"],
+          blocked_until=datetime(2026, 12, 1).date()), {}),
+    # A native blocker on X, plus a label whose only condition is a reason.
+    ({}, dict(open_blockers=[REPO + "#61"], labels=["blocked"],
+              block_reason="Nate's call")),
+    # A project block naming X, while its one ticket waits off the column.
+    (dict(labels=["blocked"], block_references=[REPO + "#61"]),
+     dict(open_blockers=["other/repo#1"])),
+])
+def test_a_condition_nothing_here_can_lift_sinks_the_project(
+    blocked_project, blocked_ticket,
+):
+    x = project(number=6, title="X free", klass="Broken")
+    y = project(number=7, title="Y free", klass="Improve")
+    z = project(number=8, title="Z", klass="Broken", **blocked_project)
+    found = rows([
+        x, y, z,
+        ticket(61, parent=x.ref, needs="human"),
+        ticket(71, parent=y.ref, needs="human"),
+        ticket(81, parent=z.ref, **blocked_ticket),
+    ])
+    assert _titles(found) == ["X free", "Y free", "Z"]
+
+
+def test_a_cycle_with_a_way_out_resolves_through_it():
+    from datetime import timedelta
+    f = project(number=2, title="F", klass="Broken")
+    g = project(number=3, title="G", klass="Improve")
+    a = project(number=4, title="A", klass="Broken",
+                status_since=NOW - timedelta(days=5))
+    b = project(number=5, title="B", klass="Broken",
+                status_since=NOW - timedelta(days=5))
+    found = rows([
+        f, g, a, b,
+        ticket(21, parent=f.ref, needs="human"),
+        ticket(31, parent=g.ref, needs="human"),
+        # A waits on B's b51 or on F's f21; b51 waits on A's a42.
+        ticket(41, parent=a.ref, open_blockers=[REPO + "#51"]),
+        ticket(42, parent=a.ref, open_blockers=[REPO + "#21"]),
+        ticket(51, parent=b.ref, open_blockers=[REPO + "#42"]),
+    ])
+    assert _titles(found) == ["F", "A", "B", "G"]
+
+
+def test_finished_work_never_reads_blocked():
+    done = project(number=9, title="done", status="Done", state="CLOSED",
+                   labels=["blocked"], closed_at=NOW)
+    found = rows([done], stage="Done")
+    assert found[0]["next_step_blocked"] is False
+
+
+def test_a_placement_failure_falls_back_to_plain_order(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("placement")
+    monkeypatch.setattr(funnel, "_dependency_ref", boom)
+    stuck = project(number=2, title="stuck", klass="Broken",
+                    labels=["blocked"], block_references=[REPO + "#9"])
+    moving = project(number=3, title="moving", klass="Improve")
+    found = rows([stuck, moving, ticket(31, parent=moving.ref)])
+    assert _titles(found) == ["stuck", "moving"]

@@ -26,6 +26,7 @@ import re
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -41,10 +42,32 @@ FINISH_OUTCOMES = (
     "done", "nothing-to-do", "errored", "skipped-over-pace",
     "skipped-api-reserve", "skipped-provider-quota",
 )
+HISTORY_AGENT_PATHS = {agent: "{}.jsonl".format(agent) for agent in AGENTS}
+HISTORY_OVERLAP_GRACE = HOUR_SECONDS
 
 
 class MetricsError(RuntimeError):
     """An input could not be read safely, or an append was unsafe."""
+
+
+@dataclass(frozen=True)
+class _HistoryCommit:
+    sha: str
+    committed_at: datetime
+
+
+@dataclass(frozen=True)
+class _HistorySample:
+    hour_start: datetime
+    commit: Optional[str]
+    sampled_at: Optional[datetime]
+    ledgers: Mapping[str, Optional[Sequence[Mapping[str, object]]]]
+    snapshot: Optional[Mapping[str, object]] = None
+    usage_readings: Optional[Mapping[str, object]] = None
+    outcome_records: Optional[Sequence[Mapping[str, object]]] = None
+    commit_activity: Optional[Mapping[str, object]] = None
+    funnel_line_count: Optional[int] = None
+    run_ids: frozenset = frozenset()
 
 
 def _timestamp(value: object) -> Optional[datetime]:
@@ -578,13 +601,29 @@ def derive_row(
     now: Optional[datetime] = None,
     commit_activity: Optional[Mapping[str, object]] = None,
     funnel_line_count: Optional[int] = None,
+    hour_start: Optional[datetime] = None,
+    derived_at: Optional[datetime] = None,
 ) -> Dict:
     """Build a JSON-safe UTC-hour observation from fixture or live inputs."""
     observed_at = now or datetime.now(timezone.utc)
     if observed_at.tzinfo is None:
         observed_at = observed_at.replace(tzinfo=timezone.utc)
     observed_at = observed_at.astimezone(timezone.utc)
-    start, end, hour = _interval(observed_at)
+    recorded_at = observed_at
+    if derived_at is not None:
+        parsed_derived_at = _timestamp(derived_at)
+        if parsed_derived_at is None:
+            raise MetricsError("derived_at must be a parseable timestamp")
+        recorded_at = parsed_derived_at
+    if hour_start is None:
+        start, end, hour = _interval(observed_at)
+    else:
+        start_at = _timestamp(hour_start)
+        if start_at is None:
+            raise MetricsError("hour_start must be a parseable timestamp")
+        start = start_at.replace(minute=0, second=0, microsecond=0)
+        end = start + timedelta(hours=1)
+        hour = _iso(start)
     brief, wrapper = _split_snapshot(snapshot)
     snapshot_at = _timestamp(
         wrapper.get("generated_at") or brief.get("generated_at")
@@ -1290,9 +1329,538 @@ def derive_row(
         "schema_version": 1,
         "hour": hour,
         "captured_at": captured_at,
-        "derived_at": _iso(observed_at),
+        "derived_at": _iso(recorded_at),
         "metrics": metrics,
     }
+
+
+def _run_git(repo_dir: Path, args: Sequence[str]) -> str:
+    try:
+        result = subprocess.run(
+            ["git"] + list(args), cwd=str(repo_dir), capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise MetricsError("could not run git: {}".format(exc)) from exc
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "git exited {}".format(
+            result.returncode
+        )).strip()
+        raise MetricsError("git {} failed: {}".format(" ".join(args), detail))
+    return result.stdout
+
+
+def _git_file(repo_dir: Path, commit: str, path: str) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["git", "show", "{}:{}".format(commit, path)],
+            cwd=str(repo_dir), capture_output=True, text=True,
+        )
+    except OSError as exc:
+        raise MetricsError("could not read git history: {}".format(exc)) from exc
+    if result.returncode == 0:
+        return result.stdout
+    detail = (result.stderr or "").strip()
+    if "does not exist in" in detail or "exists on disk, but not in" in detail:
+        return None
+    raise MetricsError("could not read {} at {}: {}".format(path, commit, detail))
+
+
+def _decode_jsonl_content(content: str, source: str) -> List[Dict]:
+    rows = []
+    for line_number, line in enumerate(content.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as exc:
+            raise MetricsError("{} line {} is invalid JSON".format(
+                source, line_number
+            )) from exc
+        if not isinstance(row, Mapping):
+            raise MetricsError("{} line {} is not an object".format(
+                source, line_number
+            ))
+        rows.append(dict(row))
+    return rows
+
+
+def _history_commits(repo_dir: Path, ref: str) -> List[_HistoryCommit]:
+    output = _run_git(repo_dir, [
+        "log", "--first-parent", "--reverse", "--format=%H%x09%ct", ref,
+    ])
+    commits = []
+    previous = None
+    for line in output.splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            raise MetricsError("heartbeat history has a malformed commit row")
+        try:
+            committed_at = datetime.fromtimestamp(int(parts[1]), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError) as exc:
+            raise MetricsError("heartbeat history has an invalid commit time") from exc
+        if previous is not None and committed_at < previous:
+            raise MetricsError("heartbeat commit times are not chronological")
+        commits.append(_HistoryCommit(parts[0], committed_at))
+        previous = committed_at
+    if not commits:
+        raise MetricsError("heartbeat history is empty")
+    return commits
+
+
+def _floor_hour(value: datetime) -> datetime:
+    found = _timestamp(value)
+    if found is None:
+        raise MetricsError("backfill boundary must be a parseable timestamp")
+    return found.replace(minute=0, second=0, microsecond=0)
+
+
+def _select_history_commits(
+    commits: Sequence[_HistoryCommit],
+    start: datetime,
+    until: datetime,
+    *,
+    stride_hours: int = 1,
+    max_delay: timedelta = timedelta(seconds=HISTORY_OVERLAP_GRACE),
+) -> List[Tuple[datetime, Optional[_HistoryCommit]]]:
+    """Select one post-hour heartbeat snapshot for every complete UTC hour."""
+    if stride_hours != 1:
+        raise MetricsError(
+            "backfill sampling must cover every UTC hour; a wider stride can skip a window"
+        )
+    first = _floor_hour(start)
+    end = _floor_hour(until)
+    if end <= first:
+        return []
+    selected: List[Tuple[datetime, Optional[_HistoryCommit]]] = []
+    root_time = commits[0].committed_at
+    index = 0
+    previous_sha = None
+    hour = first
+    while hour < end:
+        hour_end = hour + timedelta(hours=1)
+        if hour_end <= root_time:
+            # These are pre-launch hours. They will be written as explicit gaps.
+            selected.append((hour, None))
+            hour += timedelta(hours=1)
+            continue
+        while index < len(commits) and commits[index].committed_at < hour_end:
+            index += 1
+        if index >= len(commits):
+            raise MetricsError(
+                "heartbeat history has no sample after {}".format(_iso(hour_end))
+            )
+        candidate = commits[index]
+        if candidate.committed_at - hour_end > max_delay:
+            raise MetricsError(
+                "heartbeat history has a sampling gap after {}; reduce the stride or inspect the branch".format(
+                    _iso(hour_end)
+                )
+            )
+        if candidate.sha == previous_sha:
+            raise MetricsError(
+                "heartbeat sampling reused a commit across adjacent UTC hours"
+            )
+        selected.append((hour, candidate))
+        previous_sha = candidate.sha
+        hour += timedelta(hours=1)
+    return selected
+
+
+def _optional_json(content: Optional[str], source: str) -> Optional[Mapping[str, object]]:
+    if content is None:
+        return None
+    try:
+        value = json.loads(content)
+    except ValueError as exc:
+        raise MetricsError("{} is invalid JSON".format(source)) from exc
+    if not isinstance(value, Mapping):
+        raise MetricsError("{} must contain an object".format(source))
+    return dict(value)
+
+
+def _sample_run_ids(
+    ledgers: Mapping[str, Optional[Sequence[Mapping[str, object]]]],
+) -> frozenset:
+    found = set()
+    for agent, rows in ledgers.items():
+        for row in rows or ():
+            run = row.get("run")
+            phase = row.get("phase")
+            timestamp = row.get("ts")
+            if isinstance(run, str) and run and isinstance(phase, str):
+                found.add((agent, run, phase, str(timestamp)))
+    return frozenset(found)
+
+
+def _usage_from_ledgers(
+    ledgers: Mapping[str, Optional[Sequence[Mapping[str, object]]]],
+    hour_end: datetime,
+) -> Optional[Dict[str, object]]:
+    readings: Dict[str, object] = {}
+    for agent, rows in ledgers.items():
+        observed = []
+        for row in rows or ():
+            stamp = _timestamp(row.get("ts"))
+            usage = row.get("usage")
+            if stamp is not None and stamp <= hour_end and isinstance(usage, Mapping):
+                observed.append((stamp, usage))
+        if not observed:
+            continue
+        raw = max(observed, key=lambda pair: pair[0])[1]
+        if raw.get("unmetered"):
+            readings[agent] = dict(raw)
+        else:
+            windows = raw.get("windows")
+            if not isinstance(windows, Mapping):
+                windows = raw
+            readings[agent] = {"windows": dict(windows)}
+    return readings or None
+
+
+def _load_history_sample(
+    repo_dir: Path,
+    hour_start: datetime,
+    commit: Optional[_HistoryCommit],
+) -> _HistorySample:
+    if commit is None:
+        return _HistorySample(
+            hour_start=hour_start,
+            commit=None,
+            sampled_at=None,
+            ledgers={agent: None for agent in AGENTS},
+        )
+    ledgers: Dict[str, Optional[Sequence[Mapping[str, object]]]] = {}
+    for agent, path in HISTORY_AGENT_PATHS.items():
+        content = _git_file(repo_dir, commit.sha, path)
+        rows = _decode_jsonl_content(content, "{}:{}".format(commit.sha, path)) if content is not None else []
+        ledgers[agent] = rows or None
+    snapshot = _optional_json(
+        _git_file(repo_dir, commit.sha, "snapshot.json"),
+        "{}:snapshot.json".format(commit.sha),
+    )
+    readings = _optional_json(
+        _git_file(repo_dir, commit.sha, "usage.json"),
+        "{}:usage.json".format(commit.sha),
+    )
+    activity = _optional_json(
+        _git_file(repo_dir, commit.sha, "commits.json"),
+        "{}:commits.json".format(commit.sha),
+    )
+    raw_outcomes = _git_file(repo_dir, commit.sha, "outcomes.jsonl")
+    outcomes = (
+        _decode_jsonl_content(raw_outcomes, "{}:outcomes.jsonl".format(commit.sha))
+        if raw_outcomes is not None else None
+    )
+    funnel_source = _git_file(repo_dir, commit.sha, "funnel.py")
+    return _HistorySample(
+        hour_start=hour_start,
+        commit=commit.sha,
+        sampled_at=commit.committed_at,
+        ledgers=ledgers,
+        snapshot=snapshot,
+        usage_readings=readings,
+        outcome_records=outcomes,
+        commit_activity=activity,
+        funnel_line_count=(len(funnel_source.splitlines()) if funnel_source is not None else None),
+        run_ids=_sample_run_ids(ledgers),
+    )
+
+
+def _check_history_overlap(samples: Sequence[_HistorySample]) -> int:
+    """Fail closed unless adjacent populated hourly snapshots share records."""
+    checked = 0
+    previous: Optional[_HistorySample] = None
+    for sample in samples:
+        if sample.commit is None:
+            continue
+        if previous is not None:
+            if sample.hour_start - previous.hour_start != timedelta(hours=1):
+                raise MetricsError("heartbeat samples do not cover consecutive UTC hours")
+            if previous.run_ids and not sample.run_ids:
+                raise MetricsError("heartbeat ledger rows disappeared between samples")
+            if previous.run_ids and sample.run_ids:
+                overlap = previous.run_ids.intersection(sample.run_ids)
+                if not overlap:
+                    raise MetricsError(
+                        "consecutive heartbeat samples do not overlap; a sampling stride may have skipped a window"
+                    )
+                checked += 1
+        previous = sample
+    return checked
+
+
+def _main_line_history(repo_dir: Path, ref: str = "origin/main") -> List[Tuple[datetime, int]]:
+    try:
+        output = _run_git(repo_dir, [
+            "log", "--first-parent", "--format=%H%x09%ct", ref, "--", "funnel.py",
+        ])
+    except MetricsError:
+        return []
+    commits = []
+    for line in output.splitlines():
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            stamp = datetime.fromtimestamp(int(parts[1]), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            continue
+        commits.append((parts[0], stamp))
+    counts: List[Tuple[datetime, int]] = []
+    seen = set()
+    for sha, stamp in sorted(commits, key=lambda row: (row[1], row[0])):
+        if sha in seen:
+            continue
+        seen.add(sha)
+        source = _git_file(repo_dir, sha, "funnel.py")
+        if source is not None:
+            counts.append((stamp, len(source.splitlines())))
+    return counts
+
+
+def _line_count_at(history: Sequence[Tuple[datetime, int]], when: datetime) -> Optional[int]:
+    values = [count for stamp, count in history if stamp <= when]
+    return values[-1] if values else None
+
+
+def _item_timestamp(item: object, field: str) -> Optional[datetime]:
+    return _timestamp(getattr(item, field, None))
+
+
+def _building_times(items: Sequence[object]) -> List[datetime]:
+    found = []
+    for item in items:
+        if getattr(item, "parent", None) is not None or getattr(item, "klass", None) != "New":
+            continue
+        transitions = []
+        for event in getattr(item, "status_events", ()) or ():
+            if not isinstance(event, Mapping) or event.get("status") != "Building":
+                continue
+            previous = event.get("previous_status") or event.get("previousStatus")
+            if previous == "Building":
+                continue
+            stamp = _timestamp(event.get("at") or event.get("created_at") or event.get("createdAt"))
+            if stamp is not None:
+                transitions.append(stamp)
+        if not transitions and getattr(item, "status", None) == "Building":
+            stamp = _item_timestamp(item, "status_since")
+            if stamp is not None:
+                transitions.append(stamp)
+        found.extend(transitions)
+    return found
+
+
+def _project_has_prior_cause(item: object, by_ref: Mapping[str, object], funnel_module) -> bool:
+    created = _item_timestamp(item, "created_at")
+    body = getattr(item, "body", None)
+    for raw in funnel_module.parse_caused_by(body if isinstance(body, str) else ""):
+        ref = funnel_module._normalise_cause_reference(raw)
+        cause = by_ref.get(ref or "")
+        cause_created = _item_timestamp(cause, "created_at") if cause is not None else None
+        if created is not None and cause_created is not None and cause_created < created:
+            return True
+    return False
+
+
+def _hourly_rework_signal(
+    records: Optional[Sequence[Mapping[str, object]]],
+    start: datetime,
+    end: datetime,
+) -> Mapping[str, object]:
+    if not records:
+        return {"rework_attempts": None, "merged_prs": None, "reason": "GitHub outcome history is unavailable"}
+    rework_attempts = 0
+    merged_prs = 0
+    complete = True
+    for record in records:
+        repo, number = _ticket_identity(record)
+        if not repo or number is None:
+            continue
+        prs = record.get("prs")
+        if not isinstance(prs, list):
+            continue
+        merged_in_hour = []
+        unknown_branch_in_hour = False
+        all_merged = []
+        for pr in prs:
+            if not isinstance(pr, Mapping):
+                continue
+            merged_at = _timestamp(pr.get("merged_at") or pr.get("mergedAt"))
+            if merged_at is None:
+                continue
+            branch = pr.get("head_ref_name") or pr.get("headRefName")
+            if not isinstance(branch, str):
+                if start <= merged_at < end:
+                    unknown_branch_in_hour = True
+                continue
+            if branch != "ticket/{}".format(number):
+                continue
+            all_merged.append(merged_at)
+            if start <= merged_at < end:
+                merged_in_hour.append(merged_at)
+        if unknown_branch_in_hour:
+            complete = False
+        if not merged_in_hour:
+            continue
+        attempts = record.get("attempts")
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+            complete = False
+            continue
+        if max(all_merged) in merged_in_hour:
+            rework_attempts += max(0, attempts - 1)
+        merged_prs += len(merged_in_hour)
+    if not complete:
+        return {"rework_attempts": None, "merged_prs": None, "reason": "one or more merged ticket records are incomplete"}
+    return {"rework_attempts": rework_attempts, "merged_prs": merged_prs}
+
+
+def _github_snapshot(
+    items: Optional[Sequence[object]],
+    outcome_records: Optional[Sequence[Mapping[str, object]]],
+    start: datetime,
+    end: datetime,
+    captured_at: datetime,
+) -> Mapping[str, object]:
+    """Rebuild hourly A/B source facts from durable issue and PR observations."""
+    import funnel
+
+    brief: Dict[str, object] = {}
+    if outcome_records is not None:
+        prs, _, _ = _outcome_prs(outcome_records, start, end)
+        if prs is not None:
+            merged = [row for row in prs if row["in_hour"]["merged_at"]]
+            brief["command_center_ticket_pr_share"] = {
+                "available": True,
+                "ticket_merged_prs": sum(1 for row in merged if row["repo"] == REPO),
+                "merged_prs": len(merged),
+            }
+        brief["outcome_signals"] = {
+            "signals": {"rework_rate": dict(_hourly_rework_signal(outcome_records, start, end))}
+        }
+    if items is not None:
+        projects = [item for item in items if getattr(item, "parent", None) is None]
+        closed = [
+            item for item in projects
+            if (stamp := _item_timestamp(item, "closed_at")) is not None
+            and start <= stamp < end
+            and getattr(item, "state_reason", None) != "NOT_PLANNED"
+        ]
+        if all(getattr(item, "klass", None) is not None for item in closed):
+            brief["maintenance_load"] = {
+                "closed_in_window": len(closed),
+                "upkeep_projects": sum(
+                    1 for item in closed
+                    if getattr(item, "klass", None) in {"Broken", "Maintenance", "Investigate"}
+                ),
+            }
+        start_times = _building_times(projects)
+        past_starts = [stamp for stamp in start_times if stamp < end]
+        brief["maintenance_load"] = dict(brief.get("maintenance_load") or {})
+        brief["maintenance_load"].update({
+            "new_started_at": [_iso(stamp) for stamp in past_starts],
+            "days_since_anything_new_started": (
+                (end - max(past_starts)).days if past_starts else None
+            ),
+        })
+        closed_projects = [
+            item for item in projects
+            if _item_timestamp(item, "closed_at") is not None
+            and start <= _item_timestamp(item, "closed_at") < end
+        ]
+        created_projects = [
+            item for item in projects
+            if (stamp := _item_timestamp(item, "created_at")) is not None
+            and start <= stamp < end
+        ]
+        status_known = all(getattr(item, "status", None) is not None for item in closed_projects)
+        brief["disposal"] = {
+            "done": sum(1 for item in closed_projects if getattr(item, "status", None) == "Done") if status_known else None,
+            "parked": sum(1 for item in closed_projects if getattr(item, "status", None) == "Parked") if status_known else None,
+            "net_open_growth": len(created_projects) - len(closed_projects),
+        }
+        broken_created = [
+            item for item in created_projects if getattr(item, "klass", None) == "Broken"
+        ]
+        unknown_created_class = any(
+            getattr(item, "klass", None) is None for item in created_projects
+        )
+        by_ref = {getattr(item, "ref", ""): item for item in items}
+        recorded = {
+            getattr(item, "ref", "") for item in broken_created
+            if _project_has_prior_cause(item, by_ref, funnel)
+        }
+        broken_refs = {getattr(item, "ref", "") for item in broken_created}
+        for item in items:
+            if not getattr(item, "title", "").startswith(funnel.REGRESSION_PREFIX):
+                continue
+            created = _item_timestamp(item, "created_at")
+            if created is None or not (start <= created < end):
+                continue
+            ticket_ref = funnel._regression_ticket_ref(getattr(item, "body", None))
+            ticket = by_ref.get(ticket_ref or "")
+            parent = by_ref.get(getattr(ticket, "parent", None) or "") if ticket else None
+            if parent is not None and getattr(parent, "ref", None) in broken_refs:
+                recorded.add(getattr(parent, "ref"))
+        brief["recorded_cause_regressions"] = {
+            "with_recorded_cause": None if unknown_created_class else len(recorded),
+            "broken_projects": None if unknown_created_class else len(broken_created),
+        }
+    if not brief:
+        return {}
+    return {"generated_at": _iso(captured_at), "brief": brief}
+
+
+def _build_backfill_rows(
+    repo_dir: Path,
+    history_ref: str,
+    start: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    *,
+    outcome_records: Optional[Sequence[Mapping[str, object]]] = None,
+    project_items: Optional[Sequence[object]] = None,
+    derived_at: Optional[datetime] = None,
+) -> Tuple[List[Dict], int]:
+    commits = _history_commits(repo_dir, history_ref)
+    launch = start or commits[0].committed_at.replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff = min(_floor_hour(until or datetime.now(timezone.utc)), _floor_hour(commits[-1].committed_at))
+    selected = _select_history_commits(commits, launch, cutoff)
+    samples = [
+        _load_history_sample(repo_dir, hour, commit)
+        for hour, commit in selected
+    ]
+    overlap_count = _check_history_overlap(samples)
+    line_history = _main_line_history(repo_dir)
+    records_at = derived_at or datetime.now(timezone.utc)
+    rows = []
+    for sample in samples:
+        start_at = sample.hour_start
+        end_at = start_at + timedelta(hours=1)
+        records = outcome_records if outcome_records is not None else sample.outcome_records
+        snapshot = (
+            sample.snapshot
+            if sample.snapshot is not None
+            else _github_snapshot(project_items, records, start_at, end_at, records_at)
+        )
+        readings = sample.usage_readings
+        if readings is None:
+            readings = _usage_from_ledgers(sample.ledgers, end_at)
+        line_count = sample.funnel_line_count
+        if line_count is None:
+            line_count = _line_count_at(line_history, end_at)
+        observation = sample.sampled_at or (start_at + timedelta(minutes=30))
+        rows.append(derive_row(
+            snapshot,
+            sample.ledgers,
+            readings,
+            records,
+            now=observation,
+            commit_activity=sample.commit_activity,
+            funnel_line_count=line_count,
+            hour_start=start_at,
+            derived_at=records_at,
+        ))
+    return rows, overlap_count
 
 
 def _decode_rows(content: str) -> List[Dict]:
@@ -1318,18 +1886,31 @@ def _encode_rows(rows: Iterable[Mapping[str, object]]) -> str:
     return "".join(json.dumps(dict(row), sort_keys=True) + "\n" for row in rows)
 
 
+def append_rows_many(
+    existing: Sequence[Mapping[str, object]],
+    rows: Iterable[Mapping[str, object]],
+) -> Tuple[List[Dict], int]:
+    """Append only previously unseen hours, preserving every stored row."""
+    found = [dict(value) for value in existing]
+    seen = {value.get("hour") for value in found}
+    appended = 0
+    for row in rows:
+        hour = row.get("hour")
+        if not isinstance(hour, str):
+            raise MetricsError("cannot append a row without its UTC hour")
+        if hour in seen:
+            continue
+        found.append(dict(row))
+        seen.add(hour)
+        appended += 1
+    return found, appended
+
+
 def append_rows(
     existing: Sequence[Mapping[str, object]], row: Mapping[str, object]
 ) -> Tuple[List[Dict], int]:
     """Pure append policy used by the remote writer and fixture tests."""
-    hour = row.get("hour")
-    if not isinstance(hour, str):
-        raise MetricsError("cannot append a row without its UTC hour")
-    found = [dict(value) for value in existing]
-    if any(value.get("hour") == hour for value in found):
-        return found, 0
-    found.append(dict(row))
-    return found, 1
+    return append_rows_many(existing, [row])
 
 
 def _gh(args: Sequence[str], stdin: Optional[str] = None):
@@ -1397,6 +1978,45 @@ def append_remote(row: Mapping[str, object], repo: str = REPO, branch: str = BRA
             raise MetricsError(result.stderr.strip() or "could not write {}".format(METRICS_PATH))
         if attempt >= len(STORE_BACKOFF):
             raise MetricsError("could not append {} after compare-and-swap retries".format(METRICS_PATH))
+        time.sleep(STORE_BACKOFF[attempt])
+    return 0
+
+
+def append_remote_rows(
+    rows: Sequence[Mapping[str, object]],
+    repo: str = REPO,
+    branch: str = BRANCH,
+) -> int:
+    """Append a batch with Contents API compare-and-swap and hour idempotency."""
+    if not rows:
+        return 0
+    first_hour = rows[0].get("hour")
+    last_hour = rows[-1].get("hour")
+    for attempt in range(len(STORE_BACKOFF) + 1):
+        existing, sha = _read_remote(repo, branch)
+        combined, appended = append_rows_many(existing, rows)
+        if not appended:
+            return 0
+        payload = {
+            "message": "metrics: backfill {} through {}".format(first_hour, last_hour),
+            "branch": branch,
+            "content": base64.b64encode(
+                _encode_rows(combined).encode("utf-8")
+            ).decode("ascii"),
+        }
+        if sha:
+            payload["sha"] = sha
+        result = _gh([
+            "api", "-X", "PUT", "repos/{}/contents/{}".format(repo, METRICS_PATH),
+            "--input", "-",
+        ], stdin=json.dumps(payload))
+        if result.returncode == 0:
+            return appended
+        detail = (result.stderr or result.stdout or "").lower()
+        if "409" not in detail and "sha" not in detail and "conflict" not in detail:
+            raise MetricsError(result.stderr.strip() or "could not write {}".format(METRICS_PATH))
+        if attempt >= len(STORE_BACKOFF):
+            raise MetricsError("could not append backfill after compare-and-swap retries")
         time.sleep(STORE_BACKOFF[attempt])
     return 0
 
@@ -1691,6 +2311,86 @@ def _parse_now(value: Optional[str]) -> Optional[datetime]:
     return _timestamp(value) if value else None
 
 
+def _parse_backfill_boundary(value: Optional[str], name: str) -> Optional[datetime]:
+    if value is None:
+        return None
+    parsed = _timestamp(value)
+    if parsed is None:
+        raise MetricsError("--{} must be a parseable UTC timestamp".format(name))
+    return parsed
+
+
+def _collect_github_backfill_inputs(
+    now: datetime,
+) -> Tuple[List[object], List[Dict[str, object]]]:
+    """Read durable PR, issue, and Project history for the A/B metric groups."""
+    import funnel
+    import outcomes
+
+    items = funnel.load_items(include_details=True)
+    repos = sorted(set(funnel.member_repos()) | {funnel.REPO})
+    records: List[Dict[str, object]] = []
+    for repo in repos:
+        # The heartbeat branch is read locally and separately for C-F. Passing
+        # an empty mapping prevents outcome derivation from making another
+        # ledger read while it scans durable GitHub issue and PR history.
+        records.extend(outcomes.derive_repository(
+            repo, now=now, heartbeat_records={},
+        ))
+    return items, records
+
+
+def _backfill_command(args) -> int:
+    repo_dir = Path(args.repo_dir).resolve()
+    history_ref = args.history_ref
+    now = datetime.now(timezone.utc)
+    try:
+        start = _parse_backfill_boundary(args.start, "start")
+        until = _parse_backfill_boundary(args.until, "until")
+        if history_ref == "origin/heartbeat":
+            _run_git(repo_dir, [
+                "fetch", "origin",
+                "refs/heads/heartbeat:refs/remotes/origin/heartbeat",
+            ])
+            # F2 is a local main-branch line-count series. If main is not
+            # available, those cells remain gaps while heartbeat metrics can
+            # still be rebuilt.
+            try:
+                _run_git(repo_dir, [
+                    "fetch", "origin", "refs/heads/main:refs/remotes/origin/main",
+                ])
+            except MetricsError:
+                pass
+        project_items, outcomes = _collect_github_backfill_inputs(now)
+        rows, overlap_count = _build_backfill_rows(
+            repo_dir,
+            history_ref,
+            start,
+            until,
+            outcome_records=outcomes,
+            project_items=project_items,
+            derived_at=now,
+        )
+        if not rows:
+            raise MetricsError("heartbeat history contains no complete hourly windows")
+        if args.dry_run:
+            appended = None
+        else:
+            appended = append_remote_rows(rows)
+        print(json.dumps({
+            "first_hour": rows[0]["hour"],
+            "last_hour": rows[-1]["hour"],
+            "rows": len(rows),
+            "overlapping_sample_pairs": overlap_count,
+            "appended": appended,
+            "storage": "{}:{}".format(BRANCH, METRICS_PATH),
+        }, sort_keys=True))
+        return 0
+    except Exception as exc:
+        print("metrics backfill: {}".format(exc), file=sys.stderr)
+        return 1
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Derive and append one hourly metrics row")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1703,7 +2403,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     derive.add_argument("--line-count", type=int, help="fixture funnel.py line count")
     derive.add_argument("--now", help="UTC hour timestamp, for fixture reproduction")
     derive.add_argument("--dry-run", action="store_true", help="print the row without appending")
+    backfill = sub.add_parser(
+        "backfill", help="rebuild hourly metrics from heartbeat and GitHub history"
+    )
+    backfill.add_argument(
+        "--repo-dir", default=str(Path(__file__).resolve().parent),
+        help="local checkout containing the heartbeat and main git history",
+    )
+    backfill.add_argument(
+        "--history-ref", default="origin/heartbeat",
+        help="heartbeat history ref to sample (default: origin/heartbeat)",
+    )
+    backfill.add_argument("--start", help="first UTC hour; default is launch day")
+    backfill.add_argument("--until", help="exclusive UTC-hour cutoff; default is latest complete hour")
+    backfill.add_argument("--dry-run", action="store_true", help="derive rows without writing metrics.jsonl")
     args = parser.parse_args(argv)
+    if args.command == "backfill":
+        return _backfill_command(args)
     if args.command != "derive":
         parser.error("unknown command")
     now = _parse_now(args.now) or datetime.now(timezone.utc)

@@ -388,3 +388,81 @@ def test_a_closed_parent_with_no_status_is_still_named():
     assert rows[0]["reason"] == (
         "parent {}#50 is closed with Status unset".format(REPO)
     )
+
+
+# #1432: a block that nothing can lift and nobody is asked about.
+
+
+def _building(number):
+    return issue(number, status="Building", klass="Broken", children_total=2)
+
+
+def test_a_codex_decline_with_no_condition_is_stranded():
+    """FF#289 on 2026-09-24: label, Needs agent, a Declined comment."""
+    parent = _building(60)
+    declined = issue(61, parent="{}#60".format(REPO), labels=["blocked"],
+                     needs="agent", decline_reason="prerequisite unlanded")
+
+    rows = funnel.stranded_items([parent, declined], NOW)
+
+    assert [row["ref"] for row in rows] == ["{}#61".format(REPO)]
+    assert rows[0]["reason"] == (
+        "blocked with no condition that can clear it, and no one is asked "
+        "(Needs: agent)"
+    )
+
+
+def test_a_reason_only_event_wait_is_stranded():
+    """FF#230: a parsed block with a reason but no reference or date."""
+    parent = _building(62)
+    waiting = issue(63, parent="{}#62".format(REPO), labels=["blocked"],
+                    needs="external-event",
+                    block_reason="an external event")
+
+    rows = funnel.stranded_items([parent, waiting], NOW)
+
+    assert [row["ref"] for row in rows] == ["{}#63".format(REPO)]
+
+
+def test_blocks_with_a_clearable_condition_or_an_asker_are_not_stranded():
+    parent = _building(70)
+    ticket = "{}#70".format(REPO)
+    prerequisite = issue(71, parent=ticket)
+    rows = [
+        parent,
+        prerequisite,
+        issue(72, parent=ticket, labels=["blocked"], needs="external-event",
+              block_reason="wait", blocked_until=NOW.date()),
+        issue(73, parent=ticket, labels=["blocked"], needs="external-event",
+              block_reason="wait", block_references=["#71"]),
+        issue(74, parent=ticket, needs="agent",
+              open_blockers=["{}#71".format(REPO)]),
+        issue(75, parent=ticket, labels=["blocked"], needs="human"),
+        issue(76, parent=ticket, labels=["blocked"],
+              needs="claude-code-environment"),
+        # Needs none asks Nate "Unblock?", so someone is asked.
+        issue(77, parent=ticket, labels=["blocked"], needs="none"),
+    ]
+
+    assert funnel.stranded_items(rows, NOW) == []
+    assert funnel.gate_question(rows[-1]) == "Unblock?"
+
+
+def test_a_ticket_of_a_parked_project_strands_a_live_dependent():
+    """#227/#229 waited on #165, a ticket of parked #15."""
+    parked = issue(80, state="CLOSED", status="Parked", klass="Improve",
+                   children_total=2)
+    abandoned = issue(81, parent="{}#80".format(REPO))
+    sibling = issue(82, parent="{}#80".format(REPO),
+                    open_blockers=["{}#81".format(REPO)])
+    live = _building(83)
+    dependent = issue(84, parent="{}#83".format(REPO),
+                      open_blockers=["{}#81".format(REPO)])
+
+    rows = funnel.stranded_items(
+        [parked, abandoned, sibling, live, dependent], NOW)
+
+    assert [row["ref"] for row in rows] == ["{}#84".format(REPO)]
+    assert rows[0]["reason"] == (
+        "blocked on blocker that will never close: {}#81".format(REPO)
+    )

@@ -1422,7 +1422,7 @@ def finish_declined(
     needs_effect(ticket["url"], ref)
     block_effect(resolved, context["number"], cwd=context["root"])
     comment_effect(resolved, context["number"],
-                   "**Declined:** {}".format(reason),
+                   "{} {}".format(funnel.DECLINED_PREFIX, reason),
                    run=run, agent=agent, cwd=context["root"])
     release(ref)
     first = reason.splitlines()[0] if reason else "no reason given"

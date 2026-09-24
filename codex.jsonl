@@ -3119,3 +3119,4 @@
 {"agent": "codex", "api_cost": {"gh_calls": 106, "graphql_points": null}, "phase": "api_cost", "run": "ded22e4d7b79", "ts": 1790266108}
 {"agent": "codex", "attempt": null, "escalated_from": null, "harness": "codex", "model": "gpt-6-luna", "model_source": "detected", "phase": "start", "provider": "openai", "reasoning_effort": "max", "repo": {"dirty": 0, "head": "650de5862e1a"}, "run": "829f4ce6d5b0", "runtime": {"head": "650de5862e1a", "root": "/Users/nateprich/.claude/command-center-run"}, "session_id": "01a0d42e-c261-74e0-a4c7-10de25a544fb", "ticket": null, "tier": "standard", "ts": 1790266246, "usage": {"seven_day": {"resets_at": 1790734287, "used_percent": 29.0}}}
 {"agent": "codex", "do": "ticket", "phase": "bind", "run": "829f4ce6d5b0", "ts": 1790266365, "work": "nateprich-projects/The-League#271"}
+{"agent": "codex", "api_cost": {"gh_calls": 105, "graphql_points": null}, "phase": "api_cost", "run": "829f4ce6d5b0", "ts": 1790266371}

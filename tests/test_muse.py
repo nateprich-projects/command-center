@@ -313,35 +313,36 @@ def test_the_override_names_the_window_resetting_sunday_2026_09_27():
 
 
 def test_the_override_prices_the_window_from_the_panel(tmp_path, monkeypatch):
-    """#1341: the panel read 70% while the meter held $89.38, so the same
-    spend reads 70% here. At the implement-era rate the projection passes
-    100%, and is reported rather than banded."""
+    """#1396: the panel read 81% while the meter held $111.13, so the same
+    spend reads 81% here. At the 72-hour rate that reading carried, $106.92
+    ($35.64 a day), the projection passes 100%, and is reported rather than
+    banded."""
     reading, verdict, _ = _projected(
-        tmp_path, monkeypatch, spent=89.38, trailing=89.38, days_left=4.8,
+        tmp_path, monkeypatch, spent=111.13, trailing=106.92, days_left=3.98,
         at=IN_OVERRIDE)
     window = reading["windows"]["seven_day"]
-    assert reading["cap_dollars"] == pytest.approx(127.69)
-    assert window["cap_dollars"] == pytest.approx(127.69)
-    assert window["used_percent"] == pytest.approx(70.0, abs=0.01)
-    # 70 + 100 * $29.79/day * 4.8 days / $127.69: priced against the panel
-    # cap, not the $200 one, which would read 141.5.
-    assert window["projected_percent"] == pytest.approx(182.0, abs=0.05)
+    assert reading["cap_dollars"] == pytest.approx(137.20)
+    assert window["cap_dollars"] == pytest.approx(137.20)
+    assert window["used_percent"] == pytest.approx(81.0, abs=0.01)
+    # 81 + 100 * $35.64/day * 3.98 days / $137.20: priced against the panel
+    # cap, not the $200 one, which would read 126.5.
+    assert window["projected_percent"] == pytest.approx(184.39, abs=0.05)
     assert window["override"] == {"issue": 1341, "until": OVERRIDE_RESET}
 
     weekly = verdict["windows"][0]
     assert verdict["band"] == "ok"
     assert not verdict["over_pace"]
     assert weekly["allowed_percent"] == 95.0
-    assert weekly["reserve"] == pytest.approx(3.52)
+    assert weekly["reserve"] == pytest.approx(3.28)
     assert weekly["runs_out_at"] is not None
     assert weekly["override"]["issue"] == 1341
 
 
-@pytest.mark.parametrize("spent, over", [(116.0, False), (117.0, True)])
+@pytest.mark.parametrize("spent, over", [(125.0, False), (126.0, True)])
 def test_the_override_stops_at_95_less_one_session(tmp_path, monkeypatch,
                                                     spent, over):
-    """Used plus $4.50 of $127.69 (3.52%) against 95: $116 reads 90.85% and
-    is admitted, $117 reads 91.63% and is not."""
+    """Used plus $4.50 of $137.20 (3.28%) against 95: $125 reads 91.11% and
+    is admitted, $126 reads 91.84% and is not."""
     _, verdict, _ = _projected(
         tmp_path, monkeypatch, spent=spent, trailing=0.0, days_left=2.0,
         at=IN_OVERRIDE)

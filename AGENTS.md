@@ -210,8 +210,9 @@ wrong.
   panel shows a five-hour window whose reset floats with use and a weekly window that
   resets Sunday 17:00 PDT; a 429 says only `Your usage window resets at <ISO>`. A stamp
   on the Sunday lattice is the weekly wall, a floating stamp under five hours out is
-  the five-hour one. Only the weekly wall has been hit so far (2026-09-19). #1182
-  covers recording each hit so the windows can be calibrated from evidence.
+  the five-hour one. Both have been hit: the weekly wall on 2026-09-19, and the
+  five-hour wall on 2026-09-21, when 37 refusals from 13:01 PDT named 13:57:55 PDT.
+  #1182 covers recording each hit so the windows can be calibrated from evidence.
   **Muse is paced by a projection, not by a line.** At the last 72 hours' spending
   rate, will the window last until its reset? `usage.pace` answers with a band: `ok`;
   `tight` when the projected end passes 100 percent; `over` when used plus the session
@@ -232,10 +233,12 @@ wrong.
   _(agent rule, unconfirmed — advisory)_
   **The window that resets Sunday 2026-09-27 17:00 PDT runs under a dated override
   (#1341).** Its projection is reported but never bands `tight`, and its flat ceiling
-  is priced from the account panel: 70% there against $89.38 here puts the provider's
-  100% near $127.69, and the gate stops at 95% of it, less one session's reserve.
+  is priced from the account panel: 81% there against $111.13 here puts the provider's
+  100% near $137.20, and the gate stops at 95% of it, less one session's reserve.
   `usage.MUSE_PACE_OVERRIDE` names the window, so the override lapses at that reset
-  with nothing to clear. _(Nate, 2026-09-22.)_
+  with nothing to clear. _(Nate, 2026-09-22.)_ The pairing is re-taken from each new
+  panel reading. The first one, 70% against $89.38, was taken after four days of
+  Muse implement runs, and by 2026-09-23 it read 87% while the panel read 81% (#1396).
 - **No Copilot automation.** Those are employer-provided tokens; personal use stays
   one-off and manual.
 - **Every routine starts, reads fresh usage, and exits immediately if over the pace

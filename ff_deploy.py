@@ -305,9 +305,9 @@ def _current_head(checkout: Path) -> str | None:
         return None
 
 
-def tick(checkout: Path, bin_root: Path, record_path: Path) -> int:
-    """Run one deployment attempt and append its result, including refusals."""
-    record = {
+def new_deploy_record() -> dict:
+    """Create the append-only record shape shared by all runtime pollers."""
+    return {
         "timestamp": _timestamp(),
         "checkout_head_before": None,
         "checkout_head_after": None,
@@ -316,57 +316,102 @@ def tick(checkout: Path, bin_root: Path, record_path: Path) -> int:
         "operator_swap_result": {"status": "not_run"},
         "verify_result": {"status": "not_run"},
     }
+
+
+def fast_forward_checkout(
+    checkout: Path,
+    record: dict,
+    *,
+    before_fast_forward=None,
+    after_fast_forward_failure=None,
+) -> bool:
+    """Fetch origin/main and safely fast-forward a clean main checkout.
+
+    ``before_fast_forward`` lets the FF deploy install moved pins before the
+    checkout advances. Other runtimes omit it and use the same poll, clean-tree,
+    ancestry, and fast-forward checks without a pin guard.
+    """
+    if not checkout.is_dir():
+        raise DeployError("runtime checkout is missing", code="checkout_missing",
+                          outcome="refused")
+    branch = _git(checkout, ["symbolic-ref", "--quiet", "--short", "HEAD"],
+                  allow_failure=True)
+    if branch.returncode != 0 or branch.stdout.strip() != DEFAULT_BRANCH:
+        raise DeployError("runtime checkout is not on main", code="checkout_branch_invalid",
+                          outcome="refused")
+    before = _git_text(checkout, ["rev-parse", "HEAD"])
+    record["checkout_head_before"] = before
+
+    fetch = _git(checkout, [
+        "fetch", "--no-tags", DEFAULT_REMOTE,
+        "+refs/heads/main:refs/remotes/origin/main",
+    ], allow_failure=True)
+    if fetch.returncode != 0:
+        raise DeployError("fetching runtime main failed ({})".format(fetch.returncode),
+                          code="fetch_failed")
+    main_head = _git_text(checkout, ["rev-parse", "refs/remotes/origin/main"])
+    record["main_head"] = main_head
+
+    status = _git(checkout, ["status", "--porcelain", "--untracked-files=normal"])
+    if status.stdout.strip():
+        raise DeployError("runtime checkout has local changes; refusing the deploy",
+                          code="checkout_dirty", outcome="refused")
+
+    moved = before != main_head
+    if moved:
+        ancestor = _git(checkout, ["merge-base", "--is-ancestor", "HEAD", main_head],
+                        allow_failure=True)
+        if ancestor.returncode == 1:
+            raise DeployError("runtime main cannot fast-forward this checkout",
+                              code="non_fast_forward", outcome="refused")
+        if ancestor.returncode != 0:
+            raise DeployError("could not confirm runtime fast-forward safety",
+                              code="ancestry_check_failed")
+
+    if before_fast_forward is not None:
+        before_fast_forward(before, main_head)
+
+    if moved:
+        merged = _git(checkout, ["merge", "--ff-only", main_head], allow_failure=True)
+        if merged.returncode != 0:
+            if after_fast_forward_failure is not None:
+                after_fast_forward_failure()
+            raise DeployError("fast-forwarding the runtime checkout failed ({})".format(
+                merged.returncode), code="fast_forward_failed")
+    after = _git_text(checkout, ["rev-parse", "HEAD"])
+    record["checkout_head_after"] = after
+    return moved
+
+
+def tick(checkout: Path, bin_root: Path, record_path: Path) -> int:
+    """Run one deployment attempt and append its result, including refusals."""
+    record = new_deploy_record()
     returncode = 1
     try:
-        if not checkout.is_dir():
-            raise DeployError("FF runtime checkout is missing", code="checkout_missing",
-                              outcome="refused")
-        branch = _git(checkout, ["symbolic-ref", "--quiet", "--short", "HEAD"],
-                      allow_failure=True)
-        if branch.returncode != 0 or branch.stdout.strip() != DEFAULT_BRANCH:
-            raise DeployError("FF runtime checkout is not on main", code="checkout_branch_invalid",
-                              outcome="refused")
-        before = _git_text(checkout, ["rev-parse", "HEAD"])
-        record["checkout_head_before"] = before
-
-        fetch = _git(checkout, [
-            "fetch", "--no-tags", DEFAULT_REMOTE,
-            "+refs/heads/main:refs/remotes/origin/main",
-        ], allow_failure=True)
-        if fetch.returncode != 0:
-            raise DeployError("fetching FF main failed ({})".format(fetch.returncode),
-                              code="fetch_failed")
-        main_head = _git_text(checkout, ["rev-parse", "refs/remotes/origin/main"])
-        record["main_head"] = main_head
-
-        status = _git(checkout, ["status", "--porcelain", "--untracked-files=normal"])
-        if status.stdout.strip():
-            raise DeployError("FF runtime checkout has local changes; refusing the deploy",
-                              code="checkout_dirty", outcome="refused")
-
-        old_pins = parse_pins(_git_text(checkout, ["show", "HEAD:pyproject.toml"]))
-        new_pins = parse_pins(_git_text(checkout, ["show", "{}:pyproject.toml".format(main_head)]))
         attempted: list[str] = []
-        if before != main_head:
-            ancestor = _git(checkout, ["merge-base", "--is-ancestor", "HEAD", main_head],
-                            allow_failure=True)
-            if ancestor.returncode == 1:
-                raise DeployError("FF main cannot fast-forward this checkout",
-                                  code="non_fast_forward", outcome="refused")
-            if ancestor.returncode != 0:
-                raise DeployError("could not confirm FF fast-forward safety",
-                                  code="ancestry_check_failed")
-            attempted = _install_changed_pins(old_pins, new_pins, record)
-            merged = _git(checkout, ["merge", "--ff-only", main_head], allow_failure=True)
-            if merged.returncode != 0:
-                if attempted:
-                    _rollback_pins(attempted, old_pins, record)
-                raise DeployError("fast-forwarding the FF checkout failed ({})".format(
-                    merged.returncode), code="fast_forward_failed")
-            record["checkout_head_after"] = _git_text(checkout, ["rev-parse", "HEAD"])
-        else:
-            record["pin_reinstall_result"] = {"status": "not_needed", "items": []}
-            record["checkout_head_after"] = before
+        old_pins: dict[str, Pin] = {}
+
+        def prepare_pins(before: str, main_head: str) -> None:
+            nonlocal old_pins
+            old_pins = parse_pins(_git_text(checkout, ["show", "HEAD:pyproject.toml"]))
+            new_pins = parse_pins(_git_text(
+                checkout, ["show", "{}:pyproject.toml".format(main_head)]
+            ))
+            if before == main_head:
+                record["pin_reinstall_result"] = {"status": "not_needed", "items": []}
+                return
+            attempted.extend(_install_changed_pins(old_pins, new_pins, record))
+
+        def rollback_pins() -> None:
+            if attempted:
+                _rollback_pins(attempted, old_pins, record)
+
+        moved = fast_forward_checkout(
+            checkout,
+            record,
+            before_fast_forward=prepare_pins,
+            after_fast_forward_failure=rollback_pins,
+        )
 
         source = checkout / "scripts" / "ff-operate"
         destination = bin_root / "ff-operate"
@@ -387,7 +432,7 @@ def tick(checkout: Path, bin_root: Path, record_path: Path) -> int:
             raise DeployError("league_packages.verify_league_packages() failed",
                               code="verification_failed")
 
-        if before != main_head:
+        if moved:
             record["status"] = "deployed"
         elif needs_swap:
             record["status"] = "repaired"

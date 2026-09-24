@@ -68,6 +68,11 @@ dependency has complete evidence at that threshold; otherwise its status is the
 literal `not enough evidence yet` and the result names each signal's observed,
 required and shortfall amounts. An unknown question name is rejected.
 
+`python3 runtime_checkin.py` verifies the FF, League and Career runtime deploy
+records against each checkout head and current `origin/main`. It reports stale
+pollers and recorded refusals without fetching or changing any runtime checkout.
+Records older than two ten-minute poll intervals are reported as stale.
+
 ## Documentation
 
 - [`plan.md`](plan.md) — the design record, including what was rejected and why

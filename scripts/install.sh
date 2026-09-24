@@ -97,6 +97,7 @@ LAUNCHD_PLISTS=(
   com.nateprich.command-center-league-deploy.plist
   com.nateprich.command-center-career-deploy.plist
   com.nateprich.command-center-outcomes-derive.plist
+  com.nateprich.command-center-metrics-derive.plist
 )
 for name in "${LAUNCHD_PLISTS[@]}"; do
   src="$REPO/launchd/$name"

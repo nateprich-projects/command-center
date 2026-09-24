@@ -21,9 +21,12 @@ FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "project_items.json"
 @pytest.fixture(autouse=True)
 def no_resend_network(monkeypatch):
     """Brief fixture tests should not read live heartbeat or outcome branches."""
+    funnel.reset_api_usage()
     monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
     monkeypatch.setattr(funnel, "_read_outcome_signals", lambda now: None)
     monkeypatch.setattr(funnel, "_read_portfolio_metrics", lambda items, now: None)
+    yield
+    funnel.reset_api_usage()
 
 
 def fixture_items():
@@ -1283,12 +1286,25 @@ def test_brief_places_measured_api_cost_in_documented_timings_map(monkeypatch, c
         funnel, "api_cost",
         lambda: {"graphql_points": 23, "gh_calls": 7},
     )
+    monkeypatch.setattr(
+        funnel, "graphql_caller_spend",
+        lambda: {
+            "publisher": {"calls": 3, "points": 23, "remaining": 4100},
+            "unattributed": {"calls": 1, "points": None, "remaining": 4000},
+        },
+    )
 
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
 
     assert brief["timings"]["api_cost.graphql_points"] == 23
     assert brief["timings"]["api_cost.gh_calls"] == 7
+    assert brief["timings"][
+        "api_cost.graphql_by_caller.publisher.points"
+    ] == 23
+    assert brief["timings"][
+        "api_cost.graphql_by_caller.unattributed.points"
+    ] is None
     assert "api_cost" not in brief
 
 

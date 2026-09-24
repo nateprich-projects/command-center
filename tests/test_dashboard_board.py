@@ -448,6 +448,45 @@ def test_blocked_pips_line_up_behind_their_blockers():
     )
 
 
+def test_unfinished_rows_follow_the_bar_and_closed_rows_stay_last():
+    """Nate, 2026-09-24: the pips and the sub-issue rows should agree on the
+    order the tickets will be worked; closed work stays where it was in
+    both (first in the bar, last in the rows)."""
+    outside = [REPO + "#225"]
+    row = _building_row([
+        project(children_total=8),
+        ticket(260, open_blockers=outside),
+        ticket(261, open_blockers=outside),
+        ticket(262, open_blockers=outside),
+        ticket(263, open_blockers=[REPO + "#261", REPO + "#260", REPO + "#262"]),
+        ticket(264, open_blockers=outside),
+        ticket(265, state="CLOSED"),
+        ticket(266, open_blockers=[REPO + "#264"]),
+        ticket(267, open_blockers=[REPO + "#266", REPO + "#264"]),
+    ])
+    numbers = [t["number"] for t in row["tickets"]]
+    assert numbers == [260, 261, 262, 264, 263, 266, 267, 265]
+    open_rows = [t for t in row["tickets"] if t["state"] == "OPEN"]
+    closed = row["pips"].count("closed")
+    assert [funnel._dashboard_pip_state(t) for t in open_rows] == (
+        row["pips"][closed:]
+    )
+
+
+def test_rows_in_review_lead_startable_rows_as_the_bar_does():
+    facts = {REPO + "#13": {"state": "OPEN", "number": 7, "headRefOid": "a"}}
+    row = funnel.dashboard_board(
+        [project(children_total=4), ticket(11), ticket(12),
+         ticket(13), ticket(14, open_blockers=[REPO + "#11"])],
+        NOW, pr_facts=facts,
+    )["columns"]
+    row = next(c for c in row if c["stage"] == "Building")["items"][0]
+    assert [t["number"] for t in row["tickets"]] == [13, 11, 12, 14]
+    assert row["pips"] == ["submitted", "open", "open", "queued"]
+    # The next step is still the engineers' next ticket, not the review.
+    assert row["next_owner"] == "Codex"
+
+
 def test_a_chain_from_open_work_leads_a_chain_from_outside():
     row = _building_row([
         project(children_total=4),

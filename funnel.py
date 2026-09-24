@@ -8090,6 +8090,7 @@ def _dashboard_item(
     now: datetime,
     by_ref: Dict[str, Item],
     tickets: Optional[List[Dict[str, object]]] = None,
+    next_step_blocked: bool = False,
 ) -> Dict[str, object]:
     """Render the small parent-project row consumed by the dashboard page."""
     return {
@@ -8105,6 +8106,10 @@ def _dashboard_item(
         # The owner of the next step in the chain, not every owner on the
         # project: Nate, 2026-09-15, "only the assignment for the next step".
         "next_owner": _dashboard_next_owner(tickets or ()),
+        # Nothing on the project can move until a block lifts, whether the
+        # block is on the project or on every open ticket. The page reads
+        # "Blocked" where the owner would be (Nate, 2026-09-24).
+        "next_step_blocked": bool(next_step_blocked),
         "blocked": bool(item.is_blocked),
         "blockers": list(item.block_references) if item.is_blocked else [],
         "block_reason": (
@@ -8206,10 +8211,17 @@ def dashboard_board(
 
     Rows are ordered by the engineers' own queue, so the board reads as the
     priority it actually is: within a project the next ticket to be taken is
-    first and closed tickets sink to the bottom, and projects are ordered by
-    their best ticket. `Done` is newest-first; every other stage keeps its
-    time-at-gate order for projects with nothing startable. Ordering is
-    `startable()`'s throughout — this function never invents a rank.
+    first, then other work someone can act on, then blocked tickets, and
+    closed tickets sink to the bottom; projects are ordered by their best
+    ticket. `Done` is newest-first; every other stage keeps its
+    time-at-gate order for projects with nothing startable. The queue order
+    is `startable()`'s throughout — this function never invents a rank.
+
+    A project that cannot move until a block lifts never sits above one that
+    can, unless work above it is what lifts the block (Nate, 2026-09-24): it
+    is placed directly under the project on this column whose work frees it,
+    and below everything else when what it waits on is not on the column —
+    a date, a stated reason, or a project in another stage.
     """
     rows = list(items)
     by_ref = {item.ref: item for item in rows}
@@ -8282,14 +8294,25 @@ def dashboard_board(
         found = authoring.get(str(number))
         return found if found is not None else ()
 
+    def ticket_blocked(child: Item) -> bool:
+        """The block ``_dashboard_ticket`` honours, read from the Item."""
+        parent = by_ref.get(child.parent or "")
+        return bool(
+            child.is_blocked or child.open_blockers
+            or (parent is not None and parent.is_blocked)
+        )
+
     def ticket_key(child: Item):
-        """Next-to-be-taken first, then other open work, then closed."""
+        """Next-to-be-taken first, then other actionable open work (in
+        review, a human step), then blocked work, then closed."""
         rank = queue_rank.get(child.ref)
         if child.state != "OPEN":
+            return (3, 0, child.number)
+        if rank is not None:
+            return (0, rank, child.number)
+        if ticket_blocked(child):
             return (2, 0, child.number)
-        if rank is None:
-            return (1, 0, child.number)
-        return (0, rank, child.number)
+        return (1, 0, child.number)
 
     def ticket_rows(parent: Item) -> List[Dict[str, object]]:
         # `startable()` withholds every ticket of a blocked parent, so the
@@ -8332,23 +8355,24 @@ def dashboard_board(
         return _dashboard_stage_since(item)
 
     def board_key(item: Item):
-        """Pinned first, then queue order, then the ladder, then gate age.
+        """Pinned first, then the ladder, then queue order, then gate age.
 
         A pin is Nate's explicit ordering call and leads whatever else is
-        true. Projects whose tickets are startable follow in the engineers'
-        own queue order. The rest are ordered by the ladder their class sits
-        on, so a `Broken` project with everything blocked still reads above an
-        `Improve` one, and by time at gate within a class. Without the ladder
-        term a board with nothing startable fell back to age alone and the
-        pinned project sank (#902).
+        true (#902). Then the ladder, whoever owns the next step: a `Broken`
+        project Muse is reviewing reads above `Improve` work Codex can start,
+        because reviewing and implementing run side by side and the class is
+        the priority (Nate, 2026-09-24, choosing this over the engineers'
+        queue leading the board). Within a class, projects with startable
+        tickets follow the engineers' own queue order, and the rest follow
+        by time at gate. ``column_order`` then moves blocked projects.
         """
         rank = best_rank(item)
         since = stage_since(item)
         return (
             0 if item.pinned else 1,
+            ladder_index(effective_class(item, by_ref)),
             rank is None,
             rank if rank is not None else 0,
-            ladder_index(effective_class(item, by_ref)),
             since is None,
             since or max_time,
             item.repo,
@@ -8361,6 +8385,140 @@ def dashboard_board(
         return (closed is None, -(closed.timestamp() if closed else 0),
                 item.repo, item.number)
 
+    def next_step_blocked(
+        item: Item, tickets: Sequence[Mapping[str, object]]
+    ) -> bool:
+        """True when nothing on an open project can move until a block
+        lifts. Finished work is never "blocked", whatever label it kept."""
+        if item.state != "OPEN":
+            return False
+        if item.is_blocked:
+            return True
+        open_rows = [t for t in tickets if t.get("state") == "OPEN"]
+        return bool(open_rows) and all(t.get("blocked") for t in open_rows)
+
+    def column_order(
+        stage_items: List[Item],
+        tickets_by_ref: Mapping[str, Sequence[Mapping[str, object]]],
+    ) -> List[Item]:
+        """``board_key`` order, with each blocked project moved under the
+        project whose work unblocks it, or to the bottom of the column.
+
+        Positions are tuples: a project that can move is ``(i,)`` in
+        ``board_key`` order, and a blocked project is its anchor plus its
+        own tiebreak, so it sorts directly after that anchor and before the
+        next project that can move. The anchor is when the project could
+        first move again: the earliest of its open tickets to become
+        workable, and a ticket is workable only once *every* condition on it
+        has cleared. A blocker clears when its project has moved and, if the
+        blocker is itself blocked, once its own conditions clear too. A date,
+        a reason with no reference, or a reference to anything not on this
+        column cannot be lifted from here and reads as the bottom. A pin
+        stays Nate's explicit ordering call and is never moved (#902).
+
+        Blocks can form cycles, so this relaxes to a fixed point rather than
+        recursing; whatever a cycle leaves unresolved goes to the bottom.
+        """
+        ordered = sorted(stage_items, key=board_key)
+        on_column = {item.ref: item for item in ordered}
+        blocked = [
+            item for item in ordered
+            if not item.pinned
+            and next_step_blocked(item, tickets_by_ref.get(item.ref, ()))
+        ]
+        blocked_refs = {item.ref for item in blocked}
+        free = [item for item in ordered if item.ref not in blocked_refs]
+        bottom: Tuple[int, ...] = (len(free),)
+        # Larger than any real position: "not resolved yet".
+        unknown: Tuple[int, ...] = (len(free) + 1,)
+        tiebreak = {item.ref: index for index, item in enumerate(ordered)}
+        place: Dict[str, Tuple[int, ...]] = {
+            item.ref: (index,) for index, item in enumerate(free)
+        }
+        for item in blocked:
+            place[item.ref] = unknown
+
+        # Blocked open tickets anywhere on the column: a blocked project's
+        # own, and those of a project that can move (they can still block
+        # something else, and they clear later than their project).
+        waiting = [
+            child
+            for item in ordered
+            for child in children.get(item.ref, ())
+            if child.state == "OPEN" and ticket_blocked(child)
+        ]
+        ready: Dict[str, Tuple[int, ...]] = {
+            child.ref: unknown for child in waiting
+        }
+
+        def cleared(value: str, owner: Item) -> Tuple[int, ...]:
+            """When the item ``value`` names has done its work."""
+            ref = _dependency_ref(owner, value)
+            if ref in on_column:
+                return place[ref]
+            found = by_ref.get(ref or "")
+            if (
+                found is None or found.state != "OPEN"
+                or found.parent not in on_column
+            ):
+                return bottom
+            return max(place[found.parent], ready.get(found.ref, ()))
+
+        def own_block(item: Item) -> Tuple[int, ...]:
+            """When an item's own blocked label could lift, or ``()``."""
+            if not item.is_blocked:
+                return ()
+            if (
+                _item_blocked_until(item) is not None
+                or not item.block_references
+            ):
+                return bottom
+            return max(cleared(v, item) for v in item.block_references)
+
+        def ticket_ready(child: Item) -> Tuple[int, ...]:
+            conditions = [own_block(child)]
+            conditions.extend(cleared(v, child) for v in child.open_blockers)
+            parent = by_ref.get(child.parent or "")
+            if parent is not None:
+                conditions.append(own_block(parent))
+            found = max(conditions)
+            return found if found else bottom
+
+        def project_anchor(item: Item) -> Tuple[int, ...]:
+            open_children = [
+                child for child in children.get(item.ref, ())
+                if child.state == "OPEN"
+            ]
+            if not open_children:
+                return own_block(item) or bottom
+            return min(
+                ready.get(child.ref) or ticket_ready(child)
+                for child in open_children
+            )
+
+        for _ in range(len(waiting) + len(blocked) + 2):
+            changed = False
+            for child in waiting:
+                found = ticket_ready(child)
+                if found != ready[child.ref]:
+                    ready[child.ref] = found
+                    changed = True
+            for item in blocked:
+                anchor = project_anchor(item)
+                found = (
+                    unknown if anchor >= unknown
+                    else anchor + (tiebreak[item.ref],)
+                )
+                if found != place[item.ref]:
+                    place[item.ref] = found
+                    changed = True
+            if not changed:
+                break
+        for item in blocked:
+            if place[item.ref] >= unknown:
+                place[item.ref] = bottom + (tiebreak[item.ref],)
+        return sorted(ordered, key=lambda item: place[item.ref])
+
     def include(item: Item, stage: str) -> bool:
         if item.parent is not None or item.status != stage:
             return False
@@ -8372,21 +8530,30 @@ def dashboard_board(
             and item.closed_at >= done_cutoff
         )
 
-    return {
-        "columns": [
-            {
-                "stage": stage,
-                "items": [
-                    _dashboard_item(item, now, by_ref, ticket_rows(item))
-                    for item in sorted(
-                        (item for item in rows if include(item, stage)),
-                        key=done_key if stage == "Done" else board_key,
-                    )
-                ],
-            }
-            for stage in DASHBOARD_BOARD_STAGES
-        ]
-    }
+    columns: List[Dict[str, object]] = []
+    for stage in DASHBOARD_BOARD_STAGES:
+        stage_items = [item for item in rows if include(item, stage)]
+        tickets_by_ref = {item.ref: ticket_rows(item) for item in stage_items}
+        if stage == "Done":
+            ordered = sorted(stage_items, key=done_key)
+        else:
+            try:
+                ordered = column_order(stage_items, tickets_by_ref)
+            except Exception:
+                # Instrumentation again: a placement failure falls back to
+                # the plain order rather than costing the snapshot.
+                ordered = sorted(stage_items, key=board_key)
+        columns.append({
+            "stage": stage,
+            "items": [
+                _dashboard_item(
+                    item, now, by_ref, tickets_by_ref[item.ref],
+                    next_step_blocked(item, tickets_by_ref[item.ref]),
+                )
+                for item in ordered
+            ],
+        })
+    return {"columns": columns}
 
 
 def _dashboard_muse_usage(now_epoch: float) -> Optional[Dict[str, object]]:

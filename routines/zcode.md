@@ -2,6 +2,11 @@
 
 No longer runs; history in LEARNINGS.md. Protocol stays pinned below.
 
+The agent name `zcode` runs again from 2026-09-23 until 2026-10-06 09:00 PDT,
+as the z.ai standard tier of `scripts/muse-review-engine` (see AGENTS.md).
+That lane uses the engine's own prompts and `scripts/zai-exec`, not this
+routine, which stays retired.
+
 **zcode scheduled task**, Mac mini, never headless. One job per run:
 **review, then breakdown, then shaping**.
 

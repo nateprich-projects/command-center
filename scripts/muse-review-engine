@@ -1,28 +1,52 @@
 #!/bin/bash
-# A Muse judgement engine: one review, breakdown, or shape job against its
-# packet, then stop.
+# A judgement engine: one review, breakdown, or shape job against its packet,
+# then stop. Muse answers by default; z.ai's GLM-5.3 answers the standard tier
+# until 2026-10-07 00:00 Beijing time, 2026-10-06 09:00 PDT (below).
 #
 # Usage: muse-review-engine [tier] [reasoning-effort]
 #   tier   -- escalated (default) or standard; substituted into begin
-#   effort -- max (default) or high
+#   effort -- max (default) or high; Muse only, zai-exec takes none
 #
 # Phase 1 of #794: begin offers the work, the packet command assembles the
 # evidence, and a failing review precheck is applied as rejected with no model
 # call at all, except a non-OPEN PR stop, which records no verdict. A passing
 # precheck whose merged overlap has no green run yet re-runs the PR's CI once
 # and waits for the result instead of calling the model (#1019).
-# Otherwise, review calls one lister and parallel judges of at most three
-# requirements each against the same cached packet; the runner derives the
+# Otherwise, review calls one lister and judges of at most three
+# requirements each against the same cached packet — in parallel on Muse, one
+# at a time on z.ai (#1411); the runner derives the
 # verdict before handing the answer to review-apply. Breakdown and shape each
 # answer one JSON question. Calls retry once on a parse error. Breakdown rides
 # the standard tier only; shape follows wherever begin offers it.
 #
-# The model runs with --disable-shell --disable-write --disable-web-tools: it
-# has no tool at all, so it cannot run funnel.py or gh itself. No
-# --sandbox-network flag: there are no tools left that need the network, and
-# the CLI's own provider calls work under the default. No --approval-mode
-# either: the default stays on-request, so a future tool outside the three
-# disables could never be silently auto-allowed on this path.
+# Two backends, one protocol. Everything above is the same whichever model
+# answers; only the model call, the agent name on the records, and the
+# provider-quota handling differ.
+#
+#  - Muse (`muse exec`, agent `muse`) runs with --disable-shell
+#    --disable-write --disable-web-tools: it has no tool at all, so it cannot
+#    run funnel.py or gh itself. No --sandbox-network flag: there are no tools
+#    left that need the network, and the CLI's own provider calls work under
+#    the default. No --approval-mode either: the default stays on-request, so
+#    a future tool outside the three disables could never be silently
+#    auto-allowed on this path.
+#  - z.ai (`scripts/zai-exec`, agent `zcode`) posts one user message with no
+#    `tools` array to GLM-5.3's Anthropic-compatible endpoint. There is no
+#    tool to disable because none is ever offered, and it refuses any reply
+#    that a model other than glm-5.3 answered (LEARNINGS.md, 2026-09-06).
+#
+# The standard tier routes to z.ai while now < 2026-10-07 00:00 Beijing time
+# (1791302400, 2026-10-06 09:00 PDT), on Nate's decision of 2026-09-23:
+# Muse's week was nearly spent until its Sunday 17:00 PDT reset, and his
+# cancelled z.ai Coding Plan stays active until it expires on 2026-10-07, so
+# its credits are use-it-or-lose-it. The cutoff is the start of the expiry day
+# in z.ai's own time zone (UTC+8), the earliest reading of "expires
+# 2026-10-07" (#1411): it gives up most of a day rather than risk runs
+# erroring on an expired key. After it the standard tier is Muse's again with
+# nothing to undo. The escalated tier never routes. heartbeat.py's
+# ZAI_STANDARD_UNTIL is the same instant, and a test pins the two together.
+# AGENTS.md carries the terms caveat: headless use of a Coding Plan key is his
+# risk call on unread terms, as Muse's is.
 #
 # A separate runner from muse-implement on purpose: a flag error must never
 # turn a reviewer into a writer.
@@ -57,14 +81,49 @@ case "$EFFORT" in
   *) echo "muse-review-engine: reasoning effort must be max or high, got '$EFFORT'" >&2; exit 1 ;;
 esac
 
+# --- which backend answers this run (Nate, 2026-09-23) ------------------------
+#
+# Decided from the clock, not from a file or a flag in the plist: the plist
+# keeps running `standard max`, and the routing lapses at the cutoff with
+# nothing to remove. The cutoff is overridable only so the tests can drive
+# both sides of it; a value that is not a plain epoch keeps the run on Muse,
+# the behaviour this block did not exist to change.
+#
+# The agent name is `zcode`, the old z.ai lane's name (retired 2026-09-09,
+# #431; its in-app routine stays retired): it spends
+# the `zai` pool in usage.py and heartbeat.py already, so `begin` reads z.ai's
+# own five-hour and weekly windows and stops the lane when either is spent.
+# No fallback to Muse on a spent z.ai window: the standard lane records a skip
+# and waits, and Muse's week is left to the escalated tier it was kept for.
+ZAI_STANDARD_UNTIL="${MUSE_REVIEW_ENGINE_ZAI_UNTIL:-1791302400}"
+BACKEND="muse"
+AGENT="muse"
+if [[ "$TIER" == "standard" && "$ZAI_STANDARD_UNTIL" =~ ^[0-9]+$ ]] \
+  && (( $(date +%s) < ZAI_STANDARD_UNTIL )); then
+  BACKEND="zai"
+  AGENT="zcode"
+fi
+
 # The maintained read-only clone, not Nate's working tree: the routine text
 # and the funnel it invokes must come from the same checkout.
 REPO="${MUSE_REVIEW_ENGINE_REPO:-/Users/nateprich/.claude/command-center-run}"
-# The muse and gh binaries and the wall-clock bound are overridable for the
-# tests; the defaults are what the schedule runs.
+# The muse, zai-exec and gh binaries and the wall-clock bound are overridable
+# for the tests; the defaults are what the schedule runs. zai-exec is a
+# sibling of this runner, like the quota-hold helper below.
 MUSE_BIN="${MUSE_BIN:-$HOME/.local/bin/muse}"
+ZAI_EXEC_BIN="${ZAI_EXEC_BIN:-${BASH_SOURCE[0]%/*}/zai-exec}"
 GH_BIN="${GH_BIN:-gh}"
 BOUND_SECONDS="${MUSE_REVIEW_ENGINE_BOUND_SECONDS:-1200}"
+# zai-exec's own network deadline sits inside the bound, so a slow reply ends
+# as zai-exec's diagnostic rather than as the bound's kill. The kill stays as
+# the backstop.
+if (( BOUND_SECONDS > 60 )); then
+  ZAI_TIMEOUT_SECONDS=$((BOUND_SECONDS - 30))
+else
+  ZAI_TIMEOUT_SECONDS=$(( BOUND_SECONDS > 1 ? BOUND_SECONDS - 1 : 1 ))
+fi
+#: zai-exec's status for a spent z.ai window; see its docstring.
+ZAI_QUOTA_EXIT=75
 ROUTINE_REVIEW="$REPO/routines/muse-review.md"
 ROUTINE_BREAKDOWN="$REPO/routines/muse-breakdown.md"
 ROUTINE_SHAPE="$REPO/routines/muse-shape.md"
@@ -74,6 +133,13 @@ ROUTINE_SHAPE="$REPO/routines/muse-shape.md"
 WORKSPACE="$HOME/.claude/command-center-muse-workspace"
 
 mkdir -p "$WORKSPACE" || exit 1
+
+# Checked before begin, like the routines: a run must never take work it
+# cannot ask about.
+if [[ "$BACKEND" == "zai" && ! -x "$ZAI_EXEC_BIN" ]]; then
+  echo "muse-review-engine: cannot execute $ZAI_EXEC_BIN — refusing to run the z.ai standard tier without it" >&2
+  exit 1
+fi
 
 # One prompt per job, all checked before begin: a run must never take work
 # it cannot ask about. Everything after the first `---` is the agent-facing
@@ -203,15 +269,31 @@ export FUNNEL_SESSION
 
 # Bind the heartbeat start to Muse's session when available. This is
 # telemetry only: a missing id leaves usage unresolved, but must not stop the
-# run it is meant to observe.
-MUSE_EXEC=("$MUSE_BIN" exec)
-if MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null)" \
-  && [[ -n "$MUSE_SESSION_ID" ]]; then
-  export MUSE_SESSION_ID
-  MUSE_EXEC+=(--session-id "$MUSE_SESSION_ID")
+# run it is meant to observe. Muse's alone: a z.ai run never sets it, so no
+# zcode record can claim a Muse session.
+#
+# The z.ai run gets the same binding under zcode's own variable, which
+# heartbeat reads as that agent's session and zai-exec uses to name its call
+# log, so the run's calls land in one file heartbeat can read back.
+if [[ "$BACKEND" == "muse" ]]; then
+  MUSE_EXEC=("$MUSE_BIN" exec)
+  if MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null)" \
+    && [[ -n "$MUSE_SESSION_ID" ]]; then
+    export MUSE_SESSION_ID
+    MUSE_EXEC+=(--session-id "$MUSE_SESSION_ID")
+  else
+    unset MUSE_SESSION_ID
+    echo "muse-review-engine: no session id; continuing without session usage telemetry" >&2
+  fi
 else
   unset MUSE_SESSION_ID
-  echo "muse-review-engine: no session id; continuing without session usage telemetry" >&2
+  if ZCODE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null)" \
+    && [[ -n "$ZCODE_SESSION_ID" ]]; then
+    export ZCODE_SESSION_ID
+  else
+    unset ZCODE_SESSION_ID
+    echo "muse-review-engine: no session id; continuing without session usage telemetry" >&2
+  fi
 fi
 
 cleanup() {
@@ -230,7 +312,7 @@ failure() {
     echo "muse-review-engine: $note (no run id to finish)" >&2
     return 1
   fi
-  if ! python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+  if ! python3 "$REPO/heartbeat.py" finish --agent "$AGENT" --run "$BEGIN_RUN" \
       --outcome errored --note "$note"; then
     echo "muse-review-engine: could not finish errored run" >&2
     return 1
@@ -243,7 +325,7 @@ finish_done() {
   local review_result="${2:-}"
   local result_path="${3:-}"
   local -a finish_args=(
-    finish --agent muse --run "$BEGIN_RUN" --outcome done --note "$note"
+    finish --agent "$AGENT" --run "$BEGIN_RUN" --outcome done --note "$note"
   )
   if [[ -n "$result_path" && "$JOB" == "breakdown" ]]; then
     local ticket_count
@@ -377,8 +459,11 @@ resolve_muse_model() {
 # One model call: the prompt file in, the raw answer on stdout. Paths are
 # arguments so the review judges can run in parallel without sharing answers
 # or diagnostics. Plain kill, not a process-group kill: --disable-shell means
-# the model can have no children to orphan. Exit 124 when the bound kills it.
-call_muse_files() {
+# the model can have no children to orphan, and zai-exec is one Python process
+# making one HTTP request. Exit 124 when the bound kills it. The backend
+# decides only which command runs; the bound, the files and the status are
+# the same for both.
+call_model_files() {
   local prompt_path="$1"
   local answer_path="$2"
   local diag_path="$3"
@@ -391,16 +476,24 @@ call_muse_files() {
     return 1
   fi
   rm -f "$killed_marker"
-  "${MUSE_EXEC[@]}" \
-    --model "$MUSE_MODEL" \
-    --reasoning-effort "$EFFORT" \
-    --disable-shell \
-    --disable-write \
-    --disable-web-tools \
-    --max-model-steps 60 \
-    --no-foreign-personal-context \
-    --workspace "$WORKSPACE" \
-    --prompt-file "$prompt_path" >"$answer_path" 2>"$diag_path" &
+  if [[ "$BACKEND" == "zai" ]]; then
+    # No model flag and no effort: zai-exec asks for glm-5.3 itself and
+    # refuses a reply from anything else. No tool flags: it offers none.
+    "$ZAI_EXEC_BIN" \
+      --prompt-file "$prompt_path" \
+      --timeout "$ZAI_TIMEOUT_SECONDS" >"$answer_path" 2>"$diag_path" &
+  else
+    "${MUSE_EXEC[@]}" \
+      --model "$MUSE_MODEL" \
+      --reasoning-effort "$EFFORT" \
+      --disable-shell \
+      --disable-write \
+      --disable-web-tools \
+      --max-model-steps 60 \
+      --no-foreign-personal-context \
+      --workspace "$WORKSPACE" \
+      --prompt-file "$prompt_path" >"$answer_path" 2>"$diag_path" &
+  fi
   local muse_pid=$!
   (
     sleep "$BOUND_SECONDS" &
@@ -429,18 +522,46 @@ call_muse_files() {
   return "$status"
 }
 
-call_muse() {
-  call_muse_files "$PROMPT_FILE" "$ANSWER_FILE" "$DIAG_FILE"
+call_model() {
+  call_model_files "$PROMPT_FILE" "$ANSWER_FILE" "$DIAG_FILE"
 }
 
-muse_failed() {
+# End the whole run as a z.ai quota skip: no verdict, no apply, no errored
+# record, whichever call met the spent window — the lister, a judge, or an
+# issue job's one question (#1411). Nothing is parked: z.ai publishes its
+# windows, so the next `begin --agent zcode` reads the spent one and stops
+# before any Project read, and the reset lifts it by itself. Never Muse's hold
+# file either — a spent z.ai window must not park the escalated tier, which
+# still has Muse's week to spend.
+zai_quota_skip() {
+  local diag_path="$1"
+  local status="$2"
+  local zai_reason
+  zai_reason="$(grep -m 1 'zai-exec: quota-exhausted:' "$diag_path" 2>/dev/null \
+    | sed 's/^zai-exec: quota-exhausted: //')"
+  echo "muse-review-engine: z.ai's quota is exhausted; the standard lane stops until its window resets (${zai_reason:-no reason given})" >&2
+  if [[ -n "${BEGIN_RUN:-}" ]]; then
+    python3 "$REPO/heartbeat.py" finish --agent "$AGENT" --run "$BEGIN_RUN" \
+      --outcome skipped-provider-quota \
+      --note "z.ai quota exhausted: ${zai_reason:-zai-exec exit $status}" >&2 || true
+  fi
+  exit 0
+}
+
+model_failed() {
   local status="$1"
-  # A spent provider window is not the subject's failure. Record the hold so
-  # every lane waits for the reset instead of retrying on its own schedule.
-  if MUSE_QUOTA_RESET="$(muse_quota_record "$DIAG_FILE")"; then
+  # A spent provider window is not the subject's failure, on either backend.
+  # z.ai says so with zai-exec's own status.
+  if [[ "$BACKEND" == "zai" ]]; then
+    if (( status == ZAI_QUOTA_EXIT )); then
+      zai_quota_skip "$DIAG_FILE" "$status"
+    fi
+  # Muse: record the hold so every lane waits for the reset instead of
+  # retrying on its own schedule.
+  elif MUSE_QUOTA_RESET="$(muse_quota_record "$DIAG_FILE")"; then
     echo "muse-review-engine: Muse's provider quota is exhausted; parking every lane until $MUSE_QUOTA_RESET" >&2
     if [[ -n "${BEGIN_RUN:-}" ]]; then
-      python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
+      python3 "$REPO/heartbeat.py" finish --agent "$AGENT" --run "$BEGIN_RUN" \
         --outcome skipped-provider-quota \
         --note "provider quota exhausted until $MUSE_QUOTA_RESET" >&2 || true
     fi
@@ -451,9 +572,14 @@ muse_failed() {
     failure "killed after $((BOUND_SECONDS / 60)) minutes: $TIER $JOB run exceeded the wall-clock bound (#392)" || true
     exit 124
   fi
-  muse_err="$(cat "$DIAG_FILE")"
-  echo "muse-review-engine: muse exec failed (exit $status): $muse_err" >&2
-  failure "muse exec failed (exit $status) $FAIL_SUBJECT: $muse_err" || true
+  model_err="$(cat "$DIAG_FILE")"
+  if [[ "$BACKEND" == "zai" ]]; then
+    echo "muse-review-engine: zai-exec failed (exit $status): $model_err" >&2
+    failure "zai-exec failed (exit $status) $FAIL_SUBJECT: $model_err" || true
+    exit 1
+  fi
+  echo "muse-review-engine: muse exec failed (exit $status): $model_err" >&2
+  failure "muse exec failed (exit $status) $FAIL_SUBJECT: $model_err" || true
   exit 1
 }
 
@@ -485,11 +611,11 @@ run_issue_apply() {
   shift
   if [[ "$JOB" == "breakdown" ]]; then
     python3 "$REPO/breakdown-apply" "$BEGIN_REF" --answer "$ANSWER_FILE" \
-      --attempt "$attempt" "$@" --run "$BEGIN_RUN" --agent muse
+      --attempt "$attempt" "$@" --run "$BEGIN_RUN" --agent "$AGENT"
   else
     python3 "$REPO/shape-apply" "$SUBJECT_NUM" --repo "$SUBJECT_REPO" \
       --answer "$ANSWER_FILE" --attempt "$attempt" "$@" \
-      --run "$BEGIN_RUN" --agent muse
+      --run "$BEGIN_RUN" --agent "$AGENT"
   fi
 }
 
@@ -565,10 +691,10 @@ run_issue_job() {
   while true; do
     # Read the status into a variable: `$?` inside an `if !` branch is the
     # negated condition's status (0), not the call's.
-    call_muse
+    call_model
     muse_status=$?
     if (( muse_status != 0 )); then
-      muse_failed "$muse_status"
+      model_failed "$muse_status"
     fi
     # Read the status directly: `$?` after an `if` whose condition failed
     # is 0, never the apply exit, so the retryable 3 must be caught here.
@@ -596,8 +722,10 @@ run_issue_job() {
 
 # Park before claiming anything while Muse's provider quota is spent. The
 # hold is written by whichever lane last met the refusal and expires by
-# itself at the reset the provider named.
-if MUSE_QUOTA_RESET="$(muse_quota_hold_until)"; then
+# itself at the reset the provider named. It speaks for Muse only: a z.ai run
+# spends a different pool, and `begin` gates it on z.ai's own windows.
+if [[ "$BACKEND" == "muse" ]] \
+  && MUSE_QUOTA_RESET="$(muse_quota_hold_until)"; then
   echo "muse-review-engine: parked until $MUSE_QUOTA_RESET — Muse's provider quota is exhausted" >&2
   exit 0
 fi
@@ -616,7 +744,7 @@ if [[ "$TIER" == "standard" ]]; then
   BEGIN_FLAGS="$BEGIN_FLAGS --breakdown"
 fi
 BEGIN_FLAGS="$BEGIN_FLAGS --role review"
-BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent muse $BEGIN_FLAGS)"
+BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent "$AGENT" $BEGIN_FLAGS)"
 begin_status=$?
 if (( begin_status != 0 )); then
   echo "muse-review-engine: funnel begin failed (exit $begin_status)" >&2
@@ -689,7 +817,7 @@ if [[ "$BEGIN_DO" == "stop" ]]; then
     *) STOP_OUTCOME="nothing-to-do" ;;
   esac
   BEGIN_WHY="$(begin_stop_why)"
-  FINISH_ARGS=(finish --agent muse --run "$BEGIN_RUN"
+  FINISH_ARGS=(finish --agent "$AGENT" --run "$BEGIN_RUN"
     --outcome "$STOP_OUTCOME")
   if [[ -n "$BEGIN_WHY" ]]; then
     echo "muse-review-engine: begin stopped: $BEGIN_WHY" >&2
@@ -744,16 +872,20 @@ fi
 
 # Resolved once, from the repository this job works: the PR's repo for a
 # review, the subject issue's repo for a breakdown or a shape. Both are in
-# hand by here, so no job reaches `muse exec` without an answer.
-if [[ "$JOB" == "review" ]]; then
-  MUSE_MODEL="$(resolve_muse_model "$BEGIN_REPO")"
-else
-  MUSE_MODEL="$(resolve_muse_model "$SUBJECT_REPO")"
+# hand by here, so no job reaches `muse exec` without an answer. Muse only:
+# the allowlist decides which repositories may reach Meta's contributor tier,
+# and a z.ai run has one model, which zai-exec names and checks itself.
+if [[ "$BACKEND" == "muse" ]]; then
+  if [[ "$JOB" == "review" ]]; then
+    MUSE_MODEL="$(resolve_muse_model "$BEGIN_REPO")"
+  else
+    MUSE_MODEL="$(resolve_muse_model "$SUBJECT_REPO")"
+  fi
+  # See muse-implement for why this is here and not only in the helper: a
+  # command substitution that dies yields the empty string without stopping
+  # the runner, and `--model ""` is an id Muse accepts without complaint.
+  [[ -n "$MUSE_MODEL" ]] || MUSE_MODEL="$MUSE_FALLBACK_MODEL"
 fi
-# See muse-implement for why this is here and not only in the helper: a
-# command substitution that dies yields the empty string without stopping
-# the runner, and `--model ""` is an id Muse accepts without complaint.
-[[ -n "$MUSE_MODEL" ]] || MUSE_MODEL="$MUSE_FALLBACK_MODEL"
 
 if [[ "$JOB" != "review" ]]; then
   run_issue_job
@@ -866,7 +998,7 @@ if [[ "$PACKET_PASS" != "True" ]]; then
   ANSWER_NOTE="$(compact_json "$ANSWER_FILE" 4000)"
   if python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
       --answer "$ANSWER_FILE" --ci "$PACKET_CI" --head "$PACKET_HEAD" \
-      --attempt 1 --run "$BEGIN_RUN" --agent muse >"$DIAG_FILE" 2>&1; then
+      --attempt 1 --run "$BEGIN_RUN" --agent "$AGENT" >"$DIAG_FILE" 2>&1; then
     finish_done "reviewed PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: rejected without a model call ($REASON_COUNT precheck reason(s))" rejected
     exit 0
   fi
@@ -1021,10 +1153,10 @@ list_requirements() {
   local parse_status
   printf '%s\n\n%s' "$(lister_header)" "$PROMPT" >"$PROMPT_FILE"
   while true; do
-    call_muse
+    call_model
     muse_status=$?
     if (( muse_status != 0 )); then
-      muse_failed "$muse_status"
+      model_failed "$muse_status"
     fi
     # Read the status directly, for the same reason the judging loop does:
     # `$?` inside an `if !` branch is the negated condition's status.
@@ -1185,9 +1317,18 @@ run_judge_chunk() {
 
   build_judge_prompt "$requirements_path" "$prompt_path"
   while true; do
-    call_muse_files "$prompt_path" "$answer_path" "$diag_path"
+    call_model_files "$prompt_path" "$answer_path" "$diag_path"
     muse_status=$?
     if (( muse_status != 0 )); then
+      # A spent z.ai window is not an answer about these requirements, so it
+      # must not become `unsure` and, through it, a rejection of a PR nobody
+      # judged. Leave the marker and no result; the loop below finishes the
+      # whole run as a quota skip and applies no verdict (#1411).
+      if [[ "$BACKEND" == "zai" ]] && (( muse_status == ZAI_QUOTA_EXIT )); then
+        cp "$diag_path" "$call_dir/quota" 2>/dev/null || : > "$call_dir/quota"
+        echo "muse-review-engine: judge chunk $index met a spent z.ai window" >&2
+        return 0
+      fi
       if (( muse_status == 124 )); then
         evidence="judge call timed out after ${BOUND_SECONDS} seconds"
       else
@@ -1235,6 +1376,13 @@ run_judge_chunk() {
 # Build one private call directory per slice, then start all judges together.
 # Their inputs are independent and each file is isolated, so parallel max
 # calls do not race over the cached packet, answer, or diagnostic.
+#
+# On z.ai, one at a time instead (#1411). The Lite plan refuses concurrent
+# requests (code 1302), and a GLM-5.3 answer takes minutes, so parallel judges
+# past the limit would wait out their retries and read `unsure` — a rejection
+# of a good PR on every review with more than one chunk. Sequential judges
+# also stop at the first spent window instead of spending the rest of the
+# chunks' credits on a run that cannot record a verdict. Muse is unchanged.
 JUDGE_PIDS=()
 JUDGE_RUN_STATUS=0
 for (( index = 0; index < JUDGE_COUNT; index++ )); do
@@ -1260,10 +1408,23 @@ PY
     failure "could not prepare judge chunk $index for PR #$BEGIN_PR in $BEGIN_REPO" || true
     exit 1
   fi
-  run_judge_chunk "$index" "$CALL_DIR" &
-  JUDGE_PIDS+=("$!")
+  if [[ "$BACKEND" == "zai" ]]; then
+    run_judge_chunk "$index" "$CALL_DIR"
+    judge_status=$?
+    if (( judge_status != 0 )); then
+      JUDGE_RUN_STATUS=1
+    fi
+    if [[ -e "$CALL_DIR/quota" ]]; then
+      zai_quota_skip "$CALL_DIR/quota" "$ZAI_QUOTA_EXIT"
+    fi
+  else
+    run_judge_chunk "$index" "$CALL_DIR" &
+    JUDGE_PIDS+=("$!")
+  fi
 done
-for judge_pid in "${JUDGE_PIDS[@]}"; do
+# The `+` guard: bash 3.2, which launchd's /bin/bash is, reads an empty
+# array under `set -u` as unbound, and the z.ai path leaves this one empty.
+for judge_pid in ${JUDGE_PIDS[@]+"${JUDGE_PIDS[@]}"}; do
   wait "$judge_pid"
   judge_status=$?
   if (( judge_status != 0 )); then
@@ -1277,13 +1438,18 @@ fi
 
 # Preserve the shared provider-quota hold when a failed judge captured its
 # refusal. The failed chunk still becomes unsure and the code-derived verdict
-# remains rejected, as the ticket requires.
-for (( index = 0; index < JUDGE_COUNT; index++ )); do
-  if MUSE_QUOTA_RESET="$(muse_quota_record "$RUN_DIR/judge.$index/diag.txt")"; then
-    echo "muse-review-engine: Muse's provider quota is exhausted; parking future lanes until $MUSE_QUOTA_RESET" >&2
-    break
-  fi
-done
+# remains rejected, as the ticket requires. Muse only: a judge that met a
+# spent z.ai window has already ended the run as a quota skip above, and the
+# next `begin` reads the window from z.ai, so there is no hold to write — and
+# a Muse-shaped refusal in a z.ai judge's diagnostic must never park Muse.
+if [[ "$BACKEND" == "muse" ]]; then
+  for (( index = 0; index < JUDGE_COUNT; index++ )); do
+    if MUSE_QUOTA_RESET="$(muse_quota_record "$RUN_DIR/judge.$index/diag.txt")"; then
+      echo "muse-review-engine: Muse's provider quota is exhausted; parking future lanes until $MUSE_QUOTA_RESET" >&2
+      break
+    fi
+  done
+fi
 
 # Flatten chunks in canonical order and derive the only answer passed to
 # review-apply. A missing/corrupt result file is expanded to unsure entries;
@@ -1340,7 +1506,7 @@ while true; do
   # overall verdict.
   python3 "$REPO/review-apply" "$BEGIN_PR" --repo "$BEGIN_REPO" \
       --answer "$ANSWER_FILE" --ci "$PACKET_CI" --head "$PACKET_HEAD" \
-      --attempt "$ATTEMPT" --run "$BEGIN_RUN" --agent muse \
+      --attempt "$ATTEMPT" --run "$BEGIN_RUN" --agent "$AGENT" \
       >"$DIAG_FILE" 2>&1
   apply_status=$?
   if (( apply_status == 0 )); then

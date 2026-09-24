@@ -17,6 +17,8 @@ import json
 import pathlib
 import sys
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -95,10 +97,48 @@ def zai_payload(five_spent, week_spent, now):
 
 
 def fake_curl(monkeypatch, payload):
-    class Out:
-        stdout = json.dumps(payload)
-    monkeypatch.setattr(usage.subprocess, "run", lambda *a, **k: Out())
+    """The quota endpoint's answer. Named for the curl call it replaced."""
+    monkeypatch.setattr(usage, "_zai_quota_payload", lambda key: payload)
     monkeypatch.setattr(usage, "_zai_key", lambda: "k")
+
+
+class _QuotaServer:
+    """A local quota endpoint that records the headers it was sent."""
+
+    def __init__(self, status=200, body=None, location=None):
+        import http.server
+        import threading
+
+        self.seen = []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                outer.seen.append({k.lower(): v for k, v in self.headers.items()})
+                raw = json.dumps(body if body is not None else {}).encode()
+                self.send_response(status)
+                if location:
+                    self.send_header("Location", location)
+                self.send_header("content-length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def log_message(self, *args):
+                pass
+
+        self.httpd = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = "http://127.0.0.1:{}/api/monitor/usage/quota/limit".format(
+            self.httpd.server_address[1])
+        self.thread = threading.Thread(target=self.httpd.serve_forever,
+                                       daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.httpd.shutdown()
+        self.httpd.server_close()
 
 
 def test_zai_quota_is_read_from_the_api(monkeypatch):
@@ -107,6 +147,38 @@ def test_zai_quota_is_read_from_the_api(monkeypatch):
     assert r["source"] == "zai"
     assert r["windows"]["five_hour"]["used_percent"] == 10.0   # 200 / 2000
     assert r["windows"]["seven_day"]["used_percent"] == 5.0    # 500 / 10000
+
+
+def test_the_zai_key_travels_in_process_never_on_a_command_line(monkeypatch):
+    """#1411: `curl -H "Authorization: <key>"` put the key where any local
+    account could read it through `ps`. The request is now made in process,
+    so no subprocess is started for it at all."""
+    monkeypatch.setattr(usage, "_zai_key", lambda: "the-secret-key")
+    monkeypatch.setattr(usage.subprocess, "run", lambda *a, **k: pytest.fail(
+        "the quota read must not start a process: {}".format(a)))
+    with _QuotaServer(body=zai_payload(200, 500, NOW)) as server:
+        monkeypatch.setattr(usage, "ZAI_QUOTA_URL", server.url)
+        reading = usage.read_zai(NOW)
+    assert reading["windows"]["five_hour"]["used_percent"] == 10.0
+    assert server.seen[0]["authorization"] == "the-secret-key"
+
+
+@pytest.mark.parametrize("status", (401, 500))
+def test_an_http_error_from_the_quota_endpoint_fails_closed(monkeypatch,
+                                                            status):
+    monkeypatch.setattr(usage, "_zai_key", lambda: "k")
+    with _QuotaServer(status=status, body={"success": False}) as server:
+        monkeypatch.setattr(usage, "ZAI_QUOTA_URL", server.url)
+        assert usage.read_zai(NOW) is None
+
+
+def test_the_quota_read_never_follows_a_redirect_with_the_key(monkeypatch):
+    monkeypatch.setattr(usage, "_zai_key", lambda: "k")
+    with _QuotaServer(body=zai_payload(0, 0, NOW)) as elsewhere:
+        with _QuotaServer(status=302, location=elsewhere.url) as server:
+            monkeypatch.setattr(usage, "ZAI_QUOTA_URL", server.url)
+            assert usage.read_zai(NOW) is None
+    assert elsewhere.seen == []
 
 
 def test_zai_without_a_key_fails_closed(monkeypatch):
@@ -123,40 +195,96 @@ def test_zcode_spends_the_zai_pool():
     assert usage.provider_of("zcode") == "zai"
 
 
+@pytest.mark.parametrize(("five_spent", "week_spent", "gate"), (
+    (0, 0, "ok"),
+    (1500, 9000, "ok"),
+    (2000, 0, "over"),
+    (0, 10000, "over"),
+))
+def test_begin_for_zcode_gates_on_zais_own_windows(monkeypatch, five_spent,
+                                                   week_spent, gate):
+    """The engine's z.ai lane opens with `begin --agent zcode`. Its preflight
+    must read the z.ai quota endpoint — not Muse's journal, not Claude's
+    cache — and stop before any Project read once a window is spent."""
+    from datetime import datetime, timezone
+
+    import funnel
+
+    monkeypatch.setattr(funnel, "_start_begin_heartbeat",
+                        lambda agent, tier=None: "run-id")
+    fake_curl(monkeypatch, zai_payload(five_spent, week_spent, NOW))
+    monkeypatch.setattr(usage, "read_muse", lambda now: pytest.fail(
+        "zcode must not read Muse's meter"))
+
+    out, reading = funnel._begin_preflight(
+        datetime.fromtimestamp(NOW, timezone.utc), "zcode", False, "standard")
+
+    assert out["gate"] == gate
+    if gate == "ok":
+        assert reading["source"] == "zai"
+        assert "do" not in out
+    else:
+        assert out["do"] == "stop"
+        assert reading is None
+
+
+def test_begin_for_zcode_fails_closed_without_a_zai_reading(monkeypatch):
+    from datetime import datetime, timezone
+
+    import funnel
+
+    monkeypatch.setattr(funnel, "_start_begin_heartbeat",
+                        lambda agent, tier=None: "run-id")
+    monkeypatch.setattr(usage, "_zai_key", lambda: None)
+
+    out, reading = funnel._begin_preflight(
+        datetime.fromtimestamp(NOW, timezone.utc), "zcode", False, "standard")
+
+    assert out["gate"] == "unknown" and out["do"] == "stop"
+    assert reading is None
+
+
 # -- pacing policy is per provider, not global --------------------------------
 
-def test_the_dedicated_pool_has_its_own_policy_not_the_shared_default():
-    """`WEEKLY_FLOOR` exists to leave Nate room on a subscription he also works
-    on. A pool bought for the automations needs no such protection — what it
-    needs is pacing, so a week's credits are not spendable on Monday."""
-    floor = usage.PROVIDER_POLICY["zai"]["weekly_floor"]
-    target = usage.PROVIDER_POLICY["zai"].get("weekly_target", usage.WEEKLY_TARGET)
+def test_the_lapsing_zai_pool_is_spendable_all_week_not_paced():
+    """The cancelled plan's credits lapse when it expires on 2026-10-07
+    (Nate, 2026-09-23), so no line holds any of the week back: the allowance
+    is 100% from the first hour to the last, on z.ai's own policy rather than
+    the shared default."""
     allowed = [
         usage.pace(seven_day(10.0, fraction), NOW, provider="zai")["windows"][0]
         for fraction in (0.0, 0.05, 0.5, 1.0)
     ]
-    assert allowed[0]["allowed_percent"] == floor
-    assert allowed[-1]["allowed_percent"] == target
-    assert all(
-        left["allowed_percent"] < right["allowed_percent"]
-        for left, right in zip(allowed, allowed[1:])
-    )
-    assert allowed[1]["allowed_percent"] == round(
-        floor + (target - floor) * 0.05, 1
-    )
+    assert [window["allowed_percent"] for window in allowed] == [100.0] * 4
     assert allowed[1]["allowed_percent"] != usage.WEEKLY_FLOOR  # not the shared line
     assert allowed[1]["reserve"] == 0.5                         # its own reserve, not 5
     assert allowed[1]["reserve"] != usage.WEEKLY_RESERVE
+    # 90% on Monday is not "ahead": nothing later is worth saving it for.
+    assert not usage.pace(seven_day(90.0, 0.05), NOW, provider="zai")["over_pace"]
 
 
-def test_the_dedicated_pool_is_paced_rather_than_flat():
-    """The dedicated pool rises from its own floor rather than staying flat
-    until the target line catches up."""
-    day_one = usage.pace(seven_day(40.0, 0.05), NOW, provider="zai")
-    assert day_one["over_pace"]                      # 40% on Monday is ahead
-
-    late = usage.pace(seven_day(40.0, 0.9), NOW, provider="zai")
-    assert not late["over_pace"]                     # the same 40% is fine by Sunday
+@pytest.mark.parametrize(("five_spent", "week_spent", "over"), (
+    (0, 0, False),
+    (1900, 5000, False),       # 95% + 2.5 reserve = 97.5, under 100
+    (1960, 5000, True),        # 98% + 2.5 reserve: one run would not finish
+    (2000, 5000, True),        # the five-hour window is spent
+    (0, 9940, False),          # 99.4% + 0.5 reserve = 99.9, under 100
+    (0, 9960, True),           # 99.6% + 0.5 reserve: one run would not finish
+    (0, 10000, True),          # the week is spent
+))
+def test_a_spent_zai_window_still_stops_begin(monkeypatch, five_spent,
+                                              week_spent, over):
+    """Unpaced is not unbounded: either window z.ai reports stops the lane
+    once one more run could not finish inside it."""
+    fake_curl(monkeypatch, zai_payload(five_spent, week_spent, NOW))
+    verdict = usage.pace(usage.read_zai(NOW), NOW,
+                         provider=usage.provider_of("zcode"))
+    assert verdict["known"]
+    week = next(w for w in verdict["windows"] if w["window"] == "seven_day")
+    five = next(w for w in verdict["windows"] if w["window"] == "five_hour")
+    assert five["allowed_percent"] == 100.0 and five["reserve"] == 2.5
+    assert week["allowed_percent"] == 100.0 and week["reserve"] == 0.5
+    assert verdict["over_pace"] is over
 
 
 def test_the_dedicated_pool_reserve_is_sized_to_its_own_runs():
@@ -181,3 +309,41 @@ def test_an_unknown_provider_gets_the_shared_defaults():
 
 
   # shared: 94 > 45
+
+
+# -- shaping on the lapsing z.ai pool (#1411) ----------------------------------
+
+def _zai_reading(five_spent, week_spent):
+    now = usage.time.time()
+    return {"source": "zai", "captured_at": now, "windows": {
+        "five_hour": {"used_percent": 100.0 * five_spent / 2000,
+                      "resets_at": now + 3 * 3600},
+        "seven_day": {"used_percent": 100.0 * week_spent / 10000,
+                      "resets_at": now + 5 * 86400},
+    }}
+
+
+def test_zai_shapes_past_the_idle_boundary_while_the_lane_runs(monkeypatch):
+    """The 15% five-hour boundary keeps shaping off a window someone may be
+    working in. Nobody else spends the cancelled z.ai plan, and what it does
+    not spend lapses, so it shapes up to its own stop."""
+    import heartbeat
+
+    monkeypatch.setattr(heartbeat, "ZAI_STANDARD_UNTIL",
+                        usage.time.time() + 86400)
+    assert usage.shaping_allowed(_zai_reading(1200, 4000))       # 60% used
+    assert not usage.shaping_allowed(_zai_reading(1980, 4000))   # spent
+    assert not usage.shaping_allowed(_zai_reading(0, 10000))     # week spent
+    # Other pools keep the idle boundary.
+    other = dict(_zai_reading(1200, 4000), source="openai")
+    assert not usage.shaping_allowed(other)
+
+
+def test_zai_shaping_returns_to_the_idle_boundary_after_the_cutoff(
+        monkeypatch):
+    import heartbeat
+
+    monkeypatch.setattr(heartbeat, "ZAI_STANDARD_UNTIL",
+                        usage.time.time() - 1)
+    assert not usage.shaping_allowed(_zai_reading(1200, 4000))
+    assert usage.shaping_allowed(_zai_reading(200, 4000))        # 10% used

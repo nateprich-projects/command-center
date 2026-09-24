@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""zai-exec — ask GLM-5.3 on z.ai one tool-less question, print the answer.
+
+Usage: zai-exec --prompt-file PATH [--timeout SECONDS] [--max-tokens N]
+
+The z.ai half of `scripts/muse-review-engine`'s standard tier, from
+2026-09-23 until 2026-10-07 00:00 Beijing time (2026-10-06 09:00 PDT), ahead
+of the z.ai plan's expiry (Nate, 2026-09-23; AGENTS.md records the decision
+and its terms caveat; #1411). It is the
+engine's analogue of the Muse CLI's prompt-file call: the prompt file in, the
+raw answer on stdout, a diagnostic on stderr, and a status the engine reads.
+
+**No tools, by construction.** The request carries one user message and no
+`tools` array, so there is nothing for the model to call. The engine's Muse
+path reaches the same posture with three `--disable-*` flags; here there is
+no flag to get wrong, because this program never offers a tool at all.
+
+**The reply's `model` is what answered, and it must be what was asked.**
+z.ai remaps model ids server-side (LEARNINGS.md, 2026-09-06, measured): a
+Claude family name silently lands on `glm-5.3-flash`. So this requests
+`glm-5.3` by its own id and fails closed when the reply names anything else,
+rather than letting a cheaper model's judgement be recorded as GLM-5.3's.
+
+**GLM-5.3 reasons before it answers.** Measured 2026-09-23 23:05 PDT: at
+`max_tokens` 64 the reply held no text block and stopped on `max_tokens`. A
+reply that stops there has been cut off mid-answer, so it is refused rather
+than parsed; the default budget is large so a real answer fits.
+
+Exit status:
+  0   the answer is on stdout
+  1   the call failed: an HTTP error or a redirect (never followed: it would
+      carry the key to another host), a network failure that outlasted the
+      deadline's retries, a model mismatch, a reply cut off at max_tokens, or
+      no text
+  2   usage error or no key
+  75  z.ai's quota is spent. stderr carries `zai-exec: quota-exhausted:`
+      so the engine records a quota skip rather than an errored run; the next
+      `begin` reads the spent window from z.ai itself and stops there.
+
+One metadata line per call goes to a local log (`ZAI_EXEC_LOG_DIR`, default
+`~/.local/share/zai-exec/rollout`), in the shape `heartbeat.py` already reads
+for zcode: the model that answered and the token counts. Never the prompt or
+the answer — those carry private member-repository content. It is a harness
+log like Codex's session files, not a record of state. Each engine run
+writes its own file, named by ZCODE_SESSION_ID, and heartbeat reads only the
+file of the run it is recording (#1411).
+"""
+
+from __future__ import annotations
+
+import argparse
+import http.client
+import json
+import os
+import socket
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+from datetime import datetime, timezone
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+#: z.ai's Anthropic-compatible Messages endpoint. Overridable only so the
+#: tests can point it at a local server.
+DEFAULT_URL = "https://api.z.ai/api/anthropic/v1/messages"
+MODEL = "glm-5.3"
+ANTHROPIC_VERSION = "2023-06-01"
+#: Room to reason and still answer. 64 was measured to produce no text at all.
+DEFAULT_MAX_TOKENS = 32768
+#: The engine passes its own bound less a margin; this default sits under the
+#: engine's 1200-second wall clock for a caller that does not.
+DEFAULT_TIMEOUT = 1080.0
+
+EXIT_FAILED = 1
+EXIT_USAGE = 2
+EXIT_QUOTA = 75
+
+#: z.ai's published business error codes, as read from its error-code table:
+#: documented, not measured here. 1308 is the five-hour usage limit, 1310 the
+#: weekly or monthly one, 1309 an expired Coding Plan, 1113 an account with no
+#: balance or resource package. Each means the pool cannot answer until a
+#: reset, which is a quota skip, not the subject's failure.
+QUOTA_CODES = frozenset({"1113", "1308", "1309", "1310"})
+#: Concurrency (1302), request frequency (1303) and overload (1305) are
+#: momentary, as are a 5xx and a dropped connection. They are retried here,
+#: with backoff, until the caller's deadline, rather than turned into an
+#: `unsure` judgement. The engine also asks its z.ai judges one at a time, so
+#: a concurrency refusal means something else is on the same key (#1411).
+TRANSIENT_CODES = frozenset({"1302", "1303", "1305"})
+#: The first wait after a momentary refusal; each later wait doubles, to a cap.
+RETRY_FIRST_SECONDS = 5.0
+RETRY_CAP_SECONDS = 60.0
+#: A retry is only worth making with this long left for the call itself.
+MIN_CALL_SECONDS = 30.0
+
+
+class Failure(Exception):
+    def __init__(self, message: str, status: int = EXIT_FAILED):
+        super().__init__(message)
+        self.status = status
+
+
+def _key() -> str:
+    """The Coding Plan key: the environment for a throwaway test, else the
+    Keychain entry `usage.py` already reads for the quota endpoint."""
+    key = (os.environ.get("ZAI_API_KEY") or "").strip()
+    if key:
+        return key
+    try:
+        import usage
+    except Exception as exc:  # pragma: no cover - the repo ships usage.py
+        raise Failure("cannot import usage.py for the Keychain read: {}"
+                      .format(exc), EXIT_USAGE)
+    key = usage._zai_key()
+    if not key:
+        raise Failure("no z.ai key in the Keychain (service {})".format(
+            usage.ZAI_KEYCHAIN_SERVICE), EXIT_USAGE)
+    return key
+
+
+def _error_code(body: str) -> tuple:
+    """The z.ai business code and message from an error body, when present."""
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None, body.strip()[:500]
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        error = payload if isinstance(payload, dict) else {}
+    code = error.get("code")
+    message = error.get("message") or error.get("msg") or ""
+    return (str(code) if code is not None else None), str(message)[:500]
+
+
+def _classify(status: int, body: str) -> tuple:
+    """quota, transient or failed, plus a one-line reason."""
+    code, message = _error_code(body)
+    reason = "HTTP {}{}: {}".format(
+        status, " code {}".format(code) if code else "", message or "(no body)")
+    if code in QUOTA_CODES:
+        return "quota", reason
+    if code in TRANSIENT_CODES or status >= 500:
+        return "transient", reason
+    if status == 429:
+        # A 429 whose code is not a known momentary one is read as the pool
+        # being spent. Guessing "transient" would retry into a wall and then
+        # record the run as errored; a quota skip is the honest default.
+        return "quota", reason
+    return "failed", reason
+
+
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: urllib would resend `x-api-key` to whatever
+    host the Location names. Returning None makes urllib raise the 3xx as an
+    HTTPError, which is then refused like any other client error."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_RefuseRedirect)
+
+
+def _post(url: str, key: str, payload: bytes, timeout: float) -> dict:
+    request = urllib.request.Request(url, data=payload, method="POST", headers={
+        "x-api-key": key,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "content-type": "application/json",
+    })
+    with _OPENER.open(request, timeout=timeout) as response:
+        raw = response.read().decode("utf-8", errors="replace")
+    try:
+        reply = json.loads(raw)
+    except ValueError:
+        raise Failure("reply is not JSON: {}".format(raw.strip()[:500]))
+    if not isinstance(reply, dict):
+        raise Failure("reply is not a JSON object")
+    return reply
+
+
+def _backoff(attempt: int) -> float:
+    """5, 10, 20, 40, then 60 seconds for every later wait."""
+    return min(RETRY_CAP_SECONDS, RETRY_FIRST_SECONDS * (2 ** attempt))
+
+
+def _ask(url: str, key: str, prompt: str, max_tokens: int,
+         deadline: float) -> dict:
+    """POST until an answer, a spent quota, a hard refusal, or the deadline.
+
+    A momentary refusal is retried for as long as the caller's deadline
+    leaves room for another whole call, not a fixed number of times: a
+    GLM-5.3 answer takes minutes, and a concurrency refusal three quick
+    retries in would otherwise become a failed judge (#1411).
+    """
+    payload = json.dumps({
+        "model": MODEL,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode("utf-8")
+    attempt = 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 1:
+            raise Failure("no time left before the call could complete")
+        try:
+            return _post(url, key, payload, remaining)
+        except urllib.error.HTTPError as exc:
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = ""
+            kind, reason = _classify(exc.code, body)
+            if kind == "quota":
+                raise Failure("quota-exhausted: " + reason, EXIT_QUOTA)
+            if kind != "transient":
+                raise Failure(reason)
+        except (socket.timeout, TimeoutError):
+            # The remaining deadline went into this attempt; there is none
+            # left to retry with.
+            raise Failure("no reply within {:.0f}s".format(max(0.0, remaining)))
+        except urllib.error.URLError as exc:
+            reason = "could not reach {}: {}".format(url, exc.reason)
+        except (OSError, http.client.HTTPException) as exc:
+            # A dropped connection or a truncated reply (RemoteDisconnected,
+            # ConnectionResetError, IncompleteRead) says nothing about the
+            # question; it is retried like a busy server.
+            reason = "connection failed: {}: {}".format(
+                type(exc).__name__, exc)
+        delay = _backoff(attempt)
+        if deadline - time.monotonic() < delay + MIN_CALL_SECONDS:
+            raise Failure("{}; no time left to retry".format(reason))
+        print("zai-exec: {}; retrying in {:.0f}s".format(reason, delay),
+              file=sys.stderr)
+        time.sleep(delay)
+        attempt += 1
+
+
+def _usage(reply: dict) -> dict:
+    """Anthropic-shaped usage, normalised to the counts heartbeat reads.
+
+    On this endpoint, as on Anthropic's, `input_tokens` is the uncached input
+    alone: cache reads and cache writes are counted beside it, not in it. So
+    the four kinds are disjoint and add up to the total, and `input_tokens`
+    is never stored under a name heartbeat reads as the total.
+    """
+    raw = reply.get("usage") if isinstance(reply.get("usage"), dict) else {}
+
+    def count(name):
+        value = raw.get(name)
+        return value if isinstance(value, int) and not isinstance(
+            value, bool) and value >= 0 else 0
+
+    fresh = count("input_tokens")
+    read = count("cache_read_input_tokens")
+    written = count("cache_creation_input_tokens")
+    usage = {
+        "total_input_tokens": fresh + read + written,
+        "fresh_input_tokens": fresh,
+        "cache_read_input_tokens": read,
+        "cache_write_input_tokens": written,
+        "output_tokens": count("output_tokens"),
+    }
+    return {"usage": usage, "raw_usage": raw}
+
+
+def _log(reply: dict) -> None:
+    """Append this call's metadata; never fatal, never the prompt or answer."""
+    directory = os.environ.get("ZAI_EXEC_LOG_DIR")
+    if directory is None:
+        directory = os.path.expanduser("~/.local/share/zai-exec/rollout")
+    if not directory:
+        return
+    session = (os.environ.get("ZCODE_SESSION_ID") or "").strip() or (
+        "adhoc-" + uuid.uuid4().hex[:12])
+    normalised = _usage(reply)
+    row = {
+        "type": "model_io",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "id": reply.get("id"),
+        "model": reply.get("model"),
+        "response": {
+            "id": reply.get("id"),
+            "model": reply.get("model"),
+            "stop_reason": reply.get("stop_reason"),
+            "usage": normalised["usage"],
+            "raw_usage": normalised["raw_usage"],
+        },
+    }
+    try:
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        path = os.path.join(directory, "model-io-{}.jsonl".format(session))
+        # One short line per call, opened for append: the parallel judges of
+        # one run share this file, and an append of this size is not torn.
+        with open(path, "a") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+    except OSError as exc:
+        print("zai-exec: could not write the call log: {}".format(exc),
+              file=sys.stderr)
+
+
+def answer_text(reply: dict) -> str:
+    """Refuse every reply that is not GLM-5.3's finished answer."""
+    answered = reply.get("model")
+    if answered != MODEL:
+        raise Failure("model mismatch: asked for {} and {} answered; "
+                      "refusing its answer".format(MODEL, answered))
+    if reply.get("stop_reason") == "max_tokens":
+        raise Failure("the reply stopped at max_tokens; the answer is cut off")
+    blocks = reply.get("content")
+    if not isinstance(blocks, list):
+        raise Failure("the reply has no content list")
+    text = "".join(
+        block.get("text") or "" for block in blocks
+        if isinstance(block, dict) and block.get("type") == "text"
+        and isinstance(block.get("text"), str))
+    if not text.strip():
+        raise Failure("the reply carried no text (stop_reason {})".format(
+            reply.get("stop_reason")))
+    return text
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="zai-exec", description=__doc__.splitlines()[0])
+    parser.add_argument("--prompt-file", required=True)
+    parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    args = parser.parse_args(argv)
+    deadline = time.monotonic() + max(1.0, args.timeout)
+    try:
+        try:
+            with open(args.prompt_file, encoding="utf-8") as handle:
+                prompt = handle.read()
+        except OSError as exc:
+            raise Failure("cannot read the prompt file: {}".format(exc),
+                          EXIT_USAGE)
+        if not prompt.strip():
+            raise Failure("the prompt file is empty", EXIT_USAGE)
+        url = os.environ.get("ZAI_EXEC_URL") or DEFAULT_URL
+        reply = _ask(url, _key(), prompt, args.max_tokens, deadline)
+        _log(reply)
+        sys.stdout.write(answer_text(reply))
+        sys.stdout.flush()
+        return 0
+    except Failure as exc:
+        print("zai-exec: {}".format(exc), file=sys.stderr)
+        return exc.status
+    except Exception as exc:
+        # One line, never a traceback: the engine copies stderr into the
+        # heartbeat note, and a traceback there is noise that hides the cause.
+        print("zai-exec: unexpected {}: {}".format(type(exc).__name__, exc),
+              file=sys.stderr)
+        return EXIT_FAILED
+
+
+if __name__ == "__main__":
+    sys.exit(main())

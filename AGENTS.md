@@ -142,7 +142,8 @@ wrong.
   `command-center-tickets-hourly` (standard, every ten minutes) and
   `command-center-tickets-weekday-mornings` (escalated, hourly; the keeper reads its
   `BYHOUR=` rule as the escalated tier). The other three escalated windows are retired
-  and stay paused. Muse runs review, breakdown and shape on `muse-spark-1.3` at `max` and
+  and stay paused. Muse runs review, breakdown and shape on `muse-spark-1.3` at `max`
+  (the standard tier runs on z.ai until 2026-10-06 09:00 PDT; see below) and
   implements nothing: `AGENTS_BY_ROLE` names Codex alone, and `begin` refuses an implement
   caller the roster does not name. Two checks watch the app-held state:
   - every Codex run checks its own model, effort and sandbox against `codex_run.py` and
@@ -159,6 +160,49 @@ wrong.
   drift-checked by the keeper. From
   2026-09-18 to 2026-09-22 Muse implemented both tiers, because Codex's Plus week was
   nearly spent. _(confirmed by Nate 2026-09-22)_
+
+  **z.ai judges the standard tier from 2026-09-23 until 2026-10-07 00:00 Beijing time
+  (2026-10-06 09:00 PDT), ahead of the z.ai plan's expiry** (Nate, 2026-09-23; #1411).
+  Muse keeps the escalated tier. Muse's week was nearly spent until its Sunday
+  2026-09-27 17:00 PDT reset, and Nate's z.ai GLM Coding Plan (Lite: 2,000 credits per
+  five hours, 10,000 per week) is cancelled but active until it expires on 2026-10-07,
+  so its credits are use-it-or-lose-it. `scripts/muse-review-engine` routes on the
+  clock: a `standard` run before 1791302400 runs as agent `zcode` and asks GLM-5.3
+  through `scripts/zai-exec`, one Messages call with no tools offered to z.ai's
+  Anthropic-compatible endpoint, refused unless `glm-5.3` is the model that answered.
+  The same review, breakdown and shape questions, packets and apply steps serve both
+  backends, except that z.ai's review judges run one at a time, because the Lite plan
+  refuses concurrent requests. The plist is unchanged. At the cutoff the standard tier
+  is Muse's again with nothing to undo, and `heartbeat.retired_agents` retires `zcode`
+  at the same instant. The cutoff is the start of the expiry date in z.ai's own time
+  zone (UTC+8), the earliest reading of "expires 2026-10-07": it gives up most of a day
+  rather than risk runs erroring on an expired key.
+
+  A spent z.ai window ends the run cleanly, whichever call meets it: a breakdown's or a
+  shape's one question, a review's lister, or any review judge. The run records
+  `skipped-provider-quota` and applies nothing — no rejection from a review nobody
+  finished judging — and the next `begin` stops on z.ai's own reading until the window
+  resets. It never falls back to Muse and never parks Muse's lanes. The `zai` pace
+  line is off for the duration (floor and target 100, a one-run reserve in each
+  window), and so is the 15% five-hour boundary that holds back unattended shaping,
+  because credits left at the expiry are worth nothing.
+
+  **It is his risk call on unread terms, as Muse's is.** This is headless use of a
+  Coding Plan key from launchd, and z.ai's terms have not been read here. Nothing in
+  this paragraph establishes that they permit it; do not upgrade the wording to
+  "permitted" or "sanctioned". The caveat was stated in the option he answered, and
+  the worst case named was losing a subscription he has already cancelled. The
+  in-app-only rule above is specific to Anthropic and OpenAI and decides nothing here
+  either way.
+
+  **The exposure, plainly.** For the duration, every member repository's standard-tier
+  packets — diffs, tickets, plans and repository rules — go to z.ai (Zhipu), under
+  data-use terms nobody here has read. That includes private repositories such as
+  `jeffy-finance-agent` and `career-toolset`, and `The-League`, which a collaborator can
+  see. It bypasses the per-repository posture Muse keeps in
+  `muse_model.CONTRIBUTOR_REPOS`, where sending a repository to a discounted tier is a
+  deliberate edit per name. Asked exactly this, with those private repositories named,
+  Nate chose "All repos" on 2026-09-23. _(Nate, 2026-09-23.)_
 
   **`--approval-mode never` is not a guard.** Measured 2026-09-07: it does **not** fail
   closed. It means *never ask*, and it auto-approved a shell command with no prompt.
@@ -244,7 +288,7 @@ wrong.
   #1409 re-took it again at 23:10 PDT the same day and raised the ceiling from 95 to
   100, because Nate uses no Muse himself ("It's all for these runs"). At 100 the
   last review before Meta's wall can post a fail-closed `rejected` on its PR, since
-  a refused judge reads `unsure`; the provider-quota hold then parks every lane, so
+  a refused judge reads `unsure`; the provider-quota hold then parks every Muse lane, so
   that is at most one per window. _(Nate, 2026-09-23.)_
 - **No Copilot automation.** Those are employer-provided tokens; personal use stays
   one-off and manual.

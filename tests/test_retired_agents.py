@@ -1,11 +1,15 @@
-"""A retired agent's silence is not a dying run (#431, #1106)."""
+"""A retired agent's silence is not a dying run (#431, #1106).
+
+zcode retired on 2026-09-09, runs again as the engine's z.ai standard tier
+from 2026-09-23, and retires again by itself at `heartbeat.ZAI_STANDARD_UNTIL`.
+"""
 
 from __future__ import annotations
 
 import importlib.util
 import pathlib
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -29,11 +33,45 @@ def _quiet_after_a_busy_cadence(agent, minutes_silent=90, every=15, count=40):
     return rows
 
 
-def test_zcode_is_retired_and_codex_is_live_again():
+#: 2026-10-07 00:00 in Beijing time (UTC+8), 2026-10-06 09:00 PDT: the
+#: earliest reading of the z.ai plan's expiry date (Nate, 2026-09-23; #1411).
+ZAI_CUTOFF = datetime(2026, 10, 7, 0, 0,
+                      tzinfo=timezone(timedelta(hours=8))).timestamp()
+
+
+def test_the_zai_cutoff_is_the_start_of_the_expiry_day_in_beijing_time():
+    assert heartbeat.ZAI_STANDARD_UNTIL == ZAI_CUTOFF == 1791302400
+    pacific = datetime.fromtimestamp(ZAI_CUTOFF, timezone(timedelta(hours=-7)))
+    assert (pacific.month, pacific.day, pacific.hour) == (10, 6, 9)
+
+
+def test_zcode_is_live_until_the_zai_cutoff_and_retired_from_it():
+    """zcode is the engine's z.ai standard tier from 2026-09-23; its
+    silence alarms while it runs, and stops alarming by itself when the plan
+    expires, with no edit to make."""
+    assert heartbeat.retired_agents(ZAI_CUTOFF - 1) == frozenset()
+    assert heartbeat.retired_agents(ZAI_CUTOFF) == {"zcode"}
+    assert heartbeat.retired_agents(ZAI_CUTOFF + 86400) == {"zcode"}
+    assert heartbeat.RETIRED_AGENTS == heartbeat.retired_agents()
+
+
+def test_codex_claude_and_muse_are_never_retired():
     """Codex implements both tiers since #1315; its silence must alarm."""
-    assert heartbeat.RETIRED_AGENTS == {"zcode"}
-    assert heartbeat.RETIRED_AGENTS < set(heartbeat.PROVIDERS)
-    assert not {"claude", "codex", "muse"} & heartbeat.RETIRED_AGENTS
+    for now in (NOW.timestamp(), ZAI_CUTOFF - 1, ZAI_CUTOFF + 86400):
+        retired = heartbeat.retired_agents(now)
+        assert retired <= set(heartbeat.PROVIDERS)
+        assert not {"claude", "codex", "muse"} & retired
+
+
+def test_a_live_zcode_lane_alarms_on_silence_like_any_other(monkeypatch):
+    monkeypatch.setattr(heartbeat, "RETIRED_AGENTS",
+                        heartbeat.retired_agents(ZAI_CUTOFF - 1))
+    rows = {a: _quiet_after_a_busy_cadence(a) for a in ("muse", "zcode")}
+    monkeypatch.setattr(heartbeat, "read", lambda agent: rows.get(agent, []))
+
+    found = funnel.agent_health(NOW)
+
+    assert {c["agent"] for c in found} == {"muse", "zcode"}
 
 
 def test_the_same_silence_alarms_for_a_live_agent(monkeypatch):
@@ -43,6 +81,8 @@ def test_the_same_silence_alarms_for_a_live_agent(monkeypatch):
 
 
 def test_the_brief_skips_a_retired_agent_but_not_a_live_one(monkeypatch):
+    monkeypatch.setattr(heartbeat, "RETIRED_AGENTS",
+                        heartbeat.retired_agents(ZAI_CUTOFF))
     rows = {a: _quiet_after_a_busy_cadence(a) for a in ("muse", "zcode")}
     monkeypatch.setattr(heartbeat, "read", lambda agent: rows.get(agent, []))
 
@@ -70,6 +110,8 @@ def test_the_watchdog_skips_retired_agents(monkeypatch, capsys):
     watchdog = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(watchdog)
     seen = []
+    monkeypatch.setattr(watchdog.heartbeat, "RETIRED_AGENTS",
+                        watchdog.heartbeat.retired_agents(ZAI_CUTOFF))
     monkeypatch.setattr(watchdog, "records", lambda agent: seen.append(agent) or [])
     monkeypatch.setattr(watchdog, "existing_issue", lambda: {})
     monkeypatch.setattr(watchdog, "gh", lambda *a: "")

@@ -108,7 +108,9 @@ def test_codex_input_usage_aggregates_turns_and_computes_resend_ratio(
 
 def test_zcode_input_usage_reads_total_and_cached_input(
         tmp_path, monkeypatch):
-    write(tmp_path / "rollout.jsonl", [
+    # zcode reads only the run's own call log, named by its session (#1411).
+    monkeypatch.setenv("ZCODE_SESSION_ID", "s1")
+    write(tmp_path / "model-io-s1.jsonl", [
         {"type": "model_io", "response": {"usage": {
             "inputTokens": 100, "cacheReadTokens": 60,
         }}},

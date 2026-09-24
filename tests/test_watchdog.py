@@ -245,7 +245,11 @@ def test_sparse_silence_floor_reaches_the_watchdog_issue_body(monkeypatch):
     calls = []
 
     monkeypatch.setattr(watchdog.time, "time", lambda: now)
-    # zcode is the retired control since Codex came back (#1325).
+    # zcode is the retired control since Codex came back (#1325), pinned
+    # rather than read from the clock: it is live as the z.ai standard tier
+    # until `heartbeat.ZAI_STANDARD_UNTIL`.
+    monkeypatch.setattr(
+        watchdog.heartbeat, "RETIRED_AGENTS", frozenset({"zcode"}))
     monkeypatch.setattr(watchdog.heartbeat, "PROVIDERS", {
         "zcode": watchdog.heartbeat.PROVIDERS["zcode"],
         "muse": "meta",

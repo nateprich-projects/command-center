@@ -190,7 +190,10 @@ def test_sparse_history_uses_the_absolute_silence_floor_and_reaches_the_brief(
     assert "Nothing recorded for 1d8h1m" in conditions[0]
     assert "normal gap" not in conditions[0]
     # The retired agent stays quiet on the same silence. zcode, since Codex
-    # came back off the retired list (#1325).
+    # came back off the retired list (#1325). zcode is live again as the z.ai
+    # standard tier until `heartbeat.ZAI_STANDARD_UNTIL`, so the control is
+    # pinned rather than read from the clock.
+    monkeypatch.setattr(heartbeat, "RETIRED_AGENTS", frozenset({"zcode"}))
     assert assess("zcode", silent, now.timestamp()) == []
 
     monkeypatch.setattr(heartbeat, "PROVIDERS", {

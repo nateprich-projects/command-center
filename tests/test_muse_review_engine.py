@@ -16,8 +16,10 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shlex
 import stat
 import subprocess
+import sys
 import uuid
 
 import pytest
@@ -532,6 +534,24 @@ GH_STUB = (
 def _executable(path, body):
     path.write_text(body)
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+def _python_without_session_id(tmp_path, mode):
+    bin_dir = tmp_path / "python-bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "python3"
+    exit_status = 1 if mode == "failure" else 0
+    _executable(
+        wrapper,
+        "#!/bin/bash\n"
+        "if [[ \"$1\" == \"-c\" && \"$2\" == \"import uuid; print(uuid.uuid4())\" ]]; then\n"
+        "  exit {}\n"
+        "fi\n"
+        "exec {} \"$@\"\n".format(exit_status, shlex.quote(sys.executable)),
+    )
+    return {
+        "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+    }
 
 
 def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
@@ -1200,6 +1220,24 @@ def test_the_model_call_carries_the_exact_no_tool_shape(tmp_path):
     # never wait behind it.
     assert "begin --agent muse --tier standard --breakdown --role review" \
         in calls
+
+
+@pytest.mark.parametrize("mode", ("failure", "empty"))
+def test_session_id_setup_failure_does_not_gate_review(tmp_path, mode):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()),
+        extra_env=_python_without_session_id(tmp_path, mode),
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 2
+    assert (repo / "begin.session_id").read_text() == ""
+    for call in (1, 2):
+        invoked = (repo / "muse.args.{}".format(call)).read_text().splitlines()
+        assert "--session-id" not in invoked
+    assert len(_apply_calls(repo)) == 1
+    assert "continuing without session usage telemetry" in proc.stderr
 
 
 def test_a_malformed_first_answer_retries_once_with_the_parse_error(tmp_path):

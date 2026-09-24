@@ -189,18 +189,18 @@ fi
 exec 3<&-
 export FUNNEL_SESSION
 
-# Muse's session id is selected by the caller, so bind the upcoming run to one
-# before `begin` writes its heartbeat start. Pass the same id to `muse exec`
-# below so the finish and local journal refer to the same session.
-if ! MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"; then
-  echo "muse-implement: could not create a Muse session id" >&2
-  exit 1
+# Bind the upcoming heartbeat start to Muse's session when available. This is
+# telemetry only: a missing id leaves usage unresolved, but must not stop the
+# run it is meant to observe.
+MUSE_EXEC=("$MUSE_BIN" exec)
+if MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null)" \
+  && [[ -n "$MUSE_SESSION_ID" ]]; then
+  export MUSE_SESSION_ID
+  MUSE_EXEC+=(--session-id "$MUSE_SESSION_ID")
+else
+  unset MUSE_SESSION_ID
+  echo "muse-implement: no session id; continuing without session usage telemetry" >&2
 fi
-if [[ -z "$MUSE_SESSION_ID" ]]; then
-  echo "muse-implement: could not create a Muse session id" >&2
-  exit 1
-fi
-export MUSE_SESSION_ID
 
 cleanup() {
   python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
@@ -480,8 +480,7 @@ printf '%s' "$PROMPT" >"$PROMPT_FILE"
 #
 # `perl setpgrp` gives Muse and every shell child its own process group, so the
 # wall-clock bound can kill the entire tree without killing this runner.
-perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "$MUSE_BIN" exec \
-  --session-id "$MUSE_SESSION_ID" \
+perl -e 'setpgrp(0, 0); exec @ARGV or die "exec: $!"' "${MUSE_EXEC[@]}" \
   --model "$MUSE_MODEL" \
   --reasoning-effort "$EFFORT" \
   --sandbox-network enabled \

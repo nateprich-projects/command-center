@@ -201,17 +201,18 @@ fi
 exec 3<&-
 export FUNNEL_SESSION
 
-# Bind the heartbeat start to the Muse session that the runner will launch.
-# The same caller-supplied id is passed to every `muse exec` retry below.
-if ! MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"; then
-  echo "muse-review-engine: could not create a Muse session id" >&2
-  exit 1
+# Bind the heartbeat start to Muse's session when available. This is
+# telemetry only: a missing id leaves usage unresolved, but must not stop the
+# run it is meant to observe.
+MUSE_EXEC=("$MUSE_BIN" exec)
+if MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null)" \
+  && [[ -n "$MUSE_SESSION_ID" ]]; then
+  export MUSE_SESSION_ID
+  MUSE_EXEC+=(--session-id "$MUSE_SESSION_ID")
+else
+  unset MUSE_SESSION_ID
+  echo "muse-review-engine: no session id; continuing without session usage telemetry" >&2
 fi
-if [[ -z "$MUSE_SESSION_ID" ]]; then
-  echo "muse-review-engine: could not create a Muse session id" >&2
-  exit 1
-fi
-export MUSE_SESSION_ID
 
 cleanup() {
   python3 "$REPO/funnel.py" session-stop >/dev/null 2>&1 || true
@@ -390,8 +391,7 @@ call_muse_files() {
     return 1
   fi
   rm -f "$killed_marker"
-  "$MUSE_BIN" exec \
-    --session-id "$MUSE_SESSION_ID" \
+  "${MUSE_EXEC[@]}" \
     --model "$MUSE_MODEL" \
     --reasoning-effort "$EFFORT" \
     --disable-shell \

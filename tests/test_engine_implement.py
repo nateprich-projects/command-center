@@ -15,6 +15,10 @@ import pytest
 import heartbeat
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+NO_DIFF_FINISH = (
+    pathlib.Path(__file__).parent / "fixtures" /
+    "no_diff_done_finish.json"
+)
 sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
@@ -329,6 +333,9 @@ def test_no_diff_with_verified_evidence_closes_and_finishes(
     assert effects["closed"] == [(REPO, 42, clone)]
     assert effects["released"] == [REPO + "#42"]
     assert effects["finished"][0][:3] == ("codex", "run-42", "done")
+    assert effects["finished"][0][3] == json.loads(
+        NO_DIFF_FINISH.read_text()
+    )["note"]
     for url in evidence:
         assert url in effects["finished"][0][3]
 

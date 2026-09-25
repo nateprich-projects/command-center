@@ -356,12 +356,26 @@ MUSE_WEEKLY_RESERVE = round(
 #: 95%. From it to the third (#1409) the panel moved 5 points for $9.78,
 #: about $1.96 a point, the same review-mix rate. The issue marker stays
 #: #1341, because the dated release is still that one.
+#:
+#: **The provider reset the window early.** At 21:39 PDT on Thursday
+#: 2026-09-24 the panel read 0% used, three days before the Sunday reset it
+#: had been showing, while this meter held $133.25 and was about four hours
+#: from the brake. Nothing on the lattice explains it: the resets of 09-14
+#: and 09-21 were both named by refusals as Sunday 17:00 PDT. From
+#: `reopened_at` the window counts only spend made after it, so the meter
+#: reads the panel's 0% there. The cap keeps the 86% pairing, the latest
+#: rate the panel has shown per metered dollar. The 72-hour rate still
+#: reaches back past the reopening, as it does past a Sunday reset. The
+#: override still lapses at the Sunday reset: whether the provider's window
+#: now runs to Sunday or to next Thursday is what that Sunday's panel
+#: reading settles. _(Nate, 2026-09-24: "Update it tonight".)_
 MUSE_PACE_OVERRIDE = {
     "issue": 1341,
     "resets_at": 1790553600.0,  # 2026-09-28 00:00 UTC, Sunday 17:00 PDT
     "panel_used_percent": 86.0,
     "meter_dollars": 120.91,
     "ceiling_percent": 100.0,
+    "reopened_at": 1790311140.0,  # 2026-09-25 04:39 UTC, Thursday 21:39 PDT
 }
 
 
@@ -371,7 +385,8 @@ def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
     None for any other window, the one after the reset included, and None
     from the reset on. Otherwise the panel-calibrated cap, the ceiling, and
     the session reserve as a share of that cap: the reserve is dollars, so
-    a smaller cap makes it a larger share.
+    a smaller cap makes it a larger share. Once the provider has reopened
+    the window early, ``reopened_at`` says from when its spend counts.
     """
     override = MUSE_PACE_OVERRIDE
     if not override:
@@ -381,7 +396,7 @@ def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
         return None
     cap = round(float(override["meter_dollars"]) * 100.0
                 / float(override["panel_used_percent"]), 2)
-    return {
+    found = {
         "issue": override["issue"],
         "until": until,
         "cap_dollars": cap,
@@ -389,6 +404,10 @@ def muse_pace_override(resets_at: float, now: float) -> Optional[Dict]:
         "weekly_reserve": round(
             100.0 * MUSE_SESSION_RESERVE_DOLLARS / cap, 2),
     }
+    reopened = override.get("reopened_at")
+    if reopened is not None and now >= float(reopened):
+        found["reopened_at"] = float(reopened)
+    return found
 
 
 #: The provider's weekly window opens on the same lattice every week: Monday
@@ -689,7 +708,12 @@ def read_muse(now: float) -> Optional[Dict]:
     discount nobody has measured yet. #1304 reads the panel and settles
     it, and ``by_model`` is what it reads.
     """
-    cutoff = muse_window_start(now)
+    resets_at = muse_window_start(now) + SEVEN_DAY
+    # #1341: one window is priced from the account panel instead of the card,
+    # and counts from where the provider reopened it, if it did.
+    override = muse_pace_override(resets_at, now)
+    cutoff = max(muse_window_start(now),
+                 (override or {}).get("reopened_at", 0.0))
     rate_cutoff = now - MUSE_RATE_LOOKBACK
     oldest = min(cutoff, rate_cutoff)
     spent = 0.0
@@ -797,10 +821,7 @@ def read_muse(now: float) -> Optional[Dict]:
 
     spent = round(spent, 6)
     trailing = round(trailing, 6)
-    resets_at = cutoff + SEVEN_DAY
-    # #1341: one window is priced from the account panel instead of the card.
-    override = muse_pace_override(resets_at, now)
-    cap = override["cap_dollars"] if override else MUSE_WEEKLY_CAP_DOLLARS
+    cap =override["cap_dollars"] if override else MUSE_WEEKLY_CAP_DOLLARS
     used_percent = round(100.0 * spent / cap, 2)
     daily_rate = round(trailing / (MUSE_RATE_LOOKBACK / 86400.0), 6)
     days_left = max(0.0, resets_at - now) / 86400.0
@@ -877,6 +898,8 @@ def read_muse(now: float) -> Optional[Dict]:
                            "weekly_reserve": override["weekly_reserve"]}
         seven["override"] = {"issue": override["issue"],
                              "until": override["until"]}
+        if "reopened_at" in override:
+            seven["override"]["reopened_at"] = override["reopened_at"]
     return reading
 
 

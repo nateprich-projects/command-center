@@ -4,7 +4,7 @@ import test from "node:test";
 
 import {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
-  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, repoLabels, repoOf,
+  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip, repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible,
 } from "../public/app.js";
 
@@ -207,6 +207,39 @@ test("the filter sits at the top of the page and lives in the URL", async () => 
   assert.match(masthead, /<select id="repo-filter">/);
   assert.match(source, /searchParams\.set\("repo", repo\)/);
   assert.match(source, /get\("repo"\)/);
+});
+
+test("a ticket others wait on says which, in Nate's phrasing", () => {
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const ref = (n) => `nateprich-projects/command-center#${n}`;
+    assert.equal(unblocksChip({ unblocks: [] }), null);
+    assert.equal(unblocksChip({ unblocks: [ref(1465)] }).textContent, "unblocks #1465");
+    assert.equal(unblocksChip({ unblocks: [ref(1465), ref(1466)] }).textContent,
+      "unblocks #1465 & #1466");
+    assert.equal(unblocksChip({ unblocks: [ref(1465), ref(1466), ref(1467)] }).textContent,
+      "unblocks #1465, #1466, & #1467");
+    assert.equal(
+      unblocksChip({ unblocks: [ref(1465)], unblocks_later: [ref(1466), ref(1467)] }).textContent,
+      "unblocks #1465, then #1466 & #1467",
+    );
+    assert.equal(
+      unblocksChip({ unblocks: [ref(1)], unblocks_later: [2, 3, 4, 5, 6].map(ref) }).textContent,
+      "unblocks #1, then #2, #3, #4, & 2 more",
+    );
+    assert.equal(unblocksChip({ unblocks: [], unblocks_later: [ref(2)] }), null);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("a ticket row shows the class it ranks as", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const row = source.slice(source.indexOf("function ticketRow("), source.indexOf("function phoneChildren("));
+  assert.match(row, /classChip\(ticket\.state === "OPEN" \? ticket\.class : null\)/);
+  assert.match(row, /unblocksChip\(ticket\)/);
 });
 
 test("a row nobody can act on says Blocked where the owner would be", () => {

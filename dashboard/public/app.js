@@ -292,6 +292,32 @@ function blockedChip(ticket) {
   return chip("blocked, no reason recorded", "chip-blocked");
 }
 
+function refList(refs, limit = Infinity) {
+  const names = refs.map((ref) => `#${String(ref).split("#").pop()}`);
+  if (names.length > limit) {
+    return `${names.slice(0, limit).join(", ")}, & ${names.length - limit} more`;
+  }
+  if (names.length < 3) return names.join(" & ");
+  return `${names.slice(0, -1).join(", ")}, & ${names[names.length - 1]}`;
+}
+
+// The open tickets waiting on this one, then the rest of the chain behind
+// them: why a ticket can rank above its project's class (Nate, 2026-09-24,
+// on #1424: "unblocks #1465, then #1466 & #1467").
+function unblocksChip(ticket) {
+  const direct = Array.isArray(ticket && ticket.unblocks) ? ticket.unblocks : [];
+  if (!direct.length) return null;
+  const later = Array.isArray(ticket.unblocks_later) ? ticket.unblocks_later : [];
+  let text = `unblocks ${refList(direct)}`;
+  if (later.length) text += `, then ${refList(later, 3)}`;
+  return chip(text, "chip-unblocks", direct.concat(later).join(", "));
+}
+
+function classChip(value) {
+  if (!value) return element("span", "muted", "");
+  return chip(value, `chip-class chip-class-${String(value).toLowerCase()}`);
+}
+
 function ticketRow(ticket) {
   const row = gridRow("div", `ticket ticket-${pipState(ticket)}`);
   row.append(cell("cell-twisty", element("i", `pip pip-${pipState(ticket)}`)));
@@ -300,13 +326,16 @@ function ticketRow(ticket) {
   title.append(element("span", "child-rule"));
   title.append(link(`#${ticket.number} ${ticket.title || ""}`, ticket.url, "ticket-title"));
   if (ticket.blocked) title.append(blockedChip(ticket));
+  const unblocks = ticket.state === "OPEN" ? unblocksChip(ticket) : null;
+  if (unblocks) title.append(unblocks);
   row.append(title);
 
   row.append(cell("cell-repo", element("span", "muted", "")));
   row.append(cell("cell-tier", tierCell(ticket.state === "OPEN" ? ticket.tier : null)));
   row.append(cell("cell-owner", ownerCell(ticket.owner, ticketHold(ticket))));
   row.append(cell("cell-pips", element("span", "muted", "")));
-  row.append(cell("cell-class", element("span", "muted", "")));
+  // The class the ticket ranks as, which can be higher than its project's.
+  row.append(cell("cell-class", classChip(ticket.state === "OPEN" ? ticket.class : null)));
   row.append(cell("cell-age", element("span", "muted", "")));
   return row;
 }
@@ -409,6 +438,8 @@ function phoneDetails(item, inheritedClass, children) {
       const label = ticketHold(item) === "queued" ? "Queued" : "Blocked";
       fields.append(phoneField(label, blockedChip(item)));
     }
+    const unblocks = item.state === "OPEN" ? unblocksChip(item) : null;
+    if (unblocks) fields.append(phoneField("Unblocks", unblocks));
     if (children.length || Number.isFinite(item.tickets_total)) {
       fields.append(phoneField("Progress", phoneProgress(item, children)));
     }
@@ -820,6 +851,6 @@ if (typeof document !== "undefined") {
 
 export {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
-  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, repoLabels, repoOf,
+  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip, repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible,
 };

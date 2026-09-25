@@ -630,6 +630,7 @@ function decisionRow(item) {
   const row = element("li", "waiting-row");
   row.append(link(item.title || item.ref || "Untitled", item.url, "waiting-title"));
   if (item.waiting_on) row.append(chip(item.waiting_on, "chip-gate"));
+  if (item.waiting_reason) row.append(chip(item.waiting_reason, "chip-reason"));
   if (item.class) {
     row.append(chip(item.class, `chip-class chip-class-${String(item.class).toLowerCase()}`));
   }

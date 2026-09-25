@@ -23,8 +23,9 @@ comes from `generated_at`: older than about fifteen minutes is weak evidence
 that nothing is waiting.
 
 Lead with the count and the ordered list. For each item: its Class, a pin
-marker when `pinned` is `true`, the question (`waiting_on`), the repo and
-issue title as a link, and how long it has `waited`. Keep it scannable.
+marker when `pinned` is `true`, the question (`waiting_on`), its waiting
+reason when `waiting_reason` is present, the repo and issue title as a link,
+and how long it has `waited`. Keep it scannable.
 
 If `missing` is non-empty, say the brief is partial and name every missing
 section and its error before interpreting any other empty or null value. A

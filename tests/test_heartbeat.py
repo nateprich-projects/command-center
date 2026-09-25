@@ -161,6 +161,7 @@ def test_finish_records_structured_issue_outcomes(monkeypatch):
     assert records[0]["ticket_count"] == 0
     assert records[0]["needs_decision"] is None
     assert records[0]["shape_status"] == "Shaped"
+    assert "token_usage" not in records[0]
 
 
 def test_finish_records_every_muse_call_id_and_keeps_uncaptured_slots(monkeypatch):
@@ -185,9 +186,10 @@ def test_finish_records_every_muse_call_id_and_keeps_uncaptured_slots(monkeypatc
 
     assert records[0]["muse_session_ids"] == ["session-1", None, "session-3"]
     assert records[0]["muse_calls_made"] == 3
+    assert "token_usage" not in records[0]
 
 
-def test_finish_preserves_the_single_call_record_shape(monkeypatch):
+def test_finish_keeps_single_id_bound_and_omits_token_snapshot(monkeypatch):
     records = []
     monkeypatch.setattr(heartbeat, "read", lambda agent: [])
     monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
@@ -207,7 +209,8 @@ def test_finish_preserves_the_single_call_record_shape(monkeypatch):
     ]) == 0
 
     assert "muse_session_ids" not in records[0]
-    assert "muse_calls_made" not in records[0]
+    assert records[0]["muse_calls_made"] == 1
+    assert "token_usage" not in records[0]
 
 
 @pytest.mark.parametrize("call_record", [

@@ -21,6 +21,10 @@ ALREADY_MERGED_FINISH = (
     pathlib.Path(__file__).parent / "fixtures" /
     "already_merged_done_finish.json"
 )
+NO_DIFF_FINISH = (
+    pathlib.Path(__file__).parent / "fixtures" /
+    "no_diff_done_finish.json"
+)
 
 
 def _silence_fixture():
@@ -140,6 +144,33 @@ def test_already_merged_done_finish_stays_healthy_with_its_observation(
         "pr": 7,
     }
     assert finish["merged"] == observed["pr"]
+    assert funnel.agent_health(now) == []
+
+
+def test_no_diff_done_finish_stays_done_and_healthy_with_its_note(monkeypatch):
+    finish = json.loads(NO_DIFF_FINISH.read_text())
+    start = {
+        "run": finish["run"],
+        "phase": "start",
+        "ts": finish["ts"] - 60,
+        "agent": finish["agent"],
+    }
+    rows = [start, finish]
+    now = datetime.fromtimestamp(finish["ts"] + 60, timezone.utc)
+    monkeypatch.setattr(heartbeat, "PROVIDERS", {finish["agent"]: "openai"})
+    monkeypatch.setattr(heartbeat, "RETIRED_AGENTS", frozenset())
+    monkeypatch.setattr(heartbeat, "read", lambda agent: rows)
+
+    assert finish["outcome"] == "done"
+    assert finish["note"].startswith(
+        "no-diff close as completed; verified evidence: "
+    )
+    assert funnel.agent_run_summary(now) == [{
+        "agent": "codex",
+        "starts": 1,
+        "finishes": 1,
+        "re_begins": 0,
+    }]
     assert funnel.agent_health(now) == []
 
 

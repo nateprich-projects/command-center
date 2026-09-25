@@ -11,7 +11,7 @@ to run. One shared standard keeps the fiftieth breakdown shaped like the first.
 
 ## The unit
 
-**One ticket is one Codex run: work that ends in a pull request.**
+**One ticket is one Codex run: work that usually ends in a pull request.**
 
 A run can be killed by the budget gate or a rate limit mid-work. A ticket
 too big for one run dies partway, leaves a half-finished branch, and forces
@@ -22,6 +22,9 @@ A ticket is about right if it touches **one concern**, diffs **a few hundred lin
 needs "and", or the plan's paragraph about it has sub-bullets each needing
 their own tests. Split by **behaviour, not by layer**: "parse X, with
 tests" beats "add the parser" then "add the tests" then "wire it up".
+
+For a no-diff ticket, its `Accept` names the GitHub-artifact evidence channel the
+finish check verifies: a comment, rename event, closed PR, or posted measurement.
 
 ### Inferred premises
 

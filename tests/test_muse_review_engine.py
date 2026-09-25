@@ -486,6 +486,9 @@ MUSE_STUB = (
     "  done\n"
     "  if (( started < expected )); then printf 'judge calls were not concurrent' >&2; exit 1; fi\n"
     "fi\n"
+    "if (( judge_call )) && [[ -n \"${MUSE_JUDGE_DELAY_IF:-}\" ]] \\\n      && grep -Fq -- \"$MUSE_JUDGE_DELAY_IF\" \"$prompt_file\"; then\n"
+    "  sleep \"${MUSE_JUDGE_DELAY_SECONDS:-1}\"\n"
+    "fi\n"
     # #1411: the converse probe. A judge that finds another judge in flight
     # leaves an overlap marker; the z.ai path must never leave one.
     "if (( judge_call )) && [[ -n \"${MUSE_JUDGE_EXCLUSIVE:-}\" ]]; then\n"
@@ -1253,12 +1256,15 @@ def _cached_packet_from_judge_prompt(prompt):
 
 
 def test_seven_requirements_reach_three_parallel_max_judges_once_each(tmp_path):
+    """A late judge and late events still produce the full call-id list."""
     requirements = ["requirement {}".format(i) for i in range(1, 8)]
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(),
         answers=(_requirements_answer(*requirements),),
         extra_env={"MUSE_DYNAMIC_JUDGES": "1",
                    "MUSE_JUDGE_BARRIER_COUNT": "3",
+                   "MUSE_JUDGE_DELAY_IF": "requirement 1",
+                   "MUSE_JUDGE_DELAY_SECONDS": "1",
                    "MUSE_CONFIG_EVENT_LATE": "1"})
 
     assert proc.returncode == 0, proc.stderr

@@ -180,6 +180,10 @@ fi
 if ! PROMPT_SHAPE="$(check_routine "$ROUTINE_SHAPE")"; then
   exit 1
 fi
+if [[ "$BACKEND" == "muse" && ! -r "$MUSE_CALL_BIN" ]]; then
+  echo "muse-review-engine: cannot read $MUSE_CALL_BIN — refusing to run without Muse session capture" >&2
+  exit 1
+fi
 
 # One owner-only directory per run, holding every scratch file including the
 # packet, removed whole when the run ends (#1240). Two reasons it is a

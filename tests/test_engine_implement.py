@@ -361,6 +361,36 @@ def test_no_diff_without_evidence_fails_named_without_effects(
     assert effects == {"closed": [], "released": [], "finished": []}
 
 
+def test_no_diff_fails_closed_when_heartbeat_start_cannot_be_read(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(heartbeat, "read_github", lambda agent: [])
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint: pytest.fail("unreadable start must fail before artifact reads"),
+    )
+    url = "https://github.com/nateprich-projects/project/issues/12#issuecomment-91"
+    effects = {"closed": [], "released": [], "finished": []}
+
+    with pytest.raises(
+        implement.ImplementError,
+        match="could not read heartbeat start for run run-42",
+    ):
+        implement.finish_done(
+            {**answer(), "evidence": [url]},
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            close_effect=lambda *args, **kwargs: effects["closed"].append(args),
+        )
+
+    assert effects == {"closed": [], "released": [], "finished": []}
+
+
 def test_no_diff_rejects_evidence_created_before_run_start(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)

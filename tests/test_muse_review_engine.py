@@ -304,6 +304,8 @@ APPLY_STUB = (
     "    raise SystemExit(1)\n"
     "(root / 'applied.marker').write_text('applied')\n"
     "print('recorded {} on PR #{} against {} in {}'.format(verdict, args[0], flag('--head'), flag('--repo')))\n"
+    "if os.environ.get('APPLY_ALREADY_MERGED'):\n"
+    "    sys.stdout.write('review-apply: observed already-merged PR: {\"actor\":\"nate\",\"head\":\"abc123def456\",\"merged_at\":\"2026-09-25T02:43:19Z\",\"pr\":7}\\n')\n"
 )
 
 
@@ -1326,6 +1328,22 @@ def test_a_malformed_first_answer_retries_once_with_the_parse_error(tmp_path):
     assert "--attempt 1" in calls[0]
     assert (repo / "applied.marker").exists()
     assert _heartbeat(repo).endswith("--review-result approved\n")
+
+
+def test_an_already_merged_approved_head_finishes_with_the_merge_record(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), answers=_review_answers(_judge_answer()),
+        extra_env={"APPLY_ALREADY_MERGED": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    heartbeat = _heartbeat(repo)
+    assert "--outcome done" in heartbeat
+    assert "--review-result approved" in heartbeat
+    assert "--merged 7" in heartbeat
+    assert "observed already-merged PR" in heartbeat
+    assert "abc123def456" in heartbeat
+    assert "nate" in heartbeat
+    assert "2026-09-25T02:43:19Z" in heartbeat
 
 
 def test_a_malformed_final_judge_answer_fails_closed(tmp_path):

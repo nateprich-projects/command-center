@@ -74,8 +74,12 @@ dollars.
 
 Then `recorded_cause_regressions` and `command_center_ticket_pr_share` as
 portfolio signals: Broken numerator and denominator; ticket-branch numerator,
-merged-PR denominator and percentage. `unavailable`, `partial` and
-`insufficient_data` are unknown, never zero.
+merged-PR denominator and percentage. Then `decline_routing`: the four
+30-day counts for declines that became a native edge, closed as a proven
+defer, routed to review, or stayed blocked. Its window starts at classifier
+PR #1447's merge when that is newer than 30 days ago. `unavailable`,
+`partial` and `insufficient_data` are unknown, never zero; an unclassified
+decline is shown separately rather than assigned to a route.
 
 Then `main_ci`, whenever non-empty: each red member-repo `main` with its
 `repo`, `sha`, failing `job` and `verdict`. An `infra` verdict is a run that

@@ -43,6 +43,7 @@ from typing import (Any, Callable, Collection, Dict, Iterable, Iterator, List,
 
 import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
+from decline_classifier import classify_decline_reason
 
 # --------------------------------------------------------------------------
 # Configuration. These are the only knobs; everything else is derived.
@@ -629,6 +630,9 @@ BRIEF_SECTION_BUDGETS = {
     # (#1286). Measured 2026-09-23 on 476 merges (5 pages): 2.27 s, 2.62 s,
     # 2.97 s, so 3 s degraded about one read in three, and the window grows.
     "portfolio_metrics": 10.0,
+    # Reads the forward-only decline-routing signal from issue comments and
+    # current GitHub state. The search is per member repo and paged.
+    "decline_routing": 10.0,
     "rejected_merges": 0.25,
 }
 
@@ -4569,6 +4573,391 @@ def command_center_ticket_pr_share(
         "value": round(share, 3) if share is not None else None,
         "share": round(share, 3) if share is not None else None,
         "reason": None if merged else "no merged PRs in the window",
+    }
+
+
+DECLINE_ROUTING_CUTOFF_PR = 1447
+DECLINE_ROUTING_REVIEW_MARKER = "<!-- command-center-review-routing -->"
+DECLINE_ROUTING_SEARCH = """
+query($search: String!, $cursor: String) {
+  rateLimit { cost remaining resetAt }
+  search(type: ISSUE, query: $search, first: 100, after: $cursor) {
+    issueCount
+    nodes {
+      __typename
+      ... on Issue {
+        number
+        repository { nameWithOwner }
+        body
+        state
+        stateReason
+        closedAt
+        labels(first: 100) { totalCount nodes { name } }
+        blockedBy(first: 100) {
+          totalCount
+          nodes { number repository { nameWithOwner } }
+        }
+        comments(last: 100) {
+          pageInfo { hasPreviousPage }
+          nodes { body createdAt }
+        }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+
+def _decline_routing_cutoff() -> datetime:
+    """Read the first classifier ticket's merge time from GitHub."""
+    payload = _gh_json(
+        "gh", "pr", "view", str(DECLINE_ROUTING_CUTOFF_PR),
+        "--repo", REPO, "--json", "mergedAt",
+    )
+    if not isinstance(payload, dict):
+        raise GitHubError(
+            "could not read classifier PR #{}".format(
+                DECLINE_ROUTING_CUTOFF_PR
+            )
+        )
+    cutoff = _metric_time(payload.get("mergedAt"))
+    if cutoff is None:
+        raise GitHubError(
+            "classifier PR #{} has no parseable merge time".format(
+                DECLINE_ROUTING_CUTOFF_PR
+            )
+        )
+    return cutoff
+
+
+def _decline_routing_search_query(repo: str, start: datetime) -> str:
+    """Find issue candidates whose comments may contain an in-window decline."""
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is None:
+        raise GitHubError("invalid repository ref {}".format(repo))
+    return (
+        'repo:{} is:issue in:comments "Declined:" updated:>={}'
+    ).format(repo, start.date().isoformat())
+
+
+def _decline_routing_issue_pages(
+    repo: str, start: datetime
+) -> Iterable[Dict[str, object]]:
+    """Yield bounded issue-search pages with the state needed to classify them."""
+    search_text = _decline_routing_search_query(repo, start)
+    cursor: Optional[str] = None
+    seen_cursors: Set[str] = set()
+    while True:
+        variables: Dict[str, object] = {"search": search_text}
+        if cursor is not None:
+            variables["cursor"] = cursor
+        response = gh_graphql(DECLINE_ROUTING_SEARCH, **variables)
+        connection = response.get("search") if isinstance(response, dict) else None
+        if not isinstance(connection, dict):
+            raise GitHubError(
+                "could not read decline-search results for {}".format(repo)
+            )
+        issue_count = connection.get("issueCount")
+        if (not isinstance(issue_count, int) or isinstance(issue_count, bool)
+                or issue_count < 0):
+            raise GitHubError("invalid decline-search count for {}".format(repo))
+        if issue_count > 1000:
+            raise GitHubError(
+                "decline search for {} exceeded GitHub's 1,000-issue limit"
+                .format(repo)
+            )
+        nodes = connection.get("nodes")
+        page_info = connection.get("pageInfo")
+        if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            raise GitHubError("invalid decline-search page for {}".format(repo))
+        for node in nodes:
+            if not isinstance(node, dict) or node.get("__typename") != "Issue":
+                raise GitHubError(
+                    "decline search returned an invalid issue for {}".format(repo)
+                )
+            repository = node.get("repository")
+            if not isinstance(repository, dict):
+                raise GitHubError("decline-search issue has no repository")
+            if repository.get("nameWithOwner") != repo:
+                raise GitHubError(
+                    "decline search returned an issue outside {}".format(repo)
+                )
+            yield node
+        if not page_info.get("hasNextPage"):
+            return
+        next_cursor = page_info.get("endCursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            raise GitHubError(
+                "decline-search page for {} has no next cursor".format(repo)
+            )
+        if next_cursor == cursor or next_cursor in seen_cursors:
+            raise GitHubError(
+                "decline-search page for {} repeated its cursor".format(repo)
+            )
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+
+def _decline_routing_comment_rows(
+    issue: Mapping, start: datetime
+) -> List[Dict[str, object]]:
+    """Validate the comment tail and return its rows without reading old bodies."""
+    comments = issue.get("comments")
+    if not isinstance(comments, dict):
+        raise GitHubError("decline-search issue has no comments connection")
+    nodes = comments.get("nodes")
+    page_info = comments.get("pageInfo")
+    if not isinstance(nodes, list) or not isinstance(page_info, dict):
+        raise GitHubError("invalid decline comments connection")
+    rows: List[Dict[str, object]] = []
+    times: List[datetime] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise GitHubError("invalid issue-comment row in decline search")
+        created_at = _metric_time(node.get("createdAt"))
+        body = node.get("body")
+        if created_at is None or not isinstance(body, str):
+            raise GitHubError("decline-search issue has an unreadable comment")
+        times.append(created_at)
+        rows.append({"body": body, "created_at": created_at})
+
+    # The last 100 comments are enough unless more comments on this issue
+    # also fall inside the reporting window. In that case fail closed instead
+    # of silently dropping older declines or routing comments.
+    if page_info.get("hasPreviousPage"):
+        if not times:
+            raise GitHubError("decline comments page is unexpectedly empty")
+        if min(times) > start:
+            raise GitHubError(
+                "decline comments for {} exceed the bounded comment page".format(
+                    (issue.get("repository") or {}).get("nameWithOwner")
+                )
+            )
+    return rows
+
+
+def _codex_decline_events(
+    comments: Sequence[Mapping], start: datetime, now: datetime
+) -> List[Tuple[datetime, str, str]]:
+    """Read in-window Codex declines as (time, run, reason)."""
+    found: List[Tuple[datetime, str, str]] = []
+    for comment in comments:
+        body = comment.get("body")
+        created_at = comment.get("created_at")
+        if not isinstance(body, str) or not body.lstrip().startswith(DECLINED_PREFIX):
+            continue
+        if not isinstance(created_at, datetime):
+            raise GitHubError("decline comment has no parseable creation time")
+        # Keep the historical hand-fixed cases outside the parser path.
+        if created_at < start or created_at > now:
+            continue
+        provenance = parse_provenance(body)
+        if (
+            provenance is None
+            or provenance.get("voice") != "agent"
+            or provenance.get("agent") != "codex"
+        ):
+            continue
+        run = provenance.get("run")
+        if isinstance(run, str) and run:
+            reason = body.lstrip()[len(DECLINED_PREFIX):].split(
+                PROVENANCE_MARKER, 1
+            )[0].strip()
+            found.append((created_at, run, reason))
+    return found
+
+
+def _decline_routing_outcome(
+    issue: Mapping, comments: Sequence[Mapping],
+    decline_at: datetime, run: str, decline_reason: str,
+    start: datetime, now: datetime,
+) -> Optional[str]:
+    """Classify one ticket's latest in-window Codex decline from GitHub facts."""
+    repository = issue.get("repository")
+    repo = repository.get("nameWithOwner") if isinstance(repository, dict) else None
+    if not isinstance(repo, str):
+        raise GitHubError("decline-search issue has no repository")
+    decline_class, decline_target = classify_decline_reason(
+        decline_reason, repo, issue.get("body") or ""
+    )
+
+    routing_comment = False
+    for comment in comments:
+        body = comment.get("body")
+        created_at = comment.get("created_at")
+        if (
+            not isinstance(body, str)
+            or DECLINE_ROUTING_REVIEW_MARKER not in body
+            or not isinstance(created_at, datetime)
+            or created_at < max(start, decline_at)
+            or created_at > now
+        ):
+            continue
+        record = _marked_json(body, DECLINE_ROUTING_REVIEW_MARKER)
+        provenance = parse_provenance(body)
+        routing_comment = bool(
+            isinstance(record, dict)
+            and record.get("type") == "accept-body-conflict"
+            and isinstance(record.get("decline_excerpt"), str)
+            and isinstance(record.get("conflict_pointer"), str)
+            and record.get("conflict_pointer")
+            and provenance is not None
+            and provenance.get("voice") == "agent"
+            and provenance.get("agent") == "codex"
+            and provenance.get("run") == run
+        )
+        if routing_comment:
+            break
+
+    labels = issue.get("labels")
+    label_nodes = labels.get("nodes") if isinstance(labels, dict) else None
+    label_count = labels.get("totalCount") if isinstance(labels, dict) else None
+    if not isinstance(label_nodes, list) or label_count != len(label_nodes):
+        raise GitHubError("decline-search issue has incomplete labels")
+    blocked_label = any(
+        isinstance(label, dict) and label.get("name") == "blocked"
+        for label in label_nodes
+    )
+
+    blocked_by = issue.get("blockedBy")
+    blocker_nodes = blocked_by.get("nodes") if isinstance(blocked_by, dict) else None
+    edge_count = blocked_by.get("totalCount") if isinstance(blocked_by, dict) else None
+    if (
+        not isinstance(blocker_nodes, list)
+        or not isinstance(edge_count, int)
+        or isinstance(edge_count, bool)
+        or edge_count < len(blocker_nodes)
+        or edge_count < 0
+    ):
+        raise GitHubError("decline-search issue has an unreadable blocked-by count")
+    blocker_refs = set()
+    for blocker in blocker_nodes:
+        if not isinstance(blocker, dict):
+            raise GitHubError("decline-search issue has an invalid blocked-by edge")
+        number = blocker.get("number")
+        repository = blocker.get("repository")
+        owner_repo = (
+            repository.get("nameWithOwner")
+            if isinstance(repository, dict) else None
+        )
+        if (
+            not isinstance(number, int) or isinstance(number, bool)
+            or not isinstance(owner_repo, str)
+        ):
+            raise GitHubError("decline-search issue has an invalid blocked-by edge")
+        blocker_refs.add("{}#{}".format(owner_repo, number))
+    if (
+        decline_class == "prerequisite-ticket"
+        and isinstance(decline_target, str)
+        and decline_target not in blocker_refs
+        and edge_count > len(blocker_nodes)
+    ):
+        raise GitHubError(
+            "blocked-by edges for {} exceed the bounded response".format(repo)
+        )
+
+    state = str(issue.get("state") or "").upper()
+    reason = str(issue.get("stateReason") or "").upper()
+    closed_at = _metric_time(issue.get("closedAt"))
+    completed_close = (
+        state == "CLOSED" and reason == "COMPLETED"
+        and closed_at is not None and closed_at >= decline_at
+    )
+
+    if decline_class == "defer-note-proof" and completed_close:
+        return "closed_as_proven_defer"
+    if decline_class == "accept-body-conflict" and routing_comment:
+        return "routed_to_review"
+    if (
+        decline_class == "prerequisite-ticket"
+        and isinstance(decline_target, str)
+        and decline_target in blocker_refs
+        and not blocked_label
+    ):
+        return "became_edge"
+    if blocked_label:
+        return "stayed_blocked"
+    return None
+
+
+def decline_routing_metric(
+    items: Iterable[Item], now: datetime
+) -> Dict[str, object]:
+    """Count forward-only Codex decline outcomes from current GitHub state.
+
+    The latest Codex decline per issue is classified in a rolling 30-day
+    window. The window is clipped to #1419's merge, so the four hand-fixed
+    2026-09-23 declines never enter the parser or the counts.
+    """
+    normalized_now = _metric_time(now)
+    if normalized_now is None:
+        raise GitHubError("decline-routing metric needs a parseable current time")
+    merged_at = _decline_routing_cutoff()
+    start = max(normalized_now - MAINTENANCE_WINDOW, merged_at)
+    repos = {REPO}
+    for item in items:
+        repo = getattr(item, "repo", None)
+        if not isinstance(repo, str):
+            raise GitHubError("decline-routing metric found an invalid item repo")
+        if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is None:
+            raise GitHubError("invalid repository ref {}".format(repo))
+        repos.add(repo)
+
+    counts = {
+        "became_edge": 0,
+        "closed_as_proven_defer": 0,
+        "routed_to_review": 0,
+        "stayed_blocked": 0,
+    }
+    declines = 0
+    unclassified = 0
+    seen_issues: Set[str] = set()
+    for repo in sorted(repos):
+        for issue in _decline_routing_issue_pages(repo, start):
+            number = issue.get("number")
+            if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+                raise GitHubError("decline-search issue has an invalid number")
+            ref = "{}#{}".format(repo, number)
+            if ref in seen_issues:
+                raise GitHubError("decline search repeated {}".format(ref))
+            seen_issues.add(ref)
+            comments = _decline_routing_comment_rows(issue, start)
+            events = _codex_decline_events(comments, start, normalized_now)
+            if not events:
+                continue
+            decline_at, run, decline_reason = max(
+                events, key=lambda event: event[0]
+            )
+            declines += 1
+            outcome = _decline_routing_outcome(
+                issue, comments, decline_at, run, decline_reason,
+                start, normalized_now,
+            )
+            if outcome is None:
+                unclassified += 1
+            else:
+                counts[outcome] += 1
+
+    return {
+        "window_days": MAINTENANCE_WINDOW.days,
+        "cutoff_pr": DECLINE_ROUTING_CUTOFF_PR,
+        "cutoff_at": merged_at.isoformat().replace("+00:00", "Z"),
+        "from": start.isoformat().replace("+00:00", "Z"),
+        "through": normalized_now.isoformat().replace("+00:00", "Z"),
+        "definition": (
+            "latest Codex-provenanced **Declined:** comment per issue in the "
+            "rolling 30-day window, clipped to the merge of classifier PR "
+            "#{}; current GitHub state supplies the outcome"
+        ).format(DECLINE_ROUTING_CUTOFF_PR),
+        "status": "available" if not unclassified else "partial",
+        "available": not unclassified,
+        "declines": declines,
+        **counts,
+        "unclassified": unclassified,
+        "reason": (
+            "{} decline ticket(s) did not have exactly one routing outcome"
+            .format(unclassified) if unclassified else None
+        ),
     }
 
 
@@ -11377,6 +11766,7 @@ def cmd_brief(
     brief_cache: Optional[BriefCache] = None,
     outcome_signals: Optional[Dict[str, object]] = None,
     portfolio_metrics: Optional[Dict[str, object]] = None,
+    decline_routing: Optional[Dict[str, object]] = None,
     main_ci: Optional[List[Dict[str, object]]] = None,
     orphan_issues: Optional[Dict[str, object]] = None,
 ) -> int:
@@ -11611,6 +12001,7 @@ def cmd_brief(
                 portfolio_metrics.get("command_center_ticket_pr_share")
                 if isinstance(portfolio_metrics, dict) else None
             ),
+            "decline_routing": decline_routing,
             "resend_ratio": resend,
             "unattended_merges": merges,
             "unattended_approvals": approvals,
@@ -16620,6 +17011,19 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
                 if portfolio_metrics is _BRIEF_UNAVAILABLE:
                     portfolio_metrics = None
+                decline_routing = _brief_timed(
+                    "decline_routing",
+                    lambda: _brief_read(
+                        "decline_routing",
+                        lambda: decline_routing_metric(items, now),
+                        missing,
+                    ),
+                    timings,
+                    degraded,
+                    deadline=deadline,
+                )
+                if decline_routing is _BRIEF_UNAVAILABLE:
+                    decline_routing = None
                 # Live read, computed here rather than inside cmd_brief for the
                 # same reason as the two above: the renderer stays pure over its
                 # arguments, so a fixture brief needs no network and reports
@@ -16669,6 +17073,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             brief_cache=cache,
                             outcome_signals=outcome_signals,
                             portfolio_metrics=portfolio_metrics,
+                            decline_routing=decline_routing,
                             main_ci=main_ci,
                             orphan_issues=orphans,
                         )

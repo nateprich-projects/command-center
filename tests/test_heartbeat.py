@@ -63,6 +63,18 @@ def unresolved(at, candidates, outcome="done"):
 
 # -- resolution ---------------------------------------------------------------
 
+def test_read_github_excludes_records_only_in_the_local_spool(monkeypatch):
+    remote = {"run": "remote", "agent": "codex", "phase": "finish"}
+    spooled = {"run": "local", "agent": "codex", "phase": "finish"}
+    monkeypatch.setattr(
+        heartbeat, "_fetch", lambda agent: (json.dumps(remote), "blob-sha")
+    )
+    monkeypatch.setattr(heartbeat, "_spooled", lambda agent: [spooled])
+
+    assert heartbeat.read_github("codex") == [remote]
+    assert heartbeat.read("codex") == [remote, spooled]
+
+
 def test_one_open_start_resolves_without_a_run_id():
     records = [start("aaa", NOW)]
     assert heartbeat.resolve_run(records, None) == ("aaa", None)

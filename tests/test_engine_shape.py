@@ -637,7 +637,7 @@ def test_career_toolset_198_replay_drops_false_scope_and_risk():
                     "overwrite newer cloud rows."),
         }]))
 
-    reviewed, rejected = shape.review_agent_broken_output(
+    reviewed, rejected = shape.review_agent_shape_output(
         candidate, klass="Broken", origin_voice="agent")
 
     assert reviewed["needs_nate"]["scope"] is None
@@ -657,7 +657,7 @@ def test_command_center_1268_replay_keeps_its_gates_question():
                     "scope": None, "preference": None},
         escalated_risk=[]))
 
-    reviewed, rejected = shape.review_agent_broken_output(
+    reviewed, rejected = shape.review_agent_shape_output(
         candidate, klass="Broken", origin_voice="agent")
     status, reason = shape.decide(
         reviewed, klass="Broken", origin_voice="agent")
@@ -669,7 +669,7 @@ def test_command_center_1268_replay_keeps_its_gates_question():
         "Shaped", "open question under Gates")
 
 
-def test_agent_broken_review_keeps_real_scope_and_proposed_action_risk():
+def test_agent_review_keeps_real_scope_and_proposed_action_risk():
     candidate = shape.validate_answer(answer(
         proposed_class="Broken",
         needs_nate={"exposure": None, "gates": None,
@@ -679,13 +679,222 @@ def test_agent_broken_review_keeps_real_scope_and_proposed_action_risk():
             "reason": "destructive",
             "why": "The proposed repair deletes archived rows."}]))
 
-    reviewed, rejected = shape.review_agent_broken_output(
+    reviewed, rejected = shape.review_agent_shape_output(
         candidate, klass="Broken", origin_voice="agent")
 
     assert rejected == []
     assert reviewed["needs_nate"]["scope"] == [
         "Should the repair also cover archived rows?"]
     assert reviewed["escalated_risk"] == candidate["escalated_risk"]
+
+
+@pytest.mark.parametrize("klass", sorted(funnel.SELF_APPROVABLE_CLASSES))
+def test_all_agent_self_approvable_classes_strip_generic_permission(klass):
+    candidate = shape.validate_answer(answer(
+        proposed_class=klass,
+        needs_nate={"exposure": None, "gates": None,
+                    "scope": ["Should we fix this?"],
+                    "preference": None},
+        escalated_risk=[{
+            "reason": "destructive",
+            "why": "A hypothetical implementation bug could lose data.",
+        }]))
+
+    reviewed, rejected = shape.review_agent_shape_output(
+        candidate, klass=klass, origin_voice="agent")
+
+    assert reviewed["needs_nate"]["scope"] is None
+    assert "generic Scope permission" in rejected[0]
+    assert reviewed["escalated_risk"] == []
+    assert any("hypothetical implementation bug" in signal
+               for signal in rejected)
+
+
+def test_recorded_the_league_258_timing_decision_advances_without_dependency():
+    repo = "nateprich-projects/The-League"
+    item = idea(
+        258, repo=repo, klass="Maintenance",
+        body=funnel.origin_block("agent", at=NOW, run="shape-run",
+                                 agent="muse"))
+    candidate = shape.validate_answer(answer(
+        proposed_class="Maintenance",
+        decided_by_agent=[{
+            "decision": ("Land now with no ticket dependency; #165 and "
+                         "#174 keep the gate green through rebase."),
+            "alternative": "Wait for #165 and #174 to finish.",
+            "why": ("No hard technical ordering exists, and landing now "
+                    "guards the in-flight edits."),
+        }],
+        needs_nate={"exposure": None, "gates": None,
+                    "scope": ["Should this land now while #165 and #174 "
+                              "are in flight, or wait?"],
+                    "preference": None}))
+
+    reviewed, rejected = shape.review_shape_output_for_item(
+        [item], item, candidate)
+    status, reason = shape.decide(
+        reviewed, klass="Maintenance", origin_voice="agent")
+
+    assert reviewed["needs_nate"]["scope"] is None
+    assert reviewed["depends_on"] == []
+    assert "Land now with no ticket dependency" in shape.render_plan(reviewed)
+    assert status == "Ready"
+    assert reason == ("needs_nate all null; class Maintenance self-approvable; "
+                      "origin agent")
+    assert any("scheduling" in signal for signal in rejected)
+
+
+@pytest.mark.parametrize("question", [
+    "Should this wait until #165 is complete?",
+    "Should this happen after #165 closes?",
+    ("Should this wait for "
+     "https://github.com/nateprich-projects/The-League/issues/165?"),
+])
+def test_a_clear_wait_for_ticket_question_becomes_a_dependency(question):
+    repo = "nateprich-projects/The-League"
+    item = idea(
+        1448, repo=repo, klass="Maintenance",
+        body=funnel.origin_block("agent", at=NOW, run="shape-run",
+                                 agent="muse"))
+    candidate = shape.validate_answer(answer(
+        proposed_class="Maintenance",
+        needs_nate={"exposure": None, "gates": None,
+                    "scope": [question],
+                    "preference": None}))
+
+    reviewed, _ = shape.review_shape_output_for_item(
+        [item], item, candidate)
+    status, reason = shape.decide(
+        reviewed, klass="Maintenance", origin_voice="agent")
+    body = shape.render_plan(reviewed)
+
+    assert reviewed["needs_nate"]["scope"] is None
+    assert reviewed["depends_on"] == [repo + "#165"]
+    assert "Wait for {}#165 before proceeding".format(repo) \
+        in body
+    assert "Depends on: {}#165".format(repo) in body
+    assert status == "Ready"
+    assert "all null; class Maintenance self-approvable" in reason
+
+
+def test_concrete_scope_tradeoff_with_timing_words_stays_open():
+    candidate = shape.validate_answer(answer(
+        proposed_class="Maintenance",
+        needs_nate={"exposure": None, "gates": None,
+                    "scope": ["Should the repair also cover archived rows "
+                              "in this release, or defer them?"],
+                    "preference": None}))
+
+    reviewed, rejected = shape.review_agent_shape_output(
+        candidate, klass="Maintenance", origin_voice="agent",
+        repo="owner/repo")
+
+    assert rejected == []
+    assert reviewed["needs_nate"]["scope"] == candidate["needs_nate"]["scope"]
+
+
+@pytest.mark.parametrize(("field", "question"), [
+    ("exposure", "Does this expose a new reachable surface?"),
+    ("gates", "Who may write Ready?"),
+    ("preference", "Would you prefer the compact output?"),
+])
+def test_other_needs_nate_categories_stay_open(field, question):
+    needs = {"exposure": None, "gates": None,
+             "scope": None, "preference": None}
+    needs[field] = [question]
+    candidate = shape.validate_answer(answer(
+        proposed_class="Maintenance", needs_nate=needs))
+
+    reviewed, rejected = shape.review_agent_shape_output(
+        candidate, klass="Maintenance", origin_voice="agent",
+        repo="owner/repo")
+    status, reason = shape.decide(
+        reviewed, klass="Maintenance", origin_voice="agent")
+
+    assert rejected == []
+    assert reviewed["needs_nate"][field] == [question]
+    assert status == "Shaped"
+    assert reason.startswith("open question under")
+
+
+def test_unknown_scope_question_stays_open():
+    question = "Is this the appropriate approach?"
+    candidate = shape.validate_answer(answer(needs_nate={
+        "exposure": None, "gates": None, "scope": [question],
+        "preference": None}))
+
+    reviewed, rejected = shape.review_agent_shape_output(
+        candidate, klass="Maintenance", origin_voice="agent",
+        repo="owner/repo")
+
+    assert rejected == []
+    assert reviewed["needs_nate"]["scope"] == [question]
+
+
+def test_priority_question_uses_funnel_order_without_dependency():
+    question = "Should this task take priority over #165?"
+    candidate = shape.validate_answer(answer(needs_nate={
+        "exposure": None, "gates": None, "scope": [question],
+        "preference": None}))
+
+    reviewed, rejected = shape.review_agent_shape_output(
+        candidate, klass="Maintenance", origin_voice="agent",
+        repo="owner/repo")
+
+    assert reviewed["needs_nate"]["scope"] is None
+    assert reviewed["depends_on"] == []
+    assert "Use the funnel's computed order" in shape.render_plan(reviewed)
+    assert any("scheduling" in signal for signal in rejected)
+
+
+def test_unclassified_implementation_detail_is_kept():
+    question = "Should encryption be applied before upload?"
+    candidate = shape.validate_answer(answer(needs_nate={
+        "exposure": None, "gates": None, "scope": [question],
+        "preference": None}))
+
+    reviewed, rejected = shape.review_agent_shape_output(
+        candidate, klass="Maintenance", origin_voice="agent",
+        repo="owner/repo")
+
+    assert rejected == []
+    assert reviewed["needs_nate"]["scope"] == [question]
+
+
+@pytest.mark.parametrize("klass", ["New", "Replace"])
+def test_non_self_approvable_classes_are_untouched(klass):
+    candidate = shape.validate_answer(answer(
+        proposed_class=klass,
+        needs_nate={"exposure": None, "gates": None,
+                    "scope": ["Should we fix this?"],
+                    "preference": None},
+        escalated_risk=[{
+            "reason": "destructive",
+            "why": "A hypothetical implementation bug could lose data.",
+        }]))
+
+    reviewed, rejected = shape.review_agent_shape_output(
+        candidate, klass=klass, origin_voice="agent")
+
+    assert rejected == []
+    assert reviewed == candidate
+
+
+def test_nate_origin_plan_is_untouched_by_agent_output_review():
+    candidate = shape.validate_answer(answer(needs_nate={
+        "exposure": None, "gates": None,
+        "scope": ["Should this land now while #165 is in flight?"],
+        "preference": None}))
+    item = idea(
+        258, repo="nateprich-projects/The-League", klass="Maintenance",
+        origin="nate-relayed", body=funnel.origin_block(
+            "nate-relayed", at=NOW, run="shape-run", agent="nate"))
+
+    reviewed, rejected = shape.review_shape_output_for_item(
+        [item], item, candidate)
+
+    assert rejected == []
+    assert reviewed == candidate
 
 
 def test_a_documented_runtime_root_keeps_a_path_question_out_of_needs_nate():
@@ -795,11 +1004,15 @@ def test_packet_carries_every_field():
     json.dumps(found)  # the packet is JSON by contract
 
 
-def test_agent_broken_packet_carries_its_output_review():
-    found = packet(idea=idea_dict(klass="Broken"))
-    assert found["output_review"] == shape.AGENT_BROKEN_OUTPUT_REVIEW
+@pytest.mark.parametrize("klass", sorted(funnel.SELF_APPROVABLE_CLASSES))
+def test_agent_self_approvable_packet_carries_its_output_review(klass):
+    found = packet(idea=idea_dict(klass=klass))
+    assert found["output_review"] == \
+        shape.AGENT_SELF_APPROVABLE_OUTPUT_REVIEW
     assert "concrete unresolved stakeholder tradeoff" \
         in found["output_review"]["scope"]
+    assert "Timing, priority, and sequencing" \
+        in found["output_review"]["scheduling"]
     assert "hypothetical implementation bug" \
         in found["output_review"]["escalated_risk"]
 
@@ -808,6 +1021,9 @@ def test_other_origins_and_classes_do_not_get_agent_broken_review():
     assert "output_review" not in packet()
     assert "output_review" not in packet(
         idea=idea_dict(klass="Broken"), origin_voice="nate-relayed")
+    for klass in ("New", "Replace"):
+        assert "output_review" not in packet(
+            idea=idea_dict(klass=klass))
 
 
 def test_packet_marks_missing_instruction_files():

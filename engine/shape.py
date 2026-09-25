@@ -97,15 +97,22 @@ NEEDS_FIELDS = (
     ("preference", "Preference"),
 )
 
-#: The runner's conditional review policy for the false-hold family in
-#: #1359. It rides in the packet so the shaping model sees the rule at
-#: the point where it chooses signals; ``review_agent_broken_output``
-#: enforces the narrow false-positive cases before they are recorded.
-AGENT_BROKEN_OUTPUT_REVIEW = {
+#: The runner's review policy for agent-origin self-approvable plans.
+#: It rides in the packet so the shaping model sees the rule at the point
+#: where it chooses signals; ``review_agent_shape_output`` enforces the
+#: false-hold cases before they are recorded.
+AGENT_SELF_APPROVABLE_OUTPUT_REVIEW = {
     "scope": (
-        "For agent-origin Broken work, ask Scope and priority only for a "
-        "concrete unresolved stakeholder tradeoff. Do not ask generic "
-        "permission to implement the repair."),
+        "For agent-origin Investigate, Broken, Maintenance, and Improve "
+        "work, ask Scope and priority only for a concrete unresolved "
+        "stakeholder tradeoff. Do not ask generic permission to implement "
+        "the work."),
+    "scheduling": (
+        "Timing, priority, and sequencing are project-manager decisions, "
+        "not Needs Nate questions. Record the agent-owned ordering "
+        "decision. Turn a clear wait-for named ticket into a depends_on "
+        "reference; leave other named tickets as context when the recorded "
+        "decision says there is no dependency."),
     "escalated_risk": (
         "Declare risk only from actions the proposed plan actually takes. "
         "A hypothetical implementation bug or its possible consequences "
@@ -134,6 +141,54 @@ _HYPOTHETICAL_IMPLEMENTATION_RISK = re.compile(
     r"arbitrary\s+implementation[- ]bug)\b",
     re.IGNORECASE,
 )
+
+_CONCRETE_SCOPE_PATTERN = re.compile(
+    r"\b(?:include|exclude|cover|support|handle|add|remove|preserve|"
+    r"change|retain|drop|feature|capability|functionality|customer|"
+    r"user|behavior|behaviour|coverage|format|output|data|report)\b",
+    re.IGNORECASE)
+
+_SCHEDULING_QUESTION_PATTERN = re.compile(
+    r"\b(?:timing|schedule|scheduled|now|later|today|tomorrow|this week|"
+    r"next week|early|late|first|next|priority|priorit(?:y|ize|ise)|rank|"
+    r"before|after|wait|delay|defer|land|start|ship|proceed|hold|in flight|"
+    r"sequenc(?:e|ing))\b", re.IGNORECASE)
+
+_SCHEDULING_WORK_OBJECT_PATTERN = re.compile(
+    r"\b(?:this|it|the work|the plan|the ticket|the issue|the project|"
+    r"the task|the repair|the fix|the change|the patch|these tasks|"
+    r"those tasks)\b", re.IGNORECASE)
+
+_PRIORITY_QUESTION_PATTERN = re.compile(
+    r"\b(?:priority|priorit(?:y|ize|ise)|rank)\b", re.IGNORECASE)
+
+_ORDER_CHOICE_PATTERN = re.compile(
+    r"\b(?:which|what)\b.{0,50}\b(?:first|next|before|after)\b",
+    re.IGNORECASE)
+
+# Only unambiguous waits become a dependency on the named ticket. A question
+# such as the #258 "land now while #165 and #174 are in flight, or wait?"
+# is a timing decision; its recorded "land now, no dependency" decision must
+# not turn contextual ticket references into blockers.
+_TICKET_TARGET_PATTERN = (
+    r"(?:(?:https?://)?github\.com/[A-Za-z0-9_.-]+/"
+    r"[A-Za-z0-9_.-]+/issues/[1-9][0-9]*|"
+    r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)?#[1-9][0-9]*)")
+_WAIT_FOR_TICKET_PATTERN = re.compile(
+    r"\b(?:wait(?:ing)?\s+(?:for|until)|depend(?:s|ing)?\s+on|"
+    r"blocked\s+by|(?:not|only)\s+until)\s+"
+    r"(?:the\s+(?:completion|close|closure)\s+of\s+)?"
+    + _TICKET_TARGET_PATTERN
+    + r"|\b(?:after|once|when)\s+(?:the\s+)?"
+    + _TICKET_TARGET_PATTERN,
+    re.IGNORECASE)
+
+_TICKET_REFERENCE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:(?P<owner>[A-Za-z0-9_.-]+)/"
+    r"(?P<repo>[A-Za-z0-9_.-]+))?#(?P<number>[1-9][0-9]*)\b")
+_TICKET_URL_PATTERN = re.compile(
+    r"github\.com/(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)"
+    r"/issues/(?P<number>[1-9][0-9]*)", re.IGNORECASE)
 
 
 def _require_text(value: object, where: str) -> str:
@@ -421,34 +476,164 @@ def needs_nate_open(answer: Dict) -> bool:
     return bool(open_need_categories(answer))
 
 
-def review_agent_broken_output(
-        answer: Dict, *, klass: Optional[str],
-        origin_voice: Optional[str]) -> Tuple[Dict, List[str]]:
-    """Review the two false-hold signals specific to agent Broken plans.
+def _ticket_refs_in_question(question: str, repo: Optional[str]
+                             ) -> Tuple[List[str], bool]:
+    """Return canonical ticket refs in question order and whether a local
+    ``#n`` could not be resolved to a repository.
+    """
+    found = []
+    unresolved_local = False
+    matches = []
+    matches.extend((match.start(), match.end(), "url", match)
+                   for match in _TICKET_URL_PATTERN.finditer(question))
+    matches.extend((match.start(), match.end(), "ref", match)
+                   for match in _TICKET_REFERENCE_PATTERN.finditer(question))
+    for _, _, kind, match in sorted(matches, key=lambda entry: entry[0]):
+        if kind == "url":
+            ref = "{}/{}#{}".format(
+                match.group("owner"), match.group("repo"),
+                match.group("number"))
+        elif match.group("owner"):
+            ref = "{}/{}#{}".format(
+                match.group("owner"), match.group("repo"),
+                match.group("number"))
+        elif repo:
+            ref = "{}#{}".format(repo, match.group("number"))
+        else:
+            unresolved_local = True
+            continue
+        if ref not in found:
+            found.append(ref)
+    return found, unresolved_local
 
-    A generic yes/no permission question does not become a stakeholder
-    tradeoff by being placed under Scope. Likewise, a failure mode that
-    exists only if an implementation is buggy is not an action in the
-    proposed plan. Drop those signals before rendering or deciding, while
-    preserving concrete scope questions, the other Needs Nate categories,
-    and risks grounded in proposed actions. This is a shaping-output review;
-    the shared self-approval predicate remains the sole gate.
+
+def _scope_question_kind(question: str, repo: Optional[str]
+                         ) -> Tuple[Optional[str], List[str]]:
+    """Classify only categories the validator can judge confidently.
+
+    Ambiguous scope questions stay open. A generic permission, timing, or
+    priority question is owned by the project manager; a clear wait-for
+    question naming tickets is represented as a dependency instead.
+    """
+    if any(pattern.fullmatch(question)
+           for pattern in _GENERIC_FIX_PERMISSION_PATTERNS):
+        return "permission", []
+    if _CONCRETE_SCOPE_PATTERN.search(question):
+        return None, []
+    refs, unresolved_local = _ticket_refs_in_question(question, repo)
+    if _WAIT_FOR_TICKET_PATTERN.search(question):
+        if refs and not unresolved_local:
+            return "sequencing", refs
+        if unresolved_local:
+            return None, []
+    if _SCHEDULING_QUESTION_PATTERN.search(question):
+        if (_SCHEDULING_WORK_OBJECT_PATTERN.search(question)
+                or (_PRIORITY_QUESTION_PATTERN.search(question) and refs)
+                or _ORDER_CHOICE_PATTERN.search(question)
+                or (len(refs) > 1 and re.search(
+                    r"\b(?:first|next|before|after)\b", question,
+                    re.IGNORECASE))):
+            return "scheduling", []
+    return None, []
+
+
+def _has_recorded_ordering_decision(answer: Dict, refs: Sequence[str]
+                                    ) -> bool:
+    """Whether the rendered agent-decision list already records this call."""
+    markers = re.compile(
+        r"\b(?:timing|schedule|sequenc|priorit|order|land|wait|"
+        r"dependenc|now|later)\w*\b", re.IGNORECASE)
+    ref_numbers = [ref.rsplit("#", 1)[-1] for ref in refs]
+    for entry in answer.get("decided_by_agent", []):
+        text = " ".join(str(entry.get(key, ""))
+                         for key in ("decision", "alternative", "why"))
+        if refs:
+            if any(ref in text or re.search(
+                    r"(?<!\d)#{}(?!\d)".format(re.escape(number)), text)
+                   for ref, number in zip(refs, ref_numbers)):
+                return True
+        elif markers.search(text):
+            return True
+    return False
+
+
+def _record_ordering_decision(answer: Dict, refs: Sequence[str]) -> None:
+    """Make the agent-owned scheduling choice explicit in the plan body."""
+    if _has_recorded_ordering_decision(answer, refs):
+        return
+    if refs:
+        names = ", ".join(refs)
+        entry = {
+            "decision": "Wait for {} before proceeding".format(names),
+            "alternative": "Proceed concurrently with the named work",
+            "why": ("A clear sequencing question is recorded as a "
+                    "dependency; the agent owns this ordering decision."),
+        }
+    else:
+        entry = {
+            "decision": "Use the funnel's computed order; add no timing hold",
+            "alternative": "Ask Nate to choose when the work runs",
+            "why": ("Scheduling belongs to the project manager, and the "
+                    "funnel computes work order."),
+        }
+    answer["decided_by_agent"].append(entry)
+
+
+def review_agent_shape_output(
+        answer: Dict, *, klass: Optional[str],
+        origin_voice: Optional[str], repo: Optional[str] = None
+        ) -> Tuple[Dict, List[str]]:
+    """Review false holds for agent-origin self-approvable plans.
+
+    Generic implementation permission and clearly categorized scheduling
+    questions do not become stakeholder tradeoffs by being placed under
+    Scope and priority. Clear waits on named tickets move to ``depends_on``;
+    concrete scope questions and questions whose category is unclear remain
+    open. Hypothetical implementation bugs are not risks in the proposed
+    plan. The shared self-approval predicate remains the sole gate.
     """
     reviewed = copy.deepcopy(answer)
     rejected = []
-    if klass != "Broken" or origin_voice != "agent":
+    if (klass not in funnel.SELF_APPROVABLE_CLASSES
+            or origin_voice != "agent"):
         return reviewed, rejected
 
     scope_questions = reviewed["needs_nate"]["scope"]
+    kept = []
+    removed_kinds = []
+    added_dependencies = []
+    sequencing_refs = []
     if scope_questions is not None:
-        kept = [question for question in scope_questions
-                if not any(pattern.fullmatch(question)
-                           for pattern in _GENERIC_FIX_PERMISSION_PATTERNS)]
-        if len(kept) != len(scope_questions):
+        for question in scope_questions:
+            kind, refs = _scope_question_kind(question, repo)
+            if kind is None:
+                kept.append(question)
+                continue
+            removed_kinds.append(kind)
+            if kind == "sequencing":
+                for ref in refs:
+                    if ref not in sequencing_refs:
+                        sequencing_refs.append(ref)
+                    if (ref not in reviewed["depends_on"]
+                            and ref not in added_dependencies):
+                        added_dependencies.append(ref)
+        if removed_kinds:
             reviewed["needs_nate"]["scope"] = kept or None
-            rejected.append(
-                "generic Scope permission to implement an agent-origin "
-                "Broken repair")
+
+    if added_dependencies:
+        reviewed["depends_on"].extend(added_dependencies)
+        rejected.append(
+            "agent-owned sequencing question recorded as depends_on: "
+            + ", ".join(added_dependencies))
+    scheduling_kinds = {"scheduling", "sequencing"}
+    if any(kind in scheduling_kinds for kind in removed_kinds):
+        _record_ordering_decision(reviewed, sequencing_refs)
+        rejected.append(
+            "agent-owned scheduling question (timing, priority, or "
+            "sequencing)")
+    if "permission" in removed_kinds:
+        rejected.append(
+            "generic Scope permission to implement agent-origin work")
 
     risks = reviewed["escalated_risk"]
     kept_risks = [entry for entry in risks
@@ -580,8 +765,9 @@ def review_shape_output_for_item(items: list, item, answer: Dict
     effective_klass = funnel.effective_class(item, by_ref)
     if item.klass not in funnel.LADDER and origin_voice == "agent":
         effective_klass = answer["proposed_class"]
-    return review_agent_broken_output(
-        answer, klass=effective_klass, origin_voice=origin_voice)
+    return review_agent_shape_output(
+        answer, klass=effective_klass, origin_voice=origin_voice,
+        repo=item.repo)
 
 
 def report_output_review(rejected: Sequence[str]) -> None:
@@ -712,8 +898,10 @@ def build_packet(*, repo: str, idea: Dict,
         "sibling_plans": [dict(row) for row in siblings],
         "collected_at": collected_at,
     }
-    if origin_voice == "agent" and idea.get("klass") == "Broken":
-        packet["output_review"] = dict(AGENT_BROKEN_OUTPUT_REVIEW)
+    if (origin_voice == "agent"
+            and idea.get("klass") in funnel.SELF_APPROVABLE_CLASSES):
+        packet["output_review"] = dict(
+            AGENT_SELF_APPROVABLE_OUTPUT_REVIEW)
     return packet
 
 

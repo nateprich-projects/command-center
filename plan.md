@@ -225,7 +225,24 @@ finish first. Passing a gate is a commitment and nothing may silently un-commit 
 explicit ordering call and outranks the ladder's default; it orders and nothing more,
 so the WIP-cap preemption stays with the finite classes. _(Nate, 2026-09-12: "that
 was always the intent of the prioritization"; until then a pin reached only his
-decision queue.)_
+decision queue.)_ **Finite work leads a pin:** a Broken or Maintenance ticket, or one
+that blocks such work, goes ahead of pinned work. _(Nate, 2026-09-25.)_
+
+**Repos are tiered, and the tier ranks above the Building commitment.** Tier 1 is the
+tooling that keeps everything else running (`command-center`, `github-runners`,
+`workbench`); tier 2 has real-world impact (`career-toolset`, `jeffy-finance-agent`);
+every other member repo is a hobby, tier 3. _(Nate, 2026-09-25: "Non-finite work in a
+higher tier repo shouldn't have to wait for non-finite work in a lower tier repo to
+complete just because that work happens to already be building.")_ A ticket that blocks
+higher-tier work takes that tier, as it takes that work's class. The full ticket order is:
+finite work first, then pinned work, then tier, then the Building commitment, then the
+ladder, then tickets that unblock more work, then longest waiting.
+
+The cost was stated and accepted: a hobby project already Building advances only when no
+higher-tier work is startable, which on 2026-09-24's board meant waiting behind 26 tier-1
+non-finite tickets. Nate chose to accept it and watch a week rather than add a starvation
+guard. _(2026-09-25.)_ The rejection of a strict ladder on in-flight work below still
+holds within a tier.
 
 Within one decision gate, the same ladder breaks class ties; gate depth still wins.
 

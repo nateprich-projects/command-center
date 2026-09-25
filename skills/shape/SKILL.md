@@ -88,6 +88,14 @@ the scheduling rule; classify by meaning, not keywords alone. Apply the rule
 only to agent-origin plans in the four classes above. Leave Nate-origin plans
 and `New` and `Replace` classes untouched.
 
+The shared engine enforces this rule in `engine/shape.py`. Keep this mirror
+aligned with its recorded `#258` replay and countercases in
+`tests/test_engine_shape.py`: a clear wait for a named ticket becomes
+`depends_on`; a real scope tradeoff, Exposure, Gates, Preference, and unclear
+questions remain open; Nate-origin plans and `New` and `Replace` classes stay
+untouched. The `#258` land-now decision advances without a dependency and
+keeps its recorded ordering decision.
+
 ```text
 - Gates: Who may write Ready?
 ```

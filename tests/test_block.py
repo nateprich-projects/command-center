@@ -23,6 +23,19 @@ def comment_item():
     )
 
 
+FF_WEEKLY_EVENT_COMMENT = '''**Blocked until event:**
+```json
+{
+  "agent": "codex",
+  "job": "command-center-tickets-hourly",
+  "outcome": "errored",
+  "after": "2026-09-22T00:00:00Z"
+}
+```
+Wait for the next genuine daily failure.
+'''
+
+
 def test_named_block_comment_returns_references_and_reason():
     assert funnel.parse_block_comment([
         "**Blocked on #84 and #90:** Wait for both decisions.",
@@ -56,6 +69,106 @@ def test_invalid_calendar_date_is_not_a_parseable_block_header():
 
     assert funnel.parse_block_comment([body]) is None
     assert funnel.unparseable_block_comment_lines([body]) == [body]
+
+
+def test_ff_weekly_start_sit_event_wait_is_quiet_and_not_startable(monkeypatch):
+    repo = "owner/FF-Weekly-Start-Sit"
+    parent = funnel.Item(
+        repo=repo, number=200, title="Project", url="", state="OPEN",
+        status="Ready", klass="Broken",
+    )
+    item = funnel.Item(
+        repo=repo, number=230, title="Daily failure wait", url="",
+        state="OPEN", parent=parent.ref, labels=["blocked"],
+        needs="external-event",
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_json",
+        lambda *args: {"comments": [{"body": FF_WEEKLY_EVENT_COMMENT}]},
+    )
+
+    funnel._load_block_comment(item)
+
+    assert item.block_event == {
+        "agent": "codex",
+        "job": "command-center-tickets-hourly",
+        "outcome": "errored",
+        "after": "2026-09-22T00:00:00Z",
+    }
+    assert item.block_reason == "Wait for the next genuine daily failure."
+    assert item.unparseable_block_comments == []
+    assert funnel.gate_question(item) is None
+    assert funnel.awaiting_decision([parent, item]) == []
+    assert funnel.startable([parent, item]) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "**Blocked until event:**\n```json\n{not json}\n```\nWait.",
+        "**Blocked until event:**\n```json\n"
+        '{"agent":"codex","job":"daily","outcome":"done",'
+        '"after":"2026-09-22T00:00:00Z"}\n```\nWait.',
+        "**Blocked until event:**\n```json\n"
+        '{"agent":"codex","job":"daily","outcome":"errored",'
+        '"after":"2026-02-30T00:00:00Z"}\n```\nWait.',
+        "**Blocked until event:**\n```json\n"
+        '{"agent":"codex","job":"daily","outcome":"errored",'
+        '"after":"2026-09-22T00:00:00Z","kind":"workflow"}\n```\nWait.',
+        "**Blocked until event:**\n```json\n"
+        '{"agent":"codex","job":"daily","outcome":"done",'
+        '"outcome":"errored","after":"2026-09-22T00:00:00Z"}\n```\nWait.',
+        "**Blocked until workflow:**\n```json\n"
+        '{"agent":"codex","job":"daily","outcome":"errored",'
+        '"after":"2026-09-22T00:00:00Z"}\n```\nWait.',
+    ],
+    ids=[
+        "invalid-json", "unsupported-outcome", "invalid-timestamp",
+        "unknown-field", "duplicate-field", "unknown-kind",
+    ],
+)
+def test_malformed_or_unknown_event_spec_fails_toward_unblock_question(
+    monkeypatch, body
+):
+    item = funnel.Item(
+        repo="owner/repo", number=754, title="Malformed event", url="",
+        state="OPEN", parent="owner/repo#1", labels=["blocked"],
+        needs="external-event",
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_json",
+        lambda *args: {"comments": [
+            {"body": "**Blocked until 2026-09-30:** Older date condition."},
+            {"body": body},
+        ]},
+    )
+
+    funnel._load_block_comment(item)
+
+    assert item.block_event is None
+    assert item.block_references == []
+    assert item.blocked_until is None
+    assert item.block_reason == "Wait."
+    assert item.unparseable_block_comments == [body.splitlines()[0]]
+    assert funnel.gate_question(item) == "Unblock?"
+    assert funnel.awaiting_decision([item]) == [item]
+
+
+def test_external_event_routing_without_a_spec_still_asks(monkeypatch):
+    item = funnel.Item(
+        repo="owner/repo", number=755, title="Unspecified event wait", url="",
+        state="OPEN", parent="owner/repo#1", labels=["blocked"],
+        needs="external-event",
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_json",
+        lambda *args: {"comments": [{"body": "**Blocked:** Wait for an event."}]},
+    )
+
+    funnel._load_block_comment(item)
+
+    assert item.block_reason == "Wait for an event."
+    assert funnel.gate_question(item) == "Unblock?"
 
 
 def test_future_date_block_is_quiet_and_carries_date_in_the_brief(

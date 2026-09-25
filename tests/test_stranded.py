@@ -412,8 +412,8 @@ def test_a_codex_decline_with_no_condition_is_stranded():
     )
 
 
-def test_a_reason_only_event_wait_is_stranded():
-    """FF#230: a parsed block with a reason but no reference or date."""
+def test_a_reason_only_external_event_wait_without_a_spec_asks_nate():
+    """Needs external-event cannot replace a parseable condition."""
     parent = _building(62)
     waiting = issue(63, parent="{}#62".format(REPO), labels=["blocked"],
                     needs="external-event",
@@ -421,7 +421,8 @@ def test_a_reason_only_event_wait_is_stranded():
 
     rows = funnel.stranded_items([parent, waiting], NOW)
 
-    assert [row["ref"] for row in rows] == ["{}#63".format(REPO)]
+    assert rows == []
+    assert funnel.gate_question(waiting) == "Unblock?"
 
 
 def test_blocks_with_a_clearable_condition_or_an_asker_are_not_stranded():

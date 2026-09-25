@@ -128,8 +128,9 @@ possible-defect question takes the class that fits its deliverable, never
 `Investigate`. When that work changes no behaviour, include the analysis marker
 above.
 
-Use `Investigate` to ask whether a possible defect exists, and include the
-`Possible defect:` line in the plan. Its deliverable is evidence, never the fix:
-follow-ups are new ideas, classed for the work and linked back. **Still his:**
-the class on anything *he* raises, and any reclassification. Propose, do not
-set.
+Use `Investigate` to ask whether a possible defect exists. Include exactly one
+non-empty whole line of the form `Possible defect: <statement>` in the plan,
+naming the defect whose existence the evidence will decide. This mirrors the
+engine check. Its deliverable is evidence, never the fix: follow-ups are new
+ideas, classed for the work and linked back. **Still his:** the class on
+anything *he* raises, and any reclassification. Propose, do not set.

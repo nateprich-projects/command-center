@@ -307,6 +307,23 @@ LADDER = ["Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"]
 #: `claim_ticket()` stays Broken-only: Maintenance may preempt ranking, not the
 #: cap (`test_maintenance_does_not_preempt_the_limit`).
 PREEMPTING_CLASSES = frozenset({"Broken", "Maintenance"})
+
+#: Repo tiers for the engineers' queue (Nate, 2026-09-25): 1 is the tooling
+#: that keeps everything else running, 2 has real-world impact, and every
+#: other member repo is a hobby at 3. Ranked below finite work and pins and
+#: above the Building commitment, so a hobby project already Building waits
+#: while higher-tier work is startable (plan.md, "Codex's work runs the
+#: ladder"). Keyed by repository name, without the owner.
+REPO_TIERS = {
+    "command-center": 1, "github-runners": 1, "workbench": 1,
+    "career-toolset": 2, "jeffy-finance-agent": 2,
+}
+HOBBY_TIER = 3
+
+
+def repo_tier(repo: str) -> int:
+    """A repository's tier; any repo not named in ``REPO_TIERS`` is a hobby."""
+    return REPO_TIERS.get(repo.rsplit("/", 1)[-1], HOBBY_TIER)
 PREEMPTING = {"Broken", "Maintenance"}
 
 #: Existing-work classes and finite investigations may take the unattended
@@ -2208,6 +2225,15 @@ def startable(
         ref: ladder_index(klass)
         for ref, klass in queue_classes(items, descendants).items()
     }
+    # A ticket that blocks higher-tier work takes that tier, as it takes the
+    # class above: otherwise tier-1 work would wait on its own prerequisite.
+    effective_tier = {
+        ref: min(
+            repo_tier(by_ref[related].repo)
+            for related in {ref} | descendants[ref]
+        )
+        for ref in by_ref
+    }
     # Membership, not a rank threshold: a class added above Broken in LADDER
     # (#130's Investigate) must not acquire preemption rights by position.
     # plan.md grants them only to the finite classes named in
@@ -2263,13 +2289,17 @@ def startable(
     def key(item: Item):
         since = question_since(item) or datetime.max.replace(tzinfo=timezone.utc)
         return (
-            0 if pinned_ancestor(item) else 1,
             # Finite classes preempt in-flight work of unbounded ones — the half
             # of plan.md's rule this key never implemented until #435. Measured
             # 2026-09-09: six Broken projects at Ready sat behind ten in-flight
             # Improve tickets all afternoon. Read through `effective_rank` so a
-            # ticket that blocks a Broken one preempts with it.
+            # ticket that blocks a Broken one preempts with it. Finite work
+            # leads a pin (Nate, 2026-09-25).
             0 if preempting[item.ref] else 1,
+            0 if pinned_ancestor(item) else 1,
+            # Above the Building commitment: higher-tier work need not wait
+            # for a lower tier's in-flight project (Nate, 2026-09-25).
+            effective_tier[item.ref],
             not in_flight(item),
             effective_rank[item.ref],
             # A blocker with the same effective rank as its dependent still

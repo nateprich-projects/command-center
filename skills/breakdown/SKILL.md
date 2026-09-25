@@ -26,6 +26,12 @@ tests" beats "add the parser" then "add the tests" then "wire it up".
 For a no-diff ticket, its `Accept` names the GitHub-artifact evidence channel the
 finish check verifies: a comment, rename event, closed PR, or posted measurement.
 
+An `Accept` that names a run outcome or a post-merge runtime fact names its
+evidence channel during breakdown: either a CI check that covers it or a
+`**Run evidence:**` PR comment in the canonical fenced-JSON form (command, exit
+status, output summary, and environment note). If no such channel is obtainable,
+re-scope the `Accept` during breakdown to what CI or the diff can prove.
+
 ### Inferred premises
 
 Before sizing a ticket, check whether its outcome depends on a plan premise

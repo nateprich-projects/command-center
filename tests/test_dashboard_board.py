@@ -290,20 +290,6 @@ def test_the_ladder_outranks_startable_work_for_unpinned_projects():
     assert [i["next_owner"] for i in column["items"]] == ["Muse", "Codex"]
 
 
-def test_within_a_class_the_engineers_queue_leads_then_gate_age():
-    from datetime import timedelta
-    older = project(number=2, title="older, human step", klass="Improve",
-                    status_since=NOW - timedelta(days=9))
-    startable = project(number=3, title="startable", klass="Improve",
-                        status_since=NOW)
-    found = rows([
-        older, startable,
-        ticket(21, parent=older.ref, needs="human"),
-        ticket(31, parent=startable.ref),
-    ])
-    assert _titles(found) == ["startable", "older, human step"]
-
-
 def test_the_bar_fills_from_the_left_whatever_the_queue_order():
     """#902: finished work reads as progress, so it leads the bar."""
     rows = funnel.dashboard_board(
@@ -471,20 +457,6 @@ def test_unfinished_rows_follow_the_bar_and_closed_rows_stay_last():
     assert [funnel._dashboard_pip_state(t) for t in open_rows] == (
         row["pips"][closed:]
     )
-
-
-def test_rows_in_review_lead_startable_rows_as_the_bar_does():
-    facts = {REPO + "#13": {"state": "OPEN", "number": 7, "headRefOid": "a"}}
-    row = funnel.dashboard_board(
-        [project(children_total=4), ticket(11), ticket(12),
-         ticket(13), ticket(14, open_blockers=[REPO + "#11"])],
-        NOW, pr_facts=facts,
-    )["columns"]
-    row = next(c for c in row if c["stage"] == "Building")["items"][0]
-    assert [t["number"] for t in row["tickets"]] == [13, 11, 12, 14]
-    assert row["pips"] == ["submitted", "open", "open", "queued"]
-    # The next step is still the engineers' next ticket, not the review.
-    assert row["next_owner"] == "Codex"
 
 
 def test_a_chain_from_open_work_leads_a_chain_from_outside():
@@ -680,21 +652,135 @@ def test_a_roster_naming_muse_alone_gives_muse_its_work_back(monkeypatch):
     assert found[0]["tickets"][0]["owner"] == "Muse"
 
 
-# Blocked projects never outrank work someone can act on (Nate, 2026-09-24):
-# "The only reason a blocked project should sit above an unblocked project is
-# if work in a project above it will unblock the blocked project."
+# The board is what comes next (Nate, 2026-09-24): "The dashboard should
+# simply be an accurate representation of what comes next, not a string of
+# contrived rules to make it appear to be an accurate representation."
+# ``projected_pull_order`` runs ``startable()`` forward; projects and their
+# open rows follow its turns, and what it never reaches sinks below.
 
 def _titles(found):
     return [row["title"] for row in found]
 
 
+def _turns(items):
+    return [
+        int(ref.rsplit("#", 1)[1])
+        for ref in funnel.projected_pull_order(items, NOW)
+    ]
+
+
+def test_the_projection_frees_work_as_it_goes():
+    a = project(number=2, title="A", klass="Broken")
+    b = project(number=3, title="B", klass="Improve")
+    c = project(number=4, title="C", klass="Improve")
+    items = [
+        a, b, c,
+        ticket(11, parent=a.ref),
+        # Startable only once #11 is done.
+        ticket(41, parent=b.ref, open_blockers=[REPO + "#11"]),
+        ticket(31, parent=c.ref),
+    ]
+    assert _turns(items) == [11, 31, 41]
+    # The board is that order, not "under whatever frees it".
+    assert _titles(rows(items)) == ["A", "C", "B"]
+
+
+def test_a_ticket_that_frees_more_work_goes_first_as_startable_says():
+    a = project(number=2, title="A", klass="Improve")
+    b = project(number=3, title="B", klass="Improve")
+    items = [
+        a, b,
+        ticket(11, parent=a.ref),
+        ticket(21, parent=b.ref),
+        ticket(22, parent=b.ref, open_blockers=[REPO + "#21"]),
+        ticket(23, parent=b.ref, open_blockers=[REPO + "#21"]),
+    ]
+    assert _turns(items) == [21, 11, 22, 23]
+    assert _titles(rows(items)) == ["B", "A"]
+
+
+def test_a_labelled_block_lifts_once_what_it_names_is_done():
+    a = project(number=2, title="A")
+    items = [
+        a,
+        ticket(11, parent=a.ref),
+        ticket(12, parent=a.ref, labels=["blocked"],
+               block_references=["#11"], block_reason=""),
+    ]
+    assert _turns(items) == [11, 12]
+
+
+def test_a_project_ref_clears_once_all_its_tickets_are_done():
+    a = project(number=2, title="A", children_total=2)
+    b = project(number=3, title="B")
+    items = [
+        a, b,
+        ticket(11, parent=a.ref),
+        ticket(12, parent=a.ref),
+        ticket(31, parent=b.ref, open_blockers=[a.ref]),
+    ]
+    assert _turns(items) == [11, 12, 31]
+
+
+def test_work_under_way_takes_its_turn_and_a_date_never_does():
+    a = project(number=2, title="A", children_total=4)
+    facts = {REPO + "#13": {"state": "OPEN", "number": 7, "headRefOid": "a"}}
+    items = [
+        a,
+        ticket(11, parent=a.ref, needs="human"),
+        ticket(12, parent=a.ref),
+        ticket(13, parent=a.ref),
+        ticket(14, parent=a.ref, labels=["blocked"], block_reason="",
+               blocked_until=datetime(2026, 12, 1).date()),
+    ]
+    assert _turns(items) == [11, 12, 13]
+    found = rows(items, facts)[0]
+    assert [t["number"] for t in found["tickets"]] == [11, 12, 13, 14]
+    assert [t["projected_turn"] for t in found["tickets"]] == [0, 1, 2, None]
+    # The next step is the first row's: Nate's human step.
+    assert found["next_owner"] == "Nate"
+    # Rows and pips agree.
+    assert found["pips"] == ["open", "open", "submitted", "blocked"]
+
+
+def test_unreached_projects_follow_in_gate_order_below_the_projection():
+    from datetime import timedelta
+    moving = project(number=2, title="new, moving", klass="New")
+    stuck_broken = project(number=3, title="broken, dated", klass="Broken",
+                           status_since=NOW - timedelta(days=1))
+    stuck_improve = project(number=4, title="improve, waits elsewhere",
+                            klass="Improve",
+                            status_since=NOW - timedelta(days=9))
+    found = rows([
+        stuck_improve, stuck_broken, moving,
+        ticket(21, parent=moving.ref),
+        ticket(31, parent=stuck_broken.ref, labels=["blocked"],
+               blocked_until=datetime(2026, 10, 1).date()),
+        ticket(41, parent=stuck_improve.ref, open_blockers=["other/repo#1"]),
+    ])
+    assert _titles(found) == [
+        "new, moving", "broken, dated", "improve, waits elsewhere",
+    ]
+
+
+def test_a_projection_failure_still_renders_the_board(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("projection")
+    monkeypatch.setattr(funnel, "projected_pull_order", boom)
+    stuck = project(number=2, title="stuck", klass="Broken",
+                    labels=["blocked"], block_references=[REPO + "#9"])
+    moving = project(number=3, title="moving", klass="Improve")
+    found = rows([stuck, moving, ticket(31, parent=moving.ref)])
+    assert _titles(found) == ["moving", "stuck"]
+
+
 def test_a_blocked_project_sits_below_every_project_that_can_move():
     from datetime import timedelta
-    # Broken outranks Improve on the ladder, but its only ticket waits on a
-    # date, while the Improve project's PR is Muse's to review right now.
+    # The stuck project has waited longer, but its only ticket waits on a
+    # date, while the other's PR is Muse's to review right now.
     stuck = project(number=2, title="stuck broken", klass="Broken",
                     status_since=NOW - timedelta(days=9))
-    moving = project(number=3, title="in review", klass="Improve",
+    moving = project(number=3, title="in review", klass="Broken",
                      status_since=NOW - timedelta(days=1))
     facts = {REPO + "#31": {"state": "OPEN", "number": 7, "headRefOid": "a"}}
     found = rows([
@@ -710,90 +796,9 @@ def test_a_blocked_project_sits_below_every_project_that_can_move():
     assert found[1]["next_step_blocked"] is True
 
 
-def test_a_blocked_project_slots_under_the_project_that_unblocks_it():
-    from datetime import timedelta
-    first = project(number=2, title="startable", klass="Improve",
-                    status_since=NOW - timedelta(days=1))
-    second = project(number=3, title="also startable", klass="Improve",
-                     status_since=NOW - timedelta(days=1))
-    # Waits on a ticket of "startable", so it follows that project directly
-    # and outranks "also startable"; the Broken human step leads on class.
-    waiting = project(number=4, title="waits on first", klass="New",
-                      status_since=NOW - timedelta(days=30))
-    human = project(number=5, title="human step", klass="Broken",
-                    status_since=NOW - timedelta(days=2))
-    found = rows([
-        first, second, waiting, human,
-        ticket(21, parent=first.ref),
-        ticket(31, parent=second.ref),
-        ticket(41, parent=waiting.ref, open_blockers=[REPO + "#21"]),
-        ticket(51, parent=human.ref, needs="human"),
-    ])
-    assert _titles(found) == [
-        "human step", "startable", "waits on first", "also startable",
-    ]
-
-
-def test_a_project_blocked_on_a_project_ref_follows_that_project_and_chains():
-    from datetime import timedelta
-    root = project(number=2, title="root", klass="Broken",
-                   status_since=NOW - timedelta(days=1))
-    other = project(number=3, title="other", klass="Improve",
-                    status_since=NOW - timedelta(days=1))
-    middle = project(number=4, title="middle", klass="Improve",
-                     status_since=NOW - timedelta(days=5))
-    leaf = project(number=5, title="leaf", klass="Broken",
-                   status_since=NOW - timedelta(days=5))
-    found = rows([
-        leaf, middle, other, root,
-        ticket(21, parent=root.ref, needs="human"),
-        ticket(31, parent=other.ref, needs="human"),
-        # Blocked by the project itself, not one of its tickets.
-        ticket(41, parent=middle.ref, open_blockers=[root.ref]),
-        ticket(51, parent=leaf.ref, open_blockers=[middle.ref]),
-    ])
-    assert _titles(found) == ["root", "middle", "leaf", "other"]
-
-
-def test_a_route_that_needs_two_projects_waits_for_the_later_one():
-    from datetime import timedelta
-    a = project(number=2, title="a", klass="Broken", status_since=NOW)
-    b = project(number=3, title="b", klass="Improve", status_since=NOW)
-    both = project(number=4, title="needs a and b", klass="Broken",
-                   status_since=NOW - timedelta(days=9))
-    found = rows([
-        a, b, both,
-        ticket(21, parent=a.ref, needs="human"),
-        ticket(31, parent=b.ref, needs="human"),
-        ticket(41, parent=both.ref,
-               open_blockers=[REPO + "#21", REPO + "#31"]),
-    ])
-    assert _titles(found) == ["a", "b", "needs a and b"]
-
-
-def test_any_one_ticket_clearing_is_enough_so_the_earliest_route_wins():
-    from datetime import timedelta
-    a = project(number=2, title="a", klass="Broken", status_since=NOW)
-    # "b" has waited longer, so only the route puts "either" above it.
-    b = project(number=3, title="b", klass="Improve",
-                status_since=NOW - timedelta(days=9))
-    either = project(number=4, title="either", klass="Improve",
-                     status_since=NOW)
-    found = rows([
-        a, b, either,
-        ticket(21, parent=a.ref, needs="human"),
-        ticket(31, parent=b.ref, needs="human"),
-        ticket(41, parent=either.ref, open_blockers=[REPO + "#31"]),
-        ticket(42, parent=either.ref, open_blockers=[REPO + "#21"]),
-        # A sibling-only wait adds no route of its own.
-        ticket(43, parent=either.ref, open_blockers=[REPO + "#41"]),
-    ])
-    assert _titles(found) == ["a", "either", "b"]
-
-
 def test_a_block_nothing_on_the_column_can_lift_sinks_to_the_bottom():
     from datetime import timedelta
-    moving = project(number=2, title="moving", klass="Improve",
+    moving = project(number=2, title="moving", klass="Broken",
                      status_since=NOW)
     offboard = project(number=3, title="waits elsewhere", klass="Broken",
                        status_since=NOW - timedelta(days=9))
@@ -811,30 +816,11 @@ def test_a_block_nothing_on_the_column_can_lift_sinks_to_the_bottom():
     assert [row["next_step_blocked"] for row in found] == [False, True, True]
 
 
-def test_a_blocked_projects_dependents_follow_it_to_the_bottom():
-    from datetime import timedelta
-    moving = project(number=2, title="moving", klass="New", status_since=NOW)
-    dated = project(number=3, title="dated", klass="Broken",
-                    status_since=NOW - timedelta(days=1))
-    after = project(number=4, title="after dated", klass="Broken",
-                    status_since=NOW - timedelta(days=9))
-    lone = project(number=5, title="lone", klass="Improve",
-                   status_since=NOW - timedelta(days=9),
-                   labels=["blocked"], block_reason="Waiting.")
-    found = rows([
-        after, lone, dated, moving,
-        ticket(21, parent=moving.ref),
-        ticket(31, parent=dated.ref, labels=["blocked"],
-               blocked_until=datetime(2026, 10, 1).date()),
-        ticket(41, parent=after.ref, open_blockers=[dated.ref]),
-    ])
-    assert _titles(found) == ["moving", "dated", "after dated", "lone"]
-
-
 def test_a_dependency_cycle_sinks_rather_than_recursing():
     a = project(number=2, title="a", klass="Broken", status_since=NOW)
     b = project(number=3, title="b", klass="Broken", status_since=NOW)
-    moving = project(number=4, title="moving", klass="New", status_since=NOW)
+    moving = project(number=4, title="moving", klass="Broken",
+                     status_since=NOW)
     found = rows([
         a, b, moving,
         ticket(21, parent=a.ref, open_blockers=[b.ref]),
@@ -885,7 +871,7 @@ def test_a_ticketless_blocked_project_sinks_in_a_gate_stage():
                       block_reason="Waiting.",
                       status_since=NOW - timedelta(days=9))
     waiting = project(number=3, title="at gate", status="Shaped",
-                      klass="Improve", status_since=NOW)
+                      klass="Broken", status_since=NOW)
     found = rows([blocked, waiting], stage="Shaped")
     assert _titles(found) == ["at gate", "blocked"]
     assert [row["next_step_blocked"] for row in found] == [False, True]
@@ -897,7 +883,7 @@ def test_a_ticketless_blocked_project_sinks_in_a_gate_stage():
 def test_a_blocker_that_cannot_move_itself_sends_its_dependent_to_the_bottom():
     x = project(number=2, title="X free", klass="Broken")
     y = project(number=3, title="Y free", klass="Improve")
-    b = project(number=4, title="B waits on x22", klass="Broken")
+    b = project(number=4, title="B waits on x22", klass="Improve")
     found = rows([
         x, y, b,
         ticket(21, parent=x.ref, needs="human"),
@@ -924,7 +910,7 @@ def test_a_condition_nothing_here_can_lift_sinks_the_project(
 ):
     x = project(number=6, title="X free", klass="Broken")
     y = project(number=7, title="Y free", klass="Improve")
-    z = project(number=8, title="Z", klass="Broken", **blocked_project)
+    z = project(number=8, title="Z", klass="Improve", **blocked_project)
     found = rows([
         x, y, z,
         ticket(61, parent=x.ref, needs="human"),
@@ -959,14 +945,3 @@ def test_finished_work_never_reads_blocked():
                    labels=["blocked"], closed_at=NOW)
     found = rows([done], stage="Done")
     assert found[0]["next_step_blocked"] is False
-
-
-def test_a_placement_failure_falls_back_to_plain_order(monkeypatch):
-    def boom(*args, **kwargs):
-        raise RuntimeError("placement")
-    monkeypatch.setattr(funnel, "_dependency_ref", boom)
-    stuck = project(number=2, title="stuck", klass="Broken",
-                    labels=["blocked"], block_references=[REPO + "#9"])
-    moving = project(number=3, title="moving", klass="Improve")
-    found = rows([stuck, moving, ticket(31, parent=moving.ref)])
-    assert _titles(found) == ["stuck", "moving"]

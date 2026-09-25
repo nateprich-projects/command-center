@@ -1,0 +1,8 @@
+{
+  "run": "no-diff-close-with-evidence",
+  "agent": "codex",
+  "phase": "finish",
+  "ts": 1790368200,
+  "outcome": "done",
+  "note": "no-diff close as completed; verified evidence: https://github.com/nateprich-projects/project/issues/12#issuecomment-91, https://github.com/nateprich-projects/project/pull/8, https://github.com/nateprich-projects/project/issues/9"
+}

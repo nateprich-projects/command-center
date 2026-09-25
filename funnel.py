@@ -39,8 +39,8 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
-from typing import (Any, Callable, Collection, Dict, Iterable, Iterator, List,
-                    Mapping, Optional, Sequence, Set, Tuple)
+from typing import (IO, Any, Callable, Collection, Dict, Iterable, Iterator,
+                    List, Mapping, Optional, Sequence, Set, Tuple)
 
 import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
@@ -14230,6 +14230,7 @@ def ticket_pr_facts(
 def review_queue(
     items: Sequence[Item], tier: Optional[str] = None,
     pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
+    output_stream: Optional[IO[str]] = None,
 ) -> List[Dict]:
     """Open ticket PRs that need a review, best-first.
 
@@ -14279,6 +14280,7 @@ def review_queue(
                             "ci": "unknown",
                             "head_sha": head_sha,
                         },
+                        output_stream=output_stream,
                     )
                 continue
             if checks_still_running(row.get("statusCheckRollup")):
@@ -14705,15 +14707,15 @@ def reconcile_approved_merges(
                         if row.get("number") == candidate["pr"]:
                             fact = row
                             break
-                code = _call_with_optional_keyword(
+                code = _call_with_optional_keywords(
                     cmd_merge,
-                    "pr_fact",
-                    fact,
                     items,
                     now,
                     candidate["repo"],
                     candidate["pr"],
                     True,
+                    pr_fact=fact,
+                    output_stream=sys.stderr,
                 )
         except GitHubError as exc:
             code = None
@@ -15465,8 +15467,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         print(json.dumps(out, indent=2))
         return 0
 
-    queue = _call_with_optional_keyword(
-        review_queue, "pr_facts", pr_facts, items, tier
+    queue = _call_with_optional_keywords(
+        review_queue, items, tier, pr_facts=pr_facts,
+        output_stream=sys.stderr,
     )
     # The fixed job order remains the tiebreak within a class group, but a
     # finite preempting class can cross stages. Build one candidate for each
@@ -15809,7 +15812,8 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
 def _write_verdict(repo: str, pr: int, sha: str, verdict: str, ci: str,
                    blocking: List[str], note: Optional[str],
                    run: Optional[str] = None,
-                   agent: Optional[str] = None) -> int:
+                   agent: Optional[str] = None,
+                   output_stream: Optional[IO[str]] = None) -> int:
     """Write the one structured verdict artifact shared by models and gates."""
 
     body = {
@@ -15834,7 +15838,8 @@ def _write_verdict(repo: str, pr: int, sha: str, verdict: str, ci: str,
     if out.returncode != 0:
         raise GitHubError(out.stderr.strip())
     print("recorded {} on PR #{} against {} in {}".format(
-        verdict, pr, sha[:12], repo))
+        verdict, pr, sha[:12], repo),
+        file=output_stream if output_stream is not None else sys.stdout)
     return 0
 
 
@@ -15863,6 +15868,7 @@ def _record_unmergeable_rejection(
     repo: str, pr: int, pr_fact: Optional[Mapping[str, object]] = None,
     *, candidate_verdict: Optional[Mapping[str, object]] = None,
     items: Optional[Sequence[Item]] = None,
+    output_stream: Optional[IO[str]] = None,
 ) -> None:
     """Record a deterministic rejection for a conflicting current head.
 
@@ -15905,9 +15911,11 @@ def _record_unmergeable_rejection(
         and current.get("blocking") == [reason]
     )
     if not already_canonical:
-        _write_verdict(
+        _call_with_optional_keywords(
+            _write_verdict,
             repo, pr, sha, "rejected", "unknown", [reason], None,
             agent=MERGE_GATE_AGENT,
+            output_stream=output_stream,
         )
 
     # Hand the ticket back when this head is rejected for its conflict. If a
@@ -16303,6 +16311,7 @@ def merge_blockers(
 def cmd_merge(
     items: List[Item], now: datetime, repo: Optional[str], pr: int,
     confirmed: bool, pr_fact: Optional[Mapping[str, object]] = None,
+    *, output_stream: Optional[IO[str]] = None,
 ) -> int:
     """Merge a PR, but only when every condition holds.
 
@@ -16322,7 +16331,8 @@ def cmd_merge(
     if why:
         if any(_is_conflicting_branch_blocker(reason) for reason in why):
             _record_unmergeable_rejection(
-                repo, pr, pr_fact=gate_fact, items=items
+                repo, pr, pr_fact=gate_fact, items=items,
+                output_stream=output_stream,
             )
         print("refusing to merge PR #{}:".format(pr), file=sys.stderr)
         for reason in why:

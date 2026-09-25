@@ -740,6 +740,86 @@ def test_investigate_is_explicitly_covered_by_agent_output_review():
         "origin agent")
 
 
+def test_improve_is_explicitly_covered_by_agent_output_review_and_close_policy():
+    assert "Improve" in funnel.SELF_APPROVABLE_CLASSES
+
+    item = idea(
+        1448, klass="Improve",
+        body=funnel.origin_block("agent", at=NOW, run="shape-run",
+                                 agent="muse"))
+    candidate = shape.validate_answer(answer(
+        proposed_class="Improve",
+        needs_nate={"exposure": None, "gates": None,
+                    "scope": ["Should we fix this?",
+                              "Should this happen now?"],
+                    "preference": None}))
+
+    reviewed, rejected = shape.review_shape_output_for_item(
+        [item], item, candidate)
+    status, reason = shape.decide(
+        reviewed, klass="Improve", origin_voice="agent")
+
+    assert reviewed["needs_nate"]["scope"] is None
+    assert any("generic Scope permission" in signal for signal in rejected)
+    assert any("scheduling" in signal for signal in rejected)
+    assert status == "Ready"
+    assert reason == "needs_nate all null; class Improve self-approvable; origin agent"
+
+    item.status = "Building"
+    item.children_total = 1
+    item.children_done = 1
+    assert funnel._auto_closeable_project(item)
+    assert funnel.gate_question(item) is None
+
+
+@pytest.mark.parametrize("klass", ["Broken", "Investigate", "Maintenance"])
+@pytest.mark.parametrize("origin", ["agent", "nate-direct", "nate-relayed"])
+def test_self_approvable_upkeep_classes_close_after_all_tickets(klass, origin):
+    item = idea(
+        1448, klass=klass, origin=origin,
+        body=(funnel.origin_block(
+            origin, at=NOW, run="shape-run",
+            agent="muse" if origin == "agent" else "nate")
+              if origin in funnel.ORIGIN_VOICES else ""),
+        status="Building", children_total=2, children_done=2)
+
+    assert klass in funnel.SELF_APPROVABLE_CLASSES
+    assert funnel._auto_closeable_project(item)
+    assert funnel.gate_question(item) is None
+
+
+@pytest.mark.parametrize(
+    ("origin", "can_close"),
+    [("agent", True), ("nate-direct", False), ("nate-relayed", False)],
+)
+def test_improve_auto_close_requires_agent_origin(origin, can_close):
+    item = idea(
+        1448, klass="Improve", origin=origin,
+        body=(funnel.origin_block(
+            origin, at=NOW, run="shape-run",
+            agent="muse" if origin == "agent" else "nate")
+              if origin in funnel.ORIGIN_VOICES else ""),
+        status="Building", children_total=2, children_done=2)
+
+    assert "Improve" in funnel.SELF_APPROVABLE_CLASSES
+    assert funnel._auto_closeable_project(item) is can_close
+    assert funnel.gate_question(item) == (None if can_close else "Accept it?")
+
+
+@pytest.mark.parametrize("klass", funnel.LADDER)
+def test_analysis_projects_still_wait_at_accept_for_every_class(klass):
+    body = "\n\n".join((
+        funnel.origin_block("agent", at=NOW, run="shape-run", agent="muse"),
+        funnel.ANALYSIS_MARKER + '\n```json\n{"analysis": true}\n```',
+    ))
+    item = idea(
+        1448, klass=klass, origin="agent", body=body,
+        status="Building", children_total=2, children_done=2)
+
+    assert not funnel._auto_closeable_project(item)
+    assert funnel.gate_question(item) == "Accept it?"
+
+
 def test_recorded_the_league_258_timing_decision_advances_without_dependency():
     repo = "nateprich-projects/The-League"
     item = idea(

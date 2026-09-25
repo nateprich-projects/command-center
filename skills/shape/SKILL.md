@@ -16,6 +16,24 @@ about settled precedent spends the attention this system protects. Use the
 [capability boundary](../../AGENTS.md#capability-boundary) closed-world
 test; unnamed gaps count.
 
+## Analysis plans wait by default
+
+A plan whose tickets change no behaviour and deliver a finding, measurement,
+review, comparison, or recommendation is analysis. It waits for Nate's
+acceptance whatever its Class or origin. Write this marker into the plan body
+while shaping:
+
+<!-- command-center-analysis -->
+
+```json
+{"analysis": true}
+```
+
+Apply the marker even to `Maintenance` and other upkeep classes; Class does not
+decide whether analysis waits. If Nate expressly exempts a particular analysis,
+write no marker and quote his exact words on the `Scope and priority` line in
+`Needs you` as the audit trail. Do not infer an exemption.
+
 ## The decision record
 
 Three separate sections; keep these names stable:

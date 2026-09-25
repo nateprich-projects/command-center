@@ -7,6 +7,7 @@ import json
 import pathlib
 import re
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -1565,6 +1566,40 @@ def test_ticket_branch_facts_failure_stops_with_an_error_gate(
     assert "could not establish ticket branch facts" in result["why"]
 
 
+def test_cmd_begin_uses_preloaded_branch_facts_and_records_parallel_time(
+    monkeypatch, capsys
+):
+    _allow_begin(monkeypatch)
+    project, ticket = _ticket(86, 87)
+    facts = {ticket.ref: {"branch_exists": True}}
+    merge_calls = []
+    timings = {}
+    monkeypatch.setattr(
+        funnel,
+        "ticket_pr_facts",
+        lambda rows: (_ for _ in ()).throw(
+            AssertionError("preloaded branch facts must be reused")
+        ),
+    )
+    monkeypatch.setattr(
+        funnel,
+        "reconcile_approved_merges",
+        lambda items, now, pr_facts: merge_calls.append(pr_facts) or [],
+    )
+    monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+
+    assert funnel.cmd_begin(
+        [project, ticket], NOW, "zcode", "standard", False,
+        _pr_facts=facts,
+        _pr_facts_elapsed=0.25,
+        timings=timings,
+    ) == 0
+
+    assert merge_calls == [facts]
+    assert timings["begin_load.ticket_pr_facts"] == pytest.approx(0.25)
+    capsys.readouterr()
+
+
 def test_two_same_minute_begins_claim_different_tickets(monkeypatch, capsys):
     first_project, first = _ticket(8, 7)
     second_project, second = _ticket(10, 9)
@@ -2005,7 +2040,8 @@ def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
         "cmd_begin",
         lambda items, now, agent, tier, idle, breakdown=False,
         repo_readiness=None, caller_role=None, _detail_loader=None,
-        _preflight=None: (
+        _preflight=None, _pr_facts=None, _pr_facts_error=None,
+        _pr_facts_elapsed=None, **kwargs: (
             received.append(repo_readiness) or 0
         ),
     )
@@ -2013,6 +2049,75 @@ def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
     tier = "escalated" if agent == "muse" else "standard"
     assert funnel.main(["begin", "--agent", agent, "--tier", tier]) == 0
     assert received == [rows, readiness]
+
+
+def test_main_runs_begin_reads_in_a_bounded_pool_and_merges_by_repo(
+    monkeypatch,
+):
+    from concurrent.futures import ThreadPoolExecutor as RealThreadPoolExecutor
+
+    _allow_begin(monkeypatch)
+    rows = []
+    repos = ["owner/repo{}".format(index) for index in range(6)]
+    for number, repo in enumerate(repos, start=80):
+        project, ticket = _ticket(number, number + 100)
+        project.repo = repo
+        ticket.repo = repo
+        rows.extend((project, ticket))
+
+    monkeypatch.setattr(
+        funnel, "load_items", lambda include_details=True: rows
+    )
+    branch_started = threading.Event()
+    faster_repo_finished = threading.Event()
+    completion_order = []
+    received = []
+    pool_sizes = []
+
+    def readiness_for_repo(repo):
+        assert branch_started.wait(timeout=2)
+        if repo == repos[0]:
+            assert faster_repo_finished.wait(timeout=2)
+        result = funnel.MemberRepoReadiness(
+            repo, topic=True, ci_workflow=True,
+            stock_labels=(), dependabot=True,
+        )
+        completion_order.append(repo)
+        if repo == repos[1]:
+            faster_repo_finished.set()
+        return result
+
+    def branch_facts(items):
+        assert items is rows
+        branch_started.set()
+        return {"snapshot": "ready"}
+
+    def tracking_pool(*, max_workers):
+        pool_sizes.append(max_workers)
+        return RealThreadPoolExecutor(max_workers=max_workers)
+
+    def capture_begin(
+        items, now, agent, tier, idle, breakdown=False,
+        repo_readiness=None, caller_role=None, **kwargs
+    ):
+        received.append((repo_readiness, kwargs))
+        return 0
+
+    monkeypatch.setattr(funnel, "_begin_repo_readiness", readiness_for_repo)
+    monkeypatch.setattr(funnel, "ticket_pr_facts", branch_facts)
+    monkeypatch.setattr(funnel, "ThreadPoolExecutor", tracking_pool)
+    monkeypatch.setattr(funnel, "cmd_begin", capture_begin)
+
+    assert funnel.main(["begin", "--agent", "codex", "--tier", "standard"]) == 0
+
+    assert pool_sizes == [funnel.BEGIN_FETCH_POOL_SIZE]
+    assert completion_order.index(repos[1]) < completion_order.index(repos[0])
+    readiness, kwargs = received[0]
+    assert list(readiness) == repos
+    assert list(readiness) == sorted(readiness)
+    assert kwargs["_pr_facts"] == {"snapshot": "ready"}
+    assert kwargs["_pr_facts_error"] is None
+    assert kwargs["_pr_facts_elapsed"] >= 0
 
 
 def test_begin_stop_reason_omits_breakdown_when_it_was_not_requested(

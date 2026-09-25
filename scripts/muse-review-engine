@@ -766,12 +766,6 @@ if [[ "$TIER" == "standard" ]]; then
   BEGIN_FLAGS="$BEGIN_FLAGS --breakdown"
 fi
 BEGIN_FLAGS="$BEGIN_FLAGS --role review"
-BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent "$AGENT" $BEGIN_FLAGS)"
-begin_status=$?
-if (( begin_status != 0 )); then
-  echo "muse-review-engine: funnel begin failed (exit $begin_status)" >&2
-  exit "$begin_status"
-fi
 
 begin_value() {
   local key="$1"
@@ -804,6 +798,23 @@ if value is None:
 print(value)
 ' "$key"
 }
+
+BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent "$AGENT" $BEGIN_FLAGS)"
+begin_status=$?
+if (( begin_status != 0 )); then
+  echo "muse-review-engine: funnel begin failed (exit $begin_status)" >&2
+  if BEGIN_RUN="$(begin_value run)" && [[ -n "$BEGIN_RUN" ]]; then
+    begin_why="$(begin_value why 2>/dev/null || true)"
+    begin_note="funnel begin failed (exit $begin_status)"
+    if [[ -n "$begin_why" ]]; then
+      begin_note="$begin_note: $begin_why"
+    fi
+    failure "$begin_note" || true
+  else
+    echo "muse-review-engine: could not finish failed begin (no run id)" >&2
+  fi
+  exit "$begin_status"
+fi
 
 if ! BEGIN_DO="$(begin_value do)" \
   || ! BEGIN_GATE="$(begin_value gate)" \

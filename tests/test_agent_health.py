@@ -307,6 +307,32 @@ def test_three_open_starts_keep_the_dying_condition():
 
     assert len(conditions) == 1
     assert "started and never finished" in conditions[0]
+    assert "Check whether the reserves in `usage.py` are too low." in conditions[0]
+
+
+def test_begin_timeout_finishes_are_classified_from_the_record():
+    rows = [
+        {
+            "run": "begin-timeout-{}".format(index),
+            "phase": "finish",
+            "ts": NOW.timestamp() - index * 60,
+            "agent": "muse",
+            "outcome": "errored",
+            "error_class": "begin-timeout",
+            "note": (
+                "funnel begin failed (exit 2): reply-timeout: FUNNEL_SESSION "
+                "busy past the 180s reply budget (slow command: begin)"
+            ),
+        }
+        for index in range(1, 4)
+    ]
+
+    conditions = assess("muse", rows, NOW.timestamp())
+
+    assert len(conditions) == 1
+    assert "3 begin-timeout errors this week" in conditions[0]
+    assert "slow command: begin" in conditions[0]
+    assert "usage.py" not in conditions[0]
 
 
 # -- provider park (#1172) --------------------------------------------------

@@ -190,7 +190,7 @@ def _issue_answer(job, **overrides):
 
 
 FUNNEL_STUB = (
-    "import os, pathlib, sys\n"
+    "import json, os, pathlib, sys\n"
     "CI_SUCCESS_CONCLUSIONS = ('SUCCESS', 'NEUTRAL', 'SKIPPED')\n"
     "CI_PENDING_STATES = ('EXPECTED', 'QUEUED', 'IN_PROGRESS', 'PENDING', 'WAITING')\n"
     "if __name__ == '__main__':\n"
@@ -204,6 +204,12 @@ FUNNEL_STUB = (
     "        (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
     "        (root / 'begin.zcode_session_id').write_text(os.environ.get('ZCODE_SESSION_ID', ''))\n"
     "        print((root / 'begin.json').read_text(), end='')\n"
+    "        status = int(os.environ.get('FUNNEL_STATUS', '0'))\n"
+    "        if status:\n"
+    "            begin = json.loads((root / 'begin.json').read_text())\n"
+    "            with (root / 'heartbeat.log').open('a') as fh:\n"
+    "                fh.write('start --agent {} --run {}\\n'.format(begin['agent'], begin['run']))\n"
+    "            raise SystemExit(status)\n"
     "    elif command == 'session-stop':\n"
     "        pass\n"
     "    else:\n"
@@ -850,6 +856,29 @@ def test_a_stop_with_a_why_records_the_note_and_names_it_on_stderr(tmp_path):
         "--note {}\n".format(why)
     )
     assert "muse-review-engine: begin stopped: {}".format(why) in proc.stderr
+
+
+def test_a_failed_begin_finishes_its_started_run_with_the_slow_command_note(
+        tmp_path):
+    why = (
+        "funnel: reply-timeout: FUNNEL_SESSION session busy past the 180s "
+        "reply budget (slow command: begin)"
+    )
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        _begin(run="begin-timeout-run", gate="unknown", do="stop", why=why),
+        _packet(),
+        extra_env={"FUNNEL_STATUS": "2"},
+    )
+
+    assert proc.returncode == 2
+    assert _muse_calls(repo) == 0
+    assert _heartbeat(repo).splitlines() == [
+        "start --agent muse --run begin-timeout-run",
+        "finish --agent muse --run begin-timeout-run --outcome errored "
+        "--note funnel begin failed (exit 2): {}".format(why),
+    ]
+    assert "funnel begin failed (exit 2)" in proc.stderr
 
 
 def test_an_unexpected_begin_job_finishes_the_started_run(tmp_path):

@@ -23,6 +23,32 @@ needs "and", or the plan's paragraph about it has sub-bullets each needing
 their own tests. Split by **behaviour, not by layer**: "parse X, with
 tests" beats "add the parser" then "add the tests" then "wire it up".
 
+### Inferred premises
+
+Before sizing a ticket, check whether its outcome depends on a plan premise
+labelled `inferred`. Check that premise before the dependent implementation;
+measured and documented premises are recorded but never block.
+
+- If the check is cheap and belongs in the same run, make it the ticket's
+  **first verification step**. State what evidence to record, then make the
+  implementation contingent on that result.
+- If the check is too large for the run or needs its own evidence-gathering
+  work, put it in a small separate `Investigate` project in `Ideas`, linked
+  back to the plan. The dependent ticket names that existing open project in
+  `depends_on` so implementation waits for the investigation.
+- `Class` belongs to the project. **A ticket carries no `Class`**, and this
+  routing adds no label or field. Use an existing issue reference; never
+  invent one.
+
+**Worked examples:** If an inferred claim is that a service accepts an
+idempotency key, the ticket starts with a single request that fits its normal
+test and records the response before implementation. If establishing the claim
+requires checking several supported service versions, capture a small
+`Investigate` project in `Ideas`
+and link it to the plan; the dependent implementation ticket lists that
+project's open issue reference in `depends_on`. The project carries
+`Class: Investigate`; the dependent ticket carries no `Class`.
+
 ## Ordering and independence
 
 Tickets should be workable in any order: one ticket per run, and the ladder

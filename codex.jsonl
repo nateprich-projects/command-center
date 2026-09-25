@@ -4048,3 +4048,4 @@
 {"agent": "codex", "note": "reconciled: released nateprich-projects/command-center#1506 after no ticket branch activity within 30 minutes", "outcome": "errored", "phase": "finish", "reconciled_claim": "nateprich-projects/command-center#1506", "run": "22e586bf5aa8", "ts": 1790362247}
 {"agent": "codex", "do": "ticket", "phase": "bind", "run": "cb9ce480ad2d", "ts": 1790362376, "work": "nateprich-projects/career-toolset#210"}
 {"agent": "codex", "api_cost": {"gh_calls": 105, "graphql_points": null}, "graphql_by_caller": {"begin": {"calls": 21, "points": 72, "remaining": 4422}, "unattributed": {"calls": 3, "points": null, "remaining": null}}, "phase": "api_cost", "run": "cb9ce480ad2d", "ts": 1790362383}
+{"agent": "codex", "api_cost": {"gh_calls": 44, "graphql_points": null}, "graphql_by_caller": {"unattributed": {"calls": 31, "points": null, "remaining": 4097}}, "phase": "api_cost", "run": "cb9ce480ad2d", "ts": 1790362706}

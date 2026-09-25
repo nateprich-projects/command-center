@@ -175,12 +175,15 @@ def test_a_passing_check_names_the_run_s_automation(tmp_path, monkeypatch):
 # --- begin ----------------------------------------------------------------
 
 
-def _begin(monkeypatch, capsys, settings):
+def _begin(monkeypatch, capsys, settings, job_recorder=None):
     monkeypatch.setattr(funnel, "_codex_settings_check", lambda: settings)
     monkeypatch.setattr(funnel, "_codex_memory_reset", REAL_MEMORY_RESET)
     monkeypatch.setattr(funnel, "_start_begin_heartbeat",
                         lambda agent: "run-id")
-    monkeypatch.setattr(heartbeat, "record_job", lambda *args: "pushed")
+    monkeypatch.setattr(
+        heartbeat, "record_job",
+        job_recorder or (lambda *args: "pushed"),
+    )
     monkeypatch.setattr(usage, "read_agent", lambda *args: {"windows": {}})
     monkeypatch.setattr(usage, "pace", lambda *args, **kwargs: {
         "over_pace": True})
@@ -207,16 +210,11 @@ def test_begin_records_the_launching_automation_name_on_its_run(
     automation = tmp_path / "command-center-tickets-hourly"
     automation.mkdir()
     recorded = []
-    monkeypatch.setattr(
-        heartbeat, "record_job",
-        lambda *args: recorded.append(args) or "pushed",
-    )
-
     _begin(monkeypatch, capsys, {
         "ok": True,
         "effective": {"model": "gpt-6-luna", "effort": "max"},
         "automation": str(automation),
-    })
+    }, job_recorder=lambda *args: recorded.append(args) or "pushed")
 
     assert recorded == [("codex", "run-id", "command-center-tickets-hourly")]
 

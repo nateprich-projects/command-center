@@ -1,0 +1,11 @@
+{
+  "source": "Issue #1503 captured begin stdout for PR #1501 on ticket/703",
+  "pr": {
+    "number": 1501,
+    "headRefName": "ticket/703",
+    "headRefOid": "6389cc6961da",
+    "state": "OPEN",
+    "mergeable": "CONFLICTING",
+    "verdict": null
+  }
+}

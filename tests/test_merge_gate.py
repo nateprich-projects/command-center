@@ -123,6 +123,47 @@ def test_the_newest_verdict_wins(monkeypatch):
     assert funnel.latest_verdict(REPO, 5)["verdict"] == "approved"
 
 
+def _wire_review_confirmation(monkeypatch):
+    wire(monkeypatch, pr(), [])
+    monkeypatch.setattr(
+        funnel,
+        "_run_gh",
+        lambda *args, **kwargs: type(
+            "Run", (), {"returncode": 0, "stdout": "", "stderr": ""}
+        )(),
+    )
+
+
+def test_review_cli_confirmation_remains_on_stdout(monkeypatch, capsys):
+    _wire_review_confirmation(monkeypatch)
+
+    assert funnel.cmd_review(
+        REPO, 5, "approved", "green", [], None, run="review-run",
+        agent="codex",
+    ) == 0
+
+    captured = capsys.readouterr()
+    assert "recorded approved on PR #5 against {} in {}".format(
+        SHA[:12], REPO
+    ) in captured.out
+    assert captured.err == ""
+
+
+def test_ordinary_review_rejection_remains_on_stdout(monkeypatch, capsys):
+    _wire_review_confirmation(monkeypatch)
+
+    assert funnel.cmd_review(
+        REPO, 5, "rejected", "green", ["needs a correction"], "review note",
+        run="review-run", agent="codex",
+    ) == 0
+
+    captured = capsys.readouterr()
+    assert "recorded rejected on PR #5 against {} in {}".format(
+        SHA[:12], REPO
+    ) in captured.out
+    assert captured.err == ""
+
+
 # -- the gate -----------------------------------------------------------------
 
 def test_everything_in_order_merges(monkeypatch):

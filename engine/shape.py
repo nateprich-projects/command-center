@@ -207,6 +207,35 @@ def _require_line(value: object, where: str) -> str:
     return re.sub(r"\s+", " ", _require_text(value, where))
 
 
+def _validate_investigate_possible_defect(plan_markdown: str) -> None:
+    """Require one explicit possible-defect statement for Investigate.
+
+    Only a whole line in the plan narrative counts. A malformed line that
+    starts with the marker also fails closed, even if another valid line is
+    present, so the answer cannot carry conflicting defect statements.
+    """
+    matching_lines = []
+    malformed_line = False
+    for raw_line in plan_markdown.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("Possible defect"):
+            continue
+        match = re.fullmatch(r"Possible defect:[ ]+(.+)", line)
+        if not match or not match.group(1).strip():
+            malformed_line = True
+            continue
+        if line.count("Possible defect:") != 1:
+            malformed_line = True
+            continue
+        matching_lines.append(line)
+
+    if malformed_line or len(matching_lines) != 1:
+        raise ShapeError(
+            "proposed_class Investigate requires exactly one non-empty "
+            "whole line of the form 'Possible defect: <statement>' "
+            "in plan_markdown")
+
+
 def _check_keys(entry: object, keys: Sequence[str], where: str) -> None:
     """Reject a mapping that is missing keys or carries unknown ones."""
     if not isinstance(entry, dict):
@@ -383,15 +412,20 @@ def validate_answer(data: object) -> Dict:
         raise ShapeError(
             "proposed_class {!r} is not a ladder class; choose one of "
             "{}".format(proposed, ", ".join(funnel.LADDER)))
+    decided_from_precedent = _validate_precedent(
+        data["decided_from_precedent"])
+    decided_by_agent = _validate_agent_decisions(
+        data["decided_by_agent"])
+    needs_nate = _validate_needs_nate(data["needs_nate"])
+    plan_markdown = _require_text(data["plan_markdown"], "plan_markdown")
+    if proposed == "Investigate":
+        _validate_investigate_possible_defect(plan_markdown)
     return {
-        "decided_from_precedent": _validate_precedent(
-            data["decided_from_precedent"]),
-        "decided_by_agent": _validate_agent_decisions(
-            data["decided_by_agent"]),
-        "needs_nate": _validate_needs_nate(data["needs_nate"]),
+        "decided_from_precedent": decided_from_precedent,
+        "decided_by_agent": decided_by_agent,
+        "needs_nate": needs_nate,
         "proposed_class": proposed,
-        "plan_markdown": _require_text(
-            data["plan_markdown"], "plan_markdown"),
+        "plan_markdown": plan_markdown,
         "escalated_risk": _validate_escalated_risk(
             data["escalated_risk"]),
         "depends_on": _validate_depends_on(data["depends_on"]),

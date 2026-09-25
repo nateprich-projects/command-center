@@ -302,6 +302,10 @@ APPLY_STUB = (
     "if os.environ.get('APPLY_REFUSE', ''):\n"
     "    sys.stderr.write('review-apply: packet head {} is not the current head deadbeef; re-collect the packet\\n'.format(flag('--head')))\n"
     "    raise SystemExit(1)\n"
+    "if os.environ.get('APPLY_LOCKED', ''):\n"
+    "    sys.stdout.write('review-apply: PR #{} in {} was already merged at head {} under the approved verdict from run superseding-run (agent muse); this run recorded no verdict\\n'.format(args[0], flag('--repo'), flag('--head')))\n"
+    "    sys.stdout.write('run outcome: skipped-locked\\n')\n"
+    "    raise SystemExit(0)\n"
     "(root / 'applied.marker').write_text('applied')\n"
     "print('recorded {} on PR #{} against {} in {}'.format(verdict, args[0], flag('--head'), flag('--repo')))\n"
 )
@@ -1369,6 +1373,22 @@ def test_a_moved_head_refusal_finishes_errored(tmp_path):
     assert "--outcome errored" in heartbeat
     assert "review-apply failed on PR #7" in heartbeat
     assert "not the current head" in heartbeat
+
+
+def test_an_approved_merge_by_another_run_finishes_skipped_locked(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), answers=_review_answers(_judge_answer()),
+        extra_env={"APPLY_LOCKED": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert len(_apply_calls(repo)) == 1
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat(repo)
+    assert "--outcome skipped-locked" in heartbeat
+    assert "superseding-run (agent muse)" in heartbeat
+    assert "head {}".format(HEAD) in heartbeat
+    assert "this run recorded no verdict" in heartbeat
+    assert "--review-result" not in heartbeat
 
 
 def test_a_run_past_the_bound_is_killed_and_finished_errored(tmp_path):

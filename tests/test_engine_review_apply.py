@@ -343,24 +343,42 @@ def test_only_a_clean_approval_decides_approved():
 class Wiring:
     """Capture the existing-path calls instead of touching GitHub."""
 
-    def __init__(self, monkeypatch, merge_code=0, head=SHA):
+    def __init__(self, monkeypatch, merge_code=0, head=SHA,
+                 review_error=None, pr_fact=None, state_error=None):
         self.reviews = []
+        self.review_attempts = []
         self.merges = []
+        self.state_reads = []
         self.merge_code = merge_code
         self.head = head
+        self.review_error = review_error
+        self.pr_fact = pr_fact
+        self.state_error = state_error
         monkeypatch.setattr(funnel, "resolve_repo", lambda repo: REPO)
         monkeypatch.setattr(funnel, "load_items", lambda: ["items"])
         monkeypatch.setattr(review_apply, "current_head",
                             lambda repo, pr: self.head)
         monkeypatch.setattr(funnel, "cmd_review", self._review)
         monkeypatch.setattr(funnel, "cmd_merge", self._merge)
+        monkeypatch.setattr(funnel, "_pr_fact_for_number", self._pr_fact)
 
     def _review(self, repo, pr, verdict, ci, blocking, note,
                 run=None, agent=None):
+        self.review_attempts.append({"repo": repo, "pr": pr,
+                                     "verdict": verdict, "run": run,
+                                     "agent": agent})
+        if self.review_error is not None:
+            raise self.review_error
         self.reviews.append({"repo": repo, "pr": pr, "verdict": verdict,
                              "ci": ci, "blocking": blocking, "note": note,
                              "run": run, "agent": agent})
         return 0
+
+    def _pr_fact(self, repo, pr, *, include_comments=True):
+        self.state_reads.append((repo, pr, include_comments))
+        if self.state_error is not None:
+            raise self.state_error
+        return self.pr_fact
 
     def _merge(self, items, now, repo, pr, confirmed):
         self.merges.append({"items": items, "repo": repo, "pr": pr,
@@ -466,6 +484,126 @@ def test_a_refused_merge_keeps_the_verdict_and_reports_failure(
     assert code == 1
     assert wiring.reviews[0]["verdict"] == "approved"
     assert wiring.merges[0]["confirmed"] is True
+
+
+def _review_comment(verdict="approved", head=SHA,
+                    run="superseding-run", agent="muse"):
+    body = "{}\n\n```json\n{}\n```\n\n{}".format(
+        funnel.REVIEW_MARKER,
+        json.dumps({"verdict": verdict, "head_sha": head}),
+        funnel.provenance_block("agent", run=run, agent=agent),
+    )
+    return {"body": body}
+
+
+def _merged_fact(comments, **kw):
+    fact = {"number": 7, "state": "MERGED", "headRefOid": SHA,
+            "mergedAt": "2026-09-24T16:51:00Z", "comments": comments}
+    fact.update(kw)
+    return fact
+
+
+def _run_refused_approval(monkeypatch, capsys, pr=7,
+                          current_run="current-run", current_agent="codex",
+                          **wiring_options):
+    wiring = Wiring(
+        monkeypatch,
+        review_error=funnel.GitHubError(
+            "PR #{} is MERGED, not open".format(pr)),
+        **wiring_options
+    )
+    code = run_cli(
+        monkeypatch, capsys,
+        [str(pr), "--repo", REPO, "--answer", "-", "--run", current_run,
+         "--agent", current_agent],
+        stdin=answer(),
+    )
+    return code, wiring
+
+
+def test_recorded_284_race_finishes_skipped_locked(
+        monkeypatch, capsys):
+    code, wiring = _run_refused_approval(
+        monkeypatch, capsys,
+        pr=284,
+        current_run="active-zcode-run",
+        current_agent="zcode",
+        pr_fact=_merged_fact(
+            [_review_comment(run="prior-claude-run", agent="claude")],
+            number=284,
+        ),
+    )
+
+    assert code == 0
+    assert wiring.review_attempts[0]["verdict"] == "approved"
+    assert wiring.reviews == []
+    assert wiring.merges == []
+    assert wiring.state_reads == [(REPO, 284, True)]
+    out = capsys.readouterr().out
+    assert review_apply.SKIPPED_LOCKED_OUTCOME in out
+    assert "head {}".format(SHA) in out
+    assert "prior-claude-run (agent claude)" in out
+    assert "this run recorded no verdict" in out
+
+
+@pytest.mark.parametrize(
+    "fact, expected",
+    [
+        (_merged_fact([]), "no readable covering approved verdict"),
+        (_merged_fact([_review_comment(head=OTHER_SHA)]),
+         "no covering approved verdict was found"),
+        (_merged_fact([_review_comment(verdict="rejected")]),
+         "latest verdict is rejected"),
+        (_merged_fact([_review_comment(run="current-run")]),
+         "does not identify another run and agent"),
+        ({"number": 7, "state": "CLOSED", "headRefOid": SHA,
+          "mergedAt": None, "comments": []}, "CLOSED unmerged"),
+        ({"number": 7, "state": "OPEN", "headRefOid": SHA,
+          "comments": []}, "state OPEN instead of MERGED"),
+    ],
+)
+def test_noncovering_or_unmerged_review_refusal_stays_failed(
+        monkeypatch, capsys, fact, expected):
+    code, wiring = _run_refused_approval(
+        monkeypatch, capsys, pr_fact=fact)
+
+    assert code == 1
+    assert wiring.reviews == []
+    assert wiring.merges == []
+    assert wiring.state_reads == [(REPO, 7, True)]
+    assert expected in capsys.readouterr().err
+
+
+def test_an_unreadable_pr_reread_fails_closed_without_a_verdict(
+        monkeypatch, capsys):
+    code, wiring = _run_refused_approval(
+        monkeypatch, capsys,
+        state_error=funnel.GitHubError("GitHub unavailable"),
+    )
+
+    assert code == 1
+    assert wiring.reviews == []
+    assert wiring.merges == []
+    assert wiring.state_reads == [(REPO, 7, True)]
+    assert "could not re-read PR #7" in capsys.readouterr().err
+
+
+def test_non_state_review_error_does_not_trigger_a_reread(
+        monkeypatch, capsys):
+    wiring = Wiring(
+        monkeypatch,
+        review_error=funnel.GitHubError("could not write the review comment"),
+    )
+    code = run_cli(
+        monkeypatch, capsys,
+        ["7", "--repo", REPO, "--answer", "-", "--run", "current-run"],
+        stdin=answer(),
+    )
+
+    assert code == 1
+    assert wiring.state_reads == []
+    assert wiring.reviews == []
+    assert "could not write the review comment" in capsys.readouterr().err
 
 
 def test_a_moved_head_records_nothing(monkeypatch, capsys):

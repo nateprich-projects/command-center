@@ -412,6 +412,15 @@ PY
   fi
 }
 
+finish_skipped_locked() {
+  local note="$1"
+  if ! python3 "$REPO/heartbeat.py" finish --agent "$AGENT" --run "$BEGIN_RUN" \
+      --outcome skipped-locked --note "$note"; then
+    echo "muse-review-engine: could not finish skipped-locked run" >&2
+    exit 1
+  fi
+}
+
 compact_json() {
   python3 -c '
 import json
@@ -1543,6 +1552,16 @@ while true; do
       >"$DIAG_FILE" 2>&1
   apply_status=$?
   if (( apply_status == 0 )); then
+    if grep -qx 'run outcome: skipped-locked' "$DIAG_FILE"; then
+      skip_note="$(grep '^review-apply: ' "$DIAG_FILE" | tail -n 1 | sed 's/^review-apply: //')"
+      if [[ -z "$skip_note" ]]; then
+        echo "muse-review-engine: skipped-locked apply omitted its finish note" >&2
+        failure "review-apply reported skipped-locked without a finish note on PR #$BEGIN_PR in $BEGIN_REPO" || true
+        exit 1
+      fi
+      finish_skipped_locked "$skip_note"
+      exit 0
+    fi
     VERDICT="$(recorded_verdict)"
     if [[ -z "$VERDICT" ]]; then
       VERDICT="recorded"

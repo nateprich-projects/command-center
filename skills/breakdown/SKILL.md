@@ -23,6 +23,9 @@ needs "and", or the plan's paragraph about it has sub-bullets each needing
 their own tests. Split by **behaviour, not by layer**: "parse X, with
 tests" beats "add the parser" then "add the tests" then "wire it up".
 
+For a no-diff ticket, its `Accept` names the GitHub-artifact evidence channel the
+finish check verifies: a comment, rename event, closed PR, or posted measurement.
+
 ### Inferred premises
 
 Before sizing a ticket, check whether its outcome depends on a plan premise

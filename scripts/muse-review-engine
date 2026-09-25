@@ -819,6 +819,9 @@ fi
 if ! BEGIN_DO="$(begin_value do)" \
   || ! BEGIN_GATE="$(begin_value gate)" \
   || ! BEGIN_RUN="$(begin_value run)"; then
+  printf 'muse-review-engine: begin stdout (first 300 bytes):\n' >&2
+  LC_ALL=C printf '%s' "$BEGIN_JSON" | LC_ALL=C head -c 300 >&2 || true
+  printf '\n' >&2
   echo "muse-review-engine: funnel begin returned invalid JSON" >&2
   exit 1
 fi

@@ -350,11 +350,59 @@ def test_session_client_reports_a_reply_timeout_as_a_busy_session(
     )
 
     assert funnel._session_client(["brief"]) == 2
-    assert capsys.readouterr().err == (
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
         "funnel: reply-timeout: FUNNEL_SESSION session busy past the 180s "
         "reply budget (slow command: brief): timed out\n"
     )
     assert connections == [180, 1]
+
+
+def test_session_client_rejects_a_partial_reply_without_forwarding_stdout(
+    monkeypatch, capsys
+):
+    monkeypatch.setenv(funnel.SESSION_ENV, "127.0.0.1:1234:token")
+
+    class PartialStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def write(self, payload):
+            return len(payload)
+
+        def flush(self):
+            pass
+
+        def readline(self, limit):
+            return b'{"code":0,"stdout":"partial late reply"'
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def makefile(self, mode):
+            return PartialStream()
+
+    timeouts = []
+
+    def connect(address, *, timeout):
+        timeouts.append(timeout)
+        return Connection()
+
+    monkeypatch.setattr(funnel.socket, "create_connection", connect)
+
+    assert funnel._session_client(["begin"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "funnel: invalid session response\n"
+    assert timeouts == [funnel.SESSION_TIMEOUT_SECONDS]
 
 
 def test_session_server_health_answers_while_a_command_is_busy():

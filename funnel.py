@@ -7834,6 +7834,23 @@ query($ids: [ID!]!) {
 }
 """
 
+
+def _item_detail_request(
+    ids: Sequence[str], child_ids: Sequence[str],
+) -> Tuple[str, Dict[str, List[str]], str, Optional[str]]:
+    """Assemble one batched document for history and optional child nodes.
+
+    History is fetched for every selected Project item in one ``nodes`` list.
+    Child timestamps share that GraphQL document when any selected item has
+    children; otherwise use the smaller history-only document.
+    """
+    variables = {"ids": list(ids)}
+    if child_ids:
+        variables["childIds"] = list(child_ids)
+        return ITEM_DETAILS_QUERY, variables, "history", "children"
+    return ITEM_TIMELINE_DETAILS_QUERY, variables, "nodes", None
+
+
 ITEM_LOCK_QUERY = """
 query($item: ID!) {
   rateLimit { cost remaining resetAt }
@@ -8814,21 +8831,22 @@ def hydrate_item_details(
     if not ids:
         return
 
+    child_id_set = set(child_ids)
     for start in range(0, len(ids), PROJECT_ITEM_DETAIL_BATCH_SIZE):
         batch = ids[start:start + PROJECT_ITEM_DETAIL_BATCH_SIZE]
-        child_batch = child_ids[start:start + PROJECT_ITEM_DETAIL_BATCH_SIZE]
-        if child_batch:
-            data = gh_graphql(
-                ITEM_DETAILS_QUERY,
-                ids=batch,
-                childIds=child_batch,
-            )
-            timeline_nodes = data.get("history") if isinstance(data, dict) else None
-            child_nodes = data.get("children") if isinstance(data, dict) else None
+        child_batch = [item_id for item_id in batch if item_id in child_id_set]
+        query, variables, history_field, child_field = _item_detail_request(
+            batch, child_batch
+        )
+        data = gh_graphql(query, **variables)
+        if not isinstance(data, dict):
+            timeline_nodes = None
+            child_nodes = None if child_field is not None else []
         else:
-            data = gh_graphql(ITEM_TIMELINE_DETAILS_QUERY, ids=batch)
-            timeline_nodes = data.get("nodes") if isinstance(data, dict) else None
-            child_nodes = []
+            timeline_nodes = data.get(history_field)
+            child_nodes = (
+                data.get(child_field) if child_field is not None else []
+            )
         if (
             not isinstance(timeline_nodes, list)
             or not isinstance(child_nodes, list)

@@ -13,8 +13,13 @@
     <header class="masthead">
       <div class="masthead-text">
         <p class="eyebrow">Command Center</p>
-        <h1>Funnel</h1>
+        <h1 id="page-heading">Funnel</h1>
+        <nav id="view-nav" class="view-nav" aria-label="Dashboard views">
+          <a class="view-tab" href="/?tab=funnel" data-tab="funnel" aria-current="page">Funnel</a>
+          <a class="view-tab" href="/?tab=execution" data-tab="execution">Execution</a>
+        </nav>
         <p id="snapshot-status" class="snapshot-status" role="status">Loading snapshot…</p>
+        <p id="metrics-status" class="snapshot-status" role="status" hidden>Loading metrics…</p>
       </div>
       <label class="repo-filter">
         <span class="repo-filter-label">Repository</span>
@@ -23,7 +28,7 @@
         </select>
       </label>
     </header>
-    <main>
+    <main id="funnel-view">
       <section class="panel" aria-labelledby="waiting-heading">
         <h2 id="waiting-heading" class="visually-hidden">Waiting on you</h2>
         <div id="waiting"></div>
@@ -46,6 +51,12 @@
           </div>
         </div>
         <div id="board"></div>
+      </section>
+    </main>
+    <main id="execution-view" aria-labelledby="execution-heading" hidden>
+      <section class="execution-section">
+        <h2 id="execution-heading" class="visually-hidden">Execution metrics</h2>
+        <div id="metrics-grid" class="metric-grid"></div>
       </section>
     </main>
     <template id="empty-state">

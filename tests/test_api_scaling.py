@@ -162,6 +162,40 @@ def test_project_item_query_uses_maximum_bounded_page():
     assert funnel.PROJECT_ITEM_PAGE_SIZE == 100
 
 
+def test_begin_load_adds_phase_durations_to_the_existing_timings_map(
+    monkeypatch,
+):
+    """Begin instrumentation reports phases without changing the query path."""
+    monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
+    monkeypatch.setattr(
+        funnel,
+        "gh_graphql",
+        lambda query, **variables: {
+            "user": {
+                "projectV2": {
+                    "items": {
+                        "nodes": [],
+                        "pageInfo": {
+                            "hasNextPage": False,
+                            "endCursor": None,
+                        },
+                    },
+                },
+            },
+        },
+    )
+    timings = {}
+
+    assert funnel.load_items(include_details=False, timings=timings) == []
+
+    assert set(timings) == {
+        "begin_load.member_repos",
+        "begin_load.project_items",
+        "begin_load.block_comments",
+    }
+    assert all(isinstance(value, float) and value >= 0 for value in timings.values())
+
+
 def test_doctor_reports_same_count_pagination_saving():
     """The doctor quotes #655 and measures the first:100 reduction."""
     result = funnel.check_project_pagination(319, 4)

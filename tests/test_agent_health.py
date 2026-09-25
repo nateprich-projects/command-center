@@ -17,6 +17,10 @@ from agent_health import assess  # noqa: E402
 
 NOW = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
 SILENCE_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "heartbeat_silence_window.json"
+ALREADY_MERGED_FINISH = (
+    pathlib.Path(__file__).parent / "fixtures" /
+    "already_merged_done_finish.json"
+)
 
 
 def _silence_fixture():
@@ -109,6 +113,34 @@ def test_healthy_heartbeat_rows_render_no_agent_health(monkeypatch):
     )
 
     assert funnel.agent_health(NOW) == []
+
+
+def test_already_merged_done_finish_stays_healthy_with_its_observation(
+        monkeypatch):
+    finish = json.loads(ALREADY_MERGED_FINISH.read_text())
+    now = datetime.fromtimestamp(finish["ts"] + 60, timezone.utc)
+    monkeypatch.setattr(heartbeat, "PROVIDERS", {finish["agent"]: "zai"})
+    monkeypatch.setattr(heartbeat, "RETIRED_AGENTS", frozenset())
+    monkeypatch.setattr(heartbeat, "read", lambda agent: [finish])
+
+    assert finish["outcome"] == "done"
+    assert finish["review_result"] == "approved"
+    assert "observed already-merged PR" in finish["note"]
+    assert (
+        "reviewed PR #7 in nateprich-projects/command-center at "
+        "abc123def456: approved"
+    ) in finish["note"]
+    observed = json.loads(
+        finish["note"].split("observed already-merged PR: ", 1)[1]
+    )
+    assert observed == {
+        "actor": "nate",
+        "head": "abc123def456",
+        "merged_at": "2026-09-25T02:43:19Z",
+        "pr": 7,
+    }
+    assert finish["merged"] == observed["pr"]
+    assert funnel.agent_health(now) == []
 
 
 def test_a_lane_held_by_a_tight_budget_raises_no_condition():

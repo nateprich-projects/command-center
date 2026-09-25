@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from fastmcp import FastMCP
-from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from fastmcp.server.auth import RemoteAuthProvider, StaticTokenVerifier
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -24,13 +24,18 @@ def build_server(config: Config) -> FastMCP:
             }
         }
     )
+    auth = RemoteAuthProvider(
+        token_verifier=token_verifier,
+        authorization_servers=[],
+        base_url=config.public_url,
+    )
     server = FastMCP(
         name="command-center",
         instructions=(
             "Command Center MCP server. This skeleton exposes no tools; its caller-auth "
             "boundary and streamable HTTP transport are verified before tools are added."
         ),
-        auth=token_verifier,
+        auth=auth,
     )
 
     @server.custom_route("/healthz", methods=["GET"])

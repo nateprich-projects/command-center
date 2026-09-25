@@ -376,6 +376,74 @@ def _durable_token_usage(
     return found
 
 
+def _muse_token_usage(
+    finish: Optional[Mapping[str, object]],
+    session_id: object,
+    started_at: Optional[datetime],
+    finished_at: Optional[datetime],
+) -> Tuple[Optional[Dict[str, Optional[int]]], Dict[str, object]]:
+    """Derive Muse usage from call ids and state whether that read is whole."""
+    if finish is None:
+        captured = int(isinstance(session_id, str) and bool(session_id))
+        return None, {
+            "status": "partial",
+            "captured_calls": captured,
+            "made_calls": None,
+            "readable_journals": None,
+            "unreadable_journals": None,
+            "uncaptured_calls": None,
+            "reasons": ["finish_record_missing"],
+        }
+
+    has_call_count = "muse_calls_made" in finish
+    has_session_list = "muse_session_ids" in finish
+    if has_call_count or has_session_list:
+        calls_made = finish.get("muse_calls_made")
+        if has_session_list:
+            session_ids = finish.get("muse_session_ids")
+        elif calls_made == 1:
+            # The first call remains bound by the existing start record. The
+            # finish record stores its count without duplicating that id.
+            session_ids = [session_id]
+        elif calls_made == 0:
+            session_ids = []
+        else:
+            session_ids = None
+        return session_usage.usage_for_sessions(
+            "muse",
+            session_ids,
+            calls_made,
+            started_at=started_at,
+            finished_at=finished_at,
+        )
+
+    durable = _durable_token_usage(finish)
+    if durable is not _NO_DURABLE_TOKEN_USAGE:
+        # Older finishes can contain only the first-call snapshot. With no
+        # calls-made count there is no evidence that it covers the run, and
+        # the missing later ids cannot be reconstructed after the fact.
+        captured = int(isinstance(session_id, str) and bool(session_id))
+        return None, {
+            "status": "partial",
+            "captured_calls": captured,
+            "made_calls": None,
+            "readable_journals": None,
+            "unreadable_journals": None,
+            "uncaptured_calls": None,
+            "reasons": ["legacy_call_count_not_recorded"],
+        }
+
+    # A finish without the newer list/count fields keeps the pre-existing
+    # single-session fallback. New single-call finishes carry calls_made=1.
+    return session_usage.usage_for_sessions(
+        "muse",
+        [session_id],
+        1,
+        started_at=started_at,
+        finished_at=finished_at,
+    )
+
+
 def _ticket_runs(
     ticket_ref: str,
     heartbeat_records: Mapping[str, Sequence[Mapping[str, object]]],
@@ -396,18 +464,24 @@ def _ticket_runs(
             session_id = start.get("session_id") or (
                 finish.get("session_id") if finish else None
             )
-            usage = _durable_token_usage(finish)
-            if usage is _NO_DURABLE_TOKEN_USAGE:
-                # Heartbeats written before #164 have no durable token
-                # snapshot. Keep those historical records readable, but new
-                # finishes never depend on local transcripts at report time.
-                usage = session_usage.usage_for_session(
-                    agent,
-                    session_id if isinstance(session_id, str) else None,
-                    started_at=started_at,
-                    finished_at=finished_at,
+            coverage = None
+            if agent == "muse":
+                usage, coverage = _muse_token_usage(
+                    finish, session_id, started_at, finished_at
                 )
-            found.append({
+            else:
+                usage = _durable_token_usage(finish)
+                if usage is _NO_DURABLE_TOKEN_USAGE:
+                    # Heartbeats written before #164 have no durable token
+                    # snapshot. Keep those historical records readable, but
+                    # new finishes do not depend on local transcripts.
+                    usage = session_usage.usage_for_session(
+                        agent,
+                        session_id if isinstance(session_id, str) else None,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                    )
+            run_row = {
                 "run": run,
                 "agent": agent,
                 "started_at": _timestamp_text(started_at),
@@ -419,7 +493,10 @@ def _ticket_runs(
                 "reasoning_effort": _run_metadata(start, finish, "reasoning_effort"),
                 "model_source": _run_metadata(start, finish, "model_source"),
                 "token_usage": usage,
-            })
+            }
+            if coverage is not None:
+                run_row["token_usage_coverage"] = coverage
+            found.append(run_row)
     found.sort(key=lambda row: (
         row.get("started_at") is None,
         row.get("started_at") or "",

@@ -1961,15 +1961,18 @@ def main(argv=None) -> int:
             "human_intervention_required": args.human_intervention or None,
             "repo": repo_state(),
             "runtime": runtime,
-            "token_usage": token_usage_for_run(
-                args.agent, records, run_id, finished_at
-            ),
             "api_cost": api_cost_for_run(records, run_id),
             "graphql_by_caller": graphql_by_caller_for_run(
                 records, run_id
             ),
             **detect_model(args.agent),
         }
+        if args.agent != "muse":
+            # Muse usage is derived from its session ids at read time. Do not
+            # freeze a first-session snapshot into the finish record.
+            record["token_usage"] = token_usage_for_run(
+                args.agent, records, run_id, finished_at
+            )
         job = job_for_run(records, run_id, args.agent)
         if job is not None:
             record["job"] = job
@@ -1983,12 +1986,12 @@ def main(argv=None) -> int:
         if args.muse_call_record is not None:
             if args.agent != "muse":
                 raise HeartbeatError("Muse call records require --agent muse")
+            record["muse_calls_made"] = args.muse_call_record["calls_made"]
             # A one-call run is already bound by the start record's session_id;
-            # keep its finish shape stable and add coverage fields when later
-            # calls need distinct ids.
+            # keep the id-list shape stable and add the list when later calls
+            # need distinct ids.
             if args.muse_call_record["calls_made"] > 1:
                 record["muse_session_ids"] = args.muse_call_record["session_ids"]
-                record["muse_calls_made"] = args.muse_call_record["calls_made"]
         metric = input_usage(args.agent)
         if metric is not None:
             record["input_usage"] = metric

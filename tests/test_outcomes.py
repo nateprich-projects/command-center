@@ -318,6 +318,236 @@ def test_ticket_run_recovers_an_all_null_durable_snapshot_from_its_session(
     assert record["token_usage"] == expected
 
 
+def test_muse_ticket_usage_sums_all_recorded_sessions_at_read_time(monkeypatch):
+    first = {
+        "fresh_input_tokens": 10,
+        "cache_read_input_tokens": 2,
+        "cache_write_input_tokens": 1,
+        "output_tokens": 3,
+    }
+    second = {
+        "fresh_input_tokens": 20,
+        "cache_read_input_tokens": 4,
+        "cache_write_input_tokens": 2,
+        "output_tokens": 5,
+    }
+    rows = {
+        "muse": [
+            {"run": "run-1", "phase": "start", "ts": 100,
+             "session_id": "muse-one"},
+            {"run": "run-1", "phase": "bind", "ts": 101,
+             "do": "ticket", "work": "owner/repo#42"},
+            {"run": "run-1", "phase": "finish", "ts": 110,
+             "outcome": "done", "muse_session_ids": [
+                 "muse-one", "muse-two"], "muse_calls_made": 2,
+             "token_usage": first},
+        ],
+    }
+    seen = []
+
+    def usage_for_session(agent, session_id, **kwargs):
+        seen.append((agent, session_id))
+        return {"muse-one": first, "muse-two": second}.get(session_id)
+
+    monkeypatch.setattr(
+        outcomes.session_usage, "usage_for_session", usage_for_session
+    )
+
+    runs = outcomes._ticket_runs("owner/repo#42", rows)
+    record = outcomes.derive_outcome(ticket(), run_observations=runs, now=NOW)
+
+    expected = {
+        "fresh_input_tokens": 30,
+        "cache_read_input_tokens": 6,
+        "cache_write_input_tokens": 3,
+        "output_tokens": 8,
+    }
+    assert seen == [("muse", "muse-one"), ("muse", "muse-two")]
+    assert runs[0]["token_usage"] == expected
+    assert runs[0]["token_usage_coverage"] == {
+        "status": "complete",
+        "captured_calls": 2,
+        "made_calls": 2,
+        "readable_journals": 2,
+        "unreadable_journals": 0,
+        "uncaptured_calls": 0,
+    }
+    assert record["token_usage"] == expected
+
+
+def test_muse_missing_journal_makes_outcome_partial_not_zero(monkeypatch):
+    expected = {
+        "fresh_input_tokens": 10,
+        "cache_read_input_tokens": 2,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 3,
+    }
+    rows = {
+        "muse": [
+            {"run": "run-1", "phase": "start", "ts": 100,
+             "session_id": "muse-one"},
+            {"run": "run-1", "phase": "bind", "ts": 101,
+             "do": "ticket", "work": "owner/repo#42"},
+            {"run": "run-1", "phase": "finish", "ts": 110,
+             "outcome": "done", "muse_session_ids": [
+                 "muse-one", "muse-missing"], "muse_calls_made": 2},
+        ],
+    }
+    monkeypatch.setattr(
+        outcomes.session_usage,
+        "usage_for_session",
+        lambda agent, session_id, **kwargs:
+            expected if session_id == "muse-one" else None,
+    )
+
+    runs = outcomes._ticket_runs("owner/repo#42", rows)
+    record = outcomes.derive_outcome(ticket(), run_observations=runs, now=NOW)
+
+    assert runs[0]["token_usage"] is None
+    assert runs[0]["token_usage_coverage"] == {
+        "status": "partial",
+        "captured_calls": 2,
+        "made_calls": 2,
+        "readable_journals": 1,
+        "unreadable_journals": 1,
+        "uncaptured_calls": 0,
+        "reasons": ["unreadable_session_journals_or_usage"],
+    }
+    assert record["token_usage"] is None
+
+
+def test_muse_uncaptured_call_reports_captured_versus_made(monkeypatch):
+    expected = {
+        "fresh_input_tokens": 10,
+        "cache_read_input_tokens": 2,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 3,
+    }
+    rows = {
+        "muse": [
+            {"run": "run-1", "phase": "start", "ts": 100,
+             "session_id": "muse-one"},
+            {"run": "run-1", "phase": "bind", "ts": 101,
+             "do": "ticket", "work": "owner/repo#42"},
+            {"run": "run-1", "phase": "finish", "ts": 110,
+             "outcome": "done", "muse_session_ids": [
+                 "muse-one", None, "muse-three"], "muse_calls_made": 3},
+        ],
+    }
+    monkeypatch.setattr(
+        outcomes.session_usage,
+        "usage_for_session",
+        lambda agent, session_id, **kwargs: expected,
+    )
+
+    runs = outcomes._ticket_runs("owner/repo#42", rows)
+
+    assert runs[0]["token_usage"] is None
+    assert runs[0]["token_usage_coverage"] == {
+        "status": "partial",
+        "captured_calls": 2,
+        "made_calls": 3,
+        "readable_journals": 2,
+        "unreadable_journals": 0,
+        "uncaptured_calls": 1,
+        "reasons": ["uncaptured_session_ids"],
+    }
+
+
+def test_muse_absent_session_list_uses_the_bound_single_session(monkeypatch):
+    expected = {
+        "fresh_input_tokens": 10,
+        "cache_read_input_tokens": 2,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 3,
+    }
+    rows = {
+        "muse": [
+            {"run": "run-1", "phase": "start", "ts": 100,
+             "session_id": "muse-one"},
+            {"run": "run-1", "phase": "bind", "ts": 101,
+             "do": "ticket", "work": "owner/repo#42"},
+            {"run": "run-1", "phase": "finish", "ts": 110,
+             "outcome": "done", "muse_calls_made": 1},
+        ],
+    }
+    seen = []
+    monkeypatch.setattr(
+        outcomes.session_usage,
+        "usage_for_session",
+        lambda agent, session_id, **kwargs:
+            seen.append((agent, session_id)) or expected,
+    )
+
+    runs = outcomes._ticket_runs("owner/repo#42", rows)
+
+    assert seen == [("muse", "muse-one")]
+    assert runs[0]["token_usage"] == expected
+    assert runs[0]["token_usage_coverage"]["status"] == "complete"
+    assert runs[0]["token_usage_coverage"]["captured_calls"] == 1
+    assert runs[0]["token_usage_coverage"]["made_calls"] == 1
+
+
+def test_malformed_muse_session_list_is_exposed_as_fault(monkeypatch):
+    rows = {
+        "muse": [
+            {"run": "run-1", "phase": "start", "ts": 100,
+             "session_id": "muse-one"},
+            {"run": "run-1", "phase": "bind", "ts": 101,
+             "do": "ticket", "work": "owner/repo#42"},
+            {"run": "run-1", "phase": "finish", "ts": 110,
+             "outcome": "done", "muse_session_ids": ["muse-one"],
+             "muse_calls_made": 2},
+        ],
+    }
+
+    def should_not_read_session(*args, **kwargs):
+        raise AssertionError("malformed list must fail closed before reading")
+
+    monkeypatch.setattr(
+        outcomes.session_usage, "usage_for_session", should_not_read_session
+    )
+
+    runs = outcomes._ticket_runs("owner/repo#42", rows)
+
+    assert runs[0]["token_usage"] is None
+    assert runs[0]["token_usage_coverage"]["status"] == "fault"
+    assert runs[0]["token_usage_coverage"]["reasons"] == [
+        "call_count_mismatch"
+    ]
+
+
+def test_legacy_muse_snapshot_without_call_count_is_not_run_total():
+    rows = {
+        "muse": [
+            {"run": "run-1", "phase": "start", "ts": 100,
+             "session_id": "muse-one"},
+            {"run": "run-1", "phase": "bind", "ts": 101,
+             "do": "ticket", "work": "owner/repo#42"},
+            {"run": "run-1", "phase": "finish", "ts": 110,
+             "outcome": "done", "token_usage": {
+                 "fresh_input_tokens": 10,
+                 "cache_read_input_tokens": 2,
+                 "cache_write_input_tokens": 0,
+                 "output_tokens": 3,
+             }},
+        ],
+    }
+
+    runs = outcomes._ticket_runs("owner/repo#42", rows)
+
+    assert runs[0]["token_usage"] is None
+    assert runs[0]["token_usage_coverage"] == {
+        "status": "partial",
+        "captured_calls": 1,
+        "made_calls": None,
+        "readable_journals": None,
+        "unreadable_journals": None,
+        "uncaptured_calls": None,
+        "reasons": ["legacy_call_count_not_recorded"],
+    }
+
+
 def test_ticket_run_with_unreadable_session_and_all_null_snapshot_stays_unknown(
         monkeypatch):
     rows = {

@@ -4159,3 +4159,4 @@
 {"agent": "codex", "job": "command-center-tickets-hourly", "phase": "job", "run": "ad5596c5e3ca", "ts": 1790372467}
 {"agent": "codex", "note": "GraphQL budget 495 is below the engineering floor of 826 (20 loads at 42 points; ceiling 826 points)", "outcome": "skipped-api-reserve", "phase": "event", "run": "ad5596c5e3ca", "ts": 1790372479}
 {"agent": "codex", "api_cost": {"gh_calls": 1, "graphql_points": 1}, "graphql_by_caller": {"begin": {"calls": 1, "points": 1, "remaining": 495}}, "phase": "api_cost", "run": "ad5596c5e3ca", "ts": 1790372482}
+{"agent": "codex", "api_cost": {"gh_calls": 39, "graphql_points": null}, "graphql_by_caller": {"unattributed": {"calls": 31, "points": null, "remaining": 476}}, "phase": "api_cost", "run": "8327e56c1f1c", "ts": 1790372489}

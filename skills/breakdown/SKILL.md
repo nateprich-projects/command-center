@@ -23,6 +23,41 @@ needs "and", or the plan's paragraph about it has sub-bullets each needing
 their own tests. Split by **behaviour, not by layer**: "parse X, with
 tests" beats "add the parser" then "add the tests" then "wire it up".
 
+For a no-diff ticket, its `Accept` names the GitHub-artifact evidence channel the
+finish check verifies: a comment, rename event, closed PR, or posted measurement.
+
+An `Accept` that names a run outcome or a post-merge runtime fact names its
+evidence channel during breakdown: either a CI check that covers it or a
+`**Run evidence:**` PR comment in the canonical fenced-JSON form (command, exit
+status, output summary, and environment note). If no such channel is obtainable,
+re-scope the `Accept` during breakdown to what CI or the diff can prove.
+
+### Inferred premises
+
+Before sizing a ticket, check whether its outcome depends on a plan premise
+labelled `inferred`. Check that premise before the dependent implementation;
+measured and documented premises are recorded but never block.
+
+- If the check is cheap and belongs in the same run, make it the ticket's
+  **first verification step**. State what evidence to record, then make the
+  implementation contingent on that result.
+- If the check is too large for the run or needs its own evidence-gathering
+  work, put it in a small separate `Investigate` project in `Ideas`, linked
+  back to the plan. The dependent ticket names that existing open project in
+  `depends_on` so implementation waits for the investigation.
+- `Class` belongs to the project. **A ticket carries no `Class`**, and this
+  routing adds no label or field. Use an existing issue reference; never
+  invent one.
+
+**Worked examples:** If an inferred claim is that a service accepts an
+idempotency key, the ticket starts with a single request that fits its normal
+test and records the response before implementation. If establishing the claim
+requires checking several supported service versions, capture a small
+`Investigate` project in `Ideas`
+and link it to the plan; the dependent implementation ticket lists that
+project's open issue reference in `depends_on`. The project carries
+`Class: Investigate`; the dependent ticket carries no `Class`.
+
 ## Ordering and independence
 
 Tickets should be workable in any order: one ticket per run, and the ladder

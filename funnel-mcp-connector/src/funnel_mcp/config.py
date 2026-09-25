@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 3003
+DEFAULT_PUBLIC_URL = "https://funnel-mcp.nateprich.com"
 MIN_TOKEN_LENGTH = 32
 
 
@@ -20,6 +22,7 @@ class Config:
     host: str
     port: int
     inbound_static_token: str
+    public_url: str = DEFAULT_PUBLIC_URL
 
 
 def load_config() -> Config:
@@ -39,8 +42,20 @@ def load_config() -> Config:
     if not 1 <= port <= 65535:
         raise ConfigError("PORT must be between 1 and 65535")
 
+    public_url = os.environ.get("PUBLIC_URL", DEFAULT_PUBLIC_URL).strip().rstrip("/")
+    parsed_public_url = urlsplit(public_url)
+    if (
+        parsed_public_url.scheme not in {"http", "https"}
+        or not parsed_public_url.hostname
+        or parsed_public_url.path
+        or parsed_public_url.query
+        or parsed_public_url.fragment
+    ):
+        raise ConfigError("PUBLIC_URL must be an HTTP(S) origin without a path")
+
     return Config(
         host=os.environ.get("HOST", DEFAULT_HOST),
         port=port,
         inbound_static_token=token,
+        public_url=public_url,
     )

@@ -19,6 +19,7 @@ import contextlib
 import contextvars
 import copy
 from collections import namedtuple
+from concurrent.futures import ThreadPoolExecutor
 import errno
 import glob
 import hmac
@@ -54,6 +55,11 @@ PROJECT_NUMBER = 2
 TOPIC = "command-center"
 OWNERS = [("user", "nateprich"), ("organization", "nateprich-projects")]
 REPO = "nateprich-projects/command-center"
+
+# The begin path has several independent, read-only GitHub fetches after its
+# batched Project load. Keep their concurrency bounded so a large portfolio
+# cannot turn one opening command into an unbounded request burst.
+BEGIN_FETCH_POOL_SIZE = 4
 
 # The local checks deliberately keep their paths as module-level values. Tests
 # can point them at a temporary checkout and home directory without ever
@@ -301,6 +307,23 @@ LADDER = ["Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"]
 #: `claim_ticket()` stays Broken-only: Maintenance may preempt ranking, not the
 #: cap (`test_maintenance_does_not_preempt_the_limit`).
 PREEMPTING_CLASSES = frozenset({"Broken", "Maintenance"})
+
+#: Repo tiers for the engineers' queue (Nate, 2026-09-25): 1 is the tooling
+#: that keeps everything else running, 2 has real-world impact, and every
+#: other member repo is a hobby at 3. Ranked below finite work and pins and
+#: above the Building commitment, so a hobby project already Building waits
+#: while higher-tier work is startable (plan.md, "Codex's work runs the
+#: ladder"). Keyed by repository name, without the owner.
+REPO_TIERS = {
+    "command-center": 1, "github-runners": 1, "workbench": 1,
+    "career-toolset": 2, "jeffy-finance-agent": 2,
+}
+HOBBY_TIER = 3
+
+
+def repo_tier(repo: str) -> int:
+    """A repository's tier; any repo not named in ``REPO_TIERS`` is a hobby."""
+    return REPO_TIERS.get(repo.rsplit("/", 1)[-1], HOBBY_TIER)
 PREEMPTING = {"Broken", "Maintenance"}
 
 #: Existing-work classes and finite investigations may take the unattended
@@ -699,6 +722,9 @@ class Item:
     satisfied_block_record: Optional[Dict[str, object]] = None
     open_blockers: List[str] = field(default_factory=list)
     dead_blockers: List[str] = field(default_factory=list)
+    # Complete native Issue.blockedBy refs from the Project item query.
+    # None means that the connection was missing, malformed, or truncated.
+    blocked_by_refs: Optional[List[str]] = None
     assignees: List[str] = field(default_factory=list)
     in_motion_since: Optional[datetime] = None
     item_id: Optional[str] = None  # the ProjectV2Item, needed to write the lock
@@ -2200,6 +2226,15 @@ def startable(
         ref: ladder_index(klass)
         for ref, klass in queue_classes(items, descendants).items()
     }
+    # A ticket that blocks higher-tier work takes that tier, as it takes the
+    # class above: otherwise tier-1 work would wait on its own prerequisite.
+    effective_tier = {
+        ref: min(
+            repo_tier(by_ref[related].repo)
+            for related in {ref} | descendants[ref]
+        )
+        for ref in by_ref
+    }
     # Membership, not a rank threshold: a class added above Broken in LADDER
     # (#130's Investigate) must not acquire preemption rights by position.
     # plan.md grants them only to the finite classes named in
@@ -2255,13 +2290,17 @@ def startable(
     def key(item: Item):
         since = question_since(item) or datetime.max.replace(tzinfo=timezone.utc)
         return (
-            0 if pinned_ancestor(item) else 1,
             # Finite classes preempt in-flight work of unbounded ones — the half
             # of plan.md's rule this key never implemented until #435. Measured
             # 2026-09-09: six Broken projects at Ready sat behind ten in-flight
             # Improve tickets all afternoon. Read through `effective_rank` so a
-            # ticket that blocks a Broken one preempts with it.
+            # ticket that blocks a Broken one preempts with it. Finite work
+            # leads a pin (Nate, 2026-09-25).
             0 if preempting[item.ref] else 1,
+            0 if pinned_ancestor(item) else 1,
+            # Above the Building commitment: higher-tier work need not wait
+            # for a lower tier's in-flight project (Nate, 2026-09-25).
+            effective_tier[item.ref],
             not in_flight(item),
             effective_rank[item.ref],
             # A blocker with the same effective rank as its dependent still
@@ -7272,20 +7311,52 @@ def check_member_repos(repos: Optional[Iterable[str]] = None) -> List[Check]:
 
 def repo_readiness_for_items(
     items: Iterable[Item],
+    *,
+    _executor=None,
 ) -> Dict[str, MemberRepoReadiness]:
     """Read onboarding and newest-run facts once per loaded repository."""
-    readiness: Dict[str, MemberRepoReadiness] = {}
-    for repo in sorted({item.repo for item in items}):
-        base = member_repo_readiness(repo)
-        state, annotation = latest_actions_run_probe(repo)
-        if state is not None:
-            base = replace(
-                base,
-                ci_state=state,
-                ci_annotation=annotation,
-            )
-        readiness[repo] = base
-    return readiness
+    repos = sorted({item.repo for item in items})
+    if _executor is None:
+        return {repo: _begin_repo_readiness(repo) for repo in repos}
+
+    # Submit independent repository reads to the caller's bounded begin pool.
+    # Collect in key order, not completion order, so both the mapping and the
+    # first reported failure are stable across runs.
+    futures = {
+        repo: _submit_begin_read(_executor, _begin_repo_readiness, repo)
+        for repo in repos
+    }
+    return {repo: futures[repo].result() for repo in repos}
+
+
+def _begin_repo_readiness(repo: str) -> MemberRepoReadiness:
+    """Read one repository's onboarding and newest-run facts."""
+    base = member_repo_readiness(repo)
+    state, annotation = latest_actions_run_probe(repo)
+    if state is not None:
+        base = replace(
+            base,
+            ci_state=state,
+            ci_annotation=annotation,
+        )
+    return base
+
+
+def _submit_begin_read(executor, function, *args):
+    """Submit a read while preserving the command's context variables."""
+    context = contextvars.copy_context()
+    return executor.submit(context.run, function, *args)
+
+
+def _timed_begin_pr_facts(items):
+    """Return a branch snapshot with the duration measured in its worker."""
+    started = time.perf_counter()
+    try:
+        return ticket_pr_facts(items), None, max(
+            0.0, time.perf_counter() - started
+        )
+    except GitHubError as exc:
+        return None, exc, max(0.0, time.perf_counter() - started)
 
 
 def _status_for_consistency(item: Item) -> str:
@@ -7757,6 +7828,7 @@ query($login: String!, $number: Int!, $cursor: String) {
               parent { number repository { nameWithOwner } }
               subIssuesSummary { total completed }
               blockedBy(first: 50) {
+                totalCount
                 nodes { number state stateReason repository { nameWithOwner } }
               }
             }
@@ -8758,6 +8830,46 @@ def _apply_item_detail_fields(
         _apply_item_timeline_fields(item, content)
 
 
+def _blocked_by_refs_from_connection(connection: object) -> Optional[List[str]]:
+    """Return complete native blocker refs, or None when unreadable.
+
+    A partial connection cannot prove an edge is absent, so callers that use
+    this list to avoid a duplicate write must fail closed on None.
+    """
+    if not isinstance(connection, dict):
+        return None
+    nodes = connection.get("nodes")
+    total = connection.get("totalCount")
+    if (
+        not isinstance(nodes, list)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or total < 0
+        or total != len(nodes)
+    ):
+        return None
+    refs = []
+    for blocker in nodes:
+        if not isinstance(blocker, dict):
+            return None
+        number = blocker.get("number")
+        repository = blocker.get("repository")
+        repo = (
+            repository.get("nameWithOwner")
+            if isinstance(repository, dict) else None
+        )
+        if (
+            not isinstance(number, int)
+            or isinstance(number, bool)
+            or number < 1
+            or not isinstance(repo, str)
+            or not repo.strip()
+        ):
+            return None
+        refs.append("{}#{}".format(repo, number))
+    return refs
+
+
 def _from_node(node: dict) -> Optional[Item]:
     content = node.get("content") or {}
     if not content.get("number"):
@@ -8794,6 +8906,9 @@ def _from_node(node: dict) -> Optional[Item]:
         closed_at=parse_time(content.get("closedAt")),
         item_id=node.get("id"),
         in_motion_since=parse_time((node.get("lock") or {}).get("text")),
+        blocked_by_refs=_blocked_by_refs_from_connection(
+            content.get("blockedBy")
+        ),
     )
     # Keep fixture and caller-supplied full nodes compatible while the live
     # paged query stays compact. A targeted read can apply these fields again.
@@ -15102,6 +15217,11 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                   Tuple[Dict[str, object], Optional[Dict[str, object]]]
               ] = None,
               timings: Optional[Dict[str, object]] = None,
+              _pr_facts: Optional[
+                  Mapping[str, Optional[Dict[str, object]]]
+              ] = None,
+              _pr_facts_error: Optional[GitHubError] = None,
+              _pr_facts_elapsed: Optional[float] = None,
               ) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
@@ -15160,9 +15280,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     # Keeping it here prevents the approved-merge pass, engineer hand-back, and
     # reviewer queue from each paying for the same repository fan-out.
     try:
-        pr_facts = _begin_load_timed(
-            timings, "ticket_pr_facts", lambda: ticket_pr_facts(items)
-        )
+        if _pr_facts_error is not None:
+            raise _pr_facts_error
+        if _pr_facts is not None:
+            pr_facts = _pr_facts
+        else:
+            pr_facts = _begin_load_timed(
+                timings, "ticket_pr_facts", lambda: ticket_pr_facts(items)
+            )
     except GitHubError as exc:
         out.update(
             do="stop",
@@ -15171,6 +15296,11 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         )
         print(json.dumps(out, indent=2))
         return 0
+    finally:
+        if _pr_facts_elapsed is not None:
+            _record_begin_load_phase(
+                timings, "ticket_pr_facts", _pr_facts_elapsed
+            )
 
     reconciled_merges = attempt_reconcile(
         "approved_merges", reconcile_approved_merges, items, now, pr_facts)
@@ -17073,20 +17203,42 @@ def main(argv: Optional[Sequence[str]] = None, *,
 
     try:
         repo_readiness = None
-        if (
-            args.command in ("next", "queue")
-            or (
-                args.command == "begin"
-                and begin_uses_ticket_path(
-                    args.agent, args.tier, args.caller_role
-                )
-            )
-        ):
+        begin_pr_facts = None
+        begin_pr_facts_error = None
+        begin_pr_facts_elapsed = None
+        if args.command in ("next", "queue"):
             repo_readiness = _begin_load_timed(
                 begin_timings,
                 "repo_readiness",
                 lambda: repo_readiness_for_items(items),
             )
+        elif (
+            args.command == "begin"
+            and begin_uses_ticket_path(
+                args.agent, args.tier, args.caller_role
+            )
+        ):
+            repos = sorted({item.repo for item in items})
+            pool_size = min(BEGIN_FETCH_POOL_SIZE, len(repos) + 1)
+            with ThreadPoolExecutor(max_workers=pool_size) as executor:
+                pr_facts_future = _submit_begin_read(
+                    executor, _timed_begin_pr_facts, items
+                )
+                repo_readiness = _begin_load_timed(
+                    begin_timings,
+                    "repo_readiness",
+                    lambda: _call_with_optional_keyword(
+                        repo_readiness_for_items,
+                        "_executor",
+                        executor,
+                        items,
+                    ),
+                )
+                (
+                    begin_pr_facts,
+                    begin_pr_facts_error,
+                    begin_pr_facts_elapsed,
+                ) = pr_facts_future.result()
         if args.command == "claim":
             return cmd_claim(
                 items, now, args.ref, pr_facts=ticket_pr_facts(items)
@@ -17148,6 +17300,12 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 cmd_begin, "timings"
             ):
                 begin_kwargs["timings"] = begin_timings
+            if begin_pr_facts_elapsed is not None:
+                begin_kwargs.update(
+                    _pr_facts=begin_pr_facts,
+                    _pr_facts_error=begin_pr_facts_error,
+                    _pr_facts_elapsed=begin_pr_facts_elapsed,
+                )
             return cmd_begin(
                 items, now, args.agent, args.tier, args.idle,
                 args.breakdown, **begin_kwargs

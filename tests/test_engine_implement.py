@@ -768,7 +768,7 @@ def test_finish_declined_open_prerequisite_records_only_native_edge(
     ]
 
 
-def test_finish_declined_routes_accept_conflict_to_review_without_blocking(
+def test_accept_body_conflict_branch_skips_blocked_label_and_routes_to_review(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
@@ -796,6 +796,7 @@ def test_finish_declined_routes_accept_conflict_to_review_without_blocking(
 
     assert result == {"ticket": REPO + "#42",
                       "declined": ACCEPT_BODY_CONFLICT_REASON}
+    # The Accept-body-conflict branch skips the `blocked` label and human hold.
     assert effects["blocked"] == []
     assert effects["needs"] == [
         ("agent", ticket()["url"], REPO + "#42")]

@@ -763,6 +763,62 @@ def test_unreached_projects_follow_in_gate_order_below_the_projection():
     ]
 
 
+def test_a_ticket_shows_the_class_it_ranks_as_and_what_it_unblocks():
+    """Nate, 2026-09-24, on #1424: an Improve project's ticket led the
+    Broken ones because three Broken tickets wait on it."""
+    plans = project(number=2, title="plans", klass="Improve",
+                    children_total=2)
+    review = project(number=3, title="review", klass="Broken",
+                     status="Ready", children_total=3)
+    found = rows([
+        plans, review,
+        ticket(24, parent=plans.ref),
+        ticket(23, parent=plans.ref),
+        ticket(65, parent=review.ref, open_blockers=[REPO + "#24"]),
+        ticket(67, parent=review.ref, open_blockers=[REPO + "#24"]),
+        ticket(66, parent=review.ref, open_blockers=[REPO + "#24"]),
+    ])[0]
+    by_number = {t["number"]: t for t in found["tickets"]}
+    assert by_number[24]["class"] == "Broken"
+    assert by_number[24]["unblocks"] == [
+        REPO + "#65", REPO + "#66", REPO + "#67",
+    ]
+    assert by_number[24]["unblocks_later"] == []
+    assert by_number[23]["class"] == "Improve"
+    assert by_number[23]["unblocks"] == []
+    # The class shown is the class startable() ranks by.
+    ranked = funnel.queue_classes([
+        plans, review, ticket(24, parent=plans.ref),
+        ticket(65, parent=review.ref, open_blockers=[REPO + "#24"]),
+    ])
+    assert ranked[REPO + "#24"] == "Broken"
+
+
+def test_the_rest_of_a_chain_is_unblocked_later():
+    """The live #1424 shape: #1465 waits on it, #1466 on #1465, #1467 on
+    #1466. Finishing #1424 frees #1465 alone; the rest follow."""
+    found = rows([
+        project(children_total=4),
+        ticket(24),
+        ticket(65, open_blockers=[REPO + "#24"]),
+        ticket(66, open_blockers=[REPO + "#65"]),
+        ticket(67, open_blockers=[REPO + "#66"]),
+    ])[0]
+    first = next(t for t in found["tickets"] if t["number"] == 24)
+    assert first["unblocks"] == [REPO + "#65"]
+    assert first["unblocks_later"] == [REPO + "#66", REPO + "#67"]
+
+
+def test_a_closed_ticket_carries_no_class_or_unblocks():
+    found = rows([
+        project(children_total=2),
+        ticket(11, state="CLOSED"),
+        ticket(12, open_blockers=[REPO + "#11"]),
+    ])[0]
+    closed = next(t for t in found["tickets"] if t["number"] == 11)
+    assert closed["class"] is None and closed["unblocks"] == []
+
+
 def test_a_projection_failure_still_renders_the_board(monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("projection")

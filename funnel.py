@@ -949,6 +949,18 @@ def gate_question(item: Item) -> Optional[str]:
     return None
 
 
+def _acceptance_waiting_reason(
+    item: Item, question: Optional[str]
+) -> Optional[str]:
+    """Explain why a completed Building project is still awaiting acceptance."""
+    if question != GATES["Building"]:
+        return None
+    body = item.body if isinstance(item.body, str) else ""
+    if ANALYSIS_MARKER in body:
+        return "Analysis review"
+    return "Ordinary accept"
+
+
 def question_since(item: Item) -> Optional[datetime]:
     """When the item's current question became live.
 
@@ -8914,6 +8926,8 @@ def class_display(item: Item, by_ref: Dict[str, Item]) -> str:
 def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = None) -> dict:
     by_ref = by_ref if by_ref is not None else {}
     breakdown = breakdown_latency(item)
+    question = gate_question(item)
+    acceptance_reason = _acceptance_waiting_reason(item, question)
     rendered = {
         "ref": item.ref,
         "repo": item.repo,
@@ -8921,7 +8935,7 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
         "url": item.url,
         "status": item.status,
         "class": effective_class(item, by_ref),
-        "waiting_on": gate_question(item),
+        "waiting_on": question,
         "waited": humanise(item.waited(now)),
         "waited_days": item.waited(now).days if item.waited(now) else None,
         "breakdown_latency": humanise(breakdown) if breakdown else None,
@@ -8933,6 +8947,8 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
         rendered["pinned"] = True
     if item.needs_decision is not None:
         rendered["needs_decision"] = item.needs_decision
+    if acceptance_reason is not None:
+        rendered["waiting_reason"] = acceptance_reason
     return rendered
 
 

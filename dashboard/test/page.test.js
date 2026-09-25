@@ -156,6 +156,14 @@ test("page code does not sort, filter, or reverse producer data", async () => {
   assert.doesNotMatch(withoutRepoOptions(source), /\.(?:sort|filter|reverse)\s*\(/);
 });
 
+test("decision rows display the producer's waiting reason", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const start = source.indexOf("function decisionRow(");
+  const row = source.slice(start, source.indexOf("\n}\n\nfunction humanStepRow", start));
+  assert.match(row, /item\.waiting_reason/);
+  assert.match(row, /chip\(item\.waiting_reason, "chip-reason"\)/);
+});
+
 test("the repository filter keeps producer order and drops only other repos", () => {
   const rows = [
     { ref: "o/b#3", repo: "b" },

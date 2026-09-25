@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shlex
 import stat
 import subprocess
@@ -504,7 +505,7 @@ MUSE_STUB = (
     "  } >> \"$MUSE_RUNDIR_PROBE\"\n"
     "fi\n"
     "if (( judge_call )) && [[ \"${MUSE_DYNAMIC_JUDGES:-0}\" == '1' ]]; then\n"
-    "  python3 - \"$prompt_file\" \"${MUSE_JUDGE_UNMET:-}\" \\\n      \"${MUSE_JUDGE_UNSURE:-}\" <<'PY'\n"
+    "  answer=\"$(python3 - \"$prompt_file\" \"${MUSE_JUDGE_UNMET:-}\" \\\n      \"${MUSE_JUDGE_UNSURE:-}\" <<'PY'\n"
     "import json, sys\n"
     "text = open(sys.argv[1]).read()\n"
     "marker = 'The assigned requirements are:\\n```json\\n'\n"
@@ -520,12 +521,43 @@ MUSE_STUB = (
     "                 'evidence': 'thing.py:1'})\n"
     "print(json.dumps({'requirements': rows}))\n"
     "PY\n"
-    "  exit \"${MUSE_STATUS:-0}\"\n"
+    ")\"\n"
+    "else\n"
+    "  varname=\"MUSE_ANSWER_$n\"\n"
+    "  answer=\"${!varname:-$MUSE_ANSWER}\"\n"
     "fi\n"
     "if [[ -n \"${MUSE_SLEEP:-}\" ]]; then exec sleep \"$MUSE_SLEEP\"; fi\n"
-    "varname=\"MUSE_ANSWER_$n\"\n"
-    "answer=\"${!varname:-$MUSE_ANSWER}\"\n"
-    "printf '%s' \"$answer\"\n"
+    "if [[ \"${MUSE_DELAY_CALL:-}\" == \"$n\" ]]; then sleep 0.2; fi\n"
+    "if [[ \"$1\" == 'exec' ]]; then\n"
+    "  session_id=\"\"\n"
+    "  previous=\"\"\n"
+    "  for argument in \"$@\"; do\n"
+    "    if [[ \"$previous\" == '--session-id' ]]; then session_id=\"$argument\"; fi\n"
+    "    previous=\"$argument\"\n"
+    "  done\n"
+    "  if [[ -z \"$session_id\" ]]; then session_id=\"stub-session-$n\"; fi\n"
+    "  if [[ \"${MUSE_NO_SESSION_EVENT_CALL:-}\" == \"$n\" ]]; then session_id=\"\"; fi\n"
+    "  python3 - \"$n\" \"$session_id\" \"$answer\" <<'PY'\n"
+    "import json, os, sys\n"
+    "call, session_id, answer = sys.argv[1:]\n"
+    "def event(sequence, kind, payload):\n"
+    "    row = {'sequence': sequence, 'payload_type': kind, 'payload': payload}\n"
+    "    if session_id:\n"
+    "        row['stream'] = {'kind': 'session', 'id': session_id}\n"
+    "    return row\n"
+    "rows = [\n"
+    "    event(1, 'run.model.configured', {'model': 'fixture'}),\n"
+    "    event(2, 'run.terminal.completed',\n"
+    "          {'terminal': 'completed', 'text': answer}),\n"
+    "]\n"
+    "if os.environ.get('MUSE_LATE_SESSION_EVENT_CALL') == call:\n"
+    "    rows.reverse()\n"
+    "for row in rows:\n"
+    "    print(json.dumps(row, separators=(',', ':')))\n"
+    "PY\n"
+    "else\n"
+    "  printf '%s' \"$answer\"\n"
+    "fi\n"
     "if [[ -n \"${MUSE_STDERR:-}\" ]]; then printf '%s' \"$MUSE_STDERR\" >&2; fi\n"
     "exit \"${MUSE_STATUS:-0}\"\n"
 )
@@ -600,6 +632,7 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
     (engine / "review.py").write_text((ROOT / "engine" / "review.py").read_text())
     (engine / "shape.py").write_text((ROOT / "engine" / "shape.py").read_text())
     (repo / "heartbeat.py").write_text(HEARTBEAT_STUB)
+    (repo / "muse_call.py").write_text((ROOT / "muse_call.py").read_text())
     (repo / "review-packet").write_text(PACKET_STUB)
     (repo / "review-apply").write_text(APPLY_STUB)
     # The real module, not a stub: the model tests below assert that the
@@ -653,9 +686,20 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
     return proc, repo
 
 
-def _heartbeat(repo):
+def _heartbeat(repo, *, include_muse_call_record=False):
     log = repo / "heartbeat.log"
-    return log.read_text() if log.exists() else ""
+    text = log.read_text() if log.exists() else ""
+    if include_muse_call_record:
+        return text
+    # Most assertions focus on the pre-existing outcome fields. The new call
+    # record is asserted explicitly where capture behavior is under test.
+    return re.sub(r" --muse-call-record \{[^\n]*\}", "", text)
+
+
+def _muse_call_record(repo):
+    text = _heartbeat(repo, include_muse_call_record=True)
+    match = re.search(r"--muse-call-record (\{[^\n]*\})", text)
+    return json.loads(match.group(1)) if match else None
 
 
 def _muse_calls(repo):
@@ -756,12 +800,13 @@ def test_the_runner_disables_every_model_tool():
     assert "--disable-shell" in body
     assert "--disable-write" in body
     assert "--disable-web-tools" in body
-    # No network sandbox flag: no tools remain that need it. No --json: the
-    # runner needs the raw answer on stdout, not a JSONL event stream. No
-    # approval mode: the on-request default stays, so a future tool outside
-    # the three disables could never be silently auto-allowed here.
+    # No network sandbox flag: no tools remain that need it. JSONL carries
+    # each Muse session id; muse_call.py extracts the terminal answer before
+    # the review parsers see it. No approval mode: the on-request default
+    # stays, so a future tool outside the three disables cannot be silently
+    # auto-allowed here.
     assert "--sandbox-network" not in body
-    assert "--json" not in body
+    assert "--json" in body
     assert "--approval-mode" not in body
     # The prompt travels by file: a diff can outgrow the argument limit.
     assert "--prompt-file" in body
@@ -1155,7 +1200,9 @@ def test_seven_requirements_reach_three_parallel_max_judges_once_each(tmp_path):
         tmp_path, _begin(), _packet(),
         answers=(_requirements_answer(*requirements),),
         extra_env={"MUSE_DYNAMIC_JUDGES": "1",
-                   "MUSE_JUDGE_BARRIER_COUNT": "3"})
+                   "MUSE_JUDGE_BARRIER_COUNT": "3",
+                   "MUSE_DELAY_CALL": "2",
+                   "MUSE_LATE_SESSION_EVENT_CALL": "3"})
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 4
@@ -1166,6 +1213,13 @@ def test_seven_requirements_reach_three_parallel_max_judges_once_each(tmp_path):
     assert [item for chunk in chunks for item in chunk] == requirements
     assert len(set(_cached_packet_from_judge_prompt(prompt)
                    for prompt in prompts)) == 1
+    call_record = _muse_call_record(repo)
+    assert call_record["calls_made"] == 4
+    assert call_record["session_ids"][0] == \
+        (repo / "begin.session_id").read_text()
+    assert set(call_record["session_ids"][1:]) == {
+        "stub-session-2", "stub-session-3", "stub-session-4",
+    }
     session_id = (repo / "begin.session_id").read_text()
     lister = (repo / "muse.args.1").read_text().splitlines()
     assert lister[lister.index("--session-id") + 1] == session_id
@@ -1181,6 +1235,20 @@ def test_seven_requirements_reach_three_parallel_max_judges_once_each(tmp_path):
         requirements
     assert [entry["status"] for entry in answer["requirements"]] == \
         ["met"] * 7
+
+
+def test_an_uncapturable_muse_call_is_recorded_as_null(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()),
+        extra_env={"MUSE_NO_SESSION_EVENT_CALL": "2"})
+
+    assert proc.returncode == 0, proc.stderr
+    record = _muse_call_record(repo)
+    assert record["calls_made"] == 2
+    assert record["session_ids"] == [
+        (repo / "begin.session_id").read_text(), None,
+    ]
 
 
 @pytest.mark.parametrize("failure_kind", ["failed", "timed out"])
@@ -1248,7 +1316,7 @@ def test_the_model_call_carries_the_exact_no_tool_shape(tmp_path):
         assert "--workspace" in invoked
         assert "--prompt-file" in invoked
         assert "--sandbox-network" not in invoked
-        assert "--json" not in invoked
+        assert "--json" in invoked
         assert "--approval-mode" not in invoked
     calls = (repo / "funnel.calls").read_text()
     # Standard asks begin for breakdown work too (#811); escalated reviews
@@ -1502,6 +1570,9 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     assert "--run engine-run" in calls[0]
     assert "--agent muse" in calls[0]
     assert (repo / "applied.marker").exists()
+    # This one-call shape already binds its session id on the start record.
+    assert (repo / "begin.session_id").read_text()
+    assert _muse_call_record(repo) is None
     assert _heartbeat(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note shaped {}: Ready (self-approved: agent idea, finite "
@@ -1560,7 +1631,7 @@ def test_the_issue_model_call_carries_the_no_tool_shape(tmp_path):
     assert "--workspace" in invoked
     assert "--prompt-file" in invoked
     assert "--sandbox-network" not in invoked
-    assert "--json" not in invoked
+    assert "--json" in invoked
     assert "--approval-mode" not in invoked
 
 

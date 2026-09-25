@@ -112,6 +112,7 @@ REPO="${MUSE_REVIEW_ENGINE_REPO:-/Users/nateprich/.claude/command-center-run}"
 # sibling of this runner, like the quota-hold helper below.
 MUSE_BIN="${MUSE_BIN:-$HOME/.local/bin/muse}"
 ZAI_EXEC_BIN="${ZAI_EXEC_BIN:-${BASH_SOURCE[0]%/*}/zai-exec}"
+MUSE_CALL_BIN="$REPO/muse_call.py"
 GH_BIN="${GH_BIN:-gh}"
 BOUND_SECONDS="${MUSE_REVIEW_ENGINE_BOUND_SECONDS:-1200}"
 # zai-exec's own network deadline sits inside the bound, so a slow reply ends
@@ -177,6 +178,10 @@ if ! PROMPT_BREAKDOWN="$(check_routine "$ROUTINE_BREAKDOWN")"; then
   exit 1
 fi
 if ! PROMPT_SHAPE="$(check_routine "$ROUTINE_SHAPE")"; then
+  exit 1
+fi
+if [[ "$BACKEND" == "muse" && ! -r "$MUSE_CALL_BIN" ]]; then
+  echo "muse-review-engine: cannot read $MUSE_CALL_BIN — refusing to run without Muse session capture" >&2
   exit 1
 fi
 
@@ -289,8 +294,10 @@ export FUNNEL_SESSION
 # the first call only: an undercount, not the whole run (#1413).
 MUSE_SESSION_BOUND=0
 if [[ "$BACKEND" == "muse" ]]; then
-  MUSE_EXEC=("$MUSE_BIN" exec)
-  MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec)
+  # JSONL exposes stream.id; muse_call.py keeps only the terminal answer for
+  # the review parsers and records one capture slot per invocation.
+  MUSE_EXEC=("$MUSE_BIN" exec --json)
+  MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec --json)
   if MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null)" \
     && [[ -n "$MUSE_SESSION_ID" ]]; then
     export MUSE_SESSION_ID
@@ -322,12 +329,22 @@ trap cleanup EXIT
 # diagnostic, while the full stderr remains in the schedule's error log.
 failure() {
   local note="$1"
+  local muse_call_record
+  local -a finish_args
   if [[ -z "$BEGIN_RUN" ]]; then
     echo "muse-review-engine: $note (no run id to finish)" >&2
     return 1
   fi
-  if ! python3 "$REPO/heartbeat.py" finish --agent "$AGENT" --run "$BEGIN_RUN" \
-      --outcome errored --note "$note"; then
+  finish_args=(finish --agent "$AGENT" --run "$BEGIN_RUN" \
+    --outcome errored --note "$note")
+  if [[ "$BACKEND" == "muse" ]]; then
+    muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR" \
+      "${MUSE_SESSION_ID:-}")" || return 1
+    if [[ -n "$muse_call_record" ]]; then
+      finish_args+=(--muse-call-record "$muse_call_record")
+    fi
+  fi
+  if ! python3 "$REPO/heartbeat.py" "${finish_args[@]}"; then
     echo "muse-review-engine: could not finish errored run" >&2
     return 1
   fi
@@ -406,6 +423,14 @@ PY
   if [[ "$review_result" == "approved" || "$review_result" == "rejected" ]]; then
     finish_args+=(--review-result "$review_result")
   fi
+  if [[ "$BACKEND" == "muse" ]]; then
+    local muse_call_record
+    muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR" \
+      "${MUSE_SESSION_ID:-}")" || exit 1
+    if [[ -n "$muse_call_record" ]]; then
+      finish_args+=(--muse-call-record "$muse_call_record")
+    fi
+  fi
   if ! python3 "$REPO/heartbeat.py" "${finish_args[@]}"; then
     echo "muse-review-engine: could not finish the run" >&2
     exit 1
@@ -482,6 +507,8 @@ call_model_files() {
   local answer_path="$2"
   local diag_path="$3"
   local killed_marker
+  local raw_answer_path=""
+  local muse_capture_path=""
   # Split from the declaration: `local x=$(...)` would mask mktemp's status.
   # In the run directory with everything else, so the EXIT trap's one `rm -rf`
   # sweeps it too. #1233 makes several model calls per run, so this name is
@@ -502,9 +529,16 @@ call_model_files() {
     if (( MUSE_SESSION_BOUND == 0 )); then
       muse_exec=("${MUSE_EXEC[@]}")
       MUSE_SESSION_BOUND=1
+      muse_capture_path="$RUN_DIR/muse-call-first"
+      printf 'null\n' >"$muse_capture_path"
     else
       muse_exec=("${MUSE_EXEC_UNBOUND[@]}")
+      if ! muse_capture_path="$(mktemp "$RUN_DIR/muse-call-later.XXXXXX")"; then
+        return 1
+      fi
+      printf 'null\n' >"$muse_capture_path"
     fi
+    raw_answer_path="${answer_path}.muse-jsonl"
     "${muse_exec[@]}" \
       --model "$MUSE_MODEL" \
       --reasoning-effort "$EFFORT" \
@@ -514,7 +548,7 @@ call_model_files() {
       --max-model-steps 60 \
       --no-foreign-personal-context \
       --workspace "$WORKSPACE" \
-      --prompt-file "$prompt_path" >"$answer_path" 2>"$diag_path" &
+      --prompt-file "$prompt_path" >"$raw_answer_path" 2>"$diag_path" &
   fi
   local muse_pid=$!
   (
@@ -533,6 +567,13 @@ call_model_files() {
   local bound_pid=$!
   wait "$muse_pid"
   local status=$?
+  if [[ "$BACKEND" == "muse" ]]; then
+    # Read the complete stream after this invocation stops. Background tool
+    # results can arrive late, and parallel calls can complete out of order;
+    # each invocation has its own capture slot.
+    python3 "$MUSE_CALL_BIN" capture "$raw_answer_path" "$answer_path" \
+      "$muse_capture_path" || printf 'null\n' >"$muse_capture_path"
+  fi
   if [[ -e "$killed_marker" ]]; then
     wait "$bound_pid" 2>/dev/null
     rm -f "$killed_marker"
@@ -583,9 +624,18 @@ model_failed() {
   elif MUSE_QUOTA_RESET="$(muse_quota_record "$DIAG_FILE")"; then
     echo "muse-review-engine: Muse's provider quota is exhausted; parking every lane until $MUSE_QUOTA_RESET" >&2
     if [[ -n "${BEGIN_RUN:-}" ]]; then
-      python3 "$REPO/heartbeat.py" finish --agent "$AGENT" --run "$BEGIN_RUN" \
-        --outcome skipped-provider-quota \
-        --note "provider quota exhausted until $MUSE_QUOTA_RESET" >&2 || true
+      local muse_call_record
+      local -a quota_finish_args=(
+        finish --agent "$AGENT" --run "$BEGIN_RUN"
+        --outcome skipped-provider-quota
+        --note "provider quota exhausted until $MUSE_QUOTA_RESET"
+      )
+      muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR" \
+        "${MUSE_SESSION_ID:-}")" || true
+      if [[ -n "$muse_call_record" ]]; then
+        quota_finish_args+=(--muse-call-record "$muse_call_record")
+      fi
+      python3 "$REPO/heartbeat.py" "${quota_finish_args[@]}" >&2 || true
     fi
     exit 0
   fi

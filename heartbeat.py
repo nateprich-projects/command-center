@@ -172,6 +172,36 @@ def _optional_text(value: str) -> Optional[str]:
     return value if value else None
 
 
+def _muse_call_record(value: str) -> Dict[str, object]:
+    """Parse the ephemeral call capture summary written by Muse's runner."""
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be a Muse call record JSON object")
+    if not isinstance(parsed, dict) or set(parsed) != {"session_ids", "calls_made"}:
+        raise argparse.ArgumentTypeError(
+            "must contain exactly session_ids and calls_made"
+        )
+    session_ids = parsed.get("session_ids")
+    calls_made = parsed.get("calls_made")
+    if (
+        not isinstance(session_ids, list)
+        or isinstance(calls_made, bool)
+        or not isinstance(calls_made, int)
+        or calls_made < 0
+        or calls_made != len(session_ids)
+        or any(
+            session_id is not None
+            and (not isinstance(session_id, str) or not session_id.strip())
+            for session_id in session_ids
+        )
+    ):
+        raise argparse.ArgumentTypeError(
+            "session_ids must contain one non-empty id or null per call"
+        )
+    return parsed
+
+
 #: Which pool an agent spends. Deliberately separate from the model: routing will
 #: put more than one model on a pool, and the budget is per pool.
 PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
@@ -1663,6 +1693,10 @@ def main(argv=None) -> int:
         "--needs-decision", type=_optional_text, default=None,
         help="structured breakdown question; an empty value means none",
     )
+    finish.add_argument(
+        "--muse-call-record", type=_muse_call_record, default=None,
+        help="JSON session-id list and calls-made count from Muse exec results",
+    )
     finish.add_argument("--human-intervention", action="store_true",
                         help="Nate had to step in for this run to progress")
     finish.add_argument("--note", default=None)
@@ -1787,6 +1821,11 @@ def main(argv=None) -> int:
         if args.ticket_count is not None:
             record["ticket_count"] = args.ticket_count
             record["needs_decision"] = args.needs_decision
+        if args.muse_call_record is not None:
+            if args.agent != "muse":
+                raise HeartbeatError("Muse call records require --agent muse")
+            record["muse_session_ids"] = args.muse_call_record["session_ids"]
+            record["muse_calls_made"] = args.muse_call_record["calls_made"]
         metric = input_usage(args.agent)
         if metric is not None:
             record["input_usage"] = metric

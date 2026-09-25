@@ -145,10 +145,25 @@ def test_finish_records_structured_issue_outcomes(monkeypatch):
         "finish", "--agent", "muse", "--run", "run-id",
         "--outcome", "done", "--ticket-count", "0", "--needs-decision",
         "", "--shape-status", "Shaped",
+        "--muse-call-record",
+        '{"session_ids":["session-1",null,"session-3"],"calls_made":3}',
     ]) == 0
     assert records[0]["ticket_count"] == 0
     assert records[0]["needs_decision"] is None
     assert records[0]["shape_status"] == "Shaped"
+    assert records[0]["muse_session_ids"] == [
+        "session-1", None, "session-3",
+    ]
+    assert records[0]["muse_calls_made"] == 3
+
+
+def test_finish_rejects_a_muse_call_record_with_a_wrong_call_count():
+    with pytest.raises(SystemExit):
+        heartbeat.main([
+            "finish", "--agent", "muse", "--run", "run-id",
+            "--outcome", "done", "--muse-call-record",
+            '{"session_ids":["session-1"],"calls_made":2}',
+        ])
 
 
 def test_finish_rejects_negative_ticket_count():

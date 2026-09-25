@@ -527,7 +527,7 @@ wait "$bound_pid" 2>/dev/null
 if (( status != 0 )); then
   # A spent provider window is not this ticket's failure. Record the hold,
   # give the ticket back untouched, and let the reset restart the lanes.
-  if MUSE_QUOTA_RESET="$(muse_quota_record "$MUSE_STDERR_FILE")"; then
+  if MUSE_QUOTA_RESET="$(muse_quota_record "$MUSE_STDERR_FILE" "$BEGIN_RUN")"; then
     echo "muse-implement: Muse's provider quota is exhausted; parking every lane until $MUSE_QUOTA_RESET" >&2
     release_ticket
     python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \

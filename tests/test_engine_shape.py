@@ -84,6 +84,7 @@ def idea(number=42, **kw):
         "risk": "standard",
         "needs": "none",
         "item_id": "project-item-{}".format(number),
+        "blocked_by_refs": [],
         "body": body,
         "labels": ["needs-shaping"],
     }
@@ -122,6 +123,19 @@ def stub_gh(monkeypatch, item):
 def gh_calls(calls, *prefix):
     return [call for call in calls
             if call[0] == "run" and call[1][:len(prefix)] == prefix]
+
+
+def blocked_by_payload(refs):
+    nodes = []
+    for ref in refs:
+        repo, number = ref.rsplit("#", 1)
+        nodes.append({
+            "number": int(number),
+            "repository": {"nameWithOwner": repo},
+        })
+    return {"repository": {"issue": {"blockedBy": {
+        "totalCount": len(nodes), "nodes": nodes,
+    }}}}
 
 
 # -- answer validation ---------------------------------------------------
@@ -1439,6 +1453,127 @@ def test_apply_records_sequencing_edges_with_the_body_write(
     assert "Depends on: owner/repo#165" in written
     assert "advanced to Ready: needs_nate all null" in \
         capsys.readouterr().out
+
+
+def test_apply_skips_a_dependency_already_on_the_loaded_item(monkeypatch):
+    # Recorded #1195 shape: #1435 is already blocked-by before re-shaping.
+    item = idea(1195, blocked_by_refs=["owner/repo#1435"])
+    calls = stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(depends_on=["owner/repo#1435"]),
+        run="shape-run", agent="muse") == 0
+    edits = gh_calls(calls, "gh", "issue", "edit")
+    assert edits
+    assert all("--add-blocked-by" not in call[1] for call in edits)
+    assert item.status == "Ready"
+
+
+def test_apply_accepts_a_raced_edge_only_after_re_read(monkeypatch):
+    item = idea(42)
+    calls = stub_gh(monkeypatch, item)
+    original_graphql = funnel.gh_graphql
+    rereads = []
+
+    def graphql(query, **variables):
+        if query == shape.BLOCKED_BY_QUERY:
+            rereads.append(variables)
+            calls.append(("graphql", query, variables))
+            return blocked_by_payload(["owner/repo#165"])
+        return original_graphql(query, **variables)
+
+    def run(args, capture_output=False, text=True, **kwargs):
+        calls.append(("run", tuple(args)))
+        if args[:3] == ["gh", "issue", "edit"] and "--add-blocked-by" in args:
+            return SimpleNamespace(
+                returncode=1, stdout="",
+                stderr="Target issue has already been taken",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(depends_on=["owner/repo#165"]),
+        run="shape-run", agent="muse") == 0
+    attempts = [call for call in gh_calls(calls, "gh", "issue", "edit")
+                if "--add-blocked-by" in call[1]]
+    assert len(attempts) == 1
+    assert len(rereads) == 1
+    assert item.blocked_by_refs == ["owner/repo#165"]
+    assert item.status == "Ready"
+
+
+def test_apply_keeps_a_refused_edge_failure_when_re_read_shows_no_edge(
+        monkeypatch):
+    item = idea(42)
+    calls = stub_gh(monkeypatch, item)
+    original_graphql = funnel.gh_graphql
+    original_run = funnel.subprocess.run
+
+    def graphql(query, **variables):
+        if query == shape.BLOCKED_BY_QUERY:
+            return blocked_by_payload([])
+        return original_graphql(query, **variables)
+
+    def run(args, capture_output=False, text=True, **kwargs):
+        if args[:3] == ["gh", "issue", "edit"] and "--add-blocked-by" in args:
+            return SimpleNamespace(returncode=1, stdout="", stderr="refused")
+        return original_run(args, capture_output=capture_output, text=text,
+                            **kwargs)
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    with pytest.raises(funnel.GitHubError, match="owner/repo#165"):
+        shape.apply_shape(
+            [item], NOW, item.ref,
+            answer(depends_on=["owner/repo#165"]),
+            run="shape-run", agent="muse")
+    assert item.status == "Ideas"
+    assert not any(call[0] == "graphql" and call[1] != shape.BLOCKED_BY_QUERY
+                   for call in calls)
+
+
+def test_apply_fails_closed_when_edge_re_read_is_incomplete(monkeypatch):
+    item = idea(42)
+    stub_gh(monkeypatch, item)
+    original_graphql = funnel.gh_graphql
+    original_run = funnel.subprocess.run
+
+    def graphql(query, **variables):
+        if query == shape.BLOCKED_BY_QUERY:
+            return {"repository": {"issue": {"blockedBy": {
+                "totalCount": 1, "nodes": [],
+            }}}}
+        return original_graphql(query, **variables)
+
+    def run(args, capture_output=False, text=True, **kwargs):
+        if args[:3] == ["gh", "issue", "edit"] and "--add-blocked-by" in args:
+            return SimpleNamespace(returncode=1, stdout="", stderr="refused")
+        return original_run(args, capture_output=capture_output, text=text,
+                            **kwargs)
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    with pytest.raises(funnel.GitHubError, match="cannot read a complete"):
+        shape.apply_shape(
+            [item], NOW, item.ref,
+            answer(depends_on=["owner/repo#165"]),
+            run="shape-run", agent="muse")
+    assert item.status == "Ideas"
+
+
+def test_apply_fails_before_writing_when_initial_edges_are_unavailable(
+        monkeypatch):
+    item = idea(42, blocked_by_refs=None)
+    calls = stub_gh(monkeypatch, item)
+    with pytest.raises(funnel.GitHubError, match="existing blocked-by edges"):
+        shape.apply_shape(
+            [item], NOW, item.ref,
+            answer(depends_on=["owner/repo#165"]),
+            run="shape-run", agent="muse")
+    assert gh_calls(calls, "gh") == []
 
 
 def test_apply_renders_cross_repo_dependencies_as_urls(monkeypatch):

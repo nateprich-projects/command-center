@@ -698,6 +698,9 @@ class Item:
     satisfied_block_record: Optional[Dict[str, object]] = None
     open_blockers: List[str] = field(default_factory=list)
     dead_blockers: List[str] = field(default_factory=list)
+    # Complete native Issue.blockedBy refs from the Project item query.
+    # None means that the connection was missing, malformed, or truncated.
+    blocked_by_refs: Optional[List[str]] = None
     assignees: List[str] = field(default_factory=list)
     in_motion_since: Optional[datetime] = None
     item_id: Optional[str] = None  # the ProjectV2Item, needed to write the lock
@@ -7744,6 +7747,7 @@ query($login: String!, $number: Int!, $cursor: String) {
               parent { number repository { nameWithOwner } }
               subIssuesSummary { total completed }
               blockedBy(first: 50) {
+                totalCount
                 nodes { number state stateReason repository { nameWithOwner } }
               }
             }
@@ -8745,6 +8749,46 @@ def _apply_item_detail_fields(
         _apply_item_timeline_fields(item, content)
 
 
+def _blocked_by_refs_from_connection(connection: object) -> Optional[List[str]]:
+    """Return complete native blocker refs, or None when unreadable.
+
+    A partial connection cannot prove an edge is absent, so callers that use
+    this list to avoid a duplicate write must fail closed on None.
+    """
+    if not isinstance(connection, dict):
+        return None
+    nodes = connection.get("nodes")
+    total = connection.get("totalCount")
+    if (
+        not isinstance(nodes, list)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or total < 0
+        or total != len(nodes)
+    ):
+        return None
+    refs = []
+    for blocker in nodes:
+        if not isinstance(blocker, dict):
+            return None
+        number = blocker.get("number")
+        repository = blocker.get("repository")
+        repo = (
+            repository.get("nameWithOwner")
+            if isinstance(repository, dict) else None
+        )
+        if (
+            not isinstance(number, int)
+            or isinstance(number, bool)
+            or number < 1
+            or not isinstance(repo, str)
+            or not repo.strip()
+        ):
+            return None
+        refs.append("{}#{}".format(repo, number))
+    return refs
+
+
 def _from_node(node: dict) -> Optional[Item]:
     content = node.get("content") or {}
     if not content.get("number"):
@@ -8781,6 +8825,9 @@ def _from_node(node: dict) -> Optional[Item]:
         closed_at=parse_time(content.get("closedAt")),
         item_id=node.get("id"),
         in_motion_since=parse_time((node.get("lock") or {}).get("text")),
+        blocked_by_refs=_blocked_by_refs_from_connection(
+            content.get("blockedBy")
+        ),
     )
     # Keep fixture and caller-supplied full nodes compatible while the live
     # paged query stays compact. A targeted read can apply these fields again.

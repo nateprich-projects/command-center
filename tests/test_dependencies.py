@@ -39,7 +39,10 @@ def test_load_items_attaches_dependencies_to_open_tickets(monkeypatch):
                     else None
                 ),
                 "subIssuesSummary": {"total": 0, "completed": 0},
-                "blockedBy": {"nodes": list(blocked_by)},
+                "blockedBy": {
+                    "totalCount": len(blocked_by),
+                    "nodes": list(blocked_by),
+                },
                 "timelineItems": {"nodes": []},
             },
         }
@@ -87,4 +90,32 @@ def test_load_items_attaches_dependencies_to_open_tickets(monkeypatch):
 
     assert [item.open_blockers for item in items] == [[], ["owner/repo#9"], []]
     assert [item.dead_blockers for item in items] == [[], ["other/repo#10"], []]
+    assert [item.blocked_by_refs for item in items] == [
+        [], ["owner/repo#9", "other/repo#10"], ["owner/repo#9"]
+    ]
     assert calls == []
+
+
+def test_blocked_by_refs_require_a_complete_connection():
+    item_node = {
+        "content": {
+            "number": 1,
+            "title": "issue 1",
+            "url": "https://github.com/owner/repo/issues/1",
+            "state": "OPEN",
+            "repository": {"nameWithOwner": "owner/repo"},
+            "labels": {"nodes": []},
+            "assignees": {"nodes": []},
+            "blockedBy": {"totalCount": 2, "nodes": [{
+                "number": 9,
+                "repository": {"nameWithOwner": "owner/repo"},
+            }]},
+        }
+    }
+    item = funnel._from_node(item_node)
+    assert item.blocked_by_refs is None
+
+
+def test_project_query_requests_a_complete_blocked_by_page():
+    assert "blockedBy(first: 50)" in funnel.ITEM_QUERY
+    assert "blockedBy(first: 50) {\n                totalCount" in funnel.ITEM_QUERY

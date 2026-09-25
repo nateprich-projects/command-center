@@ -21,6 +21,10 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+INVESTIGATE_SHAPE_FIXTURES = json.loads(
+    (ROOT / "tests/fixtures/investigate_shape_excerpts.json").read_text(
+        encoding="utf-8"))
+
 import funnel  # noqa: E402
 from engine import shape  # noqa: E402
 from funnel import Item  # noqa: E402
@@ -84,6 +88,7 @@ def idea(number=42, **kw):
         "risk": "standard",
         "needs": "none",
         "item_id": "project-item-{}".format(number),
+        "blocked_by_refs": [],
         "body": body,
         "labels": ["needs-shaping"],
     }
@@ -122,6 +127,19 @@ def stub_gh(monkeypatch, item):
 def gh_calls(calls, *prefix):
     return [call for call in calls
             if call[0] == "run" and call[1][:len(prefix)] == prefix]
+
+
+def blocked_by_payload(refs):
+    nodes = []
+    for ref in refs:
+        repo, number = ref.rsplit("#", 1)
+        nodes.append({
+            "number": int(number),
+            "repository": {"nameWithOwner": repo},
+        })
+    return {"repository": {"issue": {"blockedBy": {
+        "totalCount": len(nodes), "nodes": nodes,
+    }}}}
 
 
 # -- answer validation ---------------------------------------------------
@@ -239,6 +257,64 @@ def test_proposed_class_must_be_a_ladder_class():
         shape.validate_answer(answer(proposed_class="Broken2"))
     with pytest.raises(shape.ShapeError):
         shape.validate_answer(answer(proposed_class="  "))
+
+
+@pytest.mark.parametrize(
+    "fixture", INVESTIGATE_SHAPE_FIXTURES["non_defect_shapes"],
+    ids=lambda fixture: fixture["source"],
+)
+def test_recorded_non_defect_shapes_cannot_propose_investigate(fixture):
+    proposed_class = fixture["proposed_class_line"].split(": ", 1)[1]
+    with pytest.raises(shape.ShapeError, match="Possible defect"):
+        shape.validate_answer(answer(
+            proposed_class=proposed_class,
+            plan_markdown=fixture["body_excerpt"]))
+
+
+def test_recorded_genuine_defect_shape_accepts_one_possible_defect_line():
+    fixture = INVESTIGATE_SHAPE_FIXTURES["genuine_defect_shape"]
+    proposed_class = fixture["proposed_class_line"].split(": ", 1)[1]
+    candidate = shape.validate_answer(answer(
+        proposed_class=proposed_class,
+        plan_markdown="{}\n\n{}".format(
+            fixture["body_excerpt"], fixture["possible_defect_line"])))
+
+    assert candidate["proposed_class"] == "Investigate"
+    assert fixture["possible_defect_line"] in candidate["plan_markdown"]
+
+
+@pytest.mark.parametrize("malformed", [
+    "Possible defect:",
+    "Possible defect:   ",
+    "Possible defect is present but has no colon: statement",
+    "Possible defect:statement has no separator",
+])
+def test_investigate_rejects_blank_or_malformed_possible_defect_lines(
+        malformed):
+    with pytest.raises(shape.ShapeError, match="Possible defect"):
+        shape.validate_answer(answer(
+            proposed_class="Investigate",
+            plan_markdown="# Plan\n\n{}\n".format(malformed)))
+
+
+def test_investigate_rejects_multiple_possible_defect_lines():
+    with pytest.raises(shape.ShapeError, match="Possible defect"):
+        shape.validate_answer(answer(
+            proposed_class="Investigate",
+            plan_markdown=(
+                "# Plan\n\n"
+                "Possible defect: the first candidate.\n"
+                "Possible defect: the second candidate.\n")))
+
+
+def test_non_investigate_proposal_is_untouched_by_possible_defect_check():
+    candidate = shape.validate_answer(answer(
+        proposed_class="Improve",
+        plan_markdown=(
+            "# Plan\n\nPossible defect:\n"
+            "Possible defect: another line.\n")))
+
+    assert candidate["proposed_class"] == "Improve"
 
 
 def test_plan_markdown_must_be_non_empty():
@@ -692,6 +768,10 @@ def test_agent_review_keeps_real_scope_and_proposed_action_risk():
 def test_all_agent_self_approvable_classes_strip_generic_permission(klass):
     candidate = shape.validate_answer(answer(
         proposed_class=klass,
+        plan_markdown=(
+            "# Plan\n\nDo the thing.\n\n"
+            "Possible defect: a defect exists."
+            if klass == "Investigate" else "# Plan\n\nDo the thing."),
         needs_nate={"exposure": None, "gates": None,
                     "scope": ["Should we fix this?"],
                     "preference": None},
@@ -720,6 +800,9 @@ def test_investigate_is_explicitly_covered_by_agent_output_review():
                                  agent="muse"))
     candidate = shape.validate_answer(answer(
         proposed_class="Investigate",
+        plan_markdown=(
+            "# Plan\n\nDo the thing.\n\n"
+            "Possible defect: the behavior may be defective."),
         needs_nate={"exposure": None, "gates": None,
                     "scope": ["Should we fix this?",
                               "Should this happen now?"],
@@ -1320,6 +1403,20 @@ def test_apply_rejects_a_malformed_answer_before_any_write(monkeypatch):
     assert item.status == "Ideas" and item.body.startswith("Captured")
 
 
+def test_apply_keeps_unset_class_untouched_when_investigate_is_rejected(
+        monkeypatch):
+    item = idea(42, klass=None)
+    calls = stub_gh(monkeypatch, item)
+    bad = answer(proposed_class="Investigate")
+
+    with pytest.raises(shape.ShapeError, match="Possible defect"):
+        shape.apply_shape([item], NOW, item.ref, bad)
+
+    assert item.klass is None
+    assert item.status == "Ideas"
+    assert calls == []
+
+
 def test_apply_writes_the_class_for_an_unclassed_agent_idea(monkeypatch):
     item = idea(42, klass=None)
     calls = stub_gh(monkeypatch, item)
@@ -1333,6 +1430,28 @@ def test_apply_writes_the_class_for_an_unclassed_agent_idea(monkeypatch):
     assert len(class_writes) == 1
     assert class_writes[0][2]["option"] == "opt-Improve"
     assert item.status == "Ready"
+
+
+def test_apply_does_not_rewrite_an_existing_class_for_investigate(
+        monkeypatch):
+    item = idea(42, klass="Investigate")
+    calls = stub_gh(monkeypatch, item)
+    plan_markdown = (
+        "# Plan\n\n"
+        "Possible defect: the route uses a different quota counter.\n")
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref, answer(
+            proposed_class="Investigate", plan_markdown=plan_markdown),
+        run="shape-run", agent="muse") == 0
+
+    class_writes = [
+        call for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+        and call[2].get("field") == funnel.CLASS_FIELD_ID
+    ]
+    assert class_writes == []
+    assert item.klass == "Investigate"
 
 
 def test_apply_honours_and_carries_an_override_to_agents(
@@ -1439,6 +1558,127 @@ def test_apply_records_sequencing_edges_with_the_body_write(
     assert "Depends on: owner/repo#165" in written
     assert "advanced to Ready: needs_nate all null" in \
         capsys.readouterr().out
+
+
+def test_apply_skips_a_dependency_already_on_the_loaded_item(monkeypatch):
+    # Recorded #1195 shape: #1435 is already blocked-by before re-shaping.
+    item = idea(1195, blocked_by_refs=["owner/repo#1435"])
+    calls = stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(depends_on=["owner/repo#1435"]),
+        run="shape-run", agent="muse") == 0
+    edits = gh_calls(calls, "gh", "issue", "edit")
+    assert edits
+    assert all("--add-blocked-by" not in call[1] for call in edits)
+    assert item.status == "Ready"
+
+
+def test_apply_accepts_a_raced_edge_only_after_re_read(monkeypatch):
+    item = idea(42)
+    calls = stub_gh(monkeypatch, item)
+    original_graphql = funnel.gh_graphql
+    rereads = []
+
+    def graphql(query, **variables):
+        if query == shape.BLOCKED_BY_QUERY:
+            rereads.append(variables)
+            calls.append(("graphql", query, variables))
+            return blocked_by_payload(["owner/repo#165"])
+        return original_graphql(query, **variables)
+
+    def run(args, capture_output=False, text=True, **kwargs):
+        calls.append(("run", tuple(args)))
+        if args[:3] == ["gh", "issue", "edit"] and "--add-blocked-by" in args:
+            return SimpleNamespace(
+                returncode=1, stdout="",
+                stderr="Target issue has already been taken",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(depends_on=["owner/repo#165"]),
+        run="shape-run", agent="muse") == 0
+    attempts = [call for call in gh_calls(calls, "gh", "issue", "edit")
+                if "--add-blocked-by" in call[1]]
+    assert len(attempts) == 1
+    assert len(rereads) == 1
+    assert item.blocked_by_refs == ["owner/repo#165"]
+    assert item.status == "Ready"
+
+
+def test_apply_keeps_a_refused_edge_failure_when_re_read_shows_no_edge(
+        monkeypatch):
+    item = idea(42)
+    calls = stub_gh(monkeypatch, item)
+    original_graphql = funnel.gh_graphql
+    original_run = funnel.subprocess.run
+
+    def graphql(query, **variables):
+        if query == shape.BLOCKED_BY_QUERY:
+            return blocked_by_payload([])
+        return original_graphql(query, **variables)
+
+    def run(args, capture_output=False, text=True, **kwargs):
+        if args[:3] == ["gh", "issue", "edit"] and "--add-blocked-by" in args:
+            return SimpleNamespace(returncode=1, stdout="", stderr="refused")
+        return original_run(args, capture_output=capture_output, text=text,
+                            **kwargs)
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    with pytest.raises(funnel.GitHubError, match="owner/repo#165"):
+        shape.apply_shape(
+            [item], NOW, item.ref,
+            answer(depends_on=["owner/repo#165"]),
+            run="shape-run", agent="muse")
+    assert item.status == "Ideas"
+    assert not any(call[0] == "graphql" and call[1] != shape.BLOCKED_BY_QUERY
+                   for call in calls)
+
+
+def test_apply_fails_closed_when_edge_re_read_is_incomplete(monkeypatch):
+    item = idea(42)
+    stub_gh(monkeypatch, item)
+    original_graphql = funnel.gh_graphql
+    original_run = funnel.subprocess.run
+
+    def graphql(query, **variables):
+        if query == shape.BLOCKED_BY_QUERY:
+            return {"repository": {"issue": {"blockedBy": {
+                "totalCount": 1, "nodes": [],
+            }}}}
+        return original_graphql(query, **variables)
+
+    def run(args, capture_output=False, text=True, **kwargs):
+        if args[:3] == ["gh", "issue", "edit"] and "--add-blocked-by" in args:
+            return SimpleNamespace(returncode=1, stdout="", stderr="refused")
+        return original_run(args, capture_output=capture_output, text=text,
+                            **kwargs)
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+    with pytest.raises(funnel.GitHubError, match="cannot read a complete"):
+        shape.apply_shape(
+            [item], NOW, item.ref,
+            answer(depends_on=["owner/repo#165"]),
+            run="shape-run", agent="muse")
+    assert item.status == "Ideas"
+
+
+def test_apply_fails_before_writing_when_initial_edges_are_unavailable(
+        monkeypatch):
+    item = idea(42, blocked_by_refs=None)
+    calls = stub_gh(monkeypatch, item)
+    with pytest.raises(funnel.GitHubError, match="existing blocked-by edges"):
+        shape.apply_shape(
+            [item], NOW, item.ref,
+            answer(depends_on=["owner/repo#165"]),
+            run="shape-run", agent="muse")
+    assert gh_calls(calls, "gh") == []
 
 
 def test_apply_renders_cross_repo_dependencies_as_urls(monkeypatch):

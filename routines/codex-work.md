@@ -30,6 +30,9 @@ implementation evidence: read its ticket, parent plan, current-head verdict,
 blocking list, and prior-run digest. Treat `vendor` as binding for sandbox scope
 and Command Center path spelling.
 
+For a no-diff ticket, its `Accept` names the GitHub-artifact evidence channel the
+finish check verifies: a comment, rename event, closed PR, or posted measurement.
+
 Clone `packet.repo` inside the current per-session workspace. Work on
 `ticket/<number>` from `origin/main`. If the remote branch exists, establish its
 contents before continuing or resetting it; never discard unknown work. A

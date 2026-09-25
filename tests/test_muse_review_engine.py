@@ -2235,6 +2235,13 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     # requirements, and the runner derives the verdict after all chunks.
     assert "This call is not the review" not in judge
     assert "Does this diff do what the ticket and the plan say" in judge
+    assert "posted PR" in judge
+    assert "Run evidence:" in judge
+    assert "command, exit status, output summary" in judge
+    assert "never automatic satisfaction" in judge
+    assert "malformed or incomplete blocks stay prose" in judge
+    assert "throwaway `launchctl submit` probe" in judge
+    assert "Install nothing; leave the keeper unchanged" in judge
 
 
 def test_the_requirement_list_is_kept_where_the_judges_will_read_it(tmp_path):

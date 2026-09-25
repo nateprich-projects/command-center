@@ -634,7 +634,7 @@ model_failed() {
     fi
   # Muse: record the hold so every lane waits for the reset instead of
   # retrying on its own schedule.
-  elif MUSE_QUOTA_RESET="$(muse_quota_record "$DIAG_FILE")"; then
+  elif MUSE_QUOTA_RESET="$(muse_quota_record "$DIAG_FILE" "${BEGIN_RUN:-}")"; then
     echo "muse-review-engine: Muse's provider quota is exhausted; parking every lane until $MUSE_QUOTA_RESET" >&2
     if [[ -n "${BEGIN_RUN:-}" ]]; then
       local muse_call_record
@@ -1329,6 +1329,13 @@ verdict. A requirement is met only when the diff satisfies it; use unmet
 when the diff clearly fails it and unsure when the packet cannot resolve it.
 For each result, cite the relevant diff lines or explain the uncertainty.
 
+Judge run-outcome and post-merge runtime requirements against posted PR
+`**Run evidence:**` in `pr_comments`: command, exit status, output summary,
+and environment note. Presence is evidence, never automatic satisfaction;
+malformed or incomplete blocks stay prose. For post-merge runtime facts, a
+throwaway `launchctl submit` probe may produce pre-merge evidence: fire, read,
+post the evidence, end the job. Install nothing; leave the keeper unchanged.
+
 Return exactly one JSON object with one result for every assigned requirement
 and no others:
 
@@ -1545,7 +1552,7 @@ fi
 # a Muse-shaped refusal in a z.ai judge's diagnostic must never park Muse.
 if [[ "$BACKEND" == "muse" ]]; then
   for (( index = 0; index < JUDGE_COUNT; index++ )); do
-    if MUSE_QUOTA_RESET="$(muse_quota_record "$RUN_DIR/judge.$index/diag.txt")"; then
+    if MUSE_QUOTA_RESET="$(muse_quota_record "$RUN_DIR/judge.$index/diag.txt" "${BEGIN_RUN:-}")"; then
       echo "muse-review-engine: Muse's provider quota is exhausted; parking future lanes until $MUSE_QUOTA_RESET" >&2
       break
     fi

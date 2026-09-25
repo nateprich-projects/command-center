@@ -698,6 +698,9 @@ class Item:
     satisfied_block_record: Optional[Dict[str, object]] = None
     open_blockers: List[str] = field(default_factory=list)
     dead_blockers: List[str] = field(default_factory=list)
+    # Complete native Issue.blockedBy refs from the Project item query.
+    # None means that the connection was missing, malformed, or truncated.
+    blocked_by_refs: Optional[List[str]] = None
     assignees: List[str] = field(default_factory=list)
     in_motion_since: Optional[datetime] = None
     item_id: Optional[str] = None  # the ProjectV2Item, needed to write the lock
@@ -947,6 +950,18 @@ def gate_question(item: Item) -> Optional[str]:
         )
         return GATES["Shaped"] if waits_for_nate else None
     return None
+
+
+def _acceptance_waiting_reason(
+    item: Item, question: Optional[str]
+) -> Optional[str]:
+    """Explain why a completed Building project is still awaiting acceptance."""
+    if question != GATES["Building"]:
+        return None
+    body = item.body if isinstance(item.body, str) else ""
+    if ANALYSIS_MARKER in body:
+        return "Analysis review"
+    return "Ordinary accept"
 
 
 def question_since(item: Item) -> Optional[datetime]:
@@ -7744,6 +7759,7 @@ query($login: String!, $number: Int!, $cursor: String) {
               parent { number repository { nameWithOwner } }
               subIssuesSummary { total completed }
               blockedBy(first: 50) {
+                totalCount
                 nodes { number state stateReason repository { nameWithOwner } }
               }
             }
@@ -8745,6 +8761,46 @@ def _apply_item_detail_fields(
         _apply_item_timeline_fields(item, content)
 
 
+def _blocked_by_refs_from_connection(connection: object) -> Optional[List[str]]:
+    """Return complete native blocker refs, or None when unreadable.
+
+    A partial connection cannot prove an edge is absent, so callers that use
+    this list to avoid a duplicate write must fail closed on None.
+    """
+    if not isinstance(connection, dict):
+        return None
+    nodes = connection.get("nodes")
+    total = connection.get("totalCount")
+    if (
+        not isinstance(nodes, list)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or total < 0
+        or total != len(nodes)
+    ):
+        return None
+    refs = []
+    for blocker in nodes:
+        if not isinstance(blocker, dict):
+            return None
+        number = blocker.get("number")
+        repository = blocker.get("repository")
+        repo = (
+            repository.get("nameWithOwner")
+            if isinstance(repository, dict) else None
+        )
+        if (
+            not isinstance(number, int)
+            or isinstance(number, bool)
+            or number < 1
+            or not isinstance(repo, str)
+            or not repo.strip()
+        ):
+            return None
+        refs.append("{}#{}".format(repo, number))
+    return refs
+
+
 def _from_node(node: dict) -> Optional[Item]:
     content = node.get("content") or {}
     if not content.get("number"):
@@ -8781,6 +8837,9 @@ def _from_node(node: dict) -> Optional[Item]:
         closed_at=parse_time(content.get("closedAt")),
         item_id=node.get("id"),
         in_motion_since=parse_time((node.get("lock") or {}).get("text")),
+        blocked_by_refs=_blocked_by_refs_from_connection(
+            content.get("blockedBy")
+        ),
     )
     # Keep fixture and caller-supplied full nodes compatible while the live
     # paged query stays compact. A targeted read can apply these fields again.
@@ -9006,6 +9065,8 @@ def class_display(item: Item, by_ref: Dict[str, Item]) -> str:
 def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = None) -> dict:
     by_ref = by_ref if by_ref is not None else {}
     breakdown = breakdown_latency(item)
+    question = gate_question(item)
+    acceptance_reason = _acceptance_waiting_reason(item, question)
     rendered = {
         "ref": item.ref,
         "repo": item.repo,
@@ -9013,7 +9074,7 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
         "url": item.url,
         "status": item.status,
         "class": effective_class(item, by_ref),
-        "waiting_on": gate_question(item),
+        "waiting_on": question,
         "waited": humanise(item.waited(now)),
         "waited_days": item.waited(now).days if item.waited(now) else None,
         "breakdown_latency": humanise(breakdown) if breakdown else None,
@@ -9025,6 +9086,8 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
         rendered["pinned"] = True
     if item.needs_decision is not None:
         rendered["needs_decision"] = item.needs_decision
+    if acceptance_reason is not None:
+        rendered["waiting_reason"] = acceptance_reason
     return rendered
 
 

@@ -21,6 +21,10 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+INVESTIGATE_SHAPE_FIXTURES = json.loads(
+    (ROOT / "tests/fixtures/investigate_shape_excerpts.json").read_text(
+        encoding="utf-8"))
+
 import funnel  # noqa: E402
 from engine import shape  # noqa: E402
 from funnel import Item  # noqa: E402
@@ -253,6 +257,64 @@ def test_proposed_class_must_be_a_ladder_class():
         shape.validate_answer(answer(proposed_class="Broken2"))
     with pytest.raises(shape.ShapeError):
         shape.validate_answer(answer(proposed_class="  "))
+
+
+@pytest.mark.parametrize(
+    "fixture", INVESTIGATE_SHAPE_FIXTURES["non_defect_shapes"],
+    ids=lambda fixture: fixture["source"],
+)
+def test_recorded_non_defect_shapes_cannot_propose_investigate(fixture):
+    proposed_class = fixture["proposed_class_line"].split(": ", 1)[1]
+    with pytest.raises(shape.ShapeError, match="Possible defect"):
+        shape.validate_answer(answer(
+            proposed_class=proposed_class,
+            plan_markdown=fixture["body_excerpt"]))
+
+
+def test_recorded_genuine_defect_shape_accepts_one_possible_defect_line():
+    fixture = INVESTIGATE_SHAPE_FIXTURES["genuine_defect_shape"]
+    proposed_class = fixture["proposed_class_line"].split(": ", 1)[1]
+    candidate = shape.validate_answer(answer(
+        proposed_class=proposed_class,
+        plan_markdown="{}\n\n{}".format(
+            fixture["body_excerpt"], fixture["possible_defect_line"])))
+
+    assert candidate["proposed_class"] == "Investigate"
+    assert fixture["possible_defect_line"] in candidate["plan_markdown"]
+
+
+@pytest.mark.parametrize("malformed", [
+    "Possible defect:",
+    "Possible defect:   ",
+    "Possible defect is present but has no colon: statement",
+    "Possible defect:statement has no separator",
+])
+def test_investigate_rejects_blank_or_malformed_possible_defect_lines(
+        malformed):
+    with pytest.raises(shape.ShapeError, match="Possible defect"):
+        shape.validate_answer(answer(
+            proposed_class="Investigate",
+            plan_markdown="# Plan\n\n{}\n".format(malformed)))
+
+
+def test_investigate_rejects_multiple_possible_defect_lines():
+    with pytest.raises(shape.ShapeError, match="Possible defect"):
+        shape.validate_answer(answer(
+            proposed_class="Investigate",
+            plan_markdown=(
+                "# Plan\n\n"
+                "Possible defect: the first candidate.\n"
+                "Possible defect: the second candidate.\n")))
+
+
+def test_non_investigate_proposal_is_untouched_by_possible_defect_check():
+    candidate = shape.validate_answer(answer(
+        proposed_class="Improve",
+        plan_markdown=(
+            "# Plan\n\nPossible defect:\n"
+            "Possible defect: another line.\n")))
+
+    assert candidate["proposed_class"] == "Improve"
 
 
 def test_plan_markdown_must_be_non_empty():
@@ -706,6 +768,10 @@ def test_agent_review_keeps_real_scope_and_proposed_action_risk():
 def test_all_agent_self_approvable_classes_strip_generic_permission(klass):
     candidate = shape.validate_answer(answer(
         proposed_class=klass,
+        plan_markdown=(
+            "# Plan\n\nDo the thing.\n\n"
+            "Possible defect: a defect exists."
+            if klass == "Investigate" else "# Plan\n\nDo the thing."),
         needs_nate={"exposure": None, "gates": None,
                     "scope": ["Should we fix this?"],
                     "preference": None},
@@ -734,6 +800,9 @@ def test_investigate_is_explicitly_covered_by_agent_output_review():
                                  agent="muse"))
     candidate = shape.validate_answer(answer(
         proposed_class="Investigate",
+        plan_markdown=(
+            "# Plan\n\nDo the thing.\n\n"
+            "Possible defect: the behavior may be defective."),
         needs_nate={"exposure": None, "gates": None,
                     "scope": ["Should we fix this?",
                               "Should this happen now?"],
@@ -1334,6 +1403,20 @@ def test_apply_rejects_a_malformed_answer_before_any_write(monkeypatch):
     assert item.status == "Ideas" and item.body.startswith("Captured")
 
 
+def test_apply_keeps_unset_class_untouched_when_investigate_is_rejected(
+        monkeypatch):
+    item = idea(42, klass=None)
+    calls = stub_gh(monkeypatch, item)
+    bad = answer(proposed_class="Investigate")
+
+    with pytest.raises(shape.ShapeError, match="Possible defect"):
+        shape.apply_shape([item], NOW, item.ref, bad)
+
+    assert item.klass is None
+    assert item.status == "Ideas"
+    assert calls == []
+
+
 def test_apply_writes_the_class_for_an_unclassed_agent_idea(monkeypatch):
     item = idea(42, klass=None)
     calls = stub_gh(monkeypatch, item)
@@ -1347,6 +1430,28 @@ def test_apply_writes_the_class_for_an_unclassed_agent_idea(monkeypatch):
     assert len(class_writes) == 1
     assert class_writes[0][2]["option"] == "opt-Improve"
     assert item.status == "Ready"
+
+
+def test_apply_does_not_rewrite_an_existing_class_for_investigate(
+        monkeypatch):
+    item = idea(42, klass="Investigate")
+    calls = stub_gh(monkeypatch, item)
+    plan_markdown = (
+        "# Plan\n\n"
+        "Possible defect: the route uses a different quota counter.\n")
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref, answer(
+            proposed_class="Investigate", plan_markdown=plan_markdown),
+        run="shape-run", agent="muse") == 0
+
+    class_writes = [
+        call for call in calls
+        if call[0] == "graphql" and call[1] == funnel.SET_FIELD
+        and call[2].get("field") == funnel.CLASS_FIELD_ID
+    ]
+    assert class_writes == []
+    assert item.klass == "Investigate"
 
 
 def test_apply_honours_and_carries_an_override_to_agents(

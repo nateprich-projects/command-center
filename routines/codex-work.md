@@ -43,6 +43,10 @@ Implement only what the ticket and plan require. Do not change project `Status`
 or `Class`, do not merge, and do not repair unrelated defects. Make the code
 change and return exactly one structured answer:
 
+For a no-diff success, include the optional non-empty evidence list of GitHub
+URLs named by the ticket's Accept. The finish check verifies each artifact
+against this run's heartbeat start.
+
 - success: `{"done":true,"summary":"...","departures":[]}`
 - a required unavailable human action:
   `{"blocked_on_human":{"reason":"<allowlisted reason>","action":"..."}}`

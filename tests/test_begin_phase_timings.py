@@ -161,3 +161,29 @@ def test_implement_begin_does_not_emit_review_phase_markers(monkeypatch, capsys)
     assert payload["do"] == "stop"
     assert payload["queue"] == "empty"
     assert "begin_review_phase" not in captured.err
+
+
+def test_session_server_markers_bypass_the_reply_capture(monkeypatch):
+    """A reply-timed-out fire must still leave its markers in the error log."""
+    import contextlib
+    import io
+
+    real = io.StringIO()
+    reply = io.StringIO()
+    monkeypatch.setenv(funnel.SESSION_SERVER_ENV, "1")
+    monkeypatch.setattr(sys, "__stderr__", real)
+    with contextlib.redirect_stderr(reply):
+        funnel._report_begin_phase_boundary("review_queue", time.perf_counter())
+
+    assert reply.getvalue() == ""
+    assert [phase for phase, _ in _logged_phases(real.getvalue())] == [
+        "review_queue"
+    ]
+
+
+def test_markers_stay_on_stderr_outside_a_session_server(monkeypatch, capsys):
+    monkeypatch.delenv(funnel.SESSION_SERVER_ENV, raising=False)
+    funnel._report_begin_phase_boundary("review_queue", time.perf_counter())
+    assert [phase for phase, _ in _logged_phases(capsys.readouterr().err)] == [
+        "review_queue"
+    ]

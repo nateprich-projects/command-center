@@ -8686,14 +8686,24 @@ def _begin_load_timed(
 
 
 def _report_begin_phase_boundary(phase: str, started: float) -> None:
-    """Write a non-gating elapsed marker before a post-load begin phase."""
+    """Write a non-gating elapsed marker before a post-load begin phase.
+
+    Inside a session server, ``dispatch`` captures ``sys.stderr`` and returns
+    it only with the reply, so a begin that overruns the client's reply
+    budget would lose every marker it wrote. The markers exist for exactly
+    that fire (#1519), so there they go to the server's own stderr, which is
+    the runner's error log.
+    """
     try:
         elapsed = max(0.0, time.perf_counter() - started)
+        stream = sys.stderr
+        if os.environ.get(SESSION_SERVER_ENV) and sys.__stderr__ is not None:
+            stream = sys.__stderr__
         print(
             "begin_review_phase phase={} elapsed_seconds={:.6f}".format(
                 phase, elapsed,
             ),
-            file=sys.stderr,
+            file=stream,
             flush=True,
         )
     except Exception:

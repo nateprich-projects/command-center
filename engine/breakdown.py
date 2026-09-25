@@ -64,7 +64,8 @@ RISK_OPTIONS = ("standard", "escalated")
 NEEDS_OPTIONS = funnel.NEEDS_OPTIONS
 
 #: The sizing standard is the judgement slice of the breakdown skill: the
-#: unit and sizing sections, without the protocol the runner now owns.
+#: unit, inferred-premise routing, and sizing rules, without the protocol the
+#: runner owns. Keep premise routing before SIZING_END so the model receives it.
 SIZING_SKILL_PATH = os.path.join("skills", "breakdown", "SKILL.md")
 SIZING_START = "## The unit"
 SIZING_END = "## Ordering and independence"

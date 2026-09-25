@@ -1,14 +1,13 @@
 # Command Center MCP connector
 
 This directory contains the authenticated HTTP MCP connector for Command Center. Its
-read-only `brief`, `ideas`, `show`, and `queue` tools call the matching `funnel.py`
-commands and return their output. Its gate tools `approve`, `accept`, and `park`
-call the matching `funnel.py` gate commands and record Nate's verbatim
-instruction in a `nate-relayed` provenance block. The connector does not reimplement
-project queries or ordering, and it does not expose `next`, `claim`, `release`,
-`gate`, heartbeat operations, or merge. There is no `start` tool: `plan.md`
-deleted the "Start now?" gate, and a Ready project moves to Building when its
-first ticket is claimed.
+read tools call `funnel.py` for the source of truth on queries and ordering. Its
+`capture` and `shaped` tools call the canonical funnel and shape commands and write
+`nate-relayed` provenance. Its gate tools record Nate's verbatim instruction in a
+`nate-relayed` provenance block. The connector does not reimplement project queries or
+ordering, and it does not expose `next`, `claim`, `release`, `gate`, heartbeat
+operations, or merge. There is no `start` tool: `plan.md` deleted the "Start now?"
+gate, and a Ready project moves to Building when its first ticket is claimed.
 
 ## Local development configuration
 
@@ -34,6 +33,21 @@ For deployment, `GH_TOKEN` comes from
 - `ideas` calls `funnel.py ideas`.
 - `show` accepts an item reference and calls `funnel.py show <ref>`.
 - `queue` calls `funnel.py queue`.
+
+## Write tools
+
+- `capture` accepts a title, optional note, and optional `owner/repo`. If the repo is
+  omitted, the funnel uses the active work binding, the sole member repo, or refuses
+  when the target would be ambiguous. Captures are recorded with Nate as their origin
+  and `nate-relayed` provenance.
+- `shaped` accepts an issue reference, `plan_markdown` text, and the remaining
+  structured shape-answer fields. It sends the answer directly on stdin to
+  `shape-apply`, so callers do not need to create a file. The shape engine validates
+  the answer, resolves the repo using the same rule, and decides whether the item stays
+  at Shaped or advances to Ready. The issue body receives `nate-relayed` provenance.
+
+Neither write tool exposes the local-only `next`, `claim`, `release`, `gate`, or
+`heartbeat` controls.
 
 ## Gate tools
 
@@ -93,8 +107,9 @@ from the two external env files and are not part of the Docker build context.
 After starting, verify the forwarded host port, tunneled metadata and auth
 boundary. The smoke test checks that requests without a token and with an invalid
 token receive 401/403, then initializes an authenticated MCP session and confirms
-the four read tools and the three gate tools are registered. Run the restart check after the initial smoke
-test to confirm Colima brings the container and host port back:
+the four read tools, two write tools, and three gate tools are registered. Run the
+restart check after the initial smoke test to confirm Colima brings the container and
+host port back:
 
 ```sh
 colima restart
@@ -107,5 +122,5 @@ docker exec command-center-mcp python /app/command-center/funnel-mcp-connector/s
 
 The smoke test exits non-zero if the token is missing, either unauthenticated
 request is accepted, the authenticated MCP exchange fails, the tool list differs
-from the four read tools and the three gate tools, or `/healthz` does not respond
-as expected.
+from the four read tools, two write tools, and three gate tools, or `/healthz` does
+not respond as expected.

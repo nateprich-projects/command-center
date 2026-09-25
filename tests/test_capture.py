@@ -150,10 +150,11 @@ def test_capture_non_transient_item_add_failure_does_not_retry(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("origin", "klass"),
-    [("nate-relayed", None), ("agent", "Improve")],
+    ("origin", "klass", "voice"),
+    [("nate-relayed", None, "nate-relayed"),
+     ("agent", "Improve", "agent")],
 )
-def test_capture_records_each_explicit_origin(monkeypatch, origin, klass):
+def test_capture_records_each_explicit_origin(monkeypatch, origin, klass, voice):
     calls = []
     field_writes = []
 
@@ -183,11 +184,12 @@ def test_capture_records_each_explicit_origin(monkeypatch, origin, klass):
     assert funnel.cmd_capture(
         [], NOW, "An idea", "Raw note", "owner/repo",
         run="capture-run", agent="claude", origin=origin, klass=klass,
+        voice=voice,
     ) == 0
 
     body = calls[0][calls[0].index("--body") + 1]
     assert funnel.parse_origin(body) is None
-    assert funnel.parse_provenance(body)["voice"] == "agent"
+    assert funnel.parse_provenance(body)["voice"] == voice
     assert ("project-item-42", "Origin",
             "agent" if origin == "agent" else "Nate",
             "https://github.com/owner/repo/issues/42") in field_writes
@@ -237,11 +239,13 @@ def test_capture_cli_passes_repeated_caused_by_refs(monkeypatch):
 
     assert funnel.main([
         "capture", "An idea", "--repo", "owner/repo",
-        "--origin", "nate-relayed", "--caused-by", "#7",
+        "--origin", "nate-relayed", "--voice", "nate-relayed",
+        "--caused-by", "#7",
         "--caused-by", "owner/repo#8",
     ], _items=[]) == 0
 
-    assert received["args"][-1] == ["#7", "owner/repo#8"]
+    assert received["args"][-2] == ["#7", "owner/repo#8"]
+    assert received["args"][-1] == "nate-relayed"
 
 
 def test_capture_requires_an_explicit_origin_before_resolving_repo(monkeypatch):

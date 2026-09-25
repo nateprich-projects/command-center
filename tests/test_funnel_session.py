@@ -49,6 +49,32 @@ def test_a_session_defers_its_load_until_the_first_command_and_reuses_it(
     ]
 
 
+def test_begin_session_loader_accepts_compact_rows_and_timing_context():
+    received = {}
+
+    def loader(include_details=True, member_repo_names=None, timings=None):
+        received.update({
+            "include_details": include_details,
+            "member_repo_names": member_repo_names,
+            "timings": timings,
+        })
+        return []
+
+    session = funnel.FunnelSession(loader=loader)
+    timings = {}
+
+    assert session._load_items(
+        include_details=False,
+        member_repo_names=["owner/repo"],
+        timings=timings,
+    ) == []
+    assert received == {
+        "include_details": False,
+        "member_repo_names": ["owner/repo"],
+        "timings": timings,
+    }
+
+
 def test_main_accepts_the_session_view_without_loading_the_project_again(
     monkeypatch,
 ):

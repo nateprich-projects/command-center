@@ -2368,6 +2368,101 @@ def test_muse_escalated_begin_uses_the_explicit_reviewer_role(
     assert result["work"] == review
 
 
+def _recorded_conflict_fixture(verdict=None):
+    recorded = json.loads(
+        (ROOT / "tests/fixtures/conflict_begin_stdout_pr1501.json").read_text()
+    )["pr"]
+    if verdict is not None:
+        recorded["verdict"] = verdict
+    return recorded
+
+
+def _recorded_conflict_ticket():
+    repo = "nateprich-projects/command-center"
+    return funnel.Item(
+        repo=repo,
+        number=703,
+        title="Recorded conflicting ticket",
+        url="https://github.com/{}/issues/703".format(repo),
+        state="OPEN",
+        status="Building",
+        risk="standard",
+        needs="none",
+        parent=repo + "#1503",
+    )
+
+
+def test_begin_keeps_recorded_conflict_precheck_off_json_stdout(
+    monkeypatch, capsys
+):
+    """The #1501 conflict precheck writes its confirmation before begin JSON."""
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+    monkeypatch.setattr(funnel, "awaiting_breakdown", lambda rows: [])
+    monkeypatch.setattr(funnel, "shapeable_idea", lambda *args: None)
+    monkeypatch.setattr(
+        funnel,
+        "_run_gh",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+    ticket = _recorded_conflict_ticket()
+    fact = _recorded_conflict_fixture()
+    facts = funnel.TicketPRFacts(rows_by_ref={ticket.ref: [fact]})
+
+    assert funnel.cmd_begin(
+        [ticket], NOW, "zcode", "standard", False,
+        repo_readiness={}, caller_role="review", _pr_facts=facts,
+    ) == 0
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["do"] == "stop"
+    assert "recorded rejected on PR #1501 against 6389cc6961da" in captured.err
+
+
+def test_begin_merge_reconcile_keeps_refusal_confirmation_off_json_stdout(
+    monkeypatch, capsys
+):
+    """A refused merge in begin's reconcile still emits parseable JSON."""
+    _allow_begin(monkeypatch)
+    ticket = _recorded_conflict_ticket()
+    fact = _recorded_conflict_fixture({
+        "verdict": "approved",
+        "ci": "green",
+        "head_sha": "6389cc6961da",
+        "blocking": [],
+    })
+    facts = funnel.TicketPRFacts(rows_by_ref={ticket.ref: [fact]})
+    blocker = "branch 'ticket/703'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    monkeypatch.setattr(
+        funnel, "merge_blockers",
+        lambda repo, pr, items, now, pr_fact=None: [blocker],
+    )
+    monkeypatch.setattr(funnel, "awaiting_breakdown", lambda rows: [])
+    monkeypatch.setattr(funnel, "review_queue", lambda rows, tier: [])
+    monkeypatch.setattr(funnel, "shapeable_idea", lambda *args: None)
+    monkeypatch.setattr(
+        funnel,
+        "_run_gh",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+
+    assert funnel.cmd_begin(
+        [ticket], NOW, "zcode", "standard", False,
+        repo_readiness={}, caller_role="review", _pr_facts=facts,
+    ) == 0
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["do"] == "stop"
+    assert result["reconciled_merges"][0]["result"] == "refused"
+    assert "recorded rejected on PR #1501 against 6389cc6961da" in captured.err
+
+
 def test_broken_review_is_before_a_broken_idea(monkeypatch, capsys):
     project, ticket = _ticket(105, 100, klass="Broken")
     idea = _idea(106, "Broken idea", "Risk: standard", klass="Broken")

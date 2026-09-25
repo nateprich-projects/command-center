@@ -133,7 +133,7 @@ requires exactly one non-empty whole line of the form
 `Possible defect: <statement>` in the plan, naming the defect the evidence will
 decide. This is a thin mirror of `engine/shape.py`, which defines the check. The
 recorded examples live in `tests/fixtures/investigate_shape_excerpts.json` and
-are exercised by `tests/test_engine_shape.py`.
-deliverable is evidence, never the fix: follow-ups are new ideas, classed for
-the work and linked back. **Still his:** the class on anything *he* raises, and
-any reclassification. Propose, do not set.
+are exercised by `tests/test_engine_shape.py`. An `Investigate` plan delivers
+evidence, never the fix: follow-ups are new ideas, classed for the work and
+linked back. **Still his:** the class on anything *he* raises, and any
+reclassification. Propose, do not set.

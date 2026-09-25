@@ -404,6 +404,23 @@ def test_approved_records_then_merges_and_closes(monkeypatch, capsys):
                               "confirmed": True}]
 
 
+def test_an_open_mergeable_pr_still_merges(monkeypatch, capsys):
+    wiring = Wiring(
+        monkeypatch, merge_code=0,
+        pr_view={"state": "OPEN", "headRefOid": SHA,
+                 "mergeable": "MERGEABLE"})
+
+    code = run_cli(monkeypatch, capsys,
+                   ["7", "--repo", REPO, "--answer", "-", "--head", SHA],
+                   stdin=answer())
+
+    assert code == 0
+    assert len(wiring.merges) == 1
+    assert wiring.merges[0]["confirmed"] is True
+    assert wiring.pr_reads == []
+    assert review_apply.OBSERVED_MERGE_PREFIX not in capsys.readouterr().out
+
+
 def test_exact_approve_synonym_records_canonical_approval_and_note(
         monkeypatch, capsys):
     wiring = Wiring(monkeypatch)

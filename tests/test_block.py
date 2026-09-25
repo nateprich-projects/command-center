@@ -26,10 +26,10 @@ def comment_item():
 FF_WEEKLY_EVENT_COMMENT = '''**Blocked until event:**
 ```json
 {
-  "agent": "codex",
-  "job": "command-center-tickets-hourly",
+  "agent": "fantasy-gm",
+  "job": "com.nateprich.ff-weekly-start-sit.daily",
   "outcome": "errored",
-  "after": "2026-09-22T00:00:00Z"
+  "after": "2026-09-22T15:00:00Z"
 }
 ```
 Wait for the next genuine daily failure.

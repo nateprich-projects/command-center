@@ -7,6 +7,7 @@ import {
   phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
+  renderMetricChart, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 } from "../public/app.js";
 
@@ -53,6 +54,8 @@ class TestNode {
 
   setAttribute(name, value) {
     this.attributes.set(name, String(value));
+    // As in a browser, the class attribute and className are one value.
+    if (name === "class") this.className = String(value);
   }
 
   addEventListener() {}
@@ -80,6 +83,16 @@ class TestDocument {
   createElement(tagName) {
     return new TestNode(tagName);
   }
+
+  createElementNS(namespace, tagName) {
+    const node = new TestNode(tagName);
+    node.namespaceURI = namespace;
+    return node;
+  }
+}
+
+function nodesByTag(root, tagName) {
+  return [...root.walk()].filter((node) => node.tagName === tagName);
 }
 
 // The page's one sort orders the repository dropdown's names, which are not
@@ -678,4 +691,93 @@ test("Execution uses a read-only request and the two views route on the same pag
     "/?repo=owner%2Frepo",
   );
   assert.match(source, /fetch\("\/api\/snapshot", \{ cache: "no-store" \}\)/);
+});
+
+test("the panel chart breaks the R7 line at a gap and draws the R28 as a rule", () => {
+  const days = Array.from({ length: 70 }, (_, index) =>
+    "2026-07-" + String(index + 1).padStart(2, "0"));
+  const r7 = days.map((_, index) => 1 + (index % 5));
+  r7[60] = null; // a gap in the window
+  r7[65] = null;
+  r7[67] = null; // day 66 stands alone between two gaps
+  const r28 = days.map(() => 2.5);
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const svg = renderMetricChart({ r7, r28, daily: [], delta: [] }, days, {
+      title: "Tickets landed / day", format: "count",
+    });
+
+    assert.equal(svg.tagName, "svg");
+    assert.equal(svg.namespaceURI, "http://www.w3.org/2000/svg");
+    assert.equal(svg.attributes.get("role"), "img");
+
+    // Only the newest 56 days are drawn, though the series keeps more.
+    const hits = svg.querySelectorAll(".chart-hit");
+    assert.equal(hits.length, CHART_WINDOW_DAYS);
+    assert.match(hits[0].textContent, /^2026-07-15 /);
+
+    // The gaps split the line into separate runs; nothing bridges or zeroes them.
+    const lines = svg.querySelectorAll(".chart-line");
+    assert.equal(lines.length, 3);
+    for (const line of lines) {
+      assert.match(line.attributes.get("d"), /^M[\d. L]+$/);
+      assert.doesNotMatch(line.attributes.get("d"), /NaN/);
+    }
+    const baseline = svg.querySelector(".chart-axis").attributes.get("y1");
+    for (const line of lines) {
+      const ys = line.attributes.get("d").slice(1).split(" L")
+        .map((pair) => pair.split(" ")[1]);
+      assert.ok(ys.every((value) => Number(value) < Number(baseline)));
+    }
+    assert.ok(hits.some((hit) => /R7 Gap/.test(hit.textContent)));
+
+    // The lone day is a dot, and the newest reading is direct-labelled.
+    const dots = svg.querySelectorAll(".chart-dot");
+    assert.equal(dots.length, 2);
+    assert.equal(svg.querySelector(".chart-end-label").textContent, "5.0");
+
+    const rule = svg.querySelector(".chart-rule");
+    assert.ok(rule);
+    assert.equal(rule.attributes.get("y1"), rule.attributes.get("y2"));
+    assert.equal(svg.querySelector(".chart-rule-label").textContent, "R28 2.5");
+
+    // Everything is inline: no image, link or external reference.
+    assert.equal(nodesByTag(svg, "image").length, 0);
+    assert.ok([...svg.walk()].every((node) => !node.attributes.has("href")));
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("a panel chart with no readings renders an empty frame, never a zero line", () => {
+  const days = ["2026-09-23", "2026-09-24"];
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const svg = renderMetricChart({ r7: [null, null], r28: [null, null] }, days);
+    assert.equal(svg.querySelectorAll(".chart-line").length, 0);
+    assert.equal(svg.querySelectorAll(".chart-dot").length, 0);
+    assert.equal(svg.querySelector(".chart-rule"), null);
+    assert.match(svg.attributes.get("aria-label"), /R7 Gap, R28 Gap/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("the chart has its own colour in both themes and makes no request", async () => {
+  const [css, source] = await Promise.all([
+    readFile(new URL("../public/styles.css", import.meta.url), "utf8"),
+    readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+  ]);
+  const light = css.slice(css.indexOf("@media (prefers-color-scheme: light)"));
+  assert.match(css.slice(0, css.indexOf("@media")), /--chart-line: #3987e5;/);
+  assert.match(light, /--chart-line: #2a78d6;/);
+  const chart = source.slice(
+    source.indexOf("const SVG_NS"), source.indexOf("function renderExecutionTiles("),
+  );
+  assert.doesNotMatch(chart, /fetch\(|XMLHttpRequest|<image|import\(/);
+  assert.deepEqual(chart.match(/https?:\/\/[^"]+/g), ["http://www.w3.org/2000/svg"]);
 });

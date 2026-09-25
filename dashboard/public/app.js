@@ -910,6 +910,150 @@ function appendMetricTile(container, definition, rows) {
   container.append(tile);
 }
 
+// The chart every Execution panel draws: an inline SVG line of the R7 over the
+// last CHART_WINDOW_DAYS days, with the newest R28 as a horizontal rule. The
+// series keeps 90 days, so the window can widen without a schema change. No
+// library and no request: the worker's CSP is script-src 'self'. A missing
+// day is a break in the line, never a zero and never interpolated.
+const SVG_NS = "http://www.w3.org/2000/svg";
+const CHART_WINDOW_DAYS = 56;
+const CHART_WIDTH = 320;
+const CHART_HEIGHT = 120;
+const CHART_PAD = { top: 12, right: 44, bottom: 18, left: 4 };
+
+function svgNode(tag, attributes = {}, text) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes)) {
+    node.setAttribute(name, String(value));
+  }
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+
+// One path per unbroken run of numbers; a lone day between gaps is a dot,
+// because a one-point path draws nothing.
+function chartRuns(values) {
+  const runs = [];
+  let run = [];
+  values.forEach((value, index) => {
+    if (isMetricNumber(value)) {
+      run.push(index);
+    } else if (run.length) {
+      runs.push(run);
+      run = [];
+    }
+  });
+  if (run.length) runs.push(run);
+  return runs;
+}
+
+function chartTop(values, format) {
+  let top = 0;
+  for (const value of values) if (isMetricNumber(value) && value > top) top = value;
+  if (format === "percent") return Math.min(1, top * 1.1) || 1;
+  return top * 1.1 || 1;
+}
+
+function renderMetricChart(series, days, { title = "", format = "count" } = {}) {
+  const start = Math.max(0, (days || []).length - CHART_WINDOW_DAYS);
+  const windowDays = (days || []).slice(start);
+  const read = (key) => windowDays.map((_, offset) => {
+    const value = series && Array.isArray(series[key]) ? series[key][start + offset] : null;
+    return isMetricNumber(value) ? value : null;
+  });
+  const r7 = read("r7");
+  const r28 = read("r28");
+  const rule = r28.length ? r28[r28.length - 1] : null;
+  const top = chartTop([...r7, rule], format);
+
+  const plotWidth = CHART_WIDTH - CHART_PAD.left - CHART_PAD.right;
+  const plotHeight = CHART_HEIGHT - CHART_PAD.top - CHART_PAD.bottom;
+  const x = (index) => CHART_PAD.left +
+    (windowDays.length > 1 ? (index / (windowDays.length - 1)) * plotWidth : plotWidth);
+  const y = (value) => CHART_PAD.top + plotHeight - (value / top) * plotHeight;
+  const point = (index) => x(index).toFixed(1) + " " + y(r7[index]).toFixed(1);
+
+  const latest = r7.length ? r7[r7.length - 1] : null;
+  const summary = (title ? title + ": " : "") + "R7 " +
+    formatMetricValue(latest, format) + ", R28 " + formatMetricValue(rule, format) +
+    ", " + windowDays.length + " days";
+  const svg = svgNode("svg", {
+    class: "metric-chart",
+    viewBox: "0 0 " + CHART_WIDTH + " " + CHART_HEIGHT,
+    role: "img",
+    "aria-label": summary,
+  });
+  svg.append(svgNode("title", {}, summary));
+  // Drawn first so a hovered day shades beneath the line, not over it.
+  const hits = svgNode("g", { class: "chart-hits" });
+  svg.append(hits);
+
+  const baseline = CHART_PAD.top + plotHeight;
+  svg.append(svgNode("line", {
+    class: "chart-axis",
+    x1: CHART_PAD.left, x2: CHART_PAD.left + plotWidth, y1: baseline, y2: baseline,
+  }));
+
+  if (isMetricNumber(rule)) {
+    svg.append(svgNode("line", {
+      class: "chart-rule",
+      x1: CHART_PAD.left, x2: CHART_PAD.left + plotWidth, y1: y(rule), y2: y(rule),
+    }));
+    // Labelled at the left end, clear of the R7's end label on the right.
+    svg.append(svgNode("text", {
+      class: "chart-rule-label", x: CHART_PAD.left + 2, y: y(rule) - 4,
+    }, "R28 " + formatMetricValue(rule, format)));
+  }
+
+  for (const run of chartRuns(r7)) {
+    if (run.length === 1) {
+      svg.append(svgNode("circle", {
+        class: "chart-dot", cx: x(run[0]).toFixed(1), cy: y(r7[run[0]]).toFixed(1), r: 4,
+      }));
+    } else {
+      svg.append(svgNode("path", {
+        class: "chart-line",
+        d: "M" + run.map(point).join(" L"),
+      }));
+    }
+  }
+
+  if (isMetricNumber(latest)) {
+    const last = r7.length - 1;
+    svg.append(svgNode("circle", {
+      class: "chart-dot", cx: x(last).toFixed(1), cy: y(latest).toFixed(1), r: 4,
+    }));
+    svg.append(svgNode("text", {
+      class: "chart-end-label", x: x(last) + 7, y: y(latest) + 3,
+    }, formatMetricValue(latest, format)));
+  }
+
+  // Hover: one full-height band per day carrying that day's reading, so a gap
+  // says "Gap" on hover rather than showing nothing.
+  const band = windowDays.length > 1 ? plotWidth / (windowDays.length - 1) : plotWidth;
+  windowDays.forEach((day, index) => {
+    const hit = svgNode("rect", {
+      class: "chart-hit",
+      x: (x(index) - band / 2).toFixed(1), y: CHART_PAD.top,
+      width: band.toFixed(1), height: plotHeight,
+    });
+    hit.append(svgNode("title", {}, day + " · R7 " + formatMetricValue(r7[index], format) +
+      " · R28 " + formatMetricValue(r28[index], format)));
+    hits.append(hit);
+  });
+
+  if (windowDays.length) {
+    svg.append(svgNode("text", {
+      class: "chart-date", x: CHART_PAD.left, y: CHART_HEIGHT - 4,
+    }, windowDays[0]));
+    svg.append(svgNode("text", {
+      class: "chart-date", x: CHART_PAD.left + plotWidth, y: CHART_HEIGHT - 4,
+      "text-anchor": "end",
+    }, windowDays[windowDays.length - 1]));
+  }
+  return svg;
+}
+
 function renderExecutionTiles(series, container) {
   if (!container) return;
   container.replaceChildren();
@@ -1117,6 +1261,6 @@ export {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
   phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,
-  renderExecutionTiles, requestMetrics,
+  renderExecutionTiles, renderMetricChart, requestMetrics, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 };

@@ -7834,6 +7834,23 @@ query($ids: [ID!]!) {
 }
 """
 
+
+def _item_detail_request(
+    ids: Sequence[str], child_ids: Sequence[str],
+) -> Tuple[str, Dict[str, List[str]], str, Optional[str]]:
+    """Assemble one batched document for history and optional child nodes.
+
+    History is fetched for every selected Project item in one ``nodes`` list.
+    Child timestamps share that GraphQL document when any selected item has
+    children; otherwise use the smaller history-only document.
+    """
+    variables = {"ids": list(ids)}
+    if child_ids:
+        variables["childIds"] = list(child_ids)
+        return ITEM_DETAILS_QUERY, variables, "history", "children"
+    return ITEM_TIMELINE_DETAILS_QUERY, variables, "nodes", None
+
+
 ITEM_LOCK_QUERY = """
 query($item: ID!) {
   rateLimit { cost remaining resetAt }
@@ -7854,6 +7871,14 @@ class GitHubError(RuntimeError):
         super().__init__(message)
         self.transient = transient
         self.request_id = request_id
+
+
+class BeginReserveStop(RuntimeError):
+    """Stop before the Project read when the first query shows low headroom."""
+
+    def __init__(self, result: Dict[str, object]):
+        self.result = result
+        super().__init__(str(result.get("why") or "begin reserve gate"))
 
 
 # `gh api graphql` occasionally returns a partial JSON document. The CLI
@@ -8546,14 +8571,51 @@ def parse_time(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def member_repos() -> List[str]:
+def _record_begin_load_phase(
+    timings: Optional[Dict[str, object]], phase: str, elapsed: float,
+) -> None:
+    """Add one non-gating begin-load duration to the existing timings map."""
+    if timings is None:
+        return
+    try:
+        timings["begin_load." + phase] = round(max(0.0, elapsed), 6)
+    except Exception:
+        # Instrumentation must not gate the command it instruments.
+        return
+
+
+def _begin_load_timed(
+    timings: Optional[Dict[str, object]],
+    phase: str,
+    reader: Callable[[], Any],
+) -> Any:
+    """Run one begin-load phase and record its duration when requested."""
+    if timings is None:
+        return reader()
+    started = time.perf_counter()
+    try:
+        return reader()
+    finally:
+        _record_begin_load_phase(
+            timings, phase, time.perf_counter() - started
+        )
+
+
+def member_repos(
+    after_first_response: Optional[Callable[[Mapping[str, object]], None]] = None,
+) -> List[str]:
     """Repos that opted in by carrying the topic. Never an allowlist."""
     members: List[str] = []
+    first_response = after_first_response
     for kind, login in OWNERS:
         query = REPO_QUERY.replace("OWNER_KIND", kind).replace("OWNER_LOGIN", login)
         cursor = None
         while True:
             data = gh_graphql(query, **({"cursor": cursor} if cursor else {}))
+            if first_response is not None:
+                callback = first_response
+                first_response = None
+                callback(data)
             repos = data[kind]["repositories"]
             for node in repos["nodes"]:
                 if node["isArchived"]:
@@ -8769,21 +8831,22 @@ def hydrate_item_details(
     if not ids:
         return
 
+    child_id_set = set(child_ids)
     for start in range(0, len(ids), PROJECT_ITEM_DETAIL_BATCH_SIZE):
         batch = ids[start:start + PROJECT_ITEM_DETAIL_BATCH_SIZE]
-        child_batch = child_ids[start:start + PROJECT_ITEM_DETAIL_BATCH_SIZE]
-        if child_batch:
-            data = gh_graphql(
-                ITEM_DETAILS_QUERY,
-                ids=batch,
-                childIds=child_batch,
-            )
-            timeline_nodes = data.get("history") if isinstance(data, dict) else None
-            child_nodes = data.get("children") if isinstance(data, dict) else None
+        child_batch = [item_id for item_id in batch if item_id in child_id_set]
+        query, variables, history_field, child_field = _item_detail_request(
+            batch, child_batch
+        )
+        data = gh_graphql(query, **variables)
+        if not isinstance(data, dict):
+            timeline_nodes = None
+            child_nodes = None if child_field is not None else []
         else:
-            data = gh_graphql(ITEM_TIMELINE_DETAILS_QUERY, ids=batch)
-            timeline_nodes = data.get("nodes") if isinstance(data, dict) else None
-            child_nodes = []
+            timeline_nodes = data.get(history_field)
+            child_nodes = (
+                data.get(child_field) if child_field is not None else []
+            )
         if (
             not isinstance(timeline_nodes, list)
             or not isinstance(child_nodes, list)
@@ -8809,45 +8872,74 @@ def hydrate_item_details(
                 )
 
 
-def load_items(include_details: bool = True) -> List[Item]:
+def load_items(
+    include_details: bool = True,
+    member_repo_names: Optional[Sequence[str]] = None,
+    timings: Optional[Dict[str, object]] = None,
+) -> List[Item]:
     global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
-    members = set(member_repos())
+    members = set(
+        member_repo_names
+        if member_repo_names is not None
+        else _begin_load_timed(timings, "member_repos", member_repos)
+    )
     items: List[Item] = []
     cursor = None
-    while True:
-        variables = {"login": PROJECT_OWNER, "number": PROJECT_NUMBER}
-        if cursor:
-            variables["cursor"] = cursor
-        _PROJECT_ITEM_PAGE_COUNT += 1
-        project = gh_graphql(ITEM_QUERY, **variables)["user"]["projectV2"]
-        if project is None:
-            raise GitHubError(
-                "Project {}/{} not found or not visible".format(
-                    PROJECT_OWNER, PROJECT_NUMBER
+    project_started = time.perf_counter() if timings is not None else None
+    block_comment_seconds = 0.0
+    try:
+        while True:
+            variables = {"login": PROJECT_OWNER, "number": PROJECT_NUMBER}
+            if cursor:
+                variables["cursor"] = cursor
+            _PROJECT_ITEM_PAGE_COUNT += 1
+            project = gh_graphql(ITEM_QUERY, **variables)["user"]["projectV2"]
+            if project is None:
+                raise GitHubError(
+                    "Project {}/{} not found or not visible".format(
+                        PROJECT_OWNER, PROJECT_NUMBER
+                    )
                 )
+            page = project["items"]
+            nodes = page["nodes"]
+            _PROJECT_ITEM_ROW_COUNT += len(nodes)
+            for node in nodes:
+                item = _from_node(node)
+                # Membership is the topic. An item whose repo has not opted in
+                # is outside the funnel even though it sits in the Project.
+                if item and item.repo in members:
+                    # Dependencies are already on the item: `_from_node` reads
+                    # them from `blockedBy` in the Project query. They used to
+                    # be fetched here instead, one REST call per open ticket —
+                    # do not restore a per-item dependency read in this loop.
+                    if item.state == "OPEN" and item.is_blocked:
+                        comment_started = time.perf_counter()
+                        try:
+                            _load_block_comment(item)
+                        finally:
+                            block_comment_seconds += (
+                                time.perf_counter() - comment_started
+                            )
+                    items.append(item)
+            if not page["pageInfo"]["hasNextPage"]:
+                break
+            cursor = page["pageInfo"]["endCursor"]
+    finally:
+        if project_started is not None:
+            project_elapsed = max(
+                0.0,
+                time.perf_counter() - project_started - block_comment_seconds,
             )
-        page = project["items"]
-        nodes = page["nodes"]
-        _PROJECT_ITEM_ROW_COUNT += len(nodes)
-        for node in nodes:
-            item = _from_node(node)
-            # Membership is the topic. An item whose repo has not opted in is
-            # outside the funnel even though it sits in the Project.
-            if item and item.repo in members:
-                # Dependencies are already on the item: `_from_node` reads them
-                # from `blockedBy` in the Project query. They used to be fetched
-                # here instead, one REST call per open ticket per command — ~78
-                # calls a run, ~1,800 an hour across the scheduled agents, which
-                # exhausted the API budget on 2026-09-08 and took `brief` down
-                # entirely. Do not restore a per-item read in this loop.
-                if item.state == "OPEN" and item.is_blocked:
-                    _load_block_comment(item)
-                items.append(item)
-        if not page["pageInfo"]["hasNextPage"]:
-            break
-        cursor = page["pageInfo"]["endCursor"]
+            _record_begin_load_phase(
+                timings, "project_items", project_elapsed,
+            )
+            _record_begin_load_phase(
+                timings, "block_comments", block_comment_seconds
+            )
     if include_details:
-        hydrate_item_details(items)
+        _begin_load_timed(
+            timings, "item_details", lambda: hydrate_item_details(items)
+        )
     mark_projects_that_carried_human_steps(items)
     return items
 
@@ -13422,6 +13514,15 @@ def _call_with_optional_keyword(
     return func(*args)
 
 
+def _call_with_optional_keywords(func: Callable, *args, **kwargs):
+    """Pass only supported optional keywords to a compatibility seam."""
+    accepted = {
+        name: value for name, value in kwargs.items()
+        if _accepts_keyword(func, name)
+    }
+    return func(*args, **accepted)
+
+
 PR_GRAPHQL_PAGE_SIZE = 100
 PR_GRAPHQL_COMMENT_PAGE_SIZE = 100
 PR_GRAPHQL_REF_PAGE_SIZE = 100
@@ -14736,36 +14837,20 @@ def _begin_preflight(
     return out, reading
 
 
-BEGIN_RATE_LIMIT_QUERY = """
-query {
-  rateLimit { cost remaining resetAt }
-}
-"""
-
-
 def _begin_api_reserve_preflight(
-    agent: str, tier: Optional[str], caller_role: Optional[str]
+    agent: str,
+    tier: Optional[str],
+    caller_role: Optional[str],
+    response: Optional[Mapping[str, object]] = None,
 ) -> Optional[Dict[str, object]]:
-    """Read the GraphQL budget before ``begin`` loads the Project.
+    """Check headroom from the first real begin query's GraphQL response.
 
-    The Project load is the expensive part of an empty poll.  A rate-limit-only
-    query gives the caller one authoritative reading without paying for the
-    Project first.  Its own cost is not the cost being reserved: #1047 measured
-    the next begin load at ``BEGIN_PROJECT_LOAD_COST`` points.
-
-    A structured zero-budget response can carry both ``rateLimit`` and GraphQL
-    errors.  ``gh_graphql`` raises for the latter after preserving the former,
-    so treat that specific empty-window shape as the same clean reserve stop as
-    a successful below-floor response. Other failures remain real begin
-    errors and are handled by the existing error envelope.
+    ``member_repos`` is the first live read in a normal begin and its document
+    already carries ``rateLimit``.  Reuse that response instead of spending a
+    standalone probe before the funnel-state load.  A structured zero-budget
+    response can carry both ``rateLimit`` and GraphQL errors; ``gh_graphql``
+    preserves that block in ``graphql_spend()`` before it raises.
     """
-    response = None
-    try:
-        response = gh_graphql(BEGIN_RATE_LIMIT_QUERY)
-    except GitHubError:
-        if _budget_exhaustion_signal() is None:
-            raise
-
     remaining = None
     if isinstance(response, Mapping):
         block = response.get("rateLimit")
@@ -14952,6 +15037,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               _preflight: Optional[
                   Tuple[Dict[str, object], Optional[Dict[str, object]]]
               ] = None,
+              timings: Optional[Dict[str, object]] = None,
               ) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
@@ -14972,6 +15058,8 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if _preflight is None:
         _preflight = _begin_preflight(now, agent, idle, tier)
     out, reading = _preflight
+    if timings is not None:
+        out["timings"] = timings
     if reading is None:
         print(json.dumps(out, indent=2))
         return 0
@@ -15008,7 +15096,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     # Keeping it here prevents the approved-merge pass, engineer hand-back, and
     # reviewer queue from each paying for the same repository fan-out.
     try:
-        pr_facts = ticket_pr_facts(items)
+        pr_facts = _begin_load_timed(
+            timings, "ticket_pr_facts", lambda: ticket_pr_facts(items)
+        )
     except GitHubError as exc:
         out.update(
             do="stop",
@@ -16769,6 +16859,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
     # the Project. Keep that gate ahead of the shared loader; an ordinary poll
     # must not spend the full Project read merely to learn that it cannot run.
     begin_preflight = None
+    begin_timings: Optional[Dict[str, object]] = None
+    begin_member_repo_names: Optional[List[str]] = None
     if args.command == "begin":
         begin_preflight = _begin_preflight(
             now, args.agent, args.idle, args.tier)
@@ -16781,15 +16873,39 @@ def main(argv: Optional[Sequence[str]] = None, *,
             begin_preflight[0].update(role_refusal)
             print(json.dumps(begin_preflight[0], indent=2))
             return 0
-        try:
-            begin_reserve = _begin_api_reserve_preflight(
-                args.agent, args.tier, args.caller_role
+        begin_timings = {}
+        reserve_response_seen = {"value": False}
+
+        def check_first_member_response(response):
+            reserve_response_seen["value"] = True
+            reserve = _begin_api_reserve_preflight(
+                args.agent, args.tier, args.caller_role, response
             )
-        except GitHubError as exc:
-            _begin_error_envelope(args.agent, exc)
-            return 2
-        if begin_reserve is not None:
-            begin_preflight[0].update(begin_reserve)
+            if reserve is not None:
+                raise BeginReserveStop(reserve)
+
+        try:
+            begin_member_repo_names = _begin_load_timed(
+                begin_timings,
+                "member_repos",
+                lambda: _call_with_optional_keyword(
+                    member_repos,
+                    "after_first_response",
+                    check_first_member_response,
+                ),
+            )
+            if not reserve_response_seen["value"]:
+                raise BeginReserveStop(_begin_api_reserve_preflight(
+                    args.agent, args.tier, args.caller_role
+                ) or {
+                    "gate": "reserve",
+                    "do": "stop",
+                    "why": "GraphQL budget could not be read; a run that "
+                           "cannot read its budget does not work",
+                })
+        except BeginReserveStop as stop:
+            begin_preflight[0].update(stop.result)
+            begin_preflight[0]["timings"] = begin_timings
             _record_begin_reserve(
                 args.agent,
                 begin_preflight[0].get("run"),
@@ -16797,6 +16913,23 @@ def main(argv: Optional[Sequence[str]] = None, *,
             )
             print(json.dumps(begin_preflight[0], indent=2))
             return 0
+        except GitHubError as exc:
+            if _budget_exhaustion_signal() is not None:
+                begin_reserve = _begin_api_reserve_preflight(
+                    args.agent, args.tier, args.caller_role
+                )
+                if begin_reserve is not None:
+                    begin_preflight[0].update(begin_reserve)
+                    begin_preflight[0]["timings"] = begin_timings
+                    _record_begin_reserve(
+                        args.agent,
+                        begin_preflight[0].get("run"),
+                        begin_preflight[0]["why"],
+                    )
+                    print(json.dumps(begin_preflight[0], indent=2))
+                    return 0
+            _begin_error_envelope(args.agent, exc)
+            return 2
 
     brief_timings: Optional[Dict[str, object]] = (
         {} if args.command == "brief" else None
@@ -16813,17 +16946,45 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if _items is not None:
             items = _items
         elif _items_loader is not None:
-            items = _items_loader()
+            if args.command == "begin":
+                items = _call_with_optional_keywords(
+                    _items_loader,
+                    include_details=False,
+                    member_repo_names=begin_member_repo_names,
+                    timings=begin_timings,
+                )
+            else:
+                items = _items_loader()
         elif args.command == "begin":
             # `begin` selects one job after its cheap gates. Keep the initial
             # Project scan compact; cmd_begin hydrates only the candidates it
             # actually needs to order or hand out.
-            items = load_items(include_details=False)
-            begin_detail_loader = lambda candidates: hydrate_item_details(
-                items, candidates
+            items = _call_with_optional_keywords(
+                load_items,
+                include_details=False,
+                member_repo_names=begin_member_repo_names,
+                timings=begin_timings,
             )
+
+            def hydrate_begin_candidates(candidates):
+                return _begin_load_timed(
+                    begin_timings,
+                    "item_details",
+                    lambda: hydrate_item_details(items, candidates),
+                )
+
+            begin_detail_loader = hydrate_begin_candidates
         else:
             items = load_items()
+        if args.command == "begin" and begin_detail_loader is None:
+            def hydrate_begin_candidates(candidates):
+                return _begin_load_timed(
+                    begin_timings,
+                    "item_details",
+                    lambda: hydrate_item_details(items, candidates),
+                )
+
+            begin_detail_loader = hydrate_begin_candidates
     except GitHubError as exc:
         if args.command == "brief":
             print(json.dumps({
@@ -16857,7 +17018,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
             )
         ):
-            repo_readiness = repo_readiness_for_items(items)
+            repo_readiness = _begin_load_timed(
+                begin_timings,
+                "repo_readiness",
+                lambda: repo_readiness_for_items(items),
+            )
         if args.command == "claim":
             return cmd_claim(
                 items, now, args.ref, pr_facts=ticket_pr_facts(items)
@@ -16915,6 +17080,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
             if begin_detail_loader is not None:
                 begin_kwargs["_detail_loader"] = begin_detail_loader
             begin_kwargs["_preflight"] = begin_preflight
+            if begin_timings is not None and _accepts_keyword(
+                cmd_begin, "timings"
+            ):
+                begin_kwargs["timings"] = begin_timings
             return cmd_begin(
                 items, now, args.agent, args.tier, args.idle,
                 args.breakdown, **begin_kwargs
@@ -17420,9 +17589,19 @@ class FunnelSession:
         self._heartbeat_agent: Optional[str] = None
         self._heartbeat_tier: Optional[str] = None
 
-    def _load_items(self) -> List[Item]:
+    def _load_items(
+        self,
+        include_details: bool = True,
+        member_repo_names: Optional[Sequence[str]] = None,
+        timings: Optional[Dict[str, object]] = None,
+    ) -> List[Item]:
         if self.items is None:
-            self.items = self._loader()
+            self.items = _call_with_optional_keywords(
+                self._loader,
+                include_details=include_details,
+                member_repo_names=member_repo_names,
+                timings=timings,
+            )
         return self.items
 
     def dispatch(self, argv: Sequence[str], stdin=None):

@@ -883,6 +883,21 @@ def test_a_failed_begin_finishes_its_started_run_with_the_slow_command_note(
     assert "funnel begin failed (exit 2)" in proc.stderr
 
 
+def test_invalid_begin_logs_only_the_first_300_bytes(tmp_path):
+    begin = {"payload": "x" * 500}
+    raw = json.dumps(begin)
+    proc, _repo = _stubbed_runner(tmp_path, begin, _packet())
+
+    assert proc.returncode == 1
+    assert (
+        "muse-review-engine: begin stdout (first 300 bytes):\n"
+        + raw[:300]
+        + "\n"
+    ) in proc.stderr
+    assert raw[300:] not in proc.stderr
+    assert "muse-review-engine: funnel begin returned invalid JSON" in proc.stderr
+
+
 def test_an_unexpected_begin_job_finishes_the_started_run(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path,

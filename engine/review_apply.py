@@ -46,6 +46,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import funnel  # noqa: E402
+from engine import review  # noqa: E402
 
 #: Malformed answer on a retryable attempt: the runner feeds the parse
 #: error back to the model and calls again with ``--attempt 2``.
@@ -58,6 +59,10 @@ FINAL_ATTEMPT = 2
 #: Raw model output kept in the second-failure note. The note is a GitHub
 #: comment, so an unbounded paste of model output does not belong there.
 MAX_RAW_NOTE = 4000
+
+# The review runner reads this line from review-apply's captured output to
+# finish the run with the existing heartbeat merge record.
+OBSERVED_MERGE_PREFIX = "review-apply: observed already-merged PR: "
 
 #: Marker the runner matches to finish the run errored after a final
 #: malformed answer. Printed on stdout, where runner diagnostics live.
@@ -284,17 +289,93 @@ def current_head(repo: str, pr: int) -> str:
 
 
 def apply_approved(repo: str, pr: int, blocking: List[str], note: Optional[str],
-                   ci: str, run: Optional[str], agent: Optional[str]) -> int:
+                   ci: str, run: Optional[str], agent: Optional[str],
+                   approved_head: Optional[str] = None) -> int:
     """Record the approval, then merge through the existing gate.
 
     ``funnel merge`` refuses unless every condition holds — CI green,
     the verdict at the head, the ticket's project Building — and closes
-    the ticket when the merge lands. Its exit code is the answer.
+    the ticket when the merge lands. If it refuses, classify an already-
+    merged PR only from the live PR state and the recorded approved head.
     """
     funnel.cmd_review(repo, pr, "approved", ci, blocking, note,
                       run=run, agent=agent)
-    return funnel.cmd_merge(
-        funnel.load_items(), datetime.now(timezone.utc), repo, pr, True)
+    merge_error = None
+    try:
+        merge_status = funnel.cmd_merge(
+            funnel.load_items(), datetime.now(timezone.utc), repo, pr, True)
+    except funnel.GitHubError as exc:
+        # The remote merge command can lose a race with a merge after the gate's read.
+        # Re-read GitHub before deciding whether that failure was terminal.
+        merge_status = 1
+        merge_error = str(exc)
+    if merge_status == 0:
+        return 0
+
+    try:
+        pr_view = review.fetch_pr(repo, pr)
+    except funnel.GitHubError as exc:
+        detail = "merge refused and current PR state could not be read: {}".format(
+            exc)
+        if merge_error:
+            detail = "{}; merge command: {}".format(detail, merge_error)
+        raise funnel.GitHubError(detail)
+
+    if not isinstance(pr_view, dict):
+        raise funnel.GitHubError(
+            "merge refused and current PR state was unreadable")
+    state = pr_view.get("state")
+    if not isinstance(state, str) or not state.strip():
+        raise funnel.GitHubError(
+            "merge refused and current PR state was unreadable")
+    if state.upper() != "MERGED":
+        if merge_error:
+            print("review-apply: {}".format(merge_error), file=sys.stderr)
+        return merge_status
+
+    verdict = funnel.latest_verdict(repo, pr)
+    if not isinstance(verdict, dict) or verdict.get("verdict") != "approved":
+        raise funnel.GitHubError(
+            "PR #{} is merged but its latest approved verdict could not be "
+            "read".format(pr))
+    verdict_head = verdict.get("head_sha")
+    if not isinstance(verdict_head, str) or not verdict_head.strip():
+        raise funnel.GitHubError(
+            "PR #{} is merged but the approved verdict has no readable head"
+            .format(pr))
+    if approved_head and verdict_head != approved_head:
+        raise funnel.GitHubError(
+            "PR #{} has an approved verdict at {}, not packet head {}".format(
+                pr, verdict_head, approved_head))
+
+    merged_head = pr_view.get("headRefOid")
+    if not isinstance(merged_head, str) or not merged_head.strip():
+        raise funnel.GitHubError(
+            "PR #{} is merged but its branch head is unreadable".format(pr))
+    if merged_head != verdict_head:
+        print(
+            "review-apply: merge refused because PR #{} is already merged at "
+            "head {}, while its approved head is {}".format(
+                pr, merged_head, verdict_head),
+            file=sys.stderr)
+        return merge_status
+
+    merged_by = pr_view.get("mergedBy")
+    actor = merged_by.get("login") if isinstance(merged_by, dict) else None
+    merged_at = pr_view.get("mergedAt")
+    if not isinstance(actor, str) or not actor.strip():
+        raise funnel.GitHubError(
+            "PR #{} is merged at the approved head but its merge actor is "
+            "unreadable".format(pr))
+    if not isinstance(merged_at, str) or not merged_at.strip():
+        raise funnel.GitHubError(
+            "PR #{} is merged at the approved head but its merge timestamp is "
+            "unreadable".format(pr))
+
+    observed = {"pr": pr, "head": merged_head, "actor": actor,
+                "merged_at": merged_at}
+    print(OBSERVED_MERGE_PREFIX + json.dumps(observed, sort_keys=True))
+    return 0
 
 
 def apply_rejected(repo: str, pr: int, blocking: List[str],
@@ -393,7 +474,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 return 1
         if verdict == "approved":
             return apply_approved(repo, args.pr, blocking, note, args.ci,
-                                  args.run, args.agent)
+                                  args.run, args.agent, args.head)
         return apply_rejected(repo, args.pr, blocking, note, args.ci,
                               args.run, args.agent)
     except funnel.GitHubError as exc:

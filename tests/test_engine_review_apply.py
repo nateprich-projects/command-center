@@ -343,15 +343,25 @@ def test_only_a_clean_approval_decides_approved():
 class Wiring:
     """Capture the existing-path calls instead of touching GitHub."""
 
-    def __init__(self, monkeypatch, merge_code=0, head=SHA):
+    def __init__(self, monkeypatch, merge_code=0, head=SHA,
+                 pr_view=None, verdict=None, state_error=None,
+                 merge_error_text=None):
         self.reviews = []
         self.merges = []
+        self.pr_reads = []
         self.merge_code = merge_code
+        self.merge_error_text = merge_error_text
+        self.pr_view = pr_view or {"state": "OPEN", "headRefOid": head}
+        self.verdict = verdict or {"verdict": "approved", "head_sha": head}
+        self.state_error = state_error
         self.head = head
         monkeypatch.setattr(funnel, "resolve_repo", lambda repo: REPO)
         monkeypatch.setattr(funnel, "load_items", lambda: ["items"])
         monkeypatch.setattr(review_apply, "current_head",
                             lambda repo, pr: self.head)
+        monkeypatch.setattr(review_apply.review, "fetch_pr", self._fetch_pr)
+        monkeypatch.setattr(funnel, "latest_verdict",
+                            lambda repo, pr: self.verdict)
         monkeypatch.setattr(funnel, "cmd_review", self._review)
         monkeypatch.setattr(funnel, "cmd_merge", self._merge)
 
@@ -365,7 +375,15 @@ class Wiring:
     def _merge(self, items, now, repo, pr, confirmed):
         self.merges.append({"items": items, "repo": repo, "pr": pr,
                             "confirmed": confirmed})
+        if self.merge_error_text:
+            print(self.merge_error_text, file=sys.stderr)
         return self.merge_code
+
+    def _fetch_pr(self, repo, pr):
+        self.pr_reads.append({"repo": repo, "pr": pr})
+        if self.state_error:
+            raise self.state_error
+        return self.pr_view
 
 
 def run_cli(monkeypatch, capsys, argv, stdin=""):
@@ -466,6 +484,85 @@ def test_a_refused_merge_keeps_the_verdict_and_reports_failure(
     assert code == 1
     assert wiring.reviews[0]["verdict"] == "approved"
     assert wiring.merges[0]["confirmed"] is True
+
+
+def test_a_refused_merge_already_merged_at_the_approved_head_finishes_done(
+        monkeypatch, capsys):
+    merged_at = "2026-09-25T02:43:19Z"
+    wiring = Wiring(
+        monkeypatch, merge_code=1,
+        pr_view={"state": "MERGED", "headRefOid": SHA,
+                 "mergedBy": {"login": "nate"}, "mergedAt": merged_at})
+
+    code = run_cli(monkeypatch, capsys,
+                   ["7", "--repo", REPO, "--answer", "-", "--head", SHA],
+                   stdin=answer())
+
+    output = capsys.readouterr().out
+    assert code == 0
+    assert len(wiring.merges) == 1
+    assert wiring.pr_reads == [{"repo": REPO, "pr": 7}]
+    marker = review_apply.OBSERVED_MERGE_PREFIX
+    assert marker in output
+    observed = json.loads(output.split(marker, 1)[1])
+    assert observed == {"pr": 7, "head": SHA, "actor": "nate",
+                        "merged_at": merged_at}
+
+
+def test_a_refused_merge_at_a_different_head_stays_failed_with_discrepancy(
+        monkeypatch, capsys):
+    wiring = Wiring(
+        monkeypatch, merge_code=1,
+        pr_view={"state": "MERGED", "headRefOid": OTHER_SHA,
+                 "mergedBy": {"login": "nate"},
+                 "mergedAt": "2026-09-25T02:43:19Z"})
+
+    code = run_cli(monkeypatch, capsys,
+                   ["7", "--repo", REPO, "--answer", "-", "--head", SHA],
+                   stdin=answer())
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert len(wiring.merges) == 1
+    assert "already merged at head {}".format(OTHER_SHA) in captured.err
+    assert "approved head is {}".format(SHA) in captured.err
+    assert review_apply.OBSERVED_MERGE_PREFIX not in captured.out
+
+
+def test_an_open_pr_keeps_the_original_unknown_mergeability_refusal(
+        monkeypatch, capsys):
+    wiring = Wiring(
+        monkeypatch, merge_code=1,
+        pr_view={"state": "OPEN", "headRefOid": SHA,
+                 "mergeable": "UNKNOWN"},
+        merge_error_text="refusing to merge: mergeability is unknown")
+
+    code = run_cli(monkeypatch, capsys,
+                   ["7", "--repo", REPO, "--answer", "-", "--head", SHA],
+                   stdin=answer())
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.err == "refusing to merge: mergeability is unknown\n"
+    assert len(wiring.merges) == 1
+    assert review_apply.OBSERVED_MERGE_PREFIX not in captured.out
+
+
+def test_an_unreadable_pr_after_merge_refusal_fails_closed(
+        monkeypatch, capsys):
+    wiring = Wiring(monkeypatch, merge_code=1,
+                    state_error=funnel.GitHubError("network dropped"))
+
+    code = run_cli(monkeypatch, capsys,
+                   ["7", "--repo", REPO, "--answer", "-", "--head", SHA],
+                   stdin=answer())
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "merge refused and current PR state could not be read" in captured.err
+    assert "network dropped" in captured.err
+    assert review_apply.OBSERVED_MERGE_PREFIX not in captured.out
+    assert len(wiring.merges) == 1
 
 
 def test_a_moved_head_records_nothing(monkeypatch, capsys):

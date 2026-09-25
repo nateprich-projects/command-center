@@ -574,6 +574,45 @@ def record_binding(agent: str, run: str, do: str, work: str,
     return kept
 
 
+def record_job(agent: str, run: Optional[str], job: str) -> str:
+    """Record the scheduled job identity for one run.
+
+    Codex learns the automation name from the app's run settings after the
+    start record is already written. Keep that identity as an append-only
+    heartbeat fact so the eventual finish can carry it.
+    """
+    if not run or not isinstance(job, str) or not job.strip():
+        return "unattributed"
+    record = {
+        "run": run,
+        "agent": agent,
+        "phase": "job",
+        "ts": int(time.time()),
+        "job": job.strip(),
+    }
+    kept = append(agent, record)
+    _report(kept)
+    return kept
+
+
+def job_for_run(records: List[Dict], run: Optional[str],
+                agent: str) -> Optional[str]:
+    """Return one unambiguous scheduled job recorded for this run."""
+    if not run:
+        return None
+    jobs = {
+        row.get("job")
+        for row in records
+        if isinstance(row, dict)
+        and row.get("phase") == "job"
+        and row.get("run") == run
+        and row.get("agent") == agent
+        and isinstance(row.get("job"), str)
+        and row["job"].strip()
+    }
+    return next(iter(jobs)) if len(jobs) == 1 else None
+
+
 def session_id(agent: str) -> Optional[str]:
     """Return the current harness session id, when the harness exposes one."""
     for name in SESSION_ENVS.get(agent, ()):
@@ -1442,19 +1481,28 @@ def muse_window_consumption(records: List[Dict]) -> List[Dict[str, object]]:
     ]
 
 
-def read(agent: str, timeout: Optional[float] = None) -> List[Dict]:
-    """Every record this machine knows about — pushed and still spooled."""
-    if timeout is None:
-        content, _ = _fetch(agent)
-    else:
-        content, _ = _fetch(agent, timeout=timeout)
+def _parse_records(content: Optional[str]) -> List[Dict]:
     records = []
     for line in (content or "").splitlines():
         try:
             records.append(json.loads(line))
         except ValueError:
             continue
-    return records + _spooled(agent)
+    return records
+
+
+def read_github(agent: str, timeout: Optional[float] = None) -> List[Dict]:
+    """Read only the durable records on GitHub, excluding the local spool."""
+    if timeout is None:
+        content, _ = _fetch(agent)
+    else:
+        content, _ = _fetch(agent, timeout=timeout)
+    return _parse_records(content)
+
+
+def read(agent: str, timeout: Optional[float] = None) -> List[Dict]:
+    """Every record this machine knows about — pushed and still spooled."""
+    return read_github(agent, timeout=timeout) + _spooled(agent)
 
 
 def open_starts(records: List[Dict]) -> List[Dict]:
@@ -1780,6 +1828,9 @@ def main(argv=None) -> int:
             ),
             **detect_model(args.agent),
         }
+        job = job_for_run(records, run_id, args.agent)
+        if job is not None:
+            record["job"] = job
         if args.outcome == "errored":
             record["error_class"] = classify_error(args.note, runtime)
         if args.shape_status is not None:

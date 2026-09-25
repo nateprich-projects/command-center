@@ -10176,12 +10176,12 @@ def _abandoned_ticket(blocker: Item, dependent: Item,
 def unclearable_block(item: Item) -> bool:
     """Whether a blocked item has no condition that can lift it and no asker.
 
-    ``clear_satisfied_blocks`` lifts only a parsed reference or date, and a
-    native edge lifts itself. ``gate_question`` stays silent for Needs
-    ``agent`` and a well-formed event spec; ``Needs: external-event`` alone
-    asks the existing unblock question. The funnel watch works
-    ``claude-code-environment``. A block outside all of those waits forever
-    and is seen by no one: a Codex decline (Needs ``agent``, a
+    ``clear_satisfied_blocks`` lifts a parsed reference, date, or matching
+    event record, and a native edge lifts itself. ``gate_question`` stays
+    silent for Needs ``agent`` and a well-formed event spec. Needs
+    ``external-event`` alone asks the existing unblock question. The funnel
+    watch supports ``claude-code-environment``. A block outside all of those
+    waits forever and is seen by no one: a Codex decline (Needs ``agent``, a
     ``**Declined:**`` comment) lands here (#1432).
     """
     if item.state != "OPEN" or not item.is_blocked:
@@ -10202,8 +10202,48 @@ def _unclearable_block_reason(item: Item) -> str:
     )
 
 
+def _satisfied_block_event(
+    event: Mapping[str, str], heartbeat_records: Sequence[Dict[str, object]],
+) -> Optional[str]:
+    """Name the earliest matching GitHub finish after the threshold."""
+    after = parse_time(event.get("after"))
+    if after is None:
+        return None
+
+    matches: List[Tuple[float, str, str]] = []
+    for record in heartbeat_records:
+        if not isinstance(record, dict) or (
+            record.get("phase") != "finish"
+            or record.get("agent") != event.get("agent")
+            or record.get("job") != event.get("job")
+            or record.get("outcome") != event.get("outcome")
+        ):
+            continue
+        stamp = record.get("ts")
+        if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+            continue
+        try:
+            occurred = datetime.fromtimestamp(stamp, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            continue
+        if occurred <= after:
+            continue
+        run = record.get("run")
+        if not isinstance(run, str) or not run.strip():
+            continue
+        at = occurred.strftime("%Y-%m-%dT%H:%M:%SZ")
+        condition = (
+            "heartbeat finish agent={} job={} outcome={} run={} at={}"
+            .format(event["agent"], event["job"], event["outcome"],
+                    run.strip(), at)
+        )
+        matches.append((occurred.timestamp(), run.strip(), condition))
+    return min(matches)[2] if matches else None
+
+
 def satisfied_block_refs(
     item: Item, by_ref: Dict[str, Item], now: Optional[datetime] = None,
+    heartbeat_records: Sequence[Dict[str, object]] = (),
 ) -> Optional[List[str]]:
     """Return all parsed block conditions that are satisfied.
 
@@ -10212,6 +10252,8 @@ def satisfied_block_refs(
     that is explicitly unable to close all fail closed with ``None``. The
     checks are deliberately separate so a caller can report which part of the
     conjunction failed without treating an empty list as vacuously satisfied.
+    Event conditions use only the GitHub heartbeat finishes supplied by the
+    caller; an absent or non-matching record fails closed.
 
     This mirrors ``_dead_dependency_refs`` over the already-loaded native and
     comment dependency facts. It never fetches a blocker: a reference must be
@@ -10229,6 +10271,14 @@ def satisfied_block_refs(
         return None
 
     conditions: List[str] = []
+    if item.block_event is not None:
+        event_condition = _satisfied_block_event(
+            item.block_event, heartbeat_records
+        )
+        if event_condition is None:
+            return None
+        conditions.append(event_condition)
+
     if blocked_until is not None:
         if blocked_until > _block_condition_date(now):
             return None
@@ -10283,7 +10333,7 @@ def satisfied_block_comment(
     body = (
         SATISFIED_BLOCK_PREFIX
         + "all machine-readable conditions were satisfied: {}.\n\n"
-          "Found closed at `{}`.\n\n```json\n{}\n```".format(
+          "Found satisfied at `{}`.\n\n```json\n{}\n```".format(
               ", ".join(refs), found_closed_at,
               json.dumps(payload, indent=2, sort_keys=True),
           )
@@ -10326,8 +10376,43 @@ def clear_satisfied_blocks(
         ),
         key=lambda item: (item.repo, item.number),
     )
+
+    # Event satisfaction is derived from the durable heartbeat branch on this
+    # queue read. A local write-ahead spool is not enough to clear a remote
+    # block.
+    event_agents = sorted({
+        item.block_event["agent"]
+        for item in candidates
+        if isinstance(item.block_event, dict)
+        and isinstance(item.block_event.get("agent"), str)
+    })
+    heartbeat_records: Dict[str, List[Dict[str, object]]] = {}
+    if event_agents:
+        import heartbeat
+
+        for event_agent in event_agents:
+            if event_agent not in heartbeat.PROVIDERS:
+                heartbeat_records[event_agent] = []
+                continue
+            try:
+                heartbeat_records[event_agent] = heartbeat.read_github(
+                    event_agent
+                )
+            except heartbeat.HeartbeatError as exc:
+                raise GitHubError(
+                    "could not read GitHub heartbeat records for {}: {}".format(
+                        event_agent, exc
+                    )
+                )
+
     for item in candidates:
-        conditions = satisfied_block_refs(item, by_ref, now=now)
+        event_records = (
+            heartbeat_records.get(item.block_event.get("agent"), [])
+            if isinstance(item.block_event, dict) else []
+        )
+        conditions = satisfied_block_refs(
+            item, by_ref, now=now, heartbeat_records=event_records
+        )
         if not conditions:
             continue
 
@@ -14144,6 +14229,18 @@ def _begin_preflight(
             return out, None
         out["effective"] = settings.get("effective")
         out["memory_reset"] = _codex_memory_reset(settings.get("automation"))
+        automation = settings.get("automation")
+        if isinstance(automation, str) and out.get("run"):
+            job = pathlib.Path(automation).name
+            if job:
+                try:
+                    import heartbeat
+
+                    heartbeat.record_job(agent, str(out["run"]), job)
+                except Exception:
+                    # The identity record is diagnostic. Its absence can only
+                    # leave a later event wait uncleared; it must not stop work.
+                    pass
 
     reading = usage.read_agent(agent, now.timestamp())
     if reading is None:

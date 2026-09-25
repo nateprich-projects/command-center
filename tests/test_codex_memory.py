@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 import codex_run  # noqa: E402
 import funnel  # noqa: E402
+import heartbeat  # noqa: E402
 import usage  # noqa: E402
 
 
@@ -179,6 +180,7 @@ def _begin(monkeypatch, capsys, settings):
     monkeypatch.setattr(funnel, "_codex_memory_reset", REAL_MEMORY_RESET)
     monkeypatch.setattr(funnel, "_start_begin_heartbeat",
                         lambda agent: "run-id")
+    monkeypatch.setattr(heartbeat, "record_job", lambda *args: "pushed")
     monkeypatch.setattr(usage, "read_agent", lambda *args: {"windows": {}})
     monkeypatch.setattr(usage, "pace", lambda *args, **kwargs: {
         "over_pace": True})
@@ -198,6 +200,25 @@ def test_begin_resets_the_launching_automation_s_memory(
 
     assert result["memory_reset"] == "reset"
     assert memory.read_text() == codex_run.MEMORY_STUB
+
+
+def test_begin_records_the_launching_automation_name_on_its_run(
+        monkeypatch, capsys, tmp_path):
+    automation = tmp_path / "command-center-tickets-hourly"
+    automation.mkdir()
+    recorded = []
+    monkeypatch.setattr(
+        heartbeat, "record_job",
+        lambda *args: recorded.append(args) or "pushed",
+    )
+
+    _begin(monkeypatch, capsys, {
+        "ok": True,
+        "effective": {"model": "gpt-6-luna", "effort": "max"},
+        "automation": str(automation),
+    })
+
+    assert recorded == [("codex", "run-id", "command-center-tickets-hourly")]
 
 
 def test_a_failed_reset_is_reported_and_the_run_goes_on(

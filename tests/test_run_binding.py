@@ -66,6 +66,31 @@ def test_record_binding_writes_its_own_phase(spool):
     }
 
 
+def test_record_job_writes_run_scoped_schedule_identity(spool):
+    assert heartbeat.record_job(
+        "codex", "r1", " command-center-tickets-hourly "
+    ) == "spooled"
+    (record,) = spool["appended"]
+    assert record["phase"] == "job"
+    assert (record["run"], record["agent"], record["job"]) == (
+        "r1", "codex", "command-center-tickets-hourly"
+    )
+    assert heartbeat.job_for_run([record], "r1", "codex") == \
+        "command-center-tickets-hourly"
+    assert heartbeat.job_for_run([record], "r1", "muse") is None
+
+
+def test_conflicting_run_job_records_fail_closed():
+    records = [
+        {"run": "r1", "agent": "codex", "phase": "job",
+         "job": "standard"},
+        {"run": "r1", "agent": "codex", "phase": "job",
+         "job": "escalated"},
+    ]
+
+    assert heartbeat.job_for_run(records, "r1", "codex") is None
+
+
 def test_bind_records_are_not_starts_or_finishes(spool):
     records = [_start("r1"), _bind("r1", "ticket", "o/r#9")]
     assert [r["run"] for r in heartbeat.open_starts(records)] == ["r1"]
@@ -81,6 +106,24 @@ def test_the_run_that_was_issued_the_work_finishes_as_before(spool, capsys):
     (record,) = spool["appended"]
     assert record["phase"] == "finish" and record["run"] == "a"
     assert record["merged"] == 96
+
+
+def test_finish_carries_only_its_run_s_job_identity(spool, capsys):
+    spool["records"] = [
+        _start("a"),
+        {"run": "a", "agent": "codex", "phase": "job",
+         "job": "command-center-tickets-hourly"},
+        {"run": "b", "agent": "codex", "phase": "job",
+         "job": "command-center-tickets-weekday-mornings"},
+    ]
+
+    assert heartbeat.main([
+        "finish", "--agent", "codex", "--run", "a",
+        "--outcome", "errored",
+    ]) == 0
+
+    (record,) = spool["appended"]
+    assert record["job"] == "command-center-tickets-hourly"
 
 
 def test_a_finish_naming_another_runs_work_is_refused_and_filed_on_that_run(

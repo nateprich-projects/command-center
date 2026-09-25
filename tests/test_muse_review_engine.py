@@ -190,7 +190,7 @@ def _issue_answer(job, **overrides):
 
 
 FUNNEL_STUB = (
-    "import os, pathlib, sys\n"
+    "import json, os, pathlib, sys\n"
     "CI_SUCCESS_CONCLUSIONS = ('SUCCESS', 'NEUTRAL', 'SKIPPED')\n"
     "CI_PENDING_STATES = ('EXPECTED', 'QUEUED', 'IN_PROGRESS', 'PENDING', 'WAITING')\n"
     "if __name__ == '__main__':\n"
@@ -204,6 +204,12 @@ FUNNEL_STUB = (
     "        (root / 'begin.session_id').write_text(os.environ.get('MUSE_SESSION_ID', ''))\n"
     "        (root / 'begin.zcode_session_id').write_text(os.environ.get('ZCODE_SESSION_ID', ''))\n"
     "        print((root / 'begin.json').read_text(), end='')\n"
+    "        status = int(os.environ.get('FUNNEL_STATUS', '0'))\n"
+    "        if status:\n"
+    "            begin = json.loads((root / 'begin.json').read_text())\n"
+    "            with (root / 'heartbeat.log').open('a') as fh:\n"
+    "                fh.write('start --agent {} --run {}\\n'.format(begin['agent'], begin['run']))\n"
+    "            raise SystemExit(status)\n"
     "    elif command == 'session-stop':\n"
     "        pass\n"
     "    else:\n"
@@ -296,8 +302,14 @@ APPLY_STUB = (
     "if os.environ.get('APPLY_REFUSE', ''):\n"
     "    sys.stderr.write('review-apply: packet head {} is not the current head deadbeef; re-collect the packet\\n'.format(flag('--head')))\n"
     "    raise SystemExit(1)\n"
+    "if os.environ.get('APPLY_LOCKED', ''):\n"
+    "    sys.stdout.write('review-apply: PR #{} in {} was already merged at head {} under the approved verdict from run superseding-run (agent muse); this run recorded no verdict\\n'.format(args[0], flag('--repo'), flag('--head')))\n"
+    "    sys.stdout.write('run outcome: skipped-locked\\n')\n"
+    "    raise SystemExit(0)\n"
     "(root / 'applied.marker').write_text('applied')\n"
     "print('recorded {} on PR #{} against {} in {}'.format(verdict, args[0], flag('--head'), flag('--repo')))\n"
+    "if os.environ.get('APPLY_ALREADY_MERGED'):\n"
+    "    sys.stdout.write('review-apply: observed already-merged PR: {\"actor\":\"nate\",\"head\":\"abc123def456\",\"merged_at\":\"2026-09-25T02:43:19Z\",\"pr\":7}\\n')\n"
 )
 
 
@@ -905,6 +917,44 @@ def test_a_stop_with_a_why_records_the_note_and_names_it_on_stderr(tmp_path):
     assert "muse-review-engine: begin stopped: {}".format(why) in proc.stderr
 
 
+def test_a_failed_begin_finishes_its_started_run_with_the_slow_command_note(
+        tmp_path):
+    why = (
+        "funnel: reply-timeout: FUNNEL_SESSION session busy past the 180s "
+        "reply budget (slow command: begin)"
+    )
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        _begin(run="begin-timeout-run", gate="unknown", do="stop", why=why),
+        _packet(),
+        extra_env={"FUNNEL_STATUS": "2"},
+    )
+
+    assert proc.returncode == 2
+    assert _muse_calls(repo) == 0
+    assert _heartbeat(repo).splitlines() == [
+        "start --agent muse --run begin-timeout-run",
+        "finish --agent muse --run begin-timeout-run --outcome errored "
+        "--note funnel begin failed (exit 2): {}".format(why),
+    ]
+    assert "funnel begin failed (exit 2)" in proc.stderr
+
+
+def test_invalid_begin_logs_only_the_first_300_bytes(tmp_path):
+    begin = {"payload": "x" * 500}
+    raw = json.dumps(begin)
+    proc, _repo = _stubbed_runner(tmp_path, begin, _packet())
+
+    assert proc.returncode == 1
+    assert (
+        "muse-review-engine: begin stdout (first 300 bytes):\n"
+        + raw[:300]
+        + "\n"
+    ) in proc.stderr
+    assert raw[300:] not in proc.stderr
+    assert "muse-review-engine: funnel begin returned invalid JSON" in proc.stderr
+
+
 def test_an_unexpected_begin_job_finishes_the_started_run(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path,
@@ -1374,6 +1424,22 @@ def test_a_malformed_first_answer_retries_once_with_the_parse_error(tmp_path):
     assert _heartbeat_without_muse_call_record(repo).endswith("--review-result approved\n")
 
 
+def test_an_already_merged_approved_head_finishes_with_the_merge_record(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), answers=_review_answers(_judge_answer()),
+        extra_env={"APPLY_ALREADY_MERGED": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    heartbeat = _heartbeat(repo)
+    assert "--outcome done" in heartbeat
+    assert "--review-result approved" in heartbeat
+    assert "--merged 7" in heartbeat
+    assert "observed already-merged PR" in heartbeat
+    assert "abc123def456" in heartbeat
+    assert "nate" in heartbeat
+    assert "2026-09-25T02:43:19Z" in heartbeat
+
+
 def test_a_malformed_final_judge_answer_fails_closed(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(),
@@ -1415,6 +1481,22 @@ def test_a_moved_head_refusal_finishes_errored(tmp_path):
     assert "--outcome errored" in heartbeat
     assert "review-apply failed on PR #7" in heartbeat
     assert "not the current head" in heartbeat
+
+
+def test_an_approved_merge_by_another_run_finishes_skipped_locked(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), answers=_review_answers(_judge_answer()),
+        extra_env={"APPLY_LOCKED": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert len(_apply_calls(repo)) == 1
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat(repo)
+    assert "--outcome skipped-locked" in heartbeat
+    assert "superseding-run (agent muse)" in heartbeat
+    assert "head {}".format(HEAD) in heartbeat
+    assert "this run recorded no verdict" in heartbeat
+    assert "--review-result" not in heartbeat
 
 
 def test_a_run_past_the_bound_is_killed_and_finished_errored(tmp_path):

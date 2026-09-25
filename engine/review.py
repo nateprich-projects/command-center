@@ -1238,7 +1238,7 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
 
 
 def fetch_pr(repo: str, pr_number: int) -> dict:
-    """One PR view: identity, head, base, CI rollup, commits, changed files.
+    """One PR view: identity, head, merge result, CI rollup, changed files.
 
     ``closingIssuesReferences`` rides the same read so the packet can
     carry every ticket the PR closes (#1088); it costs no extra call.
@@ -1249,7 +1249,7 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
         "gh", "pr", "view", str(pr_number), "--repo", repo, "--json",
         "number,title,headRefName,headRefOid,baseRefName,baseRefOid,state,"
         "mergeable,"
-        "mergedAt,closedAt,"
+        "mergedAt,mergedBy,closedAt,"
         "statusCheckRollup,commits,files,closingIssuesReferences")
     if not data:
         raise funnel.GitHubError(

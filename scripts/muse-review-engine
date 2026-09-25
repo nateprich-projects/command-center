@@ -348,6 +348,7 @@ finish_done() {
   local note="$1"
   local review_result="${2:-}"
   local result_path="${3:-}"
+  local merged_pr="${4:-}"
   local -a finish_args=(
     finish --agent "$AGENT" --run "$BEGIN_RUN" --outcome done --note "$note"
   )
@@ -423,8 +424,20 @@ PY
       finish_args+=(--muse-call-record "$muse_call_record")
     fi
   fi
+  if [[ -n "$merged_pr" ]]; then
+    finish_args+=(--merged "$merged_pr")
+  fi
   if ! python3 "$REPO/heartbeat.py" "${finish_args[@]}"; then
     echo "muse-review-engine: could not finish the run" >&2
+    exit 1
+  fi
+}
+
+finish_skipped_locked() {
+  local note="$1"
+  if ! python3 "$REPO/heartbeat.py" finish --agent "$AGENT" --run "$BEGIN_RUN" \
+      --outcome skipped-locked --note "$note"; then
+    echo "muse-review-engine: could not finish skipped-locked run" >&2
     exit 1
   fi
 }
@@ -814,12 +827,6 @@ if [[ "$TIER" == "standard" ]]; then
   BEGIN_FLAGS="$BEGIN_FLAGS --breakdown"
 fi
 BEGIN_FLAGS="$BEGIN_FLAGS --role review"
-BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent "$AGENT" $BEGIN_FLAGS)"
-begin_status=$?
-if (( begin_status != 0 )); then
-  echo "muse-review-engine: funnel begin failed (exit $begin_status)" >&2
-  exit "$begin_status"
-fi
 
 begin_value() {
   local key="$1"
@@ -853,9 +860,29 @@ print(value)
 ' "$key"
 }
 
+BEGIN_JSON="$(python3 "$REPO/funnel.py" begin --agent "$AGENT" $BEGIN_FLAGS)"
+begin_status=$?
+if (( begin_status != 0 )); then
+  echo "muse-review-engine: funnel begin failed (exit $begin_status)" >&2
+  if BEGIN_RUN="$(begin_value run)" && [[ -n "$BEGIN_RUN" ]]; then
+    begin_why="$(begin_value why 2>/dev/null || true)"
+    begin_note="funnel begin failed (exit $begin_status)"
+    if [[ -n "$begin_why" ]]; then
+      begin_note="$begin_note: $begin_why"
+    fi
+    failure "$begin_note" || true
+  else
+    echo "muse-review-engine: could not finish failed begin (no run id)" >&2
+  fi
+  exit "$begin_status"
+fi
+
 if ! BEGIN_DO="$(begin_value do)" \
   || ! BEGIN_GATE="$(begin_value gate)" \
   || ! BEGIN_RUN="$(begin_value run)"; then
+  printf 'muse-review-engine: begin stdout (first 300 bytes):\n' >&2
+  LC_ALL=C printf '%s' "$BEGIN_JSON" | LC_ALL=C head -c 300 >&2 || true
+  printf '\n' >&2
   echo "muse-review-engine: funnel begin returned invalid JSON" >&2
   exit 1
 fi
@@ -1580,11 +1607,29 @@ while true; do
       >"$DIAG_FILE" 2>&1
   apply_status=$?
   if (( apply_status == 0 )); then
+    if grep -qx 'run outcome: skipped-locked' "$DIAG_FILE"; then
+      skip_note="$(grep '^review-apply: ' "$DIAG_FILE" | tail -n 1 | sed 's/^review-apply: //')"
+      if [[ -z "$skip_note" ]]; then
+        echo "muse-review-engine: skipped-locked apply omitted its finish note" >&2
+        failure "review-apply reported skipped-locked without a finish note on PR #$BEGIN_PR in $BEGIN_REPO" || true
+        exit 1
+      fi
+      finish_skipped_locked "$skip_note"
+      exit 0
+    fi
     VERDICT="$(recorded_verdict)"
     if [[ -z "$VERDICT" ]]; then
       VERDICT="recorded"
     fi
-    finish_done "reviewed PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $VERDICT" "$VERDICT"
+    ALREADY_MERGED="$(grep -F 'review-apply: observed already-merged PR: ' \
+      "$DIAG_FILE" | tail -n 1 || true)"
+    if [[ -n "$ALREADY_MERGED" ]]; then
+      MERGE_DETAIL="${ALREADY_MERGED#review-apply: }"
+      finish_done "reviewed PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $VERDICT; $MERGE_DETAIL" \
+        "$VERDICT" "" "$BEGIN_PR"
+    else
+      finish_done "reviewed PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $VERDICT" "$VERDICT"
+    fi
     exit 0
   fi
   if (( apply_status == 3 && ATTEMPT == 1 )); then

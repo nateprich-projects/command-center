@@ -19,6 +19,11 @@
       "expected": "floor"
     },
     {
+      "name": "begin reply timeout",
+      "note": "funnel begin failed: reply-timeout: FUNNEL_SESSION busy past the 180s reply budget (slow command: begin)",
+      "expected": "begin-timeout"
+    },
+    {
       "name": "ambiguous timeout",
       "note": "the operation timed out",
       "expected": "unclassified"

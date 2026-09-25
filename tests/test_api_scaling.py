@@ -162,6 +162,40 @@ def test_project_item_query_uses_maximum_bounded_page():
     assert funnel.PROJECT_ITEM_PAGE_SIZE == 100
 
 
+def test_begin_load_adds_phase_durations_to_the_existing_timings_map(
+    monkeypatch,
+):
+    """Begin instrumentation reports phases without changing the query path."""
+    monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
+    monkeypatch.setattr(
+        funnel,
+        "gh_graphql",
+        lambda query, **variables: {
+            "user": {
+                "projectV2": {
+                    "items": {
+                        "nodes": [],
+                        "pageInfo": {
+                            "hasNextPage": False,
+                            "endCursor": None,
+                        },
+                    },
+                },
+            },
+        },
+    )
+    timings = {}
+
+    assert funnel.load_items(include_details=False, timings=timings) == []
+
+    assert set(timings) == {
+        "begin_load.member_repos",
+        "begin_load.project_items",
+        "begin_load.block_comments",
+    }
+    assert all(isinstance(value, float) and value >= 0 for value in timings.values())
+
+
 def test_doctor_reports_same_count_pagination_saving():
     """The doctor quotes #655 and measures the first:100 reduction."""
     result = funnel.check_project_pagination(319, 4)
@@ -325,6 +359,61 @@ def test_detail_query_only_requests_child_times_for_items_with_children(
     assert items[0].first_child_created_at is not None
     assert items[49].first_child_created_at is not None
     assert items[1].first_child_created_at is None
+
+
+def test_item_detail_request_assembles_combined_batch_document():
+    query, variables, history_field, child_field = funnel._item_detail_request(
+        ["project-item-1", "project-item-2", "project-item-3"],
+        ["project-item-1"],
+    )
+
+    assert query == funnel.ITEM_DETAILS_QUERY
+    assert variables == {
+        "ids": ["project-item-1", "project-item-2", "project-item-3"],
+        "childIds": ["project-item-1"],
+    }
+    assert history_field == "history"
+    assert child_field == "children"
+    assert "history: nodes(ids: $ids)" in query
+    assert "children: nodes(ids: $childIds)" in query
+
+
+def test_detail_batches_keep_child_nodes_with_their_history_batch(monkeypatch):
+    nodes = [
+        _node(number, children_total=(1 if number == 101 else 0))
+        for number in range(1, 102)
+    ]
+    for node in nodes:
+        node["id"] = "project-item-{}".format(node["content"]["number"])
+    items = [funnel._from_node(node) for node in nodes]
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        if query == funnel.ITEM_DETAILS_QUERY:
+            return {
+                "history": [],
+                "children": [{
+                    "id": item_id,
+                    "content": {"subIssues": {"nodes": []}},
+                } for item_id in variables["childIds"]],
+            }
+        return {"nodes": []}
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    funnel.hydrate_item_details(items)
+
+    assert len(calls) == 2
+    assert calls[0][0] == funnel.ITEM_TIMELINE_DETAILS_QUERY
+    assert calls[0][1]["ids"] == [
+        "project-item-{}".format(number) for number in range(1, 101)
+    ]
+    assert calls[1][0] == funnel.ITEM_DETAILS_QUERY
+    assert calls[1][1] == {
+        "ids": ["project-item-101"],
+        "childIds": ["project-item-101"],
+    }
 
 
 def test_timeline_only_detail_query_handles_batches_without_children(

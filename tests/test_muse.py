@@ -342,12 +342,46 @@ def test_the_override_prices_the_window_from_the_panel(tmp_path, monkeypatch):
 def test_the_override_stops_at_100_less_one_session(tmp_path, monkeypatch,
                                                      spent, over):
     """Used plus $4.50 of $140.59 (3.20%) against 100, strictly: $136.05
-    reads 96.77% and is admitted, $136.15 reads 96.84% and is not."""
+    reads 96.77% and is admitted, $136.15 reads 96.84% and is not. The
+    spend is recent, so it falls after the reopening."""
     _, verdict, _ = _projected(
-        tmp_path, monkeypatch, spent=spent, trailing=0.0, days_left=2.0,
+        tmp_path, monkeypatch, spent=spent, trailing=spent, days_left=2.0,
         at=IN_OVERRIDE)
     assert verdict["over_pace"] is over
     assert verdict["band"] == ("over" if over else "ok")
+
+
+REOPENED = 1790311140.0  # 2026-09-25 04:39 UTC, Thursday 21:39 PDT
+
+
+def test_the_provider_reopened_the_window_on_thursday(tmp_path, monkeypatch):
+    """At 21:39 PDT on 2026-09-24 the panel read 0% with $133.25 metered.
+    From then the window counts only later spend; before it, nothing moves.
+    The 72-hour rate still reaches back across the reopening."""
+    assert usage.MUSE_PACE_OVERRIDE["reopened_at"] == REOPENED
+    now = REOPENED + 6 * 3600.0
+    records = [
+        _muse_record(REOPENED - 3600.0, input_tokens=100_000_000,
+                     usage_id="before"),   # $125 in the old window
+        _muse_record(REOPENED + 3600.0, input_tokens=4_000_000,
+                     usage_id="after"),    # $5 after the reopening
+    ]
+    _muse_fixture(tmp_path, monkeypatch, records, mtime=now)
+    reading = usage.read_agent("muse", now)
+    window = reading["windows"]["seven_day"]
+    assert window["spent_dollars"] == pytest.approx(5.0)
+    assert window["window_start"] == REOPENED
+    assert window["resets_at"] == OVERRIDE_RESET
+    assert window["cap_dollars"] == pytest.approx(140.59)
+    assert window["used_percent"] == pytest.approx(3.56, abs=0.01)
+    assert window["trailing_72h_dollars"] == pytest.approx(130.0)
+    assert window["override"] == {"issue": 1341, "until": OVERRIDE_RESET,
+                                  "reopened_at": REOPENED}
+    assert not usage.pace(reading, now, provider="meta")["over_pace"]
+
+    before = usage.read_agent("muse", REOPENED - 60.0)
+    assert before["windows"]["seven_day"]["spent_dollars"] == pytest.approx(125.0)
+    assert "reopened_at" not in before["windows"]["seven_day"]["override"]
 
 
 def test_the_override_lapses_at_the_reset(tmp_path, monkeypatch):

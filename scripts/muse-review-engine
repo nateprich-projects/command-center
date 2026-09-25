@@ -294,12 +294,9 @@ export FUNNEL_SESSION
 # the first call only: an undercount, not the whole run (#1413).
 MUSE_SESSION_BOUND=0
 if [[ "$BACKEND" == "muse" ]]; then
-  MUSE_EXEC=("$MUSE_BIN" exec --json)
-  MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec --json)
   if MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null)" \
     && [[ -n "$MUSE_SESSION_ID" ]]; then
     export MUSE_SESSION_ID
-    MUSE_EXEC+=(--session-id "$MUSE_SESSION_ID")
   else
     unset MUSE_SESSION_ID
     echo "muse-review-engine: no session id; continuing without session usage telemetry" >&2
@@ -553,7 +550,6 @@ call_model_files() {
     fi
     raw_answer_path="${answer_path}.muse-jsonl"
     "${muse_exec[@]}" \
-      --model "$MUSE_MODEL" \
       --reasoning-effort "$EFFORT" \
       --disable-shell \
       --disable-write \
@@ -986,6 +982,13 @@ if [[ "$BACKEND" == "muse" ]]; then
   # command substitution that dies yields the empty string without stopping
   # the runner, and `--model ""` is an id Muse accepts without complaint.
   [[ -n "$MUSE_MODEL" ]] || MUSE_MODEL="$MUSE_FALLBACK_MODEL"
+  # Keep the pin on the call arrays themselves: the repository-wide guard
+  # treats each `exec` array as a call site and cannot connect a later flag.
+  MUSE_EXEC=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
+  MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
+  if [[ -n "${MUSE_SESSION_ID:-}" ]]; then
+    MUSE_EXEC+=(--session-id "$MUSE_SESSION_ID")
+  fi
 fi
 
 if [[ "$JOB" != "review" ]]; then

@@ -81,6 +81,19 @@ def test_a_session_passes_one_loaded_view_to_normal_commands():
     assert loaded == ["load"]
 
 
+def test_a_begin_session_reuses_the_member_snapshot_for_its_lazy_loader():
+    members = ["nateprich/example"]
+    rows = []
+    received = []
+    session = funnel.FunnelSession(
+        loader=lambda members=None: received.append(members) or rows,
+    )
+
+    assert session._load_items(members) is rows
+    assert session._load_items(["ignored/second-call"]) is rows
+    assert received == [members]
+
+
 def test_a_session_reset_keeps_the_first_load_in_the_command_measurement(
     monkeypatch,
 ):

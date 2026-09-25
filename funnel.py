@@ -391,8 +391,9 @@ def _reserve_floor(loads: int, load_cost: object) -> int:
 
 # #1047 measured the direct GraphQL cost of one disposable begin session's
 # Project load at 42 points, including the member-repository and paged item
-# reads.  The rate-limit-only pre-read below must reserve that known load before
-# it happens; using the pre-read's own cost would reserve only one cheap query.
+# reads.  The first useful query's rate-limit block must reserve that known
+# load before the Project pages are read; using the membership query's own cost
+# would reserve only one cheap query.
 BEGIN_PROJECT_LOAD_COST = 42
 
 #: Regression issues opened by `funnel reject`. The issues themselves are the
@@ -8546,14 +8547,39 @@ def parse_time(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def member_repos() -> List[str]:
-    """Repos that opted in by carrying the topic. Never an allowlist."""
+def member_repos(
+    on_first_query: Optional[
+        Callable[[Optional[Mapping[str, object]]], None]
+    ] = None,
+) -> List[str]:
+    """Repos that opted in by carrying the topic. Never an allowlist.
+
+    ``begin`` uses the first membership response for its reserve check. The
+    response already includes ``rateLimit``, so this first useful read replaces
+    the old rate-limit-only probe and is reused by the Project load.
+    """
     members: List[str] = []
+    first_query = on_first_query is not None
     for kind, login in OWNERS:
         query = REPO_QUERY.replace("OWNER_KIND", kind).replace("OWNER_LOGIN", login)
         cursor = None
         while True:
-            data = gh_graphql(query, **({"cursor": cursor} if cursor else {}))
+            try:
+                data = gh_graphql(
+                    query, **({"cursor": cursor} if cursor else {})
+                )
+            except GitHubError:
+                if (
+                    first_query
+                    and on_first_query is not None
+                    and _budget_exhaustion_signal() is not None
+                ):
+                    first_query = False
+                    on_first_query(None)
+                raise
+            if first_query and on_first_query is not None:
+                first_query = False
+                on_first_query(data)
             repos = data[kind]["repositories"]
             for node in repos["nodes"]:
                 if node["isArchived"]:
@@ -8564,6 +8590,8 @@ def member_repos() -> List[str]:
             if not repos["pageInfo"]["hasNextPage"]:
                 break
             cursor = repos["pageInfo"]["endCursor"]
+    if first_query and on_first_query is not None:
+        on_first_query(None)
     return sorted(members)
 
 
@@ -8809,9 +8837,12 @@ def hydrate_item_details(
                 )
 
 
-def load_items(include_details: bool = True) -> List[Item]:
+def load_items(
+    include_details: bool = True,
+    members: Optional[Iterable[str]] = None,
+) -> List[Item]:
     global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
-    members = set(member_repos())
+    member_names = set(member_repos() if members is None else members)
     items: List[Item] = []
     cursor = None
     while True:
@@ -8833,7 +8864,7 @@ def load_items(include_details: bool = True) -> List[Item]:
             item = _from_node(node)
             # Membership is the topic. An item whose repo has not opted in is
             # outside the funnel even though it sits in the Project.
-            if item and item.repo in members:
+            if item and item.repo in member_names:
                 # Dependencies are already on the item: `_from_node` reads them
                 # from `blockedBy` in the Project query. They used to be fetched
                 # here instead, one REST call per open ticket per command — ~78
@@ -14736,36 +14767,74 @@ def _begin_preflight(
     return out, reading
 
 
-BEGIN_RATE_LIMIT_QUERY = """
-query {
-  rateLimit { cost remaining resetAt }
-}
-"""
+class _BeginReserveStop(Exception):
+    """Internal control flow for a reserve stop on the first useful query."""
+
+    def __init__(self, result: Dict[str, object]):
+        super().__init__(str(result.get("why") or "GraphQL reserve stop"))
+        self.result = result
+
+
+def _run_begin_phase(
+    name: str,
+    reader: Callable[[], object],
+    timings: Optional[Dict[str, object]] = None,
+):
+    """Time one begin-load phase in the existing timing map.
+
+    Activating the existing GraphQL timing context also records operation
+    durations and call counts without changing the shared query wrapper. These
+    measurements are diagnostic only and never affect a gate.
+    """
+    if timings is None:
+        active = _ACTIVE_BRIEF_TIMINGS.get()
+        timings = active if isinstance(active, dict) else None
+    if timings is None:
+        return reader()
+
+    token = _ACTIVE_BRIEF_TIMINGS.set(timings)
+    started = time.perf_counter()
+    try:
+        return reader()
+    finally:
+        key = "begin.{}".format(name)
+        elapsed = max(0.0, time.perf_counter() - started)
+        timings[key] = round(
+            float(timings.get(key, 0.0)) + elapsed, 6
+        )
+        _ACTIVE_BRIEF_TIMINGS.reset(token)
+
+
+def _print_begin_result(
+    out: Dict[str, object], timings: Optional[Dict[str, object]] = None
+) -> None:
+    """Print the normal begin envelope with the existing timing-map shape."""
+    if timings is None:
+        active = _ACTIVE_BRIEF_TIMINGS.get()
+        timings = active if isinstance(active, dict) else None
+    if timings:
+        out["timings"] = dict(timings)
+    print(json.dumps(out, indent=2))
 
 
 def _begin_api_reserve_preflight(
-    agent: str, tier: Optional[str], caller_role: Optional[str]
+    agent: str,
+    tier: Optional[str],
+    caller_role: Optional[str],
+    response: Optional[Mapping[str, object]],
 ) -> Optional[Dict[str, object]]:
-    """Read the GraphQL budget before ``begin`` loads the Project.
+    """Check the GraphQL budget returned by begin's first useful query.
 
-    The Project load is the expensive part of an empty poll.  A rate-limit-only
-    query gives the caller one authoritative reading without paying for the
-    Project first.  Its own cost is not the cost being reserved: #1047 measured
-    the next begin load at ``BEGIN_PROJECT_LOAD_COST`` points.
+    The member-repository query is already the first live fetch for begin and
+    requests ``rateLimit`` beside its repository page. Reusing that response
+    removes the standalone probe while still checking the reserve before the
+    Project pages are loaded. Its own cost is not the cost being reserved:
+    #1047 measured the next begin load at ``BEGIN_PROJECT_LOAD_COST`` points.
 
-    A structured zero-budget response can carry both ``rateLimit`` and GraphQL
-    errors.  ``gh_graphql`` raises for the latter after preserving the former,
-    so treat that specific empty-window shape as the same clean reserve stop as
-    a successful below-floor response. Other failures remain real begin
-    errors and are handled by the existing error envelope.
+    A structured zero-budget GraphQL error is passed here without a data
+    response after ``gh_graphql`` preserves its rate-limit signal. Other query
+    failures remain real begin errors and use the existing error envelope.
     """
-    response = None
-    try:
-        response = gh_graphql(BEGIN_RATE_LIMIT_QUERY)
-    except GitHubError:
-        if _budget_exhaustion_signal() is None:
-            raise
-
     remaining = None
     if isinstance(response, Mapping):
         block = response.get("rateLimit")
@@ -14973,12 +15042,12 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         _preflight = _begin_preflight(now, agent, idle, tier)
     out, reading = _preflight
     if reading is None:
-        print(json.dumps(out, indent=2))
+        _print_begin_result(out)
         return 0
     role_refusal = _begin_role_refusal(agent, tier, caller_role)
     if role_refusal is not None:
         out.update(role_refusal)
-        print(json.dumps(out, indent=2))
+        _print_begin_result(out)
         return 0
 
     if _detail_loader is not None and not begin_uses_ticket_path(
@@ -14986,7 +15055,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     ):
         candidates = begin_detail_candidates(items, breakdown)
         if candidates:
-            _detail_loader(candidates)
+            _run_begin_phase(
+                "item_details", lambda: _detail_loader(candidates)
+            )
     # Reconcile first, and never fatally. A step that cannot reach GitHub
     # records its failure and selection proceeds without it; only a failure
     # in selection's own reads stops the run (#732, #823).
@@ -15008,14 +15079,16 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     # Keeping it here prevents the approved-merge pass, engineer hand-back, and
     # reviewer queue from each paying for the same repository fan-out.
     try:
-        pr_facts = ticket_pr_facts(items)
+        pr_facts = _run_begin_phase(
+            "ticket_pr_facts", lambda: ticket_pr_facts(items)
+        )
     except GitHubError as exc:
         out.update(
             do="stop",
             gate="error",
             why="could not establish ticket branch facts: {}".format(exc),
         )
-        print(json.dumps(out, indent=2))
+        _print_begin_result(out)
         return 0
 
     reconciled_merges = attempt_reconcile(
@@ -15187,7 +15260,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 _record_queue_empty(agent, out.get("run"), tier)
         else:
             if _detail_loader is not None:
-                _detail_loader([ticket])
+                _run_begin_phase(
+                    "item_details", lambda: _detail_loader([ticket])
+                )
             refusal = claim_ticket(items, now, ticket, pr_facts=pr_facts)
             if refusal is not None:
                 out.update(do="stop", why=refusal)
@@ -15226,7 +15301,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                         out["vendor"] = CODEX_IMPLEMENT_VENDOR
         if "bound" not in out:
             _bind_run(agent, out)
-        print(json.dumps(out, indent=2))
+        _print_begin_result(out)
         return 0
 
     queue = _call_with_optional_keyword(
@@ -15339,7 +15414,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         out.update(reserve)
         _record_begin_reserve(agent, out.get("run"), out["why"])
     _bind_run(agent, out)
-    print(json.dumps(out, indent=2))
+    _print_begin_result(out)
     return 0
 
 
@@ -15395,7 +15470,11 @@ def _github_error_text(error: GitHubError) -> Tuple[str, bool]:
     return text, transient
 
 
-def _begin_error_envelope(agent: str, error: GitHubError) -> None:
+def _begin_error_envelope(
+    agent: str,
+    error: GitHubError,
+    timings: Optional[Dict[str, object]] = None,
+) -> None:
     """Print a parseable failed ``begin`` result and preserve its heartbeat."""
     global _ACTIVE_HEARTBEAT_RUN, _ACTIVE_HEARTBEAT_AGENT
 
@@ -15419,7 +15498,7 @@ def _begin_error_envelope(agent: str, error: GitHubError) -> None:
     if signal is not None:
         _finish_begin_budget_exhausted(agent, run, *signal)
 
-    print(json.dumps({
+    _print_begin_result({
         "agent": agent,
         "run": run,
         # No budget or queue gate completed. `unknown` preserves the existing
@@ -15429,7 +15508,7 @@ def _begin_error_envelope(agent: str, error: GitHubError) -> None:
         "do": "stop",
         "why": why,
         "transient": transient,
-    }, indent=2))
+    }, timings)
 
 
 def _reserve_verdict(do: object) -> Optional[Dict[str, object]]:
@@ -16473,7 +16552,7 @@ def _needs_decision_comment_body(question: str) -> str:
 
 def main(argv: Optional[Sequence[str]] = None, *,
          _items: Optional[List[Item]] = None,
-         _items_loader: Optional[Callable[[], List[Item]]] = None,
+         _items_loader: Optional[Callable[..., List[Item]]] = None,
          _reset_api_usage: bool = True) -> int:
     # The implementation engine imports this module for the established
     # GitHub and lock operations.  Keep that dependency one-way by forwarding
@@ -16769,7 +16848,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
     # the Project. Keep that gate ahead of the shared loader; an ordinary poll
     # must not spend the full Project read merely to learn that it cannot run.
     begin_preflight = None
+    begin_timings: Optional[Dict[str, object]] = None
+    begin_members: Optional[List[str]] = None
     if args.command == "begin":
+        begin_timings = {}
         begin_preflight = _begin_preflight(
             now, args.agent, args.idle, args.tier)
         if begin_preflight[1] is None:
@@ -16781,22 +16863,33 @@ def main(argv: Optional[Sequence[str]] = None, *,
             begin_preflight[0].update(role_refusal)
             print(json.dumps(begin_preflight[0], indent=2))
             return 0
-        try:
+        def check_begin_reserve(
+            response: Optional[Mapping[str, object]],
+        ) -> None:
             begin_reserve = _begin_api_reserve_preflight(
-                args.agent, args.tier, args.caller_role
+                args.agent, args.tier, args.caller_role, response
             )
-        except GitHubError as exc:
-            _begin_error_envelope(args.agent, exc)
-            return 2
-        if begin_reserve is not None:
-            begin_preflight[0].update(begin_reserve)
+            if begin_reserve is not None:
+                raise _BeginReserveStop(begin_reserve)
+
+        try:
+            begin_members = _run_begin_phase(
+                "member_repos",
+                lambda: member_repos(on_first_query=check_begin_reserve),
+                begin_timings,
+            )
+        except _BeginReserveStop as stop:
+            begin_preflight[0].update(stop.result)
             _record_begin_reserve(
                 args.agent,
                 begin_preflight[0].get("run"),
                 begin_preflight[0]["why"],
             )
-            print(json.dumps(begin_preflight[0], indent=2))
+            _print_begin_result(begin_preflight[0], begin_timings)
             return 0
+        except GitHubError as exc:
+            _begin_error_envelope(args.agent, exc, begin_timings)
+            return 2
 
     brief_timings: Optional[Dict[str, object]] = (
         {} if args.command == "brief" else None
@@ -16813,12 +16906,27 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if _items is not None:
             items = _items
         elif _items_loader is not None:
-            items = _items_loader()
+            if args.command == "begin":
+                items = _run_begin_phase(
+                    "project_load",
+                    lambda: _call_with_optional_keyword(
+                        _items_loader, "members", begin_members
+                    ),
+                    begin_timings,
+                )
+            else:
+                items = _items_loader()
         elif args.command == "begin":
             # `begin` selects one job after its cheap gates. Keep the initial
             # Project scan compact; cmd_begin hydrates only the candidates it
             # actually needs to order or hand out.
-            items = load_items(include_details=False)
+            items = _run_begin_phase(
+                "project_load",
+                lambda: load_items(
+                    include_details=False, members=begin_members
+                ),
+                begin_timings,
+            )
             begin_detail_loader = lambda candidates: hydrate_item_details(
                 items, candidates
             )
@@ -16835,7 +16943,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
             }, indent=2))
             return 0
         if args.command == "begin":
-            _begin_error_envelope(args.agent, exc)
+            _begin_error_envelope(args.agent, exc, begin_timings)
             return 2
         print("funnel: {}".format(exc), file=sys.stderr)
         return 2
@@ -16857,7 +16965,14 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
             )
         ):
-            repo_readiness = repo_readiness_for_items(items)
+            if args.command == "begin":
+                repo_readiness = _run_begin_phase(
+                    "repo_readiness",
+                    lambda: repo_readiness_for_items(items),
+                    begin_timings,
+                )
+            else:
+                repo_readiness = repo_readiness_for_items(items)
         if args.command == "claim":
             return cmd_claim(
                 items, now, args.ref, pr_facts=ticket_pr_facts(items)
@@ -16915,10 +17030,14 @@ def main(argv: Optional[Sequence[str]] = None, *,
             if begin_detail_loader is not None:
                 begin_kwargs["_detail_loader"] = begin_detail_loader
             begin_kwargs["_preflight"] = begin_preflight
-            return cmd_begin(
-                items, now, args.agent, args.tier, args.idle,
-                args.breakdown, **begin_kwargs
-            )
+            timing_token = _ACTIVE_BRIEF_TIMINGS.set(begin_timings)
+            try:
+                return cmd_begin(
+                    items, now, args.agent, args.tier, args.idle,
+                    args.breakdown, **begin_kwargs
+                )
+            finally:
+                _ACTIVE_BRIEF_TIMINGS.reset(timing_token)
         if args.command == "next-review":
             return cmd_next_review(items, args.tier)
         if args.command == "review":
@@ -17128,7 +17247,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
         return cmd_brief(items, now, pr_facts=ticket_pr_facts(items))
     except GitHubError as exc:
         if args.command == "begin":
-            _begin_error_envelope(args.agent, exc)
+            _begin_error_envelope(args.agent, exc, begin_timings)
             return 2
         print("funnel: {}".format(exc), file=sys.stderr)
         return 2
@@ -17420,9 +17539,13 @@ class FunnelSession:
         self._heartbeat_agent: Optional[str] = None
         self._heartbeat_tier: Optional[str] = None
 
-    def _load_items(self) -> List[Item]:
+    def _load_items(
+        self, members: Optional[Iterable[str]] = None
+    ) -> List[Item]:
         if self.items is None:
-            self.items = self._loader()
+            self.items = _call_with_optional_keyword(
+                self._loader, "members", members
+            )
         return self.items
 
     def dispatch(self, argv: Sequence[str], stdin=None):

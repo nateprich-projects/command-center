@@ -22,6 +22,33 @@ import usage  # noqa: E402
 NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
 
 
+def _empty_member_repositories():
+    return {
+        "repositories": {
+            "nodes": [],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        },
+    }
+
+
+def _member_repositories(*names):
+    return {
+        "repositories": {
+            "nodes": [
+                {
+                    "nameWithOwner": name,
+                    "isArchived": False,
+                    "repositoryTopics": {
+                        "nodes": [{"topic": {"name": funnel.TOPIC}}],
+                    },
+                }
+                for name in names
+            ],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        },
+    }
+
+
 @pytest.fixture(autouse=True)
 def _bindings_never_touch_the_real_spool(monkeypatch):
     """`begin` now writes a binding record through the heartbeat (#497). The
@@ -60,6 +87,8 @@ def _allow_begin(monkeypatch):
                             "remaining": 5_000,
                             "resetAt": "later",
                         },
+                        "user": _empty_member_repositories(),
+                        "organization": _empty_member_repositories(),
                     },
                 }),
                 stderr="",
@@ -277,6 +306,8 @@ def test_main_loads_the_project_after_begin_gates_pass(
 ):
     """A passing preflight still reaches the normal queue and WIP checks."""
     events = []
+    graphql_calls = []
+    loaded_members = []
     monkeypatch.setattr(
         funnel,
         "_start_begin_heartbeat",
@@ -294,40 +325,81 @@ def test_main_loads_the_project_after_begin_gates_pass(
             "over_pace": False,
         },
     )
-    monkeypatch.setattr(
-        funnel,
-        "gh_graphql",
-        lambda query, **variables: events.append("api") or {
+
+    def run(command, **kwargs):
+        assert command[:3] == ["gh", "api", "graphql"]
+        query_arg = next(
+            part for part in command if part.startswith("query=")
+        )
+        query = query_arg[len("query="):]
+        graphql_calls.append((query, kwargs))
+        events.append("api")
+        kind = next(
+            owner_kind for owner_kind, _ in funnel.OWNERS
+            if owner_kind + "(login:" in query
+        )
+        data = {
             "rateLimit": {
                 "cost": 1,
                 "remaining": 5_000,
                 "resetAt": "later",
             },
-        },
-    )
+            kind: _member_repositories(
+                "nateprich/example" if kind == "user"
+                else "nateprich-projects/example"
+            ),
+        }
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"data": data}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
     monkeypatch.setattr(
         funnel,
         "load_items",
-        lambda include_details=True: events.append("load") or [],
+        lambda include_details=True, members=None: (
+            events.append("load") or loaded_members.extend(members or []) or []
+        ),
     )
-    monkeypatch.setattr(funnel, "repo_readiness_for_items", lambda items: {})
+
+    def repo_readiness(items):
+        events.append("readiness")
+        return {}
+
+    monkeypatch.setattr(funnel, "repo_readiness_for_items", repo_readiness)
     monkeypatch.setattr(
         funnel,
         "cmd_begin",
         lambda items, now, agent, tier, idle, breakdown=False,
         repo_readiness=None, caller_role=None, _detail_loader=None,
         _preflight=None: (
-            events.append(("begin", items, _preflight)) or 0
+            events.append(("begin", items, _preflight))
+            or funnel._print_begin_result({"agent": agent, "do": "stop"})
+            or 0
         ),
     )
 
     assert funnel.main(["begin", "--agent", "codex", "--tier", "standard"]) == 0
-    capsys.readouterr()
+    result = json.loads(capsys.readouterr().out)
     assert [event for event in events if isinstance(event, str)] == [
-        "heartbeat", "usage", "pace", "api", "load",
+        "heartbeat", "usage", "pace", "api", "api", "load",
+        "readiness",
     ]
     assert events[-1][0] == "begin"
     assert events[-1][2][0]["gate"] == "ok"
+    assert len(graphql_calls) == len(funnel.OWNERS)
+    assert all("repositories(first:" in query for query, _ in graphql_calls)
+    assert all("rateLimit" in query for query, _ in graphql_calls)
+    assert loaded_members == [
+        "nateprich-projects/example",
+        "nateprich/example",
+    ]
+    assert result["timings"]["begin.member_repos"] >= 0
+    assert result["timings"]["begin.project_load"] >= 0
+    assert result["timings"]["begin.repo_readiness"] >= 0
+    assert result["timings"]["graphql.member_repos.calls"] == len(funnel.OWNERS)
 
 
 def test_main_stands_down_before_loading_the_project_when_reserve_is_low(
@@ -388,6 +460,7 @@ def test_main_stands_down_before_loading_the_project_when_reserve_is_low(
     assert result["do"] == "stop"
     assert events[:3] == ["heartbeat", "usage", "pace"]
     assert events[3][0] == "api"
+    assert "repositories(first:" in events[3][1]
     assert "rateLimit" in events[3][1]
     assert "projectV2" not in events[3][1]
     assert reserve_events == [
@@ -397,14 +470,8 @@ def test_main_stands_down_before_loading_the_project_when_reserve_is_low(
 
 
 def test_begin_preflight_uses_the_capped_engineering_floor(monkeypatch):
-    monkeypatch.setattr(
-        funnel,
-        "gh_graphql",
-        lambda query: {"rateLimit": {"remaining": 826}},
-    )
-
     assert funnel._begin_api_reserve_preflight(
-        "codex", "standard", None
+        "codex", "standard", None, {"rateLimit": {"remaining": 826}}
     ) is None
 
 
@@ -485,6 +552,7 @@ def test_begin_records_a_named_finish_for_a_structured_exhaustion(
                     "remaining": 5_000,
                     "resetAt": reset_at,
                 },
+                "user": _empty_member_repositories(),
             },
         },
         {
@@ -515,13 +583,11 @@ def test_begin_records_a_named_finish_for_a_structured_exhaustion(
 
     monkeypatch.setattr(funnel.subprocess, "run", run)
 
-    def load_exhausted_project():
-        funnel.gh_graphql("{viewer{login}}")
-        return []
-
     assert funnel.main(
         ["begin", "--agent", "codex", "--tier", "standard"],
-        _items_loader=load_exhausted_project,
+        _items_loader=lambda: pytest.fail(
+            "the second member-repository call exhausts before Project load"
+        ),
     ) == 2
 
     result = json.loads(capsys.readouterr().out)
@@ -621,6 +687,8 @@ def test_begin_error_after_heartbeat_start_does_not_start_a_second_run(
                             "remaining": 5_000,
                             "resetAt": "later",
                         },
+                        "user": _empty_member_repositories(),
+                        "organization": _empty_member_repositories(),
                     },
                 }),
                 stderr="",
@@ -1959,7 +2027,8 @@ def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
     }
     received = []
     monkeypatch.setattr(
-        funnel, "load_items", lambda include_details=True: rows
+        funnel, "load_items",
+        lambda include_details=True, members=None: rows,
     )
     monkeypatch.setattr(
         funnel,

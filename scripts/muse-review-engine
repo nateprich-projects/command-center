@@ -112,7 +112,7 @@ REPO="${MUSE_REVIEW_ENGINE_REPO:-/Users/nateprich/.claude/command-center-run}"
 # sibling of this runner, like the quota-hold helper below.
 MUSE_BIN="${MUSE_BIN:-$HOME/.local/bin/muse}"
 ZAI_EXEC_BIN="${ZAI_EXEC_BIN:-${BASH_SOURCE[0]%/*}/zai-exec}"
-MUSE_CALL_BIN="$REPO/muse_call.py"
+MUSE_CALL_BIN="${MUSE_CALL_BIN:-$REPO/muse_call.py}"
 GH_BIN="${GH_BIN:-gh}"
 BOUND_SECONDS="${MUSE_REVIEW_ENGINE_BOUND_SECONDS:-1200}"
 # zai-exec's own network deadline sits inside the bound, so a slow reply ends
@@ -181,8 +181,7 @@ if ! PROMPT_SHAPE="$(check_routine "$ROUTINE_SHAPE")"; then
   exit 1
 fi
 if [[ "$BACKEND" == "muse" && ! -r "$MUSE_CALL_BIN" ]]; then
-  echo "muse-review-engine: cannot read $MUSE_CALL_BIN — refusing to run without Muse session capture" >&2
-  exit 1
+  echo "muse-review-engine: cannot read $MUSE_CALL_BIN — continuing without Muse session capture" >&2
 fi
 
 # One owner-only directory per run, holding every scratch file including the
@@ -333,7 +332,10 @@ failure() {
   finish_args=(finish --agent "$AGENT" --run "$BEGIN_RUN" \
     --outcome errored --note "$note")
   if [[ "$BACKEND" == "muse" ]]; then
-    muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")" || return 1
+    if ! muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")"; then
+      echo "muse-review-engine: could not summarize Muse call ids; finishing without them" >&2
+      muse_call_record=""
+    fi
     if [[ -n "$muse_call_record" ]]; then
       finish_args+=(--muse-call-record "$muse_call_record")
     fi
@@ -420,7 +422,10 @@ PY
   fi
   if [[ "$BACKEND" == "muse" ]]; then
     local muse_call_record
-    muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")" || exit 1
+    if ! muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")"; then
+      echo "muse-review-engine: could not summarize Muse call ids; finishing without them" >&2
+      muse_call_record=""
+    fi
     if [[ -n "$muse_call_record" ]]; then
       finish_args+=(--muse-call-record "$muse_call_record")
     fi
@@ -501,6 +506,43 @@ resolve_muse_model() {
   fi
 }
 
+# Recover the answer when session-id capture itself fails. The JSON stream is
+# still the model's output, so an unavailable capture helper must not turn a
+# successful call into an empty answer.
+muse_answer_from_jsonl() {
+  python3 - "$1" "$2" <<'PY'
+import json
+import pathlib
+import sys
+
+raw_path, answer_path = map(pathlib.Path, sys.argv[1:])
+try:
+    lines = raw_path.read_text(encoding="utf-8").splitlines()
+except OSError as exc:
+    raise SystemExit(str(exc))
+answers = []
+for index, line in enumerate(lines):
+    try:
+        event = json.loads(line)
+    except (TypeError, ValueError):
+        continue
+    if not isinstance(event, dict) or event.get("payload_type") != \
+            "run.terminal.completed":
+        continue
+    payload = event.get("payload")
+    if not isinstance(payload, dict) or payload.get("terminal") != "completed":
+        continue
+    text = payload.get("text")
+    if not isinstance(text, str):
+        continue
+    sequence = event.get("sequence")
+    if isinstance(sequence, bool) or not isinstance(sequence, int):
+        sequence = index
+    answers.append((sequence, index, text))
+answer_path.write_text(max(answers)[2] if answers else "", encoding="utf-8")
+PY
+}
+
 # One model call: the prompt file in, the raw answer on stdout. Paths are
 # arguments so the review judges can run in parallel without sharing answers
 # or diagnostics. Plain kill, not a process-group kill: --disable-shell means
@@ -515,6 +557,8 @@ call_model_files() {
   local killed_marker
   local raw_answer_path=""
   local muse_capture_path=""
+  local muse_call_first=0
+  local muse_capture_initial="null"
   # Split from the declaration: `local x=$(...)` would mask mktemp's status.
   # In the run directory with everything else, so the EXIT trap's one `rm -rf`
   # sweeps it too. #1233 makes several model calls per run, so this name is
@@ -535,17 +579,36 @@ call_model_files() {
     if (( MUSE_SESSION_BOUND == 0 )); then
       muse_exec=("${MUSE_EXEC[@]}")
       muse_capture_path="$RUN_DIR/muse-call-first"
-      if ! printf 'null\n' >"$muse_capture_path"; then
-        return 1
+      muse_call_first=1
+      if [[ -n "${MUSE_SESSION_ID:-}" ]]; then
+        muse_capture_initial="\"$MUSE_SESSION_ID\""
+      fi
+      if ! printf '%s\n' "$muse_capture_initial" >"$muse_capture_path"; then
+        echo "muse-review-engine: cannot initialize the first Muse call capture slot; continuing without its id" >&2
+        if [[ ! -e "$muse_capture_path" ]]; then
+          muse_capture_path="$RUN_DIR/muse-call-first.${killed_marker##*/}"
+          if ! printf '%s\n' "$muse_capture_initial" >"$muse_capture_path"; then
+            echo "muse-review-engine: cannot create a fallback Muse call capture slot" >&2
+            muse_capture_path=""
+          fi
+        fi
       fi
       MUSE_SESSION_BOUND=1
     else
       muse_exec=("${MUSE_EXEC_UNBOUND[@]}")
       if ! muse_capture_path="$(mktemp "$RUN_DIR/muse-call-later.XXXXXX")"; then
-        return 1
+        echo "muse-review-engine: cannot allocate a Muse call capture slot; using a run-local fallback" >&2
+        muse_capture_path="$RUN_DIR/muse-call-later.${killed_marker##*/}"
       fi
       if ! printf 'null\n' >"$muse_capture_path"; then
-        return 1
+        echo "muse-review-engine: cannot initialize a Muse call capture slot; continuing without its id" >&2
+        if [[ ! -e "$muse_capture_path" ]]; then
+          muse_capture_path="$RUN_DIR/muse-call-later.fallback.${killed_marker##*/}"
+          if ! printf 'null\n' >"$muse_capture_path"; then
+            echo "muse-review-engine: cannot create a fallback Muse call capture slot" >&2
+            muse_capture_path=""
+          fi
+        fi
       fi
     fi
     raw_answer_path="${answer_path}.muse-jsonl"
@@ -580,8 +643,26 @@ call_model_files() {
     # Read the complete stream after this invocation stops. Background tool
     # results can arrive late, and parallel calls can complete out of order;
     # each invocation has its own capture slot.
-    python3 "$MUSE_CALL_BIN" capture "$raw_answer_path" "$answer_path" \
-      "$muse_capture_path" || printf 'null\n' >"$muse_capture_path"
+    if [[ -n "$muse_capture_path" ]] \
+      && ! python3 "$MUSE_CALL_BIN" capture "$raw_answer_path" "$answer_path" \
+        "$muse_capture_path"; then
+      echo "muse-review-engine: Muse session capture failed; keeping the model answer and marking the id uncaptured" >&2
+      if ! muse_answer_from_jsonl "$raw_answer_path" "$answer_path"; then
+        echo "muse-review-engine: could not recover the Muse model answer from its JSON stream" >&2
+        return 1
+      fi
+      if (( muse_call_first )) && [[ -n "${MUSE_SESSION_ID:-}" ]]; then
+        printf '"%s"\n' "$MUSE_SESSION_ID" >"$muse_capture_path" 2>/dev/null || true
+      else
+        printf 'null\n' >"$muse_capture_path" 2>/dev/null || true
+      fi
+    elif [[ -z "$muse_capture_path" ]]; then
+      echo "muse-review-engine: no Muse call capture slot; continuing without its id" >&2
+      if ! muse_answer_from_jsonl "$raw_answer_path" "$answer_path"; then
+        echo "muse-review-engine: could not recover the Muse model answer from its JSON stream" >&2
+        return 1
+      fi
+    fi
   fi
   if [[ -e "$killed_marker" ]]; then
     wait "$bound_pid" 2>/dev/null
@@ -640,8 +721,8 @@ model_failed() {
         --note "provider quota exhausted until $MUSE_QUOTA_RESET"
       )
       if ! muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")"; then
-        echo "muse-review-engine: could not summarize Muse call ids" >&2
-        exit 1
+        echo "muse-review-engine: could not summarize Muse call ids; finishing without them" >&2
+        muse_call_record=""
       fi
       if [[ -n "$muse_call_record" ]]; then
         quota_finish_args+=(--muse-call-record "$muse_call_record")

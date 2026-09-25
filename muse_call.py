@@ -64,6 +64,16 @@ def capture(raw_path: pathlib.Path, answer_path: pathlib.Path,
     """Write the plain answer and one JSON session id (null means uncaptured)."""
     session_id, answer = result(raw_path)
     answer_path.write_text(answer, encoding="utf-8")
+    if session_id is None:
+        # The first call's id is already known from the session bound to the
+        # run. Preserve that value if its result omits the stream id; later
+        # calls start with null and remain explicitly uncaptured.
+        try:
+            prior = json.loads(capture_path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError):
+            prior = None
+        if isinstance(prior, str) and prior.strip():
+            session_id = prior
     capture_path.write_text(
         json.dumps(session_id, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -72,8 +82,12 @@ def capture(raw_path: pathlib.Path, answer_path: pathlib.Path,
 def summarize(run_dir: pathlib.Path) -> Optional[Dict[str, object]]:
     """Collect every invocation marker, preserving failed captures as null."""
     first = run_dir / "muse-call-first"
+    first_fallbacks = sorted(run_dir.glob("muse-call-first.*"))
     later = sorted(run_dir.glob("muse-call-later.*"))
-    paths = ([first] if first.exists() else []) + later
+    first_path = first if first.exists() else (
+        first_fallbacks[0] if first_fallbacks else None
+    )
+    paths = ([first_path] if first_path is not None else []) + later
     if not paths:
         return None
 

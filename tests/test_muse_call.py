@@ -70,3 +70,33 @@ def test_single_call_summary_has_one_id_and_count(tmp_path):
         "session_ids": ["session-one"],
         "calls_made": 1,
     }
+
+
+def test_summary_reads_first_call_fallback_marker(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "muse-call-first.killed.ABC123").write_text('"session-one"\n')
+    (run_dir / "muse-call-later.ABC124").write_text("null\n")
+
+    assert muse_call.summarize(run_dir) == {
+        "session_ids": ["session-one", None],
+        "calls_made": 2,
+    }
+
+
+def test_capture_preserves_known_first_id_when_result_omits_it(tmp_path):
+    raw = tmp_path / "call.jsonl"
+    answer = tmp_path / "answer.txt"
+    capture = tmp_path / "muse-call-first"
+    _write_events(raw, [
+        _event(
+            "run.terminal.completed", sequence=1,
+            payload={"terminal": "completed", "text": "answer"},
+        ),
+    ])
+    capture.write_text('"session-known"\n', encoding="utf-8")
+
+    muse_call.capture(raw, answer, capture)
+
+    assert answer.read_text(encoding="utf-8") == "answer"
+    assert json.loads(capture.read_text(encoding="utf-8")) == "session-known"

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import shlex
 import stat
 import subprocess
@@ -577,6 +578,15 @@ MUSE_STUB = (
     "exit \"${MUSE_STATUS:-0}\"\n"
 )
 
+MUSE_CALL_FAULT_STUB = (
+    "import os, pathlib, sys\n"
+    "sys.path.insert(0, str(pathlib.Path(__file__).parent))\n"
+    "if sys.argv[1] == os.environ.get('MUSE_CALL_FAIL_COMMAND'):\n"
+    "    raise SystemExit(1)\n"
+    "import muse_call\n"
+    "raise SystemExit(muse_call.main(sys.argv[1:]))\n"
+)
+
 GH_STUB = (
     "#!/bin/bash\n"
     "printf '%s\\n' \"$*\" >> \"$GH_LOG\"\n"
@@ -617,7 +627,7 @@ def _python_without_session_id(tmp_path, mode):
 
 def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
                     routine_body=None, bound_seconds=20, extra_env=None,
-                    timeout=40, muse_model_body=None):
+                    timeout=40, muse_model_body=None, muse_call_body=None):
     """Run the engine against stub funnel/heartbeat/packet/apply/gh/muse."""
     repo = tmp_path / "repo"
     # exist_ok: the flag-rejection test drives the runner four times in one
@@ -655,6 +665,8 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
         muse_model_body if muse_model_body is not None
         else (ROOT / "muse_model.py").read_text())
     (repo / "muse_call.py").write_text((ROOT / "muse_call.py").read_text())
+    if muse_call_body is not None:
+        (repo / "muse_call_fault.py").write_text(muse_call_body)
     (repo / "breakdown-packet").write_text(_issue_packet_stub("breakdown"))
     (repo / "breakdown-apply").write_text(BREAKDOWN_APPLY_STUB)
     (repo / "shape-packet").write_text(_issue_packet_stub("shape"))
@@ -1312,6 +1324,114 @@ def test_uncaptured_call_is_kept_in_the_finish_record(tmp_path):
     assert call_record["session_ids"][0] == \
         (repo / "begin.session_id").read_text()
     assert call_record["session_ids"][1] is None
+
+
+def test_capture_failure_keeps_answer_and_records_uncaptured_call(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()),
+        muse_call_body=MUSE_CALL_FAULT_STUB,
+        extra_env={
+            "MUSE_CALL_BIN": str(tmp_path / "repo" / "muse_call_fault.py"),
+            "MUSE_CALL_FAIL_COMMAND": "capture",
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert (repo / "applied.marker").exists()
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
+        "approved"
+    call_record = _muse_call_record(repo)
+    assert call_record["calls_made"] == 2
+    assert call_record["session_ids"][0] == \
+        (repo / "begin.session_id").read_text()
+    assert call_record["session_ids"][1] is None
+
+
+def test_missing_capture_helper_does_not_block_a_successful_review(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()),
+        extra_env={
+            "MUSE_CALL_BIN": str(tmp_path / "repo" / "missing-muse-call.py"),
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert (repo / "applied.marker").exists()
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
+        "approved"
+    assert "finish --agent muse --run engine-run --outcome done" in \
+        _heartbeat(repo)
+    assert "--muse-call-record" not in _heartbeat(repo)
+    assert "continuing without Muse session capture" in proc.stderr
+
+
+def test_summary_failure_does_not_prevent_successful_finish(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()),
+        muse_call_body=MUSE_CALL_FAULT_STUB,
+        extra_env={
+            "MUSE_CALL_BIN": str(tmp_path / "repo" / "muse_call_fault.py"),
+            "MUSE_CALL_FAIL_COMMAND": "summarize",
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    assert (repo / "applied.marker").exists()
+    assert "finish --agent muse --run engine-run --outcome done" in \
+        _heartbeat(repo)
+    assert "--muse-call-record" not in _heartbeat(repo)
+    assert "finishing without them" in proc.stderr
+
+
+def test_summary_failure_does_not_prevent_errored_finish(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()),
+        muse_call_body=MUSE_CALL_FAULT_STUB,
+        extra_env={
+            "MUSE_CALL_BIN": str(tmp_path / "repo" / "muse_call_fault.py"),
+            "MUSE_CALL_FAIL_COMMAND": "summarize",
+            "MUSE_STATUS": "1",
+            "MUSE_STDERR": "provider outage",
+        })
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 1
+    assert not (repo / "applied.marker").exists()
+    assert "finish --agent muse --run engine-run --outcome errored" in \
+        _heartbeat(repo)
+    assert "--muse-call-record" not in _heartbeat(repo)
+    assert "finishing without them" in proc.stderr
+
+
+def test_later_capture_slot_allocation_failure_keeps_run_and_capture_count(
+        tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_mktemp = shutil.which("mktemp")
+    assert real_mktemp
+    mktemp = bin_dir / "mktemp"
+    _executable(
+        mktemp,
+        "#!/bin/bash\n"
+        "case \"$*\" in\n"
+        "  *muse-call-later*) exit 1 ;;\n"
+        "  *) exec {} \"$@\" ;;\n"
+        "esac\n".format(shlex.quote(real_mktemp)),
+    )
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()),
+        extra_env={"PATH": str(bin_dir) + os.pathsep + os.environ["PATH"]})
+
+    assert proc.returncode == 0, proc.stderr
+    assert (repo / "applied.marker").exists()
+    call_record = _muse_call_record(repo)
+    assert call_record["calls_made"] == 2
+    assert call_record["session_ids"] == [
+        (repo / "begin.session_id").read_text(), "muse-call-2",
+    ]
+    assert "using a run-local fallback" in proc.stderr
 
 
 @pytest.mark.parametrize("failure_kind", ["failed", "timed out"])

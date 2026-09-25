@@ -1117,6 +1117,17 @@ elif field == "pr_not_open_reason":
         if str(reason).startswith("pr_not_open "):
             print(reason)
             break
+elif field == "covered_verdict_only":
+    precheck = packet.get("precheck") or {}
+    reasons = precheck.get("reasons") or []
+    head_sha = packet.get("head_sha")
+    expected = "verdict: a verdict already covers head {}".format(
+        str(head_sha)[:12])
+    covered = (isinstance(head_sha, str) and bool(head_sha)
+               and packet.get("verdict") is not None
+               and packet.get("verdict_head_sha") == head_sha)
+    print(precheck.get("pass") is False and covered
+          and reasons == [expected])
 elif field == "rejected_answer":
     print(json.dumps({
         "verdict": "rejected",
@@ -1139,6 +1150,7 @@ if ! PACKET_PASS="$(packet_field precheck_pass)" \
   || ! PACKET_CI_REASON="$(packet_field ci_reason)" \
   || ! PACKET_HEAD="$(packet_field head)" \
   || ! PACKET_PR_NOT_OPEN="$(packet_field pr_not_open)" \
+  || ! PACKET_COVERED_VERDICT_ONLY="$(packet_field covered_verdict_only)" \
   || ! CI_RERUN_ACTION="$(packet_field ci_rerun_action)" \
   || ! CI_RERUN_RUN="$(packet_field ci_rerun_run)" \
   || ! CI_RERUN_OVERLAPS="$(packet_field ci_rerun_overlaps)"; then
@@ -1169,6 +1181,13 @@ if [[ "$PACKET_PASS" != "True" ]]; then
     fi
     PR_NOT_OPEN_REASON="$(cat "$DECISION_FILE")"
     finish_done "review skipped PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $PR_NOT_OPEN_REASON; no verdict recorded"
+    exit 0
+  fi
+  # Row 4 already established that a verdict covers this head. Standing
+  # down only when it is the sole failing row preserves that verdict without
+  # changing the rejection path for a packet carrying another blocker.
+  if [[ "$PACKET_COVERED_VERDICT_ONLY" == "True" ]]; then
+    finish_done "review skipped — a verdict already covers head $HEAD_SHORT; no verdict recorded"
     exit 0
   fi
   # A failing precheck is applied as rejected with no model call at all. The

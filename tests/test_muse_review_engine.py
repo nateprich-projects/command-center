@@ -1048,6 +1048,17 @@ def _could_not_run_packet():
     )
 
 
+def _covered_verdict_packet():
+    return _packet(
+        verdict={"verdict": "approved", "ci": "green", "head_sha": HEAD,
+                 "blocking": []},
+        verdict_head_sha=HEAD,
+        precheck={"pass": False, "reasons": [
+            "verdict: a verdict already covers head {}".format(HEAD[:12]),
+        ]},
+    )
+
+
 def test_a_failing_precheck_applies_rejected_without_calling_muse(tmp_path):
     proc, repo = _stubbed_runner(tmp_path, _begin(), _failing_packet())
 
@@ -1073,6 +1084,30 @@ def test_a_failing_precheck_applies_rejected_without_calling_muse(tmp_path):
         "--note reviewed PR #7 in owner/repo at {}: rejected without a "
         "model call (2 precheck reason(s)) --review-result rejected\n".format(HEAD)
     )
+
+
+@pytest.mark.parametrize("backend", ["muse", "zcode"])
+def test_a_covered_verdict_with_another_failing_reason_still_rejects(
+        tmp_path, backend):
+    packet = _covered_verdict_packet()
+    packet["precheck"]["reasons"].append("stop: stop_auto_merging set")
+    if backend == "zcode":
+        proc, repo = _zai_standard(tmp_path, _begin(), packet)
+    else:
+        proc, repo = _stubbed_runner(tmp_path, _begin(), packet)
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert len(_apply_calls(repo)) == 1
+    applied = json.loads((repo / "apply.answer").read_text())
+    assert applied["verdict"] == "rejected"
+    assert applied["blocking"] == [
+        "verdict: a verdict already covers head {}".format(HEAD[:12]),
+        "stop: stop_auto_merging set",
+    ]
+    assert (repo / "applied.marker").exists()
+    assert _heartbeat_without_muse_call_record(repo).endswith(
+        "--review-result rejected\n")
 
 
 def test_a_refused_precheck_rejection_finishes_errored(tmp_path):
@@ -2481,6 +2516,28 @@ def _zai_standard(tmp_path, begin, packet, **kwargs):
     extra.setdefault("MUSE_REVIEW_ENGINE_ZAI_UNTIL", FUTURE)
     return _stubbed_runner(tmp_path, begin, packet, args=("standard", "max"),
                            extra_env=extra, **kwargs)
+
+
+@pytest.mark.parametrize("backend", ["muse", "zcode"])
+def test_a_sole_covered_verdict_stands_down_without_overwriting_approval(
+        tmp_path, backend):
+    packet = _covered_verdict_packet()
+    if backend == "zcode":
+        proc, repo = _zai_standard(tmp_path, _begin(), packet)
+    else:
+        proc, repo = _stubbed_runner(tmp_path, _begin(), packet)
+
+    assert packet["verdict"]["verdict"] == "approved"  # recorded #1509 shape
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    assert not (repo / "gh.log").exists()
+    assert _heartbeat_without_muse_call_record(repo) == (
+        "finish --agent {} --run engine-run --outcome done "
+        "--note review skipped — a verdict already covers head {}; "
+        "no verdict recorded\n".format(backend, HEAD)
+    )
 
 
 def test_the_engine_cutoff_is_the_one_heartbeat_retires_zcode_at():

@@ -38,6 +38,12 @@ Before sizing a ticket, check whether its outcome depends on a plan premise
 labelled `inferred`. Check that premise before the dependent implementation;
 measured and documented premises are recorded but never block.
 
+For a first verification step on an inferred premise, the ticket names the
+specific observation that would confirm or refute the premise and a reviewable
+evidence channel: a CI check for a repeatable probe, or a canonical
+`**Run evidence:**` PR comment for a one-off source inspection. Keep dependent
+implementation contingent on that evidence.
+
 - If the check is cheap and belongs in the same run, make it the ticket's
   **first verification step**. State what evidence to record, then make the
   implementation contingent on that result.

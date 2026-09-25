@@ -1,6 +1,9 @@
 # Command Center MCP connector
 
-This directory contains the authenticated HTTP MCP skeleton for Command Center. It exposes no tools yet; later tickets add the thin adapters over `funnel.py`.
+This directory contains the authenticated HTTP MCP connector for Command Center. Its
+read-only `brief`, `ideas`, `show`, and `queue` tools call the matching `funnel.py`
+commands and return their output. The connector does not reimplement project queries or
+ordering.
 
 ## Local development configuration
 
@@ -12,6 +15,20 @@ openssl rand -hex 32
 ```
 
 Put the generated value after `INBOUND_STATIC_TOKEN=` in `.env`. Keep `.env` private; it is gitignored and excluded from Docker build context. This in-repository file is for local development only.
+
+## Read tools
+
+The connector exposes four read-only tools. Each calls the matching `funnel.py`
+command and returns its stdout; errors include the command's diagnostic output.
+The connector inherits GitHub CLI authentication from its environment, so
+`funnel.py` remains the source for Project reads and ordering.
+For deployment, `GH_TOKEN` comes from
+`~/.config/command-center/connector.env` as described below.
+
+- `brief` calls `funnel.py brief`.
+- `ideas` calls `funnel.py ideas`.
+- `show` accepts an item reference and calls `funnel.py show <ref>`.
+- `queue` calls `funnel.py queue`.
 
 ## Deploy with Colima
 
@@ -57,7 +74,7 @@ from the two external env files and are not part of the Docker build context.
 After starting, verify the forwarded host port, tunneled metadata and auth
 boundary. The smoke test checks that requests without a token and with an invalid
 token receive 401/403, then initializes an authenticated MCP session and confirms
-this skeleton exposes no tools. Run the restart check after the initial smoke
+the four read tools are registered. Run the restart check after the initial smoke
 test to confirm Colima brings the container and host port back:
 
 ```sh

@@ -328,7 +328,8 @@ def test_main_loads_the_project_after_begin_gates_pass(
         "cmd_begin",
         lambda items, now, agent, tier, idle, breakdown=False,
         repo_readiness=None, caller_role=None, _detail_loader=None,
-        _preflight=None, timings=None: (
+        _preflight=None, timings=None, _pr_facts=None,
+        _pr_facts_error=None, _pr_facts_elapsed=None: (
             events.append(("begin", items, _preflight, timings)) or 0
         ),
     )

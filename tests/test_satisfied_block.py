@@ -12,6 +12,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
+import heartbeat  # noqa: E402
 
 
 REPO = "owner/repo"
@@ -26,8 +27,13 @@ def issue(
     open_blockers=(),
     dead_blockers=(),
 ):
-    parsed = funnel.parse_block_comment([comment]) if comment is not None else None
-    references, blocked_until, reason = parsed or ([], None, None)
+    parsed = (
+        funnel._parse_block_comment_details([comment])
+        if comment is not None else None
+    )
+    references, blocked_until, reason, event = parsed or (
+        [], None, None, None
+    )
     return funnel.Item(
         repo=REPO,
         number=number,
@@ -37,9 +43,43 @@ def issue(
         block_references=references,
         block_reason=reason,
         blocked_until=blocked_until,
+        block_event=event,
         open_blockers=list(open_blockers),
         dead_blockers=list(dead_blockers),
     )
+
+
+EVENT_COMMENT = '''**Blocked until event:**
+```json
+{
+  "agent": "codex",
+  "job": "command-center-tickets-hourly",
+  "outcome": "errored",
+  "after": "2026-09-09T15:00:00Z"
+}
+```
+Wait for the scheduled run to fail.
+'''
+
+
+def event_finish(*, ts, agent="codex", job="command-center-tickets-hourly",
+                 outcome="errored", run="run-event-1"):
+    return {
+        "agent": agent,
+        "job": job,
+        "phase": "finish",
+        "ts": ts,
+        "outcome": outcome,
+        "run": run,
+    }
+
+
+def event_issue():
+    waiting = issue(754, comment=EVENT_COMMENT)
+    waiting.labels = ["blocked"]
+    waiting.needs = "external-event"
+    waiting.item_id = "project-item-754"
+    return waiting
 
 
 @pytest.mark.parametrize(
@@ -254,6 +294,83 @@ def test_label_failure_leaves_a_reusable_provenance_record(monkeypatch):
 
     assert funnel.parse_satisfied_block_comment(calls[0][-1]) is not None
     assert calls[1][2] == "edit"
+    assert waiting.is_blocked
+
+
+def test_matching_heartbeat_finish_names_record_then_clears_event_hold(
+    monkeypatch,
+):
+    waiting = event_issue()
+    finish = event_finish(ts=int(NOW.timestamp()), run="run-event-1451")
+    calls = []
+    project_writes = []
+
+    monkeypatch.setattr(
+        heartbeat, "read_github", lambda agent: [finish]
+    )
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda *args: project_writes.append(args),
+    )
+
+    def run(args, capture_output, text=True):
+        calls.append(tuple(args))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel.subprocess, "run", run)
+
+    cleared = funnel.clear_satisfied_blocks(
+        [waiting], NOW, run="clear-run", agent="codex"
+    )
+
+    expected_condition = (
+        "heartbeat finish agent=codex job=command-center-tickets-hourly "
+        "outcome=errored run=run-event-1451 at=2026-09-09T16:00:00Z"
+    )
+    assert cleared == [{
+        "ref": waiting.ref,
+        "conditions": [expected_condition],
+        "cleared_at": NOW.isoformat(),
+    }]
+    assert len([call for call in calls if call[2] == "comment"]) == 1
+    assert expected_condition in calls[0][-1]
+    assert project_writes == [(
+        "project-item-754", "Needs", "none", waiting.ref
+    )]
+    assert calls[-1] == (
+        "gh", "issue", "edit", "754", "--repo", REPO,
+        "--remove-label", "blocked",
+    )
+    assert not waiting.is_blocked
+
+
+def test_heartbeat_finish_before_event_threshold_does_not_clear(monkeypatch):
+    waiting = event_issue()
+    finish = event_finish(ts=int((NOW - timedelta(hours=2)).timestamp()))
+    monkeypatch.setattr(heartbeat, "read_github", lambda agent: [finish])
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda *args, **kwargs: pytest.fail("an early event was mutated"),
+    )
+
+    assert funnel.clear_satisfied_blocks([waiting], NOW) == []
+    assert waiting.is_blocked
+
+
+def test_no_matching_heartbeat_finish_leaves_event_hold_untouched(monkeypatch):
+    waiting = event_issue()
+    finish = event_finish(
+        ts=int(NOW.timestamp()), job="another-scheduled-job"
+    )
+    monkeypatch.setattr(heartbeat, "read_github", lambda agent: [finish])
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda *args, **kwargs: pytest.fail(
+            "a non-matching event was mutated"
+        ),
+    )
+
+    assert funnel.clear_satisfied_blocks([waiting], NOW) == []
     assert waiting.is_blocked
 
 

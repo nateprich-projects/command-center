@@ -3,8 +3,8 @@
 
   ./smoke-test.py http://127.0.0.1:3003
 
-The token is read from INBOUND_STATIC_TOKEN or --token. The skeleton intentionally
-lists no tools; later tickets add tools and extend this authenticated protocol check.
+The token is read from INBOUND_STATIC_TOKEN or --token. The authenticated MCP
+session must list exactly the four gate tools shipped by this connector.
 """
 
 from __future__ import annotations
@@ -63,10 +63,16 @@ async def main() -> int:
         try:
             async with Client(f"{base}/mcp", auth=args.token) as client:
                 tools = await client.list_tools()
-                if tools:
-                    failures.append(f"skeleton should expose no tools, got {[tool.name for tool in tools]}")
+                names = {tool.name for tool in tools}
+                expected = {"approve", "start", "accept", "park"}
+                if names != expected:
+                    failures.append(
+                        "expected exactly the gate tools {}; got {}".format(
+                            sorted(expected), sorted(names)
+                        )
+                    )
                 else:
-                    print("  PASS  initialize and tools/list completed; no tools are registered")
+                    print("  PASS  tools/list exposes exactly approve, start, accept, and park")
         except Exception as exc:  # noqa: BLE001 - report protocol and auth failures
             failures.append(f"authenticated MCP session: {type(exc).__name__}: {exc}")
 

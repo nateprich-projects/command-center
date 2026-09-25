@@ -23,7 +23,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -122,6 +122,19 @@ TICKET_COMMENT_BODY_LIMIT = 4000
 # PR comments are durable run evidence. Keep each body bounded while carrying
 # every comment, newest last, so a reviewer can see the complete conversation.
 PR_COMMENT_BODY_LIMIT = 4000
+
+# A canonical run-evidence comment is a marked, fenced JSON block. Parsing its
+# shape helps the reviewer find the reported facts; it does not judge whether
+# those facts satisfy a ticket requirement.
+RUN_EVIDENCE_MARKER = "**Run evidence:**"
+RUN_EVIDENCE_FIELDS = (
+    "command", "exit_status", "output_summary", "environment_note",
+)
+RUN_EVIDENCE_FENCE_RE = re.compile(
+    r"\A[ \t]*\r?\n(?:[ \t]*\r?\n)?[ \t]*```json[ \t]*\r?\n"
+    r"(?P<payload>.*?)\r?\n[ \t]*```[ \t]*(?:\r?\n|$)",
+    re.DOTALL,
+)
 
 PR_COMMENTS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!,
@@ -1176,7 +1189,38 @@ def _comment_connection_page(connection: object, label: str
     return nodes, has_next, cursor if isinstance(cursor, str) else None
 
 
-def _shape_pr_comment(row: dict, kind: str) -> Dict[str, str]:
+def parse_run_evidence_comment(body: str) -> Optional[Dict[str, object]]:
+    """Read a canonical Run evidence payload without judging its claims.
+
+    The generic marked-block reader owns the fenced JSON parsing and the
+    marker family convention. This layer requires the Run evidence comment's
+    immediate fenced form and its four reported fields. A missing, malformed,
+    or incomplete form remains ordinary prose in the unchanged comment body.
+    """
+    if not isinstance(body, str):
+        return None
+    for payload, block in funnel._marked_json_blocks(
+            body, RUN_EVIDENCE_MARKER):
+        remainder = block[len(RUN_EVIDENCE_MARKER):]
+        if RUN_EVIDENCE_FENCE_RE.match(remainder) is None:
+            continue
+        if any(field not in payload for field in RUN_EVIDENCE_FIELDS):
+            continue
+        if (not isinstance(payload.get("command"), str)
+                or not payload["command"].strip()
+                or isinstance(payload.get("exit_status"), bool)
+                or not isinstance(payload.get("exit_status"), int)
+                or payload["exit_status"] < 0
+                or not isinstance(payload.get("output_summary"), str)
+                or not payload["output_summary"].strip()
+                or not isinstance(payload.get("environment_note"), str)
+                or not payload["environment_note"].strip()):
+            continue
+        return {field: payload[field] for field in RUN_EVIDENCE_FIELDS}
+    return None
+
+
+def _shape_pr_comment(row: dict, kind: str) -> Dict[str, Any]:
     """Return one reviewer-visible PR comment with a capped body."""
     body = row.get("body")
     created_at = row.get("createdAt")
@@ -1190,15 +1234,22 @@ def _shape_pr_comment(row: dict, kind: str) -> Dict[str, str]:
     if len(body) > PR_COMMENT_BODY_LIMIT:
         body = body[:PR_COMMENT_BODY_LIMIT] + (
             "\n…[truncated {} chars]".format(len(body) - PR_COMMENT_BODY_LIMIT))
-    return {
+    shaped: Dict[str, Any] = {
         "kind": kind,
         "author": login,
         "created_at": created_at,
         "body": body,
     }
+    if RUN_EVIDENCE_MARKER in body:
+        payload = parse_run_evidence_comment(body)
+        shaped["run_evidence"] = (
+            {"format": "canonical", "fields": payload}
+            if payload is not None else {"format": "prose"}
+        )
+    return shaped
 
 
-def _pr_comments_section(comments: List[Dict[str, str]]) -> Dict:
+def _pr_comments_section(comments: List[Dict[str, Any]]) -> Dict:
     """Give the packet an explicit available or empty PR-comments section."""
     comments.sort(key=lambda entry: (entry["created_at"], entry["kind"],
                                      entry["author"], entry["body"]))
@@ -1223,7 +1274,7 @@ def fetch_pr_comments(repo: str, pr_number: int) -> Dict:
 
         issue_cursor: Optional[str] = None
         thread_cursor: Optional[str] = None
-        comments: List[Dict[str, str]] = []
+        comments: List[Dict[str, Any]] = []
         while True:
             variables = {"owner": owner, "name": name, "number": pr_number}
             if issue_cursor is not None:

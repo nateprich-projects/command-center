@@ -458,6 +458,58 @@ def test_pr_comments_are_capped_with_an_explicit_truncation_marker(monkeypatch):
     assert comment_body.endswith("…[truncated 10 chars]")
 
 
+def fetch_one_pr_comment(monkeypatch, body):
+    """Shape one issue comment through the packet's GraphQL read path."""
+    monkeypatch.setattr(funnel, "gh_graphql", lambda query, **variables: {
+        "repository": {"pullRequest": {
+            "issueComments": {
+                "nodes": [{"author": {"login": "engineer"},
+                           "body": body,
+                           "createdAt": "2026-09-24T17:59:00Z"}],
+                "pageInfo": {"hasNextPage": False,
+                             "endCursor": "issue-end"},
+            },
+            "reviewThreads": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
+        }}})
+    return review.fetch_pr_comments(REPO, 7)["comments"][0]
+
+
+def test_run_evidence_comment_parses_canonical_fields_and_keeps_body(
+        monkeypatch):
+    fields = {
+        "command": "python3 -m pytest tests/test_engine_review_packet.py",
+        "exit_status": 2,
+        "output_summary": "2 failures from a fixture run",
+        "environment_note": "clean checkout on macOS",
+    }
+    body = "**Run evidence:**\n\n```json\n{}\n```".format(
+        json.dumps(fields, indent=2))
+
+    found = fetch_one_pr_comment(monkeypatch, body)
+
+    assert found["body"] == body
+    assert found["run_evidence"] == {
+        "format": "canonical",
+        "fields": fields,
+    }
+
+
+def test_malformed_run_evidence_stays_prose_and_keeps_body(monkeypatch):
+    body = (
+        "**Run evidence:**\n\n```json\n"
+        '{"command": "python3 -m pytest", "exit_status": }\n'
+        "```"
+    )
+
+    found = fetch_one_pr_comment(monkeypatch, body)
+
+    assert found["body"] == body
+    assert found["run_evidence"] == {"format": "prose"}
+
+
 def test_unreadable_pr_comment_list_is_not_rendered_as_empty(monkeypatch):
     monkeypatch.setattr(funnel, "gh_graphql", lambda query, **variables: {
         "repository": {"pullRequest": {
@@ -915,6 +967,14 @@ def test_review_checklist_probes_inferred_premises_against_live_evidence():
     assert "labelled `inferred`" in text
     assert "live" in text and "evidence" in text
     assert "Do not\nre-derive" in text
+
+
+def test_review_checklist_judges_run_outcomes_against_posted_evidence():
+    text = (ROOT / "routines" / "muse-review.md").read_text()
+    assert "the posted PR run evidence" in text
+    assert "never automatic satisfaction" in text
+    assert "launchctl submit" in text
+    assert "Nothing is installed" in text
 
 
 def test_a_ticket_without_a_comments_list_gets_an_empty_one():

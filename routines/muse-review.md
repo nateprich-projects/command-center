@@ -16,6 +16,7 @@ the plan rejected?
 - `tickets` is the union of tickets closed by the PR; `ticket` is its branch ticket. A change any ticket asks for is authorised.
 - `ticket.comments` and each `tickets` entry's comments are the newest 30, oldest first, with recorded `voice`. `nate-direct` and `nate-relayed` amend the body; `agent` and `unknown` need diff evidence.
 - Check each `parent.comments` for Accept artifacts.
+- `pr_comments` carries the PR's issue and review comments, oldest first and newest last. Each body remains available verbatim. A comment with `run_evidence.format: "canonical"` also carries parsed fields; `format: "prose"` means its marked block was malformed or incomplete.
 - `plan_md` is design context; when `plan_md_missing` is true, judge against tickets alone.
 - `diff` and `changed_files` are the proposed change at `head_sha`.
 - `verdict` is newest, judged at `verdict_head_sha`; an older rejection is answered unless the fault repeats.
@@ -34,6 +35,34 @@ Probe every `plan_premises` entry labelled `inferred` against live
 evidence in this packet, using its `evidence` pointer. Do not
 re-derive it from plan prose. Cite support or contradiction; unresolved or
 unavailable probes are `unsure`.
+
+For every Accept that names a run outcome or runtime fact, judge it against
+the posted PR run evidence: compare the reported command, exit status, output
+summary, and environment note with the requirement. A parsed block or its
+presence is evidence to judge, never automatic satisfaction. If the marked
+block is malformed or incomplete, read the unchanged comment body as prose;
+parse failure by itself is not a blocker.
+
+The engineer or watch records a verification in this canonical PR comment:
+
+````markdown
+**Run evidence:**
+
+```json
+{
+  "command": "<command actually run>",
+  "exit_status": 0,
+  "output_summary": "<observed result>",
+  "environment_note": "<relevant environment>"
+}
+```
+````
+
+`exit_status` is the observed JSON integer, including a nonzero failure.
+For post-merge runtime facts such as #1428, a throwaway `launchctl submit`
+probe is sanctioned before merge: fire it, read the output and status, post
+the comment, then let the job be gone. Nothing is installed; the keeper stays
+unchanged.
 
 For count requirements (one, once, per day, exactly, at most), list every
 effect call site and trace each path, including success, traps, `finally`,

@@ -88,6 +88,21 @@ the scheduling rule; classify by meaning, not keywords alone. Apply the rule
 only to agent-origin plans in the four classes above. Leave Nate-origin plans
 and `New` and `Replace` classes untouched.
 
+### Scheduling is the project manager's decision
+
+For an **agent-origin** `Investigate`, `Broken`, `Maintenance`, or `Improve`
+plan, timing, priority, and sequencing are project-manager decisions. Do not
+put them in `Needs Nate`; record the chosen ordering under **Decided by the
+agent**. A clear decision to wait for a named ticket belongs in `depends_on`
+as an `owner/repo#n` reference. If the choice is to proceed without waiting,
+keep named tickets as context and leave `depends_on` empty.
+
+Keep genuine Exposure and Gates questions, concrete unresolved stakeholder
+scope tradeoffs, and encoded preferences in `Needs Nate`. A concrete tradeoff
+stays open even if it mentions timing; keep a question open when its category
+is unclear rather than guessing from keywords. This scheduling rule applies
+only to agent-origin plans in the four classes above.
+
 ```text
 - Gates: Who may write Ready?
 ```

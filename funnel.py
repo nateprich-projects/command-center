@@ -2116,6 +2116,31 @@ def _freeze_withheld_summary(withheld: Sequence[Dict[str, object]]) -> str:
     )
 
 
+def queue_classes(
+    items: Sequence[Item],
+    descendants: Optional[Mapping[str, Set[str]]] = None,
+) -> Dict[str, Optional[str]]:
+    """The class each item ranks as in ``startable()``.
+
+    A ticket inherits its project's class, and a ticket that blocks work
+    higher on the ladder, directly or down a chain, ranks with that work.
+    ``None`` is an unset Class, which sorts last.
+    """
+    by_ref = {i.ref: i for i in items}
+    if descendants is None:
+        descendants = dependency_descendants(items)
+    return {
+        ref: min(
+            (
+                effective_class(by_ref[related], by_ref)
+                for related in {ref} | set(descendants[ref])
+            ),
+            key=ladder_index,
+        )
+        for ref in by_ref
+    }
+
+
 def startable(
     items: Sequence[Item],
     awaiting_review: Optional[Set[str]] = None,
@@ -2155,11 +2180,8 @@ def startable(
     by_ref = {i.ref: i for i in items}
     descendants = dependency_descendants(items)
     effective_rank = {
-        ref: min(
-            ladder_index(effective_class(by_ref[related], by_ref))
-            for related in {ref} | descendants[ref]
-        )
-        for ref in by_ref
+        ref: ladder_index(klass)
+        for ref, klass in queue_classes(items, descendants).items()
     }
     # Membership, not a rank threshold: a class added above Broken in LADDER
     # (#130's Investigate) must not acquire preemption rights by position.
@@ -8651,6 +8673,9 @@ def _dashboard_ticket(
     authoring_agents: Iterable[str] = (),
     siblings: Collection[str] = (),
     projected_turn: Optional[int] = None,
+    queue_class: Optional[str] = None,
+    unblocks: Sequence[str] = (),
+    unblocks_later: Sequence[str] = (),
 ) -> Dict[str, object]:
     """One ticket row for the dashboard, with its PR, tier and owner flags.
 
@@ -8765,6 +8790,15 @@ def _dashboard_ticket(
         # This ticket's place in ``projected_pull_order``, or None when the
         # projection never reaches it.
         "projected_turn": projected_turn,
+        # The class it ranks as (``queue_classes``), and the open tickets
+        # waiting on it: why a ticket can rank above its project's class
+        # (Nate, 2026-09-24). Open tickets only.
+        "class": queue_class if item.state == "OPEN" else None,
+        "unblocks": list(unblocks) if item.state == "OPEN" else [],
+        # Open tickets further down the chain, freed once those above are.
+        "unblocks_later": (
+            list(unblocks_later) if item.state == "OPEN" else []
+        ),
         "human_step": needs if needs in ("human", "claude-code-environment") else None,
     }
 
@@ -9063,6 +9097,21 @@ def dashboard_board(
         queue = []
     queue_rank = {item.ref: index for index, item in enumerate(queue)}
     try:
+        downstream = dependency_descendants(rows)
+        ranked_as = queue_classes(rows, downstream)
+    except Exception:
+        downstream, ranked_as = {}, {}
+    waiting_on: Dict[str, List[str]] = {}
+    for row in rows:
+        if row.state == "OPEN":
+            for blocker in row.open_blockers:
+                waiting_on.setdefault(blocker, []).append(row.ref)
+
+    def by_number(refs: Iterable[str]) -> List[str]:
+        return sorted(refs, key=lambda ref: (
+            ref.rsplit("#", 1)[0], int(ref.rsplit("#", 1)[1]),
+        ))
+    try:
         # The board's order for work in motion: each ticket's projected turn.
         turn = {
             ref: index
@@ -9148,6 +9197,16 @@ def dashboard_board(
                 authoring_for(facts.get(child.ref)),
                 siblings,
                 turn.get(child.ref) if child.state == "OPEN" else None,
+                ranked_as.get(
+                    child.ref, effective_class(child, by_ref)
+                ),
+                by_number(waiting_on.get(child.ref, ())),
+                by_number(
+                    ref for ref in downstream.get(child.ref, ())
+                    if ref not in waiting_on.get(child.ref, ())
+                    and by_ref.get(ref) is not None
+                    and by_ref[ref].state == "OPEN"
+                ),
             )
             for child in sorted(siblings_of, key=ticket_key)
         ]

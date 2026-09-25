@@ -110,6 +110,8 @@ def packet(**kw):
         "verdict": None,
         "stop_counter": dict(STOP_COUNTER),
         "collected_at": "2026-09-13T00:00:00+00:00",
+        "pr_comments": {"status": "empty", "message": "No PR comments.",
+                        "comments": []},
     }
     args.update(kw)
     return review.build_packet(**args)

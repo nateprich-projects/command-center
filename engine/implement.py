@@ -28,6 +28,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -304,14 +305,25 @@ def _read_done_answer(answer: dict) -> dict:
         isinstance(value, str) and value.strip() for value in departures
     ):
         raise ImplementError("answer departures must be a list of non-empty strings")
-    extra = sorted(set(answer) - {"done", "summary", "departures"})
+    evidence = answer.get("evidence")
+    if "evidence" in answer and (
+        not isinstance(evidence, list) or not evidence
+        or not all(isinstance(value, str) and value.strip()
+                   for value in evidence)
+    ):
+        raise ImplementError(
+            "answer evidence must be a non-empty list of non-empty GitHub URLs")
+    extra = sorted(set(answer) - {"done", "summary", "departures", "evidence"})
     if extra:
         raise ImplementError("answer has unknown field(s): {}".format(", ".join(extra)))
-    return {
+    found = {
         "done": True,
         "summary": summary.strip(),
         "departures": [value.strip() for value in departures],
     }
+    if "evidence" in answer:
+        found["evidence"] = [value.strip() for value in evidence]
+    return found
 
 
 def _read_blocked_answer(value: object) -> dict:
@@ -990,8 +1002,9 @@ def _check_no_run_scratch(root: pathlib.Path,
             "{}".format(", ".join(stray)))
 
 
-def _commit_if_needed(root: pathlib.Path, number: int, summary: str) -> bool:
-    """Commit explicit paths after the pre-PR scratch check."""
+def _commit_if_needed(root: pathlib.Path, number: int, summary: str, *,
+                      allow_empty: bool = False) -> Optional[bool]:
+    """Commit paths; optionally return None when the branch has no changes."""
     paths = _working_tree_paths(root)
     if paths:
         _stage_explicit_paths(root, paths)
@@ -1008,9 +1021,187 @@ def _commit_if_needed(root: pathlib.Path, number: int, summary: str) -> bool:
     ahead = _run(
         ["git", "rev-list", "--count", "origin/main..HEAD"], cwd=root
     ).stdout.strip()
-    if not ahead.isdigit() or int(ahead) < 1:
+    if not ahead.isdigit():
+        raise ImplementError("could not read changes ahead of origin/main")
+    if int(ahead) < 1:
+        if allow_empty:
+            return None
         raise ImplementError("done answer produced no change to commit")
     return False
+
+
+def _heartbeat_start(run: str, agent: str) -> datetime:
+    """Read the durable heartbeat start for this finish run."""
+    try:
+        import heartbeat
+        records = heartbeat.read_github(agent)
+        if not isinstance(records, list):
+            raise TypeError("heartbeat records were not a list")
+    except Exception as exc:
+        raise ImplementError(
+            "could not read heartbeat start for run {}: {}".format(run, exc)
+        )
+    starts = [
+        row for row in records
+        if isinstance(row, dict)
+        and row.get("phase") == "start"
+        and row.get("run") == run
+    ]
+    if len(starts) != 1:
+        raise ImplementError(
+            "could not read heartbeat start for run {}".format(run)
+        )
+    stamp = starts[0].get("ts")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        raise ImplementError(
+            "could not read heartbeat start for run {}".format(run)
+        )
+    try:
+        return datetime.fromtimestamp(stamp, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        raise ImplementError(
+            "could not read heartbeat start for run {}".format(run)
+        )
+
+
+def _evidence_target(url: str) -> Tuple[str, str, str, int, str]:
+    """Resolve a supported GitHub URL to one REST read and its timestamp."""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        parsed = None
+    if (parsed is None or parsed.scheme != "https"
+            or parsed.netloc.lower() != "github.com"
+            or parsed.query):
+        raise ImplementError("invalid GitHub evidence URL: {}".format(url))
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) != 4:
+        raise ImplementError("unsupported GitHub evidence URL: {}".format(url))
+    owner, repository, route, raw_number = parts
+    if (owner.lower() != "nateprich-projects"
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+", repository)
+            or not raw_number.isdigit()):
+        raise ImplementError("invalid GitHub evidence URL: {}".format(url))
+    number = int(raw_number)
+    fragment = parsed.fragment
+    repo_path = "{}/{}".format(owner, repository)
+    if route == "issues":
+        comment = re.fullmatch(r"issuecomment-(\d+)", fragment)
+        if comment:
+            return (
+                "repos/{}/issues/comments/{}".format(
+                    repo_path, comment.group(1)),
+                "comment", "created_at", int(comment.group(1)), repo_path,
+            )
+        if not fragment:
+            return (
+                "repos/{}/issues/{}".format(repo_path, number),
+                "closed", "closed_at", number, repo_path,
+            )
+    elif route == "pull":
+        issue_comment = re.fullmatch(r"issuecomment-(\d+)", fragment)
+        if issue_comment:
+            return (
+                "repos/{}/issues/comments/{}".format(
+                    repo_path, issue_comment.group(1)),
+                "comment", "created_at", int(issue_comment.group(1)), repo_path,
+            )
+        review_comment = re.fullmatch(r"discussion_r(\d+)", fragment)
+        if review_comment:
+            return (
+                "repos/{}/pulls/comments/{}".format(
+                    repo_path, review_comment.group(1)),
+                "comment", "created_at", int(review_comment.group(1)), repo_path,
+            )
+        if not fragment:
+            return (
+                "repos/{}/pulls/{}".format(repo_path, number),
+                "closed", "closed_at", number, repo_path,
+            )
+    raise ImplementError("unsupported GitHub evidence URL: {}".format(url))
+
+
+def _parse_github_timestamp(value: object) -> Optional[datetime]:
+    """Parse one timezone-qualified timestamp returned by the GitHub API."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _verify_evidence_url(url: str, started: datetime) -> None:
+    """Verify one artifact's repository identity and run-relative timestamp."""
+    endpoint, kind, stamp_field, identity, repo_path = _evidence_target(url)
+    try:
+        data = funnel._gh_api_json(endpoint)
+    except Exception as exc:
+        raise ImplementError(
+            "could not read evidence URL {}: {}".format(url, exc)
+        )
+    if not isinstance(data, dict):
+        raise ImplementError("could not read evidence URL {}".format(url))
+    api_url = data.get("url")
+    prefix = "https://api.github.com/repos/{}/".format(repo_path)
+    if (not isinstance(api_url, str)
+            or not api_url.lower().startswith(prefix.lower())):
+        raise ImplementError(
+            "evidence URL {} did not resolve inside nateprich-projects".format(
+                url)
+        )
+    html_url = data.get("html_url")
+    if (not isinstance(html_url, str)
+            or html_url.rstrip("/").lower() != url.rstrip("/").lower()):
+        raise ImplementError(
+            "evidence URL {} did not resolve to its named artifact".format(url)
+        )
+    identity_field = "id" if kind == "comment" else "number"
+    if data.get(identity_field) != identity:
+        raise ImplementError(
+            "evidence URL {} did not resolve to its named artifact".format(url)
+        )
+    if kind == "closed" and str(data.get("state", "")).lower() != "closed":
+        raise ImplementError("evidence URL {} is not closed".format(url))
+    occurred = _parse_github_timestamp(data.get(stamp_field))
+    if occurred is None:
+        raise ImplementError(
+            "could not read the timestamp for evidence URL {}".format(url)
+        )
+    if occurred < started:
+        when = "created" if kind == "comment" else "closed"
+        raise ImplementError(
+            "evidence URL {} was {} before this run started".format(url, when)
+        )
+
+
+def _verify_done_evidence(urls: Sequence[str], *, run: str,
+                          agent: str) -> List[str]:
+    """Fail closed unless every named artifact is new enough for this run."""
+    if not urls:
+        raise ImplementError(
+            "done answer produced no change and named no evidence")
+    started = _heartbeat_start(run, agent)
+    for url in urls:
+        _verify_evidence_url(url, started)
+    return list(urls)
+
+
+def close_no_diff_ticket(repo: str, number: int, *,
+                         cwd: pathlib.Path) -> None:
+    """Close a verified no-diff ticket as completed."""
+    proc = funnel._run_gh(
+        ["gh", "issue", "close", str(number), "--repo", repo,
+         "--reason", "completed"],
+        cwd=str(cwd), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise funnel.GitHubError(
+            "could not close {}#{} as completed: {}".format(
+                repo, number, (proc.stderr or "").strip()))
 
 
 def create_or_update_pr(repo: str, context: dict, ticket: dict,
@@ -1378,6 +1569,8 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 = finish_heartbeat,
                 pr_effect: Callable[[str, dict, dict, str], dict]
                 = create_or_update_pr,
+                close_effect: Callable[..., None]
+                = close_no_diff_ticket,
                 extra_note: Optional[str] = None) -> dict:
     """Perform every happy-path effect and return the resulting PR identity."""
     context = checkout_context(cwd)
@@ -1397,7 +1590,25 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         raise
     continued = _remote_branch_exists(context["root"], context["branch"])
     try:
-        _commit_if_needed(context["root"], context["number"], answer["summary"])
+        committed = _commit_if_needed(
+            context["root"], context["number"], answer["summary"],
+            allow_empty=True,
+        )
+        if committed is None:
+            evidence = _verify_done_evidence(
+                answer.get("evidence") or [], run=run, agent=agent,
+            )
+            close_effect(
+                resolved, context["number"], cwd=context["root"],
+            )
+            release(ref)
+            note = "no-diff close as completed; verified evidence: {}".format(
+                ", ".join(evidence))
+            if extra_note:
+                note += "; " + extra_note.strip()
+            heartbeat_finish(agent, run, "done", note, ref)
+            return {"number": context["number"], "url": ticket["url"],
+                    "closed": True}
         _push_ticket_branch(context["root"], context["branch"])
         # Re-read immediately before the PR effect so the guard remains the
         # last local file-list check, even when an existing branch was merged.

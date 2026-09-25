@@ -65,8 +65,9 @@ plan relies on no factual premises.
 ## Needs Nate
 
 Leave to Nate, explicitly rather than guessing: anything unreachable, any
-exposure change, any gate change, scope and priority, any encoded
-preference. Render only categories with an open question:
+exposure change, any gate change, a concrete unresolved stakeholder scope
+tradeoff, any encoded preference, and any scope question whose category is
+unclear. Render only categories with an open question:
 
 ### Scheduling is the project manager's decision
 
@@ -80,12 +81,12 @@ choice is to proceed without waiting, keep named tickets as context and leave
 #165 and #174 are in flight meant no dependency: preserve that decision, keep
 the refs as context, and do not turn the alternative “wait” into a hold.
 
-Keep genuine Exposure and Gates questions, encoded preferences, concrete
-unresolved stakeholder scope tradeoffs, and scope questions whose category is
-unclear in `Needs Nate`. A concrete tradeoff stays open even if it mentions
-timing; do not classify by keywords alone. This scheduling rule applies only
-to agent-origin plans in the four classes above; it does not apply to
-Nate-origin plans or `New` and `Replace` classes.
+Keep Exposure, Gates, and Preference questions in `Needs Nate`. Under Scope,
+keep a concrete unresolved stakeholder tradeoff even if it mentions timing,
+and keep a question whose category is unclear. These are the countercases to
+the scheduling rule; classify by meaning, not keywords alone. Apply the rule
+only to agent-origin plans in the four classes above. Leave Nate-origin plans
+and `New` and `Replace` classes untouched.
 
 ```text
 - Gates: Who may write Ready?

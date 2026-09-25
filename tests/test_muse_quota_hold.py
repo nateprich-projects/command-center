@@ -16,12 +16,14 @@ claims anything.
 from __future__ import annotations
 
 import datetime
+import base64
 import json
 import os
 import pathlib
 import subprocess
 
 import pytest
+import heartbeat
 
 from test_muse_implement import (  # noqa: E402  (shared fixture harness)
     BEGIN_REF,
@@ -61,12 +63,40 @@ def _helper(tmp_path, script, *, hold=None, env=None):
     hold_file = tmp_path / "hold"
     if hold is not None:
         hold_file.write_text(hold)
-    full = dict(os.environ, MUSE_QUOTA_HOLD_FILE=str(hold_file))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  *git/ref/heads/heartbeat*) printf '{}\\n';;\n"
+        "  *contents/muse.jsonl?ref=heartbeat*) exit 1;;\n"
+        "  *\"-X PUT\"*) cat > \"$MUSE_GH_CAPTURE\"; printf '{}\\n';;\n"
+        "  *) printf '{}\\n';;\n"
+        "esac\n"
+    )
+    gh.chmod(gh.stat().st_mode | 0o111)
+    full = dict(
+        os.environ,
+        HOME=str(tmp_path),
+        TMPDIR=str(tmp_path),
+        PATH=str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+        REPO=str(ROOT),
+        COMMAND_CENTER_HEARTBEAT_SPOOL=str(tmp_path / "heartbeat-spool"),
+        MUSE_GH_CAPTURE=str(tmp_path / "gh-request.json"),
+        MUSE_QUOTA_HOLD_FILE=str(hold_file),
+    )
     full.update(env or {})
     proc = subprocess.run(
         ["/bin/bash", "-c", ". {} && {}".format(HELPER, script)],
         env=full, capture_output=True, text=True, timeout=30)
     return proc, hold_file
+
+
+def _uploaded_records(tmp_path):
+    request = json.loads((tmp_path / "gh-request.json").read_text())
+    body = base64.b64decode(request["content"]).decode("utf-8")
+    return [json.loads(line) for line in body.splitlines() if line.strip()]
 
 
 def _stamp(offset_seconds):
@@ -78,11 +108,22 @@ def _stamp(offset_seconds):
 def test_a_refusal_records_the_reset_the_provider_named(tmp_path):
     capture = tmp_path / "stderr"
     capture.write_text("some earlier line\n" + REFUSAL)
+    hit_at = _epoch("2026-09-20T23:59:00Z")
+    os.utime(capture, (hit_at, hit_at))
     proc, hold_file = _helper(
         tmp_path, "muse_quota_record {}".format(capture))
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == "2026-09-21T00:00:00Z"
     assert hold_file.read_text().strip() == "2026-09-21T00:00:00Z"
+    record, = _uploaded_records(tmp_path)
+    hit = record["quota_hit"]
+    assert record["phase"] == "event"
+    assert record["event_type"] == "provider_quota_hit"
+    assert hit["reset_stamp"] == "2026-09-21T00:00:00Z"
+    assert hit["weekly_lattice"] is True
+    assert hit["raw_refusal"] == REFUSAL
+    assert hit["anchored_window_total"] is None
+    assert "no paired heartbeat total" in hit["degraded_note"]
 
 
 def test_an_ordinary_failure_records_no_hold(tmp_path):
@@ -107,6 +148,111 @@ def test_a_refusal_without_a_readable_stamp_still_parks_the_lane(tmp_path):
     ahead = (written - datetime.datetime.now(datetime.timezone.utc))
     assert datetime.timedelta(seconds=600) < ahead <= datetime.timedelta(
         seconds=900)
+    record, = _uploaded_records(tmp_path)
+    hit = record["quota_hit"]
+    assert hit["reset_stamp"] is None
+    assert hit["seconds_to_reset"] is None
+    assert hit["weekly_lattice"] is None
+    assert hit["window_kind"] == "unclassified"
+    assert "did not include a reset stamp" in hit["degraded_note"]
+
+
+def _epoch(stamp):
+    return datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+
+
+def test_quota_refusal_on_weekly_lattice_is_classified_from_its_stamp():
+    now = _epoch("2026-09-27T23:59:00Z")
+    refusal = REFUSAL.replace("2026-09-21T00:00:00Z", "2026-09-28T00:00:00Z")
+
+    hit = heartbeat.parse_muse_quota_refusal(refusal, now=now)
+
+    assert hit["seconds_to_reset"] == 60
+    assert hit["weekly_lattice"] is True
+    assert hit["window_kind"] == "weekly"
+    assert hit["degraded_note"] is None
+
+
+def test_quota_refusal_with_floating_under_five_hour_stamp_is_not_weekly():
+    now = _epoch("2026-09-21T00:00:00Z")
+    refusal = REFUSAL.replace("2026-09-21T00:00:00Z", "2026-09-21T04:00:00Z")
+
+    hit = heartbeat.parse_muse_quota_refusal(refusal, now=now)
+
+    assert hit["seconds_to_reset"] == 4 * 60 * 60
+    assert hit["weekly_lattice"] is False
+    assert hit["window_kind"] == "five-hour"
+
+
+def test_off_lattice_stamp_outside_five_hour_shape_is_degraded():
+    now = _epoch("2026-09-21T00:00:00Z")
+    refusal = REFUSAL.replace("2026-09-21T00:00:00Z", "2026-09-21T06:00:00Z")
+
+    hit = heartbeat.parse_muse_quota_refusal(refusal, now=now)
+
+    assert hit["weekly_lattice"] is False
+    assert hit["window_kind"] == "unclassified"
+    assert "off the weekly lattice" in hit["degraded_note"]
+
+
+def test_malformed_stamp_is_unclassified_with_a_degraded_note():
+    refusal = REFUSAL.replace("2026-09-21T00:00:00Z", "not-a-timestamp")
+
+    hit = heartbeat.parse_muse_quota_refusal(
+        refusal, now=_epoch("2026-09-21T00:00:00Z"))
+
+    assert hit["reset_stamp"] == "not-a-timestamp"
+    assert hit["seconds_to_reset"] is None
+    assert hit["weekly_lattice"] is None
+    assert hit["window_kind"] == "unclassified"
+    assert "malformed" in hit["degraded_note"]
+
+
+def test_quota_hit_records_the_matching_anchored_window_total(
+        tmp_path, monkeypatch):
+    reset = _epoch("2026-09-28T00:00:00Z")
+    now = reset - 60
+
+    def reading(run, phase, at, spent):
+        return {
+            "run": run,
+            "agent": "muse",
+            "phase": phase,
+            "ts": at,
+            "usage": {"seven_day": {
+                "resets_at": reset,
+                "spent_dollars": spent,
+            }},
+        }
+
+    rows = [
+        reading("prior", "start", 10, 3.0),
+        reading("prior", "finish", 20, 4.25),
+    ]
+    recorded = []
+    monkeypatch.setattr(heartbeat, "read", lambda agent: rows)
+    monkeypatch.setattr(
+        heartbeat, "append",
+        lambda agent, record: recorded.append(record) or "pushed")
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    capture = tmp_path / "refusal.txt"
+    capture.write_text(
+        REFUSAL.replace("2026-09-21T00:00:00Z", "2026-09-28T00:00:00Z"))
+    hold_file = tmp_path / "hold"
+    result = heartbeat.record_muse_quota_hit(
+        str(capture), str(hold_file), 900, "current-run", now=now)
+
+    assert result == "2026-09-28T00:00:00Z"
+    assert hold_file.read_text().strip() == result
+    event, = recorded
+    assert event["run"] == "current-run"
+    assert event["quota_hit"]["anchored_window_total"] == {
+        "resets_at": reset,
+        "standard_rate_dollars": 1.25,
+        "paired_runs": 1,
+    }
+    assert event["quota_hit"]["degraded_note"] is None
 
 
 def test_a_live_hold_reads_back_and_a_passed_one_is_dropped(tmp_path):

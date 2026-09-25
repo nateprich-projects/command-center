@@ -85,11 +85,47 @@ FUNNEL_STUB = (
     "    raise SystemExit('unexpected funnel command: ' + command)\n"
 )
 
-HEARTBEAT_STUB = (
-    "import pathlib, sys\n"
-    "with (pathlib.Path(__file__).parent / 'heartbeat.log').open('a') as fh:\n"
-    "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
-)
+HEARTBEAT_STUB = """\
+import datetime
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(__file__).parent
+args = sys.argv[1:]
+if args and args[0] == 'muse-quota-hit':
+    def value(name, default=None):
+        return args[args.index(name) + 1] if name in args else default
+    capture = pathlib.Path(value('--capture'))
+    text = capture.read_text(errors='replace')
+    if 'Subscription quota exhausted' not in text:
+        raise SystemExit(1)
+    with (root / 'heartbeat.log').open('a') as fh:
+        fh.write(' '.join(args) + '\\n')
+    match = re.search(r'usage window resets at\\s+(\\S+)', text, re.I)
+    parsed = None
+    if match:
+        try:
+            parsed = datetime.datetime.fromisoformat(
+                match.group(1).rstrip('.,;').replace('Z', '+00:00'))
+            if parsed.tzinfo is None:
+                parsed = None
+        except ValueError:
+            pass
+    if parsed is None:
+        seconds = float(value('--fallback-seconds', '3600'))
+        parsed = datetime.datetime.now(datetime.timezone.utc) + \\
+            datetime.timedelta(seconds=seconds)
+    written = parsed.astimezone(datetime.timezone.utc).strftime(
+        '%Y-%m-%dT%H:%M:%SZ')
+    hold = pathlib.Path(value('--hold-file'))
+    hold.parent.mkdir(parents=True, exist_ok=True)
+    hold.write_text(written + '\\n')
+    print(written)
+else:
+    with (root / 'heartbeat.log').open('a') as fh:
+        fh.write(' '.join(args) + '\\n')
+"""
 
 PACKET_STUB = (
     "import os, pathlib, sys\n"

@@ -29,7 +29,9 @@ import contextlib
 import json
 import os
 import glob
+import hashlib
 import math
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
@@ -1484,6 +1486,284 @@ def muse_window_consumption(records: List[Dict]) -> List[Dict[str, object]]:
     ]
 
 
+MUSE_QUOTA_REFUSAL_MARKER = "subscription quota exhausted"
+MUSE_QUOTA_RESET_RE = re.compile(
+    r"usage window resets at\s+(\S+)", re.IGNORECASE
+)
+MUSE_FLOATING_WINDOW_SECONDS = 5 * 60 * 60
+
+
+def _extract_muse_quota_refusal(diagnostic: str) -> Optional[str]:
+    marker_at = diagnostic.casefold().find(MUSE_QUOTA_REFUSAL_MARKER)
+    if marker_at < 0:
+        return None
+    start = diagnostic.rfind("\n", 0, marker_at) + 1
+    end_marker = diagnostic.find("(rate_limit_error)", marker_at)
+    if end_marker >= 0:
+        end = end_marker + len("(rate_limit_error)")
+        if end < len(diagnostic) and diagnostic[end] == "\n":
+            end += 1
+    else:
+        end_line = diagnostic.find("\n", marker_at)
+        end = len(diagnostic) if end_line < 0 else end_line + 1
+    return diagnostic[start:end]
+
+
+def parse_muse_quota_refusal(raw_refusal: str, *, now: Optional[float] = None
+                             ) -> Optional[Dict[str, object]]:
+    """Classify one raw Muse refusal without guessing an unknown window.
+
+    A reset on the established Monday 00:00 UTC lattice is weekly. A valid
+    floating stamp less than five hours away has the observed five-hour
+    shape. Other off-lattice stamps, missing stamps, and malformed or
+    timezone-less stamps stay unclassified with a reason attached.
+    """
+    if not isinstance(raw_refusal, str):
+        return None
+    exact_refusal = _extract_muse_quota_refusal(raw_refusal)
+    if exact_refusal is None:
+        return None
+
+    at = time.time() if now is None else float(now)
+    match = MUSE_QUOTA_RESET_RE.search(raw_refusal)
+    candidate = match.group(1).rstrip(".,;") if match else None
+    reset = None
+    seconds_to_reset = None
+    weekly_lattice = None
+    window_kind = "unclassified"
+    degraded_notes = []
+
+    if candidate is None:
+        degraded_notes.append(
+            "provider refusal did not include a reset stamp; window unclassified"
+        )
+    else:
+        try:
+            parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+            degraded_notes.append(
+                "provider reset stamp is malformed; window unclassified"
+            )
+        if parsed is not None and (
+                parsed.tzinfo is None or parsed.utcoffset() is None):
+            parsed = None
+            degraded_notes.append(
+                "provider reset stamp has no timezone; window unclassified"
+            )
+        if parsed is not None:
+            reset = parsed.astimezone(timezone.utc)
+            reset_epoch = reset.timestamp()
+            seconds_to_reset = int(reset_epoch - at)
+            try:
+                import usage
+
+                weekly_lattice = (
+                    usage.muse_window_start(reset_epoch) == reset_epoch
+                )
+            except Exception:
+                degraded_notes.append(
+                    "weekly reset lattice could not be checked; window unclassified"
+                )
+
+            if seconds_to_reset <= 0:
+                degraded_notes.append(
+                    "provider reset stamp is not in the future; window unclassified"
+                )
+            elif weekly_lattice is True:
+                window_kind = "weekly"
+            elif weekly_lattice is False and (
+                    seconds_to_reset < MUSE_FLOATING_WINDOW_SECONDS):
+                window_kind = "five-hour"
+            else:
+                degraded_notes.append(
+                    "reset stamp is off the weekly lattice and outside the observed "
+                    "under-five-hour shape; window unclassified"
+                )
+
+    reset_at = (
+        reset.strftime("%Y-%m-%dT%H:%M:%SZ") if reset is not None else None
+    )
+    return {
+        "reset_stamp": candidate,
+        "reset_at": reset_at,
+        "reset_epoch": reset.timestamp() if reset is not None else None,
+        "seconds_to_reset": seconds_to_reset,
+        "weekly_lattice": weekly_lattice,
+        "window_kind": window_kind,
+        "raw_refusal": exact_refusal,
+        "occurred_at": at,
+        "degraded_note": "; ".join(degraded_notes) or None,
+    }
+
+
+def _muse_anchored_window_total(records: List[Dict],
+                                reset_epoch: float) -> Optional[Dict[str, object]]:
+    """Return the paired-run total for exactly this weekly reset, if measured."""
+    for row in muse_window_consumption(records):
+        if row.get("resets_at") != reset_epoch:
+            continue
+        dollars = _finite_number(row.get("consumed_dollars"))
+        runs = row.get("runs")
+        if (dollars is None or dollars < 0 or isinstance(runs, bool)
+                or not isinstance(runs, int) or runs <= 0):
+            return None
+        return {
+            "resets_at": reset_epoch,
+            "standard_rate_dollars": dollars,
+            "paired_runs": runs,
+        }
+    return None
+
+
+def record_muse_quota_hit(capture_path: str, hold_file: str,
+                          fallback_seconds: object = 3600,
+                          run: Optional[str] = None, *,
+                          now: Optional[float] = None) -> Optional[str]:
+    """Write the hold and append one structured quota-hit heartbeat event.
+
+    The local hold retains the existing fail-safe behavior. The telemetry is
+    a normal heartbeat event, so it first uses the heartbeat spool and then
+    pushes to the existing ``heartbeat`` branch. A missing paired total is
+    recorded as null with a degraded note, never as zero.
+
+    ``now`` exists for deterministic fixtures. Production uses the capture
+    file's modification time, which is the closest local timestamp to when
+    the refusal was written and also makes a repeated read of the same
+    diagnostic idempotent.
+    """
+    if not os.path.isfile(capture_path):
+        return None
+    try:
+        with open(capture_path, errors="replace") as handle:
+            diagnostic = handle.read()
+    except OSError:
+        raise
+
+    try:
+        stat = os.stat(capture_path)
+        hit_at = stat.st_mtime if now is None else float(now)
+        hit_identity_time = getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1e9))
+    except OSError:
+        hit_at = time.time() if now is None else float(now)
+        hit_identity_time = int(hit_at * 1e9)
+
+    hit = parse_muse_quota_refusal(diagnostic, now=hit_at)
+    if hit is None:
+        return None
+
+    try:
+        fallback = float(fallback_seconds)
+    except (TypeError, ValueError):
+        fallback = 3600.0
+        hit["degraded_note"] = _append_degraded_note(
+            hit.get("degraded_note"),
+            "configured fallback hold was unreadable; documented 3600-second default used",
+        )
+    if not math.isfinite(fallback) or fallback <= 0:
+        fallback = 3600.0
+        hit["degraded_note"] = _append_degraded_note(
+            hit.get("degraded_note"),
+            "configured fallback hold was invalid; documented 3600-second default used",
+        )
+
+    reset_epoch = hit.get("reset_epoch")
+    if isinstance(reset_epoch, (int, float)):
+        hold_until = datetime.fromtimestamp(
+            float(reset_epoch), timezone.utc
+        )
+    else:
+        hold_until = datetime.fromtimestamp(
+            hit_at + fallback, timezone.utc
+        )
+    reset_output = hold_until.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    directory = os.path.dirname(hold_file)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(hold_file, "w") as handle:
+        handle.write(reset_output + "\n")
+
+    records = []
+    try:
+        records = read("muse")
+    except Exception:
+        hit["degraded_note"] = _append_degraded_note(
+            hit.get("degraded_note"),
+            "heartbeat history could not be read; anchored window total unavailable",
+        )
+
+    anchored_total = None
+    reset_epoch = hit.get("reset_epoch")
+    if hit.get("window_kind") == "weekly" and isinstance(
+            reset_epoch, (int, float)):
+        try:
+            anchored_total = _muse_anchored_window_total(
+                records, float(reset_epoch)
+            )
+        except Exception:
+            anchored_total = None
+        if anchored_total is None:
+            hit["degraded_note"] = _append_degraded_note(
+                hit.get("degraded_note"),
+                "no paired heartbeat total is available for this weekly reset",
+            )
+    elif hit.get("window_kind") == "five-hour":
+        hit["degraded_note"] = _append_degraded_note(
+            hit.get("degraded_note"),
+            "the heartbeat anchor has no measured total for this floating five-hour reset",
+        )
+
+    event_seed = "\0".join((
+        run or "", str(hit_identity_time), os.path.abspath(capture_path),
+        str(hit.get("raw_refusal") or ""),
+    ))
+    event_id = hashlib.sha256(event_seed.encode("utf-8", "replace")).hexdigest()
+    already_recorded = any(
+        isinstance(row, dict)
+        and row.get("event_type") == "provider_quota_hit"
+        and row.get("event_id") == event_id
+        for row in records
+    )
+    if not already_recorded:
+        event = {
+            "run": run,
+            "agent": "muse",
+            "phase": "event",
+            "ts": int(hit_at),
+            "outcome": "skipped-provider-quota",
+            "event_type": "provider_quota_hit",
+            "event_id": event_id,
+            "quota_hit": {
+                "reset_stamp": hit.get("reset_stamp"),
+                "reset_at": hit.get("reset_at"),
+                "seconds_to_reset": hit.get("seconds_to_reset"),
+                "weekly_lattice": hit.get("weekly_lattice"),
+                "window_kind": hit.get("window_kind"),
+                "raw_refusal": hit.get("raw_refusal"),
+                "anchored_window_total": anchored_total,
+                "panel_reading": None,
+                "degraded_note": hit.get("degraded_note"),
+            },
+        }
+        try:
+            _report(append("muse", event))
+        except Exception as exc:
+            print(
+                "heartbeat: quota-hit record failed: {}; continuing with the hold".format(
+                    exc
+                ),
+                file=sys.stderr,
+            )
+    return reset_output
+
+
+def _append_degraded_note(current: object, addition: str) -> str:
+    if not isinstance(current, str) or not current.strip():
+        return addition
+    return current + "; " + addition
+
+
 def _parse_records(content: Optional[str]) -> List[Dict]:
     records = []
     for line in (content or "").splitlines():
@@ -1727,6 +2007,18 @@ def main(argv=None) -> int:
              "printed it under `bound`; checked against the run's binding",
     )
 
+    quota_hit = sub.add_parser(
+        "muse-quota-hit",
+        help="record a Muse provider refusal and update its local hold",
+    )
+    quota_hit.add_argument("--capture", required=True,
+                            help="file containing the raw provider refusal")
+    quota_hit.add_argument("--hold-file", required=True,
+                           help="existing runtime path for the expiring hold")
+    quota_hit.add_argument("--fallback-seconds", default="3600")
+    quota_hit.add_argument("--run", default=None,
+                           help="heartbeat run that met the refusal, if known")
+
     show = sub.add_parser("read", help="print an agent's records as JSON")
     show.add_argument("--agent", required=True, choices=sorted(PROVIDERS))
 
@@ -1735,6 +2027,24 @@ def main(argv=None) -> int:
     try:
         if args.command == "read":
             print(json.dumps(read(args.agent), indent=2))
+            return 0
+
+        if args.command == "muse-quota-hit":
+            try:
+                reset = record_muse_quota_hit(
+                    args.capture,
+                    args.hold_file,
+                    args.fallback_seconds,
+                    args.run,
+                )
+            except (OSError, ValueError, OverflowError) as exc:
+                print("heartbeat: could not record Muse quota refusal: {}".format(
+                    exc
+                ), file=sys.stderr)
+                return 1
+            if reset is None:
+                return 1
+            print(reset)
             return 0
 
         if args.command == "start":

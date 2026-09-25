@@ -76,58 +76,25 @@ PY
 # cannot read still parks the lanes, for MUSE_QUOTA_FALLBACK_SECONDS.
 muse_quota_record() {
   [ -f "${1:-}" ] || return 1
-  MUSE_QUOTA_FALLBACK_SECONDS="$MUSE_QUOTA_FALLBACK_SECONDS" \
-    python3 - "$1" "$MUSE_QUOTA_HOLD_FILE" <<'PY'
-import datetime
-import os
-import re
-import sys
+  local heartbeat_root="${REPO:-${BASH_SOURCE[0]%/*}/..}"
+  local heartbeat_script="$heartbeat_root/heartbeat.py"
+  local run="${2:-}"
 
-capture, path = sys.argv[1], sys.argv[2]
+  if [[ ! -f "$heartbeat_script" ]]; then
+    echo "muse-quota-hold: cannot read $heartbeat_script" >&2
+    return 1
+  fi
 
-try:
-    with open(capture, errors="replace") as handle:
-        text = handle.read()
-except OSError:
-    raise SystemExit(1)
-
-if "Subscription quota exhausted" not in text:
-    raise SystemExit(1)
-
-stamp = None
-match = re.search(
-    r"usage window resets at\s+(\S+?)[\s.]*(?:\(|$)", text, re.MULTILINE)
-if match:
-    candidate = match.group(1).rstrip(".")
-    try:
-        parsed = datetime.datetime.fromisoformat(candidate.replace("Z", "+00:00"))
-    except ValueError:
-        parsed = None
-    if parsed is not None:
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-        stamp = parsed
-
-if stamp is None:
-    try:
-        seconds = float(os.environ.get("MUSE_QUOTA_FALLBACK_SECONDS", "3600"))
-    except ValueError:
-        seconds = 3600.0
-    stamp = datetime.datetime.now(datetime.timezone.utc) + (
-        datetime.timedelta(seconds=seconds))
-
-written = stamp.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-directory = os.path.dirname(path)
-if directory:
-    try:
-        os.makedirs(directory, exist_ok=True)
-    except OSError:
-        raise SystemExit(1)
-try:
-    with open(path, "w") as handle:
-        handle.write(written + "\n")
-except OSError:
-    raise SystemExit(1)
-print(written)
-PY
+  if [[ -n "$run" ]]; then
+    python3 "$heartbeat_script" muse-quota-hit \
+      --capture "$1" \
+      --hold-file "$MUSE_QUOTA_HOLD_FILE" \
+      --fallback-seconds "$MUSE_QUOTA_FALLBACK_SECONDS" \
+      --run "$run"
+  else
+    python3 "$heartbeat_script" muse-quota-hit \
+      --capture "$1" \
+      --hold-file "$MUSE_QUOTA_HOLD_FILE" \
+      --fallback-seconds "$MUSE_QUOTA_FALLBACK_SECONDS"
+  fi
 }

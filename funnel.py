@@ -19,6 +19,7 @@ import contextlib
 import contextvars
 import copy
 from collections import namedtuple
+from concurrent.futures import ThreadPoolExecutor
 import errno
 import glob
 import hmac
@@ -54,6 +55,11 @@ PROJECT_NUMBER = 2
 TOPIC = "command-center"
 OWNERS = [("user", "nateprich"), ("organization", "nateprich-projects")]
 REPO = "nateprich-projects/command-center"
+
+# The begin path has several independent, read-only GitHub fetches after its
+# batched Project load. Keep their concurrency bounded so a large portfolio
+# cannot turn one opening command into an unbounded request burst.
+BEGIN_FETCH_POOL_SIZE = 4
 
 # The local checks deliberately keep their paths as module-level values. Tests
 # can point them at a temporary checkout and home directory without ever
@@ -7274,20 +7280,52 @@ def check_member_repos(repos: Optional[Iterable[str]] = None) -> List[Check]:
 
 def repo_readiness_for_items(
     items: Iterable[Item],
+    *,
+    _executor=None,
 ) -> Dict[str, MemberRepoReadiness]:
     """Read onboarding and newest-run facts once per loaded repository."""
-    readiness: Dict[str, MemberRepoReadiness] = {}
-    for repo in sorted({item.repo for item in items}):
-        base = member_repo_readiness(repo)
-        state, annotation = latest_actions_run_probe(repo)
-        if state is not None:
-            base = replace(
-                base,
-                ci_state=state,
-                ci_annotation=annotation,
-            )
-        readiness[repo] = base
-    return readiness
+    repos = sorted({item.repo for item in items})
+    if _executor is None:
+        return {repo: _begin_repo_readiness(repo) for repo in repos}
+
+    # Submit independent repository reads to the caller's bounded begin pool.
+    # Collect in key order, not completion order, so both the mapping and the
+    # first reported failure are stable across runs.
+    futures = {
+        repo: _submit_begin_read(_executor, _begin_repo_readiness, repo)
+        for repo in repos
+    }
+    return {repo: futures[repo].result() for repo in repos}
+
+
+def _begin_repo_readiness(repo: str) -> MemberRepoReadiness:
+    """Read one repository's onboarding and newest-run facts."""
+    base = member_repo_readiness(repo)
+    state, annotation = latest_actions_run_probe(repo)
+    if state is not None:
+        base = replace(
+            base,
+            ci_state=state,
+            ci_annotation=annotation,
+        )
+    return base
+
+
+def _submit_begin_read(executor, function, *args):
+    """Submit a read while preserving the command's context variables."""
+    context = contextvars.copy_context()
+    return executor.submit(context.run, function, *args)
+
+
+def _timed_begin_pr_facts(items):
+    """Return a branch snapshot with the duration measured in its worker."""
+    started = time.perf_counter()
+    try:
+        return ticket_pr_facts(items), None, max(
+            0.0, time.perf_counter() - started
+        )
+    except GitHubError as exc:
+        return None, exc, max(0.0, time.perf_counter() - started)
 
 
 def _status_for_consistency(item: Item) -> str:
@@ -15101,6 +15139,11 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                   Tuple[Dict[str, object], Optional[Dict[str, object]]]
               ] = None,
               timings: Optional[Dict[str, object]] = None,
+              _pr_facts: Optional[
+                  Mapping[str, Optional[Dict[str, object]]]
+              ] = None,
+              _pr_facts_error: Optional[GitHubError] = None,
+              _pr_facts_elapsed: Optional[float] = None,
               ) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
@@ -15159,9 +15202,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     # Keeping it here prevents the approved-merge pass, engineer hand-back, and
     # reviewer queue from each paying for the same repository fan-out.
     try:
-        pr_facts = _begin_load_timed(
-            timings, "ticket_pr_facts", lambda: ticket_pr_facts(items)
-        )
+        if _pr_facts_error is not None:
+            raise _pr_facts_error
+        if _pr_facts is not None:
+            pr_facts = _pr_facts
+        else:
+            pr_facts = _begin_load_timed(
+                timings, "ticket_pr_facts", lambda: ticket_pr_facts(items)
+            )
     except GitHubError as exc:
         out.update(
             do="stop",
@@ -15170,6 +15218,11 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         )
         print(json.dumps(out, indent=2))
         return 0
+    finally:
+        if _pr_facts_elapsed is not None:
+            _record_begin_load_phase(
+                timings, "ticket_pr_facts", _pr_facts_elapsed
+            )
 
     reconciled_merges = attempt_reconcile(
         "approved_merges", reconcile_approved_merges, items, now, pr_facts)
@@ -17072,20 +17125,42 @@ def main(argv: Optional[Sequence[str]] = None, *,
 
     try:
         repo_readiness = None
-        if (
-            args.command in ("next", "queue")
-            or (
-                args.command == "begin"
-                and begin_uses_ticket_path(
-                    args.agent, args.tier, args.caller_role
-                )
-            )
-        ):
+        begin_pr_facts = None
+        begin_pr_facts_error = None
+        begin_pr_facts_elapsed = None
+        if args.command in ("next", "queue"):
             repo_readiness = _begin_load_timed(
                 begin_timings,
                 "repo_readiness",
                 lambda: repo_readiness_for_items(items),
             )
+        elif (
+            args.command == "begin"
+            and begin_uses_ticket_path(
+                args.agent, args.tier, args.caller_role
+            )
+        ):
+            repos = sorted({item.repo for item in items})
+            pool_size = min(BEGIN_FETCH_POOL_SIZE, len(repos) + 1)
+            with ThreadPoolExecutor(max_workers=pool_size) as executor:
+                pr_facts_future = _submit_begin_read(
+                    executor, _timed_begin_pr_facts, items
+                )
+                repo_readiness = _begin_load_timed(
+                    begin_timings,
+                    "repo_readiness",
+                    lambda: _call_with_optional_keyword(
+                        repo_readiness_for_items,
+                        "_executor",
+                        executor,
+                        items,
+                    ),
+                )
+                (
+                    begin_pr_facts,
+                    begin_pr_facts_error,
+                    begin_pr_facts_elapsed,
+                ) = pr_facts_future.result()
         if args.command == "claim":
             return cmd_claim(
                 items, now, args.ref, pr_facts=ticket_pr_facts(items)
@@ -17147,6 +17222,12 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 cmd_begin, "timings"
             ):
                 begin_kwargs["timings"] = begin_timings
+            if begin_pr_facts_elapsed is not None:
+                begin_kwargs.update(
+                    _pr_facts=begin_pr_facts,
+                    _pr_facts_error=begin_pr_facts_error,
+                    _pr_facts_elapsed=begin_pr_facts_elapsed,
+                )
             return cmd_begin(
                 items, now, args.agent, args.tier, args.idle,
                 args.breakdown, **begin_kwargs

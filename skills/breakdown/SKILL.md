@@ -11,7 +11,7 @@ to run. One shared standard keeps the fiftieth breakdown shaped like the first.
 
 ## The unit
 
-**One ticket is one Codex run: work that usually ends in a pull request.**
+**One ticket is one Codex run: work that ends in a pull request.**
 
 A run can be killed by the budget gate or a rate limit mid-work. A ticket
 too big for one run dies partway, leaves a half-finished branch, and forces

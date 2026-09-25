@@ -163,6 +163,66 @@ def test_finish_records_structured_issue_outcomes(monkeypatch):
     assert records[0]["shape_status"] == "Shaped"
 
 
+def test_finish_records_every_muse_call_id_and_keeps_uncaptured_slots(monkeypatch):
+    records = []
+    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(
+        heartbeat,
+        "append",
+        lambda agent, record: records.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    call_record = {"session_ids": ["session-1", None, "session-3"],
+                   "calls_made": 3}
+    assert heartbeat.main([
+        "finish", "--agent", "muse", "--run", "run-id",
+        "--outcome", "done", "--muse-call-record", json.dumps(call_record),
+    ]) == 0
+
+    assert records[0]["muse_session_ids"] == ["session-1", None, "session-3"]
+    assert records[0]["muse_calls_made"] == 3
+
+
+def test_finish_preserves_the_single_call_record_shape(monkeypatch):
+    records = []
+    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(
+        heartbeat,
+        "append",
+        lambda agent, record: records.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    assert heartbeat.main([
+        "finish", "--agent", "muse", "--run", "run-id",
+        "--outcome", "done", "--muse-call-record",
+        json.dumps({"session_ids": ["session-1"], "calls_made": 1}),
+    ]) == 0
+
+    assert "muse_session_ids" not in records[0]
+    assert "muse_calls_made" not in records[0]
+
+
+@pytest.mark.parametrize("call_record", [
+    {"session_ids": ["session-1"], "calls_made": 2},
+    {"session_ids": ["session-1", ""], "calls_made": 2},
+    {"session_ids": ["session-1"], "calls_made": True},
+])
+def test_finish_rejects_malformed_muse_call_records(call_record):
+    with pytest.raises(SystemExit):
+        heartbeat.main([
+            "finish", "--agent", "muse", "--run", "run-id",
+            "--outcome", "done", "--muse-call-record", json.dumps(call_record),
+        ])
+
+
 def test_finish_rejects_negative_ticket_count():
     with pytest.raises(SystemExit):
         heartbeat.main([

@@ -503,8 +503,9 @@ MUSE_STUB = (
     "    fi\n"
     "  } >> \"$MUSE_RUNDIR_PROBE\"\n"
     "fi\n"
+    "dynamic_answer=\"\"\n"
     "if (( judge_call )) && [[ \"${MUSE_DYNAMIC_JUDGES:-0}\" == '1' ]]; then\n"
-    "  python3 - \"$prompt_file\" \"${MUSE_JUDGE_UNMET:-}\" \\\n      \"${MUSE_JUDGE_UNSURE:-}\" <<'PY'\n"
+    "  dynamic_answer=\"$(python3 - \"$prompt_file\" \"${MUSE_JUDGE_UNMET:-}\" \\\n      \"${MUSE_JUDGE_UNSURE:-}\" <<'PY'\n"
     "import json, sys\n"
     "text = open(sys.argv[1]).read()\n"
     "marker = 'The assigned requirements are:\\n```json\\n'\n"
@@ -520,12 +521,43 @@ MUSE_STUB = (
     "                 'evidence': 'thing.py:1'})\n"
     "print(json.dumps({'requirements': rows}))\n"
     "PY\n"
-    "  exit \"${MUSE_STATUS:-0}\"\n"
+    "  )\"\n"
     "fi\n"
     "if [[ -n \"${MUSE_SLEEP:-}\" ]]; then exec sleep \"$MUSE_SLEEP\"; fi\n"
-    "varname=\"MUSE_ANSWER_$n\"\n"
-    "answer=\"${!varname:-$MUSE_ANSWER}\"\n"
-    "printf '%s' \"$answer\"\n"
+    "if [[ -n \"$dynamic_answer\" ]]; then\n"
+    "  answer=\"$dynamic_answer\"\n"
+    "else\n"
+    "  varname=\"MUSE_ANSWER_$n\"\n"
+    "  answer=\"${!varname:-$MUSE_ANSWER}\"\n"
+    "fi\n"
+    "json_mode=0\n"
+    "for argument in \"$@\"; do [[ \"$argument\" == '--json' ]] && json_mode=1; done\n"
+    "if (( json_mode )); then\n"
+    "  session_id=\"muse-call-$n\"\n"
+    "  previous=\"\"\n"
+    "  for argument in \"$@\"; do\n"
+    "    if [[ \"$previous\" == '--session-id' ]]; then session_id=\"$argument\"; break; fi\n"
+    "    previous=\"$argument\"\n"
+    "  done\n"
+    "  uncaptured=0\n"
+    "  if [[ \"${MUSE_UNCAPTURED_CALL:-}\" == \"$n\" ]]; then uncaptured=1; fi\n"
+    "  late=\"${MUSE_CONFIG_EVENT_LATE:-0}\"\n"
+    "  python3 - \"$session_id\" \"$answer\" \"$uncaptured\" \"$late\" <<'PY'\n"
+    "import json, sys\n"
+    "session_id, answer, uncaptured, late = sys.argv[1:]\n"
+    "stream = {'kind': 'session'}\n"
+    "if uncaptured != '1': stream['id'] = session_id\n"
+    "configured = {'record_type': 'event', 'payload_type': 'run.model.configured',\n"
+    "              'sequence': 1, 'stream': dict(stream), 'payload': {}}\n"
+    "terminal = {'record_type': 'event', 'payload_type': 'run.terminal.completed',\n"
+    "            'sequence': 2, 'stream': dict(stream),\n"
+    "            'payload': {'terminal': 'completed', 'text': answer}}\n"
+    "events = [terminal, configured] if late == '1' else [configured, terminal]\n"
+    "for event in events: print(json.dumps(event, separators=(',', ':')))\n"
+    "PY\n"
+    "else\n"
+    "  printf '%s' \"$answer\"\n"
+    "fi\n"
     "if [[ -n \"${MUSE_STDERR:-}\" ]]; then printf '%s' \"$MUSE_STDERR\" >&2; fi\n"
     "exit \"${MUSE_STATUS:-0}\"\n"
 )
@@ -607,6 +639,7 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
     (repo / "muse_model.py").write_text(
         muse_model_body if muse_model_body is not None
         else (ROOT / "muse_model.py").read_text())
+    (repo / "muse_call.py").write_text((ROOT / "muse_call.py").read_text())
     (repo / "breakdown-packet").write_text(_issue_packet_stub("breakdown"))
     (repo / "breakdown-apply").write_text(BREAKDOWN_APPLY_STUB)
     (repo / "shape-packet").write_text(_issue_packet_stub("shape"))
@@ -656,6 +689,26 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
 def _heartbeat(repo):
     log = repo / "heartbeat.log"
     return log.read_text() if log.exists() else ""
+
+
+def _heartbeat_without_muse_call_record(repo):
+    output = _heartbeat(repo)
+    lines = [
+        line.split(" --muse-call-record ", 1)[0]
+        if " --muse-call-record " in line else line
+        for line in output.splitlines()
+    ]
+    stripped = "\n".join(lines)
+    return stripped + ("\n" if output.endswith("\n") else "")
+
+
+def _muse_call_record(repo):
+    lines = [line for line in _heartbeat(repo).splitlines()
+             if " --muse-call-record " in line]
+    if not lines:
+        return None
+    raw = lines[-1].split(" --muse-call-record ", 1)[1]
+    return json.loads(raw)
 
 
 def _muse_calls(repo):
@@ -756,12 +809,12 @@ def test_the_runner_disables_every_model_tool():
     assert "--disable-shell" in body
     assert "--disable-write" in body
     assert "--disable-web-tools" in body
-    # No network sandbox flag: no tools remain that need it. No --json: the
-    # runner needs the raw answer on stdout, not a JSONL event stream. No
-    # approval mode: the on-request default stays, so a future tool outside
-    # the three disables could never be silently auto-allowed here.
+    # No network sandbox flag: no tools remain that need it. JSON mode is
+    # needed to capture each returned session id; the runner extracts the
+    # terminal answer before handing it to the existing parser. No approval
+    # mode: the on-request default stays for any future enabled tool.
     assert "--sandbox-network" not in body
-    assert "--json" not in body
+    assert "--json" in body
     assert "--approval-mode" not in body
     # The prompt travels by file: a diff can outgrow the argument limit.
     assert "--prompt-file" in body
@@ -828,7 +881,7 @@ def test_a_stop_finishes_without_launching_anything(tmp_path, gate, outcome):
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 0
     assert not (repo / "packet.calls").exists()
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run stop-run --outcome {}\n".format(outcome)
     )
 
@@ -845,7 +898,7 @@ def test_a_stop_with_a_why_records_the_note_and_names_it_on_stderr(tmp_path):
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 0
     assert not (repo / "packet.calls").exists()
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run stop-run --outcome nothing-to-do "
         "--note {}\n".format(why)
     )
@@ -862,7 +915,7 @@ def test_an_unexpected_begin_job_finishes_the_started_run(tmp_path):
 
     assert proc.returncode == 1
     assert _muse_calls(repo) == 0
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run unexpected-run --outcome errored "
         "--note funnel begin returned unknown job 'ticket'\n"
     )
@@ -875,7 +928,7 @@ def test_a_packet_failure_finishes_errored_without_a_model_call(tmp_path):
     assert proc.returncode == 1
     assert _muse_calls(repo) == 0
     assert _apply_calls(repo) == []
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run engine-run --outcome errored "
         "--note review-packet failed for PR #7 in owner/repo: "
         "could not read PR #7 in x\n"
@@ -950,7 +1003,7 @@ def test_a_failing_precheck_applies_rejected_without_calling_muse(tmp_path):
                        "unsure": [],
                        "requirements": []}
     assert (repo / "applied.marker").exists()
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note reviewed PR #7 in owner/repo at {}: rejected without a "
         "model call (2 precheck reason(s)) --review-result rejected\n".format(HEAD)
@@ -1022,7 +1075,7 @@ def test_a_rerun_packet_reruns_ci_and_waits_without_a_model_call(tmp_path):
     assert not (repo / "applied.marker").exists()
     assert (repo / "gh.log").read_text().strip() == \
         "run rerun 123 --repo owner/repo"
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note review of PR #7 in owner/repo at {} re-ran CI (run 123) "
         "to cover merged overlap (#5); waiting for the result\n".format(HEAD)
@@ -1052,7 +1105,7 @@ def test_a_wait_packet_finishes_without_calling_anything(tmp_path):
     assert _apply_calls(repo) == []
     assert not (repo / "applied.marker").exists()
     assert not (repo / "gh.log").exists()
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note review of PR #7 in owner/repo at {} waits for CI run 124 "
         "covering merged overlap (#5)\n".format(HEAD)
@@ -1069,7 +1122,7 @@ def test_a_failing_precheck_rejects_first_and_never_reruns(tmp_path):
     assert len(_apply_calls(repo)) == 1
     assert (repo / "applied.marker").exists()
     assert not (repo / "gh.log").exists()
-    assert _heartbeat(repo).endswith("--review-result rejected\n")
+    assert _heartbeat_without_muse_call_record(repo).endswith("--review-result rejected\n")
 
 
 def test_an_unknown_rerun_action_finishes_errored(tmp_path):
@@ -1110,7 +1163,7 @@ def test_an_approval_is_applied_and_finished_done(tmp_path):
     assert (repo / "applied.marker").exists()
     assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
         "approved"
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note reviewed PR #7 in owner/repo at {}: approved "
         "--review-result approved\n".format(HEAD)
@@ -1129,7 +1182,7 @@ def test_a_rejection_records_the_code_derived_blocking_list(tmp_path):
         "requirement unmet: thing.py prints the thing the ticket asks for "
         "-- the diff omits the plan requirement"
     ]
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note reviewed PR #7 in owner/repo at {}: rejected "
         "--review-result rejected\n".format(HEAD)
@@ -1155,7 +1208,8 @@ def test_seven_requirements_reach_three_parallel_max_judges_once_each(tmp_path):
         tmp_path, _begin(), _packet(),
         answers=(_requirements_answer(*requirements),),
         extra_env={"MUSE_DYNAMIC_JUDGES": "1",
-                   "MUSE_JUDGE_BARRIER_COUNT": "3"})
+                   "MUSE_JUDGE_BARRIER_COUNT": "3",
+                   "MUSE_CONFIG_EVENT_LATE": "1"})
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 4
@@ -1167,6 +1221,12 @@ def test_seven_requirements_reach_three_parallel_max_judges_once_each(tmp_path):
     assert len(set(_cached_packet_from_judge_prompt(prompt)
                    for prompt in prompts)) == 1
     session_id = (repo / "begin.session_id").read_text()
+    call_record = _muse_call_record(repo)
+    assert call_record["calls_made"] == 4
+    assert call_record["session_ids"][0] == session_id
+    assert set(call_record["session_ids"][1:]) == {
+        "muse-call-2", "muse-call-3", "muse-call-4",
+    }
     lister = (repo / "muse.args.1").read_text().splitlines()
     assert lister[lister.index("--session-id") + 1] == session_id
     for call in (2, 3, 4):
@@ -1181,6 +1241,21 @@ def test_seven_requirements_reach_three_parallel_max_judges_once_each(tmp_path):
         requirements
     assert [entry["status"] for entry in answer["requirements"]] == \
         ["met"] * 7
+
+
+def test_uncaptured_call_is_kept_in_the_finish_record(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers(_judge_answer()),
+        extra_env={"MUSE_UNCAPTURED_CALL": "2",
+                   "MUSE_CONFIG_EVENT_LATE": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    call_record = _muse_call_record(repo)
+    assert call_record["calls_made"] == 2
+    assert call_record["session_ids"][0] == \
+        (repo / "begin.session_id").read_text()
+    assert call_record["session_ids"][1] is None
 
 
 @pytest.mark.parametrize("failure_kind", ["failed", "timed out"])
@@ -1248,7 +1323,7 @@ def test_the_model_call_carries_the_exact_no_tool_shape(tmp_path):
         assert "--workspace" in invoked
         assert "--prompt-file" in invoked
         assert "--sandbox-network" not in invoked
-        assert "--json" not in invoked
+        assert "--json" in invoked
         assert "--approval-mode" not in invoked
     calls = (repo / "funnel.calls").read_text()
     # Standard asks begin for breakdown work too (#811); escalated reviews
@@ -1296,7 +1371,7 @@ def test_a_malformed_first_answer_retries_once_with_the_parse_error(tmp_path):
     assert len(calls) == 1
     assert "--attempt 1" in calls[0]
     assert (repo / "applied.marker").exists()
-    assert _heartbeat(repo).endswith("--review-result approved\n")
+    assert _heartbeat_without_muse_call_record(repo).endswith("--review-result approved\n")
 
 
 def test_a_malformed_final_judge_answer_fails_closed(tmp_path):
@@ -1312,7 +1387,7 @@ def test_a_malformed_final_judge_answer_fails_closed(tmp_path):
     assert applied["requirements"][0]["status"] == "unsure"
     assert "could not be parsed after two attempts" in \
         applied["requirements"][0]["evidence"]
-    assert _heartbeat(repo).endswith("--review-result rejected\n")
+    assert _heartbeat_without_muse_call_record(repo).endswith("--review-result rejected\n")
 
 
 def test_a_muse_failure_finishes_errored_without_applying(tmp_path):
@@ -1434,7 +1509,7 @@ def test_standard_tier_asks_begin_for_breakdown(tmp_path):
     calls = (repo / "funnel.calls").read_text()
     assert "begin --agent muse --tier standard --breakdown --role review" \
         in calls
-    assert _heartbeat(repo).endswith(
+    assert _heartbeat_without_muse_call_record(repo).endswith(
         "broke down {}: created 2 tickets --ticket-count 2 "
         "--needs-decision \n".format(BREAKDOWN_REF))
 
@@ -1474,7 +1549,7 @@ def test_a_breakdown_is_applied_and_finished_done(tmp_path):
     applied = json.loads((repo / "apply.answer").read_text())
     assert [ticket["title"] for ticket in applied["tickets"]] == \
         ["First slice", "Second slice"]
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note broke down {}: created 2 tickets "
         "--ticket-count 2 --needs-decision \n".format(BREAKDOWN_REF)
@@ -1488,6 +1563,10 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 1
+    assert _muse_call_record(repo) == {
+        "session_ids": [(repo / "begin.session_id").read_text()],
+        "calls_made": 1,
+    }
     prompt = (repo / "muse.prompt.1").read_text()
     assert "What is the plan, what is settled" in prompt
     assert "PACKET_JSON" not in prompt
@@ -1502,7 +1581,7 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     assert "--run engine-run" in calls[0]
     assert "--agent muse" in calls[0]
     assert (repo / "applied.marker").exists()
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note shaped {}: Ready (self-approved: agent idea, finite "
         "class, no open questions) --shape-status Ready\n".format(SHAPE_REF)
@@ -1518,7 +1597,7 @@ def test_a_breakdown_question_is_asked_not_created(tmp_path):
 
     assert proc.returncode == 0, proc.stderr
     assert (repo / "applied.marker").exists()
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note broke down {}: asked a needs-decision "
         "question --ticket-count 0 --needs-decision Which repo owns the "
@@ -1534,7 +1613,7 @@ def test_a_shape_with_open_questions_holds_at_shaped(tmp_path):
             "gates": None, "scope": None, "preference": None}),))
 
     assert proc.returncode == 0, proc.stderr
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note shaped {}: Shaped (open questions for Nate: "
         "exposure) --shape-status Shaped\n".format(SHAPE_REF)
@@ -1560,7 +1639,7 @@ def test_the_issue_model_call_carries_the_no_tool_shape(tmp_path):
     assert "--workspace" in invoked
     assert "--prompt-file" in invoked
     assert "--sandbox-network" not in invoked
-    assert "--json" not in invoked
+    assert "--json" in invoked
     assert "--approval-mode" not in invoked
 
 
@@ -1624,7 +1703,7 @@ def test_an_issue_packet_failure_finishes_errored_without_a_model_call(
     assert proc.returncode == 1
     assert _muse_calls(repo) == 0
     assert _apply_calls(repo) == []
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run engine-run --outcome errored "
         "--note {}-packet failed for {}: could not read the {} packet "
         "for {}\n".format(job, ref, job, packet_arg)
@@ -1652,7 +1731,7 @@ def test_an_unparseable_issue_ref_finishes_errored(tmp_path):
 
     assert proc.returncode == 1
     assert _muse_calls(repo) == 0
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run engine-run --outcome errored "
         "--note funnel begin returned an unparseable ref 'not-a-ref'\n"
     )
@@ -2108,7 +2187,7 @@ def test_a_malformed_requirement_list_retries_once_and_then_lists(tmp_path):
     # And the review still happened, with one apply on the judge's answer.
     assert len(_apply_calls(repo)) == 1
     assert (repo / "applied.marker").exists()
-    assert _heartbeat(repo).endswith("--review-result approved\n")
+    assert _heartbeat_without_muse_call_record(repo).endswith("--review-result approved\n")
 
 
 @pytest.mark.parametrize("answer,reason", [
@@ -2224,7 +2303,7 @@ def test_a_standard_review_before_the_cutoff_runs_on_zai_as_zcode(tmp_path):
         assert 0 < timeout < 20, "zai-exec's own deadline sits inside the bound"
     applies = _apply_calls(repo)
     assert len(applies) == 1 and "--agent zcode" in applies[0]
-    assert _heartbeat(repo) == (
+    assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent zcode --run engine-run --outcome done "
         "--note reviewed PR #7 in owner/repo at {}: approved "
         "--review-result approved\n".format(HEAD)

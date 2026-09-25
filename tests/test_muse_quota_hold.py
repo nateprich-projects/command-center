@@ -35,13 +35,14 @@ from test_muse_implement import (  # noqa: E402  (shared fixture harness)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 HELPER = ROOT / "scripts" / "muse-quota-hold.sh"
+RESET_AT = (datetime.datetime.now(datetime.timezone.utc) +
+            datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 REFUSAL = (
     "run ended with Failed: API error 429 "
     "[request_id=ddc4fbdf-8557-442b-afae-4ab7a8a3b3e9]: Subscription quota "
-    "exhausted. Your usage window resets at 2026-09-21T00:00:00Z. "
-    "(rate_limit_error)\n"
-)
+    "exhausted. Your usage window resets at {}. (rate_limit_error)\n"
+).format(RESET_AT)
 
 #: A stub that refuses the way the provider does: the message on stderr, a
 #: non-zero exit, and no answer left behind.
@@ -122,8 +123,8 @@ def test_a_refusal_records_the_reset_the_provider_named(tmp_path):
     proc, hold_file = _helper(
         tmp_path, "muse_quota_record {}".format(capture))
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == "2026-09-21T00:00:00Z"
-    assert hold_file.read_text().strip() == "2026-09-21T00:00:00Z"
+    assert proc.stdout.strip() == RESET_AT
+    assert hold_file.read_text().strip() == RESET_AT
 
 
 def test_weekly_lattice_hit_records_the_matching_paired_window_total(tmp_path):
@@ -257,11 +258,11 @@ def test_the_implementer_parks_the_ticket_instead_of_erroring_it(tmp_path):
     assert "skipped-provider-quota" in heartbeat
     assert "errored" not in heartbeat, (
         "a spent provider window is not the ticket's failure")
-    assert "2026-09-21T00:00:00Z" in heartbeat
+    assert RESET_AT in heartbeat
     assert any(call.startswith("release") for call in _calls(repo, "funnel")), (
         "the claim must go back")
     hold_file = tmp_path / ".claude" / "command-center-muse-quota-hold"
-    assert hold_file.read_text().strip() == "2026-09-21T00:00:00Z"
+    assert hold_file.read_text().strip() == RESET_AT
     assert BEGIN_REF in heartbeat
     # The model's stderr still reaches the launchd log.
     assert "Subscription quota exhausted" in proc.stderr

@@ -23,8 +23,9 @@ comes from `generated_at`: older than about fifteen minutes is weak evidence
 that nothing is waiting.
 
 Lead with the count and the ordered list. For each item: its Class, a pin
-marker when `pinned` is `true`, the question (`waiting_on`), the repo and
-issue title as a link, and how long it has `waited`. Keep it scannable.
+marker when `pinned` is `true`, the question (`waiting_on`), its waiting
+reason when `waiting_reason` is present, the repo and issue title as a link,
+and how long it has `waited`. Keep it scannable.
 
 If `missing` is non-empty, say the brief is partial and name every missing
 section and its error before interpreting any other empty or null value. A
@@ -74,8 +75,12 @@ dollars.
 
 Then `recorded_cause_regressions` and `command_center_ticket_pr_share` as
 portfolio signals: Broken numerator and denominator; ticket-branch numerator,
-merged-PR denominator and percentage. `unavailable`, `partial` and
-`insufficient_data` are unknown, never zero.
+merged-PR denominator and percentage. Then `decline_routing`: the four
+30-day counts for declines that became a native edge, closed as a proven
+defer, routed to review, or stayed blocked. Its window starts at classifier
+PR #1447's merge when that is newer than 30 days ago. `unavailable`,
+`partial` and `insufficient_data` are unknown, never zero; an unclassified
+decline is shown separately rather than assigned to a route.
 
 Then `main_ci`, whenever non-empty: each red member-repo `main` with its
 `repo`, `sha`, failing `job` and `verdict`. An `infra` verdict is a run that

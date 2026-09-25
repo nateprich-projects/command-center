@@ -22,6 +22,7 @@ const OWNER_CLASS = {
 // The repository the viewer picked, or null for every repository. It lives in
 // the URL, so a reload or a shared link keeps it.
 let selectedRepo = null;
+let activeTab = "funnel";
 
 // The filter's key is the full owner/repo, read from the ref first: two
 // owners can hold a repository of the same name, and the board row's own
@@ -629,6 +630,7 @@ function decisionRow(item) {
   const row = element("li", "waiting-row");
   row.append(link(item.title || item.ref || "Untitled", item.url, "waiting-title"));
   if (item.waiting_on) row.append(chip(item.waiting_on, "chip-gate"));
+  if (item.waiting_reason) row.append(chip(item.waiting_reason, "chip-reason"));
   if (item.class) {
     row.append(chip(item.class, `chip-class chip-class-${String(item.class).toLowerCase()}`));
   }
@@ -756,6 +758,18 @@ function writeRepoToUrl(repo) {
   window.history.replaceState(null, "", url);
 }
 
+function tabFromUrl(href) {
+  const url = new URL(href, "https://funnel.nateprich.com");
+  return url.searchParams.get("tab") === "execution" ? "execution" : "funnel";
+}
+
+function tabUrl(tab, href) {
+  const url = new URL(href, "https://funnel.nateprich.com");
+  if (tab === "execution") url.searchParams.set("tab", "execution");
+  else url.searchParams.delete("tab");
+  return url.pathname + url.search + url.hash;
+}
+
 // Rebuilt only when the list changes: replacing the options on every poll
 // would close the dropdown under a viewer who is choosing.
 let renderedOptions = null;
@@ -784,6 +798,211 @@ function renderAll(snapshot) {
   renderWaiting(snapshot.brief || {});
   renderUsage(snapshot.usage || {});
   renderBoard(snapshot.board || {});
+}
+
+function isMetricNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isMetricSeries(value) {
+  return value && typeof value === "object" &&
+    ["daily", "r7", "r28", "delta"].every((key) => Array.isArray(value[key]));
+}
+
+function metricAtPath(root, path) {
+  let value = root;
+  for (const part of path) {
+    if (!value || typeof value !== "object") return null;
+    value = value[part];
+  }
+  return isMetricSeries(value) ? value : null;
+}
+
+function metricLeaves(value, path = [], found = []) {
+  if (isMetricSeries(value)) {
+    found.push({ path, series: value });
+  } else if (value && typeof value === "object" && !Array.isArray(value)) {
+    for (const [key, child] of Object.entries(value)) {
+      metricLeaves(child, [...path, key], found);
+    }
+  }
+  return found;
+}
+
+function metricValues(series, index) {
+  const read = (key) => {
+    const value = series && series[key] && series[key][index];
+    return isMetricNumber(value) ? value : null;
+  };
+  return { r7: read("r7"), r28: read("r28"), delta: read("delta") };
+}
+
+// A missing component makes that aggregate a gap; never turn it into zero.
+function sumMetricValues(series, index) {
+  const sum = (key) => {
+    if (!series.length) return null;
+    let total = 0;
+    for (const item of series) {
+      const value = metricValues(item, index)[key];
+      if (!isMetricNumber(value)) return null;
+      total += value;
+    }
+    return total;
+  };
+  return { r7: sum("r7"), r28: sum("r28"), delta: sum("delta") };
+}
+
+function formatMetricNumber(value, digits, signed = false) {
+  const number = new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(value);
+  return signed && value >= 0 ? "+" + number : number;
+}
+
+function formatMetricValue(value, format, isDelta = false) {
+  if (!isMetricNumber(value)) return "Gap";
+  if (format === "percent") {
+    const points = formatMetricNumber(value * 100, 1, isDelta);
+    return isDelta ? points + " pp" : points + "%";
+  }
+  if (format === "hours") {
+    return formatMetricNumber(value, 2, isDelta) + " h";
+  }
+  return formatMetricNumber(value, 1, isDelta);
+}
+
+function appendMetricRow(tile, label, values, format) {
+  const row = element("div", "metric-series-row");
+  if (label) row.append(element("p", "metric-series-label", label));
+  const readings = element("dl", "metric-values");
+  for (const [name, value, isDelta] of [
+    ["R7", values && values.r7, false],
+    ["R28", values && values.r28, false],
+    ["Delta", values && values.delta, true],
+  ]) {
+    const reading = element(
+      "div",
+      "metric-reading" + (isDelta ? " metric-delta" : ""),
+    );
+    reading.append(element("dt", null, name));
+    const output = element(
+      "dd",
+      isMetricNumber(value) ? null : "metric-gap",
+      formatMetricValue(value, format, isDelta),
+    );
+    if (!isMetricNumber(value)) output.setAttribute("aria-label", "Gap");
+    reading.append(output);
+    readings.append(reading);
+  }
+  row.append(readings);
+  tile.append(row);
+}
+
+function appendMetricTile(container, definition, rows) {
+  const tile = element("article", "metric-tile");
+  tile.setAttribute("data-metric", definition.code);
+  tile.append(element("p", "metric-code", definition.code));
+  tile.append(element("h3", "metric-title", definition.title));
+  for (const row of rows) {
+    appendMetricRow(tile, row.label, row.values, definition.format);
+  }
+  container.append(tile);
+}
+
+function renderExecutionTiles(series, container) {
+  if (!container) return;
+  container.replaceChildren();
+  const root = series && series.metrics && typeof series.metrics === "object"
+    ? series.metrics : {};
+  const days = series && Array.isArray(series.days) ? series.days : [];
+  const index = days.length - 1;
+  const single = (path) => metricValues(metricAtPath(root, path), index);
+
+  appendMetricTile(container, {
+    code: "A1", title: "Tickets landed / day", format: "count",
+  }, [{ label: "", values: single(["A", "A1", "total"]) }]);
+
+  appendMetricTile(container, {
+    code: "A2", title: "Self-directed share", format: "percent",
+  }, [{ label: "", values: single(["A", "A2"]) }]);
+
+  const implementByAgent = root.C && root.C.C3 &&
+    root.C.C3.error_rate_by_agent_and_job;
+  const implementRows = [];
+  if (implementByAgent && typeof implementByAgent === "object") {
+    for (const [agent, jobs] of Object.entries(implementByAgent)) {
+      if (jobs && isMetricSeries(jobs.implement)) {
+        implementRows.push({
+          label: agent,
+          values: metricValues(jobs.implement, index),
+        });
+      }
+    }
+  }
+  if (!implementRows.length) implementRows.push({
+    label: "", values: { r7: null, r28: null, delta: null },
+  });
+  appendMetricTile(container, {
+    code: "C3", title: "Implement error rate", format: "percent",
+  }, implementRows);
+
+  const regressionLeaves = [];
+  for (const item of metricLeaves(
+    root.C && root.C.C4 && root.C.C4.by_agent_and_job,
+  )) {
+    if (item.path[item.path.length - 1] === "regression") regressionLeaves.push(item);
+  }
+  appendMetricTile(container, {
+    code: "C4", title: "Regression errors / day", format: "count",
+  }, [{
+    label: "",
+    values: sumMetricValues(regressionLeaves.map((item) => item.series), index),
+  }]);
+
+  const heldLeaves = metricLeaves(
+    root.D && root.D.D6 && root.D.D6.held_hours_by_agent_and_reason,
+  );
+  appendMetricTile(container, {
+    code: "D6", title: "Held hours", format: "hours",
+  }, [{
+    label: "",
+    values: sumMetricValues(heldLeaves.map((item) => item.series), index),
+  }]);
+
+  appendMetricTile(container, {
+    code: "E4", title: "Watch interventions / day", format: "count",
+  }, [{ label: "", values: single(["E", "E4"]) }]);
+}
+
+async function requestMetrics(fetchImpl = fetch) {
+  const response = await fetchImpl("/api/metrics", { cache: "no-store" });
+  if (!response.ok) throw new Error("Metrics returned " + response.status);
+  return response.json();
+}
+
+let metricsLoading = false;
+
+async function loadMetrics() {
+  if (metricsLoading) return;
+  metricsLoading = true;
+  const status = document.querySelector("#metrics-status");
+  const container = document.querySelector("#metrics-grid");
+  try {
+    const series = await requestMetrics();
+    status.textContent = series.as_of
+      ? "Metrics through " + series.as_of
+      : "Metrics date unknown";
+    status.classList.remove("failed");
+    renderExecutionTiles(series, container);
+  } catch (error) {
+    status.textContent = error.message || "Metrics unavailable";
+    status.classList.add("failed");
+    renderExecutionTiles(null, container);
+    throw error;
+  } finally {
+    metricsLoading = false;
+  }
 }
 
 function bindRepoFilter() {
@@ -824,33 +1043,80 @@ async function loadSnapshot({ force = false } = {}) {
   }
 }
 
+function activateTab(tab) {
+  activeTab = tab === "execution" ? "execution" : "funnel";
+  const execution = activeTab === "execution";
+  document.querySelector("#funnel-view").hidden = execution;
+  document.querySelector("#execution-view").hidden = !execution;
+  document.querySelector("#page-heading").textContent = execution ? "Execution" : "Funnel";
+  document.querySelector("#snapshot-status").hidden = execution;
+  document.querySelector("#metrics-status").hidden = !execution;
+  document.querySelector(".repo-filter").hidden = execution;
+  document.title = (execution ? "Execution" : "Funnel") + " · Command Center";
+  for (const link of document.querySelectorAll("#view-nav [data-tab]")) {
+    if (link.dataset.tab === activeTab) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+  if (execution) {
+    loadMetrics().catch(() => {});
+  } else {
+    loadSnapshot({ force: true }).catch((error) => {
+      const status = document.querySelector("#snapshot-status");
+      status.textContent = error.message;
+      status.classList.add("failed");
+    });
+  }
+}
+
+function bindViewNavigation() {
+  const nav = document.querySelector("#view-nav");
+  if (!nav) return;
+  nav.addEventListener("click", (event) => {
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) return;
+    const anchor = event.target.closest && event.target.closest("a[data-tab]");
+    if (!anchor || !anchor.dataset.tab) return;
+    event.preventDefault();
+    const destination = tabUrl(anchor.dataset.tab, window.location.href);
+    const current = window.location.pathname + window.location.search + window.location.hash;
+    if (destination !== current) window.history.pushState(null, "", destination);
+    activateTab(anchor.dataset.tab);
+  });
+  window.addEventListener("popstate", () => activateTab(tabFromUrl(window.location.href)));
+}
+
 function startPolling() {
   window.setInterval(() => {
     // A hidden tab is not being read; skip the request rather than poll a
     // background window every thirty seconds.
-    if (document.visibilityState === "hidden") return;
+    if (activeTab !== "funnel" || document.visibilityState === "hidden") return;
     loadSnapshot().catch(() => {});
   }, POLL_MS);
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") loadSnapshot().catch(() => {});
+    if (activeTab === "funnel" && document.visibilityState === "visible") {
+      loadSnapshot().catch(() => {});
+    }
   });
 }
 
 if (typeof document !== "undefined") {
   selectedRepo = readRepoFromUrl();
   bindRepoFilter();
-  loadSnapshot({ force: true })
-    .then(startPolling)
-    .catch((error) => {
-      const status = document.querySelector("#snapshot-status");
-      status.textContent = error.message;
-      status.classList.add("failed");
-      startPolling();
-    });
+  bindViewNavigation();
+  activateTab(tabFromUrl(window.location.href));
+  startPolling();
 }
 
 export {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
-  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip, repoLabels, repoOf,
-  repoOptions, rowTier, shortRepo, visible,
+  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
+  repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,
+  renderExecutionTiles, requestMetrics,
+  tabFromUrl, tabUrl,
 };

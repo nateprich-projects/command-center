@@ -4,8 +4,10 @@ import test from "node:test";
 
 import {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
-  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip, repoLabels, repoOf,
-  repoOptions, rowTier, shortRepo, visible,
+  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
+  repoLabels, repoOf,
+  repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
+  tabFromUrl, tabUrl,
 } from "../public/app.js";
 
 class TestNode {
@@ -28,6 +30,11 @@ class TestNode {
       if (child === undefined || child === null) continue;
       this.children.push(child);
     }
+  }
+
+  replaceChildren(...children) {
+    this.children = [];
+    this.append(...children);
   }
 
   set textContent(value) {
@@ -156,6 +163,14 @@ test("page code does not sort, filter, or reverse producer data", async () => {
   assert.doesNotMatch(withoutRepoOptions(source), /\.(?:sort|filter|reverse)\s*\(/);
 });
 
+test("decision rows display the producer's waiting reason", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const start = source.indexOf("function decisionRow(");
+  const row = source.slice(start, source.indexOf("\n}\n\nfunction humanStepRow", start));
+  assert.match(row, /item\.waiting_reason/);
+  assert.match(row, /chip\(item\.waiting_reason, "chip-reason"\)/);
+});
+
 test("the repository filter keeps producer order and drops only other repos", () => {
   const rows = [
     { ref: "o/b#3", repo: "b" },
@@ -282,11 +297,13 @@ test("the page renders no brief section other than the board and human steps", a
 
 test("the row toggle is bound once, so a chevron click does not cancel itself", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
-  const listeners = source.match(/addEventListener\("click", /g) || [];
+  const board = source.slice(source.indexOf("function projectRow("), source.indexOf("function decisionRow("));
+  const listeners = board.match(/addEventListener\("click", /g) || [];
   // One on the row (the chevron is inside it) and one on the group header.
-  // The refresh button's listener went with the button. A second listener on
-  // the chevron toggled twice and the row never opened (#902).
+  // The view navigation has its own listener; a second listener on the
+  // chevron toggled twice and the row never opened (#902).
   assert.equal(listeners.length, 2);
+  assert.match(source, /nav\.addEventListener\("click", /);
   assert.doesNotMatch(source, /twisty\.addEventListener\("click"/);
 });
 
@@ -590,4 +607,75 @@ test("phone ticket rows carry a coloured pip and read as finished when closed", 
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;
   }
+});
+
+test("the Execution headline renders six R7/R28 tiles and keeps missing data as a gap", async () => {
+  const fixture = JSON.parse(await readFile(
+    new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8",
+  ));
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const grid = new TestNode("div");
+    renderExecutionTiles(fixture, grid);
+    const tiles = grid.querySelectorAll(".metric-tile");
+
+    assert.equal(tiles.length, 6);
+    assert.deepEqual(
+      tiles.map((tile) => tile.attributes.get("data-metric")),
+      ["A1", "A2", "C3", "C4", "D6", "E4"],
+    );
+    for (const tile of tiles) {
+      assert.match(tile.textContent, /R7/);
+      assert.match(tile.textContent, /R28/);
+      assert.match(tile.textContent, /Delta/);
+    }
+
+    assert.match(tiles[2].textContent, /14\.3%/);
+    assert.match(tiles[2].textContent, /-0\.7 pp/);
+    assert.equal(tiles[2].querySelectorAll(".metric-gap").length, 3);
+    assert.ok(tiles[2].querySelectorAll(".metric-series-label")
+      .some((label) => label.textContent === "muse"));
+    assert.match(tiles[3].textContent, /0\.1/);
+    assert.match(tiles[4].textContent, /\+0\.03 h/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("Execution uses a read-only request and the two views route on the same page", async () => {
+  const [html, source, fixtureText] = await Promise.all([
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../public/app.js", import.meta.url), "utf8"),
+    readFile(new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8"),
+  ]);
+  const fixture = JSON.parse(fixtureText);
+  const requests = [];
+  const result = await requestMetrics(async (url, options) => {
+    requests.push({ url, options });
+    return { ok: true, async json() { return fixture; } };
+  });
+
+  assert.equal(result.schema_version, 1);
+  assert.deepEqual(requests, [{
+    url: "/api/metrics",
+    options: { cache: "no-store" },
+  }]);
+  assert.match(html, /<nav id="view-nav"[^>]*aria-label="Dashboard views"/);
+  assert.match(html, /href="\/\?tab=execution" data-tab="execution"/);
+  assert.match(html, /<main id="funnel-view">/);
+  assert.match(html, /<main id="execution-view"[^>]*hidden>/);
+  assert.equal(tabFromUrl("https://funnel.nateprich.com/?tab=execution&repo=owner%2Frepo"),
+    "execution");
+  assert.equal(tabFromUrl("https://funnel.nateprich.com/?tab=unknown"), "funnel");
+  assert.equal(
+    tabUrl("execution", "https://funnel.nateprich.com/?repo=owner%2Frepo"),
+    "/?repo=owner%2Frepo&tab=execution",
+  );
+  assert.equal(
+    tabUrl("funnel", "https://funnel.nateprich.com/?repo=owner%2Frepo&tab=execution"),
+    "/?repo=owner%2Frepo",
+  );
+  assert.match(source, /fetch\("\/api\/snapshot", \{ cache: "no-store" \}\)/);
 });

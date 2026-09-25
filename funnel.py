@@ -43,6 +43,7 @@ from typing import (Any, Callable, Collection, Dict, Iterable, Iterator, List,
 
 import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
+from decline_classifier import classify_decline_reason
 
 # --------------------------------------------------------------------------
 # Configuration. These are the only knobs; everything else is derived.
@@ -630,6 +631,9 @@ BRIEF_SECTION_BUDGETS = {
     # (#1286). Measured 2026-09-23 on 476 merges (5 pages): 2.27 s, 2.62 s,
     # 2.97 s, so 3 s degraded about one read in three, and the window grows.
     "portfolio_metrics": 10.0,
+    # Reads the forward-only decline-routing signal from issue comments and
+    # current GitHub state. The search is per member repo and paged.
+    "decline_routing": 10.0,
     "rejected_merges": 0.25,
 }
 
@@ -944,6 +948,18 @@ def gate_question(item: Item) -> Optional[str]:
         )
         return GATES["Shaped"] if waits_for_nate else None
     return None
+
+
+def _acceptance_waiting_reason(
+    item: Item, question: Optional[str]
+) -> Optional[str]:
+    """Explain why a completed Building project is still awaiting acceptance."""
+    if question != GATES["Building"]:
+        return None
+    body = item.body if isinstance(item.body, str) else ""
+    if ANALYSIS_MARKER in body:
+        return "Analysis review"
+    return "Ordinary accept"
 
 
 def question_since(item: Item) -> Optional[datetime]:
@@ -4573,6 +4589,391 @@ def command_center_ticket_pr_share(
     }
 
 
+DECLINE_ROUTING_CUTOFF_PR = 1447
+DECLINE_ROUTING_REVIEW_MARKER = "<!-- command-center-review-routing -->"
+DECLINE_ROUTING_SEARCH = """
+query($search: String!, $cursor: String) {
+  rateLimit { cost remaining resetAt }
+  search(type: ISSUE, query: $search, first: 100, after: $cursor) {
+    issueCount
+    nodes {
+      __typename
+      ... on Issue {
+        number
+        repository { nameWithOwner }
+        body
+        state
+        stateReason
+        closedAt
+        labels(first: 100) { totalCount nodes { name } }
+        blockedBy(first: 100) {
+          totalCount
+          nodes { number repository { nameWithOwner } }
+        }
+        comments(last: 100) {
+          pageInfo { hasPreviousPage }
+          nodes { body createdAt }
+        }
+      }
+    }
+    pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+
+def _decline_routing_cutoff() -> datetime:
+    """Read the first classifier ticket's merge time from GitHub."""
+    payload = _gh_json(
+        "gh", "pr", "view", str(DECLINE_ROUTING_CUTOFF_PR),
+        "--repo", REPO, "--json", "mergedAt",
+    )
+    if not isinstance(payload, dict):
+        raise GitHubError(
+            "could not read classifier PR #{}".format(
+                DECLINE_ROUTING_CUTOFF_PR
+            )
+        )
+    cutoff = _metric_time(payload.get("mergedAt"))
+    if cutoff is None:
+        raise GitHubError(
+            "classifier PR #{} has no parseable merge time".format(
+                DECLINE_ROUTING_CUTOFF_PR
+            )
+        )
+    return cutoff
+
+
+def _decline_routing_search_query(repo: str, start: datetime) -> str:
+    """Find issue candidates whose comments may contain an in-window decline."""
+    if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is None:
+        raise GitHubError("invalid repository ref {}".format(repo))
+    return (
+        'repo:{} is:issue in:comments "Declined:" updated:>={}'
+    ).format(repo, start.date().isoformat())
+
+
+def _decline_routing_issue_pages(
+    repo: str, start: datetime
+) -> Iterable[Dict[str, object]]:
+    """Yield bounded issue-search pages with the state needed to classify them."""
+    search_text = _decline_routing_search_query(repo, start)
+    cursor: Optional[str] = None
+    seen_cursors: Set[str] = set()
+    while True:
+        variables: Dict[str, object] = {"search": search_text}
+        if cursor is not None:
+            variables["cursor"] = cursor
+        response = gh_graphql(DECLINE_ROUTING_SEARCH, **variables)
+        connection = response.get("search") if isinstance(response, dict) else None
+        if not isinstance(connection, dict):
+            raise GitHubError(
+                "could not read decline-search results for {}".format(repo)
+            )
+        issue_count = connection.get("issueCount")
+        if (not isinstance(issue_count, int) or isinstance(issue_count, bool)
+                or issue_count < 0):
+            raise GitHubError("invalid decline-search count for {}".format(repo))
+        if issue_count > 1000:
+            raise GitHubError(
+                "decline search for {} exceeded GitHub's 1,000-issue limit"
+                .format(repo)
+            )
+        nodes = connection.get("nodes")
+        page_info = connection.get("pageInfo")
+        if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            raise GitHubError("invalid decline-search page for {}".format(repo))
+        for node in nodes:
+            if not isinstance(node, dict) or node.get("__typename") != "Issue":
+                raise GitHubError(
+                    "decline search returned an invalid issue for {}".format(repo)
+                )
+            repository = node.get("repository")
+            if not isinstance(repository, dict):
+                raise GitHubError("decline-search issue has no repository")
+            if repository.get("nameWithOwner") != repo:
+                raise GitHubError(
+                    "decline search returned an issue outside {}".format(repo)
+                )
+            yield node
+        if not page_info.get("hasNextPage"):
+            return
+        next_cursor = page_info.get("endCursor")
+        if not isinstance(next_cursor, str) or not next_cursor:
+            raise GitHubError(
+                "decline-search page for {} has no next cursor".format(repo)
+            )
+        if next_cursor == cursor or next_cursor in seen_cursors:
+            raise GitHubError(
+                "decline-search page for {} repeated its cursor".format(repo)
+            )
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+
+
+def _decline_routing_comment_rows(
+    issue: Mapping, start: datetime
+) -> List[Dict[str, object]]:
+    """Validate the comment tail and return its rows without reading old bodies."""
+    comments = issue.get("comments")
+    if not isinstance(comments, dict):
+        raise GitHubError("decline-search issue has no comments connection")
+    nodes = comments.get("nodes")
+    page_info = comments.get("pageInfo")
+    if not isinstance(nodes, list) or not isinstance(page_info, dict):
+        raise GitHubError("invalid decline comments connection")
+    rows: List[Dict[str, object]] = []
+    times: List[datetime] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise GitHubError("invalid issue-comment row in decline search")
+        created_at = _metric_time(node.get("createdAt"))
+        body = node.get("body")
+        if created_at is None or not isinstance(body, str):
+            raise GitHubError("decline-search issue has an unreadable comment")
+        times.append(created_at)
+        rows.append({"body": body, "created_at": created_at})
+
+    # The last 100 comments are enough unless more comments on this issue
+    # also fall inside the reporting window. In that case fail closed instead
+    # of silently dropping older declines or routing comments.
+    if page_info.get("hasPreviousPage"):
+        if not times:
+            raise GitHubError("decline comments page is unexpectedly empty")
+        if min(times) > start:
+            raise GitHubError(
+                "decline comments for {} exceed the bounded comment page".format(
+                    (issue.get("repository") or {}).get("nameWithOwner")
+                )
+            )
+    return rows
+
+
+def _codex_decline_events(
+    comments: Sequence[Mapping], start: datetime, now: datetime
+) -> List[Tuple[datetime, str, str]]:
+    """Read in-window Codex declines as (time, run, reason)."""
+    found: List[Tuple[datetime, str, str]] = []
+    for comment in comments:
+        body = comment.get("body")
+        created_at = comment.get("created_at")
+        if not isinstance(body, str) or not body.lstrip().startswith(DECLINED_PREFIX):
+            continue
+        if not isinstance(created_at, datetime):
+            raise GitHubError("decline comment has no parseable creation time")
+        # Keep the historical hand-fixed cases outside the parser path.
+        if created_at < start or created_at > now:
+            continue
+        provenance = parse_provenance(body)
+        if (
+            provenance is None
+            or provenance.get("voice") != "agent"
+            or provenance.get("agent") != "codex"
+        ):
+            continue
+        run = provenance.get("run")
+        if isinstance(run, str) and run:
+            reason = body.lstrip()[len(DECLINED_PREFIX):].split(
+                PROVENANCE_MARKER, 1
+            )[0].strip()
+            found.append((created_at, run, reason))
+    return found
+
+
+def _decline_routing_outcome(
+    issue: Mapping, comments: Sequence[Mapping],
+    decline_at: datetime, run: str, decline_reason: str,
+    start: datetime, now: datetime,
+) -> Optional[str]:
+    """Classify one ticket's latest in-window Codex decline from GitHub facts."""
+    repository = issue.get("repository")
+    repo = repository.get("nameWithOwner") if isinstance(repository, dict) else None
+    if not isinstance(repo, str):
+        raise GitHubError("decline-search issue has no repository")
+    decline_class, decline_target = classify_decline_reason(
+        decline_reason, repo, issue.get("body") or ""
+    )
+
+    routing_comment = False
+    for comment in comments:
+        body = comment.get("body")
+        created_at = comment.get("created_at")
+        if (
+            not isinstance(body, str)
+            or DECLINE_ROUTING_REVIEW_MARKER not in body
+            or not isinstance(created_at, datetime)
+            or created_at < max(start, decline_at)
+            or created_at > now
+        ):
+            continue
+        record = _marked_json(body, DECLINE_ROUTING_REVIEW_MARKER)
+        provenance = parse_provenance(body)
+        routing_comment = bool(
+            isinstance(record, dict)
+            and record.get("type") == "accept-body-conflict"
+            and isinstance(record.get("decline_excerpt"), str)
+            and isinstance(record.get("conflict_pointer"), str)
+            and record.get("conflict_pointer")
+            and provenance is not None
+            and provenance.get("voice") == "agent"
+            and provenance.get("agent") == "codex"
+            and provenance.get("run") == run
+        )
+        if routing_comment:
+            break
+
+    labels = issue.get("labels")
+    label_nodes = labels.get("nodes") if isinstance(labels, dict) else None
+    label_count = labels.get("totalCount") if isinstance(labels, dict) else None
+    if not isinstance(label_nodes, list) or label_count != len(label_nodes):
+        raise GitHubError("decline-search issue has incomplete labels")
+    blocked_label = any(
+        isinstance(label, dict) and label.get("name") == "blocked"
+        for label in label_nodes
+    )
+
+    blocked_by = issue.get("blockedBy")
+    blocker_nodes = blocked_by.get("nodes") if isinstance(blocked_by, dict) else None
+    edge_count = blocked_by.get("totalCount") if isinstance(blocked_by, dict) else None
+    if (
+        not isinstance(blocker_nodes, list)
+        or not isinstance(edge_count, int)
+        or isinstance(edge_count, bool)
+        or edge_count < len(blocker_nodes)
+        or edge_count < 0
+    ):
+        raise GitHubError("decline-search issue has an unreadable blocked-by count")
+    blocker_refs = set()
+    for blocker in blocker_nodes:
+        if not isinstance(blocker, dict):
+            raise GitHubError("decline-search issue has an invalid blocked-by edge")
+        number = blocker.get("number")
+        repository = blocker.get("repository")
+        owner_repo = (
+            repository.get("nameWithOwner")
+            if isinstance(repository, dict) else None
+        )
+        if (
+            not isinstance(number, int) or isinstance(number, bool)
+            or not isinstance(owner_repo, str)
+        ):
+            raise GitHubError("decline-search issue has an invalid blocked-by edge")
+        blocker_refs.add("{}#{}".format(owner_repo, number))
+    if (
+        decline_class == "prerequisite-ticket"
+        and isinstance(decline_target, str)
+        and decline_target not in blocker_refs
+        and edge_count > len(blocker_nodes)
+    ):
+        raise GitHubError(
+            "blocked-by edges for {} exceed the bounded response".format(repo)
+        )
+
+    state = str(issue.get("state") or "").upper()
+    reason = str(issue.get("stateReason") or "").upper()
+    closed_at = _metric_time(issue.get("closedAt"))
+    completed_close = (
+        state == "CLOSED" and reason == "COMPLETED"
+        and closed_at is not None and closed_at >= decline_at
+    )
+
+    if decline_class == "defer-note-proof" and completed_close:
+        return "closed_as_proven_defer"
+    if decline_class == "accept-body-conflict" and routing_comment:
+        return "routed_to_review"
+    if (
+        decline_class == "prerequisite-ticket"
+        and isinstance(decline_target, str)
+        and decline_target in blocker_refs
+        and not blocked_label
+    ):
+        return "became_edge"
+    if blocked_label:
+        return "stayed_blocked"
+    return None
+
+
+def decline_routing_metric(
+    items: Iterable[Item], now: datetime
+) -> Dict[str, object]:
+    """Count forward-only Codex decline outcomes from current GitHub state.
+
+    The latest Codex decline per issue is classified in a rolling 30-day
+    window. The window is clipped to #1419's merge, so the four hand-fixed
+    2026-09-23 declines never enter the parser or the counts.
+    """
+    normalized_now = _metric_time(now)
+    if normalized_now is None:
+        raise GitHubError("decline-routing metric needs a parseable current time")
+    merged_at = _decline_routing_cutoff()
+    start = max(normalized_now - MAINTENANCE_WINDOW, merged_at)
+    repos = {REPO}
+    for item in items:
+        repo = getattr(item, "repo", None)
+        if not isinstance(repo, str):
+            raise GitHubError("decline-routing metric found an invalid item repo")
+        if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo) is None:
+            raise GitHubError("invalid repository ref {}".format(repo))
+        repos.add(repo)
+
+    counts = {
+        "became_edge": 0,
+        "closed_as_proven_defer": 0,
+        "routed_to_review": 0,
+        "stayed_blocked": 0,
+    }
+    declines = 0
+    unclassified = 0
+    seen_issues: Set[str] = set()
+    for repo in sorted(repos):
+        for issue in _decline_routing_issue_pages(repo, start):
+            number = issue.get("number")
+            if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+                raise GitHubError("decline-search issue has an invalid number")
+            ref = "{}#{}".format(repo, number)
+            if ref in seen_issues:
+                raise GitHubError("decline search repeated {}".format(ref))
+            seen_issues.add(ref)
+            comments = _decline_routing_comment_rows(issue, start)
+            events = _codex_decline_events(comments, start, normalized_now)
+            if not events:
+                continue
+            decline_at, run, decline_reason = max(
+                events, key=lambda event: event[0]
+            )
+            declines += 1
+            outcome = _decline_routing_outcome(
+                issue, comments, decline_at, run, decline_reason,
+                start, normalized_now,
+            )
+            if outcome is None:
+                unclassified += 1
+            else:
+                counts[outcome] += 1
+
+    return {
+        "window_days": MAINTENANCE_WINDOW.days,
+        "cutoff_pr": DECLINE_ROUTING_CUTOFF_PR,
+        "cutoff_at": merged_at.isoformat().replace("+00:00", "Z"),
+        "from": start.isoformat().replace("+00:00", "Z"),
+        "through": normalized_now.isoformat().replace("+00:00", "Z"),
+        "definition": (
+            "latest Codex-provenanced **Declined:** comment per issue in the "
+            "rolling 30-day window, clipped to the merge of classifier PR "
+            "#{}; current GitHub state supplies the outcome"
+        ).format(DECLINE_ROUTING_CUTOFF_PR),
+        "status": "available" if not unclassified else "partial",
+        "available": not unclassified,
+        "declines": declines,
+        **counts,
+        "unclassified": unclassified,
+        "reason": (
+            "{} decline ticket(s) did not have exactly one routing outcome"
+            .format(unclassified) if unclassified else None
+        ),
+    }
+
+
 def _read_portfolio_metrics(
     items: Iterable[Item], now: datetime
 ) -> Dict[str, object]:
@@ -7446,6 +7847,23 @@ query($ids: [ID!]!) {
 }
 """
 
+
+def _item_detail_request(
+    ids: Sequence[str], child_ids: Sequence[str],
+) -> Tuple[str, Dict[str, List[str]], str, Optional[str]]:
+    """Assemble one batched document for history and optional child nodes.
+
+    History is fetched for every selected Project item in one ``nodes`` list.
+    Child timestamps share that GraphQL document when any selected item has
+    children; otherwise use the smaller history-only document.
+    """
+    variables = {"ids": list(ids)}
+    if child_ids:
+        variables["childIds"] = list(child_ids)
+        return ITEM_DETAILS_QUERY, variables, "history", "children"
+    return ITEM_TIMELINE_DETAILS_QUERY, variables, "nodes", None
+
+
 ITEM_LOCK_QUERY = """
 query($item: ID!) {
   rateLimit { cost remaining resetAt }
@@ -7466,6 +7884,14 @@ class GitHubError(RuntimeError):
         super().__init__(message)
         self.transient = transient
         self.request_id = request_id
+
+
+class BeginReserveStop(RuntimeError):
+    """Stop before the Project read when the first query shows low headroom."""
+
+    def __init__(self, result: Dict[str, object]):
+        self.result = result
+        super().__init__(str(result.get("why") or "begin reserve gate"))
 
 
 # `gh api graphql` occasionally returns a partial JSON document. The CLI
@@ -8158,14 +8584,51 @@ def parse_time(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def member_repos() -> List[str]:
+def _record_begin_load_phase(
+    timings: Optional[Dict[str, object]], phase: str, elapsed: float,
+) -> None:
+    """Add one non-gating begin-load duration to the existing timings map."""
+    if timings is None:
+        return
+    try:
+        timings["begin_load." + phase] = round(max(0.0, elapsed), 6)
+    except Exception:
+        # Instrumentation must not gate the command it instruments.
+        return
+
+
+def _begin_load_timed(
+    timings: Optional[Dict[str, object]],
+    phase: str,
+    reader: Callable[[], Any],
+) -> Any:
+    """Run one begin-load phase and record its duration when requested."""
+    if timings is None:
+        return reader()
+    started = time.perf_counter()
+    try:
+        return reader()
+    finally:
+        _record_begin_load_phase(
+            timings, phase, time.perf_counter() - started
+        )
+
+
+def member_repos(
+    after_first_response: Optional[Callable[[Mapping[str, object]], None]] = None,
+) -> List[str]:
     """Repos that opted in by carrying the topic. Never an allowlist."""
     members: List[str] = []
+    first_response = after_first_response
     for kind, login in OWNERS:
         query = REPO_QUERY.replace("OWNER_KIND", kind).replace("OWNER_LOGIN", login)
         cursor = None
         while True:
             data = gh_graphql(query, **({"cursor": cursor} if cursor else {}))
+            if first_response is not None:
+                callback = first_response
+                first_response = None
+                callback(data)
             repos = data[kind]["repositories"]
             for node in repos["nodes"]:
                 if node["isArchived"]:
@@ -8381,21 +8844,22 @@ def hydrate_item_details(
     if not ids:
         return
 
+    child_id_set = set(child_ids)
     for start in range(0, len(ids), PROJECT_ITEM_DETAIL_BATCH_SIZE):
         batch = ids[start:start + PROJECT_ITEM_DETAIL_BATCH_SIZE]
-        child_batch = child_ids[start:start + PROJECT_ITEM_DETAIL_BATCH_SIZE]
-        if child_batch:
-            data = gh_graphql(
-                ITEM_DETAILS_QUERY,
-                ids=batch,
-                childIds=child_batch,
-            )
-            timeline_nodes = data.get("history") if isinstance(data, dict) else None
-            child_nodes = data.get("children") if isinstance(data, dict) else None
+        child_batch = [item_id for item_id in batch if item_id in child_id_set]
+        query, variables, history_field, child_field = _item_detail_request(
+            batch, child_batch
+        )
+        data = gh_graphql(query, **variables)
+        if not isinstance(data, dict):
+            timeline_nodes = None
+            child_nodes = None if child_field is not None else []
         else:
-            data = gh_graphql(ITEM_TIMELINE_DETAILS_QUERY, ids=batch)
-            timeline_nodes = data.get("nodes") if isinstance(data, dict) else None
-            child_nodes = []
+            timeline_nodes = data.get(history_field)
+            child_nodes = (
+                data.get(child_field) if child_field is not None else []
+            )
         if (
             not isinstance(timeline_nodes, list)
             or not isinstance(child_nodes, list)
@@ -8421,45 +8885,74 @@ def hydrate_item_details(
                 )
 
 
-def load_items(include_details: bool = True) -> List[Item]:
+def load_items(
+    include_details: bool = True,
+    member_repo_names: Optional[Sequence[str]] = None,
+    timings: Optional[Dict[str, object]] = None,
+) -> List[Item]:
     global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
-    members = set(member_repos())
+    members = set(
+        member_repo_names
+        if member_repo_names is not None
+        else _begin_load_timed(timings, "member_repos", member_repos)
+    )
     items: List[Item] = []
     cursor = None
-    while True:
-        variables = {"login": PROJECT_OWNER, "number": PROJECT_NUMBER}
-        if cursor:
-            variables["cursor"] = cursor
-        _PROJECT_ITEM_PAGE_COUNT += 1
-        project = gh_graphql(ITEM_QUERY, **variables)["user"]["projectV2"]
-        if project is None:
-            raise GitHubError(
-                "Project {}/{} not found or not visible".format(
-                    PROJECT_OWNER, PROJECT_NUMBER
+    project_started = time.perf_counter() if timings is not None else None
+    block_comment_seconds = 0.0
+    try:
+        while True:
+            variables = {"login": PROJECT_OWNER, "number": PROJECT_NUMBER}
+            if cursor:
+                variables["cursor"] = cursor
+            _PROJECT_ITEM_PAGE_COUNT += 1
+            project = gh_graphql(ITEM_QUERY, **variables)["user"]["projectV2"]
+            if project is None:
+                raise GitHubError(
+                    "Project {}/{} not found or not visible".format(
+                        PROJECT_OWNER, PROJECT_NUMBER
+                    )
                 )
+            page = project["items"]
+            nodes = page["nodes"]
+            _PROJECT_ITEM_ROW_COUNT += len(nodes)
+            for node in nodes:
+                item = _from_node(node)
+                # Membership is the topic. An item whose repo has not opted in
+                # is outside the funnel even though it sits in the Project.
+                if item and item.repo in members:
+                    # Dependencies are already on the item: `_from_node` reads
+                    # them from `blockedBy` in the Project query. They used to
+                    # be fetched here instead, one REST call per open ticket —
+                    # do not restore a per-item dependency read in this loop.
+                    if item.state == "OPEN" and item.is_blocked:
+                        comment_started = time.perf_counter()
+                        try:
+                            _load_block_comment(item)
+                        finally:
+                            block_comment_seconds += (
+                                time.perf_counter() - comment_started
+                            )
+                    items.append(item)
+            if not page["pageInfo"]["hasNextPage"]:
+                break
+            cursor = page["pageInfo"]["endCursor"]
+    finally:
+        if project_started is not None:
+            project_elapsed = max(
+                0.0,
+                time.perf_counter() - project_started - block_comment_seconds,
             )
-        page = project["items"]
-        nodes = page["nodes"]
-        _PROJECT_ITEM_ROW_COUNT += len(nodes)
-        for node in nodes:
-            item = _from_node(node)
-            # Membership is the topic. An item whose repo has not opted in is
-            # outside the funnel even though it sits in the Project.
-            if item and item.repo in members:
-                # Dependencies are already on the item: `_from_node` reads them
-                # from `blockedBy` in the Project query. They used to be fetched
-                # here instead, one REST call per open ticket per command — ~78
-                # calls a run, ~1,800 an hour across the scheduled agents, which
-                # exhausted the API budget on 2026-09-08 and took `brief` down
-                # entirely. Do not restore a per-item read in this loop.
-                if item.state == "OPEN" and item.is_blocked:
-                    _load_block_comment(item)
-                items.append(item)
-        if not page["pageInfo"]["hasNextPage"]:
-            break
-        cursor = page["pageInfo"]["endCursor"]
+            _record_begin_load_phase(
+                timings, "project_items", project_elapsed,
+            )
+            _record_begin_load_phase(
+                timings, "block_comments", block_comment_seconds
+            )
     if include_details:
-        hydrate_item_details(items)
+        _begin_load_timed(
+            timings, "item_details", lambda: hydrate_item_details(items)
+        )
     mark_projects_that_carried_human_steps(items)
     return items
 
@@ -8526,6 +9019,8 @@ def class_display(item: Item, by_ref: Dict[str, Item]) -> str:
 def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = None) -> dict:
     by_ref = by_ref if by_ref is not None else {}
     breakdown = breakdown_latency(item)
+    question = gate_question(item)
+    acceptance_reason = _acceptance_waiting_reason(item, question)
     rendered = {
         "ref": item.ref,
         "repo": item.repo,
@@ -8533,7 +9028,7 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
         "url": item.url,
         "status": item.status,
         "class": effective_class(item, by_ref),
-        "waiting_on": gate_question(item),
+        "waiting_on": question,
         "waited": humanise(item.waited(now)),
         "waited_days": item.waited(now).days if item.waited(now) else None,
         "breakdown_latency": humanise(breakdown) if breakdown else None,
@@ -8545,6 +9040,8 @@ def item_json(item: Item, now: datetime, by_ref: Optional[Dict[str, Item]] = Non
         rendered["pinned"] = True
     if item.needs_decision is not None:
         rendered["needs_decision"] = item.needs_decision
+    if acceptance_reason is not None:
+        rendered["waiting_reason"] = acceptance_reason
     return rendered
 
 
@@ -11419,6 +11916,7 @@ def cmd_brief(
     brief_cache: Optional[BriefCache] = None,
     outcome_signals: Optional[Dict[str, object]] = None,
     portfolio_metrics: Optional[Dict[str, object]] = None,
+    decline_routing: Optional[Dict[str, object]] = None,
     main_ci: Optional[List[Dict[str, object]]] = None,
     orphan_issues: Optional[Dict[str, object]] = None,
 ) -> int:
@@ -11659,6 +12157,7 @@ def cmd_brief(
                 portfolio_metrics.get("command_center_ticket_pr_share")
                 if isinstance(portfolio_metrics, dict) else None
             ),
+            "decline_routing": decline_routing,
             "resend_ratio": resend,
             "unattended_merges": merges,
             "unattended_approvals": approvals,
@@ -13079,6 +13578,15 @@ def _call_with_optional_keyword(
     return func(*args)
 
 
+def _call_with_optional_keywords(func: Callable, *args, **kwargs):
+    """Pass only supported optional keywords to a compatibility seam."""
+    accepted = {
+        name: value for name, value in kwargs.items()
+        if _accepts_keyword(func, name)
+    }
+    return func(*args, **accepted)
+
+
 PR_GRAPHQL_PAGE_SIZE = 100
 PR_GRAPHQL_COMMENT_PAGE_SIZE = 100
 PR_GRAPHQL_REF_PAGE_SIZE = 100
@@ -14393,36 +14901,20 @@ def _begin_preflight(
     return out, reading
 
 
-BEGIN_RATE_LIMIT_QUERY = """
-query {
-  rateLimit { cost remaining resetAt }
-}
-"""
-
-
 def _begin_api_reserve_preflight(
-    agent: str, tier: Optional[str], caller_role: Optional[str]
+    agent: str,
+    tier: Optional[str],
+    caller_role: Optional[str],
+    response: Optional[Mapping[str, object]] = None,
 ) -> Optional[Dict[str, object]]:
-    """Read the GraphQL budget before ``begin`` loads the Project.
+    """Check headroom from the first real begin query's GraphQL response.
 
-    The Project load is the expensive part of an empty poll.  A rate-limit-only
-    query gives the caller one authoritative reading without paying for the
-    Project first.  Its own cost is not the cost being reserved: #1047 measured
-    the next begin load at ``BEGIN_PROJECT_LOAD_COST`` points.
-
-    A structured zero-budget response can carry both ``rateLimit`` and GraphQL
-    errors.  ``gh_graphql`` raises for the latter after preserving the former,
-    so treat that specific empty-window shape as the same clean reserve stop as
-    a successful below-floor response. Other failures remain real begin
-    errors and are handled by the existing error envelope.
+    ``member_repos`` is the first live read in a normal begin and its document
+    already carries ``rateLimit``.  Reuse that response instead of spending a
+    standalone probe before the funnel-state load.  A structured zero-budget
+    response can carry both ``rateLimit`` and GraphQL errors; ``gh_graphql``
+    preserves that block in ``graphql_spend()`` before it raises.
     """
-    response = None
-    try:
-        response = gh_graphql(BEGIN_RATE_LIMIT_QUERY)
-    except GitHubError:
-        if _budget_exhaustion_signal() is None:
-            raise
-
     remaining = None
     if isinstance(response, Mapping):
         block = response.get("rateLimit")
@@ -14609,6 +15101,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               _preflight: Optional[
                   Tuple[Dict[str, object], Optional[Dict[str, object]]]
               ] = None,
+              timings: Optional[Dict[str, object]] = None,
               ) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
@@ -14629,6 +15122,8 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if _preflight is None:
         _preflight = _begin_preflight(now, agent, idle, tier)
     out, reading = _preflight
+    if timings is not None:
+        out["timings"] = timings
     if reading is None:
         print(json.dumps(out, indent=2))
         return 0
@@ -14665,7 +15160,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     # Keeping it here prevents the approved-merge pass, engineer hand-back, and
     # reviewer queue from each paying for the same repository fan-out.
     try:
-        pr_facts = ticket_pr_facts(items)
+        pr_facts = _begin_load_timed(
+            timings, "ticket_pr_facts", lambda: ticket_pr_facts(items)
+        )
     except GitHubError as exc:
         out.update(
             do="stop",
@@ -16426,6 +16923,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
     # the Project. Keep that gate ahead of the shared loader; an ordinary poll
     # must not spend the full Project read merely to learn that it cannot run.
     begin_preflight = None
+    begin_timings: Optional[Dict[str, object]] = None
+    begin_member_repo_names: Optional[List[str]] = None
     if args.command == "begin":
         begin_preflight = _begin_preflight(
             now, args.agent, args.idle, args.tier)
@@ -16438,15 +16937,39 @@ def main(argv: Optional[Sequence[str]] = None, *,
             begin_preflight[0].update(role_refusal)
             print(json.dumps(begin_preflight[0], indent=2))
             return 0
-        try:
-            begin_reserve = _begin_api_reserve_preflight(
-                args.agent, args.tier, args.caller_role
+        begin_timings = {}
+        reserve_response_seen = {"value": False}
+
+        def check_first_member_response(response):
+            reserve_response_seen["value"] = True
+            reserve = _begin_api_reserve_preflight(
+                args.agent, args.tier, args.caller_role, response
             )
-        except GitHubError as exc:
-            _begin_error_envelope(args.agent, exc)
-            return 2
-        if begin_reserve is not None:
-            begin_preflight[0].update(begin_reserve)
+            if reserve is not None:
+                raise BeginReserveStop(reserve)
+
+        try:
+            begin_member_repo_names = _begin_load_timed(
+                begin_timings,
+                "member_repos",
+                lambda: _call_with_optional_keyword(
+                    member_repos,
+                    "after_first_response",
+                    check_first_member_response,
+                ),
+            )
+            if not reserve_response_seen["value"]:
+                raise BeginReserveStop(_begin_api_reserve_preflight(
+                    args.agent, args.tier, args.caller_role
+                ) or {
+                    "gate": "reserve",
+                    "do": "stop",
+                    "why": "GraphQL budget could not be read; a run that "
+                           "cannot read its budget does not work",
+                })
+        except BeginReserveStop as stop:
+            begin_preflight[0].update(stop.result)
+            begin_preflight[0]["timings"] = begin_timings
             _record_begin_reserve(
                 args.agent,
                 begin_preflight[0].get("run"),
@@ -16454,6 +16977,23 @@ def main(argv: Optional[Sequence[str]] = None, *,
             )
             print(json.dumps(begin_preflight[0], indent=2))
             return 0
+        except GitHubError as exc:
+            if _budget_exhaustion_signal() is not None:
+                begin_reserve = _begin_api_reserve_preflight(
+                    args.agent, args.tier, args.caller_role
+                )
+                if begin_reserve is not None:
+                    begin_preflight[0].update(begin_reserve)
+                    begin_preflight[0]["timings"] = begin_timings
+                    _record_begin_reserve(
+                        args.agent,
+                        begin_preflight[0].get("run"),
+                        begin_preflight[0]["why"],
+                    )
+                    print(json.dumps(begin_preflight[0], indent=2))
+                    return 0
+            _begin_error_envelope(args.agent, exc)
+            return 2
 
     brief_timings: Optional[Dict[str, object]] = (
         {} if args.command == "brief" else None
@@ -16470,17 +17010,45 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if _items is not None:
             items = _items
         elif _items_loader is not None:
-            items = _items_loader()
+            if args.command == "begin":
+                items = _call_with_optional_keywords(
+                    _items_loader,
+                    include_details=False,
+                    member_repo_names=begin_member_repo_names,
+                    timings=begin_timings,
+                )
+            else:
+                items = _items_loader()
         elif args.command == "begin":
             # `begin` selects one job after its cheap gates. Keep the initial
             # Project scan compact; cmd_begin hydrates only the candidates it
             # actually needs to order or hand out.
-            items = load_items(include_details=False)
-            begin_detail_loader = lambda candidates: hydrate_item_details(
-                items, candidates
+            items = _call_with_optional_keywords(
+                load_items,
+                include_details=False,
+                member_repo_names=begin_member_repo_names,
+                timings=begin_timings,
             )
+
+            def hydrate_begin_candidates(candidates):
+                return _begin_load_timed(
+                    begin_timings,
+                    "item_details",
+                    lambda: hydrate_item_details(items, candidates),
+                )
+
+            begin_detail_loader = hydrate_begin_candidates
         else:
             items = load_items()
+        if args.command == "begin" and begin_detail_loader is None:
+            def hydrate_begin_candidates(candidates):
+                return _begin_load_timed(
+                    begin_timings,
+                    "item_details",
+                    lambda: hydrate_item_details(items, candidates),
+                )
+
+            begin_detail_loader = hydrate_begin_candidates
     except GitHubError as exc:
         if args.command == "brief":
             print(json.dumps({
@@ -16514,7 +17082,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
             )
         ):
-            repo_readiness = repo_readiness_for_items(items)
+            repo_readiness = _begin_load_timed(
+                begin_timings,
+                "repo_readiness",
+                lambda: repo_readiness_for_items(items),
+            )
         if args.command == "claim":
             return cmd_claim(
                 items, now, args.ref, pr_facts=ticket_pr_facts(items)
@@ -16572,6 +17144,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
             if begin_detail_loader is not None:
                 begin_kwargs["_detail_loader"] = begin_detail_loader
             begin_kwargs["_preflight"] = begin_preflight
+            if begin_timings is not None and _accepts_keyword(
+                cmd_begin, "timings"
+            ):
+                begin_kwargs["timings"] = begin_timings
             return cmd_begin(
                 items, now, args.agent, args.tier, args.idle,
                 args.breakdown, **begin_kwargs
@@ -16668,6 +17244,19 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
                 if portfolio_metrics is _BRIEF_UNAVAILABLE:
                     portfolio_metrics = None
+                decline_routing = _brief_timed(
+                    "decline_routing",
+                    lambda: _brief_read(
+                        "decline_routing",
+                        lambda: decline_routing_metric(items, now),
+                        missing,
+                    ),
+                    timings,
+                    degraded,
+                    deadline=deadline,
+                )
+                if decline_routing is _BRIEF_UNAVAILABLE:
+                    decline_routing = None
                 # Live read, computed here rather than inside cmd_brief for the
                 # same reason as the two above: the renderer stays pure over its
                 # arguments, so a fixture brief needs no network and reports
@@ -16717,6 +17306,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                             brief_cache=cache,
                             outcome_signals=outcome_signals,
                             portfolio_metrics=portfolio_metrics,
+                            decline_routing=decline_routing,
                             main_ci=main_ci,
                             orphan_issues=orphans,
                         )
@@ -17063,9 +17653,19 @@ class FunnelSession:
         self._heartbeat_agent: Optional[str] = None
         self._heartbeat_tier: Optional[str] = None
 
-    def _load_items(self) -> List[Item]:
+    def _load_items(
+        self,
+        include_details: bool = True,
+        member_repo_names: Optional[Sequence[str]] = None,
+        timings: Optional[Dict[str, object]] = None,
+    ) -> List[Item]:
         if self.items is None:
-            self.items = self._loader()
+            self.items = _call_with_optional_keywords(
+                self._loader,
+                include_details=include_details,
+                member_repo_names=member_repo_names,
+                timings=timings,
+            )
         return self.items
 
     def dispatch(self, argv: Sequence[str], stdin=None):

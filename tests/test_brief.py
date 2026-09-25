@@ -25,6 +25,10 @@ def no_resend_network(monkeypatch):
     monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
     monkeypatch.setattr(funnel, "_read_outcome_signals", lambda now: None)
     monkeypatch.setattr(funnel, "_read_portfolio_metrics", lambda items, now: None)
+    monkeypatch.setattr(
+        funnel, "decline_routing_metric",
+        lambda items, now: {"status": "available", "declines": 0},
+    )
     yield
     funnel.reset_api_usage()
 
@@ -238,6 +242,22 @@ def test_brief_carries_portfolio_metrics_without_recomputing_them(capsys):
     assert brief["command_center_ticket_pr_share"] == metrics[
         "command_center_ticket_pr_share"
     ]
+
+
+def test_brief_carries_decline_routing_section_without_recomputing_them(capsys):
+    metric = {
+        "window_days": 30,
+        "declines": 4,
+        "became_edge": 1,
+        "closed_as_proven_defer": 1,
+        "routed_to_review": 1,
+        "stayed_blocked": 1,
+    }
+
+    assert funnel.cmd_brief([], NOW, decline_routing=metric) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["decline_routing"] == metric
 
 
 def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
@@ -1325,6 +1345,10 @@ def test_main_brief_reads_named_outcome_signals(monkeypatch, capsys):
 
     assert brief["outcome_signals"] == signals
     assert "outcome_signals" in brief["timings"]
+    assert brief["decline_routing"] == {
+        "status": "available", "declines": 0
+    }
+    assert "decline_routing" in brief["timings"]
 
 
 def test_brief_emits_elapsed_seconds_for_each_section(monkeypatch, capsys):

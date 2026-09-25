@@ -126,6 +126,7 @@ FLOOR_ERROR_MARKERS = (
     "tls handshake timeout",
     "i/o timeout",
 )
+BEGIN_TIMEOUT_ERROR_MARKERS = ("reply-timeout", "slow command: begin")
 REGRESSION_ERROR_MARKERS = ("tests failed:",)
 UNCLASSIFIED_ERROR_MARKERS = (
     "could not derive a test command",
@@ -147,6 +148,8 @@ def classify_error(note: Optional[str], runtime: Optional[Dict]) -> str:
         return "unclassified"
 
     normalized = note.casefold()
+    if all(marker in normalized for marker in BEGIN_TIMEOUT_ERROR_MARKERS):
+        return "begin-timeout"
     if any(marker in normalized for marker in FLOOR_ERROR_MARKERS):
         return "floor"
     if any(marker in normalized for marker in UNCLASSIFIED_ERROR_MARKERS):
@@ -1479,6 +1482,111 @@ def muse_window_consumption(records: List[Dict]) -> List[Dict[str, object]]:
             consumed_by_reset.items(), reverse=True
         )
     ]
+
+
+def record_muse_quota_hit(run: Optional[str], reset_stamp: Optional[str],
+                          raw_refusal: str,
+                          observed_at: Optional[float] = None) -> str:
+    """Record a provider refusal and the paired usage known for its window.
+
+    Only a future reset exactly on Muse's observed Monday 00:00 UTC lattice
+    can use the weekly paired-run total. An off-lattice, malformed, or stale
+    stamp stays unclassified; the local hold may still use its existing
+    fallback, but that fallback is never represented as a provider reset.
+    """
+    observed_at = time.time() if observed_at is None else observed_at
+    if _finite_number(observed_at) is None:
+        observed_at = time.time()
+    observed_at = float(observed_at)
+
+    reset_epoch = None
+    seconds_to_reset = None
+    weekly_lattice = False
+    classification = "unclassified"
+    degraded = []
+    if not isinstance(reset_stamp, str) or not reset_stamp.strip():
+        degraded.append("provider reset stamp is missing")
+    else:
+        try:
+            parsed = datetime.fromisoformat(
+                reset_stamp.strip().replace("Z", "+00:00")
+            )
+        except ValueError:
+            parsed = None
+        if parsed is None:
+            degraded.append("provider reset stamp is malformed")
+        elif parsed.tzinfo is None:
+            degraded.append("provider reset stamp has no timezone")
+        else:
+            reset_utc = parsed.astimezone(timezone.utc)
+            reset_epoch = reset_utc.timestamp()
+            seconds_to_reset = reset_epoch - observed_at
+            weekly_lattice = (
+                reset_utc.weekday() == 0
+                and reset_utc.hour == 0
+                and reset_utc.minute == 0
+                and reset_utc.second == 0
+                and reset_utc.microsecond == 0
+            )
+            if not weekly_lattice:
+                degraded.append(
+                    "reset is off the Monday 00:00 UTC lattice; "
+                    "window type remains unclassified"
+                )
+            elif seconds_to_reset <= 0:
+                degraded.append(
+                    "weekly reset stamp is not in the future; "
+                    "window remains unclassified"
+                )
+            else:
+                classification = "weekly"
+
+    total_dollars = None
+    total_runs = None
+    if classification == "weekly" and reset_epoch is not None:
+        read_failed = False
+        try:
+            records = read("muse", timeout=10)
+            matches = [
+                row for row in muse_window_consumption(records)
+                if abs(float(row["resets_at"]) - reset_epoch) < 0.5
+            ]
+        except Exception:
+            matches = []
+            read_failed = True
+        if matches:
+            total_dollars = matches[0].get("consumed_dollars")
+            total_runs = matches[0].get("runs")
+        if total_dollars is None or total_runs is None:
+            total_dollars = None
+            total_runs = None
+            if read_failed:
+                degraded.append("paired Muse usage total could not be read")
+            else:
+                degraded.append(
+                    "no paired Muse usage total matches this weekly reset"
+                )
+
+    record = {
+        "run": run if isinstance(run, str) and run else None,
+        "agent": "muse",
+        "phase": "quota_hit",
+        "ts": int(observed_at),
+        "reset_stamp": reset_stamp,
+        "seconds_to_reset": (
+            round(seconds_to_reset, 3)
+            if seconds_to_reset is not None else None
+        ),
+        "weekly_lattice": weekly_lattice,
+        "raw_refusal": raw_refusal,
+        "classification": classification,
+        "anchored_window_total_dollars": total_dollars,
+        "anchored_window_runs": total_runs,
+        "degraded_note": "; ".join(degraded) if degraded else None,
+    }
+    kept = append("muse", record)
+    _report(kept)
+    return kept
 
 
 def _parse_records(content: Optional[str]) -> List[Dict]:

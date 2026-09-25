@@ -65,8 +65,9 @@ plan relies on no factual premises.
 ## Needs Nate
 
 Leave to Nate, explicitly rather than guessing: anything unreachable, any
-exposure change, any gate change, scope and priority, any encoded
-preference. Render only categories with an open question:
+exposure change, any gate change, scope and priority (except scheduling on
+agent-origin plans; see below), any encoded preference. Render only
+categories with an open question:
 
 ```text
 - Gates: Who may write Ready?
@@ -75,6 +76,33 @@ preference. Render only categories with an open question:
 The typed shaping answer still carries all four categories as null or a list;
 the runner writes `Needs: human` when any list is open and `Needs: none` when
 all are null.
+
+### Scheduling is the project manager's decision
+
+For an **agent-origin** `Investigate`, `Broken`, `Maintenance`, or `Improve`
+plan, timing, priority, and sequencing are project-manager decisions. Never
+emit a question solely about one of those decisions in `Needs Nate`; record the
+chosen ordering under **Decided by the agent**. A clear choice to wait for a
+named ticket belongs in `depends_on` as an `owner/repo#n` reference. If the
+choice is to proceed without waiting, keep named tickets as context and leave
+`depends_on` empty. For the recorded The-League#258 case, “land now” while
+#165 and #174 are in flight meant no dependency: preserve that decision, keep
+the refs as context, and do not turn the alternative “wait” into a hold.
+
+Keep Exposure, Gates, and Preference questions in `Needs Nate`. Under Scope,
+keep a concrete unresolved stakeholder tradeoff even if it mentions timing,
+and keep a question whose category is unclear. These are the countercases to
+the scheduling rule; classify by meaning, not keywords alone. Apply the rule
+only to agent-origin plans in the four classes above. Leave Nate-origin plans
+and `New` and `Replace` classes untouched.
+
+The shared engine enforces this rule in `engine/shape.py`. Keep this mirror
+aligned with its recorded `#258` replay and countercases in
+`tests/test_engine_shape.py`: a clear wait for a named ticket becomes
+`depends_on`; a real scope tradeoff, Exposure, Gates, Preference, and unclear
+questions remain open; Nate-origin plans and `New` and `Replace` classes stay
+untouched. The `#258` land-now decision advances without a dependency and
+keeps its recorded ordering decision.
 
 When all four are null, a self-approvable Class with `agent` origin and
 `Risk: standard`

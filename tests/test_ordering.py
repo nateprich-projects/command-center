@@ -215,6 +215,35 @@ def test_analysis_marker_waits_and_preserves_other_close_rules(
     assert gate_question(finished) == (None if can_close else "Accept it?")
 
 
+@_pytest.mark.parametrize(
+    ("klass", "body", "expected_reason"),
+    [
+        (
+            "Maintenance",
+            funnel.ANALYSIS_MARKER + '\n```json\n{"analysis": true}\n```',
+            "Analysis review",
+        ),
+        ("New", "", "Ordinary accept"),
+        (
+            "Maintenance",
+            funnel.ANALYSIS_MARKER + "\n```json\n{not json}\n```",
+            "Analysis review",
+        ),
+    ],
+)
+def test_brief_item_explains_why_building_waits_for_acceptance(
+    klass, body, expected_reason
+):
+    finished = project(
+        1, "Building", klass, children=1, done=1, body=body,
+    )
+
+    rendered = funnel.item_json(finished, NOW)
+
+    assert rendered["waiting_on"] == "Accept it?"
+    assert rendered["waiting_reason"] == expected_reason
+
+
 def test_new_replace_and_unset_class_still_wait_for_acceptance():
     for number, klass in enumerate(("New", "Replace", None), start=1):
         finished = project(number, "Building", klass, children=1, done=1)

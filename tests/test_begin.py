@@ -84,6 +84,15 @@ def _allow_begin(monkeypatch):
     )
     monkeypatch.setattr(funnel, "ticket_pr_facts", lambda rows: {})
 
+    def member_repos(after_first_response=None):
+        if after_first_response is not None:
+            after_first_response({
+                "rateLimit": {"cost": 1, "remaining": 5_000},
+            })
+        return []
+
+    monkeypatch.setattr(funnel, "member_repos", member_repos)
+
 
 def _begin(monkeypatch, capsys, *, breakdown):
     _allow_begin(monkeypatch)
@@ -294,17 +303,19 @@ def test_main_loads_the_project_after_begin_gates_pass(
             "over_pace": False,
         },
     )
-    monkeypatch.setattr(
-        funnel,
-        "gh_graphql",
-        lambda query, **variables: events.append("api") or {
-            "rateLimit": {
-                "cost": 1,
-                "remaining": 5_000,
-                "resetAt": "later",
-            },
-        },
-    )
+    def member_repos(after_first_response=None):
+        events.append("api")
+        if after_first_response is not None:
+            after_first_response({
+                "rateLimit": {
+                    "cost": 1,
+                    "remaining": 5_000,
+                    "resetAt": "later",
+                },
+            })
+        return []
+
+    monkeypatch.setattr(funnel, "member_repos", member_repos)
     monkeypatch.setattr(
         funnel,
         "load_items",
@@ -316,8 +327,8 @@ def test_main_loads_the_project_after_begin_gates_pass(
         "cmd_begin",
         lambda items, now, agent, tier, idle, breakdown=False,
         repo_readiness=None, caller_role=None, _detail_loader=None,
-        _preflight=None: (
-            events.append(("begin", items, _preflight)) or 0
+        _preflight=None, timings=None: (
+            events.append(("begin", items, _preflight, timings)) or 0
         ),
     )
 
@@ -328,6 +339,7 @@ def test_main_loads_the_project_after_begin_gates_pass(
     ]
     assert events[-1][0] == "begin"
     assert events[-1][2][0]["gate"] == "ok"
+    assert "begin_load.member_repos" in events[-1][3]
 
 
 def test_main_stands_down_before_loading_the_project_when_reserve_is_low(
@@ -356,7 +368,7 @@ def test_main_stands_down_before_loading_the_project_when_reserve_is_low(
         },
     )
 
-    def rate_limit_only(query, **variables):
+    def first_member_query(query, **variables):
         events.append(("api", query))
         return {
             "rateLimit": {
@@ -366,7 +378,15 @@ def test_main_stands_down_before_loading_the_project_when_reserve_is_low(
             },
         }
 
-    monkeypatch.setattr(funnel, "gh_graphql", rate_limit_only)
+    monkeypatch.setattr(funnel, "OWNERS", [("user", "owner")])
+    monkeypatch.setattr(funnel, "gh_graphql", first_member_query)
+    monkeypatch.setattr(
+        funnel,
+        "_gh_api_json",
+        lambda *args, **kwargs: pytest.fail(
+            "begin reserve must not consult REST rate_limit"
+        ),
+    )
     monkeypatch.setattr(
         funnel,
         "load_items",
@@ -389,6 +409,7 @@ def test_main_stands_down_before_loading_the_project_when_reserve_is_low(
     assert events[:3] == ["heartbeat", "usage", "pace"]
     assert events[3][0] == "api"
     assert "rateLimit" in events[3][1]
+    assert "repositories(first:" in events[3][1]
     assert "projectV2" not in events[3][1]
     assert reserve_events == [
         ("codex", "run-id", "skipped-api-reserve", {"note": result["why"]}),
@@ -400,11 +421,13 @@ def test_begin_preflight_uses_the_capped_engineering_floor(monkeypatch):
     monkeypatch.setattr(
         funnel,
         "gh_graphql",
-        lambda query: {"rateLimit": {"remaining": 826}},
+        lambda *args, **kwargs: pytest.fail(
+            "reserve check must consume an existing GraphQL response"
+        ),
     )
-
     assert funnel._begin_api_reserve_preflight(
-        "codex", "standard", None
+        "codex", "standard", None,
+        {"rateLimit": {"remaining": 826}},
     ) is None
 
 
@@ -462,6 +485,7 @@ def test_main_treats_a_structured_empty_window_as_a_clean_reserve_stop(
     result = json.loads(captured.out)
     assert result["gate"] == "reserve"
     assert result["do"] == "stop"
+    assert result["timings"]["begin_load.member_repos"] >= 0
     assert events[3][0] == "api"
     assert reserve_events == [
         ("codex", "run-id", "skipped-api-reserve", {"note": result["why"]}),
@@ -516,6 +540,7 @@ def test_begin_records_a_named_finish_for_a_structured_exhaustion(
     monkeypatch.setattr(funnel.subprocess, "run", run)
 
     def load_exhausted_project():
+        funnel.gh_graphql("{viewer{login}}")
         funnel.gh_graphql("{viewer{login}}")
         return []
 
@@ -637,6 +662,15 @@ def test_begin_error_after_heartbeat_start_does_not_start_a_second_run(
     )
     monkeypatch.setattr(
         usage, "pace", lambda reading, timestamp, provider: {"over_pace": False}
+    )
+    monkeypatch.setattr(
+        funnel,
+        "member_repos",
+        lambda after_first_response=None: (
+            after_first_response({
+                "rateLimit": {"cost": 1, "remaining": 5_000}
+            }) or []
+        ),
     )
     monkeypatch.setattr(funnel, "repo_readiness_for_items", lambda items: {})
     monkeypatch.setattr(

@@ -76,14 +76,16 @@ PY
 # cannot read still parks the lanes, for MUSE_QUOTA_FALLBACK_SECONDS.
 muse_quota_record() {
   [ -f "${1:-}" ] || return 1
+  local repo_root
+  repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   MUSE_QUOTA_FALLBACK_SECONDS="$MUSE_QUOTA_FALLBACK_SECONDS" \
-    python3 - "$1" "$MUSE_QUOTA_HOLD_FILE" <<'PY'
+    python3 - "$1" "$MUSE_QUOTA_HOLD_FILE" "${2:-}" "$repo_root" <<'PY'
 import datetime
 import os
 import re
 import sys
 
-capture, path = sys.argv[1], sys.argv[2]
+capture, path, run, repo_root = sys.argv[1:5]
 
 try:
     with open(capture, errors="replace") as handle:
@@ -94,7 +96,8 @@ except OSError:
 if "Subscription quota exhausted" not in text:
     raise SystemExit(1)
 
-stamp = None
+candidate = None
+parsed = None
 match = re.search(
     r"usage window resets at\s+(\S+?)[\s.]*(?:\(|$)", text, re.MULTILINE)
 if match:
@@ -103,20 +106,22 @@ if match:
         parsed = datetime.datetime.fromisoformat(candidate.replace("Z", "+00:00"))
     except ValueError:
         parsed = None
-    if parsed is not None:
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-        stamp = parsed
 
-if stamp is None:
+now = datetime.datetime.now(datetime.timezone.utc)
+hold_until = parsed
+if hold_until is None:
     try:
         seconds = float(os.environ.get("MUSE_QUOTA_FALLBACK_SECONDS", "3600"))
     except ValueError:
         seconds = 3600.0
-    stamp = datetime.datetime.now(datetime.timezone.utc) + (
+    hold_until = now + (
         datetime.timedelta(seconds=seconds))
+elif hold_until.tzinfo is None:
+    # Preserve the existing parking behavior, but heartbeat records the raw
+    # stamp as unclassified because a timezone-free value is not evidence.
+    hold_until = hold_until.replace(tzinfo=datetime.timezone.utc)
 
-written = stamp.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+written = hold_until.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 directory = os.path.dirname(path)
 if directory:
     try:
@@ -128,6 +133,26 @@ try:
         handle.write(written + "\n")
 except OSError:
     raise SystemExit(1)
+
+# Heartbeat is the state of record. Its spool is write-ahead and best-effort,
+# so a telemetry problem must never prevent the provider hold from taking effect.
+start = text.rfind("\n", 0, text.find("Subscription quota exhausted")) + 1
+end = text.find("\n", text.find("Subscription quota exhausted"))
+raw_refusal = text[start:end if end >= 0 else len(text)].rstrip("\r")
+try:
+    sys.path.insert(0, repo_root)
+    import heartbeat
+
+    heartbeat.record_muse_quota_hit(
+        run or None,
+        candidate,
+        raw_refusal,
+        observed_at=now.timestamp(),
+    )
+except Exception as exc:
+    print("muse-quota-hold: structured quota record failed: {}".format(exc),
+          file=sys.stderr)
+
 print(written)
 PY
 }

@@ -673,6 +673,78 @@ def test_packet_carries_parent_comments_with_the_same_shape_and_caps():
     json.dumps(found)
 
 
+def test_packet_renders_the_four_1315_premises_as_testable_entries():
+    entries = [
+        {"claim": "CODEX_THREAD_ID reaches the automation process",
+         "evidence": "#1315 CODEX_THREAD_ID probe", "label": "inferred"},
+        {"claim": "The Codex app injects the memory-file read into each run",
+         "evidence": "#1315 memory-read injector", "label": "inferred"},
+        {"claim": "nothing-to-do means the queue had no available work",
+         "evidence": "#1315 nothing-to-do outcomes", "label": "inferred"},
+        {"claim": "writable_roots bound the run to the listed write scope",
+         "evidence": "#1315 writable_roots probe", "label": "inferred"},
+    ]
+    body = "# Parent plan\n\n## Premises\n\n{}\n\nProposed class: Improve\n".format(
+        "\n".join(
+            "- {} (label: {}; evidence: {})".format(
+                row["claim"], row["label"], row["evidence"])
+            for row in entries))
+    parent = {"number": 1, "ref": "owner/repo#1", "body": body,
+              "comments": []}
+
+    found = packet(ticket=ticket(parent=parent))
+
+    assert found["plan_premises"] == [{
+        "parent_ref": "owner/repo#1",
+        "ticket_refs": ["owner/repo#9"],
+        "available": True,
+        "premises": entries,
+    }]
+    assert "body" not in found["ticket"]["parent"]
+    json.dumps(found)
+
+
+@pytest.mark.parametrize("body", [
+    "# Legacy plan\n\nNo premises section was recorded.\n",
+    "# New plan\n\n## Premises\n\nNone recorded.\n\n"
+    "Proposed class: Improve\n",
+])
+def test_packet_keeps_a_plan_without_premises_valid(body):
+    parent = {"number": 1, "ref": "owner/repo#1", "body": body,
+              "comments": []}
+    found = packet(ticket=ticket(parent=parent))
+
+    assert found["plan_premises"] == [{
+        "parent_ref": "owner/repo#1",
+        "ticket_refs": ["owner/repo#9"],
+        "available": True,
+        "premises": [],
+    }]
+    json.dumps(found)
+
+
+def test_packet_marks_an_unreadable_parent_plan_instead_of_empty_premises():
+    parent = {"number": 1, "ref": "owner/repo#1", "comments": []}
+
+    found = packet(ticket=ticket(parent=parent))
+
+    assert found["plan_premises"] == [{
+        "parent_ref": "owner/repo#1",
+        "ticket_refs": ["owner/repo#9"],
+        "available": False,
+        "premises": [],
+        "error": "parent plan body is unavailable",
+    }]
+
+
+def test_review_checklist_probes_inferred_premises_against_live_evidence():
+    text = (ROOT / "routines" / "muse-review.md").read_text()
+    assert "plan_premises" in text
+    assert "labelled `inferred`" in text
+    assert "live" in text and "evidence" in text
+    assert "Do not\nre-derive" in text
+
+
 def test_a_ticket_without_a_comments_list_gets_an_empty_one():
     assert packet()["ticket"]["comments"] == []
 
@@ -708,7 +780,7 @@ def test_fetch_ticket_uses_parent_comments_already_in_the_parent_row(monkeypatch
     def fake_gh_json(*args):
         calls.append(args)
         return {"number": 9, "title": "t", "url": "u", "body": "b",
-                "parent": {"number": 1, "comments": rows},
+                "parent": {"number": 1, "body": "", "comments": rows},
                 "comments": []}
 
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
@@ -719,6 +791,9 @@ def test_fetch_ticket_uses_parent_comments_already_in_the_parent_row(monkeypatch
 
 def test_fetch_ticket_reads_parent_comments_with_one_parent_view(monkeypatch):
     rows = [comment("on the plan")]
+    parent_body = ("# Plan\n\n## Premises\n\n"
+                   "- Claim holds (label: inferred; evidence: probe output)\n\n"
+                   "Proposed class: Improve\n")
     calls = []
 
     def fake_gh_json(*args):
@@ -729,7 +804,7 @@ def test_fetch_ticket_reads_parent_comments_with_one_parent_view(monkeypatch):
         if len(calls) == 2:
             return {"number": 1,
                     "repository": {"full_name": REPO}}
-        return {"comments": rows}
+        return {"body": parent_body, "comments": rows}
 
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
     found = review.fetch_ticket(REPO, 9)
@@ -737,9 +812,14 @@ def test_fetch_ticket_reads_parent_comments_with_one_parent_view(monkeypatch):
     assert calls[1] == (
         "gh", "api", "repos/{}/issues/9/parent".format(REPO))
     assert calls[2] == (
-        "gh", "issue", "view", "1", "--repo", REPO, "--json", "comments")
+        "gh", "issue", "view", "1", "--repo", REPO,
+        "--json", "body,comments")
     assert found["parent"]["comments"] == rows
     assert found["parent"]["ref"] == "{}#1".format(REPO)
+    assert found["parent"]["body"] == parent_body
+    assert packet(ticket=found)["plan_premises"][0]["premises"] == [{
+        "claim": "Claim holds", "evidence": "probe output",
+        "label": "inferred"}]
 
 
 def test_fetch_ticket_resolves_a_cross_repo_parent_to_its_own_repo(monkeypatch):
@@ -757,7 +837,7 @@ def test_fetch_ticket_resolves_a_cross_repo_parent_to_its_own_repo(monkeypatch):
         if len(calls) == 2:
             return {"number": 1054,
                     "repository": {"full_name": home}}
-        return {"comments": rows}
+        return {"body": "", "comments": rows}
 
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
     found = review.fetch_ticket(member, 221)
@@ -765,7 +845,7 @@ def test_fetch_ticket_resolves_a_cross_repo_parent_to_its_own_repo(monkeypatch):
         "gh", "api", "repos/{}/issues/221/parent".format(member))
     assert calls[2] == (
         "gh", "issue", "view", "1054", "--repo", home,
-        "--json", "comments")
+        "--json", "body,comments")
     assert found["parent"]["ref"] == "{}#1054".format(home)
     built = packet(repo=member, ticket=found)
     assert built["ticket"]["parent"]["ref"] == "{}#1054".format(home)
@@ -785,9 +865,10 @@ def test_fetch_ticket_skips_the_relationship_read_when_the_row_names_the_repo(
         if len(calls) == 1:
             return {"number": 9, "title": "t", "url": "u", "body": "b",
                     "parent": {"number": 1,
-                               "repository": {"full_name": REPO}},
+                               "repository": {"full_name": REPO},
+                               "body": ""},
                     "comments": []}
-        return {"comments": rows}
+        return {"body": "", "comments": rows}
 
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
     found = review.fetch_ticket(REPO, 9)
@@ -858,21 +939,21 @@ def test_fetch_ticket_reads_a_cross_repo_parent_from_its_own_repo(monkeypatch):
                         "https://github.com/nateprich-projects/"
                         "command-center/issues/1054")},
                     "comments": []}
-        return {"comments": []}
+        return {"body": "", "comments": []}
 
     monkeypatch.setattr(funnel, "_gh_json", fake_gh_json)
     review.fetch_ticket("nateprich-projects/The-League", 220)
     assert len(calls) == 2  # the URL resolves the repo: no relationship read
     assert calls[1] == (
         "gh", "issue", "view", "1054", "--repo",
-        "nateprich-projects/command-center", "--json", "comments")
+        "nateprich-projects/command-center", "--json", "body,comments")
 
 
 def test_a_failed_cross_repo_parent_read_degrades_and_names_the_parent_repo(
         monkeypatch):
     """#1066: a 404 parent view degrades; the URL-resolved repo is named."""
     def fake_gh_json(*args):
-        if "--json" in args and args[-1] == "comments":
+        if "--json" in args and args[-1] == "body,comments":
             return None
         return {"number": 220, "title": "t", "url": "u", "body": "b",
                 "parent": {"number": 1054, "url": (

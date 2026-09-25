@@ -598,6 +598,7 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
     engine.mkdir(exist_ok=True)
     (engine / "__init__.py").write_text("")
     (engine / "review.py").write_text((ROOT / "engine" / "review.py").read_text())
+    (engine / "shape.py").write_text((ROOT / "engine" / "shape.py").read_text())
     (repo / "heartbeat.py").write_text(HEARTBEAT_STUB)
     (repo / "review-packet").write_text(PACKET_STUB)
     (repo / "review-apply").write_text(APPLY_STUB)

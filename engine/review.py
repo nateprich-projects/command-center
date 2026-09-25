@@ -28,6 +28,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import funnel  # noqa: E402
+from engine.shape import PREMISE_LABELS  # noqa: E402
 
 #: Entries ending in "/" match a directory prefix; the rest match exactly.
 #: A ticket PR touching any of these fails review unless its own ticket
@@ -98,6 +99,16 @@ REPO_PATH_RULES = (
 #: How many merged PRs the merged-overlap row can see. Mirror of the open-PR
 #: scan bound: a head older than this window may hide an overlap.
 MERGED_PR_SCAN_LIMIT = 100
+
+# The parent issue body is rendered by engine.shape.render_plan. Keep the
+# reader on that stable line shape so review never has to rediscover the
+# premises from free-form plan prose.
+PLAN_PREMISES_HEADING_RE = re.compile(r"^## Premises[ \t]*$", re.MULTILINE)
+PLAN_PREMISES_END_RE = re.compile(
+    r"^(?:#{1,6}[ \t]+\S|Proposed class: )", re.MULTILINE)
+PLAN_PREMISE_ROW_RE = re.compile(
+    r"^- (?P<claim>.+?) \(label: (?P<label>[^;]+); "
+    r"evidence: (?P<evidence>.+)\)$")
 
 #: How many of the ticket's comments the packet carries, and how much of
 #: each. The newest comments win: a decision recorded late in a long ticket
@@ -993,6 +1004,114 @@ def precheck(packet: dict) -> Dict[str, object]:
     return {"pass": not reasons, "reasons": reasons}
 
 
+def parse_plan_premises(body: object) -> Tuple[List[Dict[str, str]], Optional[str]]:
+    """Read the fixed premises section rendered into a parent plan body.
+
+    Plans written before #1422 have no section; that is a valid empty list.
+    A present but malformed section is reported to the reviewer instead of
+    silently dropping a premise.
+    """
+    if not isinstance(body, str):
+        return [], "parent plan body is unavailable"
+    headings = list(PLAN_PREMISES_HEADING_RE.finditer(body))
+    if not headings:
+        return [], None
+    if len(headings) != 1:
+        return [], "parent plan has multiple Premises sections"
+
+    section = body[headings[0].end():]
+    end = PLAN_PREMISES_END_RE.search(section)
+    if end:
+        section = section[:end.start()]
+
+    premises: List[Dict[str, str]] = []
+    empty_marker = False
+    for line_number, line in enumerate(section.splitlines(), start=1):
+        text = line.strip()
+        if not text:
+            continue
+        if text == "None recorded.":
+            empty_marker = True
+            continue
+        match = PLAN_PREMISE_ROW_RE.fullmatch(text)
+        if not match:
+            return [], "parent plan Premises line {} is not in the rendered format".format(
+                line_number)
+        label = match.group("label")
+        if label not in PREMISE_LABELS:
+            return [], "parent plan Premises line {} has an unknown label".format(
+                line_number)
+        claim = match.group("claim").strip()
+        evidence = match.group("evidence").strip()
+        if not claim or not evidence:
+            return [], "parent plan Premises line {} is incomplete".format(
+                line_number)
+        premises.append({"claim": claim, "evidence": evidence,
+                         "label": label})
+
+    if empty_marker and premises:
+        return [], "parent plan Premises section mixes entries with None recorded"
+    return premises, None
+
+
+def packet_plan_premises(tickets: Sequence[Optional[dict]]) -> List[Dict]:
+    """Group structured premises by ticket parent for a fixed packet section.
+
+    Multiple tickets can share a project plan, or one PR can close tickets
+    from different plans. Keep those sources explicit and preserve an
+    unavailable state distinct from a legacy plan with no premises.
+    """
+    grouped: Dict[object, Dict] = {}
+    for ticket in tickets:
+        if not isinstance(ticket, dict):
+            continue
+        parent = ticket.get("parent")
+        if not isinstance(parent, dict):
+            continue
+        ticket_ref = ticket.get("ref")
+        parent_number = parent.get("number")
+        parent_repo = parent_repo_from_row(parent)
+        parent_ref = parent.get("ref")
+        if not isinstance(parent_ref, str):
+            if parent_repo and isinstance(parent_number, int):
+                parent_ref = "{}#{}".format(parent_repo, parent_number)
+            else:
+                parent_ref = parent.get("url")
+        if not isinstance(parent_ref, str):
+            parent_ref = None
+        key: object = parent_ref or ("unresolved", parent_number, ticket_ref)
+
+        body = parent.get("body")
+        if parent.get("body_unavailable"):
+            body = None
+        premises, error = parse_plan_premises(body)
+        group = grouped.get(key)
+        if group is None:
+            group = {
+                "parent_ref": parent_ref,
+                "ticket_refs": [],
+                "available": error is None,
+                "premises": premises if error is None else [],
+            }
+            if error is not None:
+                group["error"] = error
+            grouped[key] = group
+        elif error is None and not group["available"]:
+            # Another ticket in the same PR may have supplied the same
+            # parent body successfully after an earlier read degraded.
+            group["available"] = True
+            group["premises"] = premises
+            group.pop("error", None)
+        elif (error is None and group["available"]
+              and group["premises"] != premises):
+            group["available"] = False
+            group["premises"] = []
+            group["error"] = "parent plan changed during packet collection"
+        if isinstance(ticket_ref, str) and ticket_ref not in group["ticket_refs"]:
+            group["ticket_refs"].append(ticket_ref)
+    return list(grouped.values())
+
+
 def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
                  ticket: Optional[dict], plan_md: str,
                  plan_md_missing: bool, open_prs: Sequence[dict],
@@ -1021,6 +1140,10 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     single-ticket PR's packet keeps its shape. The PR description stays
     out on purpose: it is the author's own claims, and a reviewer that
     trusts it can be argued into approving.
+    ``plan_premises`` groups the fixed, structured premises section from
+    each ticket's parent plan. An available empty list means that plan
+    recorded none; ``available: false`` means its body could not be read
+    or its section could not be parsed.
     ``ci_runs`` rows are ``gh run list`` JSON; None reads as no runs
     scanned, which fails closed — an overlap then rejects as stale, as
     before #1019.
@@ -1051,11 +1174,12 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     runs = summarize_runs(ci_runs or [], pr_view.get("headRefOid"))
     green_at = green_run_at(runs)
     could_not_run = funnel.ci_could_not_run_reasons(rollup)
-    ticket_packet = shape_ticket(ticket)
     if tickets is None:
         ticket_rows: List[Optional[dict]] = [ticket] if ticket is not None else []
     else:
         ticket_rows = list(tickets)
+    plan_premises = packet_plan_premises(ticket_rows)
+    ticket_packet = shape_ticket(ticket)
     tickets_packet = [shape_ticket(row) for row in ticket_rows
                       if isinstance(row, dict)]
     head = head_date(pr_view)
@@ -1073,6 +1197,7 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "head_date": head,
         "ticket": ticket_packet,
         "tickets": tickets_packet,
+        "plan_premises": plan_premises,
         "plan_md": plan_md,
         "plan_md_missing": plan_md_missing,
         "diff": diff,
@@ -1339,6 +1464,10 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
     if isinstance(parent, dict):
         parent = dict(parent)
         parent["comments"] = ticket_comments(parent.get("comments"))
+        # The full project plan is read only to render its structured
+        # premises in the packet's dedicated section.
+        parent.pop("body", None)
+        parent.pop("body_unavailable", None)
     return {
         "ref": ticket.get("ref"),
         "number": ticket.get("number"),
@@ -1407,17 +1536,21 @@ def resolve_parent_repo(repo: str, ticket_number: int,
 
 def degraded_parent(parent: dict, parent_number: object,
                     parent_repo: Optional[str]) -> dict:
-    """A parent row without comments that says so, for an unreadable parent.
+    """A partial parent row that names which plan/comment reads failed.
 
     A 404 on either parent read degrades instead of raising: the review
-    proceeds without the parent comments and ``comments_unavailable``
-    tells the reviewer not to read the empty list as no parent decisions.
-    The ``ref`` names the parent only when its repository resolved, so a
-    degraded row never names the wrong repository.
+    proceeds without that parent data. The ``comments_unavailable`` and
+    ``body_unavailable`` markers keep missing data distinct from an empty
+    comments list or a plan with no premises. The ``ref`` names the parent
+    only when its repository resolved, so a degraded row never names the
+    wrong repository.
     """
     enriched = dict(parent)
-    enriched["comments"] = []
-    enriched["comments_unavailable"] = True
+    if not isinstance(enriched.get("comments"), list):
+        enriched["comments"] = []
+        enriched["comments_unavailable"] = True
+    if not isinstance(enriched.get("body"), str):
+        enriched["body_unavailable"] = True
     if parent_repo is not None:
         enriched["repo"] = parent_repo
         enriched["ref"] = "{}#{}".format(parent_repo, parent_number)
@@ -1426,37 +1559,46 @@ def degraded_parent(parent: dict, parent_number: object,
 
 def fetch_parent_comments(repo: str, ticket_number: int,
                           parent: Optional[dict]) -> Optional[dict]:
-    """Attach a parent's comments, resolved against the parent's repository.
+    """Attach a parent's body and comments, resolved against its repository.
 
     GitHub CLI currently returns only the parent's identity in the ticket's
-    ``parent`` field. Some fixtures and future CLI versions may include the
-    comments there already, so preserve that fast path. Otherwise the
-    parent's repository resolves from the row or from one sub-issue
+    ``parent`` field. Some fixtures and future CLI versions may include its
+    body and comments there already, so preserve that fast path. Otherwise
+    the parent's repository resolves from the row or from one sub-issue
     relationship read, and one parent issue view in that repository
-    supplies the comments. Either read failing degrades to a parent row
-    without comments that says so, never a raise: an unreadable parent
-    must not block a review.
+    supplies both. Either read failing degrades to a marked partial row,
+    never a raise: an unreadable parent must not block a review.
     """
     if not isinstance(parent, dict):
         return parent
-    if isinstance(parent.get("comments"), list):
+    if (isinstance(parent.get("comments"), list)
+            and isinstance(parent.get("body"), str)
+            and not parent.get("body_unavailable")):
         return parent
     parent_number = parent.get("number")
     if parent_number is None:
         enriched = dict(parent)
-        enriched["comments"] = []
+        if not isinstance(enriched.get("comments"), list):
+            enriched["comments"] = []
+        if not isinstance(enriched.get("body"), str):
+            enriched["body_unavailable"] = True
         return enriched
     parent_repo = resolve_parent_repo(repo, ticket_number, parent)
     if parent_repo is None:
         return degraded_parent(parent, parent_number, None)
     parent_view = funnel._gh_json(
         "gh", "issue", "view", str(parent_number), "--repo", parent_repo,
-        "--json", "comments")
+        "--json", "body,comments")
     if not isinstance(parent_view, dict) \
             or not isinstance(parent_view.get("comments"), list):
         return degraded_parent(parent, parent_number, parent_repo)
     enriched = dict(parent)
     enriched["comments"] = parent_view["comments"]
+    if isinstance(parent_view.get("body"), str):
+        enriched["body"] = parent_view["body"]
+        enriched.pop("body_unavailable", None)
+    elif not isinstance(enriched.get("body"), str):
+        enriched["body_unavailable"] = True
     enriched["repo"] = parent_repo
     enriched["ref"] = "{}#{}".format(parent_repo, parent_number)
     return enriched
@@ -1468,7 +1610,7 @@ def fetch_ticket(repo: str, number: int) -> dict:
     Comments ride the ticket read, so the reviewer sees decisions recorded
     there at no extra GitHub call. The parent is enriched from one sub-issue
     relationship read for its repository and one parent issue view for its
-    comments, only when its comments were not already included.
+    plan body and comments when either is not already included.
     """
     data = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo, "--json",

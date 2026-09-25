@@ -290,6 +290,11 @@ wrong.
   last review before Meta's wall can post a fail-closed `rejected` on its PR, since
   a refused judge reads `unsure`; the provider-quota hold then parks every Muse lane, so
   that is at most one per window. _(Nate, 2026-09-23.)_
+  At 21:39 PDT on Thursday 2026-09-24 the panel read 0% used, three days before the
+  Sunday reset it had been showing, so the provider reopened the window early. The
+  override's `reopened_at` makes the window count only spend after that moment. The
+  cap keeps the 86% pairing, and the override still lapses on Sunday, when the panel
+  shows whether the provider's week now ends Sunday or Thursday. _(Nate, 2026-09-24.)_
 - **No Copilot automation.** Those are employer-provided tokens; personal use stays
   one-off and manual.
 - **Every routine starts, reads fresh usage, and exits immediately if over the pace

@@ -124,7 +124,22 @@ def test_already_merged_done_finish_stays_healthy_with_its_observation(
     monkeypatch.setattr(heartbeat, "read", lambda agent: [finish])
 
     assert finish["outcome"] == "done"
+    assert finish["review_result"] == "approved"
     assert "observed already-merged PR" in finish["note"]
+    assert (
+        "reviewed PR #7 in nateprich-projects/command-center at "
+        "abc123def456: approved"
+    ) in finish["note"]
+    observed = json.loads(
+        finish["note"].split("observed already-merged PR: ", 1)[1]
+    )
+    assert observed == {
+        "actor": "nate",
+        "head": "abc123def456",
+        "merged_at": "2026-09-25T02:43:19Z",
+        "pr": 7,
+    }
+    assert finish["merged"] == observed["pr"]
     assert funnel.agent_health(now) == []
 
 

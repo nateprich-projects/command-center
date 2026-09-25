@@ -1086,10 +1086,15 @@ def test_a_failing_precheck_applies_rejected_without_calling_muse(tmp_path):
     )
 
 
-def test_a_covered_verdict_with_another_failing_reason_still_rejects(tmp_path):
+@pytest.mark.parametrize("backend", ["muse", "zcode"])
+def test_a_covered_verdict_with_another_failing_reason_still_rejects(
+        tmp_path, backend):
     packet = _covered_verdict_packet()
     packet["precheck"]["reasons"].append("stop: stop_auto_merging set")
-    proc, repo = _stubbed_runner(tmp_path, _begin(), packet)
+    if backend == "zcode":
+        proc, repo = _zai_standard(tmp_path, _begin(), packet)
+    else:
+        proc, repo = _stubbed_runner(tmp_path, _begin(), packet)
 
     assert proc.returncode == 0, proc.stderr
     assert _muse_calls(repo) == 0

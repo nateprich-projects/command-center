@@ -472,6 +472,27 @@ def assess(
             if row.get("error_class") == "regression"
             and _runtime_head(row) is not None
         ]
+    else:
+        begin_timeouts = [
+            row for row in errored
+            if row.get("error_class") == "begin-timeout"
+        ]
+        if len(begin_timeouts) >= error_threshold:
+            notes = [r.get("note") for r in begin_timeouts[-3:] if r.get("note")]
+            problems.append(
+                "`{}` had {} begin-timeout errors this week.{}".format(
+                    agent, len(begin_timeouts),
+                    (" Most recent: " + "; ".join(notes)) if notes else "",
+                )
+            )
+            # A classified begin timeout has its own diagnosis above. Do not
+            # repeat it in the generic errored-runs condition. Below the
+            # class threshold, keep it in the aggregate so mixed failures
+            # still reach the existing error threshold.
+            errored = [
+                row for row in errored
+                if row.get("error_class") != "begin-timeout"
+            ]
     if len(errored) >= error_threshold:
         if regressions_only:
             details = []

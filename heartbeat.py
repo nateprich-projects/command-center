@@ -126,6 +126,7 @@ FLOOR_ERROR_MARKERS = (
     "tls handshake timeout",
     "i/o timeout",
 )
+BEGIN_TIMEOUT_ERROR_MARKERS = ("reply-timeout", "slow command: begin")
 REGRESSION_ERROR_MARKERS = ("tests failed:",)
 UNCLASSIFIED_ERROR_MARKERS = (
     "could not derive a test command",
@@ -147,6 +148,8 @@ def classify_error(note: Optional[str], runtime: Optional[Dict]) -> str:
         return "unclassified"
 
     normalized = note.casefold()
+    if all(marker in normalized for marker in BEGIN_TIMEOUT_ERROR_MARKERS):
+        return "begin-timeout"
     if any(marker in normalized for marker in FLOOR_ERROR_MARKERS):
         return "floor"
     if any(marker in normalized for marker in UNCLASSIFIED_ERROR_MARKERS):

@@ -710,6 +710,36 @@ def test_all_agent_self_approvable_classes_strip_generic_permission(klass):
                for signal in rejected)
 
 
+def test_investigate_is_explicitly_covered_by_agent_output_review():
+    assert "Investigate" in funnel.SELF_APPROVABLE_CLASSES
+
+    repo = "nateprich-projects/command-center"
+    item = idea(
+        1448, repo=repo, klass="Investigate",
+        body=funnel.origin_block("agent", at=NOW, run="shape-run",
+                                 agent="muse"))
+    candidate = shape.validate_answer(answer(
+        proposed_class="Investigate",
+        needs_nate={"exposure": None, "gates": None,
+                    "scope": ["Should we fix this?",
+                              "Should this happen now?"],
+                    "preference": None}))
+
+    reviewed, rejected = shape.review_shape_output_for_item(
+        [item], item, candidate)
+    status, reason = shape.decide(
+        reviewed, klass="Investigate", origin_voice="agent")
+
+    assert reviewed["needs_nate"]["scope"] is None
+    assert any("generic Scope permission" in signal for signal in rejected)
+    assert any("scheduling" in signal for signal in rejected)
+    assert "Use the funnel's computed order" in shape.render_plan(reviewed)
+    assert status == "Ready"
+    assert reason == (
+        "needs_nate all null; class Investigate self-approvable; "
+        "origin agent")
+
+
 def test_recorded_the_league_258_timing_decision_advances_without_dependency():
     repo = "nateprich-projects/The-League"
     item = idea(

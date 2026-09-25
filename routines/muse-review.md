@@ -16,7 +16,6 @@ the plan rejected?
 - `tickets` is the union of tickets closed by the PR; `ticket` is its branch ticket. A change any ticket asks for is authorised.
 - `ticket.comments` and each `tickets` entry's comments are the newest 30, oldest first, with recorded `voice`. `nate-direct` and `nate-relayed` amend the body; `agent` and `unknown` need diff evidence.
 - Check each `parent.comments` for Accept artifacts.
-- `pr_comments` bodies stay verbatim; `run_evidence.format`: `canonical` if parsed, `prose` otherwise.
 - `plan_md` is design context; when `plan_md_missing` is true, judge against tickets alone.
 - `diff` and `changed_files` are the proposed change at `head_sha`.
 - `verdict` is newest, judged at `verdict_head_sha`; an older rejection is answered unless the fault repeats.
@@ -35,20 +34,6 @@ Probe every `plan_premises` entry labelled `inferred` against live
 evidence in this packet, using its `evidence` pointer. Do not
 re-derive it from plan prose. Cite support or contradiction; unresolved or
 unavailable probes are `unsure`.
-
-Judge run-outcome/runtime Accepts against the posted PR run evidence and
-requirement: command, exit status, output summary, environment note. Presence
-is evidence, never automatic satisfaction; malformed/incomplete blocks stay
-prose, never blockers.
-
-Engineer/watch posts `**Run evidence:**` at verification in fenced JSON:
-
-```json
-{"command":"...","exit_status":0,"output_summary":"...","environment_note":"..."}
-```
-
-For #1428-style post-merge facts, use throwaway `launchctl submit` pre-merge:
-fire, read, post evidence, end job. Nothing is installed; keeper unchanged.
 
 For count requirements (one, once, per day, exactly, at most), list every
 effect call site and trace each path, including success, traps, `finally`,

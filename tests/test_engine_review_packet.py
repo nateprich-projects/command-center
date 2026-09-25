@@ -969,14 +969,6 @@ def test_review_checklist_probes_inferred_premises_against_live_evidence():
     assert "Do not\nre-derive" in text
 
 
-def test_review_checklist_judges_run_outcomes_against_posted_evidence():
-    text = (ROOT / "routines" / "muse-review.md").read_text()
-    assert "the posted PR run evidence" in text
-    assert "never automatic satisfaction" in text
-    assert "launchctl submit" in text
-    assert "Nothing is installed" in text
-
-
 def test_a_ticket_without_a_comments_list_gets_an_empty_one():
     assert packet()["ticket"]["comments"] == []
 

@@ -122,7 +122,14 @@ inventing an answer is a defect.
 
 Class a capture with the ladder names — `Investigate`, `Broken`,
 `Maintenance`, `Improve`, `New`, `Replace` — and say why; stated doubt beats
-confident error. `Investigate` asks whether a defect exists and delivers
-evidence, never the fix: follow-ups are new ideas, classed for the work and
-linked back. **Still his:** the class on anything *he* raises, and any
-reclassification. Propose, do not set.
+confident error. Choose the class for what the tickets will deliver: a study,
+measurement, documentation recording, or product research with no
+possible-defect question takes the class that fits its deliverable, never
+`Investigate`. When that work changes no behaviour, include the analysis marker
+above.
+
+Use `Investigate` to ask whether a possible defect exists, and include the
+`Possible defect:` line in the plan. Its deliverable is evidence, never the fix:
+follow-ups are new ideas, classed for the work and linked back. **Still his:**
+the class on anything *he* raises, and any reclassification. Propose, do not
+set.

@@ -4103,3 +4103,4 @@
 {"agent": "codex", "api_cost": {"gh_calls": 49, "graphql_points": null}, "graphql_by_caller": {"unattributed": {"calls": 33, "points": null, "remaining": 2996}}, "phase": "api_cost", "run": "cc152d35bbc6", "ts": 1790367091}
 {"agent": "codex", "job": "command-center-tickets-hourly", "phase": "job", "run": "cc152d35bbc6", "ts": 1790367094}
 {"agent": "codex", "do": "ticket", "phase": "bind", "run": "cc152d35bbc6", "ts": 1790367201, "work": "nateprich-projects/The-League#292"}
+{"agent": "codex", "api_cost": {"gh_calls": 108, "graphql_points": null}, "graphql_by_caller": {"begin": {"calls": 21, "points": 74, "remaining": 2609}, "unattributed": {"calls": 1, "points": null, "remaining": null}}, "phase": "api_cost", "run": "cc152d35bbc6", "ts": 1790367208}

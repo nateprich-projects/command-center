@@ -1307,10 +1307,23 @@ def test_apply_advances_an_all_clear_agent_plan_to_ready(
     assert funnel.parse_self_approval(comments[0][1][-1]) == (
         "needs_nate all null; class Improve self-approvable; "
         "origin agent; no escalated risk")
-
     output = capsys.readouterr().out
     assert "owner/repo#42 → Ready" in output
     assert "advanced to Ready: needs_nate all null" in output
+
+
+def test_apply_can_stamp_nate_relayed_provenance(monkeypatch):
+    item = idea(42)
+    calls = stub_gh(monkeypatch, item)
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref, answer(),
+        run="shape-run", agent="codex", voice="nate-relayed") == 0
+
+    written = gh_calls(calls, "gh", "issue", "edit")[0][1][-1]
+    assert funnel.parse_provenance(written) == {
+        "agent": "codex", "at": NOW.isoformat(), "run": "shape-run",
+        "voice": "nate-relayed"}
 
 
 def test_apply_reviews_false_holds_on_an_agent_broken_replay(
@@ -1795,12 +1808,15 @@ def test_apply_cli_reads_the_answer_from_stdin(
     monkeypatch.setattr(funnel, "load_items", lambda: [item])
     monkeypatch.setattr(
         sys, "stdin", io.StringIO(json.dumps(answer())))
-    stub_gh(monkeypatch, item)
+    calls = stub_gh(monkeypatch, item)
     assert shape.apply_main(
         ["42", "--repo", REPO, "--answer", "-",
-         "--run", "shape-run", "--agent", "muse"]) == 0
+         "--run", "shape-run", "--agent", "muse",
+         "--voice", "nate-relayed"]) == 0
     assert item.status == "Ready"
     assert "→ Ready" in capsys.readouterr().out
+    written = gh_calls(calls, "gh", "issue", "edit")[0][1][-1]
+    assert funnel.parse_provenance(written)["voice"] == "nate-relayed"
 
 
 def test_apply_cli_rejects_invalid_json_before_any_read(

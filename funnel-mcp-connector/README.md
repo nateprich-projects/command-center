@@ -1,6 +1,8 @@
 # Command Center MCP connector
 
-This directory contains the authenticated HTTP MCP skeleton for Command Center. It exposes no tools yet; later tickets add the thin adapters over `funnel.py`.
+This directory contains the authenticated HTTP MCP connector for Command Center. Its
+`capture` and `shaped` tools use the repository's canonical funnel and shape commands;
+both write `nate-relayed` provenance.
 
 ## Local development configuration
 
@@ -12,6 +14,21 @@ openssl rand -hex 32
 ```
 
 Put the generated value after `INBOUND_STATIC_TOKEN=` in `.env`. Keep `.env` private; it is gitignored and excluded from Docker build context. This in-repository file is for local development only.
+
+## Write tools
+
+- `capture` accepts a title, optional note, and optional `owner/repo`. If the repo is
+  omitted, the funnel uses the active work binding, the sole member repo, or refuses
+  when the target would be ambiguous. Captures are recorded with Nate as their origin
+  and `nate-relayed` provenance.
+- `shaped` accepts an issue reference, `plan_markdown` text, and the remaining
+  structured shape-answer fields. It sends the answer directly on stdin to
+  `shape-apply`, so callers do not need to create a file. The shape engine validates
+  the answer, resolves the repo using the same rule, and decides whether the item stays
+  at Shaped or advances to Ready. The issue body receives `nate-relayed` provenance.
+
+Neither tool exposes the local-only `next`, `claim`, `release`, `gate`, or `heartbeat`
+controls.
 
 ## Deploy with Colima
 
@@ -57,8 +74,9 @@ from the two external env files and are not part of the Docker build context.
 After starting, verify the forwarded host port, tunneled metadata and auth
 boundary. The smoke test checks that requests without a token and with an invalid
 token receive 401/403, then initializes an authenticated MCP session and confirms
-this skeleton exposes no tools. Run the restart check after the initial smoke
-test to confirm Colima brings the container and host port back:
+`capture` and `shaped` are registered without the forbidden controls above. Run the
+restart check after the initial smoke test to confirm Colima brings the container and
+host port back:
 
 ```sh
 colima restart

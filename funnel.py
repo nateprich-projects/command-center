@@ -13047,11 +13047,16 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
                 agent: Optional[str] = None,
                 origin: Optional[str] = None,
                 klass: Optional[str] = None,
-                caused_by: Optional[Sequence[str]] = None) -> int:
+                caused_by: Optional[Sequence[str]] = None,
+                voice: str = "agent") -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
     if origin not in ORIGIN_VOICES:
         raise GitHubError(
             "capture requires an explicit --origin (nate-relayed or agent)"
+        )
+    if voice not in ("agent", "nate-relayed"):
+        raise GitHubError(
+            "capture --voice must be agent or nate-relayed"
         )
     if origin == "agent" and klass is None:
         raise GitHubError("capture requires --class when --origin agent")
@@ -13071,7 +13076,7 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
             raise GitHubError("--caused-by requires a non-empty PR or ticket reference")
     repo = capture_repo(repo, run, agent)
     body = append_provenance(
-        note or "Captured from chat. Not yet thought through.", "agent",
+        note or "Captured from chat. Not yet thought through.", voice,
         at=now, run=run, agent=agent,
     )
     if caused_by_refs:
@@ -16710,6 +16715,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
         help="idea origin: nate-relayed if Nate raised it, agent if observed",
     )
     capture.add_argument(
+        "--voice", choices=("agent", "nate-relayed"), default="agent",
+        help="provenance voice for the body written by this command",
+    )
+    capture.add_argument(
         "--class", dest="klass", choices=LADDER, default=None,
         help="ladder class; required when --origin agent",
     )
@@ -17134,7 +17143,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
                                args.run, args.agent, args.origin, args.klass,
-                               args.caused_by)
+                               args.caused_by, args.voice)
         if args.command == "begin":
             begin_kwargs = {
                 "repo_readiness": repo_readiness,

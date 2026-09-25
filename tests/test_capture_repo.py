@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+import json
 import pathlib
 import sys
 
@@ -12,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
 import heartbeat  # noqa: E402
+from engine import shape  # noqa: E402
 
 FF = "nateprich-projects/FF-Weekly-Start-Sit"
 CC = "nateprich-projects/command-center"
@@ -25,6 +28,20 @@ def _bound(monkeypatch, run, do, work, repo=None, members=(CC, FF)):
         {"run": run, "agent": "codex", "phase": "start", "ts": 0}, rec])
     monkeypatch.setattr(funnel, "member_repos", lambda: list(members))
     monkeypatch.setattr(funnel, "_heartbeat_context", lambda r, a: (r or run, a or "codex"))
+
+
+def _run_shape_apply(monkeypatch, *args):
+    applied = []
+    monkeypatch.setattr(shape, "validate_answer", lambda data: data)
+    monkeypatch.setattr(funnel, "load_items", lambda: [])
+    monkeypatch.setattr(
+        shape, "apply_shape",
+        lambda items, now, ref, answer, **kwargs: applied.append(ref) or 0,
+    )
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps({"plan_markdown": "# Plan"})))
+    code = shape.apply_main([*args, "--answer", "-"])
+    return code, applied
 
 
 def test_the_flag_wins_over_the_binding(monkeypatch):
@@ -68,3 +85,46 @@ def test_begin_binds_the_reviews_repo(monkeypatch):
     assert out["bound"] == {"do": "review", "work": "60", "repo": FF}
     assert heartbeat.bindings([{"run": "r2", "phase": "bind", "ts": 1, "do": "review",
                                 "work": "60", "repo": FF}])["r2"]["repo"] == FF
+
+
+def test_shaped_repo_flag_wins_over_the_binding(monkeypatch):
+    _bound(monkeypatch, "r1", "ticket", FF + "#29")
+    code, applied = _run_shape_apply(monkeypatch, "42", "--repo", CC)
+    assert code == 0
+    assert applied == [CC + "#42"]
+
+
+def test_shaped_uses_a_bound_ticket_repo(monkeypatch):
+    _bound(monkeypatch, "r1", "ticket", FF + "#29")
+    code, applied = _run_shape_apply(
+        monkeypatch, "42", "--run", "r1", "--agent", "codex")
+    assert code == 0
+    assert applied == [FF + "#42"]
+
+
+def test_shaped_uses_a_bound_review_repo(monkeypatch):
+    _bound(monkeypatch, "r1", "review", "60", repo=FF)
+    code, applied = _run_shape_apply(
+        monkeypatch, "42", "--run", "r1", "--agent", "codex")
+    assert code == 0
+    assert applied == [FF + "#42"]
+
+
+def test_shaped_without_a_binding_uses_the_sole_member_repo(monkeypatch):
+    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(funnel, "member_repos", lambda: [CC])
+    monkeypatch.setattr(funnel, "_heartbeat_context", lambda r, a: (None, None))
+    code, applied = _run_shape_apply(monkeypatch, "42")
+    assert code == 0
+    assert applied == [CC + "#42"]
+
+
+def test_shaped_without_a_binding_refuses_multiple_member_repos(
+        monkeypatch, capsys):
+    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(funnel, "member_repos", lambda: [CC, FF])
+    monkeypatch.setattr(funnel, "_heartbeat_context", lambda r, a: (None, None))
+    code, applied = _run_shape_apply(monkeypatch, "42")
+    assert code == 1
+    assert applied == []
+    assert "--repo is required" in capsys.readouterr().err

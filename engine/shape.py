@@ -1101,7 +1101,8 @@ def packet_main(argv: Optional[Sequence[str]] = None) -> int:
 def apply_shape(items: list, now: datetime, ref: str,
                 answer_data: object,
                 run: Optional[str] = None,
-                agent: Optional[str] = None) -> int:
+                agent: Optional[str] = None,
+                voice: str = "agent") -> int:
     """Validate one shape answer and record the plan it carries.
 
     Renders the issue body from the answer fields, applies the
@@ -1119,6 +1120,8 @@ def apply_shape(items: list, now: datetime, ref: str,
     the edges together, so a ref GitHub cannot resolve fails the whole
     write instead of recording a plan whose dependency is missing.
     """
+    if voice not in ("agent", "nate-relayed"):
+        raise ShapeError("shape provenance voice must be agent or nate-relayed")
     item = funnel.find(items, ref)
     answer = validate_answer(answer_data)
     answer, rejected_signals = review_shape_output_for_item(
@@ -1141,7 +1144,7 @@ def apply_shape(items: list, now: datetime, ref: str,
     status, reason = preview_decision(items, item, answer)
     authority_signals = funnel.needs_nate_signals(rendered)
     body = funnel.append_provenance(
-        rendered, "agent", at=now, run=run, agent=agent)
+        rendered, voice, at=now, run=run, agent=agent)
     for block in carried_blocks:
         body = "{}\n\n{}".format(body, block)
 
@@ -1303,6 +1306,9 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
                         help="run id recorded in provenance blocks")
     parser.add_argument("--agent", default=None,
                         help="agent name recorded in provenance blocks")
+    parser.add_argument("--voice", choices=("agent", "nate-relayed"),
+                        default="agent",
+                        help="provenance voice for the plan body")
     parser.add_argument("--attempt", type=int, default=None,
                         help="attempt number in the runner protocol: a "
                              "malformed answer exits 3 below attempt 2 "
@@ -1340,7 +1346,7 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
         print("shape-apply: {}".format(exc), file=sys.stderr)
         return validation_exit(args.attempt)
     try:
-        resolved = funnel.resolve_repo(args.repo)
+        resolved = funnel.capture_repo(args.repo, args.run, args.agent)
         ref = "{}#{}".format(resolved, args.idea)
         # Shape validation reads the idea and its parent for effective Class.
         # Fetch those Project rows by ref; if either filter misses, keep the
@@ -1372,7 +1378,7 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         return apply_shape(
             items, datetime.now(timezone.utc), ref, data,
-            run=args.run, agent=args.agent)
+            run=args.run, agent=args.agent, voice=args.voice)
     except (ShapeError, funnel.GitHubError) as exc:
         print("shape-apply: {}".format(exc), file=sys.stderr)
         return 1

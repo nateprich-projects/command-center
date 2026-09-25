@@ -289,11 +289,13 @@ test("the page renders no brief section other than the board and human steps", a
 
 test("the row toggle is bound once, so a chevron click does not cancel itself", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
-  const listeners = source.match(/addEventListener\("click", /g) || [];
+  const board = source.slice(source.indexOf("function projectRow("), source.indexOf("function decisionRow("));
+  const listeners = board.match(/addEventListener\("click", /g) || [];
   // One on the row (the chevron is inside it) and one on the group header.
-  // The refresh button's listener went with the button. A second listener on
-  // the chevron toggled twice and the row never opened (#902).
+  // The view navigation has its own listener; a second listener on the
+  // chevron toggled twice and the row never opened (#902).
   assert.equal(listeners.length, 2);
+  assert.match(source, /nav\.addEventListener\("click", /);
   assert.doesNotMatch(source, /twisty\.addEventListener\("click"/);
 });
 
@@ -668,4 +670,4 @@ test("Execution uses a read-only request and the two views route on the same pag
     "/?repo=owner%2Frepo",
   );
   assert.match(source, /fetch\("\/api\/snapshot", \{ cache: "no-store" \}\)/);
-}
+});

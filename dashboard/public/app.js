@@ -946,9 +946,12 @@ function renderExecutionTiles(series, container) {
     code: "C3", title: "Implement error rate", format: "percent",
   }, implementRows);
 
-  const regressionLeaves = metricLeaves(
+  const regressionLeaves = [];
+  for (const item of metricLeaves(
     root.C && root.C.C4 && root.C.C4.by_agent_and_job,
-  ).filter((item) => item.path[item.path.length - 1] === "regression");
+  )) {
+    if (item.path[item.path.length - 1] === "regression") regressionLeaves.push(item);
+  }
   appendMetricTile(container, {
     code: "C4", title: "Regression errors / day", format: "count",
   }, [{

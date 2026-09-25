@@ -41,29 +41,6 @@ calendar date with the label and comment instead.
 sentence in the body, add the `blocked` label, and comment
 `**Blocked until 2026-10-04:**`.
 
-For a wait on a named agent's errored heartbeat finish, keep the `blocked`
-label and post this form, replacing each value with the specific event being
-waited for:
-
-````markdown
-**Blocked until event:**
-```json
-{
-  "agent": "codex",
-  "job": "command-center-tickets-hourly",
-  "outcome": "errored",
-  "after": "2026-09-22T00:00:00Z"
-}
-```
-````
-
-`after` is a UTC timestamp in `YYYY-MM-DDTHH:MM:SSZ` form. This is the only
-supported event kind; the agent and job must be named and the outcome must be
-`errored`. A missing, malformed, or unknown event form is unconditioned and
-asks `Unblock?`. Set `Needs: external-event` to route the wait, but the field
-alone is not a condition that can keep it out of that question.
-_(agent rule, unconfirmed — advisory)_
-
 ## Coverage
 
 Cover the plan's stated outcome, not its headings. Reread the plan, trace

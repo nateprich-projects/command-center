@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import json
 import pathlib
+import re
 import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -148,6 +149,9 @@ class Board:
         compact = " ".join(query.split())
         if "nodes(ids:" in compact:
             return self._details(variables)
+        aliases = re.findall(r"(\w+): items\(", query)
+        if aliases:
+            return self._begin_page(query, aliases, variables)
         if "items(first:" in compact:
             return self._page(query, variables)
         if query in (funnel.SET_FIELD, funnel.SET_LOCK):
@@ -177,6 +181,33 @@ class Board:
         }}}}
         if "shapeIssue:" in query:
             assert index == 0
+            response["shapeIssue"] = {"issue": {"comments": {
+                "nodes": copy.deepcopy(SHAPE_COMMENTS),
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}}
+        return response
+
+    def _begin_page(self, query, aliases, variables):
+        """The aliased begin document (#1625): ``open`` pages the open rows
+        of each full page in turn; no closed row here matches a closed-set
+        filter (#12 is a Done child), so the other connections are empty."""
+        project = {}
+        for alias in aliases:
+            if alias != "open":
+                project[alias] = {"nodes": [], "pageInfo": {
+                    "hasNextPage": False, "endCursor": None}}
+                continue
+            index = int(variables.get("openCursor") or 0)
+            more = index + 1 < len(self.pages)
+            project[alias] = {
+                "nodes": [copy.deepcopy(node) for node in self.pages[index]
+                          if node["content"]["state"] == "OPEN"],
+                "pageInfo": {"hasNextPage": more,
+                             "endCursor": str(index + 1) if more else None},
+            }
+        response = {"user": {"projectV2": project}}
+        if "shapeIssue:" in query:
+            assert "openCursor" not in variables
             response["shapeIssue"] = {"issue": {"comments": {
                 "nodes": copy.deepcopy(SHAPE_COMMENTS),
                 "pageInfo": {"hasNextPage": False, "endCursor": None},

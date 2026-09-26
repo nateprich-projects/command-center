@@ -1845,7 +1845,7 @@ def test_collect_requests_thread_with_the_project_item_read(monkeypatch):
         lambda repo, path: ("{} text".format(path), False))
     found = shape.collect(REPO, 42, now=NOW)
     assert received == {"include_details": False,
-                        "shape_issue": (REPO, 42)}
+                        "shape_issue": (REPO, 42), "scope": "begin"}
     assert "## Issue thread" in found["issue_thread"]
     assert "The old premise is false." in found["issue_thread"]
 

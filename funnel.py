@@ -100,6 +100,39 @@ CODEX_IMPLEMENT_VENDOR = {
     ),
 }
 
+#: The same facts for Claude's Saturday implement lane (#1557). Claude runs as a
+#: Desktop scheduled task on the Mac mini, not in a sandbox, so the only rules
+#: are where helpers live and where the checkout and answer go.
+CLAUDE_IMPLEMENT_VENDOR = {
+    "path_spelling": (
+        "Invoke every Command Center helper through exactly "
+        "/Users/nateprich/.claude/command-center-run."
+    ),
+    "checkout": (
+        "Clone packet.repo into a fresh directory under the session's scratch "
+        "or temporary directory, never inside a Command Center checkout."
+    ),
+    "answer_handoff": (
+        "Write the one structured answer to a file outside the ticket "
+        "checkout, then invoke finish-ticket --agent claude from the checkout "
+        "with --run RUN --answer-file PATH."
+    ),
+}
+
+#: Claude implements only on Saturday mornings, spending what is left of the
+#: Anthropic week before it resets at noon local (usage.WEEKLY_RESET_*). No new
+#: work starts at or after 11:15, so a run, or an automatic resume after a
+#: usage-limit pause, cannot begin a ticket that would run into next week's
+#: allowance. The routine prompt stops in-flight work at 11:45. Nate, 2026-09-25
+#: (#1557).
+IMPLEMENT_VENDORS = {
+    "codex": CODEX_IMPLEMENT_VENDOR,
+    "claude": CLAUDE_IMPLEMENT_VENDOR,
+}
+
+CLAUDE_WINDOW_WEEKDAY = 5  # Monday is 0, so 5 is Saturday
+CLAUDE_WINDOW_LAST_START = (11, 15)
+
 # One small, shared shape for every doctor check. Later doctor tickets add
 # checks to the fixed list without changing the report contract.
 Check = namedtuple("Check", "name ok found fix")
@@ -1126,9 +1159,12 @@ TIERS = ("standard", "escalated")
 #: in-app automations; Muse judges and no longer implements (Nate,
 #: 2026-09-22, #1315). `scripts/muse-implement` stays as the reversal path:
 #: putting `muse` back here is the switch.
+#: Claude implements on Saturday mornings only (#1557); `begin` enforces the
+#: window. It takes the whole shared order, so ``None`` (untiered) is allowed.
 AGENTS_BY_ROLE = {
     "implement": {
         "codex": frozenset(TIERS),
+        "claude": frozenset(TIERS + (None,)),
     },
 }
 
@@ -14977,6 +15013,25 @@ def begin_detail_candidates(
     return [item for item in items if item.ref in found]
 
 
+def _local_time(now: datetime) -> datetime:
+    """``now`` on this Mac's clock, the zone the weekly reset is kept in."""
+    return now.astimezone()
+
+
+def claude_window_refusal(local: datetime) -> Optional[str]:
+    """Why a Claude run may not start now, or None inside the window."""
+    hour, minute = CLAUDE_WINDOW_LAST_START
+    if local.weekday() != CLAUDE_WINDOW_WEEKDAY:
+        return ("Claude works Saturdays only, before {:02d}:{:02d} "
+                "(#1557); it is {}".format(hour, minute,
+                                           local.strftime("%A %H:%M")))
+    if (local.hour, local.minute) >= (hour, minute):
+        return ("Claude starts no work at or after {:02d}:{:02d} on "
+                "Saturday, before the noon reset (#1557); it is {}".format(
+                    hour, minute, local.strftime("%H:%M")))
+    return None
+
+
 def _begin_preflight(
     now: datetime, agent: str, idle: bool, tier: Optional[str] = None
 ) -> Tuple[Dict[str, object], Optional[Dict[str, object]]]:
@@ -15020,6 +15075,18 @@ def _begin_preflight(
                     # The identity record is diagnostic. Its absence can only
                     # leave a later event wait uncleared; it must not stop work.
                     pass
+
+    if agent == "claude":
+        # The Saturday lane runs until the clock or the provider's own limit
+        # stops it. By Nate's direction it reads and estimates no budget
+        # (2026-09-25, #1557), so the window is its only local gate.
+        refusal = claude_window_refusal(_local_time(now))
+        if refusal is not None:
+            out.update(gate="time", do="stop", why=refusal)
+            return out, None
+        out.update(gate="ok", unmetered=True)
+        return out, {"source": "claude", "captured_at": now.timestamp(),
+                     "unmetered": True, "windows": {}}
 
     reading = usage.read_agent(agent, now.timestamp())
     if reading is None:
@@ -15546,7 +15613,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     do="ticket",
                     work=item_json(ticket, now, {i.ref: i for i in items}),
                 )
-                if agent == "codex":
+                if agent in IMPLEMENT_VENDORS:
                     # Bind immediately after the claim, before the packet's
                     # slower ticket/plan/verdict reads. A process abandoned
                     # during that load is then attributable and recoverable by
@@ -15573,7 +15640,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                             ),
                         )
                     else:
-                        out["vendor"] = CODEX_IMPLEMENT_VENDOR
+                        out["vendor"] = IMPLEMENT_VENDORS[agent]
         if "bound" not in out:
             _bind_run(agent, out)
         print(json.dumps(out, indent=2))

@@ -4374,3 +4374,4 @@
 {"agent": "codex", "job": "command-center-tickets-hourly", "phase": "job", "run": "11088736da2a", "ts": 1790395293}
 {"agent": "codex", "do": "ticket", "phase": "bind", "run": "11088736da2a", "ts": 1790395390, "work": "nateprich-projects/command-center#1547"}
 {"agent": "codex", "api_cost": {"gh_calls": 100, "graphql_points": null}, "graphql_by_caller": {"begin": {"calls": 22, "points": 75, "remaining": 4123}, "unattributed": {"calls": 1, "points": null, "remaining": null}}, "phase": "api_cost", "run": "11088736da2a", "ts": 1790395396}
+{"agent": "codex", "api_cost": {"gh_calls": 37, "graphql_points": null}, "graphql_by_caller": {"unattributed": {"calls": 31, "points": null, "remaining": 4058}}, "phase": "api_cost", "run": "46744d001121", "ts": 1790395445}

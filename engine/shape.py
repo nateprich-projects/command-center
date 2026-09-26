@@ -1030,7 +1030,11 @@ def collect(repo: Optional[str], idea_number: int, *,
     """Fetch every piece and build the packet. Reads only, no writes."""
     resolved = funnel.resolve_repo(repo)
     if items_loader is None:
-        items = funnel.load_items(shape_issue=(resolved, idea_number))
+        # No packet field reads Project history (status_since, status
+        # events, blocked times, child timestamps), so skip the per-item
+        # detail batch: it is most of this load's time and points (#1620).
+        items = funnel.load_items(
+            include_details=False, shape_issue=(resolved, idea_number))
     else:
         items = items_loader()
     idea_item = funnel.find(items, "{}#{}".format(resolved, idea_number))
@@ -1323,7 +1327,11 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
         return validation_exit(args.attempt)
     try:
         resolved = funnel.resolve_repo(args.repo)
-        items = funnel.load_items()
+        # Neither the decision, the output review, nor any write guard
+        # (including the closed-issue Status refusal) reads Project
+        # history, so the detail batch is skipped (#1620). `_write_status`
+        # only assigns status_since/status_events after a confirmed write.
+        items = funnel.load_items(include_details=False)
         ref = "{}#{}".format(resolved, args.idea)
         if args.validate_only:
             item = funnel.find(items, ref)

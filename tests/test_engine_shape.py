@@ -1844,7 +1844,8 @@ def test_collect_requests_thread_with_the_project_item_read(monkeypatch):
         shape, "fetch_repo_text",
         lambda repo, path: ("{} text".format(path), False))
     found = shape.collect(REPO, 42, now=NOW)
-    assert received == {"shape_issue": (REPO, 42)}
+    assert received == {"include_details": False,
+                        "shape_issue": (REPO, 42)}
     assert "## Issue thread" in found["issue_thread"]
     assert "The old premise is false." in found["issue_thread"]
 
@@ -1907,7 +1908,7 @@ def test_packet_cli_reports_an_unreadable_issue_thread(monkeypatch, capsys):
 def test_apply_cli_reads_the_answer_from_stdin(
         monkeypatch, capsys):
     item = idea(42)
-    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [item])
     monkeypatch.setattr(
         sys, "stdin", io.StringIO(json.dumps(answer())))
     stub_gh(monkeypatch, item)
@@ -1935,7 +1936,7 @@ def test_apply_cli_rejects_invalid_json_before_any_read(
 def test_apply_cli_rejects_a_malformed_answer_without_writing(
         monkeypatch, capsys):
     item = idea(42)
-    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [item])
 
     def fail(*args, **kwargs):
         raise AssertionError("no write may precede validation")
@@ -1964,7 +1965,7 @@ def test_validation_exit_maps_attempts_to_retry_then_final():
 
 def test_apply_cli_with_attempt_1_asks_for_a_retry(monkeypatch, capsys):
     item = idea(42)
-    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [item])
 
     def fail(*args, **kwargs):
         raise AssertionError("no write may precede validation")
@@ -1983,7 +1984,7 @@ def test_apply_cli_with_attempt_1_asks_for_a_retry(monkeypatch, capsys):
 
 def test_apply_cli_with_attempt_2_is_final(monkeypatch, capsys):
     item = idea(42)
-    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [item])
 
     def fail(*args, **kwargs):
         raise AssertionError("no write may precede validation")
@@ -2021,7 +2022,7 @@ def test_apply_cli_validate_only_reports_the_decision_without_writing(
     """Decide from the same inputs as the live path and report, without
     touching the idea; the runner uses this to validate a retried answer."""
     item = idea(42)
-    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [item])
 
     def fail(*args, **kwargs):
         raise AssertionError("validate-only must not reach GitHub")
@@ -2044,7 +2045,7 @@ def test_apply_cli_validate_only_reports_the_decision_without_writing(
 def test_apply_cli_validate_only_previews_a_shaped_decision(
         monkeypatch, capsys):
     item = idea(42)
-    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [item])
 
     def fail(*args, **kwargs):
         raise AssertionError("validate-only must not reach GitHub")
@@ -2067,7 +2068,7 @@ def test_apply_cli_validate_only_previews_a_shaped_decision(
 def test_apply_cli_validate_only_rejects_a_malformed_answer(
         monkeypatch, capsys):
     item = idea(42)
-    monkeypatch.setattr(funnel, "load_items", lambda: [item])
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [item])
     bad = answer()
     del bad["plan_markdown"]
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(bad)))

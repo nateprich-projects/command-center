@@ -231,17 +231,51 @@ function tierCell(tier) {
 // be, rather than a blank: Queued when it waits only on its siblings, Blocked
 // otherwise (Nate, 2026-09-24). ``hold`` is "queued", "blocked", or a
 // boolean, where true means blocked.
-function ownerCell(owner, hold = false) {
+function ownerCell(owner, hold = false, note = null) {
   if (!owner && hold === "queued") return chip("Queued", "chip-owner owner-queued");
+  if (!owner && hold === "paused") return chip("Paused", "chip-owner owner-paused", note);
   if (!owner && hold) return chip("Blocked", "chip-owner owner-blocked");
   if (!owner) return element("span", "muted", "—");
   return chip(owner, `chip-owner ${OWNER_CLASS[owner] || ""}`);
 }
 
-// What holds an open ticket: "queued" behind its siblings, "blocked", or null.
+// What holds an open ticket: "queued" behind its siblings, "blocked",
+// "paused" after repeated failed runs, or null.
 function ticketHold(ticket) {
-  if (!ticket || ticket.state !== "OPEN" || !ticket.blocked) return null;
-  return ticket.blocked_by_siblings ? "queued" : "blocked";
+  if (!ticket || ticket.state !== "OPEN") return null;
+  if (ticket.blocked) return ticket.blocked_by_siblings ? "queued" : "blocked";
+  return ticket.paused_until ? "paused" : null;
+}
+
+// A project's hold for its Next step cell: blocked, or waiting out a pause.
+function projectHold(item) {
+  if (projectBlocked(item)) return "blocked";
+  return item && item.next_step_paused_until ? "paused" : null;
+}
+
+// A time in the viewer's own zone, never UTC (Nate's standing rule).
+function localTime(iso) {
+  const when = new Date(iso);
+  if (Number.isNaN(when.getTime())) return String(iso);
+  return when.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+}
+
+// The engine holds the Project fields do not show (Nate, 2026-09-25): a
+// ticket paused after repeated failed runs, or one its comments record as
+// finished and waiting for Nate to close.
+function holdChip(ticket) {
+  if (!ticket || ticket.state !== "OPEN") return null;
+  if (ticket.finished_by_comments) {
+    return chip("finished — close it", "chip-finished",
+      "Its comments record it done; it waits for Nate to close it.");
+  }
+  if (ticket.paused_until) {
+    const runs = Number.isFinite(ticket.paused_failures)
+      ? `${ticket.paused_failures} failed runs in a row` : "repeated failed runs";
+    return chip(`paused until ${localTime(ticket.paused_until)}`, "chip-paused",
+      `${runs}; offered again then, or as soon as a run finishes it.`);
+  }
+  return null;
 }
 
 // The producer's flag; an older snapshot without it falls back to the
@@ -327,6 +361,8 @@ function ticketRow(ticket) {
   title.append(element("span", "child-rule"));
   title.append(link(`#${ticket.number} ${ticket.title || ""}`, ticket.url, "ticket-title"));
   if (ticket.blocked) title.append(blockedChip(ticket));
+  const hold = holdChip(ticket);
+  if (hold) title.append(hold);
   const unblocks = ticket.state === "OPEN" ? unblocksChip(ticket) : null;
   if (unblocks) title.append(unblocks);
   row.append(title);
@@ -425,7 +461,8 @@ function phoneDetails(item, inheritedClass, children) {
   if (project) {
     fields.append(phoneMeta([
       ["Tier", tierCell(rowTier(children))],
-      ["Next step", ownerCell(nextOwner(item), projectBlocked(item))],
+      ["Next step", ownerCell(nextOwner(item), projectHold(item),
+        item.next_step_paused_until ? `until ${localTime(item.next_step_paused_until)}` : null)],
       ["Updated", element("span", "age", item.waited || "—")],
     ]));
     if (item.blocked) fields.append(phoneField("Blocked", blockedChip(item)));
@@ -439,6 +476,8 @@ function phoneDetails(item, inheritedClass, children) {
       const label = ticketHold(item) === "queued" ? "Queued" : "Blocked";
       fields.append(phoneField(label, blockedChip(item)));
     }
+    const hold = holdChip(item);
+    if (hold) fields.append(phoneField(item.finished_by_comments ? "Finished" : "Paused", hold));
     const unblocks = item.state === "OPEN" ? unblocksChip(item) : null;
     if (unblocks) fields.append(phoneField("Unblocks", unblocks));
     if (children.length || Number.isFinite(item.tickets_total)) {
@@ -546,7 +585,8 @@ function projectRow(item) {
 
   row.append(cell("cell-repo", element("span", "repo", shortRepo(item.repo || item.repository) || "")));
   row.append(cell("cell-tier", tierCell(rowTier(tickets))));
-  row.append(cell("cell-owner", ownerCell(nextOwner(item), projectBlocked(item))));
+  row.append(cell("cell-owner", ownerCell(nextOwner(item), projectHold(item),
+    item.next_step_paused_until ? `until ${localTime(item.next_step_paused_until)}` : null)));
   row.append(cell("cell-pips", pips(item, tickets, item.tickets_closed, item.tickets_total)));
   row.append(cell("cell-class", item.class
     ? chip(item.class, `chip-class chip-class-${String(item.class).toLowerCase()}`)
@@ -1259,7 +1299,8 @@ if (typeof document !== "undefined") {
 
 export {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
-  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
+  phoneState, pipState, projectBlocked, projectHold, holdChip, localTime,
+  renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,
   renderExecutionTiles, renderMetricChart, requestMetrics, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,

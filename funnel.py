@@ -100,6 +100,39 @@ CODEX_IMPLEMENT_VENDOR = {
     ),
 }
 
+#: The same facts for Claude's Saturday implement lane (#1557). Claude runs as a
+#: Desktop scheduled task on the Mac mini, not in a sandbox, so the only rules
+#: are where helpers live and where the checkout and answer go.
+CLAUDE_IMPLEMENT_VENDOR = {
+    "path_spelling": (
+        "Invoke every Command Center helper through exactly "
+        "/Users/nateprich/.claude/command-center-run."
+    ),
+    "checkout": (
+        "Clone packet.repo into a fresh directory under the session's scratch "
+        "or temporary directory, never inside a Command Center checkout."
+    ),
+    "answer_handoff": (
+        "Write the one structured answer to a file outside the ticket "
+        "checkout, then invoke finish-ticket --agent claude from the checkout "
+        "with --run RUN --answer-file PATH."
+    ),
+}
+
+#: Claude implements only on Saturday mornings, spending what is left of the
+#: Anthropic week before it resets at noon local (usage.WEEKLY_RESET_*). No new
+#: work starts at or after 11:15, so a run, or an automatic resume after a
+#: usage-limit pause, cannot begin a ticket that would run into next week's
+#: allowance. The routine prompt stops in-flight work at 11:45. Nate, 2026-09-25
+#: (#1557).
+IMPLEMENT_VENDORS = {
+    "codex": CODEX_IMPLEMENT_VENDOR,
+    "claude": CLAUDE_IMPLEMENT_VENDOR,
+}
+
+CLAUDE_WINDOW_WEEKDAY = 5  # Monday is 0, so 5 is Saturday
+CLAUDE_WINDOW_LAST_START = (11, 15)
+
 # One small, shared shape for every doctor check. Later doctor tickets add
 # checks to the fixed list without changing the report contract.
 Check = namedtuple("Check", "name ok found fix")
@@ -1126,9 +1159,12 @@ TIERS = ("standard", "escalated")
 #: in-app automations; Muse judges and no longer implements (Nate,
 #: 2026-09-22, #1315). `scripts/muse-implement` stays as the reversal path:
 #: putting `muse` back here is the switch.
+#: Claude implements on Saturday mornings only (#1557); `begin` enforces the
+#: window. It takes the whole shared order, so ``None`` (untiered) is allowed.
 AGENTS_BY_ROLE = {
     "implement": {
         "codex": frozenset(TIERS),
+        "claude": frozenset(TIERS + (None,)),
     },
 }
 
@@ -2317,6 +2353,7 @@ def startable(
 
 def projected_pull_order(
     items: Sequence[Item], now: Optional[datetime] = None,
+    paused: Collection[str] = (),
 ) -> List[str]:
     """Every ticket's projected turn, found by running ``startable()`` forward.
 
@@ -2333,6 +2370,11 @@ def projected_pull_order(
     taken now. What never becomes startable (a future date, a reason with no
     reference, a blocker off the board, a missing Class) gets no turn and is
     absent from the list. The items are copied; nothing is written.
+
+    ``paused`` names tickets held by ``backoff_withheld`` after repeated
+    failed runs. The engineers will not take them before the hold lifts, so
+    they wait until everything available now has had its turn (Nate,
+    2026-09-25: a row must never claim a next step the engineers won't take).
     """
     sim = [copy.copy(item) for item in items]
     by_ref = {item.ref: item for item in sim}
@@ -2372,9 +2414,13 @@ def projected_pull_order(
             done.add(parent.ref)
 
     order: List[str] = []
+    held = {ref: {} for ref in paused}
     lift_blocks()
-    for _ in range(len(sim) + 1):
-        queue = startable(sim)
+    for _ in range(len(sim) + 2):
+        queue = startable(sim, backed_off=held)
+        if not queue and held:
+            held = {}
+            continue
         if not queue:
             break
         order.append(queue[0].ref)
@@ -9360,6 +9406,8 @@ def _dashboard_ticket(
     queue_class: Optional[str] = None,
     unblocks: Sequence[str] = (),
     unblocks_later: Sequence[str] = (),
+    paused: Optional[Mapping[str, object]] = None,
+    finished: bool = False,
 ) -> Dict[str, object]:
     """One ticket row for the dashboard, with its PR, tier and owner flags.
 
@@ -9429,6 +9477,13 @@ def _dashboard_ticket(
         owner: Optional[str] = None
     elif blocked:
         owner = None
+    elif finished:
+        # Its comments record it done: closing it is Nate's move.
+        owner = OWNER_NATE
+    elif paused:
+        # Held after repeated failed runs; nobody takes it before the hold
+        # lifts, and the page says until when.
+        owner = None
     elif needs not in NEEDS_OPTIONS:
         owner = None
     elif needs == "claude-code-environment":
@@ -9484,7 +9539,25 @@ def _dashboard_ticket(
             list(unblocks_later) if item.state == "OPEN" else []
         ),
         "human_step": needs if needs in ("human", "claude-code-environment") else None,
+        # Engine holds the Project fields do not show (Nate, 2026-09-25).
+        "paused_until": _dashboard_paused_until(paused),
+        "paused_failures": (
+            paused.get("failures") if isinstance(paused, Mapping) else None
+        ),
+        "finished_by_comments": bool(finished),
     }
+
+
+def _dashboard_paused_until(
+    paused: Optional[Mapping[str, object]]
+) -> Optional[str]:
+    """When a backoff hold lifts, as ISO text, or None when not paused."""
+    if not isinstance(paused, Mapping):
+        return None
+    until = paused.get("until")
+    if isinstance(until, datetime):
+        return until.isoformat()
+    return str(until) if until else None
 
 
 def _block_refs(item: Item) -> List[Optional[str]]:
@@ -9542,6 +9615,11 @@ def _dashboard_item(
         # block is on the project or on every open ticket. The page reads
         # "Blocked" where the owner would be (Nate, 2026-09-24).
         "next_step_blocked": bool(next_step_blocked),
+        # Nothing else on the project can move while a ticket waits out a
+        # backoff hold: the page reads "Paused" and says until when.
+        "next_step_paused_until": _dashboard_next_paused(
+            tickets or (), next_step_blocked
+        ),
         "blocked": bool(item.is_blocked),
         "blockers": list(item.block_references) if item.is_blocked else [],
         "block_reason": (
@@ -9714,6 +9792,20 @@ def _dashboard_pips(
     return bar
 
 
+def _dashboard_next_paused(
+    tickets: Sequence[Mapping[str, object]], next_step_blocked: bool,
+) -> Optional[str]:
+    """The earliest hold's end when a backoff hold is all that stops the
+    project's next step, else None."""
+    if next_step_blocked or _dashboard_next_owner(tickets):
+        return None
+    holds = sorted(
+        str(ticket["paused_until"]) for ticket in tickets
+        if ticket.get("state") == "OPEN" and ticket.get("paused_until")
+    )
+    return holds[0] if holds else None
+
+
 def _dashboard_next_owner(
     tickets: Sequence[Mapping[str, object]]
 ) -> Optional[str]:
@@ -9730,6 +9822,7 @@ def dashboard_board(
     pr_facts: Optional[Mapping[str, Optional[Mapping[str, object]]]] = None,
     pr_facts_known: Optional[bool] = None,
     authoring_pr_agents: Optional[Mapping[str, Iterable[str]]] = None,
+    backed_off: Optional[Mapping[str, Mapping[str, object]]] = None,
 ) -> Dict[str, List[Dict[str, object]]]:
     """Build the ordered parent-project board for one already-loaded brief.
 
@@ -9739,8 +9832,15 @@ def dashboard_board(
     project. Work the projection never reaches follows in gate order, with
     anything that cannot move below what can. `Done` is newest-first. The
     order is `startable()`'s throughout — this function never invents a rank.
+
+    ``backed_off`` is ``backoff_withheld``'s mapping, read from the local
+    heartbeat by the caller. With the tickets finished by comments, these are
+    the holds the engineers honour that the Project fields do not show, so
+    the rows name them rather than a next step nobody will take.
     """
     rows = list(items)
+    paused_rows = dict(backed_off or {})
+    finished: Set[str] = set()
     by_ref = {item.ref: item for item in rows}
     done_cutoff = now - DASHBOARD_DONE_WINDOW
     max_time = datetime.max.replace(tzinfo=timezone.utc)
@@ -9773,7 +9873,8 @@ def dashboard_board(
         # Match what `cmd_next` withholds, so the rank shown is the rank the
         # engineers actually use: work already in review, and work finished by
         # comments and waiting on Nate to close.
-        withheld = set(in_review) | set(finished_by_comments(rows))
+        finished = set(finished_by_comments(rows))
+        withheld = set(in_review) | finished
         queue = startable(rows, awaiting_review=withheld)
     except Exception:
         # The board is instrumentation: an ordering failure must not cost the
@@ -9799,7 +9900,9 @@ def dashboard_board(
         # The board's order for work in motion: each ticket's projected turn.
         turn = {
             ref: index
-            for index, ref in enumerate(projected_pull_order(rows, now))
+            for index, ref in enumerate(
+                projected_pull_order(rows, now, paused=paused_rows)
+            )
         }
     except Exception:
         turn = {}
@@ -9891,6 +9994,8 @@ def dashboard_board(
                     and by_ref.get(ref) is not None
                     and by_ref[ref].state == "OPEN"
                 ),
+                paused_rows.get(child.ref) if child.state == "OPEN" else None,
+                child.ref in finished and child.state == "OPEN",
             )
             for child in sorted(siblings_of, key=ticket_key)
         ]
@@ -14956,6 +15061,25 @@ def begin_detail_candidates(
     return [item for item in items if item.ref in found]
 
 
+def _local_time(now: datetime) -> datetime:
+    """``now`` on this Mac's clock, the zone the weekly reset is kept in."""
+    return now.astimezone()
+
+
+def claude_window_refusal(local: datetime) -> Optional[str]:
+    """Why a Claude run may not start now, or None inside the window."""
+    hour, minute = CLAUDE_WINDOW_LAST_START
+    if local.weekday() != CLAUDE_WINDOW_WEEKDAY:
+        return ("Claude works Saturdays only, before {:02d}:{:02d} "
+                "(#1557); it is {}".format(hour, minute,
+                                           local.strftime("%A %H:%M")))
+    if (local.hour, local.minute) >= (hour, minute):
+        return ("Claude starts no work at or after {:02d}:{:02d} on "
+                "Saturday, before the noon reset (#1557); it is {}".format(
+                    hour, minute, local.strftime("%H:%M")))
+    return None
+
+
 def _begin_preflight(
     now: datetime, agent: str, idle: bool, tier: Optional[str] = None
 ) -> Tuple[Dict[str, object], Optional[Dict[str, object]]]:
@@ -14999,6 +15123,18 @@ def _begin_preflight(
                     # The identity record is diagnostic. Its absence can only
                     # leave a later event wait uncleared; it must not stop work.
                     pass
+
+    if agent == "claude":
+        # The Saturday lane runs until the clock or the provider's own limit
+        # stops it. By Nate's direction it reads and estimates no budget
+        # (2026-09-25, #1557), so the window is its only local gate.
+        refusal = claude_window_refusal(_local_time(now))
+        if refusal is not None:
+            out.update(gate="time", do="stop", why=refusal)
+            return out, None
+        out.update(gate="ok", unmetered=True)
+        return out, {"source": "claude", "captured_at": now.timestamp(),
+                     "unmetered": True, "windows": {}}
 
     reading = usage.read_agent(agent, now.timestamp())
     if reading is None:
@@ -15525,7 +15661,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     do="ticket",
                     work=item_json(ticket, now, {i.ref: i for i in items}),
                 )
-                if agent == "codex":
+                if agent in IMPLEMENT_VENDORS:
                     # Bind immediately after the claim, before the packet's
                     # slower ticket/plan/verdict reads. A process abandoned
                     # during that load is then attributable and recoverable by
@@ -15552,7 +15688,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                             ),
                         )
                     else:
-                        out["vendor"] = CODEX_IMPLEMENT_VENDOR
+                        out["vendor"] = IMPLEMENT_VENDORS[agent]
         if "bound" not in out:
             _bind_run(agent, out)
         print(json.dumps(out, indent=2))
@@ -17555,12 +17691,19 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         for fact in pr_facts.values()
                     ):
                         authoring_pr_agents = _dashboard_authoring_pr_agents()
+                    try:
+                        # The same holds `cmd_next` honours, from the local
+                        # heartbeat; the board is not worth failing over them.
+                        backed_off = backoff_withheld(_backoff_rows(), now)
+                    except Exception:
+                        backed_off = {}
                     write_dashboard_snapshot(
                         brief_payload,
                         dashboard_board(
                             items, now, pr_facts=pr_facts,
                             pr_facts_known=not pr_facts_missing,
                             authoring_pr_agents=authoring_pr_agents,
+                            backed_off=backed_off,
                         ),
                         generated_at,
                         usage={

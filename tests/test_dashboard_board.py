@@ -819,6 +819,49 @@ def test_a_closed_ticket_carries_no_class_or_unblocks():
     assert closed["class"] is None and closed["unblocks"] == []
 
 
+def test_a_paused_ticket_waits_until_the_available_work_has_had_its_turn():
+    """Nate, 2026-09-25: a row must never claim a next step the engineers
+    won't take. A backoff hold keeps a ticket out of `begin` until it lifts."""
+    a = project(number=2, title="A", klass="Broken")
+    b = project(number=3, title="B", klass="Improve")
+    items = [a, b, ticket(11, parent=a.ref), ticket(21, parent=b.ref)]
+    assert _turns(items) == [11, 21]
+    assert [
+        int(r.rsplit("#", 1)[1])
+        for r in funnel.projected_pull_order(items, NOW, paused=[REPO + "#11"])
+    ] == [21, 11]
+
+
+def test_paused_and_finished_tickets_name_their_hold_not_a_false_owner():
+    until = datetime(2026, 9, 26, 8, 9, 44, tzinfo=timezone.utc)
+    a = project(number=2, title="paused", klass="Broken", children_total=1)
+    b = project(number=3, title="finished", klass="Improve", children_total=1)
+    c = project(number=4, title="moving", klass="Improve", children_total=1)
+    items = [a, b, c, ticket(11, parent=a.ref), ticket(21, parent=b.ref),
+             ticket(31, parent=c.ref)]
+    monkey = {REPO + "#11": {"failures": 6, "until": until}}
+    original = funnel.finished_by_comments
+    funnel.finished_by_comments = lambda rows: [REPO + "#21"]
+    try:
+        board = funnel.dashboard_board(items, NOW, backed_off=monkey)
+    finally:
+        funnel.finished_by_comments = original
+    found = next(c for c in board["columns"] if c["stage"] == "Building")
+    by_title = {row["title"]: row for row in found["items"]}
+    paused = by_title["paused"]["tickets"][0]
+    assert paused["owner"] is None
+    assert paused["paused_until"] == until.isoformat()
+    assert paused["paused_failures"] == 6
+    assert by_title["paused"]["next_owner"] is None
+    assert by_title["paused"]["next_step_paused_until"] == until.isoformat()
+    finished = by_title["finished"]["tickets"][0]
+    assert finished["owner"] == "Nate" and finished["finished_by_comments"]
+    assert by_title["finished"]["next_owner"] == "Nate"
+    # The paused Broken project no longer leads: its turn comes after the
+    # work available now.
+    assert [row["title"] for row in found["items"]][-1] == "paused"
+
+
 def test_a_projection_failure_still_renders_the_board(monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("projection")

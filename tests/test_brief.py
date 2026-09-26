@@ -872,6 +872,82 @@ def test_brief_surfaces_blocked_projects_and_tickets_oldest_first(
     assert calls == []
 
 
+def test_brief_renders_event_condition_and_elapsed_wait_from_after(
+    monkeypatch, capsys
+):
+    after = (NOW - timedelta(days=2, hours=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    event = {
+        "agent": "codex",
+        "job": "command-center-tickets-hourly",
+        "outcome": "errored",
+        "after": after,
+    }
+    item = funnel.Item(
+        repo="nateprich/beta", number=34, title="Daily failure wait",
+        url="https://example.invalid/34", state="OPEN", status="Building",
+        status_since=NOW - timedelta(days=8), labels=["blocked"],
+        block_reason="Wait for the next daily failure.",
+        block_event=event, parent="nateprich/beta#29",
+        needs="external-event",
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([item], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    row = brief["blocked"][0]
+    assert row["event_condition"] == event
+    assert row["event_wait"] == "2 days"
+    assert row["event_wait_seconds"] == 187200.0
+    assert brief["items"] == []
+    assert brief["event_block_inconsistencies"] == []
+
+
+def test_brief_flags_both_event_spec_and_needs_mismatches(monkeypatch, capsys):
+    event = {
+        "agent": "codex",
+        "job": "command-center-tickets-hourly",
+        "outcome": "errored",
+        "after": "2026-09-04T00:00:00Z",
+    }
+    spec_without_needs = funnel.Item(
+        repo="nateprich/beta", number=40, title="Missing event routing",
+        url="https://example.invalid/40", state="OPEN", status="Building",
+        labels=["blocked"], block_event=event, parent="nateprich/beta#29",
+        needs="none",
+    )
+    needs_without_spec = funnel.Item(
+        repo="nateprich/beta", number=41, title="Missing event spec",
+        url="https://example.invalid/41", state="OPEN", status="Building",
+        labels=["blocked"], parent="nateprich/beta#29",
+        needs="external-event",
+    )
+    ordinary_ticket = funnel.Item(
+        repo="nateprich/beta", number=42, title="Ordinary block",
+        url="https://example.invalid/42", state="OPEN", status="Building",
+        labels=["blocked"], parent="nateprich/beta#29", needs="none",
+    )
+    project = funnel.Item(
+        repo="nateprich/beta", number=43, title="External-event project",
+        url="https://example.invalid/43", state="OPEN", status="Ready",
+        labels=["blocked"], needs="external-event",
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief(
+        [spec_without_needs, needs_without_spec, ordinary_ticket, project], NOW
+    ) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert [row["ref"] for row in brief["event_block_inconsistencies"]] == [
+        "nateprich/beta#40", "nateprich/beta#41",
+    ]
+    assert [row["mismatch"] for row in brief["event_block_inconsistencies"]] == [
+        "well-formed event spec without Needs: external-event",
+        "Needs: external-event without a well-formed event spec",
+    ]
+
+
 def test_brief_carries_breakdown_question_on_decision_and_blocked_rows(
     monkeypatch, capsys
 ):

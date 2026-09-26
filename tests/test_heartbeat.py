@@ -878,6 +878,18 @@ def test_graphql_points_count_null_reset_bucket_as_unknown_not_zero():
     }
 
 
+def test_graphql_points_keep_aggregate_unknown_when_caller_map_is_empty():
+    record = finish("run-id", NOW + 10)
+    record["api_cost"] = {"graphql_points": 12, "gh_calls": 2}
+    record["graphql_by_caller"] = {}
+
+    assert heartbeat.graphql_points_by_reset_at([record]) == {
+        "by_reset_at": {},
+        "unattributed_unknown_buckets": 1,
+        "untimed_unknown_buckets": 0,
+    }
+
+
 def test_graphql_points_keep_mixed_reset_windows_across_hour_boundary():
     record = finish("run-id", NOW + 7200)
     record["graphql_by_caller"] = {

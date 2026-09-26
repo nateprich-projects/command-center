@@ -1053,7 +1053,7 @@ def graphql_points_by_reset_at(
 
     for record in sources:
         callers = record.get("graphql_by_caller")
-        if not isinstance(callers, dict):
+        if not isinstance(callers, dict) or not callers:
             api = record.get("api_cost")
             api = api if isinstance(api, dict) else {}
             points = _api_cost_number(api.get("graphql_points"))

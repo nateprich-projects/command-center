@@ -82,10 +82,59 @@ def test_cost_and_remaining_accumulate_in_separate_caller_buckets(monkeypatch):
     with funnel.graphql_caller("publisher"):
         funnel.gh_graphql("{third}")
 
-    assert funnel.graphql_caller_spend() == {
+    spend = funnel.graphql_caller_spend()
+    assert {
+        caller: {key: reading[key] for key in ("calls", "points", "remaining")}
+        for caller, reading in spend.items()
+    } == {
         "standard": {"calls": 2, "points": 5, "remaining": 80},
         "publisher": {"calls": 1, "points": 5, "remaining": 70},
     }
+    assert [reading["cost"] for reading in spend["standard"]["readings"]] == [2, 3]
+    assert [reading["remaining"] for reading in spend["standard"]["readings"]] == [
+        100, 80,
+    ]
+
+
+def test_response_reading_keeps_reset_stamp_and_receipt_time(monkeypatch):
+    reset()
+    response_at = 1_790_425_555.125
+    monkeypatch.setattr(funnel.time, "time", lambda: response_at)
+    monkeypatch.setattr(funnel.subprocess, "run", lambda *a, **k: Proc(
+        {"data": {"viewer": {}, "rateLimit": {
+            "cost": 7, "remaining": 4993,
+            "resetAt": "2026-09-26T10:49:20Z",
+        }}}
+    ))
+
+    with funnel.graphql_caller("standard"):
+        funnel.gh_graphql("{viewer{login}}")
+
+    assert funnel.graphql_caller_spend()["standard"]["readings"] == [{
+        "cost": 7,
+        "remaining": 4993,
+        "reset_at": "2026-09-26T10:49:20Z",
+        "received_at": response_at,
+    }]
+
+
+def test_response_without_rate_limit_keeps_unknown_values_null(monkeypatch):
+    reset()
+    response_at = 1_790_425_556.25
+    monkeypatch.setattr(funnel.time, "time", lambda: response_at)
+    monkeypatch.setattr(funnel.subprocess, "run", lambda *a, **k: Proc(
+        {"data": {"viewer": {}}}
+    ))
+
+    with funnel.graphql_caller("standard"):
+        funnel.gh_graphql("{viewer{login}}")
+
+    assert funnel.graphql_caller_spend()["unattributed"]["readings"] == [{
+        "cost": None,
+        "remaining": None,
+        "reset_at": None,
+        "received_at": response_at,
+    }]
 
 
 def test_unreadable_cost_is_kept_under_unattributed(monkeypatch):
@@ -97,9 +146,15 @@ def test_unreadable_cost_is_kept_under_unattributed(monkeypatch):
     with funnel.graphql_caller("escalated"):
         funnel.gh_graphql("{viewer{login}}")
 
-    assert funnel.graphql_caller_spend() == {
+    spend = funnel.graphql_caller_spend()
+    assert {
+        caller: {key: reading[key] for key in ("calls", "points", "remaining")}
+        for caller, reading in spend.items()
+    } == {
         "unattributed": {"calls": 1, "points": None, "remaining": 42},
     }
+    assert spend["unattributed"]["readings"][0]["reset_at"] is None
+    assert spend["unattributed"]["readings"][0]["remaining"] == 42
 
 
 def test_partial_error_response_still_contributes_its_rate_limit_reading(
@@ -120,9 +175,15 @@ def test_partial_error_response_still_contributes_its_rate_limit_reading(
         with pytest.raises(funnel.GitHubError, match="partial result"):
             funnel.gh_graphql("{viewer{login}}")
 
-    assert funnel.graphql_caller_spend() == {
+    spend = funnel.graphql_caller_spend()
+    assert {
+        caller: {key: reading[key] for key in ("calls", "points", "remaining")}
+        for caller, reading in spend.items()
+    } == {
         "watch": {"calls": 1, "points": 4, "remaining": 20},
     }
+    assert spend["watch"]["readings"][0]["cost"] == 4
+    assert spend["watch"]["readings"][0]["received_at"] is not None
 
 
 def test_command_caller_mapping_covers_the_named_paths():
@@ -278,7 +339,10 @@ def test_report_api_cost_attaches_measurement_to_the_resolved_run(monkeypatch):
             "graphql_points": 7,
             "gh_calls": 3,
             "graphql_by_caller": {
-                "standard": {"calls": 1, "points": 7, "remaining": 90},
+                "standard": {
+                    "calls": 1, "points": 7, "remaining": 90,
+                    "readings": [],
+                },
             },
         }
     )]

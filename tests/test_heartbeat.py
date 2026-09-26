@@ -646,8 +646,60 @@ def test_finish_sums_api_cost_events_from_two_funnel_commands(monkeypatch):
         "gh_calls": 5,
     }
     assert written[0]["graphql_by_caller"] == {
-        "unattributed": {"calls": None, "points": 12, "remaining": None},
+        "unattributed": {
+            "calls": None, "points": 12, "remaining": None, "readings": [],
+        },
     }
+
+
+def test_api_cost_event_preserves_reset_metadata_and_null_unknowns(monkeypatch):
+    written = []
+    monkeypatch.setattr(
+        heartbeat, "append",
+        lambda agent, record: written.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    heartbeat.record_api_cost("claude", "run-id", {
+        "graphql_points": 7,
+        "gh_calls": 2,
+        "graphql_by_caller": {
+            "standard": {
+                "calls": 2,
+                "points": 7,
+                "remaining": 4993,
+                "readings": [
+                    {
+                        "cost": 7,
+                        "remaining": 4993,
+                        "reset_at": "2026-09-26T10:49:20Z",
+                        "received_at": NOW + 0.25,
+                    },
+                    {
+                        "cost": None,
+                        "remaining": None,
+                        "reset_at": None,
+                        "received_at": NOW + 0.5,
+                    },
+                ],
+            },
+        },
+    })
+
+    assert written[0]["graphql_by_caller"]["standard"]["readings"] == [
+        {
+            "cost": 7,
+            "remaining": 4993,
+            "reset_at": "2026-09-26T10:49:20Z",
+            "received_at": NOW + 0.25,
+        },
+        {
+            "cost": None,
+            "remaining": None,
+            "reset_at": None,
+            "received_at": NOW + 0.5,
+        },
+    ]
 
 
 def test_finish_aggregates_caller_costs_and_keeps_unknowns_unattributed(
@@ -660,8 +712,22 @@ def test_finish_aggregates_caller_costs_and_keeps_unknowns_unattributed(
             "ts": int(NOW) + 1,
             "api_cost": {"graphql_points": 5, "gh_calls": 2},
             "graphql_by_caller": {
-                "standard": {"calls": 2, "points": 5, "remaining": 100},
-                "unattributed": {"calls": 1, "points": None, "remaining": 90},
+                "standard": {
+                    "calls": 2, "points": 5, "remaining": 100,
+                    "readings": [
+                        {"cost": 2, "remaining": 100, "reset_at": "z",
+                         "received_at": NOW + 1.1},
+                        {"cost": 3, "remaining": 100, "reset_at": "z",
+                         "received_at": NOW + 1.2},
+                    ],
+                },
+                "unattributed": {
+                    "calls": 1, "points": None, "remaining": 90,
+                    "readings": [
+                        {"cost": None, "remaining": 90, "reset_at": None,
+                         "received_at": NOW + 1.3},
+                    ],
+                },
             },
         },
         {
@@ -669,9 +735,27 @@ def test_finish_aggregates_caller_costs_and_keeps_unknowns_unattributed(
             "ts": int(NOW) + 2,
             "api_cost": {"graphql_points": 7, "gh_calls": 1},
             "graphql_by_caller": {
-                "standard": {"calls": 1, "points": 7, "remaining": 80},
-                "publisher": {"calls": 1, "points": 3, "remaining": 75},
-                "unattributed": {"calls": 1, "points": None, "remaining": 70},
+                "standard": {
+                    "calls": 1, "points": 7, "remaining": 80,
+                    "readings": [
+                        {"cost": 7, "remaining": 80, "reset_at": "later",
+                         "received_at": NOW + 2.1},
+                    ],
+                },
+                "publisher": {
+                    "calls": 1, "points": 3, "remaining": 75,
+                    "readings": [
+                        {"cost": 3, "remaining": 75, "reset_at": "later",
+                         "received_at": NOW + 2.2},
+                    ],
+                },
+                "unattributed": {
+                    "calls": 1, "points": None, "remaining": 70,
+                    "readings": [
+                        {"cost": None, "remaining": 70, "reset_at": None,
+                         "received_at": NOW + 2.3},
+                    ],
+                },
             },
         },
     ]
@@ -679,9 +763,33 @@ def test_finish_aggregates_caller_costs_and_keeps_unknowns_unattributed(
     result = heartbeat.graphql_by_caller_for_run(records, "run-id")
 
     assert result == {
-        "publisher": {"calls": 1, "points": 3, "remaining": 75},
-        "standard": {"calls": 3, "points": 12, "remaining": 80},
-        "unattributed": {"calls": 2, "points": None, "remaining": 70},
+        "publisher": {
+            "calls": 1, "points": 3, "remaining": 75,
+            "readings": [
+                {"cost": 3, "remaining": 75, "reset_at": "later",
+                 "received_at": NOW + 2.2},
+            ],
+        },
+        "standard": {
+            "calls": 3, "points": 12, "remaining": 80,
+            "readings": [
+                {"cost": 2, "remaining": 100, "reset_at": "z",
+                 "received_at": NOW + 1.1},
+                {"cost": 3, "remaining": 100, "reset_at": "z",
+                 "received_at": NOW + 1.2},
+                {"cost": 7, "remaining": 80, "reset_at": "later",
+                 "received_at": NOW + 2.1},
+            ],
+        },
+        "unattributed": {
+            "calls": 2, "points": None, "remaining": 70,
+            "readings": [
+                {"cost": None, "remaining": 90, "reset_at": None,
+                 "received_at": NOW + 1.3},
+                {"cost": None, "remaining": 70, "reset_at": None,
+                 "received_at": NOW + 2.3},
+            ],
+        },
     }
 
 

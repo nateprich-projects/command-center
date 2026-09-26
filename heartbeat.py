@@ -818,9 +818,34 @@ def api_cost_for_run(records: List[Dict], run: Optional[str]) -> Dict[str, Optio
     return result
 
 
-def _clean_graphql_by_caller(value: Dict) -> Dict[str, Dict[str, Optional[int]]]:
-    """Keep only the bounded caller schema and measured non-negative integers."""
-    cleaned: Dict[str, Dict[str, Optional[int]]] = {}
+def _clean_graphql_readings(value: object) -> List[Dict[str, object]]:
+    """Keep each response's measured rate-limit fields without guessing."""
+    if not isinstance(value, list):
+        return []
+    cleaned = []
+    for reading in value:
+        if not isinstance(reading, dict):
+            continue
+        reset_at = reading.get("reset_at")
+        received_at = _finite_number(reading.get("received_at"))
+        cleaned.append({
+            "cost": _api_cost_number(reading.get("cost")),
+            "remaining": _api_cost_number(reading.get("remaining")),
+            "reset_at": (
+                reset_at.strip()
+                if isinstance(reset_at, str) and reset_at.strip() else None
+            ),
+            "received_at": (
+                received_at if received_at is not None and received_at >= 0
+                else None
+            ),
+        })
+    return cleaned
+
+
+def _clean_graphql_by_caller(value: Dict) -> Dict[str, Dict[str, object]]:
+    """Keep bounded caller totals and their individual response readings."""
+    cleaned: Dict[str, Dict[str, object]] = {}
     for name, entry in value.items():
         caller = (
             name if isinstance(name, str) and name in GRAPHQL_CALLER_NAMES
@@ -830,24 +855,29 @@ def _clean_graphql_by_caller(value: Dict) -> Dict[str, Dict[str, Optional[int]]]
             entry = {}
         target = cleaned.setdefault(caller, {
             "calls": None, "points": None, "remaining": None,
+            "readings": [],
         })
         for field in GRAPHQL_CALLER_COST_FIELDS:
             number = _api_cost_number(entry.get(field))
             if number is not None:
                 previous = target[field]
                 target[field] = number if previous is None else previous + number
+        readings = target["readings"]
+        if isinstance(readings, list):
+            readings.extend(_clean_graphql_readings(entry.get("readings")))
     return cleaned
 
 
 def graphql_by_caller_for_run(
         records: List[Dict], run: Optional[str]
-        ) -> Optional[Dict[str, Dict[str, Optional[int]]]]:
-    """Aggregate per-command caller readings without hiding unreadable costs.
+        ) -> Optional[Dict[str, Dict[str, object]]]:
+    """Aggregate caller totals and retain every response reading for the run.
 
     `points` and `calls` sum across this run. `remaining` is the latest valid
     GraphQL response value for that caller, not a delta against the shared
-    account window. Older api_cost events have no caller map; their known
-    points, or an unreadable value, stay visible under `unattributed`.
+    account window. Each response's reset stamp and receipt time remain in its
+    caller's `readings`; older api_cost events have no caller map, so their
+    known points, or an unreadable value, stay visible under `unattributed`.
     """
     if not run:
         return None
@@ -869,16 +899,21 @@ def graphql_by_caller_for_run(
                     "calls": None,
                     "points": _api_cost_number(api.get("graphql_points")),
                     "remaining": None,
+                    "readings": [],
                 }
             }
         for name, entry in _clean_graphql_by_caller(raw).items():
             bucket = totals.setdefault(name, {
                 "calls": 0, "points": 0, "remaining": None,
+                "readings": [],
                 "calls_readable": True, "points_readable": True,
                 "remaining_stamp": (float("-inf"), -1),
             })
             if not isinstance(entry, dict):
                 entry = {}
+            readings = bucket["readings"]
+            if isinstance(readings, list):
+                readings.extend(entry.get("readings", []))
             for field in ("calls", "points"):
                 value = _api_cost_number(entry.get(field))
                 if value is None:
@@ -898,7 +933,7 @@ def graphql_by_caller_for_run(
                     bucket["remaining"] = remaining
                     bucket["remaining_stamp"] = (stamp, index)
 
-    result: Dict[str, Dict[str, Optional[int]]] = {}
+    result: Dict[str, Dict[str, object]] = {}
     caller_order = [*sorted(GRAPHQL_CALLER_NAMES - {"unattributed"}),
                     "unattributed"]
     for caller in caller_order:
@@ -915,6 +950,7 @@ def graphql_by_caller_for_run(
                 if bucket["points_readable"] else None
             ),
             "remaining": bucket["remaining"],
+            "readings": list(bucket["readings"]),
         }
     return result
 

@@ -31,14 +31,12 @@ If the command fails, show the error. Do not query GitHub yourself.
 | `total_needing_nate` | Decisions waiting; `Ideas` excluded, never pressure |
 | `human_steps` | Tickets waiting on Nate to go and do the declared `reason`; outside `total_needing_nate`, their only surface |
 | `machine_local_steps` | Tickets waiting on a Claude Code session to go and do the declared `reason`; never folded into decisions or the total |
-| `event_block_inconsistencies` | Blocked tickets whose event spec and Needs routing disagree |
 | `unattended_merges` | Agent merges without him (`pr`, `at`, `note`, `agent`; retired agents excluded); call `self_reviewed: true` self-reviewed |
 
 The code template documents these: `generated_at`, `counts_by_gate`,
 `items`, `waiting_on`, `waited`, `class`, `pinned`, `needs_class`,
 `unclassed_captures`, `in_motion`, `wip_limit`, `stale_locks_taken_over`,
-`stranded`, `event_block_inconsistencies`, `working_tree_touched`,
-`maintenance_load`, `disposal`,
+`stranded`, `working_tree_touched`, `maintenance_load`, `disposal`,
 `recorded_cause_regressions`, `command_center_ticket_pr_share`,
 `resend_ratio`, `outcome_signals`, `blocked`, `blocked_human_steps`,
 `blocked_machine_local_steps`, `suspected_human_steps`, `parked`,
@@ -47,10 +45,6 @@ The code template documents these: `generated_at`, `counts_by_gate`,
 `rejected_merges`, `status_state_mismatches`, `main_ci`,
 `closed_with_access_vocabulary`, `member_issues_without_project_items`, `missing`, `timings`,
 `degraded`.
-
-For `event_block_inconsistencies`, each row shows `ref`, `title`, `needs` and
-the mismatch direction; include `event_condition` when present, and omit the
-section when the list is empty.
 
 ## How to render it
 

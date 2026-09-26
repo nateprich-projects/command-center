@@ -649,7 +649,6 @@ BRIEF_SECTION_BUDGETS = {
     # 1091-item board at 20.93 s, 25.17 s, 22.94 s.
     "cleared_blocks": 30.0,
     "blocked": 0.25,
-    "event_block_inconsistencies": 0.25,
     "human_steps": 0.25,
     "machine_local_steps": 0.25,
     "blocked_human_steps": 0.25,
@@ -10926,6 +10925,9 @@ def _blocked_item_json(item: Item, now: datetime) -> Dict[str, object]:
             rendered["event_wait_seconds"] = round(
                 elapsed.total_seconds(), 3
             )
+    mismatch = _event_block_mismatch(item)
+    if mismatch is not None:
+        rendered["event_mismatch"] = mismatch
     if item.needs_decision is not None:
         rendered["needs_decision"] = item.needs_decision
     return rendered
@@ -10953,30 +10955,6 @@ def _event_block_mismatch(item: Item) -> Optional[str]:
     if item.needs == "external-event":
         return "Needs: external-event without a well-formed event spec"
     return None
-
-
-def event_block_inconsistencies_json(
-    items: Iterable[Item],
-) -> List[Dict[str, object]]:
-    """List blocked tickets whose event spec and Needs routing disagree."""
-    found: List[Dict[str, object]] = []
-    for item in blocked_items(items):
-        mismatch = _event_block_mismatch(item)
-        if mismatch is None:
-            continue
-        row = {
-            "ref": item.ref,
-            "title": item.title,
-            "url": item.url,
-            "needs": item.needs,
-            "mismatch": mismatch,
-        }
-        if item.block_event is not None:
-            row["event_condition"] = dict(item.block_event)
-        found.append(row)
-    return found
-
-
 # Approval may adopt an unset Class only from an explicit, whole-line
 # proposal: no agent infers or writes a Class from plan prose on Nate's
 # behalf. The value match below is exact, so a fuzzy line stays with him.
@@ -12572,11 +12550,6 @@ def cmd_brief(
             "cleared_blocks", lambda: cleared_blocks_json(items, now)
         )
         blocked = section("blocked", lambda: blocked_json(items, now), [])
-        event_block_inconsistencies = section(
-            "event_block_inconsistencies",
-            lambda: event_block_inconsistencies_json(items),
-            [],
-        )
         human = section("human_steps", lambda: human_step_json(items, now), [])
         machine_local = section(
             "machine_local_steps",
@@ -12694,7 +12667,6 @@ def cmd_brief(
             "closed_itself": closed_itself,
             "cleared_blocks": cleared_blocks,
             "blocked": blocked,
-            "event_block_inconsistencies": event_block_inconsistencies,
             "human_steps": human,
             "machine_local_steps": machine_local,
             "blocked_human_steps": blocked_human,

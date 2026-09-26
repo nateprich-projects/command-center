@@ -900,7 +900,7 @@ def test_brief_renders_event_condition_and_elapsed_wait_from_after(
     assert row["event_wait"] == "2 days"
     assert row["event_wait_seconds"] == 187200.0
     assert brief["items"] == []
-    assert brief["event_block_inconsistencies"] == []
+    assert "event_mismatch" not in row
 
 
 def test_brief_flags_both_event_spec_and_needs_mismatches(monkeypatch, capsys):
@@ -939,17 +939,17 @@ def test_brief_flags_both_event_spec_and_needs_mismatches(monkeypatch, capsys):
     ) == 0
     brief = json.loads(capsys.readouterr().out)
 
-    mismatches = brief["event_block_inconsistencies"]
-    assert [row["ref"] for row in mismatches] == [
-        "nateprich/beta#40", "nateprich/beta#41",
-    ]
-    assert [row["mismatch"] for row in mismatches] == [
-        "well-formed event spec without Needs: external-event",
-        "Needs: external-event without a well-formed event spec",
-    ]
-    assert mismatches[0]["event_condition"] == event
-    assert mismatches[1]["needs"] == "external-event"
-    assert all("url" in row and "title" in row for row in mismatches)
+    mismatches = {
+        row["ref"]: row.get("event_mismatch") for row in brief["blocked"]
+    }
+    assert mismatches == {
+        "nateprich/beta#40":
+            "well-formed event spec without Needs: external-event",
+        "nateprich/beta#41":
+            "Needs: external-event without a well-formed event spec",
+        "nateprich/beta#42": None,
+        "nateprich/beta#43": None,
+    }
 
 
 def test_brief_carries_breakdown_question_on_decision_and_blocked_rows(

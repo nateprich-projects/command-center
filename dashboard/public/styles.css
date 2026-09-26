@@ -354,6 +354,50 @@ main[hidden] { display: none; }
 .metric-reading.metric-delta dd { color: var(--accent-ink); }
 .metric-reading dd.metric-gap { color: var(--ink-faint); font-weight: 400; }
 
+.execution-section + .execution-section { margin-top: 4px; }
+.execution-section > h2 { margin: 0; font-size: 16px; }
+.run-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.run-metric-panel {
+  min-width: 0;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.run-metric-heading { margin-bottom: 8px; }
+.run-metric-heading .metric-title { margin-bottom: 4px; }
+.run-metric-description {
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.run-series-row {
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) minmax(150px, 1.2fr);
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--row-line);
+}
+.run-series-meta { min-width: 0; }
+.run-series-label {
+  margin: 0 0 5px;
+  color: var(--ink-dim);
+  font-size: 11px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.run-series-meta .metric-values { gap: 3px; }
+.run-series-meta .metric-reading dt { font-size: 9px; }
+.run-series-meta .metric-reading dd { font-size: 11px; }
+.metric-chart-compact { margin: 0; }
+.run-metric-empty { margin: 0; padding: 12px 0 2px; font-size: 12px; }
+
 /* The panel chart: a 2px R7 line that breaks at every gap, the R28 as a
    recessive rule, a hairline baseline, and ink-coloured labels. */
 .metric-chart { display: block; width: 100%; height: auto; margin-top: 10px; overflow: visible; }
@@ -538,7 +582,8 @@ main[hidden] { display: none; }
    both themes without a second set of literals. */
 .chip-tier-escalated,
 .chip-blocked, .chip-pin, .chip-gate, .owner-nate, .owner-claude, .owner-muse,
-.owner-codex, .owner-blocked, .owner-queued, .chip-queued, .chip-unblocks, .chip-class-broken, .chip-class-maintenance, .chip-class-improve,
+.owner-codex, .owner-blocked, .owner-queued, .chip-queued, .owner-paused, .chip-paused,
+.chip-finished, .chip-unblocks, .chip-class-broken, .chip-class-maintenance, .chip-class-improve,
 .chip-class-new, .chip-class-replace, .chip-class-investigate {
   border-color: color-mix(in srgb, currentColor 48%, transparent);
 }
@@ -547,6 +592,8 @@ main[hidden] { display: none; }
 .chip-tier-standard { color: var(--ink-faint); }
 .chip-blocked { color: var(--danger); }
 .chip-queued { color: var(--ink-dim); }
+.chip-paused { color: var(--pip-blocked); }
+.chip-finished { color: var(--accent-ink); }
 .chip-unblocks { color: var(--accent-ink); }
 .chip-pin { color: var(--accent-ink); }
 .chip-gate { color: var(--accent-ink); }
@@ -558,6 +605,7 @@ main[hidden] { display: none; }
 .owner-codex { color: var(--green); }
 .owner-blocked { color: var(--pip-blocked-pip); }
 .owner-queued { color: var(--ink-dim); }
+.owner-paused { color: var(--pip-blocked); }
 .chip-class { color: var(--ink-dim); }
 .chip-class-broken { color: var(--danger); }
 .chip-class-maintenance { color: var(--pip-blocked); }
@@ -581,6 +629,7 @@ main[hidden] { display: none; }
   .masthead, main { padding-left: 12px; padding-right: 12px; }
   .table { --cols: 24px minmax(160px, 3fr) 104px 110px; }
   .cell-repo, .cell-tier, .cell-class, .cell-age { display: none; }
+  .run-metric-grid { grid-template-columns: minmax(0, 1fr); }
   .panel-head { align-items: flex-start; flex-wrap: wrap; }
   .legend {
     display: flex;
@@ -594,6 +643,8 @@ main[hidden] { display: none; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .budget-grid { grid-template-columns: minmax(0, 1fr); padding: 12px; }
   .metric-tile { padding: 12px; }
+  .run-metric-panel { padding: 12px; }
+  .run-series-row { grid-template-columns: minmax(0, 1fr); }
   .brief-sections {
     display: grid;
     grid-template-columns: minmax(0, 1fr);

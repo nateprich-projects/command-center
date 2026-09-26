@@ -1208,6 +1208,50 @@ const RUN_METRICS = [
   },
 ];
 
+const ATTENTION_METRICS = [
+  {
+    code: "E1",
+    title: "Waiting on Nate",
+    description: "Items at Nate’s decision gates and average dwell at Shaped and Ready. A long Ready wait can reflect deliberate sequencing.",
+    format: "count",
+    sources: [
+      { path: ["E", "E1", "total_needing_nate"], label: "Total waiting" },
+      { path: ["E", "E1", "gate_dwell"], label: "Average time at gate", format: "duration-hours" },
+    ],
+  },
+  {
+    code: "E2",
+    title: "Human steps",
+    description: "Outstanding steps and steps opened per day. Opening history is unavailable, so those readings remain gaps.",
+    format: "count",
+    sources: [
+      { path: ["E", "E2", "outstanding"], label: "Outstanding" },
+      { path: ["E", "E2", "opened_this_hour"], label: "Opened / day" },
+    ],
+  },
+  {
+    code: "E3",
+    title: "Unattended decisions",
+    description: "Machine approvals and merges per day.",
+    format: "count",
+    sources: [{ path: ["E", "E3"] }],
+  },
+  {
+    code: "E4",
+    title: "Watch interventions",
+    description: "Funnel-watch check-ins that acted per day.",
+    format: "count",
+    sources: [{ path: ["E", "E4"], label: "Actions / day" }],
+  },
+  {
+    code: "E5",
+    title: "Machine-health noise",
+    description: "Counts per day for stranded work, degraded sections, status mismatches, and stale lock takeovers.",
+    format: "count",
+    sources: [{ path: ["E", "E5"] }],
+  },
+];
+
 function valueAtPath(root, path) {
   let value = root;
   for (const part of path) {
@@ -1219,11 +1263,17 @@ function valueAtPath(root, path) {
 
 function humanizeRunKey(key) {
   const labels = {
+    approvals_this_hour: "Approvals / day",
     claim_to_pr: "claim to PR",
+    degraded_sections: "Degraded sections",
+    merges_this_hour: "Merges / day",
+    opened_this_hour: "Opened / day",
     pr_to_merge: "PR to merge",
     wall_clock_kills: "wall-clock kills",
     reconciled_claims: "reconciled claims",
     re_begins: "re-begins",
+    stale_locks_taken_over: "Stale locks taken over",
+    status_state_mismatches: "Status/state mismatches",
   };
   return labels[key] || key;
 }
@@ -1240,13 +1290,14 @@ function runMetricRows(root, definition) {
         key: [...source.path, ...item.path].join("."),
         label: parts.join(" · "),
         series: item.series,
+        format: source.format || definition.format,
       });
     }
   }
   return rows;
 }
 
-function renderRunMetrics(series, container) {
+function renderMetricPanels(series, container, definitions, panelClass) {
   if (!container) return;
   container.replaceChildren();
   const root = series && series.metrics && typeof series.metrics === "object"
@@ -1254,8 +1305,8 @@ function renderRunMetrics(series, container) {
   const days = series && Array.isArray(series.days) ? series.days : [];
   const index = days.length - 1;
 
-  for (const definition of RUN_METRICS) {
-    const panel = element("article", "run-metric-panel");
+  for (const definition of definitions) {
+    const panel = element("article", panelClass);
     panel.setAttribute("data-metric", definition.code);
     const heading = element("div", "run-metric-heading");
     heading.append(element("p", "metric-code", definition.code));
@@ -1273,11 +1324,11 @@ function renderRunMetrics(series, container) {
       row.setAttribute("data-series", item.key);
       const meta = element("div", "run-series-meta");
       meta.append(element("p", "run-series-label", item.label));
-      meta.append(metricReadings(metricValues(item.series, index), definition.format));
+      meta.append(metricReadings(metricValues(item.series, index), item.format));
       row.append(meta);
       row.append(renderMetricChart(item.series, days, {
         title: item.label,
-        format: definition.format,
+        format: item.format,
         compact: true,
       }));
       list.append(row);
@@ -1285,6 +1336,17 @@ function renderRunMetrics(series, container) {
     panel.append(list);
     container.append(panel);
   }
+}
+
+function renderRunMetrics(series, container) {
+  renderMetricPanels(series, container, RUN_METRICS, "run-metric-panel");
+}
+
+function renderAttentionMetrics(series, container) {
+  renderMetricPanels(
+    series, container, ATTENTION_METRICS,
+    "run-metric-panel attention-metric-panel",
+  );
 }
 
 function renderExecutionTiles(series, container) {
@@ -1536,12 +1598,14 @@ async function loadMetrics() {
     renderExecutionTiles(series, container);
     renderBudgetMetrics(series, document.querySelector("#budget-grid"));
     renderRunMetrics(series, runsContainer);
+    renderAttentionMetrics(series, document.querySelector("#attention-grid"));
   } catch (error) {
     status.textContent = error.message || "Metrics unavailable";
     status.classList.add("failed");
     renderExecutionTiles(null, container);
     renderBudgetMetrics(null, document.querySelector("#budget-grid"));
     renderRunMetrics(null, runsContainer);
+    renderAttentionMetrics(null, document.querySelector("#attention-grid"));
     throw error;
   } finally {
     metricsLoading = false;
@@ -1662,6 +1726,7 @@ export {
   renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,
   renderExecutionTiles, renderMetricChart, renderBudgetMetrics, renderRunMetrics,
+  renderAttentionMetrics,
   requestMetrics, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 };

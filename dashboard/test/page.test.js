@@ -7,7 +7,8 @@ import {
   phoneState, pipState, projectBlocked, projectHold, holdChip, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
-  renderMetricChart, renderBudgetMetrics, renderRunMetrics, CHART_WINDOW_DAYS,
+  renderMetricChart, renderBudgetMetrics, renderRunMetrics, renderAttentionMetrics,
+  CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 } from "../public/app.js";
 
@@ -785,6 +786,60 @@ test("the Runs panel renders C1-C6 by agent and job and preserves their gaps", a
   }
 });
 
+test("the Attention panel renders E1-E5, keeps gaps, and uses neutral panels", async () => {
+  const [fixtureText, html] = await Promise.all([
+    readFile(new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8"),
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+  ]);
+  const fixture = JSON.parse(fixtureText);
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const grid = new TestNode("div");
+    renderAttentionMetrics(fixture, grid);
+    const panels = grid.querySelectorAll(".attention-metric-panel");
+    assert.deepEqual(
+      panels.map((panel) => panel.attributes.get("data-metric")),
+      ["E1", "E2", "E3", "E4", "E5"],
+    );
+
+    const waiting = panels[0].querySelectorAll(".run-series-row");
+    assert.ok(waiting.some((row) => row.attributes.get("data-series")
+      === "E.E1.total_needing_nate"));
+    assert.ok(waiting.some((row) => row.attributes.get("data-series")
+      === "E.E1.gate_dwell.Shaped"));
+    assert.ok(waiting.some((row) => row.attributes.get("data-series")
+      === "E.E1.gate_dwell.Ready"));
+    const total = waiting.find((row) => row.attributes.get("data-series")
+      === "E.E1.total_needing_nate");
+    assert.ok(total.querySelectorAll(".chart-line").length >= 2,
+      "the R7 line breaks around a missing day");
+
+    const opened = panels[1].querySelectorAll(".run-series-row")
+      .find((row) => row.attributes.get("data-series")
+        === "E.E2.opened_this_hour");
+    assert.ok(opened);
+    assert.equal(opened.querySelectorAll(".metric-gap").length, 3);
+    assert.equal(opened.querySelectorAll(".chart-line").length, 0);
+    assert.ok(opened.querySelectorAll(".chart-hit")
+      .some((hit) => hit.textContent.includes("R7 Gap")));
+
+    assert.match(panels[2].textContent, /Approvals \/ day/);
+    assert.match(panels[2].textContent, /Merges \/ day/);
+    assert.match(panels[3].textContent, /Actions \/ day/);
+    assert.match(panels[4].textContent, /Degraded sections/);
+    assert.match(panels[4].textContent, /Status\/state mismatches/);
+    assert.ok(panels.every((panel) => !/alert|threshold|target/i.test(panel.className)));
+
+    assert.ok(html.indexOf('id="runs-heading"') < html.indexOf('id="budget-heading"'));
+    assert.ok(html.indexOf('id="budget-heading"') < html.indexOf('id="attention-heading"'));
+    assert.match(html, /<div id="attention-grid" class="run-metric-grid"><\/div>/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
 test("Execution uses a read-only request and the two views route on the same page", async () => {
   const [html, source, fixtureText] = await Promise.all([
     readFile(new URL("../public/index.html", import.meta.url), "utf8"),
@@ -808,6 +863,7 @@ test("Execution uses a read-only request and the two views route on the same pag
   assert.match(html, /<main id="funnel-view">/);
   assert.match(html, /<main id="execution-view"[^>]*hidden>/);
   assert.match(html, /<div id="runs-grid" class="run-metric-grid"><\/div>/);
+  assert.match(html, /<div id="attention-grid" class="run-metric-grid"><\/div>/);
   assert.equal(tabFromUrl("https://funnel.nateprich.com/?tab=execution&repo=owner%2Frepo"),
     "execution");
   assert.equal(tabFromUrl("https://funnel.nateprich.com/?tab=unknown"), "funnel");

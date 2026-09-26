@@ -15,9 +15,12 @@
 # Otherwise, review calls one lister and judges of at most three
 # requirements each against the same cached packet — in parallel on Muse, one
 # at a time on z.ai (#1411); the runner derives the
-# verdict before handing the answer to review-apply. Breakdown and shape each
-# answer one JSON question. Calls retry once on a parse error. Breakdown rides
-# the standard tier only; shape follows wherever begin offers it.
+# verdict before handing the answer to review-apply. Breakdown answers one
+# JSON question. Shape on Muse asks one framer, then sibling checks, deciders
+# and an auditor in parallel, and merges their answers in code (#1599); shape
+# on z.ai answers one JSON question. Calls retry once on a parse error.
+# Breakdown rides the standard tier only; shape follows wherever begin offers
+# it.
 #
 # Two backends, one protocol. Everything above is the same whichever model
 # answers; only the model call, the agent name on the records, and the
@@ -701,42 +704,53 @@ zai_quota_skip() {
   exit 0
 }
 
+# End the whole run as a Muse quota skip once muse_quota_record has written
+# the hold into MUSE_QUOTA_RESET: no verdict, no apply, no errored record.
+# Shared by the one-call paths and the shape parts (#1599), whichever call met
+# the refusal.
+muse_quota_skip() {
+  echo "muse-review-engine: Muse's provider quota is exhausted; parking every lane until $MUSE_QUOTA_RESET" >&2
+  if [[ -n "${BEGIN_RUN:-}" ]]; then
+    local muse_call_record
+    local -a quota_finish_args=(
+      finish --agent "$AGENT" --run "$BEGIN_RUN"
+      --outcome skipped-provider-quota
+      --note "provider quota exhausted until $MUSE_QUOTA_RESET"
+    )
+    if ! muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")"; then
+      echo "muse-review-engine: could not summarize Muse call ids; finishing without them" >&2
+      muse_call_record=""
+    fi
+    if [[ -n "$muse_call_record" ]]; then
+      quota_finish_args+=(--muse-call-record "$muse_call_record")
+    fi
+    python3 "$REPO/heartbeat.py" "${quota_finish_args[@]}" >&2 || true
+  fi
+  exit 0
+}
+
+# The optional second argument is the failed call's own diagnostic, for a
+# call that ran in a directory of its own (the shape framer, #1599).
 model_failed() {
   local status="$1"
+  local diag_path="${2:-$DIAG_FILE}"
   # A spent provider window is not the subject's failure, on either backend.
   # z.ai says so with zai-exec's own status.
   if [[ "$BACKEND" == "zai" ]]; then
     if (( status == ZAI_QUOTA_EXIT )); then
-      zai_quota_skip "$DIAG_FILE" "$status"
+      zai_quota_skip "$diag_path" "$status"
     fi
   # Muse: record the hold so every lane waits for the reset instead of
   # retrying on its own schedule.
-  elif MUSE_QUOTA_RESET="$(muse_quota_record "$DIAG_FILE" "${BEGIN_RUN:-}")"; then
-    echo "muse-review-engine: Muse's provider quota is exhausted; parking every lane until $MUSE_QUOTA_RESET" >&2
-    if [[ -n "${BEGIN_RUN:-}" ]]; then
-      local muse_call_record
-      local -a quota_finish_args=(
-        finish --agent "$AGENT" --run "$BEGIN_RUN"
-        --outcome skipped-provider-quota
-        --note "provider quota exhausted until $MUSE_QUOTA_RESET"
-      )
-      if ! muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")"; then
-        echo "muse-review-engine: could not summarize Muse call ids; finishing without them" >&2
-        muse_call_record=""
-      fi
-      if [[ -n "$muse_call_record" ]]; then
-        quota_finish_args+=(--muse-call-record "$muse_call_record")
-      fi
-      python3 "$REPO/heartbeat.py" "${quota_finish_args[@]}" >&2 || true
-    fi
-    exit 0
+  elif MUSE_QUOTA_RESET="$(muse_quota_record "$diag_path" "${BEGIN_RUN:-}")"; then
+    muse_quota_skip
   fi
   if (( status == 124 )); then
     echo "muse-review-engine: the model call outlived the wall-clock bound" >&2
     failure "killed after $((BOUND_SECONDS / 60)) minutes: $TIER $JOB run exceeded the wall-clock bound (#392)" || true
     exit 124
   fi
-  model_err="$(cat "$DIAG_FILE")"
+  model_err="$(cat "$diag_path")"
   if [[ "$BACKEND" == "zai" ]]; then
     echo "muse-review-engine: zai-exec failed (exit $status): $model_err" >&2
     failure "zai-exec failed (exit $status) $FAIL_SUBJECT: $model_err" || true
@@ -753,7 +767,9 @@ model_failed() {
 # restrictions as review, a malformed answer retries once with the parse
 # error fed back, and the apply performs every side effect. A malformed
 # final answer records nothing — the project stays awaiting breakdown, the
-# idea keeps its needs-shaping label — so the next run asks again.
+# idea keeps its needs-shaping label — so the next run asks again. Shape on
+# Muse is the exception: it asks several small questions instead (#1599,
+# below), under the same records-nothing rule.
 
 fetch_issue_packet() {
   if [[ "$JOB" == "breakdown" ]]; then
@@ -826,6 +842,430 @@ retry_issue_prompt() {
     "$PROMPT" "$parse_err" >"$PROMPT_FILE"
 }
 
+# --- shape on Muse: small questions instead of one call (#1599) -------------
+#
+# One max call over the whole shape packet goes silent on the hardest ideas,
+# and #1233 measured that difficulty, not size, drives the silence. Review
+# answered that by splitting the question, not the evidence; shape does the
+# same here (plan #1581). The packet is still fetched once, and
+# engine/shape_split.py cuts each part the slice its question needs:
+#
+#  1. the framer drafts the plan and lists its open decision points, with the
+#     sibling plans reduced to an index. It runs first, in this shell, and is
+#     the one call that carries the session id (#1413);
+#  2. sibling checks read at most three full sibling plans each;
+#  3. deciders settle at most three decision points each;
+#  4. the auditor records the draft's premises and escalated risk.
+#
+# Parts 2-4 run together, unbound, each in its own directory with its own
+# prompt, answer and diagnostic, like the review judges. Each prompt is a
+# header built here in front of the routine's own prompt, with the part's
+# packet where PACKET_JSON stands: the routine file stays as it is
+# (routines/ is protected), and the header replaces its answer format.
+#
+# Every part must answer. A model failure, a timeout or a second parse
+# failure in any part ends the run errored with nothing applied, so the idea
+# keeps needs-shaping and the next run asks again. A failed part never
+# becomes a question for Nate: unlike an `unsure` requirement, a missing
+# decision has no safe reading. The answer is built in code, so shape-apply
+# runs once and its exit 3 is final; asking the model again would not change
+# a merge. z.ai's shape keeps the one call below, and breakdown keeps it on
+# both backends.
+
+# The Python side of the split, one small entry point per step, calling
+# engine/shape_split.py the way the review split calls engine/review.py. A
+# ShapeError exits 3, the status the parse retry reads, with the message on
+# stderr to feed back to the model.
+#
+#   framer-packet PACKET OUT   the framer's packet: sibling bodies out
+#   parts PACKET DRAFT RUN_DIR one directory per later part, each with its
+#                              packet and assigned items; the part names on
+#                              stdout and in RUN_DIR/shape-parts.json
+#   parse KIND CALL_DIR        validate CALL_DIR/answer.json into result.json
+#   merge RUN_DIR OUT          the shape answer, from every part's result
+shape_split() {
+  python3 - "$REPO" "$@" <<'PY'
+import json
+import os
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from engine import shape_split
+from engine.shape import ShapeError
+
+command, args = sys.argv[2], sys.argv[3:]
+
+
+def load(path):
+    with open(path) as handle:
+        return json.load(handle)
+
+
+def dump(value, path):
+    with open(path, "w") as handle:
+        json.dump(value, handle, indent=2)
+
+
+def result(run_dir, name):
+    return load(os.path.join(run_dir, "shape." + name, "result.json"))
+
+
+try:
+    if command == "framer-packet":
+        packet = load(args[0])
+        if not isinstance(packet, dict):
+            raise ShapeError("the shape packet must be a JSON object")
+        dump(shape_split.framer_packet(packet), args[1])
+    elif command == "parts":
+        packet, draft, run_dir = load(args[0]), load(args[1]), args[2]
+        # A sibling without a ref could never be answered; refuse it here
+        # rather than spend two calls learning that.
+        for row in packet.get("sibling_plans") or []:
+            if not isinstance(row.get("ref"), str) or not row["ref"].strip():
+                raise ShapeError("a sibling plan in the packet has no ref")
+        parts = [("sibling", part,
+                  [row.get("ref") for row in part["sibling_plans"]])
+                 for part in shape_split.sibling_packets(packet, draft)]
+        parts += [("decider", part, part["decision_points"])
+                  for part in shape_split.decider_packets(
+                      packet, draft, draft["decision_points"])]
+        parts.append(("auditor", shape_split.auditor_packet(packet, draft),
+                      None))
+        names = []
+        counts = {}
+        for kind, part, assigned in parts:
+            name = kind
+            if assigned is not None:
+                name = "{}.{}".format(kind, counts.get(kind, 0))
+                counts[kind] = counts.get(kind, 0) + 1
+            call_dir = os.path.join(run_dir, "shape." + name)
+            os.mkdir(call_dir)
+            dump(part, os.path.join(call_dir, "packet.json"))
+            if assigned is not None:
+                dump(assigned, os.path.join(call_dir, "assigned.json"))
+            names.append(name)
+        dump(names, os.path.join(run_dir, "shape-parts.json"))
+        print("\n".join(names))
+    elif command == "parse":
+        kind, call_dir = args
+        with open(os.path.join(call_dir, "answer.json")) as handle:
+            raw = handle.read()
+        if kind == "framer":
+            parsed = shape_split.parse_framer(raw)
+        elif kind == "sibling":
+            parsed = shape_split.parse_siblings(
+                raw, load(os.path.join(call_dir, "assigned.json")))
+        elif kind == "decider":
+            parsed = shape_split.parse_decider(
+                raw, load(os.path.join(call_dir, "assigned.json")))
+        elif kind == "auditor":
+            parsed = shape_split.parse_auditor(raw)
+        else:
+            raise SystemExit("unknown shape part {!r}".format(kind))
+        dump(parsed, os.path.join(call_dir, "result.json"))
+    elif command == "merge":
+        run_dir, out = args
+        names = load(os.path.join(run_dir, "shape-parts.json"))
+        siblings, decisions = [], []
+        for name in names:
+            if name.startswith("sibling."):
+                siblings.extend(result(run_dir, name))
+            elif name.startswith("decider."):
+                decisions.extend(result(run_dir, name))
+        dump(shape_split.merge_shape_answer(
+            result(run_dir, "framer"), siblings, decisions,
+            result(run_dir, "auditor")), out)
+    else:
+        raise SystemExit("unknown shape_split command {!r}".format(command))
+except ShapeError as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(3)
+PY
+}
+
+shape_framer_header() {
+  cat <<'HEADER'
+This call is the shape framer, one part of a larger shaping run. Draft the
+plan and name the decisions it leaves open. Decide none of them, and judge
+nothing about who should decide them.
+
+Later calls read your draft. Sibling checks read the sibling plans in full,
+deciders settle each decision point, and an auditor records the premises and
+escalated risk. So:
+
+- `plan_markdown` states what it is, concretely enough to ticket, and what
+  was rejected and why. Leave out the premises, the decision record and the
+  siblings: the runner renders a `## Siblings checked` section from the
+  sibling checks, so do not write one. An Investigate plan carries exactly
+  one whole line `Possible defect: <statement>`.
+- `decision_points` lists every decision the plan leaves open, one distinct
+  line each, at least one. Name each decision; do not answer it.
+- `sibling_index` lists the sibling plans without their bodies. Put
+  named-ticket order in `depends_on` as `owner/repo#n` refs; `[]` when the
+  plan waits on nothing.
+- `proposed_class` names one ladder class: Investigate, Broken, Maintenance,
+  Improve, New, or Replace.
+
+Answer with exactly one JSON object and nothing else:
+
+{"proposed_class": "Improve", "plan_markdown": "the plan", "decision_points": ["one open decision"], "depends_on": ["owner/repo#n"]}
+
+The text after this paragraph is the shaping question, included for the
+rules and the packet it carries. Read its packet and follow its rules for the
+plan; ignore its instructions about the decision record and about the shape
+of your answer, which this paragraph replaces.
+HEADER
+}
+
+shape_sibling_header() {
+  cat <<'HEADER'
+This call is one shape sibling check, one part of a larger shaping run. The
+packet's `draft` is the plan being shaped, and its `sibling_plans` are the
+only sibling plans this call checks. Decide nothing else about the plan.
+
+For each sibling plan, say how it relates to the draft:
+
+- `independent`: neither waits on the other and they share no work;
+- `depends_on`: the draft cannot start or finish until the sibling lands;
+- `overlaps`: both plans would do some of the same work.
+
+Answer every sibling plan exactly once, its `ref` copied verbatim, with a
+one-line `why` naming what in the two plans makes it so. Answer with exactly
+one JSON object and nothing else:
+
+{"siblings": [{"ref": "owner/repo#n", "relation": "independent" | "depends_on" | "overlaps", "why": "one line"}]}
+
+The text after this paragraph is the shaping question, included for the
+packet it carries. Read its packet; ignore its instructions about the
+decision record and about the shape of your answer, which this paragraph
+replaces.
+HEADER
+}
+
+shape_decider_header() {
+  cat <<'HEADER'
+This call is one shape decider, one part of a larger shaping run. The
+packet's `draft` is the plan being shaped, and its `decision_points` are the
+only decisions this call settles. Settle each one exactly once, its `point`
+copied verbatim, in exactly one of three ways:
+
+- `precedent`: the packet's rules or a sibling convention settle it. Give
+  the settled `claim` and its `source`.
+- `agent`: precedent settles nothing and the judgement is yours. Give your
+  `decision`, the `alternative` you rejected, and `why`. Technical defaults,
+  sequencing, assumptions and rollbacks are yours.
+- `nate`: only Nate may answer it, as a question about exposure, gates and
+  their writers, scope and priority, or a preference over deductions. Give
+  its `category` (`exposure`, `gates`, `scope` or `preference`) and one
+  single `question`.
+
+Check precedent first. Every field is one non-empty line. Answer with exactly
+one JSON object and nothing else:
+
+{"decisions": [{"point": "the point", "kind": "precedent", "claim": "...", "source": "..."}, {"point": "the point", "kind": "agent", "decision": "...", "alternative": "...", "why": "..."}, {"point": "the point", "kind": "nate", "category": "scope", "question": "..."}]}
+
+The text after this paragraph is the shaping question, included for the
+rules and the packet it carries. Read its packet and follow its rules for
+the decision record; ignore its instructions about the shape of your answer,
+which this paragraph replaces.
+HEADER
+}
+
+shape_auditor_header() {
+  cat <<'HEADER'
+This call is the shape auditor, one part of a larger shaping run. The
+packet's `draft` is the plan being shaped. Record its premises and its
+escalated risk, and decide nothing else about the plan.
+
+- `premises`: each factual claim the plan rests on, with a `file:line`,
+  command and output, or rollout or record pointer as `evidence`, and an
+  honest `label`: `measured`, `documented` or `inferred`. `[]` only when the
+  plan makes no factual claim.
+- `escalated_risk`: judge the plan, not its wording. Declare each risk as a
+  `reason` (`credentials`, `authorisation`, `data-migration`, `destructive`
+  or `concurrency`) with a one-line `why`; `[]` when none.
+
+Every field is one non-empty line. Answer with exactly one JSON object and
+nothing else:
+
+{"premises": [{"claim": "...", "evidence": "...", "label": "measured" | "documented" | "inferred"}], "escalated_risk": [{"reason": "...", "why": "..."}]}
+
+The text after this paragraph is the shaping question, included for the
+rules and the packet it carries. Read its packet and follow its rules for
+premises and escalated risk; ignore its instructions about the rest of the
+decision record and about the shape of your answer, which this paragraph
+replaces.
+HEADER
+}
+
+# One part's prompt: its header, then the routine's prompt with the part's
+# packet where PACKET_JSON stands, then the parse error on the retry.
+build_shape_part_prompt() {
+  local kind="$1"
+  local call_dir="$2"
+  local parse_error="${3:-}"
+  local part_json
+  part_json="$(cat "$call_dir/packet.json")"
+  {
+    "shape_${kind}_header"
+    printf '\n\n%s' "${PROMPT_TEMPLATE//PACKET_JSON/$part_json}"
+    if [[ -n "$parse_error" ]]; then
+      printf '\n\nYour previous answer could not be parsed: %s\nReply again with exactly one JSON object and nothing else.' \
+        "$parse_error"
+    fi
+  } >"$call_dir/prompt.txt"
+}
+
+# One part and its one parse retry, in RUN_DIR/shape.<name>. Returns 0 with
+# result.json written, or 1 with a `failed` note for the finish record, plus a
+# `model-status` file when the model call itself failed. Never exits: the
+# later parts run in the background, and the caller decides the run.
+run_shape_part() {
+  local name="$1"
+  local kind="${name%%.*}"
+  local call_dir="$RUN_DIR/shape.$name"
+  local attempt=1
+  local muse_status
+  local parse_status
+  local parse_err
+  local note
+
+  build_shape_part_prompt "$kind" "$call_dir"
+  while true; do
+    call_model_files "$call_dir/prompt.txt" "$call_dir/answer.json" \
+      "$call_dir/diag.txt"
+    muse_status=$?
+    if (( muse_status != 0 )); then
+      printf '%s\n' "$muse_status" >"$call_dir/model-status"
+      if (( muse_status == 124 )); then
+        note="shape $name was killed after $((BOUND_SECONDS / 60)) minutes: it exceeded the wall-clock bound (#392)"
+      else
+        note="shape $name: muse exec failed (exit $muse_status): $(head -c 1000 "$call_dir/diag.txt" 2>/dev/null)"
+      fi
+      printf '%s' "$note" >"$call_dir/failed"
+      echo "muse-review-engine: $note" >&2
+      return 1
+    fi
+    # Read the status directly, for the same reason the judging loop does.
+    shape_split parse "$kind" "$call_dir" 2>"$call_dir/parse.txt"
+    parse_status=$?
+    if (( parse_status == 0 )); then
+      return 0
+    fi
+    parse_err="$(cat "$call_dir/parse.txt")"
+    if (( attempt == 1 )); then
+      build_shape_part_prompt "$kind" "$call_dir" "$parse_err"
+      attempt=2
+      continue
+    fi
+    note="shape $name answer could not be parsed after two attempts: $parse_err"
+    printf '%s' "$note" >"$call_dir/failed"
+    echo "muse-review-engine: $note" >&2
+    return 1
+  done
+}
+
+run_shape_split() {
+  local framer_dir="$RUN_DIR/shape.framer"
+  local -a part_names=()
+  local -a part_pids=()
+  local name
+  local pid
+  local notes=""
+  local split_err
+
+  # The framer, in this shell and before anything is backgrounded, so it is
+  # the call that binds the session id: MUSE_SESSION_BOUND is a shell
+  # variable, and a background part could never hand the binding back.
+  if ! mkdir "$framer_dir" \
+    || ! shape_split framer-packet "$PACKET_FILE" "$framer_dir/packet.json" \
+      2>"$DIAG_FILE"; then
+    split_err="$(cat "$DIAG_FILE")"
+    echo "muse-review-engine: could not build the framer packet: $split_err" >&2
+    failure "could not build the shape framer packet for $BEGIN_REF: $split_err" || true
+    exit 1
+  fi
+  if ! run_shape_part framer; then
+    # The framer's own model failure reads like the one-call path's: a
+    # quota refusal parks the lanes, a timeout exits 124.
+    if [[ -e "$framer_dir/model-status" ]]; then
+      model_failed "$(cat "$framer_dir/model-status")" "$framer_dir/diag.txt"
+    fi
+    failure "could not frame the shape of $BEGIN_REF; nothing applied: $(cat "$framer_dir/failed")" || true
+    exit 1
+  fi
+
+  # The later parts, cut from the one packet and the framer's draft. The
+  # parts file is written before any call starts; `while read` rather than
+  # mapfile, which bash 3.2 lacks.
+  if ! shape_split parts "$PACKET_FILE" "$framer_dir/result.json" "$RUN_DIR" \
+      >"$RUN_DIR/shape-parts.txt" 2>"$DIAG_FILE"; then
+    split_err="$(cat "$DIAG_FILE")"
+    echo "muse-review-engine: could not split the shape parts: $split_err" >&2
+    failure "could not split the shape parts for $BEGIN_REF: $split_err" || true
+    exit 1
+  fi
+  while IFS= read -r name; do
+    [[ -n "$name" ]] && part_names+=("$name")
+  done <"$RUN_DIR/shape-parts.txt"
+
+  # All together, as the review judges run on Muse. The framer has bound the
+  # session, so every call from here is unbound. The `+` guards: bash 3.2
+  # reads an empty array under `set -u` as unbound. A draft always yields a
+  # decider and the auditor, so these are never empty; the guards keep a
+  # future change from making that fatal.
+  for name in ${part_names[@]+"${part_names[@]}"}; do
+    run_shape_part "$name" &
+    part_pids+=("$!")
+  done
+  for pid in ${part_pids[@]+"${part_pids[@]}"}; do
+    wait "$pid"
+  done
+
+  # Any part's diagnostic can hold the provider's refusal. Scanned whatever
+  # the part's status, as the judges' are; one refusal parks every lane and
+  # ends this run as a quota skip, with nothing applied.
+  for name in ${part_names[@]+"${part_names[@]}"}; do
+    if MUSE_QUOTA_RESET="$(muse_quota_record "$RUN_DIR/shape.$name/diag.txt" "${BEGIN_RUN:-}")"; then
+      muse_quota_skip
+    fi
+  done
+  for name in ${part_names[@]+"${part_names[@]}"}; do
+    if [[ -e "$RUN_DIR/shape.$name/failed" ]]; then
+      notes="${notes:+$notes; }$(cat "$RUN_DIR/shape.$name/failed")"
+    elif [[ ! -r "$RUN_DIR/shape.$name/result.json" ]]; then
+      notes="${notes:+$notes; }shape $name recorded no result"
+    fi
+  done
+  if [[ -n "$notes" ]]; then
+    failure "shape parts failed for $BEGIN_REF; nothing applied: $notes" || true
+    exit 1
+  fi
+
+  if ! shape_split merge "$RUN_DIR" "$ANSWER_FILE" 2>"$DIAG_FILE"; then
+    split_err="$(cat "$DIAG_FILE")"
+    echo "muse-review-engine: could not merge the shape parts: $split_err" >&2
+    failure "could not merge the shape parts for $BEGIN_REF: $split_err" || true
+    exit 1
+  fi
+
+  # Once, and final: the answer is code-built, so a retryable refusal would
+  # only refuse the same object again.
+  run_issue_apply 1 >"$RESULT_FILE" 2>"$DIAG_FILE"
+  apply_status=$?
+  if (( apply_status == 0 )); then
+    if ! NOTE="$(issue_live_note)"; then
+      NOTE="$JOB_PAST $BEGIN_REF: applied"
+    fi
+    finish_done "$NOTE" "" "$RESULT_FILE"
+    exit 0
+  fi
+  apply_err="$(cat "$DIAG_FILE")"
+  echo "muse-review-engine: $JOB-apply failed: $apply_err" >&2
+  failure "$JOB-apply failed on $BEGIN_REF: $apply_err" || true
+  exit 1
+}
+
 run_issue_job() {
   # The packet is the only evidence the model ever sees. Reads only;
   # nothing here changes remote state.
@@ -840,6 +1280,11 @@ run_issue_job() {
     echo "muse-review-engine: the $JOB packet for $BEGIN_REF is not valid JSON" >&2
     failure "$JOB-packet for $BEGIN_REF printed invalid JSON" || true
     exit 1
+  fi
+
+  # Shape on Muse asks its small questions instead of the one call below.
+  if [[ "$JOB" == "shape" && "$BACKEND" == "muse" ]]; then
+    run_shape_split
   fi
 
   # Substitute the whole packet where PACKET_JSON stands. The template check

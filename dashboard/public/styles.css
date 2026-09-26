@@ -492,7 +492,8 @@ main[hidden] { display: none; }
    both themes without a second set of literals. */
 .chip-tier-escalated,
 .chip-blocked, .chip-pin, .chip-gate, .owner-nate, .owner-claude, .owner-muse,
-.owner-codex, .owner-blocked, .owner-queued, .chip-queued, .chip-unblocks, .chip-class-broken, .chip-class-maintenance, .chip-class-improve,
+.owner-codex, .owner-blocked, .owner-queued, .chip-queued, .owner-paused, .chip-paused,
+.chip-finished, .chip-unblocks, .chip-class-broken, .chip-class-maintenance, .chip-class-improve,
 .chip-class-new, .chip-class-replace, .chip-class-investigate {
   border-color: color-mix(in srgb, currentColor 48%, transparent);
 }
@@ -501,6 +502,8 @@ main[hidden] { display: none; }
 .chip-tier-standard { color: var(--ink-faint); }
 .chip-blocked { color: var(--danger); }
 .chip-queued { color: var(--ink-dim); }
+.chip-paused { color: var(--pip-blocked); }
+.chip-finished { color: var(--accent-ink); }
 .chip-unblocks { color: var(--accent-ink); }
 .chip-pin { color: var(--accent-ink); }
 .chip-gate { color: var(--accent-ink); }
@@ -512,6 +515,7 @@ main[hidden] { display: none; }
 .owner-codex { color: var(--green); }
 .owner-blocked { color: var(--pip-blocked-pip); }
 .owner-queued { color: var(--ink-dim); }
+.owner-paused { color: var(--pip-blocked); }
 .chip-class { color: var(--ink-dim); }
 .chip-class-broken { color: var(--danger); }
 .chip-class-maintenance { color: var(--pip-blocked); }

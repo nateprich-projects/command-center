@@ -2317,6 +2317,7 @@ def startable(
 
 def projected_pull_order(
     items: Sequence[Item], now: Optional[datetime] = None,
+    paused: Collection[str] = (),
 ) -> List[str]:
     """Every ticket's projected turn, found by running ``startable()`` forward.
 
@@ -2333,6 +2334,11 @@ def projected_pull_order(
     taken now. What never becomes startable (a future date, a reason with no
     reference, a blocker off the board, a missing Class) gets no turn and is
     absent from the list. The items are copied; nothing is written.
+
+    ``paused`` names tickets held by ``backoff_withheld`` after repeated
+    failed runs. The engineers will not take them before the hold lifts, so
+    they wait until everything available now has had its turn (Nate,
+    2026-09-25: a row must never claim a next step the engineers won't take).
     """
     sim = [copy.copy(item) for item in items]
     by_ref = {item.ref: item for item in sim}
@@ -2372,9 +2378,13 @@ def projected_pull_order(
             done.add(parent.ref)
 
     order: List[str] = []
+    held = {ref: {} for ref in paused}
     lift_blocks()
-    for _ in range(len(sim) + 1):
-        queue = startable(sim)
+    for _ in range(len(sim) + 2):
+        queue = startable(sim, backed_off=held)
+        if not queue and held:
+            held = {}
+            continue
         if not queue:
             break
         order.append(queue[0].ref)
@@ -9314,6 +9324,8 @@ def _dashboard_ticket(
     queue_class: Optional[str] = None,
     unblocks: Sequence[str] = (),
     unblocks_later: Sequence[str] = (),
+    paused: Optional[Mapping[str, object]] = None,
+    finished: bool = False,
 ) -> Dict[str, object]:
     """One ticket row for the dashboard, with its PR, tier and owner flags.
 
@@ -9383,6 +9395,13 @@ def _dashboard_ticket(
         owner: Optional[str] = None
     elif blocked:
         owner = None
+    elif finished:
+        # Its comments record it done: closing it is Nate's move.
+        owner = OWNER_NATE
+    elif paused:
+        # Held after repeated failed runs; nobody takes it before the hold
+        # lifts, and the page says until when.
+        owner = None
     elif needs not in NEEDS_OPTIONS:
         owner = None
     elif needs == "claude-code-environment":
@@ -9438,7 +9457,25 @@ def _dashboard_ticket(
             list(unblocks_later) if item.state == "OPEN" else []
         ),
         "human_step": needs if needs in ("human", "claude-code-environment") else None,
+        # Engine holds the Project fields do not show (Nate, 2026-09-25).
+        "paused_until": _dashboard_paused_until(paused),
+        "paused_failures": (
+            paused.get("failures") if isinstance(paused, Mapping) else None
+        ),
+        "finished_by_comments": bool(finished),
     }
+
+
+def _dashboard_paused_until(
+    paused: Optional[Mapping[str, object]]
+) -> Optional[str]:
+    """When a backoff hold lifts, as ISO text, or None when not paused."""
+    if not isinstance(paused, Mapping):
+        return None
+    until = paused.get("until")
+    if isinstance(until, datetime):
+        return until.isoformat()
+    return str(until) if until else None
 
 
 def _block_refs(item: Item) -> List[Optional[str]]:
@@ -9496,6 +9533,11 @@ def _dashboard_item(
         # block is on the project or on every open ticket. The page reads
         # "Blocked" where the owner would be (Nate, 2026-09-24).
         "next_step_blocked": bool(next_step_blocked),
+        # Nothing else on the project can move while a ticket waits out a
+        # backoff hold: the page reads "Paused" and says until when.
+        "next_step_paused_until": _dashboard_next_paused(
+            tickets or (), next_step_blocked
+        ),
         "blocked": bool(item.is_blocked),
         "blockers": list(item.block_references) if item.is_blocked else [],
         "block_reason": (
@@ -9668,6 +9710,20 @@ def _dashboard_pips(
     return bar
 
 
+def _dashboard_next_paused(
+    tickets: Sequence[Mapping[str, object]], next_step_blocked: bool,
+) -> Optional[str]:
+    """The earliest hold's end when a backoff hold is all that stops the
+    project's next step, else None."""
+    if next_step_blocked or _dashboard_next_owner(tickets):
+        return None
+    holds = sorted(
+        str(ticket["paused_until"]) for ticket in tickets
+        if ticket.get("state") == "OPEN" and ticket.get("paused_until")
+    )
+    return holds[0] if holds else None
+
+
 def _dashboard_next_owner(
     tickets: Sequence[Mapping[str, object]]
 ) -> Optional[str]:
@@ -9684,6 +9740,7 @@ def dashboard_board(
     pr_facts: Optional[Mapping[str, Optional[Mapping[str, object]]]] = None,
     pr_facts_known: Optional[bool] = None,
     authoring_pr_agents: Optional[Mapping[str, Iterable[str]]] = None,
+    backed_off: Optional[Mapping[str, Mapping[str, object]]] = None,
 ) -> Dict[str, List[Dict[str, object]]]:
     """Build the ordered parent-project board for one already-loaded brief.
 
@@ -9693,8 +9750,15 @@ def dashboard_board(
     project. Work the projection never reaches follows in gate order, with
     anything that cannot move below what can. `Done` is newest-first. The
     order is `startable()`'s throughout — this function never invents a rank.
+
+    ``backed_off`` is ``backoff_withheld``'s mapping, read from the local
+    heartbeat by the caller. With the tickets finished by comments, these are
+    the holds the engineers honour that the Project fields do not show, so
+    the rows name them rather than a next step nobody will take.
     """
     rows = list(items)
+    paused_rows = dict(backed_off or {})
+    finished: Set[str] = set()
     by_ref = {item.ref: item for item in rows}
     done_cutoff = now - DASHBOARD_DONE_WINDOW
     max_time = datetime.max.replace(tzinfo=timezone.utc)
@@ -9727,7 +9791,8 @@ def dashboard_board(
         # Match what `cmd_next` withholds, so the rank shown is the rank the
         # engineers actually use: work already in review, and work finished by
         # comments and waiting on Nate to close.
-        withheld = set(in_review) | set(finished_by_comments(rows))
+        finished = set(finished_by_comments(rows))
+        withheld = set(in_review) | finished
         queue = startable(rows, awaiting_review=withheld)
     except Exception:
         # The board is instrumentation: an ordering failure must not cost the
@@ -9753,7 +9818,9 @@ def dashboard_board(
         # The board's order for work in motion: each ticket's projected turn.
         turn = {
             ref: index
-            for index, ref in enumerate(projected_pull_order(rows, now))
+            for index, ref in enumerate(
+                projected_pull_order(rows, now, paused=paused_rows)
+            )
         }
     except Exception:
         turn = {}
@@ -9845,6 +9912,8 @@ def dashboard_board(
                     and by_ref.get(ref) is not None
                     and by_ref[ref].state == "OPEN"
                 ),
+                paused_rows.get(child.ref) if child.state == "OPEN" else None,
+                child.ref in finished and child.state == "OPEN",
             )
             for child in sorted(siblings_of, key=ticket_key)
         ]
@@ -17507,12 +17576,19 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         for fact in pr_facts.values()
                     ):
                         authoring_pr_agents = _dashboard_authoring_pr_agents()
+                    try:
+                        # The same holds `cmd_next` honours, from the local
+                        # heartbeat; the board is not worth failing over them.
+                        backed_off = backoff_withheld(_backoff_rows(), now)
+                    except Exception:
+                        backed_off = {}
                     write_dashboard_snapshot(
                         brief_payload,
                         dashboard_board(
                             items, now, pr_facts=pr_facts,
                             pr_facts_known=not pr_facts_missing,
                             authoring_pr_agents=authoring_pr_agents,
+                            backed_off=backed_off,
                         ),
                         generated_at,
                         usage={

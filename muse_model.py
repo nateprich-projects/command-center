@@ -29,20 +29,28 @@ CONTRIBUTOR_MODEL = "muse-spark-1.3-contributor"
 #: including one this module has never heard of.
 STANDARD_MODEL = "muse-spark-1.3"
 
-#: The repositories cleared for the contributor model, by bare name. Empty.
+#: The repositories cleared for the contributor model, by bare name: repo
+#: tiers 1 and 3, never tier 2 (`funnel.REPO_TIERS`).
 #:
-#: #1299 cleared `command-center`, `FF-Weekly-Start-Sit` and `The-League` on
-#: 2026-09-22, the last two as Nate's deliberate override of the FAIL in
-#: docs/meta-model-api-tos-aup-1095.md. He withdrew all three the same day
-#: (#1315): judgement runs on the private model at `max`, and
-#: implementation leaves Muse for Codex, so no lane needs the discount. The
-#: resolver, both rate cards and the doctor check stay. Every `muse exec`
-#: still names its model, and clearing a repository again is a deliberate
-#: edit here.
+#: Nate, 2026-09-26 (#1570): "So tier 1 and tier 3, but not tier 2." z.ai's
+#: standard tier had used its week in about 46 hours, and Muse cannot carry
+#: that run rate at the private model's price; the discount is the test of
+#: whether it can. `command-center` is public. The other five are private,
+#: and clearing them is his deliberate override of the §6.2 FAIL in
+#: docs/meta-model-api-tos-aup-1095.md, as #1299 was on 2026-09-22 for the
+#: two football repos before #1315 withdrew all three. `career-toolset` and
+#: `jeffy-finance-agent` carry real-world data and stay private.
+#:
+#: Named here rather than derived from the tiers: a repository new to the
+#: funnel is tier 3 by default, and it must not reach a training tier
+#: before anyone decided it should. A test holds tier 2 off this list.
 #:
 #: Membership is exact. A near-miss spelling is not a member, because the
 #: failure it would otherwise cause cannot be withdrawn.
-CONTRIBUTOR_REPOS = frozenset()
+CONTRIBUTOR_REPOS = frozenset({
+    "command-center", "github-runners", "workbench",
+    "Fantasy-GM", "The-League", "AFL",
+})
 
 #: Per-million-token rates by model id: input, cached input, output. The
 #: two cards are not a flat multiple — contributor discounts a cache read
@@ -75,7 +83,7 @@ KNOWN_OWNERS = frozenset({"nateprich-projects", "nateprich"})
 #: The owner a cleared repository must live under.
 #:
 #: `nateprich` is a known owner because member repos do appear under the
-#: user account, but none of the three #1299 cleared did. Without this,
+#: user account, but none of the cleared ones do. Without this,
 #: `nateprich/The-League` — a scratch fork, a rename in progress, anything
 #: that happens to share the name — would route to the training tier. That
 #: is the same class of hole as accepting a filesystem path, found by the

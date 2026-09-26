@@ -13,17 +13,15 @@ sys.path.insert(0, str(ROOT))
 import muse_model  # noqa: E402
 
 
-#: The three repositories #1299 cleared for the contributor model on
-#: 2026-09-22, withdrawn the same day by #1315. The production allowlist is
-#: empty. Tests of the allowlist mechanism put these back for one test with
-#: the `cleared` fixture: an empty list makes every "stays private" test
-#: pass without testing anything, and the mechanism has to still work the
-#: day a repository is cleared again.
-FORMERLY_CLEARED = ("command-center", "FF-Weekly-Start-Sit", "The-League")
-EXCLUDED = ("jeffy-finance-agent", "workbench", "career-toolset")
-#: Every repository carrying the `command-center` topic on 2026-09-22.
-#: `AFL` was never part of #1299's decision either way.
-MEMBER_REPOS = FORMERLY_CLEARED + EXCLUDED + ("AFL",)
+#: The repositories Nate cleared for the contributor model on 2026-09-26
+#: (#1570): repo tiers 1 and 3. Spelled out, like the model ids below, so a
+#: silent addition to or removal from the production allowlist fails here.
+CLEARED = ("command-center", "github-runners", "workbench",
+           "Fantasy-GM", "The-League", "AFL")
+#: Tier 2, kept on the private model: real-world impact, real-world data.
+EXCLUDED = ("jeffy-finance-agent", "career-toolset")
+#: Every member repository on 2026-09-26.
+MEMBER_REPOS = CLEARED + EXCLUDED
 
 #: Spelled out rather than imported. Every other assertion here compares
 #: against `muse_model.CONTRIBUTOR_MODEL` and `muse_model.STANDARD_MODEL`,
@@ -37,21 +35,37 @@ STANDARD_ID = "muse-spark-1.3"
 
 @pytest.fixture
 def cleared(monkeypatch):
-    """The allowlist as #1299 set it, for tests of the mechanism."""
-    monkeypatch.setattr(muse_model, "CONTRIBUTOR_REPOS",
-                        frozenset(FORMERLY_CLEARED))
+    """The allowlist as #1570 set it, pinned for tests of the mechanism so
+    they keep testing it whatever the production list later becomes."""
+    monkeypatch.setattr(muse_model, "CONTRIBUTOR_REPOS", frozenset(CLEARED))
 
 
-def test_no_repository_is_cleared_for_the_contributor_model():
-    """Nate, 2026-09-22 (#1315): judgement runs on the private model and
-    implementation leaves Muse, so nothing needs Discounted Services.
+def test_the_cleared_repositories_are_exactly_tiers_1_and_3():
+    """Nate, 2026-09-26 (#1570): "So tier 1 and tier 3, but not tier 2."
     Clearing a repository is an exposure decision; a silent addition is
     the failure this test exists for."""
-    assert muse_model.CONTRIBUTOR_REPOS == frozenset()
+    assert muse_model.CONTRIBUTOR_REPOS == frozenset(CLEARED)
 
 
-@pytest.mark.parametrize("repo", MEMBER_REPOS)
-def test_every_member_repo_resolves_to_the_literal_private_id(repo):
+def test_no_tier_2_repository_is_ever_cleared():
+    """Tier 2 is the work with real-world impact; its data stays off the
+    training tier whatever else joins the allowlist."""
+    import funnel
+
+    tier_2 = {name for name, tier in funnel.REPO_TIERS.items() if tier == 2}
+    assert tier_2 == set(EXCLUDED)
+    assert not tier_2 & muse_model.CONTRIBUTOR_REPOS
+
+
+@pytest.mark.parametrize("repo", CLEARED)
+def test_every_cleared_repo_resolves_to_the_literal_contributor_id(repo):
+    assert muse_model.model_for(repo) == CONTRIBUTOR_ID
+    assert muse_model.model_for("nateprich-projects/" + repo) == \
+        CONTRIBUTOR_ID
+
+
+@pytest.mark.parametrize("repo", EXCLUDED)
+def test_every_tier_2_repo_resolves_to_the_literal_private_id(repo):
     assert muse_model.model_for(repo) == STANDARD_ID
     assert muse_model.model_for("nateprich-projects/" + repo) == STANDARD_ID
 
@@ -62,26 +76,26 @@ def test_the_model_ids_are_the_ones_meta_publishes():
     assert muse_model.STANDARD_MODEL == STANDARD_ID
 
 
-@pytest.mark.parametrize("repo", FORMERLY_CLEARED)
+@pytest.mark.parametrize("repo", CLEARED)
 def test_cleared_repos_route_to_the_literal_contributor_id(repo, cleared):
     assert muse_model.model_for(repo) == CONTRIBUTOR_ID
 
 
 @pytest.mark.parametrize("repo", EXCLUDED)
 def test_excluded_repos_route_to_the_literal_private_id(repo, cleared):
-    """The three repos Nate kept off Discounted Services on 2026-09-22.
+    """The tier-2 repos Nate kept off Discounted Services on 2026-09-26.
     If this ever passes while naming the contributor id, personal data
     is going somewhere he declined to send it."""
     assert muse_model.model_for(repo) == STANDARD_ID
     assert muse_model.model_for(repo) != CONTRIBUTOR_ID
 
 
-@pytest.mark.parametrize("repo", FORMERLY_CLEARED)
+@pytest.mark.parametrize("repo", CLEARED)
 def test_allowlisted_repos_resolve_to_contributor(repo, cleared):
     assert muse_model.model_for(repo) == muse_model.CONTRIBUTOR_MODEL
 
 
-@pytest.mark.parametrize("repo", FORMERLY_CLEARED)
+@pytest.mark.parametrize("repo", CLEARED)
 def test_owner_qualified_form_resolves_the_same(repo, cleared):
     """The runners get `owner/name` from funnel.py begin."""
     assert muse_model.model_for("nateprich-projects/" + repo) == \
@@ -129,7 +143,7 @@ def test_a_filesystem_path_is_not_a_repository(repo, cleared):
 @pytest.mark.parametrize("repo", [
     "someone-else/The-League",
     "braven112/command-center",
-    "forks-r-us/FF-Weekly-Start-Sit",
+    "forks-r-us/Fantasy-GM",
     "/The-League",
     " /The-League",
 ])
@@ -140,7 +154,7 @@ def test_another_owners_repo_is_not_on_the_allowlist(repo, cleared):
 
 def test_only_the_owner_the_cleared_repos_live_under_resolves(cleared):
     """`nateprich` is a known owner because member repos do appear under
-    the user account — but none of the cleared three do. A scratch fork
+    the user account — but none of the cleared ones do. A scratch fork
     or a rename in progress that happens to share the name must not
     inherit the clearance."""
     assert muse_model.model_for("nateprich-projects/The-League") == \
@@ -148,12 +162,12 @@ def test_only_the_owner_the_cleared_repos_live_under_resolves(cleared):
     assert muse_model.model_for("nateprich/The-League") == STANDARD_ID
     assert muse_model.model_for("nateprich/command-center") == STANDARD_ID
     assert muse_model.model_for(
-        "nateprich/FF-Weekly-Start-Sit") == STANDARD_ID
+        "nateprich/Fantasy-GM") == STANDARD_ID
 
 
 def test_a_bare_name_still_resolves_without_an_owner(cleared):
     """The runners pass `owner/name`; a human or a test says `name`."""
-    for repo in FORMERLY_CLEARED:
+    for repo in CLEARED:
         assert muse_model.model_for(repo) == CONTRIBUTOR_ID
 
 
@@ -203,7 +217,7 @@ def test_repo_name_is_tested_directly(value, expected):
     "commandcenter",
     "the-league",
     "command-center/",
-    "FF-Weekly-Start-Sit/extra",
+    "Fantasy-GM/extra",
 ])
 def test_near_miss_spellings_do_not_reach_contributor(repo, cleared):
     """A disclosure to a training tier cannot be withdrawn, so a
@@ -213,7 +227,7 @@ def test_near_miss_spellings_do_not_reach_contributor(repo, cleared):
 
 @pytest.mark.parametrize("repo", [
     "  The-League  ",
-    "FF-Weekly-Start-Sit ",
+    "Fantasy-GM ",
     "\tcommand-center\n",
     " nateprich-projects/The-League\n",
 ])
@@ -278,11 +292,11 @@ def test_cli_prints_the_model_for_an_allowlisted_repo(capsys, cleared):
     assert capsys.readouterr().out.strip() == muse_model.CONTRIBUTOR_MODEL
 
 
-def test_cli_prints_the_private_model_for_a_formerly_cleared_repo(capsys):
-    """What the runners actually receive since #1315."""
+def test_cli_prints_the_contributor_model_for_a_cleared_repo(capsys):
+    """What the runners actually receive since #1570."""
     assert muse_model.main(["model", "--repo",
                             "nateprich-projects/The-League"]) == 0
-    assert capsys.readouterr().out.strip() == STANDARD_ID
+    assert capsys.readouterr().out.strip() == CONTRIBUTOR_ID
 
 
 def test_cli_prints_the_standard_model_for_an_unknown_repo(capsys):
@@ -293,7 +307,7 @@ def test_cli_prints_the_standard_model_for_an_unknown_repo(capsys):
 
 
 def test_cli_prints_the_standard_model_for_an_excluded_repo(capsys):
-    assert muse_model.main(["model", "--repo", "workbench"]) == 0
+    assert muse_model.main(["model", "--repo", "career-toolset"]) == 0
     assert capsys.readouterr().out.strip() == muse_model.STANDARD_MODEL
 
 

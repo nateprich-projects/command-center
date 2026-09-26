@@ -8685,6 +8685,32 @@ def _begin_load_timed(
         )
 
 
+def _report_begin_phase_boundary(phase: str, started: float) -> None:
+    """Write a non-gating elapsed marker before a post-load begin phase.
+
+    Inside a session server, ``dispatch`` captures ``sys.stderr`` and returns
+    it only with the reply, so a begin that overruns the client's reply
+    budget would lose every marker it wrote. The markers exist for exactly
+    that fire (#1519), so there they go to the server's own stderr, which is
+    the runner's error log.
+    """
+    try:
+        elapsed = max(0.0, time.perf_counter() - started)
+        stream = sys.stderr
+        if os.environ.get(SESSION_SERVER_ENV) and sys.__stderr__ is not None:
+            stream = sys.__stderr__
+        print(
+            "begin_review_phase phase={} elapsed_seconds={:.6f}".format(
+                phase, elapsed,
+            ),
+            file=stream,
+            flush=True,
+        )
+    except Exception:
+        # Instrumentation must not gate the command it instruments.
+        return
+
+
 def member_repos(
     after_first_response: Optional[Callable[[Mapping[str, object]], None]] = None,
 ) -> List[str]:
@@ -15176,6 +15202,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
               ] = None,
               _pr_facts_error: Optional[GitHubError] = None,
               _pr_facts_elapsed: Optional[float] = None,
+              _phase_started: Optional[float] = None,
               ) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
@@ -15193,6 +15220,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import heartbeat
 
+    phase_started = (
+        _phase_started if _phase_started is not None else time.perf_counter()
+    )
     if _preflight is None:
         _preflight = _begin_preflight(now, agent, idle, tier)
     out, reading = _preflight
@@ -15207,9 +15237,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         print(json.dumps(out, indent=2))
         return 0
 
-    if _detail_loader is not None and not begin_uses_ticket_path(
-        agent, tier, caller_role
-    ):
+    ticket_path = begin_uses_ticket_path(agent, tier, caller_role)
+
+    def review_phase_boundary(phase: str) -> None:
+        if not ticket_path:
+            _report_begin_phase_boundary(phase, phase_started)
+
+    review_phase_boundary("detail_hydration")
+    if _detail_loader is not None and not ticket_path:
         candidates = begin_detail_candidates(items, breakdown)
         if candidates:
             _detail_loader(candidates)
@@ -15234,6 +15269,8 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     # Keeping it here prevents the approved-merge pass, engineer hand-back, and
     # reviewer queue from each paying for the same repository fan-out.
     try:
+        if not ticket_path:
+            review_phase_boundary("ticket_pr_facts")
         if _pr_facts_error is not None:
             raise _pr_facts_error
         if _pr_facts is not None:
@@ -15256,28 +15293,34 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                 timings, "ticket_pr_facts", _pr_facts_elapsed
             )
 
+    review_phase_boundary("reconcile_approved_merges")
     reconciled_merges = attempt_reconcile(
         "approved_merges", reconcile_approved_merges, items, now, pr_facts)
     if reconciled_merges:
         out["reconciled_merges"] = reconciled_merges
 
+    review_phase_boundary("reconcile_auto_closeable_projects")
     auto_closed = attempt_reconcile(
         "auto_closeable_projects", reconcile_auto_closeable_projects, items)
     if auto_closed:
         out["auto_closed"] = auto_closed
 
+    review_phase_boundary("reconcile_closed_items")
     reconciled_statuses = attempt_reconcile(
         "closed_items", reconcile_closed_items, items)
     if reconciled_statuses:
         out["reconciled_statuses"] = reconciled_statuses
+    review_phase_boundary("reconcile_parked_wakes")
     woke_parked = attempt_reconcile(
         "parked_wakes", reconcile_parked_wakes, items, now)
     if woke_parked:
         out["woke_parked"] = woke_parked
+    review_phase_boundary("reconcile_closed_claims")
     released_claims = attempt_reconcile(
         "closed_claims", reconcile_closed_claims, items)
     if released_claims:
         out["released_claims"] = released_claims
+    review_phase_boundary("reconcile_orphaned_starts")
     orphaned = attempt_reconcile(
         "orphaned_starts", reconcile_orphaned_starts, items, now)
     if orphaned:
@@ -15467,6 +15510,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         print(json.dumps(out, indent=2))
         return 0
 
+    review_phase_boundary("review_queue")
     queue = _call_with_optional_keywords(
         review_queue, items, tier, pr_facts=pr_facts,
         output_stream=sys.stderr,
@@ -15492,6 +15536,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     # Finish plans that already qualify for unattended approval before the
     # shape queue looks for another Idea. Updating the shared Items first also
     # lets the Ready plan enter this pass's breakdown queue.
+    review_phase_boundary("self_approvals")
     self_approved, self_approval_errors = sweep_shaped_self_approvals(
         items, now, run=out.get("run"), agent=agent
     )
@@ -15500,13 +15545,16 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if self_approval_errors:
         out["shaped_self_approval_errors"] = self_approval_errors
 
+    review_phase_boundary("breakdown_queue")
     pending = awaiting_breakdown(items) if breakdown else []
+    review_phase_boundary("shape_queue")
     shape_item = shapeable_idea(items, tier, reading)
     review = _queue_candidate(queue, review_class_of)
     breakdown_item = _queue_candidate(
         pending, lambda entry: getattr(entry, "klass", None))
     candidates: List[Tuple[int, int, str, object]] = []
 
+    review_phase_boundary("candidate_selection")
     if review is not None:
         review_item = by_ref.get(review.get("ref"))
         review_class = (
@@ -15573,10 +15621,12 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                  if breakdown else "nothing to review"),
         )
 
+    review_phase_boundary("reserve_gate")
     reserve = _reserve_verdict(out.get("do"))
     if reserve is not None:
         out.update(reserve)
         _record_begin_reserve(agent, out.get("run"), out["why"])
+    review_phase_boundary("run_binding")
     _bind_run(agent, out)
     print(json.dumps(out, indent=2))
     return 0
@@ -17015,9 +17065,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
     # the Project. Keep that gate ahead of the shared loader; an ordinary poll
     # must not spend the full Project read merely to learn that it cannot run.
     begin_preflight = None
+    begin_phase_started: Optional[float] = None
     begin_timings: Optional[Dict[str, object]] = None
     begin_member_repo_names: Optional[List[str]] = None
     if args.command == "begin":
+        begin_phase_started = time.perf_counter()
         begin_preflight = _begin_preflight(
             now, args.agent, args.idle, args.tier)
         if begin_preflight[1] is None:
@@ -17255,6 +17307,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 "repo_readiness": repo_readiness,
                 "caller_role": args.caller_role,
             }
+            if begin_phase_started is not None and _accepts_keyword(
+                cmd_begin, "_phase_started"
+            ):
+                begin_kwargs["_phase_started"] = begin_phase_started
             if begin_detail_loader is not None:
                 begin_kwargs["_detail_loader"] = begin_detail_loader
             begin_kwargs["_preflight"] = begin_preflight

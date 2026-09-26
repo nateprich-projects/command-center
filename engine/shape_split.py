@@ -21,7 +21,10 @@ The parts are merged here, in code, into exactly ``engine.shape``'s
 ``ANSWER_KEYS``, so ``shape-apply`` and its self-approval rule are
 unchanged. Every parser reuses the shape validators and raises
 ``ShapeError``, the error the runner already feeds back to the model on
-its one retry. Pure: no IO, no subprocess, no network.
+its one retry. The #1581 premise that the framer itself may still go silent
+remains unsure until #1600 posts live run evidence; this pure module and its
+tests do not establish runtime stream behavior. Pure: no IO, no subprocess,
+no network.
 """
 
 from __future__ import annotations

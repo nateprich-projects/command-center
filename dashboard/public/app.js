@@ -1208,6 +1208,62 @@ const RUN_METRICS = [
   },
 ];
 
+const ATTENTION_METRICS = [
+  {
+    code: "E1",
+    title: "Waiting on Nate",
+    description: "Total waiting at Nate’s gates and average dwell at Shaped and Ready.",
+    format: "count",
+    sources: [
+      { path: ["E", "E1", "total_needing_nate"], label: "Waiting on Nate" },
+      {
+        path: ["E", "E1", "gate_dwell"],
+        label: "Gate dwell",
+        format: "duration-hours",
+      },
+    ],
+  },
+  {
+    code: "E2",
+    title: "Human steps",
+    description: "Steps opened per day and outstanding; missing opening history stays a gap.",
+    format: "count",
+    sources: [
+      { path: ["E", "E2", "opened_this_hour"], label: "Opened per day" },
+      { path: ["E", "E2", "outstanding"], label: "Outstanding now" },
+    ],
+  },
+  {
+    code: "E3",
+    title: "Unattended decisions",
+    description: "Approvals and merges made without Nate, per day.",
+    format: "count",
+    sources: [
+      { path: ["E", "E3", "approvals_this_hour"], label: "Approvals per day" },
+      { path: ["E", "E3", "merges_this_hour"], label: "Merges per day" },
+    ],
+  },
+  {
+    code: "E4",
+    title: "Watch interventions",
+    description: "Check-in #684 actions that unwedge, override, or reconcile.",
+    format: "count",
+    sources: [{ path: ["E", "E4"], label: "Actions per day" }],
+  },
+  {
+    code: "E5",
+    title: "Machine-health noise",
+    description: "Counts of stranded work, degraded sections, mismatches, and stale-lock takeovers.",
+    format: "count",
+    sources: [
+      { path: ["E", "E5", "stranded"], label: "Stranded" },
+      { path: ["E", "E5", "degraded_sections"], label: "Degraded sections" },
+      { path: ["E", "E5", "status_state_mismatches"], label: "Status/state mismatches" },
+      { path: ["E", "E5", "stale_locks_taken_over"], label: "Stale locks taken over" },
+    ],
+  },
+];
+
 function valueAtPath(root, path) {
   let value = root;
   for (const part of path) {
@@ -1228,7 +1284,7 @@ function humanizeRunKey(key) {
   return labels[key] || key;
 }
 
-function runMetricRows(root, definition) {
+function metricPanelRows(root, definition) {
   const rows = [];
   for (const source of definition.sources) {
     const prefix = source.label ? [source.label] : [];
@@ -1240,13 +1296,14 @@ function runMetricRows(root, definition) {
         key: [...source.path, ...item.path].join("."),
         label: parts.join(" · "),
         series: item.series,
+        format: source.format || definition.format,
       });
     }
   }
   return rows;
 }
 
-function renderRunMetrics(series, container) {
+function renderMetricPanels(series, container, definitions) {
   if (!container) return;
   container.replaceChildren();
   const root = series && series.metrics && typeof series.metrics === "object"
@@ -1254,7 +1311,7 @@ function renderRunMetrics(series, container) {
   const days = series && Array.isArray(series.days) ? series.days : [];
   const index = days.length - 1;
 
-  for (const definition of RUN_METRICS) {
+  for (const definition of definitions) {
     const panel = element("article", "run-metric-panel");
     panel.setAttribute("data-metric", definition.code);
     const heading = element("div", "run-metric-heading");
@@ -1264,7 +1321,7 @@ function renderRunMetrics(series, container) {
     panel.append(heading);
 
     const list = element("div", "run-series-list");
-    const rows = runMetricRows(root, definition);
+    const rows = metricPanelRows(root, definition);
     if (!rows.length) {
       list.append(element("p", "run-metric-empty metric-gap", "No series available."));
     }
@@ -1273,11 +1330,11 @@ function renderRunMetrics(series, container) {
       row.setAttribute("data-series", item.key);
       const meta = element("div", "run-series-meta");
       meta.append(element("p", "run-series-label", item.label));
-      meta.append(metricReadings(metricValues(item.series, index), definition.format));
+      meta.append(metricReadings(metricValues(item.series, index), item.format));
       row.append(meta);
       row.append(renderMetricChart(item.series, days, {
         title: item.label,
-        format: definition.format,
+        format: item.format,
         compact: true,
       }));
       list.append(row);
@@ -1285,6 +1342,14 @@ function renderRunMetrics(series, container) {
     panel.append(list);
     container.append(panel);
   }
+}
+
+function renderRunMetrics(series, container) {
+  renderMetricPanels(series, container, RUN_METRICS);
+}
+
+function renderAttentionMetrics(series, container) {
+  renderMetricPanels(series, container, ATTENTION_METRICS);
 }
 
 function renderExecutionTiles(series, container) {
@@ -1527,6 +1592,7 @@ async function loadMetrics() {
   const status = document.querySelector("#metrics-status");
   const container = document.querySelector("#metrics-grid");
   const runsContainer = document.querySelector("#runs-grid");
+  const attentionContainer = document.querySelector("#attention-grid");
   try {
     const series = await requestMetrics();
     status.textContent = series.as_of
@@ -1534,14 +1600,16 @@ async function loadMetrics() {
       : "Metrics date unknown";
     status.classList.remove("failed");
     renderExecutionTiles(series, container);
-    renderBudgetMetrics(series, document.querySelector("#budget-grid"));
     renderRunMetrics(series, runsContainer);
+    renderBudgetMetrics(series, document.querySelector("#budget-grid"));
+    renderAttentionMetrics(series, attentionContainer);
   } catch (error) {
     status.textContent = error.message || "Metrics unavailable";
     status.classList.add("failed");
     renderExecutionTiles(null, container);
-    renderBudgetMetrics(null, document.querySelector("#budget-grid"));
     renderRunMetrics(null, runsContainer);
+    renderBudgetMetrics(null, document.querySelector("#budget-grid"));
+    renderAttentionMetrics(null, attentionContainer);
     throw error;
   } finally {
     metricsLoading = false;
@@ -1662,6 +1730,7 @@ export {
   renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,
   renderExecutionTiles, renderMetricChart, renderBudgetMetrics, renderRunMetrics,
+  renderAttentionMetrics,
   requestMetrics, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 };

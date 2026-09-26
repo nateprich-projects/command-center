@@ -8017,8 +8017,8 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String!) {
 """
 
 
-def _item_query_with_shape_comments(repo: str, number: int) -> str:
-    """Add the target idea's first comment page to the Project item query."""
+def _shape_issue_comments_field(repo: str, number: int) -> str:
+    """Build the shared issue-thread field used by packet readers."""
     try:
         owner, name = repo.split("/", 1)
     except ValueError as exc:
@@ -8026,11 +8026,8 @@ def _item_query_with_shape_comments(repo: str, number: int) -> str:
     if (not owner or not name or not isinstance(number, int)
             or isinstance(number, bool) or number < 1):
         raise GitHubError("invalid shape issue ref {}#{}".format(repo, number))
-    closing = ITEM_QUERY.rfind("\n}")
-    if closing < 0:
-        raise GitHubError("could not extend the Project item query")
-    issue_field = (
-        "\n  shapeIssue: repository(owner: {}, name: {}) {{\n"
+    return (
+        "  shapeIssue: repository(owner: {}, name: {}) {{\n"
         "    issue(number: {}) {{\n"
         "      comments(first: 100) {{\n"
         "        nodes {{ author {{ login }} body createdAt }}\n"
@@ -8039,7 +8036,25 @@ def _item_query_with_shape_comments(repo: str, number: int) -> str:
         "    }}\n"
         "  }}\n"
     ).format(json.dumps(owner), json.dumps(name), number)
+
+
+def _item_query_with_shape_comments(repo: str, number: int) -> str:
+    """Add the target idea's first comment page to the Project item query."""
+    issue_field = "\n" + _shape_issue_comments_field(repo, number)
+    closing = ITEM_QUERY.rfind("\n}")
+    if closing < 0:
+        raise GitHubError("could not extend the Project item query")
     return ITEM_QUERY[:closing] + issue_field + ITEM_QUERY[closing:]
+
+
+def _standalone_shape_issue_comments_query(repo: str, number: int) -> str:
+    """Read one issue's first comment page without loading Project items."""
+    return (
+        "query {\n"
+        "  rateLimit { cost remaining resetAt }\n"
+        + _shape_issue_comments_field(repo, number)
+        + "}"
+    )
 
 
 def _shape_issue_comments_from_response(
@@ -8111,6 +8126,12 @@ def _shape_issue_comments_from_response(
         )
         has_next, cursor = add_page(page_connection)
     return comments
+
+
+def read_issue_comments(repo: str, number: int) -> List[Dict[str, object]]:
+    """Read a complete issue thread through the shared shape-packet reader."""
+    data = gh_graphql(_standalone_shape_issue_comments_query(repo, number))
+    return _shape_issue_comments_from_response(data, repo, number)
 
 # The paged list is the cheap gate input. History and child timestamps are
 # fetched below only for the candidate items a caller has kept after its cheap

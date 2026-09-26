@@ -61,6 +61,7 @@ def test_both_windows_are_rendered_and_cached(cache):
 
     written = json.loads(cache.read_text())
     assert written["five_hour"]["used_percentage"] == 23.5
+    # statusline.sh copies this reset value into the cache unchanged.
     assert written["seven_day"]["resets_at"] == week
     assert written["captured_at"] > 0
 

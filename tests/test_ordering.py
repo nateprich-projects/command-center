@@ -175,7 +175,6 @@ def test_building_gate_and_close_share_class_origin_policy(
         klass,
         children=2,
         done=2,
-        carried_human_step=True,
         body=_completion_policy_body(origin, override),
     )
 

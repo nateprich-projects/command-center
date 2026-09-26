@@ -781,6 +781,40 @@ def test_begin_runs_parked_wakes_as_a_reconcile_step(monkeypatch, capsys):
     assert result["woke_parked"] == [items[0].ref]
 
 
+def test_begin_records_a_failed_parked_wakes_batch_and_writes_nothing(
+    monkeypatch, capsys
+):
+    # The wired GraphQL double answers every read with an empty response, so
+    # the batched comment read is partial: the pass is skipped and recorded,
+    # never rendered as "no wake date" (#1592).
+    items = [
+        _closed_project_item(
+            235, status="Parked", state_reason="NOT_PLANNED"
+        )
+    ]
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert "woke_parked" not in result
+    assert [
+        error for error in result["reconcile_errors"]
+        if error["step"] == "parked_wakes"
+    ] == [{
+        "step": "parked_wakes",
+        "error": "could not read comments for {}".format(items[0].ref),
+        "transient": False,
+    }]
+    assert [query for query, _ in graphql_calls if "comments(last:" in query]
+    assert not [
+        call for call in graphql_calls if "comments(last:" not in call[0]
+    ]
+    assert not [call for call in calls if call[:3] == ["gh", "issue", "reopen"]]
+    assert items[0].status == "Parked"
+    assert items[0].state == "CLOSED"
+
+
 def test_begin_retries_an_approval_at_the_current_head(monkeypatch, capsys):
     project, ticket = _ticket(7, 6)
     result, calls = _reconcile_begin(
@@ -919,7 +953,7 @@ def test_begin_reconcile_is_idempotent_when_the_pr_is_no_longer_open(
 
 
 def _completed_project(number, *, klass="Improve", children_done=2,
-                      carried_human_step=False, origin="agent", parent=None):
+                      origin="agent", parent=None):
     repo = "nateprich/example"
     body = (
         funnel.origin_block(origin, at=NOW, run="reconcile-run", agent="codex")
@@ -941,7 +975,6 @@ def _completed_project(number, *, klass="Improve", children_done=2,
         item_id="project-{}".format(number),
         children_total=2,
         children_done=children_done,
-        carried_human_step=carried_human_step,
     )
     children = [
         funnel.Item(
@@ -972,9 +1005,47 @@ def _closed_project_item(number, *, status, state_reason, labels=None):
     )
 
 
-def _begin_with_reconcile_wired(monkeypatch, capsys, items):
+def _sub_issue_node(item):
+    return {
+        "number": item.number,
+        "title": item.title,
+        "state": item.state,
+        "url": item.url,
+        "repository": {"nameWithOwner": item.repo},
+    }
+
+
+def _sub_issue_page(nodes, *, total=None, has_next=False, cursor=None):
+    return {
+        "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},
+        "repository": {"issue": {"subIssues": {
+            "totalCount": len(nodes) if total is None else total,
+            "nodes": nodes,
+            "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+        }}},
+    }
+
+
+def _sub_issues_from_items(items):
+    """Answer the closed-itself ticket read from the loaded children."""
+    def answer(variables):
+        parent = "{owner}/{name}#{number}".format(**variables)
+        return _sub_issue_page([
+            _sub_issue_node(item) for item in items if item.parent == parent
+        ])
+    return answer
+
+
+def _begin_with_reconcile_wired(monkeypatch, capsys, items, sub_issues=None):
     calls = []
     graphql_calls = []
+    sub_issues = sub_issues or _sub_issues_from_items(items)
+
+    def graphql(query, **variables):
+        graphql_calls.append((query, variables))
+        if query == funnel.CLOSED_ITSELF_TICKETS:
+            return sub_issues(variables)
+        return {}
 
     def run(argv, **kwargs):
         calls.append(argv)
@@ -990,9 +1061,7 @@ def _begin_with_reconcile_wired(monkeypatch, capsys, items):
         usage, "pace", lambda reading, timestamp, provider: {"over_pace": False}
     )
     monkeypatch.setattr(funnel, "drift_since_approval", lambda item: [])
-    monkeypatch.setattr(funnel, "gh_graphql", lambda query, **variables: (
-        graphql_calls.append((query, variables)) or {}
-    ))
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
     monkeypatch.setattr(funnel, "ticket_pr_facts", lambda rows: funnel.TicketPRFacts())
     monkeypatch.setattr(funnel, "_option_id", lambda *args: "done-option")
     monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
@@ -1155,20 +1224,19 @@ def test_begin_leaves_a_nonqualifying_parented_item_at_building_gate(
 
 
 @pytest.mark.parametrize(
-    "klass,carried_human_step,children_done,origin",
+    "klass,children_done,origin",
     [
-        ("New", False, 2, "agent"),
-        ("Improve", True, 2, "nate-relayed"),
-        ("Improve", False, 1, "agent"),
+        ("New", 2, "agent"),
+        ("Improve", 2, "nate-relayed"),
+        ("Improve", 1, "agent"),
     ],
 )
 def test_begin_leaves_non_reconcilable_projects_untouched(
-    monkeypatch, capsys, klass, carried_human_step, children_done, origin
+    monkeypatch, capsys, klass, children_done, origin
 ):
     items = _completed_project(
         210,
         klass=klass,
-        carried_human_step=carried_human_step,
         children_done=children_done,
         origin=origin,
     )
@@ -1192,14 +1260,12 @@ def test_begin_leaves_non_reconcilable_projects_untouched(
 
 @pytest.mark.parametrize("klass", ["Broken", "Investigate", "Maintenance"])
 @pytest.mark.parametrize("origin", ["agent", "nate-direct", "nate-relayed"])
-@pytest.mark.parametrize("carried_human_step", [False, True])
-def test_begin_reconciles_parented_upkeep_items_regardless_of_origin_or_human_step(
-    monkeypatch, capsys, klass, origin, carried_human_step
+def test_begin_reconciles_parented_upkeep_items_regardless_of_origin(
+    monkeypatch, capsys, klass, origin
 ):
     items = _completed_project(
         211,
         klass=klass,
-        carried_human_step=carried_human_step,
         origin=origin,
         parent="nateprich/example#210",
     )
@@ -1282,6 +1348,219 @@ def test_begin_reconcile_is_idempotent(monkeypatch, capsys):
     ]
 
 
+def _marker_payload(calls):
+    comments = [
+        call[-1] for call in calls
+        if call[:3] == ["gh", "issue", "comment"]
+    ]
+    assert len(comments) == 1
+    return json.loads(
+        comments[0].split("```json\n", 1)[1].rsplit("\n```", 1)[0]
+    )
+
+
+def _nothing_closed(project, calls, graphql_calls):
+    assert project.state == "OPEN"
+    assert project.status == "Building"
+    assert not [
+        call for call in calls
+        if call[:3] in (["gh", "issue", "close"], ["gh", "issue", "comment"])
+    ]
+    assert not [
+        call for call in graphql_calls
+        if call[1].get("item") == project.item_id
+    ]
+
+
+def test_closed_itself_marker_lists_a_ticket_absent_from_the_loaded_items(
+    monkeypatch, capsys
+):
+    """#1591: begin need not load closed tickets, so the marker reads the
+    project's own sub-issues rather than the loaded Project items."""
+    project, loaded, unloaded = _completed_project(250)
+
+    result, calls, _graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, [project, loaded],
+        sub_issues=lambda variables: _sub_issue_page(
+            [_sub_issue_node(unloaded), _sub_issue_node(loaded)]
+        ),
+    )
+
+    assert result["auto_closed"] == [project.ref]
+    assert _marker_payload(calls)["tickets"] == [
+        {"ref": loaded.ref, "title": loaded.title},
+        {"ref": unloaded.ref, "title": unloaded.title},
+    ]
+
+
+def test_closed_itself_marker_is_unchanged_for_a_full_load(monkeypatch, capsys):
+    items = _completed_project(251)
+    # The marker the loaded-items derivation wrote before #1591.
+    expected = funnel.closed_itself_comment(
+        sorted(
+            (item for item in items if item.parent == items[0].ref),
+            key=lambda item: (item.repo, item.number),
+        ),
+        [],
+    )
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items,
+        sub_issues=lambda variables: _sub_issue_page(
+            [_sub_issue_node(item) for item in reversed(items[1:])]
+        ),
+    )
+
+    assert result["auto_closed"] == [items[0].ref]
+    assert [
+        call[-1] for call in calls if call[:3] == ["gh", "issue", "comment"]
+    ] == [expected]
+    assert [
+        variables for query, variables in graphql_calls
+        if query == funnel.CLOSED_ITSELF_TICKETS
+    ] == [{"owner": "nateprich", "name": "example", "number": 251}]
+
+
+def test_closed_itself_ticket_count_mismatch_leaves_the_project_open(
+    monkeypatch, capsys
+):
+    items = _completed_project(252)
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items,
+        sub_issues=lambda variables: _sub_issue_page(
+            [_sub_issue_node(items[1])], total=2
+        ),
+    )
+
+    assert "auto_closed" not in result
+    assert [error["step"] for error in result["reconcile_errors"]] == [
+        "auto_closeable_projects"
+    ]
+    assert "read 1 of 2 tickets" in result["reconcile_errors"][0]["error"]
+    _nothing_closed(items[0], calls, graphql_calls)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {},
+        {"repository": {"issue": None}},
+        {"repository": {"issue": {"subIssues": None}}},
+        {"repository": {"issue": {"subIssues": {
+            "nodes": [], "pageInfo": {"hasNextPage": False},
+        }}}},
+        {"repository": {"issue": {"subIssues": {
+            "totalCount": "2", "nodes": [],
+            "pageInfo": {"hasNextPage": False},
+        }}}},
+        {"repository": {"issue": {"subIssues": {
+            "totalCount": 1, "nodes": None,
+            "pageInfo": {"hasNextPage": False},
+        }}}},
+        {"repository": {"issue": {"subIssues": {
+            "totalCount": 1, "nodes": [{"number": 253, "title": "t"}],
+            "pageInfo": {"hasNextPage": False},
+        }}}},
+        {"repository": {"issue": {"subIssues": {
+            "totalCount": 2, "nodes": [{"number": 1}],
+            "pageInfo": {"hasNextPage": True, "endCursor": None},
+        }}}},
+    ],
+    ids=[
+        "empty", "no-issue", "no-connection", "no-total", "string-total",
+        "no-nodes", "row-without-repository", "no-next-cursor",
+    ],
+)
+def test_malformed_closed_itself_ticket_read_leaves_the_project_open(
+    monkeypatch, capsys, response
+):
+    items = _completed_project(253)
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items, sub_issues=lambda variables: response,
+    )
+
+    assert "auto_closed" not in result
+    assert [error["step"] for error in result["reconcile_errors"]] == [
+        "auto_closeable_projects"
+    ]
+    _nothing_closed(items[0], calls, graphql_calls)
+
+
+def test_closed_itself_tickets_raises_on_a_duplicate_row(monkeypatch):
+    project, ticket, _other = _completed_project(254)
+    monkeypatch.setattr(
+        funnel, "gh_graphql", lambda query, **variables: _sub_issue_page(
+            [_sub_issue_node(ticket), _sub_issue_node(ticket)]
+        ),
+    )
+
+    with pytest.raises(funnel.GitHubError, match="listed twice"):
+        funnel.closed_itself_tickets(project)
+
+
+def test_closed_itself_tickets_pages_beyond_one_hundred(monkeypatch):
+    repo = "nateprich/example"
+    project = _completed_project(1000)[0]
+    project.children_total = project.children_done = 150
+    children = [
+        funnel.Item(
+            repo=repo, number=1000 + offset, title="Ticket {}".format(offset),
+            url="https://github.com/{}/issues/{}".format(repo, 1000 + offset),
+            state="CLOSED", parent=project.ref,
+        )
+        for offset in range(150, 0, -1)
+    ]
+    requests = []
+
+    def graphql(query, **variables):
+        assert query == funnel.CLOSED_ITSELF_TICKETS
+        requests.append(variables)
+        if "after" not in variables:
+            return _sub_issue_page(
+                [_sub_issue_node(child) for child in children[:100]],
+                total=150, has_next=True, cursor="page-2",
+            )
+        assert variables["after"] == "page-2"
+        return _sub_issue_page(
+            [_sub_issue_node(child) for child in children[100:]], total=150,
+        )
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    tickets = funnel.closed_itself_tickets(project)
+
+    assert [request.get("after") for request in requests] == [None, "page-2"]
+    assert [ticket.number for ticket in tickets] == list(range(1001, 1151))
+    assert [(ticket.ref, ticket.title) for ticket in tickets] == [
+        (child.ref, child.title)
+        for child in sorted(children, key=lambda child: child.number)
+    ]
+
+
+def test_closed_itself_tickets_raises_when_paging_changes_the_count(
+    monkeypatch
+):
+    project = _completed_project(1200)[0]
+    pages = iter([
+        _sub_issue_page([{"number": 1201, "title": "a", "state": "CLOSED",
+                          "url": "u", "repository": {
+                              "nameWithOwner": "nateprich/example"}}],
+                        total=2, has_next=True, cursor="next"),
+        _sub_issue_page([{"number": 1202, "title": "b", "state": "CLOSED",
+                          "url": "u", "repository": {
+                              "nameWithOwner": "nateprich/example"}}],
+                        total=3),
+    ])
+    monkeypatch.setattr(
+        funnel, "gh_graphql", lambda query, **variables: next(pages)
+    )
+
+    with pytest.raises(funnel.GitHubError, match="changed while paging"):
+        funnel.closed_itself_tickets(project)
+
+
 def test_begin_repairs_closed_terminal_statuses_and_stale_shaping_labels(
     monkeypatch, capsys
 ):
@@ -1323,6 +1602,11 @@ def test_begin_repairs_closed_terminal_statuses_and_stale_shaping_labels(
     assert already_parked.status == "Parked"
     assert open_item.status == "Ideas"
     assert open_item.labels == ["needs-shaping"]
+    # The already-Parked item is read by the batched parked-wakes pass
+    # (#1592); only the Status writes matter here.
+    graphql_calls = [
+        call for call in graphql_calls if "comments(last:" not in call[0]
+    ]
     assert [variables for query, variables in graphql_calls] == [
         {
             "project": funnel.PROJECT_ID,
@@ -1352,7 +1636,9 @@ def test_begin_repairs_closed_terminal_statuses_and_stale_shaping_labels(
     )
 
     assert "reconciled_statuses" not in result
-    assert not graphql_calls
+    assert not [
+        call for call in graphql_calls if "comments(last:" not in call[0]
+    ]
     assert not [
         call for call in calls
         if call[:3] == ["gh", "issue", "edit"]
@@ -2254,6 +2540,97 @@ def test_begin_offers_shape_when_needs_decision_blocks_breakdown(monkeypatch, ca
 
     assert result["do"] == "shape"
     assert result["work"]["ref"] == idea.ref
+
+
+def _backoff_row(ref):
+    until = NOW + funnel.BACKOFF_COOLDOWN
+    return {"ref": ref, "failures": 11, "until": until,
+            "reason": "backoff: 11 consecutive failed runs"}
+
+
+def _shape_idea(number, risk="escalated"):
+    return funnel.Item(
+        repo="nateprich/example",
+        number=number,
+        title="Idea {}".format(number),
+        url="https://github.com/nateprich/example/issues/{}".format(number),
+        state="OPEN",
+        status="Ideas",
+        klass="Broken",
+        origin="agent",
+        risk=risk,
+        needs="none",
+        labels=["needs-shaping"],
+        body="Risk: {}".format(risk),
+    )
+
+
+def test_review_lane_skips_a_backed_off_shape_and_says_so(monkeypatch, capsys):
+    """#1581: #1195's shape failed eleven times in a row because the review
+    lane never read the backoff the ticket path honours."""
+    stuck = _shape_idea(1195)
+    next_idea = _shape_idea(1196)
+
+    monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [])
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+    monkeypatch.setattr(funnel, "_backed_off_work",
+                        lambda items, now: {stuck.ref: _backoff_row(stuck.ref)})
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+
+    assert funnel.cmd_begin(
+        [stuck, next_idea], NOW, "muse", "escalated", False, True
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "shape"
+    assert result["work"]["ref"] == next_idea.ref
+    assert [row["ref"] for row in result["backed_off"]] == [stuck.ref]
+    assert result["backed_off"][0]["failures"] == 11
+
+
+def test_review_lane_skips_a_backed_off_breakdown(monkeypatch, capsys):
+    project = funnel.Item(
+        repo="nateprich/example",
+        number=40,
+        title="A Ready plan",
+        url="https://github.com/nateprich/example/issues/40",
+        state="OPEN",
+        status="Ready",
+        klass="Broken",
+    )
+    monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [])
+    monkeypatch.setattr(funnel, "awaiting_breakdown", lambda items: [project])
+    monkeypatch.setattr(funnel, "shapeable_idea", lambda items, tier, reading: None)
+    monkeypatch.setattr(funnel, "_backed_off_work",
+                        lambda items, now: {project.ref: _backoff_row(project.ref)})
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+
+    assert funnel.cmd_begin(
+        [project], NOW, "zcode", "standard", False, True
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "stop"
+    assert [row["ref"] for row in result["backed_off"]] == [project.ref]
+
+
+def test_review_lane_skips_the_backoff_read_with_no_issue_job(monkeypatch, capsys):
+    """The heartbeat read costs seconds of the reply budget; a fire with no
+    breakdown or shape candidate must not pay for it."""
+    work = {"pr": 7, "repo": "nateprich/beta", "ref": "nateprich/beta#19"}
+    monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [work])
+    monkeypatch.setattr(funnel, "awaiting_breakdown", lambda items: [])
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("backoff read with nothing to filter")
+
+    monkeypatch.setattr(funnel, "_backed_off_work", unexpected)
+
+    result = _begin(monkeypatch, capsys, breakdown=True)
+
+    assert result["do"] == "review"
 
 
 def test_breakdown_work_carries_plan_access_signals(monkeypatch, capsys):

@@ -768,10 +768,6 @@ class Item:
     parent: Optional[str] = None  # "owner/repo#123"
     children_total: int = 0
     children_done: int = 0
-    # Derived at load time from child ticket Needs fields. This is
-    # deliberately not a second GitHub record: the Needs field remains the
-    # only source of truth, including after its ticket closes.
-    carried_human_step: bool = False
     first_child_created_at: Optional[datetime] = None
     last_child_closed_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
@@ -1256,23 +1252,6 @@ RISK_LINE = re.compile(r"^\s*Risk:\s*(standard|escalated)\b(.*)$",
 # agent may work it, "claude-code-environment" means only Claude Code may,
 # and "human" means no agent may. The Human step body marker this replaced
 # is deleted with its parser; readers check item.needs and nothing else.
-
-
-def mark_projects_that_carried_human_steps(items: Sequence[Item]) -> None:
-    """Derive project acceptance history from child ticket Needs fields.
-
-    Closed child tickets remain in the Project item feed, so deriving this
-    after all pages load preserves "ever carried" without persisting a second
-    record that could drift from the field.
-    """
-    parent_refs = {
-        item.parent
-        for item in items
-        if item.parent is not None
-        and item.needs in ("human", "claude-code-environment")
-    }
-    for item in items:
-        item.carried_human_step = item.ref in parent_refs
 
 
 #: A safety boundary for capture and migration. False positives cost one
@@ -9446,7 +9425,6 @@ def load_items(
         _begin_load_timed(
             timings, "item_details", lambda: hydrate_item_details(items)
         )
-    mark_projects_that_carried_human_steps(items)
     return items
 
 
@@ -13116,6 +13094,11 @@ def reconcile_parked_wakes(
     funnel never guesses where to put an item. Reopen first so the shared
     guarded Status writer can safely restore an active stage; if that write
     fails, the still-Parked item is eligible for an idempotent retry next run.
+
+    Every candidate's comments are read before any write (#1592): one batched
+    GraphQL pass for the bounded tails, then a complete read only for an issue
+    whose full tail holds no park header. A failed or partial read raises, so
+    `begin` records the reason and this fire makes no wake writes at all.
     """
     candidates = sorted(
         (
@@ -13126,17 +13109,25 @@ def reconcile_parked_wakes(
         ),
         key=lambda item: (item.repo, item.number),
     )
+    if not candidates:
+        return []
     woke: List[str] = []
     today = _block_condition_date(now)
 
+    tails = _batched_issue_comments(candidates)
+    parks: Dict[str, Optional[Dict[str, object]]] = {}
     for item in candidates:
-        parsed = None
-        for comment in reversed(_issue_comments(item)):
-            if not isinstance(comment, dict):
-                continue
-            parsed = parse_park_comment(comment.get("body") or "")
-            if parsed is not None:
-                break
+        tail = tails[item.ref]
+        parsed = _latest_park_comment(tail)
+        if parsed is None and len(tail) >= CLOSED_ITSELF_COMMENT_PAGE_SIZE:
+            # A full tail may have cut the park comment off. Reading that as
+            # "no wake date" would strand the item silently, so page the whole
+            # thread for this one issue instead.
+            parsed = _latest_park_comment(_issue_comments(item))
+        parks[item.ref] = parsed
+
+    for item in candidates:
+        parsed = parks[item.ref]
         if parsed is None:
             continue
 
@@ -13182,6 +13173,19 @@ def reconcile_parked_wakes(
         woke.append(item.ref)
 
     return woke
+
+
+def _latest_park_comment(
+    comments: Sequence[object],
+) -> Optional[Dict[str, object]]:
+    """Parse the newest park header in oldest-first comments, if any."""
+    for comment in reversed(comments):
+        if not isinstance(comment, dict):
+            continue
+        parsed = parse_park_comment(comment.get("body") or "")
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
@@ -15992,10 +15996,47 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if self_approval_errors:
         out["shaped_self_approval_errors"] = self_approval_errors
 
+    # The repeated-failure backoff covers breakdown and shape jobs as well as
+    # tickets (#1581): the review lane never read it, so #1195's shape was
+    # retried on every escalated fire through eleven straight failures. The
+    # binding's work for these jobs is the issue ref, so the same heartbeat
+    # count applies unchanged. The heartbeat read costs about two seconds of
+    # a reply budget #1591 is already short of, so it runs only when there is
+    # an issue job to filter.
     review_phase_boundary("breakdown_queue")
     pending = awaiting_breakdown(items) if breakdown else []
+    review_backed_off: Dict[str, Dict[str, object]] = {}
+    if pending or any(
+        "needs-shaping" in getattr(entry, "labels", ()) for entry in items
+    ):
+        review_backed_off = _backed_off_work(items, now)
+    pending = [entry for entry in pending
+               if entry.ref not in review_backed_off]
     review_phase_boundary("shape_queue")
-    shape_item = shapeable_idea(items, tier, reading)
+    shape_item = shapeable_idea(
+        [entry for entry in items if entry.ref not in review_backed_off],
+        tier, reading,
+    )
+    withheld_issue_jobs = [
+        row for row in review_backed_off.values()
+        if row["ref"] in {
+            entry.ref for entry in items
+            if entry.state == "OPEN"
+            and (
+                "needs-shaping" in getattr(entry, "labels", ())
+                or entry.status == "Ready"
+            )
+        }
+    ]
+    if withheld_issue_jobs:
+        # Never a silent hold, as on the ticket path.
+        out["backed_off"] = [
+            {"ref": row["ref"], "failures": row["failures"],
+             "until": row["until"].isoformat(),
+             "reason": row["reason"]}
+            for row in sorted(withheld_issue_jobs,
+                              key=lambda row: str(row["ref"]))
+        ]
     review = _queue_candidate(queue, review_class_of)
     breakdown_item = _queue_candidate(
         pending, lambda entry: getattr(entry, "klass", None))
@@ -16460,6 +16501,140 @@ def ticket_ref_from_branch(repo: str, branch: str) -> Optional[str]:
     return "{}#{}".format(repo, tail) if tail.isdigit() else None
 
 
+#: The marker's ticket list, read from the project's own sub-issues at close
+#: time rather than from the loaded Project items, which need not carry closed
+#: tickets (#1591). ``totalCount`` is requested so a short read is detectable.
+CLOSED_ITSELF_TICKETS = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      subIssues(first: 100, after: $after) {
+        totalCount
+        nodes { number title state url repository { nameWithOwner } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
+def closed_itself_tickets(project: Item) -> List[Item]:
+    """Read every sub-issue of ``project`` for its closed-itself marker.
+
+    Fails closed: a malformed page, a missing cursor, a duplicate row, or a
+    ``totalCount`` that disagrees with the rows returned raises
+    ``GitHubError`` so the close waits for a later fire rather than recording
+    an incomplete ticket list.
+    """
+    try:
+        owner, name = project.repo.split("/", 1)
+    except ValueError:
+        raise GitHubError("invalid repository ref {}".format(project.repo))
+
+    tickets: List[Item] = []
+    seen: Set[str] = set()
+    total: Optional[int] = None
+    cursor: Optional[str] = None
+    while True:
+        variables: Dict[str, object] = {
+            "owner": owner, "name": name, "number": project.number,
+        }
+        if cursor is not None:
+            variables["after"] = cursor
+        data = gh_graphql(CLOSED_ITSELF_TICKETS, **variables)
+        repository = data.get("repository") if isinstance(data, dict) else None
+        issue = (
+            repository.get("issue") if isinstance(repository, dict) else None
+        )
+        connection = (
+            issue.get("subIssues") if isinstance(issue, dict) else None
+        )
+        if not isinstance(connection, dict):
+            raise GitHubError(
+                "could not read tickets for {}".format(project.ref)
+            )
+        page_total = connection.get("totalCount")
+        nodes = connection.get("nodes")
+        page_info = connection.get("pageInfo")
+        if (
+            not isinstance(page_total, int) or isinstance(page_total, bool)
+            or page_total < 0
+            or not isinstance(nodes, list)
+            or not isinstance(page_info, dict)
+        ):
+            raise GitHubError(
+                "invalid ticket page for {}".format(project.ref)
+            )
+        if total is None:
+            total = page_total
+        elif page_total != total:
+            raise GitHubError(
+                "ticket count for {} changed while paging: {} then {}".format(
+                    project.ref, total, page_total
+                )
+            )
+
+        for node in nodes:
+            child_repo = (
+                (node.get("repository") or {}).get("nameWithOwner")
+                if isinstance(node, dict)
+                and isinstance(node.get("repository"), dict) else None
+            )
+            number = node.get("number") if isinstance(node, dict) else None
+            if (
+                not isinstance(child_repo, str) or "/" not in child_repo
+                or not isinstance(number, int) or isinstance(number, bool)
+                or not all(
+                    isinstance(node.get(key), str)
+                    for key in ("title", "state", "url")
+                )
+            ):
+                raise GitHubError(
+                    "invalid ticket row for {}".format(project.ref)
+                )
+            ticket = Item(
+                repo=child_repo,
+                number=number,
+                title=node["title"],
+                url=node["url"],
+                state=node["state"],
+                parent=project.ref,
+            )
+            if ticket.ref in seen:
+                raise GitHubError(
+                    "ticket {} listed twice for {}".format(
+                        ticket.ref, project.ref
+                    )
+                )
+            seen.add(ticket.ref)
+            tickets.append(ticket)
+
+        if not page_info.get("hasNextPage"):
+            break
+        next_cursor = page_info.get("endCursor")
+        if (
+            not nodes or not isinstance(next_cursor, str) or not next_cursor
+            or next_cursor == cursor
+        ):
+            raise GitHubError(
+                "ticket page for {} has no usable next cursor".format(
+                    project.ref
+                )
+            )
+        cursor = next_cursor
+
+    if len(tickets) != total:
+        raise GitHubError(
+            "read {} of {} tickets for {}".format(
+                len(tickets), total, project.ref
+            )
+        )
+    tickets.sort(key=lambda ticket: (ticket.repo, ticket.number))
+    return tickets
+
+
 def closed_itself_comment(tickets: Sequence[Item], drift: Sequence[str]) -> str:
     """Render the durable marker comment for a funnel-closed project."""
     payload = {
@@ -16492,7 +16667,7 @@ def _auto_closeable_project(item: Item, *, children_done: Optional[int] = None
     )
 
 
-def _close_auto_closeable_project(items: Sequence[Item], project: Item,
+def _close_auto_closeable_project(project: Item,
                                   *, children_done: Optional[int] = None
                                   ) -> bool:
     """Move one eligible item to Done, close it, and record its marker."""
@@ -16504,8 +16679,9 @@ def _close_auto_closeable_project(items: Sequence[Item], project: Item,
         )
 
     drift = drift_since_approval(project)
-    tickets = [item for item in items if item.parent == project.ref]
-    tickets.sort(key=lambda item: (item.repo, item.number))
+    # Read before any write: a short or malformed read leaves the project
+    # untouched for a later fire.
+    tickets = closed_itself_tickets(project)
 
     gh_graphql(
         SET_FIELD,
@@ -16556,7 +16732,7 @@ def reconcile_auto_closeable_projects(items: Sequence[Item]) -> List[str]:
         key=lambda item: (item.repo, item.number),
     )
     for project in projects:
-        if _close_auto_closeable_project(items, project):
+        if _close_auto_closeable_project(project):
             closed.append(project.ref)
     return closed
 
@@ -16658,11 +16834,8 @@ def _auto_close_parent(items: Sequence[Item], ticket: Item) -> bool:
         or parent.children_done != parent.children_total - 1
     ):
         return False
-    merge_items = list(items)
-    if not any(item.ref == ticket.ref for item in merge_items):
-        merge_items.append(ticket)
     return _close_auto_closeable_project(
-        merge_items, parent, children_done=parent.children_total
+        parent, children_done=parent.children_total
     )
 
 
@@ -16724,6 +16897,22 @@ def merge_blockers(
     # routines ran the full 35-section reporting read before every merge just
     # to read this counter, and a slow read blocked the merge by timing out
     # (#830). The gate is fail-closed: a tripped counter refuses.
+    #
+    # Begin and the session server load the board without item history, so a
+    # regression item arrives with no `status_since` and the counter silently
+    # read zero on every lane merge (#1596). Read the missing history here,
+    # for regression items only, and refuse when it cannot be read.
+    unread_regressions = [
+        item for item in items
+        if item.title.startswith(REGRESSION_PREFIX)
+        and item.status_since is None
+    ]
+    if unread_regressions:
+        try:
+            hydrate_item_details(items, unread_regressions)
+        except GitHubError as exc:
+            why.append("could not read the rejected-merge history: {}".format(
+                exc))
     counter = rejected_merges(items, now)
     if counter["stop_auto_merging"]:
         why.append("auto-merging is stopped: {} rejected merges in the last "

@@ -547,6 +547,19 @@ def _merge_wired(monkeypatch, issue_state="OPEN", close_rc=0, close_err="",
 
     def fake_graphql(query, **variables):
         graphql_calls.append((query, variables))
+        if query == funnel.CLOSED_ITSELF_TICKETS:
+            # The parent's tickets, as its sub-issues read would list them.
+            parent = "{owner}/{name}#{number}".format(**variables)
+            nodes = [
+                {"number": row.number, "title": row.title, "state": row.state,
+                 "url": row.url, "repository": {"nameWithOwner": row.repo}}
+                for row in rows if row.parent == parent
+            ]
+            return {"repository": {"issue": {"subIssues": {
+                "totalCount": len(nodes),
+                "nodes": nodes,
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}}}
         data = pr(**(pr_fields or {}))
         data.setdefault("number", 7)
         data.setdefault("url", "https://example.invalid/7")
@@ -725,3 +738,61 @@ def test_ticket_ref_from_branch_is_the_one_parser():
     assert funnel.ticket_ref_from_branch(REPO, "ticket/9") == REPO + "#9"
     assert funnel.ticket_ref_from_branch(REPO, "main") is None
     assert funnel.ticket_ref_from_branch(REPO, "ticket/not-a-number") is None
+
+
+def _regressions(count, at):
+    return [
+        Item(repo=REPO, number=100 + n,
+             title="{}{} broke something".format(funnel.REGRESSION_PREFIX, 50 + n),
+             url="", state="OPEN", status="Ideas",
+             item_id="regression-{}".format(n))
+        for n in range(count)
+    ]
+
+
+def test_unhydrated_regressions_still_stop_auto_merging(monkeypatch):
+    """#1596: begin and the session server load items without history, so
+    regression items carried no `status_since` and the stop never tripped."""
+    wire(monkeypatch, pr(), [verdict()])
+    regressions = _regressions(funnel.REJECTED_MERGE_ALARM, NOW)
+    hydrated = []
+
+    def hydrate(rows, candidates=None):
+        chosen = list(candidates)
+        hydrated.append([item.ref for item in chosen])
+        for item in chosen:
+            item.status_since = NOW - timedelta(days=1)
+
+    monkeypatch.setattr(funnel, "hydrate_item_details", hydrate)
+
+    why = funnel.merge_blockers(REPO, 5, items() + regressions, NOW)
+
+    assert hydrated == [[item.ref for item in regressions]]
+    assert any("auto-merging is stopped" in reason for reason in why)
+
+
+def test_hydrated_regressions_are_not_read_again(monkeypatch):
+    wire(monkeypatch, pr(), [verdict()])
+    regressions = _regressions(1, NOW)
+    regressions[0].status_since = NOW - timedelta(days=30)
+
+    def hydrate(rows, candidates=None):
+        raise AssertionError("history already loaded")
+
+    monkeypatch.setattr(funnel, "hydrate_item_details", hydrate)
+
+    assert funnel.merge_blockers(REPO, 5, items() + regressions, NOW) == []
+
+
+def test_unreadable_regression_history_refuses_the_merge(monkeypatch):
+    wire(monkeypatch, pr(), [verdict()])
+
+    def hydrate(rows, candidates=None):
+        raise funnel.GitHubError("HTTP 502")
+
+    monkeypatch.setattr(funnel, "hydrate_item_details", hydrate)
+
+    why = funnel.merge_blockers(REPO, 5, items() + _regressions(1, NOW), NOW)
+
+    assert any("rejected-merge history" in reason and "HTTP 502" in reason
+               for reason in why)

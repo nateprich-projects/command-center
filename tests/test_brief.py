@@ -555,16 +555,15 @@ def test_closed_itself_candidates_follow_auto_close_eligibility_signal():
     wrong_class = closed(
         112, klass="New", children_total=1, children_done=1
     )
-    carried_human_step = closed(
+    second_plausible = closed(
         113, klass="Improve", children_total=1, children_done=1,
             body=funnel.origin_block("agent", at=NOW, run="brief-run", agent="codex"),
             origin="agent", risk="standard", needs="none",
-            carried_human_step=True,
     )
 
     assert funnel.closed_itself_items(
-        [no_children, wrong_class, carried_human_step, plausible], NOW
-    ) == [plausible, carried_human_step]
+        [no_children, wrong_class, second_plausible, plausible], NOW
+    ) == [plausible, second_plausible]
 
 
 def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):

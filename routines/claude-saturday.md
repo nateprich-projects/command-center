@@ -78,7 +78,12 @@ local checkout, and go back to step 1. Never force-push.
    `python3 /Users/nateprich/.claude/command-center-run/finish-ticket --agent claude --run <run> --answer-file <path>`.
    It tests, commits, pushes, opens the PR or records the blocked or declined
    path, releases the claim and finishes the run. If it fails, report the
-   failure honestly and never simulate an effect it did not complete: push what
-   you have, release the ticket and finish the run `errored` with the reason if
-   either is still open, and stop the session.
+   failure honestly and never simulate an effect it did not complete.
+   - **It recorded the failure itself** (it finished the run `errored` and
+     released the claim, as it does for a failing test suite): run the clock
+     check and go back to step 1. `begin` may hand you the same ticket again;
+     one retry is fine, since a flaky test usually passes the second time.
+   - **It failed twice in a row, or failed without recording the outcome:**
+     push what you have, release the ticket and finish the run `errored` with
+     the reason if either is still open, and stop the session.
 8. Go back to step 1.

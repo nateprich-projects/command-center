@@ -1,4 +1,4 @@
-"""The filtered begin load, ``load_items(scope="begin")`` (#1591, ticket 2).
+"""The filtered begin load, ``load_items(scope="begin")`` (#1591, tickets 2-3).
 
 Every test answers GraphQL with a fake that pages each alias on its own, so
 nothing here reaches GitHub.
@@ -16,6 +16,8 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
+
+_REAL_HEARTBEAT_BOUND_REFS = funnel._heartbeat_bound_refs
 
 
 REPO = "owner/repo"
@@ -37,25 +39,31 @@ ALIASES = list(EXPECTED_FILTERS)
 
 def _node(
     number, *, state="OPEN", reason=None, status="Building", parent=None,
-    labels=(), lock=None, title=None, repo=REPO,
+    labels=(), lock=None, title=None, repo=REPO, closed_at=None, needs=None,
+    parent_repo=None,
 ):
     return {
         "id": "item-{}-{}".format(repo, number),
         "lock": {"text": lock} if lock else None,
         "status": {"name": status} if status else None,
         "class": {"name": "New"},
+        "needs": {"name": needs} if needs else None,
         "content": {
             "number": number,
             "title": title or "issue {}".format(number),
             "url": "https://github.com/{}/issues/{}".format(repo, number),
             "state": state,
             "stateReason": reason,
-            "closedAt": None if state == "OPEN" else "2026-09-20T00:00:00Z",
+            "closedAt": (
+                None if state == "OPEN"
+                else closed_at or "2026-09-20T00:00:00Z"
+            ),
             "repository": {"nameWithOwner": repo},
             "labels": {"nodes": [{"name": label} for label in labels]},
             "assignees": {"nodes": []},
             "parent": (
-                {"number": parent, "repository": {"nameWithOwner": repo}}
+                {"number": parent,
+                 "repository": {"nameWithOwner": parent_repo or repo}}
                 if parent is not None
                 else None
             ),
@@ -72,20 +80,49 @@ def _page(nodes, cursor=None):
     }
 
 
+ANCHOR_CONNECTION = re.compile(
+    r'(r\d+): items\(first: 5, query: ("(?:[^"\\]|\\.)*")\)'
+)
+
+
+def _anchor_filters(query):
+    """The ``{alias: filter}`` of an anchor query, in alias order."""
+    return {alias: json.loads(literal)
+            for alias, literal in ANCHOR_CONNECTION.findall(query)}
+
+
 class FakeBoard:
     """Answer the aliased begin query one alias at a time.
 
     ``pages[alias]`` is a list of ``(nodes, next_cursor)``; the page served
     is the one after the cursor the request carries for that alias.
+    ``anchors[filter]`` is the rows an anchor connection with that Project
+    filter returns; any other filter returns none.
     """
 
-    def __init__(self, pages):
+    def __init__(self, pages, anchors=None):
         self.pages = {alias: list(pages.get(alias, [([], None)]))
                       for alias in ALIASES}
+        self.anchors = dict(anchors or {})
         self.calls = []
+
+    @property
+    def anchor_calls(self):
+        return [(query, variables) for query, variables in self.calls
+                if _anchor_filters(query)]
 
     def __call__(self, query, **variables):
         self.calls.append((query, variables))
+        anchors = _anchor_filters(query)
+        if anchors:
+            return {
+                "rateLimit": {"cost": 3, "remaining": 4000,
+                              "resetAt": "later"},
+                "user": {"projectV2": {
+                    alias: _page(self.anchors.get(text, []))
+                    for alias, text in anchors.items()
+                }},
+            }
         aliases = re.findall(r"(\w+): items\(", query)
         project = {}
         for alias in aliases:
@@ -101,6 +138,12 @@ class FakeBoard:
             "rateLimit": {"cost": 3, "remaining": 4000, "resetAt": "later"},
             "user": {"projectV2": project},
         }
+
+
+@pytest.fixture(autouse=True)
+def no_heartbeat(monkeypatch):
+    """Keep the heartbeat anchor source off GitHub; a test may override it."""
+    monkeypatch.setattr(funnel, "_heartbeat_bound_refs", lambda: [])
 
 
 def _load(monkeypatch, board, **kwargs):
@@ -394,7 +437,13 @@ def test_members_and_block_comments_are_handled_as_in_the_full_load(
     assert items[1].block_references == ["#84"]
     assert set(timings) == {
         "begin_load.project_items", "begin_load.block_comments",
+        "begin_load.anchor_items",
     }
+    # The missing blocker was asked for, and it is not in the Project.
+    assert [list(_anchor_filters(query).values())
+            for query, _variables in board.anchor_calls] == [
+        ["repo:owner/repo #84"],
+    ]
 
 
 def test_timings_record_the_same_phases_as_the_full_load(monkeypatch):
@@ -416,6 +465,7 @@ def test_timings_record_the_same_phases_as_the_full_load(monkeypatch):
         "begin_load.member_repos",
         "begin_load.project_items",
         "begin_load.block_comments",
+        "begin_load.anchor_items",
         "begin_load.item_details",
     }
 
@@ -470,3 +520,273 @@ def test_an_unknown_scope_or_a_shape_issue_is_refused(monkeypatch):
         funnel.load_items(scope="brief")
     with pytest.raises(ValueError, match="shape issue"):
         funnel.load_items(scope="begin", shape_issue=(REPO, 42))
+
+
+# Anchors (#1591, ticket 3): refs a begin consumer reads that the filtered
+# connections leave out are fetched by ref, one filtered connection each.
+
+OTHER_MEMBER = "owner/second"
+NOW = funnel.datetime(2026, 9, 26, 18, 0, tzinfo=funnel.timezone.utc)
+
+
+def _blocked_on(monkeypatch, body):
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args: {"comments": [{"body": body}]}
+    )
+
+
+def test_an_old_closed_blocker_is_fetched_and_its_block_clears(monkeypatch):
+    _blocked_on(monkeypatch, "**Blocked on #84:** Wait for the decision.")
+    blocker = _node(84, state="CLOSED", reason="COMPLETED", status="Done",
+                    parent=1, closed_at="2026-07-28T00:00:00Z")
+    board = FakeBoard(
+        {"open": [([_node(1), _node(2, parent=1, labels=("blocked",))],
+                   None)]},
+        anchors={"repo:owner/repo #84": [blocker]},
+    )
+
+    items = _load(monkeypatch, board)
+    by_ref = {item.ref: item for item in items}
+
+    assert [item.ref for item in items] == [
+        REPO + "#1", REPO + "#2", REPO + "#84",
+    ]
+    assert by_ref[REPO + "#84"].state == "CLOSED"
+    assert funnel.satisfied_block_refs(by_ref[REPO + "#2"], by_ref, NOW) == [
+        REPO + "#84",
+    ]
+
+
+def test_the_closed_freeze_owner_is_fetched_so_the_freeze_stays_inert(
+    monkeypatch,
+):
+    owner_repo, owner_number = funnel.FREEZE_OWNER_REF.split("#")
+    owner = _node(int(owner_number), state="CLOSED", reason="COMPLETED",
+                  status="Done", repo=owner_repo)
+    board = FakeBoard(
+        {"open": [([_node(1)], None)]},
+        anchors={"repo:{} #{}".format(owner_repo, owner_number): [owner]},
+    )
+
+    items = _load(monkeypatch, board,
+                  member_repo_names=[REPO, owner_repo])
+    by_ref = {item.ref: item for item in items}
+
+    assert by_ref[funnel.FREEZE_OWNER_REF].state == "CLOSED"
+    assert funnel._freeze_governing(by_ref) is None
+    # Without it the freeze would read as governing again.
+    del by_ref[funnel.FREEZE_OWNER_REF]
+    assert funnel._freeze_governing(by_ref) is not None
+
+
+def test_a_closed_parent_is_fetched_so_its_ticket_stays_startable(
+    monkeypatch,
+):
+    parent = _node(3, state="CLOSED", reason="COMPLETED", status="Building")
+    board = FakeBoard(
+        {"open": [([_node(1), _node(5, parent=3, needs="agent")], None)]},
+        anchors={"repo:owner/repo #3": [parent]},
+    )
+
+    items = _load(monkeypatch, board)
+    by_ref = {item.ref: item for item in items}
+
+    assert REPO + "#3" in by_ref
+    assert funnel._startable_without_repo_readiness(
+        by_ref[REPO + "#5"], by_ref, set()
+    )
+    del by_ref[REPO + "#3"]
+    assert not funnel._startable_without_repo_readiness(
+        by_ref[REPO + "#5"], by_ref, set()
+    )
+
+
+def test_a_heartbeat_bound_closed_ticket_is_fetched(monkeypatch):
+    monkeypatch.setattr(funnel, "_heartbeat_bound_refs",
+                        lambda: [REPO + "#40"])
+    ticket = _node(40, state="CLOSED", reason="COMPLETED", status="Done",
+                   parent=1)
+    board = FakeBoard(
+        {"open": [([_node(1)], None)]},
+        anchors={"repo:owner/repo #40": [ticket]},
+    )
+
+    items = _load(monkeypatch, board)
+
+    assert [item.ref for item in items] == [REPO + "#1", REPO + "#40"]
+
+
+def test_heartbeat_refs_come_from_open_ticket_starts_of_live_agents(
+    monkeypatch,
+):
+    import heartbeat
+
+    monkeypatch.setattr(heartbeat, "PROVIDERS",
+                        {"alpha": "a", "beta": "b", "gone": "g"})
+    monkeypatch.setattr(heartbeat, "RETIRED_AGENTS", frozenset({"gone"}))
+    spools = {
+        "alpha": [
+            {"run": "a1", "phase": "start", "ts": 1},
+            {"run": "a1", "phase": "bind", "ts": 2, "do": "ticket",
+             "work": REPO + "#40"},
+            {"run": "a2", "phase": "start", "ts": 3},
+            {"run": "a2", "phase": "bind", "ts": 4, "do": "review",
+             "work": "12", "repo": REPO},
+            {"run": "a3", "phase": "start", "ts": 5},
+            {"run": "a3", "phase": "bind", "ts": 6, "do": "ticket",
+             "work": REPO + "#41"},
+            {"run": "a3", "phase": "finish", "ts": 7, "outcome": "done"},
+        ],
+        "gone": [
+            {"run": "g1", "phase": "start", "ts": 1},
+            {"run": "g1", "phase": "bind", "ts": 2, "do": "ticket",
+             "work": REPO + "#42"},
+        ],
+    }
+
+    def rows(agent):
+        if agent == "beta":
+            raise RuntimeError("heartbeat branch unreadable")
+        return spools[agent]
+
+    monkeypatch.setattr(funnel, "_brief_heartbeat_rows", rows)
+    monkeypatch.setattr(funnel, "_heartbeat_bound_refs",
+                        _REAL_HEARTBEAT_BOUND_REFS)
+
+    assert funnel._heartbeat_bound_refs() == [REPO + "#40"]
+
+
+def test_an_issue_outside_the_project_stays_absent(monkeypatch):
+    _blocked_on(monkeypatch, "**Blocked on #84 and #85:** Wait.")
+    board = FakeBoard(
+        {"open": [([
+            _node(1),
+            _node(2, parent=1, labels=("blocked",)),
+            _node(6, parent=9, parent_repo=OTHER_MEMBER),
+            _node(7, parent=3, parent_repo=OTHER_REPO),
+        ], None)]},
+        # The filter narrows; Python decides. Near matches are not the ref.
+        anchors={"repo:owner/repo #84": [
+            _node(841, state="CLOSED"),
+            _node(84, state="CLOSED", repo=OTHER_MEMBER),
+        ]},
+    )
+
+    items = _load(monkeypatch, board,
+                  member_repo_names=[REPO, OTHER_MEMBER])
+
+    assert [item.ref for item in items] == [
+        REPO + "#1", REPO + "#2", REPO + "#6", REPO + "#7",
+    ]
+    # A non-member repo is never asked for, as the full load never keeps it.
+    assert [list(_anchor_filters(query).values())
+            for query, _variables in board.anchor_calls] == [[
+        "repo:owner/repo #84", "repo:owner/repo #85", "repo:owner/second #9",
+    ]]
+
+
+def test_a_failed_anchor_fetch_raises(monkeypatch):
+    board = FakeBoard({"open": [([_node(1), _node(5, parent=3)], None)]})
+
+    def failing(query, **variables):
+        if _anchor_filters(query):
+            raise funnel.GitHubError("GraphQL: something went wrong")
+        return board(query, **variables)
+
+    with pytest.raises(funnel.GitHubError, match="something went wrong"):
+        _load(monkeypatch, failing)
+
+
+@pytest.mark.parametrize("breakage", [
+    "missing-connection", "nodes-not-a-list", "row-without-repository",
+    "next-page-without-the-issue",
+])
+def test_a_malformed_anchor_response_raises(monkeypatch, breakage):
+    board = FakeBoard({"open": [([_node(1), _node(5, parent=3)], None)]})
+
+    def broken(query, **variables):
+        response = board(query, **variables)
+        if not _anchor_filters(query):
+            return response
+        project = response["user"]["projectV2"]
+        if breakage == "missing-connection":
+            del project["r0"]
+        elif breakage == "nodes-not-a-list":
+            project["r0"]["nodes"] = None
+        elif breakage == "row-without-repository":
+            row = _node(3, state="CLOSED")
+            del row["content"]["repository"]
+            project["r0"]["nodes"] = [row]
+        else:
+            project["r0"] = _page([_node(30, state="CLOSED")], "more")
+        return response
+
+    with pytest.raises(funnel.GitHubError, match=r"r0|owner/repo#3"):
+        _load(monkeypatch, broken)
+
+
+def test_nothing_missing_sends_no_anchor_query(monkeypatch):
+    _blocked_on(monkeypatch, "**Blocked on #3:** Wait.")
+    board = FakeBoard({
+        "open": [([_node(1), _node(2, parent=1, labels=("blocked",))],
+                   None)],
+        "claims": [([_node(3, state="CLOSED", reason="COMPLETED",
+                           status="Done", parent=1,
+                           lock="2026-09-20T00:00:00Z")], None)],
+    })
+
+    _load(monkeypatch, board)
+
+    assert len(board.calls) == 1
+    assert board.anchor_calls == []
+
+
+def test_missing_refs_across_two_repos_share_one_request(monkeypatch):
+    monkeypatch.setattr(funnel, "_heartbeat_bound_refs",
+                        lambda: [OTHER_MEMBER + "#7", REPO + "#3"])
+    board = FakeBoard(
+        {"open": [([
+            _node(1),
+            _node(5, parent=3),
+            _node(6, parent=3),
+            _node(8, parent=4, parent_repo=OTHER_MEMBER),
+        ], None)]},
+        anchors={
+            "repo:owner/repo #3": [_node(3, state="CLOSED")],
+            "repo:owner/second #4": [
+                _node(4, state="CLOSED", repo=OTHER_MEMBER)],
+            "repo:owner/second #7": [
+                _node(7, state="CLOSED", repo=OTHER_MEMBER, parent=4)],
+        },
+    )
+    funnel.reset_api_usage()
+
+    items = _load(monkeypatch, board,
+                  member_repo_names=[REPO, OTHER_MEMBER])
+
+    assert len(board.anchor_calls) == 1
+    query, variables = board.anchor_calls[0]
+    assert _anchor_filters(query) == {
+        "r0": "repo:owner/repo #3",
+        "r1": "repo:owner/second #4",
+        "r2": "repo:owner/second #7",
+    }
+    assert variables == {
+        "login": funnel.PROJECT_OWNER, "number": funnel.PROJECT_NUMBER,
+    }
+    assert funnel.ITEM_NODE_FIELDS in query
+    assert [item.ref for item in items][-3:] == [
+        REPO + "#3", OTHER_MEMBER + "#4", OTHER_MEMBER + "#7",
+    ]
+    assert funnel.project_item_load_measurement() == (2, 7)
+
+
+def test_more_than_twenty_missing_refs_take_another_request(monkeypatch):
+    refs = [REPO + "#{}".format(100 + index) for index in range(25)]
+    monkeypatch.setattr(funnel, "_heartbeat_bound_refs", lambda: refs)
+    board = FakeBoard({"open": [([_node(1)], None)]})
+
+    _load(monkeypatch, board)
+
+    assert [len(_anchor_filters(query))
+            for query, _variables in board.anchor_calls] == [20, 5]

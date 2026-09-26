@@ -8074,6 +8074,61 @@ def _begin_item_query(aliases: Sequence[str]) -> str:
     )
 
 
+# The begin load's anchors (#1591): items a begin consumer reads by ref that
+# the filtered connections leave out — a closed parent, an old closed blocker,
+# the closed freeze owner, a closed ticket still bound to an open heartbeat
+# start. The Project filter selects one issue with ``repo:<owner>/<name>
+# #<number>`` (measured 2026-09-26; two numbers in one filter match nothing
+# and ``number:`` is not a filter), so each ref is its own aliased connection.
+# ``Issue.projectItems`` is not an option: it is empty for org-repo issues in
+# this user-owned Project (LEARNINGS.md, 2026-09-05). Each connection costs
+# about 3 points, like any other Project item connection.
+BEGIN_ANCHOR_PAGE_SIZE = 5
+BEGIN_ANCHOR_ALIASES_PER_REQUEST = 20
+_BEGIN_ANCHOR_REF_RE = re.compile(r"^([\w.-]+/[\w.-]+)#([1-9][0-9]*)$")
+
+
+def _begin_anchor_filter(ref: str) -> str:
+    """The Project filter that selects exactly the issue ``ref`` names."""
+    match = _BEGIN_ANCHOR_REF_RE.match(ref)
+    if match is None:
+        raise ValueError("not an issue ref: {!r}".format(ref))
+    return "repo:{} #{}".format(match.group(1), match.group(2))
+
+
+def _begin_anchor_query(refs: Sequence[str]) -> str:
+    """One Project query with a filtered connection per ref, ``r0`` onward."""
+    if not refs or len(refs) > BEGIN_ANCHOR_ALIASES_PER_REQUEST:
+        raise ValueError(
+            "a begin anchor query carries 1 to {} refs, not {}".format(
+                BEGIN_ANCHOR_ALIASES_PER_REQUEST, len(refs)
+            )
+        )
+    connections = "".join(
+        "      r{index}: items(first: {size}, query: {query}) {{\n"
+        "        pageInfo {{ hasNextPage endCursor }}\n"
+        "        nodes {{ ...BeginItem }}\n"
+        "      }}\n".format(
+            index=index, size=BEGIN_ANCHOR_PAGE_SIZE,
+            query=json.dumps(_begin_anchor_filter(ref)),
+        )
+        for index, ref in enumerate(refs)
+    )
+    return (
+        "\nquery($login: String!, $number: Int!) {{\n"
+        "  rateLimit {{ cost remaining resetAt }}\n"
+        "  user(login: $login) {{\n"
+        "    projectV2(number: $number) {{\n"
+        "{connections}"
+        "    }}\n"
+        "  }}\n"
+        "}}\n"
+        "\nfragment BeginItem on ProjectV2Item {{\n"
+        "{fields}"
+        "}}\n"
+    ).format(connections=connections, fields=ITEM_NODE_FIELDS)
+
+
 SHAPE_ISSUE_COMMENTS_PAGE_QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $cursor: String!) {
   rateLimit { cost remaining resetAt }
@@ -9634,6 +9689,134 @@ def _load_begin_items(
     return items
 
 
+def _heartbeat_bound_refs() -> List[str]:
+    """Ticket refs bound to an open heartbeat start, as the orphan reconciler
+    reads them, or none from any agent whose heartbeat cannot be read.
+
+    Like ``_backoff_rows``, an unreadable heartbeat only drops this source:
+    ``reconcile_orphaned_starts`` then finds no candidates, as it would itself.
+    """
+    refs: List[str] = []
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import heartbeat
+
+        agents = [
+            agent for agent in sorted(heartbeat.PROVIDERS)
+            if agent not in heartbeat.RETIRED_AGENTS
+        ]
+    except Exception:
+        return []
+    for agent in agents:
+        try:
+            records = _brief_heartbeat_rows(agent)
+            bound = heartbeat.bindings(records)
+            for start in heartbeat.open_starts(records):
+                binding = bound.get(start.get("run"))
+                if binding and binding.get("do") == "ticket":
+                    refs.append(str(binding.get("work")))
+        except Exception:
+            continue
+    return refs
+
+
+def _begin_anchor_refs(items: Sequence[Item], members: Set[str]) -> List[str]:
+    """Refs a begin consumer reads that the filtered load did not return.
+
+    Parents of open items (``startable``, ``effective_class``), the refs named
+    in open items' block comments (``satisfied_block_refs``), the freeze owner
+    (``_freeze_governing`` reads its absence as an active freeze), and tickets
+    bound to open heartbeat starts (``reconcile_orphaned_starts``). Only member
+    repos, as the full load keeps; anything unparseable is left alone.
+    """
+    loaded = {item.ref for item in items}
+    wanted: List[str] = []
+    for item in items:
+        if item.state != "OPEN":
+            continue
+        if item.parent:
+            wanted.append(item.parent)
+        for value in item.block_references:
+            ref = _dependency_ref(item, value)
+            if ref is not None:
+                wanted.append(ref)
+    wanted.append(FREEZE_OWNER_REF)
+    wanted.extend(_heartbeat_bound_refs())
+    refs: List[str] = []
+    for ref in wanted:
+        match = _BEGIN_ANCHOR_REF_RE.match(ref)
+        if (
+            match is None
+            or match.group(1) not in members
+            or ref in loaded
+            or ref in refs
+        ):
+            continue
+        refs.append(ref)
+    return refs
+
+
+def _load_begin_anchor_items(
+    items: Sequence[Item], members: Set[str],
+    timings: Optional[Dict[str, object]],
+) -> List[Item]:
+    """Fetch the begin anchors by ref, up to 20 connections per request.
+
+    The filter narrows; Python decides: a row is kept only when its repo and
+    number are exactly the ref's. A ref with no such row stays absent, as an
+    issue outside the Project is under the full load. A malformed response,
+    or a connection with more rows than one page and no exact match on it,
+    raises rather than reading as absent.
+    """
+    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
+    started = time.perf_counter() if timings is not None else None
+    found: List[Item] = []
+    try:
+        refs = _begin_anchor_refs(items, members)
+        for start in range(0, len(refs), BEGIN_ANCHOR_ALIASES_PER_REQUEST):
+            batch = refs[start:start + BEGIN_ANCHOR_ALIASES_PER_REQUEST]
+            _PROJECT_ITEM_PAGE_COUNT += 1
+            response = gh_graphql(
+                _begin_anchor_query(batch),
+                login=PROJECT_OWNER, number=PROJECT_NUMBER,
+            )
+            project = _begin_project_from_response(response)
+            for index, ref in enumerate(batch):
+                alias = "r{}".format(index)
+                nodes, has_next, _cursor = _begin_connection_page(
+                    project, alias
+                )
+                _PROJECT_ITEM_ROW_COUNT += len(nodes)
+                match = None
+                for node in nodes:
+                    try:
+                        item = _from_node(node)
+                    except (KeyError, TypeError, AttributeError) as exc:
+                        raise GitHubError(
+                            "begin anchor {} returned a malformed row"
+                            .format(ref)
+                        ) from exc
+                    if item is not None and item.ref == ref:
+                        match = item
+                        break
+                if match is None:
+                    if has_next:
+                        raise GitHubError(
+                            "begin anchor {} matched more than one page "
+                            "without the issue itself".format(ref)
+                        )
+                    continue  # not in the Project: absent, as in full
+                if match.state == "OPEN" and match.is_blocked:
+                    _load_block_comment(match)
+                found.append(match)
+    finally:
+        if started is not None:
+            _record_begin_load_phase(
+                timings, "anchor_items", time.perf_counter() - started
+            )
+    return found
+
+
 def load_items(
     include_details: bool = True,
     member_repo_names: Optional[Sequence[str]] = None,
@@ -9645,7 +9828,8 @@ def load_items(
 
     ``scope`` None or ``"full"`` reads every Project item. ``"begin"`` reads
     every open item and only the closed items a begin consumer needs, through
-    ``BEGIN_ITEM_CONNECTIONS`` (#1591).
+    ``BEGIN_ITEM_CONNECTIONS``, then fetches by ref the parents, blockers,
+    freeze owner and heartbeat-bound tickets those left out (#1591).
     """
     global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     if scope not in (None, "full", "begin"):
@@ -9660,6 +9844,9 @@ def load_items(
     )
     if scope == "begin":
         begin_items = _load_begin_items(members, timings)
+        begin_items.extend(
+            _load_begin_anchor_items(begin_items, members, timings)
+        )
         if include_details:
             _begin_load_timed(
                 timings, "item_details",

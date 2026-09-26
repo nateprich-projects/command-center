@@ -16016,10 +16016,47 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if self_approval_errors:
         out["shaped_self_approval_errors"] = self_approval_errors
 
+    # The repeated-failure backoff covers breakdown and shape jobs as well as
+    # tickets (#1581): the review lane never read it, so #1195's shape was
+    # retried on every escalated fire through eleven straight failures. The
+    # binding's work for these jobs is the issue ref, so the same heartbeat
+    # count applies unchanged. The heartbeat read costs about two seconds of
+    # a reply budget #1591 is already short of, so it runs only when there is
+    # an issue job to filter.
     review_phase_boundary("breakdown_queue")
     pending = awaiting_breakdown(items) if breakdown else []
+    review_backed_off: Dict[str, Dict[str, object]] = {}
+    if pending or any(
+        "needs-shaping" in getattr(entry, "labels", ()) for entry in items
+    ):
+        review_backed_off = _backed_off_work(items, now)
+    pending = [entry for entry in pending
+               if entry.ref not in review_backed_off]
     review_phase_boundary("shape_queue")
-    shape_item = shapeable_idea(items, tier, reading)
+    shape_item = shapeable_idea(
+        [entry for entry in items if entry.ref not in review_backed_off],
+        tier, reading,
+    )
+    withheld_issue_jobs = [
+        row for row in review_backed_off.values()
+        if row["ref"] in {
+            entry.ref for entry in items
+            if entry.state == "OPEN"
+            and (
+                "needs-shaping" in getattr(entry, "labels", ())
+                or entry.status == "Ready"
+            )
+        }
+    ]
+    if withheld_issue_jobs:
+        # Never a silent hold, as on the ticket path.
+        out["backed_off"] = [
+            {"ref": row["ref"], "failures": row["failures"],
+             "until": row["until"].isoformat(),
+             "reason": row["reason"]}
+            for row in sorted(withheld_issue_jobs,
+                              key=lambda row: str(row["ref"]))
+        ]
     review = _queue_candidate(queue, review_class_of)
     breakdown_item = _queue_candidate(
         pending, lambda entry: getattr(entry, "klass", None))

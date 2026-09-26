@@ -9,6 +9,7 @@ import {
   repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
   renderMetricChart, renderBudgetMetrics, renderRunMetrics,
   renderAttentionMetrics, renderChurnMetrics,
+  renderOutputPanel,
   CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 } from "../public/app.js";
@@ -882,6 +883,74 @@ test("the Churn panel separates repositories, keeps gaps, and pairs brief cost m
   }
 });
 
+test("Output renders A1-A6 from metrics.py series paths", async () => {
+  const fixture = JSON.parse(await readFile(
+    new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8",
+  ));
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    assert.equal(fixture.fixture_evidence.a_series_source, "metrics.series_from_rows");
+    const grid = new TestNode("div");
+    renderOutputPanel(fixture, grid);
+    const tiles = grid.querySelectorAll(".output-metric");
+    assert.deepEqual(
+      tiles.map((tile) => tile.attributes.get("data-metric")),
+      ["A1", "A2", "A3", "A4", "A5", "A6"],
+    );
+    for (const tile of tiles) {
+      assert.ok(tile.querySelectorAll(".metric-chart").length > 0);
+      assert.match(tile.textContent, /R7/);
+      assert.match(tile.textContent, /R28/);
+      assert.match(tile.textContent, /Delta/);
+    }
+
+    const a1 = fixture.metrics.A.A1;
+    assert.equal(tiles[0].querySelectorAll(".metric-chart").length,
+      1 + Object.keys(a1.by_repo).length);
+    assert.ok(tiles[0].querySelectorAll(".metric-series-label")
+      .some((label) => label.textContent === "command-center"));
+    const repoDailyTotal = Object.values(a1.by_repo)
+      .reduce((sum, repo) => sum + repo.daily[40], 0);
+    assert.equal(repoDailyTotal, a1.total.daily[40]);
+
+    const a4 = fixture.metrics.A.A4;
+    assert.ok(a4.new_projects_started.daily.some(Number.isFinite));
+    assert.ok(a4.days_since_last_new_started.daily.some(Number.isFinite));
+    assert.match(tiles[3].textContent, /Days since last New project entered Building/);
+    assert.match(tiles[3].textContent, /6 days/);
+    assert.doesNotMatch(tiles[3].textContent, /Days since last New project entered Building\s+Gap/);
+
+    assert.ok(tiles[2].querySelectorAll(".chart-hit")
+      .some((hit) => /R7 Gap/.test(hit.textContent)));
+
+    const a6 = fixture.metrics.A.A6;
+    const revertSeries = Object.values(a6.reverts_by_repo);
+    assert.ok(revertSeries.length > 0);
+    assert.ok(revertSeries.some((repo) => repo.daily.some(Number.isFinite)));
+    assert.ok(a6.reopened_tickets.daily.some(Number.isFinite));
+    assert.equal(tiles[5].querySelectorAll(".metric-chart").length,
+      revertSeries.length + 1);
+
+    const evidence = fixture.fixture_evidence.a3_denominator;
+    const upkeep = fixture.metrics.A.A3;
+    assert.ok(evidence.closed_tickets > evidence.closed_projects);
+    assert.equal(upkeep.numerators[evidence.day_index], evidence.upkeep_projects);
+    assert.equal(upkeep.denominators[evidence.day_index], evidence.closed_projects);
+    assert.equal(
+      upkeep.daily[evidence.day_index],
+      evidence.upkeep_projects / evidence.closed_projects,
+    );
+    assert.notEqual(
+      upkeep.daily[evidence.day_index],
+      evidence.upkeep_projects / evidence.closed_tickets,
+    );
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
 test("Execution uses a read-only request and the two views route on the same page", async () => {
   const [html, source, fixtureText] = await Promise.all([
     readFile(new URL("../public/index.html", import.meta.url), "utf8"),
@@ -908,6 +977,8 @@ test("Execution uses a read-only request and the two views route on the same pag
   assert.match(html, /<div id="attention-grid" class="run-metric-grid"><\/div>/);
   assert.ok(html.indexOf('id="runs-grid"') < html.indexOf('id="budget-grid"'));
   assert.ok(html.indexOf('id="budget-grid"') < html.indexOf('id="attention-grid"'));
+  assert.match(html, /<div id="output-grid" class="output-grid"><\/div>/);
+  assert.match(source, /renderOutputPanel\(series, output\)/);
   assert.equal(tabFromUrl("https://funnel.nateprich.com/?tab=execution&repo=owner%2Frepo"),
     "execution");
   assert.equal(tabFromUrl("https://funnel.nateprich.com/?tab=unknown"), "funnel");

@@ -26,6 +26,7 @@ import hmac
 import inspect
 import io
 import json
+import math
 import os
 import pathlib
 import random
@@ -8303,7 +8304,7 @@ GRAPHQL_CALLERS = (
     "standard", "escalated", "publisher", "watch", "begin", "breakdown",
 )
 GRAPHQL_UNATTRIBUTED = "unattributed"
-_GRAPHQL_CALLER_SPEND: Dict[str, Dict[str, Optional[int]]] = {}
+_GRAPHQL_CALLER_SPEND: Dict[str, Dict[str, object]] = {}
 _ACTIVE_GRAPHQL_CALLER: contextvars.ContextVar = contextvars.ContextVar(
     "active_graphql_caller", default=GRAPHQL_UNATTRIBUTED
 )
@@ -8496,12 +8497,20 @@ def graphql_spend() -> Dict[str, object]:
     return dict(_GRAPHQL_SPEND)
 
 
-def graphql_caller_spend() -> Dict[str, Dict[str, Optional[int]]]:
-    """Snapshot this process's GraphQL points and headroom by caller."""
-    return {
-        caller: dict(values)
-        for caller, values in _GRAPHQL_CALLER_SPEND.items()
-    }
+def graphql_caller_spend() -> Dict[str, Dict[str, object]]:
+    """Snapshot this process's GraphQL readings and totals by caller."""
+    result = {}
+    for caller, values in _GRAPHQL_CALLER_SPEND.items():
+        readings = values.get("readings")
+        result[caller] = {
+            **values,
+            "readings": (
+                [dict(reading) for reading in readings
+                 if isinstance(reading, dict)]
+                if isinstance(readings, list) else []
+            ),
+        }
+    return result
 
 
 @contextlib.contextmanager
@@ -8596,8 +8605,18 @@ def graphql_caller_for_command(argv: Sequence[str], *,
     return _graphql_tier_caller(command_tier)
 
 
-def _record_graphql_caller_response(block: object) -> None:
-    """Record one response; unreadable costs are never charged to a caller."""
+def _graphql_response_timestamp() -> Optional[float]:
+    """Read a best-effort receipt time without gating a GraphQL response."""
+    try:
+        received_at = float(time.time())
+    except Exception:
+        return None
+    return received_at if math.isfinite(received_at) and received_at >= 0 else None
+
+
+def _record_graphql_caller_response(
+        block: object, received_at: Optional[float]) -> None:
+    """Record one response, including its window metadata and receipt time."""
     values = block if isinstance(block, dict) else {}
     cost = values.get("cost")
     cost_readable = (
@@ -8609,7 +8628,9 @@ def _record_graphql_caller_response(block: object) -> None:
 
     bucket = _GRAPHQL_CALLER_SPEND.get(caller)
     if bucket is None:
-        bucket = {"calls": 0, "points": 0, "remaining": None}
+        bucket = {
+            "calls": 0, "points": 0, "remaining": None, "readings": [],
+        }
         _GRAPHQL_CALLER_SPEND[caller] = bucket
     bucket["calls"] = int(bucket.get("calls") or 0) + 1
     if cost_readable:
@@ -8622,6 +8643,24 @@ def _record_graphql_caller_response(block: object) -> None:
     if (isinstance(remaining, int) and not isinstance(remaining, bool)
             and remaining >= 0):
         bucket["remaining"] = remaining
+
+    readings = bucket["readings"]
+    reset_at = values.get("resetAt")
+    reading = {
+        "cost": cost if cost_readable else None,
+        "remaining": (
+            remaining
+            if isinstance(remaining, int) and not isinstance(remaining, bool)
+            and remaining >= 0 else None
+        ),
+        "reset_at": (
+            reset_at.strip()
+            if isinstance(reset_at, str) and reset_at.strip() else None
+        ),
+        "received_at": received_at,
+    }
+    if isinstance(readings, list):
+        readings.append(reading)
 
 
 def _budget_exhaustion_signal() -> Optional[Tuple[int, str]]:
@@ -8802,9 +8841,10 @@ def gh_graphql(query: str, **variables) -> dict:
                 # Keep the GraphQL spend count aligned even when no child
                 # response exists to carry a rate-limit block.
                 _record_graphql_attempt()
-                _record_graphql_caller_response(None)
+                _record_graphql_caller_response(None, None)
                 raise
 
+            received_at = _graphql_response_timestamp()
             _record_graphql_attempt()
             stderr = _graphql_text(getattr(proc, "stderr", ""))
             stdout = getattr(proc, "stdout", "")
@@ -8830,7 +8870,7 @@ def gh_graphql(query: str, **variables) -> dict:
                     error_data.get("rateLimit")
                     if isinstance(error_data, dict) else None
                 )
-                _record_graphql_caller_response(error_block)
+                _record_graphql_caller_response(error_block, received_at)
                 if isinstance(error_data, dict):
                     _record_rate_limit(error_block)
                     if (isinstance(error_block, dict)
@@ -8862,7 +8902,7 @@ def gh_graphql(query: str, **variables) -> dict:
             try:
                 payload = json.loads(stdout)
             except (TypeError, ValueError) as exc:
-                _record_graphql_caller_response(None)
+                _record_graphql_caller_response(None, received_at)
                 error = GitHubError(
                     "malformed GraphQL response: {}".format(exc),
                     transient=True,
@@ -8874,7 +8914,7 @@ def gh_graphql(query: str, **variables) -> dict:
                 continue
 
             if not isinstance(payload, dict):
-                _record_graphql_caller_response(None)
+                _record_graphql_caller_response(None, received_at)
                 error = GitHubError(
                     "malformed GraphQL response: top-level JSON is not an object",
                     transient=True,
@@ -8892,7 +8932,7 @@ def gh_graphql(query: str, **variables) -> dict:
             # before handling errors so begin can classify that failure
             # without matching prose or an exit code.
             block = data.get("rateLimit") if isinstance(data, dict) else None
-            _record_graphql_caller_response(block)
+            _record_graphql_caller_response(block, received_at)
             if isinstance(data, dict):
                 _record_rate_limit(block)
                 if isinstance(block, dict) and block.get("remaining") == 0:

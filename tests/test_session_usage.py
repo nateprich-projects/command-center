@@ -147,6 +147,90 @@ def test_muse_journal_extracts_embedded_token_usage(tmp_path, monkeypatch):
     }
 
 
+def _write_muse_session(tmp_path, session_id, input_tokens, cached_tokens,
+                        output_tokens):
+    path = tmp_path / session_id / "journal-00000000.bin"
+    path.parent.mkdir()
+    event = json.dumps({
+        "method": "session/tokenUsage",
+        "params": {
+            "turnId": "turn-1",
+            "usage": {
+                "inputTokens": input_tokens,
+                "cacheReadTokens": cached_tokens,
+                "cacheWriteTokens": 0,
+                "outputTokens": output_tokens,
+            },
+        },
+    }).encode()
+    path.write_bytes(b"binary-prefix" + event + b"binary-suffix")
+
+
+def test_muse_sums_every_recorded_session_with_complete_coverage(
+    tmp_path, monkeypatch
+):
+    _write_muse_session(tmp_path, "muse-one", 10, 2, 3)
+    _write_muse_session(tmp_path, "muse-two", 20, 5, 7)
+    monkeypatch.setitem(
+        session_usage.SESSION_GLOBS,
+        "muse",
+        str(tmp_path / "*" / "*"),
+    )
+
+    usage, coverage = session_usage.usage_for_sessions(
+        "muse", ["muse-one", "muse-two"], 2
+    )
+
+    assert usage == {
+        "fresh_input_tokens": 23,
+        "cache_read_input_tokens": 7,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 10,
+    }
+    assert coverage == {
+        "status": "complete",
+        "captured_calls": 2,
+        "made_calls": 2,
+        "readable_journals": 2,
+        "unreadable_journals": 0,
+        "uncaptured_calls": 0,
+    }
+
+
+def test_muse_missing_session_journal_is_partial_not_zero(tmp_path, monkeypatch):
+    _write_muse_session(tmp_path, "muse-one", 10, 2, 3)
+    monkeypatch.setitem(
+        session_usage.SESSION_GLOBS,
+        "muse",
+        str(tmp_path / "*" / "*"),
+    )
+
+    usage, coverage = session_usage.usage_for_sessions(
+        "muse", ["muse-one", "missing"], 2
+    )
+
+    assert usage is None
+    assert coverage == {
+        "status": "partial",
+        "captured_calls": 2,
+        "made_calls": 2,
+        "readable_journals": 1,
+        "unreadable_journals": 1,
+        "uncaptured_calls": 0,
+        "reasons": ["unreadable_session_journals_or_usage"],
+    }
+
+
+def test_malformed_session_list_is_a_fault_not_a_partial_sum():
+    usage, coverage = session_usage.usage_for_sessions(
+        "muse", ["muse-one"], 2
+    )
+
+    assert usage is None
+    assert coverage["status"] == "fault"
+    assert coverage["reasons"] == ["call_count_mismatch"]
+
+
 def test_missing_token_kind_stays_null(tmp_path, monkeypatch):
     session_id = "codex-session"
     path = tmp_path / session_id / "rollout.jsonl"

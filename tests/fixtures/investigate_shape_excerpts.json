@@ -1,0 +1,20 @@
+{
+  "non_defect_shapes": [
+    {
+      "source": "FF-Weekly-Start-Sit#275",
+      "proposed_class_line": "Proposed class: Investigate",
+      "body_excerpt": "A read-only evidence study tracing both sides of historical trades involving draft picks through the players selected and subsequent returns, with no new trading rule or transaction engine."
+    },
+    {
+      "source": "The-League#251",
+      "proposed_class_line": "Proposed class: Investigate",
+      "body_excerpt": "Quota-recording hygiene split out of closed #245 third question."
+    }
+  ],
+  "genuine_defect_shape": {
+    "source": "command-center#239",
+    "proposed_class_line": "Proposed class: Investigate",
+    "body_excerpt": "The /rate_limit endpoint reported full headroom while a real GraphQL call on the same token returned Remaining 0, Used 5012.",
+    "possible_defect_line": "Possible defect: the /rate_limit endpoint reports a budget counter different from the one actual calls spend."
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "run": "already-merged-approved-head",
+  "agent": "zcode",
+  "phase": "finish",
+  "ts": 1790304200,
+  "outcome": "done",
+  "note": "reviewed PR #7 in nateprich-projects/command-center at abc123def456: approved; observed already-merged PR: {\"actor\": \"nate\", \"head\": \"abc123def456\", \"merged_at\": \"2026-09-25T02:43:19Z\", \"pr\": 7}",
+  "merged": 7,
+  "review_result": "approved"
+}

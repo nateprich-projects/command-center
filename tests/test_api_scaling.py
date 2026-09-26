@@ -5,6 +5,8 @@ from __future__ import annotations
 import pathlib
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
@@ -556,3 +558,73 @@ def test_load_items_follows_the_cursor_after_a_full_page(monkeypatch):
             "cursor": "cursor-1",
         },
     ]
+
+
+def test_shape_item_query_reads_and_paginates_the_full_issue_thread(monkeypatch):
+    node = _node(42)
+    node["content"]["body"] = "Current idea body."
+    first = {
+        "author": {"login": "nate"},
+        "body": "First comment.",
+        "createdAt": "2026-09-25T01:00:00Z",
+    }
+    second = {
+        "author": {"login": "muse"},
+        "body": "Second comment.",
+        "createdAt": "2026-09-25T02:00:00Z",
+    }
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        if "shapeIssue:" in query:
+            return {
+                "user": {"projectV2": {"items": {
+                    "nodes": [node],
+                    "pageInfo": {"hasNextPage": False,
+                                 "endCursor": None},
+                }}},
+                "shapeIssue": {"issue": {"comments": {
+                    "nodes": [first],
+                    "pageInfo": {"hasNextPage": True,
+                                 "endCursor": "comment-cursor-1"},
+                }}},
+            }
+        assert query == funnel.SHAPE_ISSUE_COMMENTS_PAGE_QUERY
+        assert variables == {
+            "owner": "owner", "name": "repo", "number": 42,
+            "cursor": "comment-cursor-1",
+        }
+        return {"repository": {"issue": {"comments": {
+            "nodes": [second],
+            "pageInfo": {"hasNextPage": False,
+                         "endCursor": "comment-cursor-2"},
+        }}}}
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    items = funnel.load_items(
+        include_details=False, member_repo_names=[REPO],
+        shape_issue=(REPO, 42),
+    )
+    assert len(calls) == 2
+    first_query = " ".join(calls[0][0].split())
+    assert "content { ... on Issue { number title url body state" in first_query
+    assert 'shapeIssue: repository(owner: "owner", name: "repo")' \
+        in first_query
+    assert items[0].issue_comments == [first, second]
+
+
+def test_shape_item_query_fails_closed_when_thread_is_unreadable(monkeypatch):
+    node = _node(42)
+    response = {
+        "user": {"projectV2": {"items": {
+            "nodes": [node],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        }}}
+    }
+    monkeypatch.setattr(funnel, "gh_graphql", lambda *args, **kwargs: response)
+    with pytest.raises(funnel.GitHubError, match="could not read comments"):
+        funnel.load_items(
+            include_details=False, member_repo_names=[REPO],
+            shape_issue=(REPO, 42),
+        )

@@ -30,6 +30,9 @@ implementation evidence: read its ticket, parent plan, current-head verdict,
 blocking list, and prior-run digest. Treat `vendor` as binding for sandbox scope
 and Command Center path spelling.
 
+For a no-diff ticket, its `Accept` names the GitHub-artifact evidence channel the
+finish check verifies: a comment, rename event, closed PR, or posted measurement.
+
 Clone `packet.repo` inside the current per-session workspace. Work on
 `ticket/<number>` from `origin/main`. If the remote branch exists, establish its
 contents before continuing or resetting it; never discard unknown work. A
@@ -39,6 +42,10 @@ blocking item. Keep all checkout, scratch, and build files inside the workspace.
 Implement only what the ticket and plan require. Do not change project `Status`
 or `Class`, do not merge, and do not repair unrelated defects. Make the code
 change and return exactly one structured answer:
+
+For a no-diff success, include the optional non-empty evidence list of GitHub
+URLs named by the ticket's Accept. The finish check verifies each artifact
+against this run's heartbeat start.
 
 - success: `{"done":true,"summary":"...","departures":[]}`
 - a required unavailable human action:

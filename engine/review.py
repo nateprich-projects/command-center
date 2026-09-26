@@ -2,11 +2,11 @@
 """Assemble one read-only review packet for a PR (Phase 1 of #794).
 
 The review runner shows the model this packet and nothing else: the ticket
-body and its comments, the parent project's comments, plan.md, the diff, CI
-state, the newest verdict and its head, the changed-file overlap with every
-other open PR,
-protected-path touches, the stop-auto-merging counter, and the
-pull_request CI runs on the head. #798 assembled the evidence; #799 adds
+body and its comments, the parent project's comments, PR review and issue
+comments, plan.md, the diff, CI state, the newest verdict and its head, the
+changed-file overlap with every other open PR, protected-path touches, the
+stop-auto-merging counter, and the pull_request CI runs on the head. #798
+assembled the evidence; #799 adds
 the deterministic pre-check rows the runner evaluates before any model is
 called. The model call itself comes later.
 
@@ -23,7 +23,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -118,6 +118,62 @@ PLAN_PREMISE_ROW_RE = re.compile(
 #: long ticket cannot flood the prompt.
 TICKET_COMMENT_LIMIT = 30
 TICKET_COMMENT_BODY_LIMIT = 4000
+
+# PR comments are durable run evidence. Keep each body bounded while carrying
+# every comment, newest last, so a reviewer can see the complete conversation.
+PR_COMMENT_BODY_LIMIT = 4000
+
+# A canonical run-evidence comment is a marked, fenced JSON block. Parsing its
+# shape helps the reviewer find the reported facts; it does not judge whether
+# those facts satisfy a ticket requirement.
+RUN_EVIDENCE_MARKER = "**Run evidence:**"
+RUN_EVIDENCE_FIELDS = (
+    "command", "exit_status", "output_summary", "environment_note",
+)
+RUN_EVIDENCE_FENCE_RE = re.compile(
+    r"\A[ \t]*\r?\n(?:[ \t]*\r?\n)?[ \t]*```json[ \t]*\r?\n"
+    r"(?P<payload>.*?)\r?\n[ \t]*```[ \t]*(?:\r?\n|$)",
+    re.DOTALL,
+)
+
+PR_COMMENTS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!,
+      $issueCursor: String, $threadCursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      issueComments: comments(first: 100, after: $issueCursor) {
+        nodes { author { login } body createdAt }
+        pageInfo { hasNextPage endCursor }
+      }
+      reviewThreads(first: 100, after: $threadCursor) {
+        nodes {
+          id
+          comments(first: 100) {
+            nodes { author { login } body createdAt }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+  rateLimit { cost remaining resetAt }
+}
+"""
+
+PR_REVIEW_THREAD_COMMENTS_QUERY = """
+query($threadId: ID!, $cursor: String) {
+  node(id: $threadId) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $cursor) {
+        nodes { author { login } body createdAt }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+  rateLimit { cost remaining resetAt }
+}
+"""
 
 #: How many pull_request runs the merged-overlap row can see. Newest first,
 #: so a head whose runs fall outside this window reads as uncovered — the
@@ -907,9 +963,16 @@ def precheck_ci(packet: dict) -> List[str]:
 
 def precheck_verdict(packet: dict) -> List[str]:
     """Row 4: a verdict already covering this head needs no new review."""
-    if packet.get("verdict") is None:
-        return []
-    if packet.get("verdict_head_sha") != packet.get("head_sha"):
+    comments_section = packet.get("pr_comments")
+    comments = (
+        comments_section.get("comments")
+        if isinstance(comments_section, dict)
+        and isinstance(comments_section.get("comments"), list)
+        else None
+    )
+    if not funnel.verdict_covers_head(
+        packet.get("verdict"), packet.get("head_sha"), comments
+    ):
         return []
     return ["verdict: a verdict already covers head {}".format(
         str(packet.get("head_sha"))[:12])]
@@ -1112,11 +1175,175 @@ def packet_plan_premises(tickets: Sequence[Optional[dict]]) -> List[Dict]:
     return list(grouped.values())
 
 
+def _comment_connection_page(connection: object, label: str
+                             ) -> Tuple[List[dict], bool, Optional[str]]:
+    """Read one GraphQL comment page, failing closed on an incomplete shape."""
+    if not isinstance(connection, dict):
+        raise funnel.GitHubError("{} comment list was unreadable".format(label))
+    nodes = connection.get("nodes")
+    page_info = connection.get("pageInfo")
+    if not isinstance(nodes, list) or not isinstance(page_info, dict):
+        raise funnel.GitHubError("{} comment list was unreadable".format(label))
+    has_next = page_info.get("hasNextPage")
+    if not isinstance(has_next, bool):
+        raise funnel.GitHubError("{} comment pagination was unreadable".format(label))
+    cursor = page_info.get("endCursor")
+    if ((has_next or nodes)
+            and (not isinstance(cursor, str) or not cursor)):
+        raise funnel.GitHubError("{} comment pagination was unreadable".format(label))
+    if any(not isinstance(row, dict) for row in nodes):
+        raise funnel.GitHubError("{} comment row was unreadable".format(label))
+    return nodes, has_next, cursor if isinstance(cursor, str) else None
+
+
+def parse_run_evidence_comment(body: str) -> Optional[Dict[str, object]]:
+    """Read a canonical Run evidence payload without judging its claims.
+
+    The generic marked-block reader owns the fenced JSON parsing and the
+    marker family convention. This layer requires the Run evidence comment's
+    immediate fenced form and its four reported fields. A missing, malformed,
+    or incomplete form remains ordinary prose in the unchanged comment body.
+    """
+    if not isinstance(body, str):
+        return None
+    for payload, block in funnel._marked_json_blocks(
+            body, RUN_EVIDENCE_MARKER):
+        remainder = block[len(RUN_EVIDENCE_MARKER):]
+        if RUN_EVIDENCE_FENCE_RE.match(remainder) is None:
+            continue
+        if any(field not in payload for field in RUN_EVIDENCE_FIELDS):
+            continue
+        if (not isinstance(payload.get("command"), str)
+                or not payload["command"].strip()
+                or isinstance(payload.get("exit_status"), bool)
+                or not isinstance(payload.get("exit_status"), int)
+                or payload["exit_status"] < 0
+                or not isinstance(payload.get("output_summary"), str)
+                or not payload["output_summary"].strip()
+                or not isinstance(payload.get("environment_note"), str)
+                or not payload["environment_note"].strip()):
+            continue
+        return {field: payload[field] for field in RUN_EVIDENCE_FIELDS}
+    return None
+
+
+def _shape_pr_comment(row: dict, kind: str) -> Dict[str, Any]:
+    """Return one reviewer-visible PR comment with a capped body."""
+    body = row.get("body")
+    created_at = row.get("createdAt")
+    if not isinstance(body, str) or not isinstance(created_at, str) or not created_at:
+        raise funnel.GitHubError("{} comment fields were unreadable".format(kind))
+    author = row.get("author")
+    login = author.get("login") if isinstance(author, dict) else None
+    if not isinstance(login, str) or not login:
+        login = "unknown"
+    body = body.strip()
+    if len(body) > PR_COMMENT_BODY_LIMIT:
+        body = body[:PR_COMMENT_BODY_LIMIT] + (
+            "\n…[truncated {} chars]".format(len(body) - PR_COMMENT_BODY_LIMIT))
+    shaped: Dict[str, Any] = {
+        "kind": kind,
+        "author": login,
+        "created_at": created_at,
+        "body": body,
+    }
+    if RUN_EVIDENCE_MARKER in body:
+        payload = parse_run_evidence_comment(body)
+        shaped["run_evidence"] = (
+            {"format": "canonical", "fields": payload}
+            if payload is not None else {"format": "prose"}
+        )
+    return shaped
+
+
+def _pr_comments_section(comments: List[Dict[str, Any]]) -> Dict:
+    """Give the packet an explicit available or empty PR-comments section."""
+    comments.sort(key=lambda entry: (entry["created_at"], entry["kind"],
+                                     entry["author"], entry["body"]))
+    return {
+        "status": "available" if comments else "empty",
+        "message": None if comments else "No PR comments.",
+        "comments": comments,
+    }
+
+
+def fetch_pr_comments(repo: str, pr_number: int) -> Dict:
+    """Fetch every PR issue and inline review comment through shared GraphQL.
+
+    The comments appear oldest first, newest last. A failed or malformed read
+    becomes an explicit could-not-read section instead of looking like an
+    empty PR.
+    """
+    try:
+        owner, separator, name = repo.partition("/")
+        if not separator or not owner or not name or "/" in name:
+            raise funnel.GitHubError("repository name was unreadable")
+
+        issue_cursor: Optional[str] = None
+        thread_cursor: Optional[str] = None
+        comments: List[Dict[str, Any]] = []
+        while True:
+            variables = {"owner": owner, "name": name, "number": pr_number}
+            if issue_cursor is not None:
+                variables["issueCursor"] = issue_cursor
+            if thread_cursor is not None:
+                variables["threadCursor"] = thread_cursor
+            data = funnel.gh_graphql(PR_COMMENTS_QUERY, **variables)
+            repository = data.get("repository") if isinstance(data, dict) else None
+            pull_request = (repository.get("pullRequest")
+                            if isinstance(repository, dict) else None)
+            if not isinstance(pull_request, dict):
+                raise funnel.GitHubError("PR comment list was unreadable")
+
+            issue_rows, issue_more, next_issue_cursor = _comment_connection_page(
+                pull_request.get("issueComments"), "issue")
+            for row in issue_rows:
+                comments.append(_shape_pr_comment(row, "issue"))
+
+            thread_rows, thread_more, next_thread_cursor = _comment_connection_page(
+                pull_request.get("reviewThreads"), "review")
+            for thread in thread_rows:
+                thread_id = thread.get("id")
+                if not isinstance(thread_id, str) or not thread_id:
+                    raise funnel.GitHubError("review comment thread was unreadable")
+                review_rows, review_more, next_review_cursor = (
+                    _comment_connection_page(thread.get("comments"), "review"))
+                for row in review_rows:
+                    comments.append(_shape_pr_comment(row, "review"))
+                while review_more:
+                    review_data = funnel.gh_graphql(
+                        PR_REVIEW_THREAD_COMMENTS_QUERY,
+                        threadId=thread_id, cursor=next_review_cursor)
+                    node = review_data.get("node") if isinstance(review_data, dict) else None
+                    review_connection = (node.get("comments")
+                                         if isinstance(node, dict) else None)
+                    review_rows, review_more, next_review_cursor = (
+                        _comment_connection_page(review_connection, "review"))
+                    for row in review_rows:
+                        comments.append(_shape_pr_comment(row, "review"))
+
+            # Carry the last cursor even after a connection is exhausted.
+            # The other connection may still have another page, and omitting
+            # an exhausted cursor would make GraphQL repeat its first page.
+            issue_cursor = next_issue_cursor
+            thread_cursor = next_thread_cursor
+            if not issue_more and not thread_more:
+                break
+        return _pr_comments_section(comments)
+    except (funnel.GitHubError, OSError, TypeError, ValueError) as exc:
+        reason = str(exc).strip() or "the response was unreadable"
+        return {
+            "status": "could_not_read",
+            "message": "Could not read PR comments: {}".format(reason),
+            "comments": [],
+        }
+
+
 def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
                  ticket: Optional[dict], plan_md: str,
                  plan_md_missing: bool, open_prs: Sequence[dict],
                  verdict: Optional[dict], stop_counter: dict,
-                 collected_at: str,
+                 collected_at: str, pr_comments: dict,
                  merged_prs: Optional[Sequence[dict]] = None,
                  ci_runs: Optional[Sequence[dict]] = None,
                  tickets: Optional[Sequence[Optional[dict]]] = None,
@@ -1144,6 +1371,8 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     each ticket's parent plan. An available empty list means that plan
     recorded none; ``available: false`` means its body could not be read
     or its section could not be parsed.
+    ``pr_comments`` is a fixed section for issue and inline review comments;
+    its explicit empty and could-not-read states are distinct.
     ``ci_runs`` rows are ``gh run list`` JSON; None reads as no runs
     scanned, which fails closed — an overlap then rejects as stale, as
     before #1019.
@@ -1198,6 +1427,7 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "ticket": ticket_packet,
         "tickets": tickets_packet,
         "plan_premises": plan_premises,
+        "pr_comments": pr_comments,
         "plan_md": plan_md,
         "plan_md_missing": plan_md_missing,
         "diff": diff,
@@ -1801,6 +2031,7 @@ def collect(repo: Optional[str], pr_number: int, *,
         merged_prs=fetch_merged_prs(resolved),
         ci_runs=fetch_ci_runs(resolved, branch) if branch else [],
         verdict=fetch_verdict(resolved, pr_number),
+        pr_comments=fetch_pr_comments(resolved, pr_number),
         stop_counter=fetch_stop_counter(lambda: loaded_items, now),
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),
     )

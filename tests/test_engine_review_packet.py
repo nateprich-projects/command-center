@@ -82,6 +82,10 @@ STOP_COUNTER = {"window_days": 7, "count": 0, "refs": [],
                 "stop_auto_merging": False}
 
 
+def empty_pr_comments():
+    return {"status": "empty", "message": "No PR comments.", "comments": []}
+
+
 def packet(**kw):
     args = {
         "repo": REPO,
@@ -95,6 +99,7 @@ def packet(**kw):
         "verdict": verdict(),
         "stop_counter": dict(STOP_COUNTER),
         "collected_at": "2026-09-13T00:00:00+00:00",
+        "pr_comments": empty_pr_comments(),
     }
     args.update(kw)
     return review.build_packet(**args)
@@ -298,6 +303,8 @@ def test_collect_fetches_runs_for_the_pr_branch(monkeypatch):
     monkeypatch.setattr(review, "fetch_open_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
+    monkeypatch.setattr(
+        review, "fetch_pr_comments", lambda repo, pr: empty_pr_comments())
     seen = {}
 
     def fake_runs(repo, branch):
@@ -309,6 +316,223 @@ def test_collect_fetches_runs_for_the_pr_branch(monkeypatch):
     found = review.collect(REPO, 7, items_loader=lambda: [])
     assert seen == {"repo": REPO, "branch": "ticket/9"}
     assert found["ci"]["green_run_at"] == RUN_AT
+
+
+def test_packet_exposes_the_watch_run_comment_for_a_run_outcome_accept():
+    run_comment = {
+        "kind": "issue",
+        "author": "nateprich",
+        "created_at": "2026-09-24T17:59:00Z",
+        "body": "Fresh-clone run: `python3 -m pytest`; exit 0; 597 tests OK.",
+    }
+    requirement = (
+        "Run-outcome requirement: the reviewer judges it against the posted "
+        "run evidence in the PR comments."
+    )
+    found = packet(
+        ticket=ticket(body=requirement),
+        pr_comments={"status": "available", "message": None,
+                     "comments": [run_comment]},
+    )
+    assert found["pr_comments"]["comments"] == [run_comment]
+    assert "597 tests OK" in found["pr_comments"]["comments"][0]["body"]
+    assert requirement in found["ticket"]["body"]
+
+
+def test_packet_has_an_explicit_empty_pr_comments_section():
+    assert packet()["pr_comments"] == empty_pr_comments()
+
+
+def test_fetch_pr_comments_uses_shared_graphql_and_sorts_both_comment_kinds(
+        monkeypatch):
+    seen = {}
+
+    def fake_graphql(query, **variables):
+        seen["query"] = query
+        seen["variables"] = variables
+        return {"repository": {"pullRequest": {
+            "issueComments": {
+                "nodes": [{"author": {"login": "author-a"},
+                           "body": "watch run: 597 tests OK",
+                           "createdAt": "2026-09-24T17:59:00Z"}],
+                "pageInfo": {"hasNextPage": False, "endCursor": "issue-end"},
+            },
+            "reviewThreads": {
+                "nodes": [{"id": "thread-1", "comments": {
+                    "nodes": [{"author": {"login": "reviewer"},
+                               "body": "run outcome is judgeable",
+                               "createdAt": "2026-09-24T17:58:00Z"}],
+                    "pageInfo": {"hasNextPage": False,
+                                 "endCursor": "review-end"},
+                }}],
+                "pageInfo": {"hasNextPage": False, "endCursor": "thread-end"},
+            },
+        }}}
+
+    monkeypatch.setattr(funnel, "gh_graphql", fake_graphql)
+    found = review.fetch_pr_comments(REPO, 7)
+    assert seen["variables"] == {"owner": "owner", "name": "repo", "number": 7}
+    assert "issueComments: comments" in seen["query"]
+    assert "reviewThreads" in seen["query"]
+    assert "rateLimit { cost remaining resetAt }" in seen["query"]
+    assert found == {
+        "status": "available",
+        "message": None,
+        "comments": [
+            {"kind": "review", "author": "reviewer",
+             "created_at": "2026-09-24T17:58:00Z",
+             "body": "run outcome is judgeable"},
+            {"kind": "issue", "author": "author-a",
+             "created_at": "2026-09-24T17:59:00Z",
+             "body": "watch run: 597 tests OK"},
+        ],
+    }
+
+
+def test_fetch_pr_comments_paginates_each_connection(monkeypatch):
+    requests = []
+
+    def connection(nodes, has_next, end_cursor):
+        return {"nodes": nodes,
+                "pageInfo": {"hasNextPage": has_next,
+                             "endCursor": end_cursor}}
+
+    def fake_graphql(query, **variables):
+        requests.append((query, variables))
+        if query == review.PR_REVIEW_THREAD_COMMENTS_QUERY:
+            assert variables == {"threadId": "thread-1",
+                                 "cursor": "review-cursor-1"}
+            return {"node": {"comments": connection([
+                {"author": {"login": "reviewer"}, "body": "review page two",
+                 "createdAt": "2026-09-24T17:58:00Z"}], False,
+                "review-cursor-2")}}
+
+        issue_cursor = variables.get("issueCursor")
+        if issue_cursor is None:
+            return {"repository": {"pullRequest": {
+                "issueComments": connection([
+                    {"author": {"login": "author"}, "body": "issue page one",
+                     "createdAt": "2026-09-24T17:56:00Z"}], True,
+                    "issue-cursor-1"),
+                "reviewThreads": connection([{
+                    "id": "thread-1",
+                    "comments": connection([
+                        {"author": {"login": "reviewer"},
+                         "body": "review page one",
+                         "createdAt": "2026-09-24T17:57:00Z"}], True,
+                        "review-cursor-1"),
+                }], False, "thread-end"),
+            }}}
+
+        assert issue_cursor == "issue-cursor-1"
+        assert variables.get("threadCursor") == "thread-end"
+        return {"repository": {"pullRequest": {
+            "issueComments": connection([
+                {"author": {"login": "author"}, "body": "issue page two",
+                 "createdAt": "2026-09-24T17:59:00Z"}], False,
+                "issue-cursor-2"),
+            "reviewThreads": connection([], False, None),
+        }}}
+
+    monkeypatch.setattr(funnel, "gh_graphql", fake_graphql)
+    found = review.fetch_pr_comments(REPO, 7)
+    assert [entry["body"] for entry in found["comments"]] == [
+        "issue page one", "review page one", "review page two", "issue page two"]
+    assert len(requests) == 3
+
+
+def test_pr_comments_are_capped_with_an_explicit_truncation_marker(monkeypatch):
+    body = "x" * (review.PR_COMMENT_BODY_LIMIT + 10)
+    monkeypatch.setattr(funnel, "gh_graphql", lambda query, **variables: {
+        "repository": {"pullRequest": {
+            "issueComments": {"nodes": [{
+                "author": {"login": "author"}, "body": body,
+                "createdAt": "2026-09-24T17:59:00Z"}],
+                "pageInfo": {"hasNextPage": False, "endCursor": "issue-end"}},
+            "reviewThreads": {"nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None}},
+        }}})
+    found = review.fetch_pr_comments(REPO, 7)
+    comment_body = found["comments"][0]["body"]
+    assert comment_body.startswith("x" * review.PR_COMMENT_BODY_LIMIT)
+    assert comment_body.endswith("…[truncated 10 chars]")
+
+
+def fetch_one_pr_comment(monkeypatch, body):
+    """Shape one issue comment through the packet's GraphQL read path."""
+    monkeypatch.setattr(funnel, "gh_graphql", lambda query, **variables: {
+        "repository": {"pullRequest": {
+            "issueComments": {
+                "nodes": [{"author": {"login": "engineer"},
+                           "body": body,
+                           "createdAt": "2026-09-24T17:59:00Z"}],
+                "pageInfo": {"hasNextPage": False,
+                             "endCursor": "issue-end"},
+            },
+            "reviewThreads": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            },
+        }}})
+    return review.fetch_pr_comments(REPO, 7)["comments"][0]
+
+
+def test_run_evidence_comment_parses_canonical_fields_and_keeps_body(
+        monkeypatch):
+    fields = {
+        "command": "python3 -m pytest tests/test_engine_review_packet.py",
+        "exit_status": 2,
+        "output_summary": "2 failures from a fixture run",
+        "environment_note": "clean checkout on macOS",
+    }
+    body = "**Run evidence:**\n\n```json\n{}\n```".format(
+        json.dumps(fields, indent=2))
+
+    found = fetch_one_pr_comment(monkeypatch, body)
+
+    assert found["body"] == body
+    assert found["run_evidence"] == {
+        "format": "canonical",
+        "fields": fields,
+    }
+
+
+def test_malformed_run_evidence_stays_prose_and_keeps_body(monkeypatch):
+    body = (
+        "**Run evidence:**\n\n```json\n"
+        '{"command": "python3 -m pytest", "exit_status": }\n'
+        "```"
+    )
+
+    found = fetch_one_pr_comment(monkeypatch, body)
+
+    assert found["body"] == body
+    assert found["run_evidence"] == {"format": "prose"}
+
+
+def test_unreadable_pr_comment_list_is_not_rendered_as_empty(monkeypatch):
+    monkeypatch.setattr(funnel, "gh_graphql", lambda query, **variables: {
+        "repository": {"pullRequest": {
+            "issueComments": {},
+            "reviewThreads": {"nodes": [],
+                "pageInfo": {"hasNextPage": False, "endCursor": None}},
+        }}})
+    found = review.fetch_pr_comments(REPO, 7)
+    assert found == {
+        "status": "could_not_read",
+        "message": "Could not read PR comments: issue comment list was unreadable",
+        "comments": [],
+    }
+
+
+def test_graphql_failure_is_an_explicit_could_not_read_section(monkeypatch):
+    def fail(query, **variables):
+        raise funnel.GitHubError("fixture unavailable")
+
+    monkeypatch.setattr(funnel, "gh_graphql", fail)
+    found = review.fetch_pr_comments(REPO, 7)
+    assert found["status"] == "could_not_read"
+    assert found["message"] == "Could not read PR comments: fixture unavailable"
 
 
 # -- the assembled packet ---------------------------------------------------
@@ -342,6 +566,33 @@ def test_packet_carries_every_field():
     assert found["stop_auto_merging"] == STOP_COUNTER
     assert found["collected_at"] == "2026-09-13T00:00:00+00:00"
     json.dumps(found)  # the packet is JSON by contract
+
+
+def test_packet_ci_section_renders_per_check_conclusions_at_its_head():
+    found = review.build_packet(
+        repo=REPO,
+        pr_number=7,
+        pr_view=pr_view(statusCheckRollup=[
+            {"name": "offline", "conclusion": "SUCCESS",
+             "status": "COMPLETED"},
+        ]),
+        diff="diff --git a/funnel.py b/funnel.py\n",
+        ticket=ticket(),
+        plan_md="# design record",
+        plan_md_missing=False,
+        open_prs=[],
+        verdict=verdict(),
+        stop_counter=dict(STOP_COUNTER),
+        collected_at="2026-09-13T00:00:00+00:00",
+        pr_comments=empty_pr_comments(),
+    )
+
+    assert found["head_sha"] == SHA
+    assert found["ci"]["state"] == "green"
+    assert found["ci"]["checks"] == [
+        {"name": "offline", "conclusion": "SUCCESS", "state": None,
+         "status": "COMPLETED"},
+    ]
 
 
 # -- prior instalments of the same ticket (#908) ----------------------------
@@ -1113,6 +1364,8 @@ def test_collect_fetches_each_closing_ticket_once(monkeypatch):
     monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
     monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
+    monkeypatch.setattr(
+        review, "fetch_pr_comments", lambda repo, pr: empty_pr_comments())
     found = review.collect(REPO, 132, items_loader=lambda: [])
     assert seen == [(REPO, 131), (REPO, 129)]
     assert [entry["number"] for entry in found["tickets"]] == [131, 129]
@@ -1133,6 +1386,8 @@ def test_collect_without_closing_refs_fetches_only_the_branch_ticket(
     monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
     monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
+    monkeypatch.setattr(
+        review, "fetch_pr_comments", lambda repo, pr: empty_pr_comments())
     found = review.collect(REPO, 7, items_loader=lambda: [])
     assert seen == [9]
     assert [entry["number"] for entry in found["tickets"]] == [9]
@@ -1192,6 +1447,8 @@ def _collect_with_diff(monkeypatch):
     monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
     monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
+    monkeypatch.setattr(
+        review, "fetch_pr_comments", lambda repo, pr: empty_pr_comments())
     return review.collect(REPO, 7, items_loader=lambda: [])
 
 
@@ -1354,6 +1611,8 @@ def _stub_collect_prereqs(monkeypatch, view):
     monkeypatch.setattr(review, "fetch_merged_prs", lambda repo: [])
     monkeypatch.setattr(review, "fetch_verdict", lambda repo, pr: None)
     monkeypatch.setattr(review, "fetch_ci_runs", lambda repo, branch: [])
+    monkeypatch.setattr(
+        review, "fetch_pr_comments", lambda repo, pr: empty_pr_comments())
 
 
 def test_compare_scope_holds_only_the_branch_files(monkeypatch):

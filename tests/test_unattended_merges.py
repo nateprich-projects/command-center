@@ -7,6 +7,7 @@ hard-wired to the retired Claude routine's spool.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 from datetime import datetime, timedelta, timezone
@@ -18,6 +19,10 @@ import funnel  # noqa: E402
 import heartbeat  # noqa: E402
 
 NOW = datetime(2026, 9, 10, 6, 0, tzinfo=timezone.utc)
+ALREADY_MERGED_FINISH = (
+    pathlib.Path(__file__).parent / "fixtures" /
+    "already_merged_done_finish.json"
+)
 
 
 def _finish(agent, merged=None, days_ago=1, note=None):
@@ -69,6 +74,20 @@ def test_every_live_agent_is_read_and_each_record_names_its_agent(monkeypatch):
     assert [(m["pr"], m["agent"]) for m in found] == [(202, "muse"), (101, "claude")]
     assert all(set(m) == {"pr", "at", "note", "agent"} for m in found)
     assert set(read) == {"claude", "codex", "muse"}
+
+
+def test_already_merged_finish_note_is_rendered_from_the_done_record(monkeypatch):
+    finish = json.loads(ALREADY_MERGED_FINISH.read_text())
+    _wire(monkeypatch, {finish["agent"]: [finish]}, retired=frozenset())
+    now = datetime.fromtimestamp(finish["ts"] + 60, timezone.utc)
+
+    found = funnel.unattended_merges(now)
+
+    assert len(found) == 1
+    assert found[0]["pr"] == finish["merged"]
+    assert found[0]["agent"] == finish["agent"]
+    assert found[0]["note"] == finish["note"]
+    assert "observed already-merged PR" in found[0]["note"]
 
 
 def test_a_retired_agent_is_never_read(monkeypatch):

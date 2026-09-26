@@ -99,6 +99,8 @@ def test_review_packet_carries_the_stop_without_failing_precheck():
         verdict=None,
         stop_counter={"stop_auto_merging": False},
         collected_at="2026-09-18T00:00:00+00:00",
+        pr_comments={"status": "empty", "message": "No PR comments.",
+                     "comments": []},
     )
 
     assert packet["ci"]["state"] == funnel.CI_COULD_NOT_RUN

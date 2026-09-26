@@ -112,6 +112,7 @@ REPO="${MUSE_REVIEW_ENGINE_REPO:-/Users/nateprich/.claude/command-center-run}"
 # sibling of this runner, like the quota-hold helper below.
 MUSE_BIN="${MUSE_BIN:-$HOME/.local/bin/muse}"
 ZAI_EXEC_BIN="${ZAI_EXEC_BIN:-${BASH_SOURCE[0]%/*}/zai-exec}"
+MUSE_CALL_BIN="${MUSE_CALL_BIN:-$REPO/muse_call.py}"
 GH_BIN="${GH_BIN:-gh}"
 BOUND_SECONDS="${MUSE_REVIEW_ENGINE_BOUND_SECONDS:-1200}"
 # zai-exec's own network deadline sits inside the bound, so a slow reply ends
@@ -178,6 +179,9 @@ if ! PROMPT_BREAKDOWN="$(check_routine "$ROUTINE_BREAKDOWN")"; then
 fi
 if ! PROMPT_SHAPE="$(check_routine "$ROUTINE_SHAPE")"; then
   exit 1
+fi
+if [[ "$BACKEND" == "muse" && ! -r "$MUSE_CALL_BIN" ]]; then
+  echo "muse-review-engine: cannot read $MUSE_CALL_BIN — continuing without Muse session capture" >&2
 fi
 
 # One owner-only directory per run, holding every scratch file including the
@@ -289,12 +293,9 @@ export FUNNEL_SESSION
 # the first call only: an undercount, not the whole run (#1413).
 MUSE_SESSION_BOUND=0
 if [[ "$BACKEND" == "muse" ]]; then
-  MUSE_EXEC=("$MUSE_BIN" exec)
-  MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec)
   if MUSE_SESSION_ID="$(python3 -c 'import uuid; print(uuid.uuid4())' 2>/dev/null)" \
     && [[ -n "$MUSE_SESSION_ID" ]]; then
     export MUSE_SESSION_ID
-    MUSE_EXEC+=(--session-id "$MUSE_SESSION_ID")
   else
     unset MUSE_SESSION_ID
     echo "muse-review-engine: no session id; continuing without session usage telemetry" >&2
@@ -322,12 +323,24 @@ trap cleanup EXIT
 # diagnostic, while the full stderr remains in the schedule's error log.
 failure() {
   local note="$1"
+  local muse_call_record
+  local -a finish_args
   if [[ -z "$BEGIN_RUN" ]]; then
     echo "muse-review-engine: $note (no run id to finish)" >&2
     return 1
   fi
-  if ! python3 "$REPO/heartbeat.py" finish --agent "$AGENT" --run "$BEGIN_RUN" \
-      --outcome errored --note "$note"; then
+  finish_args=(finish --agent "$AGENT" --run "$BEGIN_RUN" \
+    --outcome errored --note "$note")
+  if [[ "$BACKEND" == "muse" ]]; then
+    if ! muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")"; then
+      echo "muse-review-engine: could not summarize Muse call ids; finishing without them" >&2
+      muse_call_record=""
+    fi
+    if [[ -n "$muse_call_record" ]]; then
+      finish_args+=(--muse-call-record "$muse_call_record")
+    fi
+  fi
+  if ! python3 "$REPO/heartbeat.py" "${finish_args[@]}"; then
     echo "muse-review-engine: could not finish errored run" >&2
     return 1
   fi
@@ -407,6 +420,16 @@ PY
   if [[ "$review_result" == "approved" || "$review_result" == "rejected" ]]; then
     finish_args+=(--review-result "$review_result")
   fi
+  if [[ "$BACKEND" == "muse" ]]; then
+    local muse_call_record
+    if ! muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")"; then
+      echo "muse-review-engine: could not summarize Muse call ids; finishing without them" >&2
+      muse_call_record=""
+    fi
+    if [[ -n "$muse_call_record" ]]; then
+      finish_args+=(--muse-call-record "$muse_call_record")
+    fi
+  fi
   if [[ -n "$merged_pr" ]]; then
     finish_args+=(--merged "$merged_pr")
   fi
@@ -483,6 +506,43 @@ resolve_muse_model() {
   fi
 }
 
+# Recover the answer when session-id capture itself fails. The JSON stream is
+# still the model's output, so an unavailable capture helper must not turn a
+# successful call into an empty answer.
+muse_answer_from_jsonl() {
+  python3 - "$1" "$2" <<'PY'
+import json
+import pathlib
+import sys
+
+raw_path, answer_path = map(pathlib.Path, sys.argv[1:])
+try:
+    lines = raw_path.read_text(encoding="utf-8").splitlines()
+except OSError as exc:
+    raise SystemExit(str(exc))
+answers = []
+for index, line in enumerate(lines):
+    try:
+        event = json.loads(line)
+    except (TypeError, ValueError):
+        continue
+    if not isinstance(event, dict) or event.get("payload_type") != \
+            "run.terminal.completed":
+        continue
+    payload = event.get("payload")
+    if not isinstance(payload, dict) or payload.get("terminal") != "completed":
+        continue
+    text = payload.get("text")
+    if not isinstance(text, str):
+        continue
+    sequence = event.get("sequence")
+    if isinstance(sequence, bool) or not isinstance(sequence, int):
+        sequence = index
+    answers.append((sequence, index, text))
+answer_path.write_text(max(answers)[2] if answers else "", encoding="utf-8")
+PY
+}
+
 # One model call: the prompt file in, the raw answer on stdout. Paths are
 # arguments so the review judges can run in parallel without sharing answers
 # or diagnostics. Plain kill, not a process-group kill: --disable-shell means
@@ -495,6 +555,10 @@ call_model_files() {
   local answer_path="$2"
   local diag_path="$3"
   local killed_marker
+  local raw_answer_path=""
+  local muse_capture_path=""
+  local muse_call_first=0
+  local muse_capture_initial="null"
   # Split from the declaration: `local x=$(...)` would mask mktemp's status.
   # In the run directory with everything else, so the EXIT trap's one `rm -rf`
   # sweeps it too. #1233 makes several model calls per run, so this name is
@@ -514,12 +578,41 @@ call_model_files() {
     local -a muse_exec
     if (( MUSE_SESSION_BOUND == 0 )); then
       muse_exec=("${MUSE_EXEC[@]}")
+      muse_capture_path="$RUN_DIR/muse-call-first"
+      muse_call_first=1
+      if [[ -n "${MUSE_SESSION_ID:-}" ]]; then
+        muse_capture_initial="\"$MUSE_SESSION_ID\""
+      fi
+      if ! printf '%s\n' "$muse_capture_initial" >"$muse_capture_path"; then
+        echo "muse-review-engine: cannot initialize the first Muse call capture slot; continuing without its id" >&2
+        if [[ ! -e "$muse_capture_path" ]]; then
+          muse_capture_path="$RUN_DIR/muse-call-first.${killed_marker##*/}"
+          if ! printf '%s\n' "$muse_capture_initial" >"$muse_capture_path"; then
+            echo "muse-review-engine: cannot create a fallback Muse call capture slot" >&2
+            muse_capture_path=""
+          fi
+        fi
+      fi
       MUSE_SESSION_BOUND=1
     else
       muse_exec=("${MUSE_EXEC_UNBOUND[@]}")
+      if ! muse_capture_path="$(mktemp "$RUN_DIR/muse-call-later.XXXXXX")"; then
+        echo "muse-review-engine: cannot allocate a Muse call capture slot; using a run-local fallback" >&2
+        muse_capture_path="$RUN_DIR/muse-call-later.${killed_marker##*/}"
+      fi
+      if ! printf 'null\n' >"$muse_capture_path"; then
+        echo "muse-review-engine: cannot initialize a Muse call capture slot; continuing without its id" >&2
+        if [[ ! -e "$muse_capture_path" ]]; then
+          muse_capture_path="$RUN_DIR/muse-call-later.fallback.${killed_marker##*/}"
+          if ! printf 'null\n' >"$muse_capture_path"; then
+            echo "muse-review-engine: cannot create a fallback Muse call capture slot" >&2
+            muse_capture_path=""
+          fi
+        fi
+      fi
     fi
+    raw_answer_path="${answer_path}.muse-jsonl"
     "${muse_exec[@]}" \
-      --model "$MUSE_MODEL" \
       --reasoning-effort "$EFFORT" \
       --disable-shell \
       --disable-write \
@@ -527,7 +620,7 @@ call_model_files() {
       --max-model-steps 60 \
       --no-foreign-personal-context \
       --workspace "$WORKSPACE" \
-      --prompt-file "$prompt_path" >"$answer_path" 2>"$diag_path" &
+      --prompt-file "$prompt_path" >"$raw_answer_path" 2>"$diag_path" &
   fi
   local muse_pid=$!
   (
@@ -546,6 +639,31 @@ call_model_files() {
   local bound_pid=$!
   wait "$muse_pid"
   local status=$?
+  if [[ "$BACKEND" == "muse" ]]; then
+    # Read the complete stream after this invocation stops. Background tool
+    # results can arrive late, and parallel calls can complete out of order;
+    # each invocation has its own capture slot.
+    if [[ -n "$muse_capture_path" ]] \
+      && ! python3 "$MUSE_CALL_BIN" capture "$raw_answer_path" "$answer_path" \
+        "$muse_capture_path"; then
+      echo "muse-review-engine: Muse session capture failed; keeping the model answer and marking the id uncaptured" >&2
+      if ! muse_answer_from_jsonl "$raw_answer_path" "$answer_path"; then
+        echo "muse-review-engine: could not recover the Muse model answer from its JSON stream" >&2
+        return 1
+      fi
+      if (( muse_call_first )) && [[ -n "${MUSE_SESSION_ID:-}" ]]; then
+        printf '"%s"\n' "$MUSE_SESSION_ID" >"$muse_capture_path" 2>/dev/null || true
+      else
+        printf 'null\n' >"$muse_capture_path" 2>/dev/null || true
+      fi
+    elif [[ -z "$muse_capture_path" ]]; then
+      echo "muse-review-engine: no Muse call capture slot; continuing without its id" >&2
+      if ! muse_answer_from_jsonl "$raw_answer_path" "$answer_path"; then
+        echo "muse-review-engine: could not recover the Muse model answer from its JSON stream" >&2
+        return 1
+      fi
+    fi
+  fi
   if [[ -e "$killed_marker" ]]; then
     wait "$bound_pid" 2>/dev/null
     rm -f "$killed_marker"
@@ -596,9 +714,20 @@ model_failed() {
   elif MUSE_QUOTA_RESET="$(muse_quota_record "$DIAG_FILE" "${BEGIN_RUN:-}")"; then
     echo "muse-review-engine: Muse's provider quota is exhausted; parking every lane until $MUSE_QUOTA_RESET" >&2
     if [[ -n "${BEGIN_RUN:-}" ]]; then
-      python3 "$REPO/heartbeat.py" finish --agent "$AGENT" --run "$BEGIN_RUN" \
-        --outcome skipped-provider-quota \
-        --note "provider quota exhausted until $MUSE_QUOTA_RESET" >&2 || true
+      local muse_call_record
+      local -a quota_finish_args=(
+        finish --agent "$AGENT" --run "$BEGIN_RUN"
+        --outcome skipped-provider-quota
+        --note "provider quota exhausted until $MUSE_QUOTA_RESET"
+      )
+      if ! muse_call_record="$(python3 "$MUSE_CALL_BIN" summarize "$RUN_DIR")"; then
+        echo "muse-review-engine: could not summarize Muse call ids; finishing without them" >&2
+        muse_call_record=""
+      fi
+      if [[ -n "$muse_call_record" ]]; then
+        quota_finish_args+=(--muse-call-record "$muse_call_record")
+      fi
+      python3 "$REPO/heartbeat.py" "${quota_finish_args[@]}" >&2 || true
     fi
     exit 0
   fi
@@ -934,6 +1063,13 @@ if [[ "$BACKEND" == "muse" ]]; then
   # command substitution that dies yields the empty string without stopping
   # the runner, and `--model ""` is an id Muse accepts without complaint.
   [[ -n "$MUSE_MODEL" ]] || MUSE_MODEL="$MUSE_FALLBACK_MODEL"
+  # Keep the pin on the call arrays themselves: the repository-wide guard
+  # treats each `exec` array as a call site and cannot connect a later flag.
+  MUSE_EXEC=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
+  MUSE_EXEC_UNBOUND=("$MUSE_BIN" exec --model "$MUSE_MODEL" --json)
+  if [[ -n "${MUSE_SESSION_ID:-}" ]]; then
+    MUSE_EXEC+=(--session-id "$MUSE_SESSION_ID")
+  fi
 fi
 
 if [[ "$JOB" != "review" ]]; then
@@ -981,6 +1117,17 @@ elif field == "pr_not_open_reason":
         if str(reason).startswith("pr_not_open "):
             print(reason)
             break
+elif field == "covered_verdict_only":
+    precheck = packet.get("precheck") or {}
+    reasons = precheck.get("reasons") or []
+    head_sha = packet.get("head_sha")
+    expected = "verdict: a verdict already covers head {}".format(
+        str(head_sha)[:12])
+    covered = (isinstance(head_sha, str) and bool(head_sha)
+               and packet.get("verdict") is not None
+               and packet.get("verdict_head_sha") == head_sha)
+    print(precheck.get("pass") is False and covered
+          and reasons == [expected])
 elif field == "rejected_answer":
     print(json.dumps({
         "verdict": "rejected",
@@ -1003,6 +1150,7 @@ if ! PACKET_PASS="$(packet_field precheck_pass)" \
   || ! PACKET_CI_REASON="$(packet_field ci_reason)" \
   || ! PACKET_HEAD="$(packet_field head)" \
   || ! PACKET_PR_NOT_OPEN="$(packet_field pr_not_open)" \
+  || ! PACKET_COVERED_VERDICT_ONLY="$(packet_field covered_verdict_only)" \
   || ! CI_RERUN_ACTION="$(packet_field ci_rerun_action)" \
   || ! CI_RERUN_RUN="$(packet_field ci_rerun_run)" \
   || ! CI_RERUN_OVERLAPS="$(packet_field ci_rerun_overlaps)"; then
@@ -1033,6 +1181,13 @@ if [[ "$PACKET_PASS" != "True" ]]; then
     fi
     PR_NOT_OPEN_REASON="$(cat "$DECISION_FILE")"
     finish_done "review skipped PR #$BEGIN_PR in $BEGIN_REPO at $HEAD_SHORT: $PR_NOT_OPEN_REASON; no verdict recorded"
+    exit 0
+  fi
+  # Row 4 already established that a verdict covers this head. Standing
+  # down only when it is the sole failing row preserves that verdict without
+  # changing the rejection path for a packet carrying another blocker.
+  if [[ "$PACKET_COVERED_VERDICT_ONLY" == "True" ]]; then
+    finish_done "review skipped — a verdict already covers head $HEAD_SHORT; no verdict recorded"
     exit 0
   fi
   # A failing precheck is applied as rejected with no model call at all. The
@@ -1269,6 +1424,12 @@ if ! JUDGE_COUNT="$(python3 -c 'import json,sys; print(len(json.load(open(sys.ar
 fi
 
 judge_header() {
+  # Verified for #1546 (#1339) before changing the contract: origin/main
+  # required a posted PR Run evidence block for run-outcome facts;
+  # engine/review.py's build_packet places head_sha beside ci.checks rows
+  # carrying each check's name, conclusion, state and status. The clause below
+  # depends on both findings and applies only to a check that directly proves
+  # the requirement.
   cat <<'HEADER'
 This is one judge call in a larger review. Judge only the requirements in
 the list below against the supplied review packet. Do not derive additional
@@ -1276,6 +1437,19 @@ requirements, judge requirements outside this list, or give an overall
 verdict. A requirement is met only when the diff satisfies it; use unmet
 when the diff clearly fails it and unsure when the packet cannot resolve it.
 For each result, cite the relevant diff lines or explain the uncertainty.
+
+Judge run-outcome requirements against the packet's CI section first. A
+successful named check in `ci.checks` for the packet's `head_sha` satisfies
+only a run-outcome requirement that check directly proves (for example, an
+`offline` check with `SUCCESS` proves "offline tests are green"). Do not mark
+that proved requirement unsure because no Run evidence comment exists. Judge
+run-outcome requirements the CI section does not prove, and post-merge runtime
+requirements, against posted PR `**Run evidence:**` in `pr_comments`:
+command, exit status, output summary, and environment note. Presence is
+evidence, never automatic satisfaction; malformed or incomplete blocks stay prose.
+For post-merge runtime facts, a throwaway `launchctl submit` probe may
+produce pre-merge evidence: fire, read, post the evidence, end the job.
+Install nothing; leave the keeper unchanged.
 
 Return exactly one JSON object with one result for every assigned requirement
 and no others:

@@ -110,6 +110,8 @@ def packet(**kw):
         "verdict": None,
         "stop_counter": dict(STOP_COUNTER),
         "collected_at": "2026-09-13T00:00:00+00:00",
+        "pr_comments": {"status": "empty", "message": "No PR comments.",
+                        "comments": []},
     }
     args.update(kw)
     return review.build_packet(**args)
@@ -198,6 +200,57 @@ def test_verdict_row_passes_when_the_verdict_is_stale():
 
 def test_verdict_row_passes_with_no_verdict():
     assert packet(verdict=None)["precheck"] == {"pass": True, "reasons": []}
+
+
+@pytest.mark.parametrize(
+    ("found_verdict", "comments", "covered"),
+    [
+        (
+            {"verdict": "rejected", "ci": "green", "head_sha": SHA,
+             "blocking": ["requirement unsure: verify the run"],
+             "comment_created_at": "2026-09-13T12:00:00Z"},
+            [{"created_at": "2026-09-13T12:01:00Z", "body": "evidence"}],
+            False,
+        ),
+        (
+            {"verdict": "rejected", "ci": "green", "head_sha": SHA,
+             "blocking": ["requirement unsure: verify the run"],
+             "comment_created_at": "2026-09-13T12:00:00Z"},
+            [],
+            True,
+        ),
+        (
+            {"verdict": "rejected", "ci": "green", "head_sha": SHA,
+             "blocking": ["requirement unsure: verify the run"],
+             "comment_created_at": "2026-09-13T12:00:00Z"},
+            [{"created_at": "2026-09-13T11:59:00Z", "body": "old"}],
+            True,
+        ),
+        (
+            {"verdict": "approved", "ci": "green", "head_sha": SHA,
+             "blocking": [], "comment_created_at": "2026-09-13T12:00:00Z"},
+            [{"created_at": "2026-09-13T12:01:00Z", "body": "later"}],
+            True,
+        ),
+        (
+            {"verdict": "rejected", "ci": "green", "head_sha": SHA,
+             "blocking": ["requirement unmet: fix the behavior"],
+             "comment_created_at": "2026-09-13T12:00:00Z"},
+            [{"created_at": "2026-09-13T12:01:00Z", "body": "later"}],
+            True,
+        ),
+    ],
+)
+def test_verdict_precheck_uses_the_shared_coverage_exception(
+    found_verdict, comments, covered,
+):
+    found = packet(
+        verdict=found_verdict,
+        pr_comments={"status": "available", "message": None,
+                     "comments": comments},
+    )
+
+    assert (found["precheck"]["reasons"] == []) is (not covered)
 
 
 # -- row 5: merged since the head ----------------------------------------------

@@ -538,12 +538,105 @@ def test_an_investigate_ticket_is_startable_without_preempting_broken_work():
 
 def test_a_pinned_projects_tickets_lead_the_engineers_queue():
     """Reversed 2026-09-12 on Nate's ruling: a pin was always meant to move the
-    work, not only the decision (#673). An older Broken ticket yields to it."""
+    work, not only the decision (#673). Older in-flight work yields to it."""
+    rows = [
+        project(1, "Ready", "Improve", days=1, pinned=True), ticket(2, 1),
+        project(3, "Building", "Improve", days=30), ticket(4, 3),
+    ]
+    assert [i.number for i in startable(rows)] == [2, 4]
+
+
+def test_finite_work_leads_a_pin():
+    """Nate, 2026-09-25: preemption and the pin swap places. Finite work ends,
+    so it cannot starve the pinned project for long."""
     rows = [
         project(1, "Ready", "Improve", days=1, pinned=True), ticket(2, 1),
         project(3, "Building", "Broken", days=30), ticket(4, 3),
     ]
+    assert [i.number for i in startable(rows)] == [4, 2]
+
+
+def tier_project(repo, number, status, klass, days=1.0, **kw) -> Item:
+    return item(number, status, klass, days=days, repo=repo,
+                children_total=1, children_done=0, **kw)
+
+
+def tier_ticket(repo, number, parent, days=1.0, **kw) -> Item:
+    return item(number, None, None, days=days, repo=repo,
+                parent="{}#{}".format(repo, parent), **kw)
+
+
+TOOLING = "nateprich-projects/command-center"
+IMPACT = "nateprich-projects/career-toolset"
+HOBBY = "nateprich-projects/The-League"
+
+
+def test_repo_tiers_name_the_tooling_and_the_real_world_repos():
+    assert [funnel.repo_tier("nateprich-projects/" + name) for name in (
+        "command-center", "github-runners", "workbench",
+        "career-toolset", "jeffy-finance-agent",
+        "The-League", "Fantasy-GM", "AFL",
+    )] == [1, 1, 1, 2, 2, 3, 3, 3]
+
+
+def test_higher_tier_work_does_not_wait_for_a_lower_tiers_building_project():
+    """Nate, 2026-09-25: "Non-finite work in a higher tier repo shouldn't have
+    to wait for non-finite work in a lower tier repo to complete just because
+    that work happens to already be building." """
+    rows = [
+        tier_project(HOBBY, 1, "Building", "Improve", days=30),
+        tier_ticket(HOBBY, 2, 1, days=30),
+        tier_project(IMPACT, 3, "Ready", "New", days=1),
+        tier_ticket(IMPACT, 4, 3, days=1),
+        tier_project(TOOLING, 5, "Ready", "Replace", days=1),
+        tier_ticket(TOOLING, 6, 5, days=1),
+    ]
+    assert [i.number for i in startable(rows)] == [6, 4, 2]
+
+
+def test_within_a_tier_the_building_commitment_still_holds():
+    rows = [
+        tier_project(TOOLING, 1, "Building", "Replace", days=1),
+        tier_ticket(TOOLING, 2, 1, days=1),
+        tier_project(TOOLING, 3, "Ready", "Improve", days=30),
+        tier_ticket(TOOLING, 4, 3, days=30),
+    ]
     assert [i.number for i in startable(rows)] == [2, 4]
+
+
+def test_finite_work_in_a_hobby_repo_still_preempts_higher_tier_work():
+    rows = [
+        tier_project(TOOLING, 1, "Building", "Improve", days=30),
+        tier_ticket(TOOLING, 2, 1, days=30),
+        tier_project(HOBBY, 3, "Ready", "Broken", days=1),
+        tier_ticket(HOBBY, 4, 3, days=1),
+    ]
+    assert [i.number for i in startable(rows)] == [4, 2]
+
+
+def test_among_finite_work_the_tier_comes_before_the_building_commitment():
+    rows = [
+        tier_project(HOBBY, 1, "Building", "Broken", days=30),
+        tier_ticket(HOBBY, 2, 1, days=30),
+        tier_project(TOOLING, 3, "Ready", "Maintenance", days=1),
+        tier_ticket(TOOLING, 4, 3, days=1),
+    ]
+    assert [i.number for i in startable(rows)] == [4, 2]
+
+
+def test_a_ticket_blocking_higher_tier_work_takes_that_tier():
+    rows = [
+        tier_project(HOBBY, 1, "Building", "Improve", days=30),
+        tier_ticket(HOBBY, 2, 1, days=30),
+        tier_project(HOBBY, 3, "Ready", "Improve", days=1),
+        tier_ticket(HOBBY, 4, 3, days=1),
+        tier_project(TOOLING, 5, "Ready", "Improve", days=1),
+        tier_ticket(TOOLING, 6, 5, days=1,
+                    open_blockers=[HOBBY + "#4"]),
+    ]
+    # #6 waits on #4, so #4 ranks as tier 1 and passes the hobby's
+    # in-flight #2.
+    assert [i.number for i in startable(rows)] == [4, 2]
 
 
 def test_two_pinned_projects_keep_the_ladders_order_between_them():

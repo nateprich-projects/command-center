@@ -231,17 +231,51 @@ function tierCell(tier) {
 // be, rather than a blank: Queued when it waits only on its siblings, Blocked
 // otherwise (Nate, 2026-09-24). ``hold`` is "queued", "blocked", or a
 // boolean, where true means blocked.
-function ownerCell(owner, hold = false) {
+function ownerCell(owner, hold = false, note = null) {
   if (!owner && hold === "queued") return chip("Queued", "chip-owner owner-queued");
+  if (!owner && hold === "paused") return chip("Paused", "chip-owner owner-paused", note);
   if (!owner && hold) return chip("Blocked", "chip-owner owner-blocked");
   if (!owner) return element("span", "muted", "—");
   return chip(owner, `chip-owner ${OWNER_CLASS[owner] || ""}`);
 }
 
-// What holds an open ticket: "queued" behind its siblings, "blocked", or null.
+// What holds an open ticket: "queued" behind its siblings, "blocked",
+// "paused" after repeated failed runs, or null.
 function ticketHold(ticket) {
-  if (!ticket || ticket.state !== "OPEN" || !ticket.blocked) return null;
-  return ticket.blocked_by_siblings ? "queued" : "blocked";
+  if (!ticket || ticket.state !== "OPEN") return null;
+  if (ticket.blocked) return ticket.blocked_by_siblings ? "queued" : "blocked";
+  return ticket.paused_until ? "paused" : null;
+}
+
+// A project's hold for its Next step cell: blocked, or waiting out a pause.
+function projectHold(item) {
+  if (projectBlocked(item)) return "blocked";
+  return item && item.next_step_paused_until ? "paused" : null;
+}
+
+// A time in the viewer's own zone, never UTC (Nate's standing rule).
+function localTime(iso) {
+  const when = new Date(iso);
+  if (Number.isNaN(when.getTime())) return String(iso);
+  return when.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+}
+
+// The engine holds the Project fields do not show (Nate, 2026-09-25): a
+// ticket paused after repeated failed runs, or one its comments record as
+// finished and waiting for Nate to close.
+function holdChip(ticket) {
+  if (!ticket || ticket.state !== "OPEN") return null;
+  if (ticket.finished_by_comments) {
+    return chip("finished — close it", "chip-finished",
+      "Its comments record it done; it waits for Nate to close it.");
+  }
+  if (ticket.paused_until) {
+    const runs = Number.isFinite(ticket.paused_failures)
+      ? `${ticket.paused_failures} failed runs in a row` : "repeated failed runs";
+    return chip(`paused until ${localTime(ticket.paused_until)}`, "chip-paused",
+      `${runs}; offered again then, or as soon as a run finishes it.`);
+  }
+  return null;
 }
 
 // The producer's flag; an older snapshot without it falls back to the
@@ -327,6 +361,8 @@ function ticketRow(ticket) {
   title.append(element("span", "child-rule"));
   title.append(link(`#${ticket.number} ${ticket.title || ""}`, ticket.url, "ticket-title"));
   if (ticket.blocked) title.append(blockedChip(ticket));
+  const hold = holdChip(ticket);
+  if (hold) title.append(hold);
   const unblocks = ticket.state === "OPEN" ? unblocksChip(ticket) : null;
   if (unblocks) title.append(unblocks);
   row.append(title);
@@ -425,7 +461,8 @@ function phoneDetails(item, inheritedClass, children) {
   if (project) {
     fields.append(phoneMeta([
       ["Tier", tierCell(rowTier(children))],
-      ["Next step", ownerCell(nextOwner(item), projectBlocked(item))],
+      ["Next step", ownerCell(nextOwner(item), projectHold(item),
+        item.next_step_paused_until ? `until ${localTime(item.next_step_paused_until)}` : null)],
       ["Updated", element("span", "age", item.waited || "—")],
     ]));
     if (item.blocked) fields.append(phoneField("Blocked", blockedChip(item)));
@@ -439,6 +476,8 @@ function phoneDetails(item, inheritedClass, children) {
       const label = ticketHold(item) === "queued" ? "Queued" : "Blocked";
       fields.append(phoneField(label, blockedChip(item)));
     }
+    const hold = holdChip(item);
+    if (hold) fields.append(phoneField(item.finished_by_comments ? "Finished" : "Paused", hold));
     const unblocks = item.state === "OPEN" ? unblocksChip(item) : null;
     if (unblocks) fields.append(phoneField("Unblocks", unblocks));
     if (children.length || Number.isFinite(item.tickets_total)) {
@@ -546,7 +585,8 @@ function projectRow(item) {
 
   row.append(cell("cell-repo", element("span", "repo", shortRepo(item.repo || item.repository) || "")));
   row.append(cell("cell-tier", tierCell(rowTier(tickets))));
-  row.append(cell("cell-owner", ownerCell(nextOwner(item), projectBlocked(item))));
+  row.append(cell("cell-owner", ownerCell(nextOwner(item), projectHold(item),
+    item.next_step_paused_until ? `until ${localTime(item.next_step_paused_until)}` : null)));
   row.append(cell("cell-pips", pips(item, tickets, item.tickets_closed, item.tickets_total)));
   row.append(cell("cell-class", item.class
     ? chip(item.class, `chip-class chip-class-${String(item.class).toLowerCase()}`)
@@ -862,6 +902,16 @@ function formatMetricNumber(value, digits, signed = false) {
 
 function formatMetricValue(value, format, isDelta = false) {
   if (!isMetricNumber(value)) return "Gap";
+  if (format === "percent-points") {
+    const points = formatMetricNumber(value, 1, isDelta);
+    return isDelta ? points + " pp" : points + "%";
+  }
+  if (format === "currency") {
+    const amount = "$" + formatMetricNumber(Math.abs(value), 2);
+    if (value < 0) return "-" + amount;
+    return isDelta && value > 0 ? "+" + amount : amount;
+  }
+  if (format === "ratio") return formatMetricNumber(value, 1, isDelta) + "×";
   if (format === "percent") {
     const points = formatMetricNumber(value * 100, 1, isDelta);
     return isDelta ? points + " pp" : points + "%";
@@ -869,12 +919,13 @@ function formatMetricValue(value, format, isDelta = false) {
   if (format === "hours") {
     return formatMetricNumber(value, 2, isDelta) + " h";
   }
+  if (format === "duration-hours") {
+    return formatMetricNumber(value / 3600, 1, isDelta) + " h";
+  }
   return formatMetricNumber(value, 1, isDelta);
 }
 
-function appendMetricRow(tile, label, values, format) {
-  const row = element("div", "metric-series-row");
-  if (label) row.append(element("p", "metric-series-label", label));
+function metricReadings(values, format) {
   const readings = element("dl", "metric-values");
   for (const [name, value, isDelta] of [
     ["R7", values && values.r7, false],
@@ -895,6 +946,13 @@ function appendMetricRow(tile, label, values, format) {
     reading.append(output);
     readings.append(reading);
   }
+  return readings;
+}
+
+function appendMetricRow(tile, label, values, format) {
+  const row = element("div", "metric-series-row");
+  if (label) row.append(element("p", "metric-series-label", label));
+  const readings = metricReadings(values, format);
   row.append(readings);
   tile.append(row);
 }
@@ -908,6 +966,390 @@ function appendMetricTile(container, definition, rows) {
     appendMetricRow(tile, row.label, row.values, definition.format);
   }
   container.append(tile);
+}
+
+// The chart every Execution panel draws: an inline SVG line of the R7 over the
+// last CHART_WINDOW_DAYS days, with the newest R28 as a horizontal rule. The
+// series keeps 90 days, so the window can widen without a schema change. No
+// library and no request: the worker's CSP is script-src 'self'. A missing
+// day is a break in the line, never a zero and never interpolated.
+const SVG_NS = "http://www.w3.org/2000/svg";
+const CHART_WINDOW_DAYS = 56;
+const CHART_WIDTH = 320;
+const CHART_HEIGHT = 120;
+const CHART_PAD = { top: 12, right: 44, bottom: 18, left: 4 };
+const COMPACT_CHART_HEIGHT = 52;
+const COMPACT_CHART_PAD = { top: 5, right: 40, bottom: 5, left: 3 };
+
+function svgNode(tag, attributes = {}, text) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes)) {
+    node.setAttribute(name, String(value));
+  }
+  if (text !== undefined && text !== null) node.textContent = String(text);
+  return node;
+}
+
+// One path per unbroken run of numbers; a lone day between gaps is a dot,
+// because a one-point path draws nothing.
+function chartRuns(values) {
+  const runs = [];
+  let run = [];
+  values.forEach((value, index) => {
+    if (isMetricNumber(value)) {
+      run.push(index);
+    } else if (run.length) {
+      runs.push(run);
+      run = [];
+    }
+  });
+  if (run.length) runs.push(run);
+  return runs;
+}
+
+function chartTop(values, format) {
+  let top = 0;
+  for (const value of values) if (isMetricNumber(value) && value > top) top = value;
+  if (format === "percent-points") return Math.min(100, top * 1.1) || 100;
+  if (format === "percent") return Math.min(1, top * 1.1) || 1;
+  return top * 1.1 || 1;
+}
+
+function renderMetricChart(series, days, {
+  title = "", format = "count", bands = [], markers = [], compact = false,
+} = {}) {
+  const start = Math.max(0, (days || []).length - CHART_WINDOW_DAYS);
+  const windowDays = (days || []).slice(start);
+  const windowBands = Array.isArray(bands)
+    ? bands.slice(start, start + windowDays.length) : [];
+  const markerDates = new Set(Array.isArray(markers) ? markers : []);
+  const read = (key) => windowDays.map((_, offset) => {
+    const value = series && Array.isArray(series[key]) ? series[key][start + offset] : null;
+    return isMetricNumber(value) ? value : null;
+  });
+  const r7 = read("r7");
+  const r28 = read("r28");
+  const rule = r28.length ? r28[r28.length - 1] : null;
+  const top = chartTop([...r7, rule], format);
+
+  const height = compact ? COMPACT_CHART_HEIGHT : CHART_HEIGHT;
+  const padding = compact ? COMPACT_CHART_PAD : CHART_PAD;
+  const plotWidth = CHART_WIDTH - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const x = (index) => padding.left +
+    (windowDays.length > 1 ? (index / (windowDays.length - 1)) * plotWidth : plotWidth);
+  const y = (value) => padding.top + plotHeight - (value / top) * plotHeight;
+  const point = (index) => x(index).toFixed(1) + " " + y(r7[index]).toFixed(1);
+
+  const latest = r7.length ? r7[r7.length - 1] : null;
+  const summary = (title ? title + ": " : "") + "R7 " +
+    formatMetricValue(latest, format) + ", R28 " + formatMetricValue(rule, format) +
+    ", " + windowDays.length + " days";
+  const svg = svgNode("svg", {
+    class: "metric-chart" + (compact ? " metric-chart-compact" : ""),
+    viewBox: "0 0 " + CHART_WIDTH + " " + height,
+    role: "img",
+    "aria-label": summary,
+  });
+  svg.append(svgNode("title", {}, summary));
+
+  const bandClasses = { ok: "ok", tight: "tight", over: "over" };
+  const bandsGroup = svgNode("g", { class: "chart-bands" });
+  windowDays.forEach((day, index) => {
+    const bandName = bandClasses[windowBands[index]];
+    if (!bandName) return;
+    const left = index === 0 ? padding.left : (x(index - 1) + x(index)) / 2;
+    const right = index === windowDays.length - 1
+      ? padding.left + plotWidth : (x(index) + x(index + 1)) / 2;
+    const band = svgNode("rect", {
+      class: "chart-band chart-band-" + bandName,
+      x: left.toFixed(1), y: padding.top,
+      width: Math.max(0, right - left).toFixed(1), height: plotHeight,
+    });
+    band.append(svgNode("title", {}, day + " · Pace " + bandName));
+    bandsGroup.append(band);
+  });
+  svg.append(bandsGroup);
+
+  // Drawn first so a hovered day shades beneath the line, not over it.
+  const hits = svgNode("g", { class: "chart-hits" });
+  svg.append(hits);
+
+  const baseline = padding.top + plotHeight;
+  svg.append(svgNode("line", {
+    class: "chart-axis",
+    x1: padding.left, x2: padding.left + plotWidth, y1: baseline, y2: baseline,
+  }));
+
+  windowDays.forEach((day, index) => {
+    if (!markerDates.has(day)) return;
+    const markerX = x(index);
+    const marker = svgNode("line", {
+      class: "chart-reset-marker",
+      x1: markerX.toFixed(1), x2: markerX.toFixed(1),
+      y1: padding.top, y2: baseline,
+    });
+    marker.append(svgNode("title", {}, "Window reset · " + day));
+    svg.append(marker);
+  });
+
+  if (isMetricNumber(rule)) {
+    svg.append(svgNode("line", {
+      class: "chart-rule",
+      x1: padding.left, x2: padding.left + plotWidth, y1: y(rule), y2: y(rule),
+    }));
+    // Labelled at the left end, clear of the R7's end label on the right.
+    if (!compact) {
+      svg.append(svgNode("text", {
+        class: "chart-rule-label", x: padding.left + 2, y: y(rule) - 4,
+      }, "R28 " + formatMetricValue(rule, format)));
+    }
+  }
+
+  for (const run of chartRuns(r7)) {
+    if (run.length === 1) {
+      svg.append(svgNode("circle", {
+        class: "chart-dot", cx: x(run[0]).toFixed(1), cy: y(r7[run[0]]).toFixed(1), r: 4,
+      }));
+    } else {
+      svg.append(svgNode("path", {
+        class: "chart-line",
+        d: "M" + run.map(point).join(" L"),
+      }));
+    }
+  }
+
+  if (isMetricNumber(latest)) {
+    const last = r7.length - 1;
+    svg.append(svgNode("circle", {
+      class: "chart-dot", cx: x(last).toFixed(1), cy: y(latest).toFixed(1), r: 4,
+    }));
+    if (!compact) {
+      svg.append(svgNode("text", {
+        class: "chart-end-label", x: x(last) + 7, y: y(latest) + 3,
+      }, formatMetricValue(latest, format)));
+    }
+  }
+
+  // Hover: one full-height band per day carrying that day's reading, so a gap
+  // says "Gap" on hover rather than showing nothing.
+  const band = windowDays.length > 1 ? plotWidth / (windowDays.length - 1) : plotWidth;
+  windowDays.forEach((day, index) => {
+    const hit = svgNode("rect", {
+      class: "chart-hit",
+      x: (x(index) - band / 2).toFixed(1), y: padding.top,
+      width: band.toFixed(1), height: plotHeight,
+    });
+    hit.append(svgNode("title", {}, day + " · R7 " + formatMetricValue(r7[index], format) +
+      " · R28 " + formatMetricValue(r28[index], format)));
+    hits.append(hit);
+  });
+
+  if (windowDays.length && !compact) {
+    svg.append(svgNode("text", {
+      class: "chart-date", x: padding.left, y: height - 4,
+    }, windowDays[0]));
+    svg.append(svgNode("text", {
+      class: "chart-date", x: padding.left + plotWidth, y: height - 4,
+      "text-anchor": "end",
+    }, windowDays[windowDays.length - 1]));
+  }
+  return svg;
+}
+
+const RUN_METRICS = [
+  {
+    code: "C1",
+    title: "Fires by outcome",
+    description: "Finishes per day by outcome, agent, and job kind.",
+    format: "count",
+    sources: [{
+      path: ["C", "C1", "by_agent_and_job"],
+      excludeKeys: ["finishes"],
+    }],
+  },
+  {
+    code: "C2",
+    title: "Productive and empty-fire share",
+    description: "Done and nothing-to-do finishes over all finishes.",
+    format: "percent",
+    sources: [
+      { path: ["C", "C2", "productive_share"], label: "productive share" },
+      { path: ["C", "C2", "empty_fire_share"], label: "empty-fire share" },
+    ],
+  },
+  {
+    code: "C3",
+    title: "Error rate on engaged runs",
+    description: "Errored ÷ (done + errored); skipped fires are excluded.",
+    format: "percent",
+    sources: [{ path: ["C", "C3", "error_rate_by_agent_and_job"] }],
+  },
+  {
+    code: "C4",
+    title: "Error class",
+    description: "Floor, regression, and unclassified errors stay separate.",
+    format: "count",
+    sources: [{ path: ["C", "C4", "by_agent_and_job"] }],
+  },
+  {
+    code: "C5",
+    title: "Claim losses",
+    description: "Reconciled claims, wall-clock kills, and re-begins per day.",
+    format: "count",
+    sources: [{ path: ["C", "C5", "by_agent_and_job"] }],
+  },
+  {
+    code: "C6",
+    title: "Time to PR and merge",
+    description: "Claim to PR opened, then PR opened to merged; shown in hours.",
+    format: "duration-hours",
+    sources: [{ path: ["C", "C6", "by_agent_and_job"] }],
+  },
+];
+
+const ATTENTION_METRICS = [
+  {
+    code: "E1",
+    title: "Waiting on Nate",
+    description: "Total waiting at Nate’s gates and average dwell at Shaped and Ready.",
+    format: "count",
+    sources: [
+      { path: ["E", "E1", "total_needing_nate"], label: "Waiting on Nate" },
+      {
+        path: ["E", "E1", "gate_dwell"],
+        label: "Gate dwell",
+        format: "duration-hours",
+      },
+    ],
+  },
+  {
+    code: "E2",
+    title: "Human steps",
+    description: "Steps opened per day and outstanding; missing opening history stays a gap.",
+    format: "count",
+    sources: [
+      { path: ["E", "E2", "opened_this_hour"], label: "Opened per day" },
+      { path: ["E", "E2", "outstanding"], label: "Outstanding now" },
+    ],
+  },
+  {
+    code: "E3",
+    title: "Unattended decisions",
+    description: "Approvals and merges made without Nate, per day.",
+    format: "count",
+    sources: [
+      { path: ["E", "E3", "approvals_this_hour"], label: "Approvals per day" },
+      { path: ["E", "E3", "merges_this_hour"], label: "Merges per day" },
+    ],
+  },
+  {
+    code: "E4",
+    title: "Watch interventions",
+    description: "Check-in #684 actions that unwedge, override, or reconcile.",
+    format: "count",
+    sources: [{ path: ["E", "E4"], label: "Actions per day" }],
+  },
+  {
+    code: "E5",
+    title: "Machine-health noise",
+    description: "Counts of stranded work, degraded sections, mismatches, and stale-lock takeovers.",
+    format: "count",
+    sources: [
+      { path: ["E", "E5", "stranded"], label: "Stranded" },
+      { path: ["E", "E5", "degraded_sections"], label: "Degraded sections" },
+      { path: ["E", "E5", "status_state_mismatches"], label: "Status/state mismatches" },
+      { path: ["E", "E5", "stale_locks_taken_over"], label: "Stale locks taken over" },
+    ],
+  },
+];
+
+function valueAtPath(root, path) {
+  let value = root;
+  for (const part of path) {
+    if (!value || typeof value !== "object") return null;
+    value = value[part];
+  }
+  return value;
+}
+
+function humanizeRunKey(key) {
+  const labels = {
+    claim_to_pr: "claim to PR",
+    pr_to_merge: "PR to merge",
+    wall_clock_kills: "wall-clock kills",
+    reconciled_claims: "reconciled claims",
+    re_begins: "re-begins",
+  };
+  return labels[key] || key;
+}
+
+function metricPanelRows(root, definition) {
+  const rows = [];
+  for (const source of definition.sources) {
+    const prefix = source.label ? [source.label] : [];
+    for (const item of metricLeaves(valueAtPath(root, source.path))) {
+      const leafName = item.path[item.path.length - 1];
+      if (source.excludeKeys && source.excludeKeys.includes(leafName)) continue;
+      const parts = [...prefix, ...item.path.map(humanizeRunKey)];
+      rows.push({
+        key: [...source.path, ...item.path].join("."),
+        label: parts.join(" · "),
+        series: item.series,
+        format: source.format || definition.format,
+      });
+    }
+  }
+  return rows;
+}
+
+function renderMetricPanels(series, container, definitions) {
+  if (!container) return;
+  container.replaceChildren();
+  const root = series && series.metrics && typeof series.metrics === "object"
+    ? series.metrics : {};
+  const days = series && Array.isArray(series.days) ? series.days : [];
+  const index = days.length - 1;
+
+  for (const definition of definitions) {
+    const panel = element("article", "run-metric-panel");
+    panel.setAttribute("data-metric", definition.code);
+    const heading = element("div", "run-metric-heading");
+    heading.append(element("p", "metric-code", definition.code));
+    heading.append(element("h3", "metric-title", definition.title));
+    heading.append(element("p", "run-metric-description", definition.description));
+    panel.append(heading);
+
+    const list = element("div", "run-series-list");
+    const rows = metricPanelRows(root, definition);
+    if (!rows.length) {
+      list.append(element("p", "run-metric-empty metric-gap", "No series available."));
+    }
+    for (const item of rows) {
+      const row = element("div", "run-series-row");
+      row.setAttribute("data-series", item.key);
+      const meta = element("div", "run-series-meta");
+      meta.append(element("p", "run-series-label", item.label));
+      meta.append(metricReadings(metricValues(item.series, index), item.format));
+      row.append(meta);
+      row.append(renderMetricChart(item.series, days, {
+        title: item.label,
+        format: item.format,
+        compact: true,
+      }));
+      list.append(row);
+    }
+    panel.append(list);
+    container.append(panel);
+  }
+}
+
+function renderRunMetrics(series, container) {
+  renderMetricPanels(series, container, RUN_METRICS);
+}
+
+function renderAttentionMetrics(series, container) {
+  renderMetricPanels(series, container, ATTENTION_METRICS);
 }
 
 function renderExecutionTiles(series, container) {
@@ -975,6 +1417,167 @@ function renderExecutionTiles(series, container) {
   }, [{ label: "", values: single(["E", "E4"]) }]);
 }
 
+function appendBudgetTile(container, code, title) {
+  const tile = element("article", "metric-tile budget-tile");
+  tile.setAttribute("data-metric", code);
+  tile.append(element("p", "metric-code", code));
+  tile.append(element("h3", "metric-title", title));
+  container.append(tile);
+  return tile;
+}
+
+function appendBudgetMetric(tile, label, series, days, format, chartOptions = {}) {
+  const index = days.length - 1;
+  appendMetricRow(tile, label, metricValues(series, index), format);
+  tile.append(renderMetricChart(series, days, {
+    title: label,
+    format,
+    ...chartOptions,
+  }));
+}
+
+function appendBudgetDetail(tile, label, value, className = "") {
+  const row = element("p", "budget-detail" + (className ? " " + className : ""));
+  row.append(element("span", "budget-detail-label", label));
+  row.append(element("span", "budget-detail-value", value));
+  tile.append(row);
+}
+
+function appendBudgetGap(tile, message) {
+  if (typeof message === "string" && message) {
+    tile.append(element("p", "metric-gap-reason", message));
+  }
+}
+
+function latestSeriesValue(series, index) {
+  const value = series && Array.isArray(series.daily) ? series.daily[index] : null;
+  return typeof value === "string" ? value : null;
+}
+
+function resetMarkerDates(series, days) {
+  const result = new Set();
+  const availableDays = new Set(days || []);
+  for (const value of (series && Array.isArray(series.daily) ? series.daily : [])) {
+    if (typeof value !== "string" || value.length < 10) continue;
+    const date = value.slice(0, 10);
+    if (availableDays.has(date)) result.add(date);
+  }
+  return [...result];
+}
+
+function resetLabel(value) {
+  if (typeof value !== "string") return "Gap";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "Gap";
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium", timeStyle: "short",
+  }).format(date);
+}
+
+function budgetReasonLabel(value) {
+  return String(value || "").replaceAll("_", " ").replaceAll("-", " ");
+}
+
+function renderBudgetMetrics(series, container) {
+  if (!container) return;
+  container.replaceChildren();
+  const root = series && series.metrics && typeof series.metrics === "object"
+    ? series.metrics : {};
+  const days = series && Array.isArray(series.days) ? series.days : [];
+  const index = days.length - 1;
+  const get = (path) => metricAtPath(root, path);
+  const muse = appendBudgetTile(container, "D1", "Muse $/day and window %");
+  const museDollars = get(["D", "D1", "dollars_per_day"]);
+  const musePercent = get(["D", "D1", "window_used_percent"]);
+  const musePace = get(["D", "D1", "pace_band"]);
+  const museReset = get(["D", "D1", "window_resets_at"]);
+  appendBudgetMetric(muse, "Spend per day", museDollars, days, "currency");
+  appendBudgetMetric(muse, "Seven-day usage", musePercent, days, "percent-points", {
+    bands: musePace && musePace.daily,
+    markers: resetMarkerDates(museReset, days),
+  });
+  const pace = latestSeriesValue(musePace, index);
+  const paceLabels = { ok: "On pace", tight: "Tight", over: "Over" };
+  appendBudgetDetail(
+    muse, "Current pace", paceLabels[pace] || "Gap",
+    pace ? "pace-status pace-" + pace : "metric-gap",
+  );
+  appendBudgetDetail(muse, "Next window reset", resetLabel(latestSeriesValue(museReset, index)));
+  const legend = element("div", "pace-legend");
+  for (const [name, label] of [["ok", "On pace"], ["tight", "Tight"], ["over", "Over"]]) {
+    const item = element("span", "pace-legend-item");
+    item.append(element("i", "pace-swatch pace-swatch-" + name));
+    item.append(element("span", null, label));
+    legend.append(item);
+  }
+  const resetLegend = element("span", "pace-legend-item");
+  resetLegend.append(element("i", "pace-reset-swatch"));
+  resetLegend.append(element("span", null, "Window reset"));
+  legend.append(resetLegend);
+  muse.append(legend);
+  appendBudgetGap(muse, museReset && museReset.gap);
+
+  const codex = appendBudgetTile(container, "D2", "Codex weekly usage");
+  appendBudgetMetric(codex, "Weekly usage", get(["D", "D2", "weekly_used_percent"]), days, "percent-points");
+  appendBudgetMetric(codex, "Funnel share", get(["D", "D2", "funnel_vs_personal", "funnel_share"]), days, "percent");
+  appendBudgetMetric(codex, "Personal share", get(["D", "D2", "funnel_vs_personal", "personal_share"]), days, "percent");
+  appendBudgetGap(codex, root.D && root.D.D2 && root.D.D2.funnel_vs_personal
+    && root.D.D2.funnel_vs_personal.gap);
+
+  const claude = appendBudgetTile(container, "D3", "Claude window usage");
+  for (const [windowName, label] of [["five_hour", "Five-hour window"], ["seven_day", "Seven-day window"]]) {
+    const used = get(["D", "D3", "windows", windowName, "used_percent"]);
+    appendBudgetMetric(claude, label, used, days, "percent-points");
+    const reset = latestSeriesValue(get(["D", "D3", "windows", windowName, "resets_at"]), index);
+    if (reset) appendBudgetDetail(claude, label + " reset", resetLabel(reset));
+  }
+  appendBudgetGap(claude, root.D && root.D.D3 && root.D.D3.gap);
+
+  const cost = appendBudgetTile(container, "D4", "Cost per merged PR by lane");
+  const costLeaves = metricLeaves(root.D && root.D.D4);
+  let costShown = false;
+  for (const item of costLeaves) {
+    if (item.series.kind === "category") continue;
+    const label = item.path.length ? budgetReasonLabel(item.path[item.path.length - 1]) : "By lane";
+    appendBudgetMetric(cost, label, item.series, days, "currency");
+    costShown = true;
+  }
+  if (!costShown) appendBudgetMetric(cost, "By lane", null, days, "currency");
+  appendBudgetGap(cost, root.D && root.D.D4 && root.D.D4.gap);
+
+  const api = appendBudgetTile(container, "D5", "GitHub API and resend ratio");
+  appendBudgetMetric(api, "GraphQL points per brief", get(["D", "D5", "points_per_brief"]), days, "count");
+  const runLeaves = metricLeaves(root.D && root.D.D5 && root.D.D5.graphql_points_per_run);
+  let runShown = false;
+  for (const item of runLeaves) {
+    if (item.path.length < 2 || item.path[item.path.length - 1] !== "points_per_run") continue;
+    appendBudgetMetric(api, budgetReasonLabel(item.path[item.path.length - 2]) + " points per run", item.series, days, "count");
+    runShown = true;
+  }
+  if (!runShown) appendBudgetMetric(api, "Points per run", null, days, "count");
+  appendBudgetMetric(api, "API-reserve skips per day", get(["D", "D5", "api_reserve_skips"]), days, "count");
+  const resendLeaves = metricLeaves(root.D && root.D.D5 && root.D.D5.resend_ratio_by_agent);
+  let resendShown = false;
+  for (const item of resendLeaves) {
+    if (item.path.length !== 1) continue;
+    appendBudgetMetric(api, budgetReasonLabel(item.path[0]) + " resend ratio", item.series, days, "ratio");
+    resendShown = true;
+  }
+  if (!resendShown) appendBudgetMetric(api, "Resend ratio", null, days, "ratio");
+
+  const held = appendBudgetTile(container, "D6", "Held hours by lane and reason");
+  const heldLeaves = metricLeaves(root.D && root.D.D6 && root.D.D6.held_hours_by_agent_and_reason);
+  let heldShown = false;
+  for (const item of heldLeaves) {
+    if (item.path.length < 2) continue;
+    const label = budgetReasonLabel(item.path[0]) + " · " + budgetReasonLabel(item.path[1]);
+    appendBudgetMetric(held, label, item.series, days, "hours");
+    heldShown = true;
+  }
+  if (!heldShown) appendBudgetMetric(held, "By lane and reason", null, days, "hours");
+  appendBudgetGap(held, root.D && root.D.D6 && root.D.D6.gap);
+}
+
 async function requestMetrics(fetchImpl = fetch) {
   const response = await fetchImpl("/api/metrics", { cache: "no-store" });
   if (!response.ok) throw new Error("Metrics returned " + response.status);
@@ -988,6 +1591,8 @@ async function loadMetrics() {
   metricsLoading = true;
   const status = document.querySelector("#metrics-status");
   const container = document.querySelector("#metrics-grid");
+  const runsContainer = document.querySelector("#runs-grid");
+  const attentionContainer = document.querySelector("#attention-grid");
   try {
     const series = await requestMetrics();
     status.textContent = series.as_of
@@ -995,10 +1600,16 @@ async function loadMetrics() {
       : "Metrics date unknown";
     status.classList.remove("failed");
     renderExecutionTiles(series, container);
+    renderRunMetrics(series, runsContainer);
+    renderBudgetMetrics(series, document.querySelector("#budget-grid"));
+    renderAttentionMetrics(series, attentionContainer);
   } catch (error) {
     status.textContent = error.message || "Metrics unavailable";
     status.classList.add("failed");
     renderExecutionTiles(null, container);
+    renderRunMetrics(null, runsContainer);
+    renderBudgetMetrics(null, document.querySelector("#budget-grid"));
+    renderAttentionMetrics(null, attentionContainer);
     throw error;
   } finally {
     metricsLoading = false;
@@ -1115,8 +1726,11 @@ if (typeof document !== "undefined") {
 
 export {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
-  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
+  phoneState, pipState, projectBlocked, projectHold, holdChip, localTime,
+  renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,
-  renderExecutionTiles, requestMetrics,
+  renderExecutionTiles, renderMetricChart, renderBudgetMetrics, renderRunMetrics,
+  renderAttentionMetrics,
+  requestMetrics, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 };

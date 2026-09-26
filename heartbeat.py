@@ -93,6 +93,7 @@ OUTCOMES = [
     "config-drift",        # a Codex run's settings differ from codex_run.py (#1316);
                            # not `skipped-*`, which the watchdog treats as healthy
     "skipped-provider-quota",  # the model provider refused: its usage window is spent
+    "skipped-outside-window",  # Claude's Saturday-morning window is closed (#1557)
     "budget-exhausted",     # begin could not start after the GraphQL pool hit zero
     "errored",             # tried and failed
 ]
@@ -173,6 +174,36 @@ def _non_negative_int(value: str) -> int:
 def _optional_text(value: str) -> Optional[str]:
     """Treat the empty CLI value as the explicit JSON null it represents."""
     return value if value else None
+
+
+def _muse_call_record(value: str) -> Dict[str, object]:
+    """Parse the ephemeral call capture summary written by Muse's runner."""
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be a Muse call record JSON object")
+    if not isinstance(parsed, dict) or set(parsed) != {"session_ids", "calls_made"}:
+        raise argparse.ArgumentTypeError(
+            "must contain exactly session_ids and calls_made"
+        )
+    session_ids = parsed.get("session_ids")
+    calls_made = parsed.get("calls_made")
+    if (
+        not isinstance(session_ids, list)
+        or isinstance(calls_made, bool)
+        or not isinstance(calls_made, int)
+        or calls_made < 0
+        or calls_made != len(session_ids)
+        or any(
+            session_id is not None
+            and (not isinstance(session_id, str) or not session_id.strip())
+            for session_id in session_ids
+        )
+    ):
+        raise argparse.ArgumentTypeError(
+            "session_ids must contain one non-empty id or null per call"
+        )
+    return parsed
 
 
 #: Which pool an agent spends. Deliberately separate from the model: routing will
@@ -787,9 +818,34 @@ def api_cost_for_run(records: List[Dict], run: Optional[str]) -> Dict[str, Optio
     return result
 
 
-def _clean_graphql_by_caller(value: Dict) -> Dict[str, Dict[str, Optional[int]]]:
-    """Keep only the bounded caller schema and measured non-negative integers."""
-    cleaned: Dict[str, Dict[str, Optional[int]]] = {}
+def _clean_graphql_readings(value: object) -> List[Dict[str, object]]:
+    """Keep each response's measured rate-limit fields without guessing."""
+    if not isinstance(value, list):
+        return []
+    cleaned = []
+    for reading in value:
+        if not isinstance(reading, dict):
+            continue
+        reset_at = reading.get("reset_at")
+        received_at = _finite_number(reading.get("received_at"))
+        cleaned.append({
+            "cost": _api_cost_number(reading.get("cost")),
+            "remaining": _api_cost_number(reading.get("remaining")),
+            "reset_at": (
+                reset_at.strip()
+                if isinstance(reset_at, str) and reset_at.strip() else None
+            ),
+            "received_at": (
+                received_at if received_at is not None and received_at >= 0
+                else None
+            ),
+        })
+    return cleaned
+
+
+def _clean_graphql_by_caller(value: Dict) -> Dict[str, Dict[str, object]]:
+    """Keep bounded caller totals and their individual response readings."""
+    cleaned: Dict[str, Dict[str, object]] = {}
     for name, entry in value.items():
         caller = (
             name if isinstance(name, str) and name in GRAPHQL_CALLER_NAMES
@@ -799,24 +855,29 @@ def _clean_graphql_by_caller(value: Dict) -> Dict[str, Dict[str, Optional[int]]]
             entry = {}
         target = cleaned.setdefault(caller, {
             "calls": None, "points": None, "remaining": None,
+            "readings": [],
         })
         for field in GRAPHQL_CALLER_COST_FIELDS:
             number = _api_cost_number(entry.get(field))
             if number is not None:
                 previous = target[field]
                 target[field] = number if previous is None else previous + number
+        readings = target["readings"]
+        if isinstance(readings, list):
+            readings.extend(_clean_graphql_readings(entry.get("readings")))
     return cleaned
 
 
 def graphql_by_caller_for_run(
         records: List[Dict], run: Optional[str]
-        ) -> Optional[Dict[str, Dict[str, Optional[int]]]]:
-    """Aggregate per-command caller readings without hiding unreadable costs.
+        ) -> Optional[Dict[str, Dict[str, object]]]:
+    """Aggregate caller totals and retain every response reading for the run.
 
     `points` and `calls` sum across this run. `remaining` is the latest valid
     GraphQL response value for that caller, not a delta against the shared
-    account window. Older api_cost events have no caller map; their known
-    points, or an unreadable value, stay visible under `unattributed`.
+    account window. Each response's reset stamp and receipt time remain in its
+    caller's `readings`; older api_cost events have no caller map, so their
+    known points, or an unreadable value, stay visible under `unattributed`.
     """
     if not run:
         return None
@@ -838,16 +899,21 @@ def graphql_by_caller_for_run(
                     "calls": None,
                     "points": _api_cost_number(api.get("graphql_points")),
                     "remaining": None,
+                    "readings": [],
                 }
             }
         for name, entry in _clean_graphql_by_caller(raw).items():
             bucket = totals.setdefault(name, {
                 "calls": 0, "points": 0, "remaining": None,
+                "readings": [],
                 "calls_readable": True, "points_readable": True,
                 "remaining_stamp": (float("-inf"), -1),
             })
             if not isinstance(entry, dict):
                 entry = {}
+            readings = bucket["readings"]
+            if isinstance(readings, list):
+                readings.extend(entry.get("readings", []))
             for field in ("calls", "points"):
                 value = _api_cost_number(entry.get(field))
                 if value is None:
@@ -867,7 +933,7 @@ def graphql_by_caller_for_run(
                     bucket["remaining"] = remaining
                     bucket["remaining_stamp"] = (stamp, index)
 
-    result: Dict[str, Dict[str, Optional[int]]] = {}
+    result: Dict[str, Dict[str, object]] = {}
     caller_order = [*sorted(GRAPHQL_CALLER_NAMES - {"unattributed"}),
                     "unattributed"]
     for caller in caller_order:
@@ -884,6 +950,7 @@ def graphql_by_caller_for_run(
                 if bucket["points_readable"] else None
             ),
             "remaining": bucket["remaining"],
+            "readings": list(bucket["readings"]),
         }
     return result
 
@@ -1819,6 +1886,10 @@ def main(argv=None) -> int:
         "--needs-decision", type=_optional_text, default=None,
         help="structured breakdown question; an empty value means none",
     )
+    finish.add_argument(
+        "--muse-call-record", type=_muse_call_record, default=None,
+        help="JSON session-id list and calls-made count from Muse exec results",
+    )
     finish.add_argument("--human-intervention", action="store_true",
                         help="Nate had to step in for this run to progress")
     finish.add_argument("--note", default=None)
@@ -1927,15 +1998,18 @@ def main(argv=None) -> int:
             "human_intervention_required": args.human_intervention or None,
             "repo": repo_state(),
             "runtime": runtime,
-            "token_usage": token_usage_for_run(
-                args.agent, records, run_id, finished_at
-            ),
             "api_cost": api_cost_for_run(records, run_id),
             "graphql_by_caller": graphql_by_caller_for_run(
                 records, run_id
             ),
             **detect_model(args.agent),
         }
+        if args.agent != "muse":
+            # Muse usage is derived from its session ids at read time. Do not
+            # freeze a first-session snapshot into the finish record.
+            record["token_usage"] = token_usage_for_run(
+                args.agent, records, run_id, finished_at
+            )
         job = job_for_run(records, run_id, args.agent)
         if job is not None:
             record["job"] = job
@@ -1946,6 +2020,15 @@ def main(argv=None) -> int:
         if args.ticket_count is not None:
             record["ticket_count"] = args.ticket_count
             record["needs_decision"] = args.needs_decision
+        if args.muse_call_record is not None:
+            if args.agent != "muse":
+                raise HeartbeatError("Muse call records require --agent muse")
+            record["muse_calls_made"] = args.muse_call_record["calls_made"]
+            # A one-call run is already bound by the start record's session_id;
+            # keep the id-list shape stable and add the list when later calls
+            # need distinct ids.
+            if args.muse_call_record["calls_made"] > 1:
+                record["muse_session_ids"] = args.muse_call_record["session_ids"]
         metric = input_usage(args.agent)
         if metric is not None:
             record["input_usage"] = metric

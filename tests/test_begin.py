@@ -7,6 +7,7 @@ import json
 import pathlib
 import re
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -327,7 +328,8 @@ def test_main_loads_the_project_after_begin_gates_pass(
         "cmd_begin",
         lambda items, now, agent, tier, idle, breakdown=False,
         repo_readiness=None, caller_role=None, _detail_loader=None,
-        _preflight=None, timings=None: (
+        _preflight=None, timings=None, _pr_facts=None,
+        _pr_facts_error=None, _pr_facts_elapsed=None: (
             events.append(("begin", items, _preflight, timings)) or 0
         ),
     )
@@ -1565,6 +1567,40 @@ def test_ticket_branch_facts_failure_stops_with_an_error_gate(
     assert "could not establish ticket branch facts" in result["why"]
 
 
+def test_cmd_begin_uses_preloaded_branch_facts_and_records_parallel_time(
+    monkeypatch, capsys
+):
+    _allow_begin(monkeypatch)
+    project, ticket = _ticket(86, 87)
+    facts = {ticket.ref: {"branch_exists": True}}
+    merge_calls = []
+    timings = {}
+    monkeypatch.setattr(
+        funnel,
+        "ticket_pr_facts",
+        lambda rows: (_ for _ in ()).throw(
+            AssertionError("preloaded branch facts must be reused")
+        ),
+    )
+    monkeypatch.setattr(
+        funnel,
+        "reconcile_approved_merges",
+        lambda items, now, pr_facts: merge_calls.append(pr_facts) or [],
+    )
+    monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+
+    assert funnel.cmd_begin(
+        [project, ticket], NOW, "zcode", "standard", False,
+        _pr_facts=facts,
+        _pr_facts_elapsed=0.25,
+        timings=timings,
+    ) == 0
+
+    assert merge_calls == [facts]
+    assert timings["begin_load.ticket_pr_facts"] == pytest.approx(0.25)
+    capsys.readouterr()
+
+
 def test_two_same_minute_begins_claim_different_tickets(monkeypatch, capsys):
     first_project, first = _ticket(8, 7)
     second_project, second = _ticket(10, 9)
@@ -1771,7 +1807,9 @@ def test_the_role_refusal_comes_before_the_project_read(monkeypatch, capsys):
 
 def test_codex_implements_both_tiers_and_muse_reviews():
     assert funnel.AGENTS_BY_ROLE["implement"] == {
-        "codex": frozenset(funnel.TIERS)}
+        "codex": frozenset(funnel.TIERS),
+        "claude": frozenset(funnel.TIERS + (None,)),
+    }
     assert funnel._begin_role_refusal("codex", "standard", "implement") is None
     assert funnel._begin_role_refusal("codex", "escalated", "implement") is None
     assert funnel._begin_role_refusal("muse", "standard", "review") is None
@@ -1983,6 +2021,8 @@ def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
     monkeypatch, agent
 ):
     _allow_begin(monkeypatch)
+    # Claude's lane is closed outside Saturday morning (#1557).
+    monkeypatch.setattr(funnel, "_local_time", lambda now: SATURDAY_0500)
     project, ticket = _ticket(74, 75)
     rows = [project, ticket]
     readiness = {
@@ -2005,7 +2045,8 @@ def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
         "cmd_begin",
         lambda items, now, agent, tier, idle, breakdown=False,
         repo_readiness=None, caller_role=None, _detail_loader=None,
-        _preflight=None: (
+        _preflight=None, _pr_facts=None, _pr_facts_error=None,
+        _pr_facts_elapsed=None, **kwargs: (
             received.append(repo_readiness) or 0
         ),
     )
@@ -2013,6 +2054,75 @@ def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
     tier = "escalated" if agent == "muse" else "standard"
     assert funnel.main(["begin", "--agent", agent, "--tier", tier]) == 0
     assert received == [rows, readiness]
+
+
+def test_main_runs_begin_reads_in_a_bounded_pool_and_merges_by_repo(
+    monkeypatch,
+):
+    from concurrent.futures import ThreadPoolExecutor as RealThreadPoolExecutor
+
+    _allow_begin(monkeypatch)
+    rows = []
+    repos = ["owner/repo{}".format(index) for index in range(6)]
+    for number, repo in enumerate(repos, start=80):
+        project, ticket = _ticket(number, number + 100)
+        project.repo = repo
+        ticket.repo = repo
+        rows.extend((project, ticket))
+
+    monkeypatch.setattr(
+        funnel, "load_items", lambda include_details=True: rows
+    )
+    branch_started = threading.Event()
+    faster_repo_finished = threading.Event()
+    completion_order = []
+    received = []
+    pool_sizes = []
+
+    def readiness_for_repo(repo):
+        assert branch_started.wait(timeout=2)
+        if repo == repos[0]:
+            assert faster_repo_finished.wait(timeout=2)
+        result = funnel.MemberRepoReadiness(
+            repo, topic=True, ci_workflow=True,
+            stock_labels=(), dependabot=True,
+        )
+        completion_order.append(repo)
+        if repo == repos[1]:
+            faster_repo_finished.set()
+        return result
+
+    def branch_facts(items):
+        assert items is rows
+        branch_started.set()
+        return {"snapshot": "ready"}
+
+    def tracking_pool(*, max_workers):
+        pool_sizes.append(max_workers)
+        return RealThreadPoolExecutor(max_workers=max_workers)
+
+    def capture_begin(
+        items, now, agent, tier, idle, breakdown=False,
+        repo_readiness=None, caller_role=None, **kwargs
+    ):
+        received.append((repo_readiness, kwargs))
+        return 0
+
+    monkeypatch.setattr(funnel, "_begin_repo_readiness", readiness_for_repo)
+    monkeypatch.setattr(funnel, "ticket_pr_facts", branch_facts)
+    monkeypatch.setattr(funnel, "ThreadPoolExecutor", tracking_pool)
+    monkeypatch.setattr(funnel, "cmd_begin", capture_begin)
+
+    assert funnel.main(["begin", "--agent", "codex", "--tier", "standard"]) == 0
+
+    assert pool_sizes == [funnel.BEGIN_FETCH_POOL_SIZE]
+    assert completion_order.index(repos[1]) < completion_order.index(repos[0])
+    readiness, kwargs = received[0]
+    assert list(readiness) == repos
+    assert list(readiness) == sorted(readiness)
+    assert kwargs["_pr_facts"] == {"snapshot": "ready"}
+    assert kwargs["_pr_facts_error"] is None
+    assert kwargs["_pr_facts_elapsed"] >= 0
 
 
 def test_begin_stop_reason_omits_breakdown_when_it_was_not_requested(
@@ -2260,6 +2370,101 @@ def test_muse_escalated_begin_uses_the_explicit_reviewer_role(
 
     assert result["do"] == "review"
     assert result["work"] == review
+
+
+def _recorded_conflict_fixture(verdict=None):
+    recorded = json.loads(
+        (ROOT / "tests/fixtures/conflict_begin_stdout_pr1501.json").read_text()
+    )["pr"]
+    if verdict is not None:
+        recorded["verdict"] = verdict
+    return recorded
+
+
+def _recorded_conflict_ticket():
+    repo = "nateprich-projects/command-center"
+    return funnel.Item(
+        repo=repo,
+        number=703,
+        title="Recorded conflicting ticket",
+        url="https://github.com/{}/issues/703".format(repo),
+        state="OPEN",
+        status="Building",
+        risk="standard",
+        needs="none",
+        parent=repo + "#1503",
+    )
+
+
+def test_begin_keeps_recorded_conflict_precheck_off_json_stdout(
+    monkeypatch, capsys
+):
+    """The #1501 conflict precheck writes its confirmation before begin JSON."""
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+    monkeypatch.setattr(funnel, "awaiting_breakdown", lambda rows: [])
+    monkeypatch.setattr(funnel, "shapeable_idea", lambda *args: None)
+    monkeypatch.setattr(
+        funnel,
+        "_run_gh",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+    ticket = _recorded_conflict_ticket()
+    fact = _recorded_conflict_fixture()
+    facts = funnel.TicketPRFacts(rows_by_ref={ticket.ref: [fact]})
+
+    assert funnel.cmd_begin(
+        [ticket], NOW, "zcode", "standard", False,
+        repo_readiness={}, caller_role="review", _pr_facts=facts,
+    ) == 0
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["do"] == "stop"
+    assert "recorded rejected on PR #1501 against 6389cc6961da" in captured.err
+
+
+def test_begin_merge_reconcile_keeps_refusal_confirmation_off_json_stdout(
+    monkeypatch, capsys
+):
+    """A refused merge in begin's reconcile still emits parseable JSON."""
+    _allow_begin(monkeypatch)
+    ticket = _recorded_conflict_ticket()
+    fact = _recorded_conflict_fixture({
+        "verdict": "approved",
+        "ci": "green",
+        "head_sha": "6389cc6961da",
+        "blocking": [],
+    })
+    facts = funnel.TicketPRFacts(rows_by_ref={ticket.ref: [fact]})
+    blocker = "branch 'ticket/703'" + funnel.CONFLICTING_BRANCH_SUFFIX
+    monkeypatch.setattr(
+        funnel, "merge_blockers",
+        lambda repo, pr, items, now, pr_fact=None: [blocker],
+    )
+    monkeypatch.setattr(funnel, "awaiting_breakdown", lambda rows: [])
+    monkeypatch.setattr(funnel, "review_queue", lambda rows, tier: [])
+    monkeypatch.setattr(funnel, "shapeable_idea", lambda *args: None)
+    monkeypatch.setattr(
+        funnel,
+        "_run_gh",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        ),
+    )
+
+    assert funnel.cmd_begin(
+        [ticket], NOW, "zcode", "standard", False,
+        repo_readiness={}, caller_role="review", _pr_facts=facts,
+    ) == 0
+
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["do"] == "stop"
+    assert result["reconciled_merges"][0]["result"] == "refused"
+    assert "recorded rejected on PR #1501 against 6389cc6961da" in captured.err
 
 
 def test_broken_review_is_before_a_broken_idea(monkeypatch, capsys):
@@ -3087,3 +3292,102 @@ def test_plan_needs_nate_reads_only_the_visible_open_categories():
         "## Needs Nate\n\n"
         "- Gates: answered 2026-09-24T06:00:00Z by Nate. Agents may.\n"
     ) is False
+
+
+# Claude's Saturday-morning implement lane (#1557).
+
+SATURDAY_0500 = datetime(2026, 9, 26, 5, 0)
+SATURDAY_1114 = datetime(2026, 9, 26, 11, 14)
+SATURDAY_1115 = datetime(2026, 9, 26, 11, 15)
+FRIDAY_2300 = datetime(2026, 9, 25, 23, 0)
+
+
+def test_claude_window_is_saturday_before_eleven_fifteen():
+    assert funnel.claude_window_refusal(SATURDAY_0500) is None
+    assert funnel.claude_window_refusal(SATURDAY_1114) is None
+    assert "11:15" in funnel.claude_window_refusal(SATURDAY_1115)
+    assert "Saturdays only" in funnel.claude_window_refusal(FRIDAY_2300)
+
+
+def test_claude_implements_every_tier_and_untiered():
+    for tier in funnel.TIERS + (None,):
+        assert funnel._begin_role_refusal("claude", tier, "implement") is None
+
+
+def test_claude_outside_the_window_stops_before_usage_or_project(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(funnel, "_start_begin_heartbeat",
+                        lambda agent: "run-id")
+    monkeypatch.setattr(funnel, "_local_time", lambda now: SATURDAY_1115)
+    monkeypatch.setattr(usage, "read_agent", lambda *args: pytest.fail(
+        "the Claude lane reads no budget"))
+    monkeypatch.setattr(funnel, "load_items", lambda *args, **kwargs:
+                        pytest.fail("a closed window reads no Project"))
+
+    assert funnel.main(["begin", "--agent", "claude", "--role",
+                        "implement"]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["gate"] == "time"
+    assert result["do"] == "stop"
+
+
+def test_claude_inside_the_window_is_unmetered():
+    import usage as usage_module
+
+    original = funnel._local_time
+    try:
+        funnel._local_time = lambda now: SATURDAY_0500
+        saved = usage_module.read_agent
+        usage_module.read_agent = lambda *args: pytest.fail(
+            "the Claude lane reads no budget")
+        try:
+            import heartbeat
+
+            start = funnel._start_begin_heartbeat
+            funnel._start_begin_heartbeat = lambda agent: "run-id"
+            try:
+                out, reading = funnel._begin_preflight(
+                    NOW, "claude", False, None)
+            finally:
+                funnel._start_begin_heartbeat = start
+        finally:
+            usage_module.read_agent = saved
+    finally:
+        funnel._local_time = original
+    assert out["gate"] == "ok"
+    assert out["unmetered"] is True
+    assert reading["unmetered"] is True
+
+
+def test_claude_ticket_begin_carries_the_packet_and_claude_vendor_block(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(funnel, "_local_time", lambda now: SATURDAY_0500)
+    project, ticket = _ticket(81, 80)
+    calls = []
+    monkeypatch.setattr(
+        funnel,
+        "implementation_packet",
+        lambda repo, number, agent: (
+            calls.append((repo, number, agent)) or {"repo": repo}
+        ),
+    )
+
+    result, _ = _implementing_begin(
+        monkeypatch, capsys, [project, ticket], agent="claude", tier=None,
+        caller_role="implement",
+    )
+
+    assert result["do"] == "ticket"
+    assert result["vendor"] == funnel.CLAUDE_IMPLEMENT_VENDOR
+    assert "finish-ticket --agent claude" in (
+        result["vendor"]["answer_handoff"])
+    assert calls == [(ticket.repo, ticket.number, "claude")]
+
+
+def test_skipped_outside_window_is_a_heartbeat_outcome():
+    import heartbeat
+
+    assert "skipped-outside-window" in heartbeat.OUTCOMES

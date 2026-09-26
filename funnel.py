@@ -19,12 +19,14 @@ import contextlib
 import contextvars
 import copy
 from collections import namedtuple
+from concurrent.futures import ThreadPoolExecutor
 import errno
 import glob
 import hmac
 import inspect
 import io
 import json
+import math
 import os
 import pathlib
 import random
@@ -38,8 +40,8 @@ import threading
 import time
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
-from typing import (Any, Callable, Collection, Dict, Iterable, Iterator, List,
-                    Mapping, Optional, Sequence, Set, Tuple)
+from typing import (IO, Any, Callable, Collection, Dict, Iterable, Iterator,
+                    List, Mapping, Optional, Sequence, Set, Tuple)
 
 import agent_health as agent_health_module
 from agent_health import assess as assess_agent_health
@@ -54,6 +56,11 @@ PROJECT_NUMBER = 2
 TOPIC = "command-center"
 OWNERS = [("user", "nateprich"), ("organization", "nateprich-projects")]
 REPO = "nateprich-projects/command-center"
+
+# The begin path has several independent, read-only GitHub fetches after its
+# batched Project load. Keep their concurrency bounded so a large portfolio
+# cannot turn one opening command into an unbounded request burst.
+BEGIN_FETCH_POOL_SIZE = 4
 
 # The local checks deliberately keep their paths as module-level values. Tests
 # can point them at a temporary checkout and home directory without ever
@@ -93,6 +100,39 @@ CODEX_IMPLEMENT_VENDOR = {
         "a failure and never invoke begin again."
     ),
 }
+
+#: The same facts for Claude's Saturday implement lane (#1557). Claude runs as a
+#: Desktop scheduled task on the Mac mini, not in a sandbox, so the only rules
+#: are where helpers live and where the checkout and answer go.
+CLAUDE_IMPLEMENT_VENDOR = {
+    "path_spelling": (
+        "Invoke every Command Center helper through exactly "
+        "/Users/nateprich/.claude/command-center-run."
+    ),
+    "checkout": (
+        "Clone packet.repo into a fresh directory under the session's scratch "
+        "or temporary directory, never inside a Command Center checkout."
+    ),
+    "answer_handoff": (
+        "Write the one structured answer to a file outside the ticket "
+        "checkout, then invoke finish-ticket --agent claude from the checkout "
+        "with --run RUN --answer-file PATH."
+    ),
+}
+
+#: Claude implements only on Saturday mornings, spending what is left of the
+#: Anthropic week before it resets at noon local (usage.WEEKLY_RESET_*). No new
+#: work starts at or after 11:15, so a run, or an automatic resume after a
+#: usage-limit pause, cannot begin a ticket that would run into next week's
+#: allowance. The routine prompt stops in-flight work at 11:45. Nate, 2026-09-25
+#: (#1557).
+IMPLEMENT_VENDORS = {
+    "codex": CODEX_IMPLEMENT_VENDOR,
+    "claude": CLAUDE_IMPLEMENT_VENDOR,
+}
+
+CLAUDE_WINDOW_WEEKDAY = 5  # Monday is 0, so 5 is Saturday
+CLAUDE_WINDOW_LAST_START = (11, 15)
 
 # One small, shared shape for every doctor check. Later doctor tickets add
 # checks to the fixed list without changing the report contract.
@@ -301,6 +341,23 @@ LADDER = ["Investigate", "Broken", "Maintenance", "Improve", "New", "Replace"]
 #: `claim_ticket()` stays Broken-only: Maintenance may preempt ranking, not the
 #: cap (`test_maintenance_does_not_preempt_the_limit`).
 PREEMPTING_CLASSES = frozenset({"Broken", "Maintenance"})
+
+#: Repo tiers for the engineers' queue (Nate, 2026-09-25): 1 is the tooling
+#: that keeps everything else running, 2 has real-world impact, and every
+#: other member repo is a hobby at 3. Ranked below finite work and pins and
+#: above the Building commitment, so a hobby project already Building waits
+#: while higher-tier work is startable (plan.md, "Codex's work runs the
+#: ladder"). Keyed by repository name, without the owner.
+REPO_TIERS = {
+    "command-center": 1, "github-runners": 1, "workbench": 1,
+    "career-toolset": 2, "jeffy-finance-agent": 2,
+}
+HOBBY_TIER = 3
+
+
+def repo_tier(repo: str) -> int:
+    """A repository's tier; any repo not named in ``REPO_TIERS`` is a hobby."""
+    return REPO_TIERS.get(repo.rsplit("/", 1)[-1], HOBBY_TIER)
 PREEMPTING = {"Broken", "Maintenance"}
 
 #: Existing-work classes and finite investigations may take the unattended
@@ -697,7 +754,14 @@ class Item:
     block_comments_error: Optional[str] = None
     satisfied_block_record: Optional[Dict[str, object]] = None
     open_blockers: List[str] = field(default_factory=list)
+    # The shape packet can request the target idea's complete issue thread
+    # in the same GraphQL operation that loads Project items. Other funnel
+    # callers leave this unset and do not pay for comment reads.
+    issue_comments: Optional[List[Dict[str, object]]] = None
     dead_blockers: List[str] = field(default_factory=list)
+    # Complete native Issue.blockedBy refs from the Project item query.
+    # None means that the connection was missing, malformed, or truncated.
+    blocked_by_refs: Optional[List[str]] = None
     assignees: List[str] = field(default_factory=list)
     in_motion_since: Optional[datetime] = None
     item_id: Optional[str] = None  # the ProjectV2Item, needed to write the lock
@@ -1100,9 +1164,12 @@ TIERS = ("standard", "escalated")
 #: in-app automations; Muse judges and no longer implements (Nate,
 #: 2026-09-22, #1315). `scripts/muse-implement` stays as the reversal path:
 #: putting `muse` back here is the switch.
+#: Claude implements on Saturday mornings only (#1557); `begin` enforces the
+#: window. It takes the whole shared order, so ``None`` (untiered) is allowed.
 AGENTS_BY_ROLE = {
     "implement": {
         "codex": frozenset(TIERS),
+        "claude": frozenset(TIERS + (None,)),
     },
 }
 
@@ -1420,19 +1487,105 @@ def needs_nate_signals(plan_body: str) -> List[str]:
 
 
 def plan_is_escalated(plan_body: str) -> List[str]:
-    """Return escalation reasons found across the whole plan body.
+    """Return plan escalation reason names using the plan-only scan region."""
+    return [entry["reason"] for entry in plan_escalation_matches(plan_body)
+            if isinstance(entry.get("reason"), str)]
 
-    Plans have no separate ticket title, so the plan is passed as the body to
-    the shared escalation machinery. The empty-list result is the all-clear
-    used by the self-approval condition.
+
+_PLAN_ATX_HEADING_RE = re.compile(
+    r"^ {0,3}(?P<hashes>#{1,6})(?:[ \t]+(?P<title>.*?)|[ \t]*)$"
+)
+_PLAN_MALFORMED_ATX_RE = re.compile(
+    r"^ {0,3}(?:#{7,}|#{1,6}(?!#)\S).*$"
+)
+_PLAN_MALFORMED_REJECTED_RE = re.compile(
+    r"^ {0,3}#{1,6}(?!#)[ \t]*Rejected\b", re.IGNORECASE
+)
+_PLAN_REJECTED_INLINE_RE = re.compile(
+    r"[ \t]+\(rejected:[^\r\n]*\)[ \t]*$", re.IGNORECASE
+)
+
+
+def _plan_escalation_scan_text(plan_body: str) -> str:
+    """Remove plan-only rejected prose before using the shared word matcher.
+
+    A malformed Rejected heading or a malformed heading inside its section
+    makes the section boundary ambiguous. In that case keep the original body
+    intact so an uncertain parse cannot hide a scan hit.
     """
-    return escalation_reasons("", plan_body)
+    body = plan_body or ""
+    raw_lines = body.splitlines(keepends=True)
+    visible_lines = asserted_text(body).splitlines()
+    if len(visible_lines) > len(raw_lines):
+        return body
+    visible_lines.extend([""] * (len(raw_lines) - len(visible_lines)))
+
+    headings = []
+    malformed = []
+    rejected_sections = []
+    malformed_rejected = False
+    for index, line in enumerate(visible_lines):
+        match = _PLAN_ATX_HEADING_RE.match(line)
+        if match:
+            level = len(match.group("hashes"))
+            title = (match.group("title") or "").strip()
+            title = re.sub(r"[ \t]+#+[ \t]*$", "", title).strip()
+            headings.append((index, level, title))
+            if re.match(r"(?i)^rejected\b", title):
+                if level != 2 or title != "Rejected":
+                    malformed_rejected = True
+                else:
+                    rejected_sections.append(index)
+        elif _PLAN_MALFORMED_ATX_RE.match(line):
+            malformed.append(index)
+            if _PLAN_MALFORMED_REJECTED_RE.match(line):
+                malformed_rejected = True
+
+    if malformed_rejected or len(rejected_sections) > 1:
+        return body
+
+    start = rejected_sections[0] if rejected_sections else None
+    end = len(raw_lines)
+    if start is not None:
+        end = next((index for index, level, _ in headings
+                    if index > start and level <= 2), len(raw_lines))
+        if any(start < index < end for index in malformed):
+            return body
+
+    agent_decision_lines = set()
+    for section_start, level, title in headings:
+        if level != 2 or title != "Decided by the agent":
+            continue
+        section_end = next((index for index, next_level, _ in headings
+                            if index > section_start and next_level <= 2),
+                           len(raw_lines))
+        if any(section_start < index < section_end for index in malformed):
+            continue
+        agent_decision_lines.update(range(section_start + 1, section_end))
+
+    for index, line in enumerate(raw_lines):
+        content = line.rstrip("\r\n")
+        ending = line[len(content):]
+        if start is not None and start <= index < end:
+            raw_lines[index] = ending
+            continue
+        if index in agent_decision_lines:
+            content = _PLAN_REJECTED_INLINE_RE.sub(
+                lambda match: " " * len(match.group(0)), content
+            )
+        raw_lines[index] = content + ending
+    return "".join(raw_lines)
 
 
 def plan_escalation_matches(plan_body: str
                             ) -> List[Dict[str, Optional[str]]]:
-    """Return plan escalation reasons together with their matching lines."""
-    return escalation_matches("", plan_body)
+    """Return plan risks after excluding its recorded rejected alternatives.
+
+    Plan-section knowledge stays here; ticket text still uses the canonical
+    matcher unchanged. If a Rejected boundary cannot be parsed, the whole body
+    is scanned as written.
+    """
+    return escalation_matches("", _plan_escalation_scan_text(plan_body))
 
 
 def plan_needs_nate(plan_body: str) -> bool:
@@ -2199,6 +2352,15 @@ def startable(
         ref: ladder_index(klass)
         for ref, klass in queue_classes(items, descendants).items()
     }
+    # A ticket that blocks higher-tier work takes that tier, as it takes the
+    # class above: otherwise tier-1 work would wait on its own prerequisite.
+    effective_tier = {
+        ref: min(
+            repo_tier(by_ref[related].repo)
+            for related in {ref} | descendants[ref]
+        )
+        for ref in by_ref
+    }
     # Membership, not a rank threshold: a class added above Broken in LADDER
     # (#130's Investigate) must not acquire preemption rights by position.
     # plan.md grants them only to the finite classes named in
@@ -2254,13 +2416,17 @@ def startable(
     def key(item: Item):
         since = question_since(item) or datetime.max.replace(tzinfo=timezone.utc)
         return (
-            0 if pinned_ancestor(item) else 1,
             # Finite classes preempt in-flight work of unbounded ones — the half
             # of plan.md's rule this key never implemented until #435. Measured
             # 2026-09-09: six Broken projects at Ready sat behind ten in-flight
             # Improve tickets all afternoon. Read through `effective_rank` so a
-            # ticket that blocks a Broken one preempts with it.
+            # ticket that blocks a Broken one preempts with it. Finite work
+            # leads a pin (Nate, 2026-09-25).
             0 if preempting[item.ref] else 1,
+            0 if pinned_ancestor(item) else 1,
+            # Above the Building commitment: higher-tier work need not wait
+            # for a lower tier's in-flight project (Nate, 2026-09-25).
+            effective_tier[item.ref],
             not in_flight(item),
             effective_rank[item.ref],
             # A blocker with the same effective rank as its dependent still
@@ -2278,6 +2444,7 @@ def startable(
 
 def projected_pull_order(
     items: Sequence[Item], now: Optional[datetime] = None,
+    paused: Collection[str] = (),
 ) -> List[str]:
     """Every ticket's projected turn, found by running ``startable()`` forward.
 
@@ -2294,6 +2461,11 @@ def projected_pull_order(
     taken now. What never becomes startable (a future date, a reason with no
     reference, a blocker off the board, a missing Class) gets no turn and is
     absent from the list. The items are copied; nothing is written.
+
+    ``paused`` names tickets held by ``backoff_withheld`` after repeated
+    failed runs. The engineers will not take them before the hold lifts, so
+    they wait until everything available now has had its turn (Nate,
+    2026-09-25: a row must never claim a next step the engineers won't take).
     """
     sim = [copy.copy(item) for item in items]
     by_ref = {item.ref: item for item in sim}
@@ -2333,9 +2505,13 @@ def projected_pull_order(
             done.add(parent.ref)
 
     order: List[str] = []
+    held = {ref: {} for ref in paused}
     lift_blocks()
-    for _ in range(len(sim) + 1):
-        queue = startable(sim)
+    for _ in range(len(sim) + 2):
+        queue = startable(sim, backed_off=held)
+        if not queue and held:
+            held = {}
+            continue
         if not queue:
             break
         order.append(queue[0].ref)
@@ -2778,6 +2954,18 @@ def parse_self_approval(body: str) -> Optional[str]:
 def parse_verdict(body: str) -> Optional[Dict]:
     """The verdict carried by one comment, or None if it is not one."""
     return _marked_json(body, REVIEW_MARKER)
+
+
+def _verdict_from_comment(row: Mapping[str, object]) -> Optional[Dict]:
+    """Read a verdict and retain the timestamp of its GitHub comment."""
+    found = parse_verdict(str(row.get("body") or ""))
+    if found is None:
+        return None
+    verdict = dict(found)
+    created_at = row.get("createdAt") or row.get("created_at")
+    if isinstance(created_at, str) and created_at.strip():
+        verdict["comment_created_at"] = created_at
+    return verdict
 
 
 def parse_provenance(body: str) -> Optional[Dict]:
@@ -3440,7 +3628,7 @@ def latest_verdict(repo: str, pr) -> Optional[Dict]:
     rows = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
                      "--json", "comments") or {}).get("comments", [])
     for row in reversed(rows):
-        found = parse_verdict(row.get("body") or "")
+        found = _verdict_from_comment(row)
         if found:
             return found
     return None
@@ -3500,9 +3688,43 @@ def finished_by_comments(items: Sequence[Item]) -> Set[str]:
     return {ref for ref, (_, marker) in latest.items() if marker}
 
 
-def verdict_covers_head(verdict: Optional[Dict], head_oid: Optional[str]) -> bool:
-    """Whether a verdict judged exactly the commit that is the branch head now."""
-    return bool(verdict) and bool(head_oid) and verdict.get("head_sha") == head_oid
+def verdict_covers_head(
+    verdict: Optional[Dict],
+    head_oid: Optional[str],
+    pr_comments: Optional[Sequence[Mapping[str, object]]] = None,
+) -> bool:
+    """Whether a verdict still covers the branch's current head.
+
+    A requirement-unsure rejection stops covering after a later PR comment:
+    the new evidence needs a fresh judgement. All other verdicts keep their
+    existing same-head coverage. Missing timestamps or comment reads do not
+    establish that evidence arrived later, so they preserve current coverage.
+    """
+    if not verdict or not head_oid or verdict.get("head_sha") != head_oid:
+        return False
+    if verdict.get("verdict") != "rejected":
+        return True
+    blocking = verdict.get("blocking")
+    if not isinstance(blocking, (list, tuple)) or not any(
+        isinstance(reason, str)
+        and reason.startswith("requirement unsure:")
+        for reason in blocking
+    ):
+        return True
+
+    verdict_at = parse_time(verdict.get("comment_created_at"))
+    if verdict_at is None:
+        return True
+    for comment in pr_comments or ():
+        if not isinstance(comment, Mapping):
+            continue
+        created_at = comment.get("createdAt") or comment.get("created_at")
+        comment_at = parse_time(
+            created_at if isinstance(created_at, str) else None
+        )
+        if comment_at is not None and comment_at > verdict_at:
+            return False
+    return True
 
 
 def rejected_at_current_head(verdict: Optional[Dict], head_oid: Optional[str]) -> bool:
@@ -7284,20 +7506,52 @@ def check_member_repos(repos: Optional[Iterable[str]] = None) -> List[Check]:
 
 def repo_readiness_for_items(
     items: Iterable[Item],
+    *,
+    _executor=None,
 ) -> Dict[str, MemberRepoReadiness]:
     """Read onboarding and newest-run facts once per loaded repository."""
-    readiness: Dict[str, MemberRepoReadiness] = {}
-    for repo in sorted({item.repo for item in items}):
-        base = member_repo_readiness(repo)
-        state, annotation = latest_actions_run_probe(repo)
-        if state is not None:
-            base = replace(
-                base,
-                ci_state=state,
-                ci_annotation=annotation,
-            )
-        readiness[repo] = base
-    return readiness
+    repos = sorted({item.repo for item in items})
+    if _executor is None:
+        return {repo: _begin_repo_readiness(repo) for repo in repos}
+
+    # Submit independent repository reads to the caller's bounded begin pool.
+    # Collect in key order, not completion order, so both the mapping and the
+    # first reported failure are stable across runs.
+    futures = {
+        repo: _submit_begin_read(_executor, _begin_repo_readiness, repo)
+        for repo in repos
+    }
+    return {repo: futures[repo].result() for repo in repos}
+
+
+def _begin_repo_readiness(repo: str) -> MemberRepoReadiness:
+    """Read one repository's onboarding and newest-run facts."""
+    base = member_repo_readiness(repo)
+    state, annotation = latest_actions_run_probe(repo)
+    if state is not None:
+        base = replace(
+            base,
+            ci_state=state,
+            ci_annotation=annotation,
+        )
+    return base
+
+
+def _submit_begin_read(executor, function, *args):
+    """Submit a read while preserving the command's context variables."""
+    context = contextvars.copy_context()
+    return executor.submit(context.run, function, *args)
+
+
+def _timed_begin_pr_facts(items):
+    """Return a branch snapshot with the duration measured in its worker."""
+    started = time.perf_counter()
+    try:
+        return ticket_pr_facts(items), None, max(
+            0.0, time.perf_counter() - started
+        )
+    except GitHubError as exc:
+        return None, exc, max(0.0, time.perf_counter() - started)
 
 
 def _status_for_consistency(item: Item) -> str:
@@ -7769,6 +8023,7 @@ query($login: String!, $number: Int!, $cursor: String) {
               parent { number repository { nameWithOwner } }
               subIssuesSummary { total completed }
               blockedBy(first: 50) {
+                totalCount
                 nodes { number state stateReason repository { nameWithOwner } }
               }
             }
@@ -7779,6 +8034,117 @@ query($login: String!, $number: Int!, $cursor: String) {
   }
 }
 """ % PROJECT_ITEM_PAGE_SIZE
+
+
+SHAPE_ISSUE_COMMENTS_PAGE_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String!) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      comments(first: 100, after: $cursor) {
+        nodes { author { login } body createdAt }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
+def _item_query_with_shape_comments(repo: str, number: int) -> str:
+    """Add the target idea's first comment page to the Project item query."""
+    try:
+        owner, name = repo.split("/", 1)
+    except ValueError as exc:
+        raise GitHubError("invalid repository ref {}".format(repo)) from exc
+    if (not owner or not name or not isinstance(number, int)
+            or isinstance(number, bool) or number < 1):
+        raise GitHubError("invalid shape issue ref {}#{}".format(repo, number))
+    closing = ITEM_QUERY.rfind("\n}")
+    if closing < 0:
+        raise GitHubError("could not extend the Project item query")
+    issue_field = (
+        "\n  shapeIssue: repository(owner: {}, name: {}) {{\n"
+        "    issue(number: {}) {{\n"
+        "      comments(first: 100) {{\n"
+        "        nodes {{ author {{ login }} body createdAt }}\n"
+        "        pageInfo {{ hasNextPage endCursor }}\n"
+        "      }}\n"
+        "    }}\n"
+        "  }}\n"
+    ).format(json.dumps(owner), json.dumps(name), number)
+    return ITEM_QUERY[:closing] + issue_field + ITEM_QUERY[closing:]
+
+
+def _shape_issue_comments_from_response(
+    data: object, repo: str, number: int,
+) -> List[Dict[str, object]]:
+    """Read every issue comment, failing closed on an incomplete connection."""
+    repository = data.get("shapeIssue") if isinstance(data, dict) else None
+    issue = repository.get("issue") if isinstance(repository, dict) else None
+    connection = issue.get("comments") if isinstance(issue, dict) else None
+    comments: List[Dict[str, object]] = []
+    cursors = set()
+
+    def add_page(page: object) -> Tuple[bool, Optional[str]]:
+        if not isinstance(page, dict):
+            raise GitHubError(
+                "could not read comments for {}#{}".format(repo, number)
+            )
+        nodes = page.get("nodes")
+        page_info = page.get("pageInfo")
+        if (not isinstance(nodes, list) or not isinstance(page_info, dict)
+                or not isinstance(page_info.get("hasNextPage"), bool)):
+            raise GitHubError(
+                "could not read a complete comments connection for {}#{}".
+                format(repo, number)
+            )
+        for node in nodes:
+            if not isinstance(node, dict):
+                raise GitHubError(
+                    "could not read a complete comments connection for {}#{}".
+                    format(repo, number)
+                )
+            comments.append(node)
+        has_next = page_info["hasNextPage"]
+        cursor = page_info.get("endCursor")
+        if has_next and (not isinstance(cursor, str) or not cursor):
+            raise GitHubError(
+                "comments pagination is incomplete for {}#{}".
+                format(repo, number)
+            )
+        return has_next, cursor if isinstance(cursor, str) else None
+
+    if not isinstance(connection, dict):
+        raise GitHubError("could not read comments for {}#{}".format(
+            repo, number
+        ))
+    has_next, cursor = add_page(connection)
+    owner, name = repo.split("/", 1)
+    while has_next:
+        if cursor in cursors:
+            raise GitHubError(
+                "comments pagination did not advance for {}#{}".
+                format(repo, number)
+            )
+        cursors.add(cursor)
+        page_data = gh_graphql(
+            SHAPE_ISSUE_COMMENTS_PAGE_QUERY,
+            owner=owner, name=name, number=number, cursor=cursor,
+        )
+        page_repository = (
+            page_data.get("repository")
+            if isinstance(page_data, dict) else None
+        )
+        page_issue = (
+            page_repository.get("issue")
+            if isinstance(page_repository, dict) else None
+        )
+        page_connection = (
+            page_issue.get("comments") if isinstance(page_issue, dict) else None
+        )
+        has_next, cursor = add_page(page_connection)
+    return comments
 
 # The paged list is the cheap gate input. History and child timestamps are
 # fetched below only for the candidate items a caller has kept after its cheap
@@ -7950,7 +8316,7 @@ GRAPHQL_CALLERS = (
     "standard", "escalated", "publisher", "watch", "begin", "breakdown",
 )
 GRAPHQL_UNATTRIBUTED = "unattributed"
-_GRAPHQL_CALLER_SPEND: Dict[str, Dict[str, Optional[int]]] = {}
+_GRAPHQL_CALLER_SPEND: Dict[str, Dict[str, object]] = {}
 _ACTIVE_GRAPHQL_CALLER: contextvars.ContextVar = contextvars.ContextVar(
     "active_graphql_caller", default=GRAPHQL_UNATTRIBUTED
 )
@@ -8143,12 +8509,20 @@ def graphql_spend() -> Dict[str, object]:
     return dict(_GRAPHQL_SPEND)
 
 
-def graphql_caller_spend() -> Dict[str, Dict[str, Optional[int]]]:
-    """Snapshot this process's GraphQL points and headroom by caller."""
-    return {
-        caller: dict(values)
-        for caller, values in _GRAPHQL_CALLER_SPEND.items()
-    }
+def graphql_caller_spend() -> Dict[str, Dict[str, object]]:
+    """Snapshot this process's GraphQL readings and totals by caller."""
+    result = {}
+    for caller, values in _GRAPHQL_CALLER_SPEND.items():
+        readings = values.get("readings")
+        result[caller] = {
+            **values,
+            "readings": (
+                [dict(reading) for reading in readings
+                 if isinstance(reading, dict)]
+                if isinstance(readings, list) else []
+            ),
+        }
+    return result
 
 
 @contextlib.contextmanager
@@ -8243,8 +8617,18 @@ def graphql_caller_for_command(argv: Sequence[str], *,
     return _graphql_tier_caller(command_tier)
 
 
-def _record_graphql_caller_response(block: object) -> None:
-    """Record one response; unreadable costs are never charged to a caller."""
+def _graphql_response_timestamp() -> Optional[float]:
+    """Read a best-effort receipt time without gating a GraphQL response."""
+    try:
+        received_at = float(time.time())
+    except Exception:
+        return None
+    return received_at if math.isfinite(received_at) and received_at >= 0 else None
+
+
+def _record_graphql_caller_response(
+        block: object, received_at: Optional[float]) -> None:
+    """Record one response, including its window metadata and receipt time."""
     values = block if isinstance(block, dict) else {}
     cost = values.get("cost")
     cost_readable = (
@@ -8256,7 +8640,9 @@ def _record_graphql_caller_response(block: object) -> None:
 
     bucket = _GRAPHQL_CALLER_SPEND.get(caller)
     if bucket is None:
-        bucket = {"calls": 0, "points": 0, "remaining": None}
+        bucket = {
+            "calls": 0, "points": 0, "remaining": None, "readings": [],
+        }
         _GRAPHQL_CALLER_SPEND[caller] = bucket
     bucket["calls"] = int(bucket.get("calls") or 0) + 1
     if cost_readable:
@@ -8269,6 +8655,24 @@ def _record_graphql_caller_response(block: object) -> None:
     if (isinstance(remaining, int) and not isinstance(remaining, bool)
             and remaining >= 0):
         bucket["remaining"] = remaining
+
+    readings = bucket["readings"]
+    reset_at = values.get("resetAt")
+    reading = {
+        "cost": cost if cost_readable else None,
+        "remaining": (
+            remaining
+            if isinstance(remaining, int) and not isinstance(remaining, bool)
+            and remaining >= 0 else None
+        ),
+        "reset_at": (
+            reset_at.strip()
+            if isinstance(reset_at, str) and reset_at.strip() else None
+        ),
+        "received_at": received_at,
+    }
+    if isinstance(readings, list):
+        readings.append(reading)
 
 
 def _budget_exhaustion_signal() -> Optional[Tuple[int, str]]:
@@ -8449,9 +8853,10 @@ def gh_graphql(query: str, **variables) -> dict:
                 # Keep the GraphQL spend count aligned even when no child
                 # response exists to carry a rate-limit block.
                 _record_graphql_attempt()
-                _record_graphql_caller_response(None)
+                _record_graphql_caller_response(None, None)
                 raise
 
+            received_at = _graphql_response_timestamp()
             _record_graphql_attempt()
             stderr = _graphql_text(getattr(proc, "stderr", ""))
             stdout = getattr(proc, "stdout", "")
@@ -8477,7 +8882,7 @@ def gh_graphql(query: str, **variables) -> dict:
                     error_data.get("rateLimit")
                     if isinstance(error_data, dict) else None
                 )
-                _record_graphql_caller_response(error_block)
+                _record_graphql_caller_response(error_block, received_at)
                 if isinstance(error_data, dict):
                     _record_rate_limit(error_block)
                     if (isinstance(error_block, dict)
@@ -8509,7 +8914,7 @@ def gh_graphql(query: str, **variables) -> dict:
             try:
                 payload = json.loads(stdout)
             except (TypeError, ValueError) as exc:
-                _record_graphql_caller_response(None)
+                _record_graphql_caller_response(None, received_at)
                 error = GitHubError(
                     "malformed GraphQL response: {}".format(exc),
                     transient=True,
@@ -8521,7 +8926,7 @@ def gh_graphql(query: str, **variables) -> dict:
                 continue
 
             if not isinstance(payload, dict):
-                _record_graphql_caller_response(None)
+                _record_graphql_caller_response(None, received_at)
                 error = GitHubError(
                     "malformed GraphQL response: top-level JSON is not an object",
                     transient=True,
@@ -8539,7 +8944,7 @@ def gh_graphql(query: str, **variables) -> dict:
             # before handling errors so begin can classify that failure
             # without matching prose or an exit code.
             block = data.get("rateLimit") if isinstance(data, dict) else None
-            _record_graphql_caller_response(block)
+            _record_graphql_caller_response(block, received_at)
             if isinstance(data, dict):
                 _record_rate_limit(block)
                 if isinstance(block, dict) and block.get("remaining") == 0:
@@ -8624,6 +9029,32 @@ def _begin_load_timed(
         _record_begin_load_phase(
             timings, phase, time.perf_counter() - started
         )
+
+
+def _report_begin_phase_boundary(phase: str, started: float) -> None:
+    """Write a non-gating elapsed marker before a post-load begin phase.
+
+    Inside a session server, ``dispatch`` captures ``sys.stderr`` and returns
+    it only with the reply, so a begin that overruns the client's reply
+    budget would lose every marker it wrote. The markers exist for exactly
+    that fire (#1519), so there they go to the server's own stderr, which is
+    the runner's error log.
+    """
+    try:
+        elapsed = max(0.0, time.perf_counter() - started)
+        stream = sys.stderr
+        if os.environ.get(SESSION_SERVER_ENV) and sys.__stderr__ is not None:
+            stream = sys.__stderr__
+        print(
+            "begin_review_phase phase={} elapsed_seconds={:.6f}".format(
+                phase, elapsed,
+            ),
+            file=stream,
+            flush=True,
+        )
+    except Exception:
+        # Instrumentation must not gate the command it instruments.
+        return
 
 
 def member_repos(
@@ -8770,6 +9201,46 @@ def _apply_item_detail_fields(
         _apply_item_timeline_fields(item, content)
 
 
+def _blocked_by_refs_from_connection(connection: object) -> Optional[List[str]]:
+    """Return complete native blocker refs, or None when unreadable.
+
+    A partial connection cannot prove an edge is absent, so callers that use
+    this list to avoid a duplicate write must fail closed on None.
+    """
+    if not isinstance(connection, dict):
+        return None
+    nodes = connection.get("nodes")
+    total = connection.get("totalCount")
+    if (
+        not isinstance(nodes, list)
+        or not isinstance(total, int)
+        or isinstance(total, bool)
+        or total < 0
+        or total != len(nodes)
+    ):
+        return None
+    refs = []
+    for blocker in nodes:
+        if not isinstance(blocker, dict):
+            return None
+        number = blocker.get("number")
+        repository = blocker.get("repository")
+        repo = (
+            repository.get("nameWithOwner")
+            if isinstance(repository, dict) else None
+        )
+        if (
+            not isinstance(number, int)
+            or isinstance(number, bool)
+            or number < 1
+            or not isinstance(repo, str)
+            or not repo.strip()
+        ):
+            return None
+        refs.append("{}#{}".format(repo, number))
+    return refs
+
+
 def _from_node(node: dict) -> Optional[Item]:
     content = node.get("content") or {}
     if not content.get("number"):
@@ -8806,6 +9277,9 @@ def _from_node(node: dict) -> Optional[Item]:
         closed_at=parse_time(content.get("closedAt")),
         item_id=node.get("id"),
         in_motion_since=parse_time((node.get("lock") or {}).get("text")),
+        blocked_by_refs=_blocked_by_refs_from_connection(
+            content.get("blockedBy")
+        ),
     )
     # Keep fixture and caller-supplied full nodes compatible while the live
     # paged query stays compact. A targeted read can apply these fields again.
@@ -8901,6 +9375,7 @@ def load_items(
     include_details: bool = True,
     member_repo_names: Optional[Sequence[str]] = None,
     timings: Optional[Dict[str, object]] = None,
+    shape_issue: Optional[Tuple[str, int]] = None,
 ) -> List[Item]:
     global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     members = set(
@@ -8910,6 +9385,7 @@ def load_items(
     )
     items: List[Item] = []
     cursor = None
+    shape_comments: Optional[List[Dict[str, object]]] = None
     project_started = time.perf_counter() if timings is not None else None
     block_comment_seconds = 0.0
     try:
@@ -8918,7 +9394,15 @@ def load_items(
             if cursor:
                 variables["cursor"] = cursor
             _PROJECT_ITEM_PAGE_COUNT += 1
-            project = gh_graphql(ITEM_QUERY, **variables)["user"]["projectV2"]
+            query = ITEM_QUERY
+            if shape_issue is not None and cursor is None:
+                query = _item_query_with_shape_comments(*shape_issue)
+            response = gh_graphql(query, **variables)
+            if shape_issue is not None and cursor is None:
+                shape_comments = _shape_issue_comments_from_response(
+                    response, *shape_issue
+                )
+            project = response["user"]["projectV2"]
             if project is None:
                 raise GitHubError(
                     "Project {}/{} not found or not visible".format(
@@ -8961,6 +9445,16 @@ def load_items(
             _record_begin_load_phase(
                 timings, "block_comments", block_comment_seconds
             )
+    if shape_issue is not None:
+        if shape_comments is None:
+            raise GitHubError(
+                "could not read comments for {}#{}".format(*shape_issue)
+            )
+        target_ref = "{}#{}".format(*shape_issue)
+        for item in items:
+            if item.ref == target_ref:
+                item.issue_comments = shape_comments
+                break
     if include_details:
         _begin_load_timed(
             timings, "item_details", lambda: hydrate_item_details(items)
@@ -9186,6 +9680,8 @@ def _dashboard_ticket(
     queue_class: Optional[str] = None,
     unblocks: Sequence[str] = (),
     unblocks_later: Sequence[str] = (),
+    paused: Optional[Mapping[str, object]] = None,
+    finished: bool = False,
 ) -> Dict[str, object]:
     """One ticket row for the dashboard, with its PR, tier and owner flags.
 
@@ -9255,6 +9751,13 @@ def _dashboard_ticket(
         owner: Optional[str] = None
     elif blocked:
         owner = None
+    elif finished:
+        # Its comments record it done: closing it is Nate's move.
+        owner = OWNER_NATE
+    elif paused:
+        # Held after repeated failed runs; nobody takes it before the hold
+        # lifts, and the page says until when.
+        owner = None
     elif needs not in NEEDS_OPTIONS:
         owner = None
     elif needs == "claude-code-environment":
@@ -9310,7 +9813,25 @@ def _dashboard_ticket(
             list(unblocks_later) if item.state == "OPEN" else []
         ),
         "human_step": needs if needs in ("human", "claude-code-environment") else None,
+        # Engine holds the Project fields do not show (Nate, 2026-09-25).
+        "paused_until": _dashboard_paused_until(paused),
+        "paused_failures": (
+            paused.get("failures") if isinstance(paused, Mapping) else None
+        ),
+        "finished_by_comments": bool(finished),
     }
+
+
+def _dashboard_paused_until(
+    paused: Optional[Mapping[str, object]]
+) -> Optional[str]:
+    """When a backoff hold lifts, as ISO text, or None when not paused."""
+    if not isinstance(paused, Mapping):
+        return None
+    until = paused.get("until")
+    if isinstance(until, datetime):
+        return until.isoformat()
+    return str(until) if until else None
 
 
 def _block_refs(item: Item) -> List[Optional[str]]:
@@ -9368,6 +9889,11 @@ def _dashboard_item(
         # block is on the project or on every open ticket. The page reads
         # "Blocked" where the owner would be (Nate, 2026-09-24).
         "next_step_blocked": bool(next_step_blocked),
+        # Nothing else on the project can move while a ticket waits out a
+        # backoff hold: the page reads "Paused" and says until when.
+        "next_step_paused_until": _dashboard_next_paused(
+            tickets or (), next_step_blocked
+        ),
         "blocked": bool(item.is_blocked),
         "blockers": list(item.block_references) if item.is_blocked else [],
         "block_reason": (
@@ -9540,6 +10066,20 @@ def _dashboard_pips(
     return bar
 
 
+def _dashboard_next_paused(
+    tickets: Sequence[Mapping[str, object]], next_step_blocked: bool,
+) -> Optional[str]:
+    """The earliest hold's end when a backoff hold is all that stops the
+    project's next step, else None."""
+    if next_step_blocked or _dashboard_next_owner(tickets):
+        return None
+    holds = sorted(
+        str(ticket["paused_until"]) for ticket in tickets
+        if ticket.get("state") == "OPEN" and ticket.get("paused_until")
+    )
+    return holds[0] if holds else None
+
+
 def _dashboard_next_owner(
     tickets: Sequence[Mapping[str, object]]
 ) -> Optional[str]:
@@ -9556,6 +10096,7 @@ def dashboard_board(
     pr_facts: Optional[Mapping[str, Optional[Mapping[str, object]]]] = None,
     pr_facts_known: Optional[bool] = None,
     authoring_pr_agents: Optional[Mapping[str, Iterable[str]]] = None,
+    backed_off: Optional[Mapping[str, Mapping[str, object]]] = None,
 ) -> Dict[str, List[Dict[str, object]]]:
     """Build the ordered parent-project board for one already-loaded brief.
 
@@ -9565,8 +10106,15 @@ def dashboard_board(
     project. Work the projection never reaches follows in gate order, with
     anything that cannot move below what can. `Done` is newest-first. The
     order is `startable()`'s throughout — this function never invents a rank.
+
+    ``backed_off`` is ``backoff_withheld``'s mapping, read from the local
+    heartbeat by the caller. With the tickets finished by comments, these are
+    the holds the engineers honour that the Project fields do not show, so
+    the rows name them rather than a next step nobody will take.
     """
     rows = list(items)
+    paused_rows = dict(backed_off or {})
+    finished: Set[str] = set()
     by_ref = {item.ref: item for item in rows}
     done_cutoff = now - DASHBOARD_DONE_WINDOW
     max_time = datetime.max.replace(tzinfo=timezone.utc)
@@ -9599,7 +10147,8 @@ def dashboard_board(
         # Match what `cmd_next` withholds, so the rank shown is the rank the
         # engineers actually use: work already in review, and work finished by
         # comments and waiting on Nate to close.
-        withheld = set(in_review) | set(finished_by_comments(rows))
+        finished = set(finished_by_comments(rows))
+        withheld = set(in_review) | finished
         queue = startable(rows, awaiting_review=withheld)
     except Exception:
         # The board is instrumentation: an ordering failure must not cost the
@@ -9625,7 +10174,9 @@ def dashboard_board(
         # The board's order for work in motion: each ticket's projected turn.
         turn = {
             ref: index
-            for index, ref in enumerate(projected_pull_order(rows, now))
+            for index, ref in enumerate(
+                projected_pull_order(rows, now, paused=paused_rows)
+            )
         }
     except Exception:
         turn = {}
@@ -9717,6 +10268,8 @@ def dashboard_board(
                     and by_ref.get(ref) is not None
                     and by_ref[ref].state == "OPEN"
                 ),
+                paused_rows.get(child.ref) if child.state == "OPEN" else None,
+                child.ref in finished and child.state == "OPEN",
             )
             for child in sorted(siblings_of, key=ticket_key)
         ]
@@ -13900,7 +14453,7 @@ def _latest_verdict_from_comments(comments: object) -> Optional[Dict]:
     for row in reversed(comments):
         if not isinstance(row, dict):
             continue
-        found = parse_verdict(row.get("body") or "")
+        found = _verdict_from_comment(row)
         if found:
             return found
     return None
@@ -14136,6 +14689,7 @@ def ticket_pr_facts(
 def review_queue(
     items: Sequence[Item], tier: Optional[str] = None,
     pr_facts: Optional[Mapping[str, Optional[Dict[str, object]]]] = None,
+    output_stream: Optional[IO[str]] = None,
 ) -> List[Dict]:
     """Open ticket PRs that need a review, best-first.
 
@@ -14185,6 +14739,7 @@ def review_queue(
                             "ci": "unknown",
                             "head_sha": head_sha,
                         },
+                        output_stream=output_stream,
                     )
                 continue
             if checks_still_running(row.get("statusCheckRollup")):
@@ -14195,7 +14750,9 @@ def review_queue(
                 # the next tick reconsiders, because nothing was recorded.
                 continue
             verdict = _row_verdict(row, repo)
-            if verdict_covers_head(verdict, row.get("headRefOid")):
+            if verdict_covers_head(
+                verdict, row.get("headRefOid"), row.get("comments")
+            ):
                 continue  # this exact diff has already been judged
             recorded_risk = getattr(ticket, "risk", None)
             needed = (
@@ -14611,15 +15168,15 @@ def reconcile_approved_merges(
                         if row.get("number") == candidate["pr"]:
                             fact = row
                             break
-                code = _call_with_optional_keyword(
+                code = _call_with_optional_keywords(
                     cmd_merge,
-                    "pr_fact",
-                    fact,
                     items,
                     now,
                     candidate["repo"],
                     candidate["pr"],
                     True,
+                    pr_fact=fact,
+                    output_stream=sys.stderr,
                 )
         except GitHubError as exc:
             code = None
@@ -14786,6 +15343,25 @@ def begin_detail_candidates(
     return [item for item in items if item.ref in found]
 
 
+def _local_time(now: datetime) -> datetime:
+    """``now`` on this Mac's clock, the zone the weekly reset is kept in."""
+    return now.astimezone()
+
+
+def claude_window_refusal(local: datetime) -> Optional[str]:
+    """Why a Claude run may not start now, or None inside the window."""
+    hour, minute = CLAUDE_WINDOW_LAST_START
+    if local.weekday() != CLAUDE_WINDOW_WEEKDAY:
+        return ("Claude works Saturdays only, before {:02d}:{:02d} "
+                "(#1557); it is {}".format(hour, minute,
+                                           local.strftime("%A %H:%M")))
+    if (local.hour, local.minute) >= (hour, minute):
+        return ("Claude starts no work at or after {:02d}:{:02d} on "
+                "Saturday, before the noon reset (#1557); it is {}".format(
+                    hour, minute, local.strftime("%H:%M")))
+    return None
+
+
 def _begin_preflight(
     now: datetime, agent: str, idle: bool, tier: Optional[str] = None
 ) -> Tuple[Dict[str, object], Optional[Dict[str, object]]]:
@@ -14829,6 +15405,18 @@ def _begin_preflight(
                     # The identity record is diagnostic. Its absence can only
                     # leave a later event wait uncleared; it must not stop work.
                     pass
+
+    if agent == "claude":
+        # The Saturday lane runs until the clock or the provider's own limit
+        # stops it. By Nate's direction it reads and estimates no budget
+        # (2026-09-25, #1557), so the window is its only local gate.
+        refusal = claude_window_refusal(_local_time(now))
+        if refusal is not None:
+            out.update(gate="time", do="stop", why=refusal)
+            return out, None
+        out.update(gate="ok", unmetered=True)
+        return out, {"source": "claude", "captured_at": now.timestamp(),
+                     "unmetered": True, "windows": {}}
 
     reading = usage.read_agent(agent, now.timestamp())
     if reading is None:
@@ -15075,6 +15663,12 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                   Tuple[Dict[str, object], Optional[Dict[str, object]]]
               ] = None,
               timings: Optional[Dict[str, object]] = None,
+              _pr_facts: Optional[
+                  Mapping[str, Optional[Dict[str, object]]]
+              ] = None,
+              _pr_facts_error: Optional[GitHubError] = None,
+              _pr_facts_elapsed: Optional[float] = None,
+              _phase_started: Optional[float] = None,
               ) -> int:
     """Start a run and say what — if anything — there is to do. One call.
 
@@ -15092,6 +15686,9 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import heartbeat
 
+    phase_started = (
+        _phase_started if _phase_started is not None else time.perf_counter()
+    )
     if _preflight is None:
         _preflight = _begin_preflight(now, agent, idle, tier)
     out, reading = _preflight
@@ -15106,9 +15703,14 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         print(json.dumps(out, indent=2))
         return 0
 
-    if _detail_loader is not None and not begin_uses_ticket_path(
-        agent, tier, caller_role
-    ):
+    ticket_path = begin_uses_ticket_path(agent, tier, caller_role)
+
+    def review_phase_boundary(phase: str) -> None:
+        if not ticket_path:
+            _report_begin_phase_boundary(phase, phase_started)
+
+    review_phase_boundary("detail_hydration")
+    if _detail_loader is not None and not ticket_path:
         candidates = begin_detail_candidates(items, breakdown)
         if candidates:
             _detail_loader(candidates)
@@ -15133,9 +15735,16 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     # Keeping it here prevents the approved-merge pass, engineer hand-back, and
     # reviewer queue from each paying for the same repository fan-out.
     try:
-        pr_facts = _begin_load_timed(
-            timings, "ticket_pr_facts", lambda: ticket_pr_facts(items)
-        )
+        if not ticket_path:
+            review_phase_boundary("ticket_pr_facts")
+        if _pr_facts_error is not None:
+            raise _pr_facts_error
+        if _pr_facts is not None:
+            pr_facts = _pr_facts
+        else:
+            pr_facts = _begin_load_timed(
+                timings, "ticket_pr_facts", lambda: ticket_pr_facts(items)
+            )
     except GitHubError as exc:
         out.update(
             do="stop",
@@ -15144,29 +15753,40 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         )
         print(json.dumps(out, indent=2))
         return 0
+    finally:
+        if _pr_facts_elapsed is not None:
+            _record_begin_load_phase(
+                timings, "ticket_pr_facts", _pr_facts_elapsed
+            )
 
+    review_phase_boundary("reconcile_approved_merges")
     reconciled_merges = attempt_reconcile(
         "approved_merges", reconcile_approved_merges, items, now, pr_facts)
     if reconciled_merges:
         out["reconciled_merges"] = reconciled_merges
 
+    review_phase_boundary("reconcile_auto_closeable_projects")
     auto_closed = attempt_reconcile(
         "auto_closeable_projects", reconcile_auto_closeable_projects, items)
     if auto_closed:
         out["auto_closed"] = auto_closed
 
+    review_phase_boundary("reconcile_closed_items")
     reconciled_statuses = attempt_reconcile(
         "closed_items", reconcile_closed_items, items)
     if reconciled_statuses:
         out["reconciled_statuses"] = reconciled_statuses
+    review_phase_boundary("reconcile_parked_wakes")
     woke_parked = attempt_reconcile(
         "parked_wakes", reconcile_parked_wakes, items, now)
     if woke_parked:
         out["woke_parked"] = woke_parked
+    review_phase_boundary("reconcile_closed_claims")
     released_claims = attempt_reconcile(
         "closed_claims", reconcile_closed_claims, items)
     if released_claims:
         out["released_claims"] = released_claims
+    review_phase_boundary("reconcile_orphaned_starts")
     orphaned = attempt_reconcile(
         "orphaned_starts", reconcile_orphaned_starts, items, now)
     if orphaned:
@@ -15323,7 +15943,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     do="ticket",
                     work=item_json(ticket, now, {i.ref: i for i in items}),
                 )
-                if agent == "codex":
+                if agent in IMPLEMENT_VENDORS:
                     # Bind immediately after the claim, before the packet's
                     # slower ticket/plan/verdict reads. A process abandoned
                     # during that load is then attributable and recoverable by
@@ -15350,14 +15970,16 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                             ),
                         )
                     else:
-                        out["vendor"] = CODEX_IMPLEMENT_VENDOR
+                        out["vendor"] = IMPLEMENT_VENDORS[agent]
         if "bound" not in out:
             _bind_run(agent, out)
         print(json.dumps(out, indent=2))
         return 0
 
-    queue = _call_with_optional_keyword(
-        review_queue, "pr_facts", pr_facts, items, tier
+    review_phase_boundary("review_queue")
+    queue = _call_with_optional_keywords(
+        review_queue, items, tier, pr_facts=pr_facts,
+        output_stream=sys.stderr,
     )
     # The fixed job order remains the tiebreak within a class group, but a
     # finite preempting class can cross stages. Build one candidate for each
@@ -15380,6 +16002,7 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     # Finish plans that already qualify for unattended approval before the
     # shape queue looks for another Idea. Updating the shared Items first also
     # lets the Ready plan enter this pass's breakdown queue.
+    review_phase_boundary("self_approvals")
     self_approved, self_approval_errors = sweep_shaped_self_approvals(
         items, now, run=out.get("run"), agent=agent
     )
@@ -15388,13 +16011,16 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if self_approval_errors:
         out["shaped_self_approval_errors"] = self_approval_errors
 
+    review_phase_boundary("breakdown_queue")
     pending = awaiting_breakdown(items) if breakdown else []
+    review_phase_boundary("shape_queue")
     shape_item = shapeable_idea(items, tier, reading)
     review = _queue_candidate(queue, review_class_of)
     breakdown_item = _queue_candidate(
         pending, lambda entry: getattr(entry, "klass", None))
     candidates: List[Tuple[int, int, str, object]] = []
 
+    review_phase_boundary("candidate_selection")
     if review is not None:
         review_item = by_ref.get(review.get("ref"))
         review_class = (
@@ -15461,10 +16087,12 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                  if breakdown else "nothing to review"),
         )
 
+    review_phase_boundary("reserve_gate")
     reserve = _reserve_verdict(out.get("do"))
     if reserve is not None:
         out.update(reserve)
         _record_begin_reserve(agent, out.get("run"), out["why"])
+    review_phase_boundary("run_binding")
     _bind_run(agent, out)
     print(json.dumps(out, indent=2))
     return 0
@@ -15700,7 +16328,8 @@ def cmd_review(repo: Optional[str], pr: int, verdict: str, ci: str,
 def _write_verdict(repo: str, pr: int, sha: str, verdict: str, ci: str,
                    blocking: List[str], note: Optional[str],
                    run: Optional[str] = None,
-                   agent: Optional[str] = None) -> int:
+                   agent: Optional[str] = None,
+                   output_stream: Optional[IO[str]] = None) -> int:
     """Write the one structured verdict artifact shared by models and gates."""
 
     body = {
@@ -15725,7 +16354,8 @@ def _write_verdict(repo: str, pr: int, sha: str, verdict: str, ci: str,
     if out.returncode != 0:
         raise GitHubError(out.stderr.strip())
     print("recorded {} on PR #{} against {} in {}".format(
-        verdict, pr, sha[:12], repo))
+        verdict, pr, sha[:12], repo),
+        file=output_stream if output_stream is not None else sys.stdout)
     return 0
 
 
@@ -15754,6 +16384,7 @@ def _record_unmergeable_rejection(
     repo: str, pr: int, pr_fact: Optional[Mapping[str, object]] = None,
     *, candidate_verdict: Optional[Mapping[str, object]] = None,
     items: Optional[Sequence[Item]] = None,
+    output_stream: Optional[IO[str]] = None,
 ) -> None:
     """Record a deterministic rejection for a conflicting current head.
 
@@ -15796,9 +16427,11 @@ def _record_unmergeable_rejection(
         and current.get("blocking") == [reason]
     )
     if not already_canonical:
-        _write_verdict(
+        _call_with_optional_keywords(
+            _write_verdict,
             repo, pr, sha, "rejected", "unknown", [reason], None,
             agent=MERGE_GATE_AGENT,
+            output_stream=output_stream,
         )
 
     # Hand the ticket back when this head is rejected for its conflict. If a
@@ -16194,6 +16827,7 @@ def merge_blockers(
 def cmd_merge(
     items: List[Item], now: datetime, repo: Optional[str], pr: int,
     confirmed: bool, pr_fact: Optional[Mapping[str, object]] = None,
+    *, output_stream: Optional[IO[str]] = None,
 ) -> int:
     """Merge a PR, but only when every condition holds.
 
@@ -16213,7 +16847,8 @@ def cmd_merge(
     if why:
         if any(_is_conflicting_branch_blocker(reason) for reason in why):
             _record_unmergeable_rejection(
-                repo, pr, pr_fact=gate_fact, items=items
+                repo, pr, pr_fact=gate_fact, items=items,
+                output_stream=output_stream,
             )
         print("refusing to merge PR #{}:".format(pr), file=sys.stderr)
         for reason in why:
@@ -16939,9 +17574,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
     # the Project. Keep that gate ahead of the shared loader; an ordinary poll
     # must not spend the full Project read merely to learn that it cannot run.
     begin_preflight = None
+    begin_phase_started: Optional[float] = None
     begin_timings: Optional[Dict[str, object]] = None
     begin_member_repo_names: Optional[List[str]] = None
     if args.command == "begin":
+        begin_phase_started = time.perf_counter()
         begin_preflight = _begin_preflight(
             now, args.agent, args.idle, args.tier)
         if begin_preflight[1] is None:
@@ -17089,20 +17726,42 @@ def main(argv: Optional[Sequence[str]] = None, *,
 
     try:
         repo_readiness = None
-        if (
-            args.command in ("next", "queue")
-            or (
-                args.command == "begin"
-                and begin_uses_ticket_path(
-                    args.agent, args.tier, args.caller_role
-                )
-            )
-        ):
+        begin_pr_facts = None
+        begin_pr_facts_error = None
+        begin_pr_facts_elapsed = None
+        if args.command in ("next", "queue"):
             repo_readiness = _begin_load_timed(
                 begin_timings,
                 "repo_readiness",
                 lambda: repo_readiness_for_items(items),
             )
+        elif (
+            args.command == "begin"
+            and begin_uses_ticket_path(
+                args.agent, args.tier, args.caller_role
+            )
+        ):
+            repos = sorted({item.repo for item in items})
+            pool_size = min(BEGIN_FETCH_POOL_SIZE, len(repos) + 1)
+            with ThreadPoolExecutor(max_workers=pool_size) as executor:
+                pr_facts_future = _submit_begin_read(
+                    executor, _timed_begin_pr_facts, items
+                )
+                repo_readiness = _begin_load_timed(
+                    begin_timings,
+                    "repo_readiness",
+                    lambda: _call_with_optional_keyword(
+                        repo_readiness_for_items,
+                        "_executor",
+                        executor,
+                        items,
+                    ),
+                )
+                (
+                    begin_pr_facts,
+                    begin_pr_facts_error,
+                    begin_pr_facts_elapsed,
+                ) = pr_facts_future.result()
         if args.command == "claim":
             return cmd_claim(
                 items, now, args.ref, pr_facts=ticket_pr_facts(items)
@@ -17159,6 +17818,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 "repo_readiness": repo_readiness,
                 "caller_role": args.caller_role,
             }
+            if begin_phase_started is not None and _accepts_keyword(
+                cmd_begin, "_phase_started"
+            ):
+                begin_kwargs["_phase_started"] = begin_phase_started
             if begin_detail_loader is not None:
                 begin_kwargs["_detail_loader"] = begin_detail_loader
             begin_kwargs["_preflight"] = begin_preflight
@@ -17166,6 +17829,12 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 cmd_begin, "timings"
             ):
                 begin_kwargs["timings"] = begin_timings
+            if begin_pr_facts_elapsed is not None:
+                begin_kwargs.update(
+                    _pr_facts=begin_pr_facts,
+                    _pr_facts_error=begin_pr_facts_error,
+                    _pr_facts_elapsed=begin_pr_facts_elapsed,
+                )
             return cmd_begin(
                 items, now, args.agent, args.tier, args.idle,
                 args.breakdown, **begin_kwargs
@@ -17349,12 +18018,19 @@ def main(argv: Optional[Sequence[str]] = None, *,
                         for fact in pr_facts.values()
                     ):
                         authoring_pr_agents = _dashboard_authoring_pr_agents()
+                    try:
+                        # The same holds `cmd_next` honours, from the local
+                        # heartbeat; the board is not worth failing over them.
+                        backed_off = backoff_withheld(_backoff_rows(), now)
+                    except Exception:
+                        backed_off = {}
                     write_dashboard_snapshot(
                         brief_payload,
                         dashboard_board(
                             items, now, pr_facts=pr_facts,
                             pr_facts_known=not pr_facts_missing,
                             authoring_pr_agents=authoring_pr_agents,
+                            backed_off=backed_off,
                         ),
                         generated_at,
                         usage={

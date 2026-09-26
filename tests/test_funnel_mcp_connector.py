@@ -1,4 +1,4 @@
-"""The general-chat MCP surface is limited to its four gate adapters."""
+"""The general-chat MCP surface is limited to its read and gate adapters."""
 
 from __future__ import annotations
 
@@ -41,6 +41,11 @@ class FakeStaticTokenVerifier:
         self.options = kwargs
 
 
+class FakeRemoteAuthProvider:
+    def __init__(self, **kwargs):
+        self.options = kwargs
+
+
 def _module(name, *, package=False, **attributes):
     value = types.ModuleType(name)
     if package:
@@ -55,12 +60,10 @@ def connector_server(monkeypatch):
     fake_modules = {
         "fastmcp": _module("fastmcp", package=True, FastMCP=FakeFastMCP),
         "fastmcp.server": _module("fastmcp.server", package=True),
-        "fastmcp.server.auth": _module("fastmcp.server.auth", package=True),
-        "fastmcp.server.auth.providers": _module(
-            "fastmcp.server.auth.providers", package=True
-        ),
-        "fastmcp.server.auth.providers.jwt": _module(
-            "fastmcp.server.auth.providers.jwt",
+        "fastmcp.server.auth": _module(
+            "fastmcp.server.auth",
+            package=True,
+            RemoteAuthProvider=FakeRemoteAuthProvider,
             StaticTokenVerifier=FakeStaticTokenVerifier,
         ),
         "starlette": _module("starlette", package=True),
@@ -79,7 +82,7 @@ def connector_server(monkeypatch):
         sys.modules["funnel_mcp.server"] = prior_server
 
 
-def test_server_registers_only_the_four_permitted_gate_tools(
+def test_server_registers_only_the_read_and_gate_tools(
     connector_server,
 ):
     server = connector_server.build_server(
@@ -88,7 +91,13 @@ def test_server_registers_only_the_four_permitted_gate_tools(
         )
     )
 
-    assert set(server.tools) == {"approve", "start", "accept", "park"}
+    assert set(server.tools) == {
+        "brief", "ideas", "show", "queue",
+        "approve", "start", "accept", "park",
+    }
+    assert not set(server.tools) & {
+        "next", "claim", "release", "gate", "heartbeat", "merge",
+    }
 
 
 def test_tools_forward_verbatim_instruction_and_supported_arguments(
@@ -108,14 +117,14 @@ def test_tools_forward_verbatim_instruction_and_supported_arguments(
     monkeypatch.setattr(connector_server.subprocess, "run", run)
     instruction = "  Accept the finished work.\nKeep this wording.  "
 
-    assert server.tools["approve"]("owner/repo#1", instruction) == "gate updated"
-    assert server.tools["start"]("owner/repo#2", instruction) == "gate updated"
+    assert server.tools["approve"]("owner/repo#1", instruction) == "gate updated\n"
+    assert server.tools["start"]("owner/repo#2", instruction) == "gate updated\n"
     assert server.tools["accept"](
         "owner/repo#3", instruction, no_tickets=True
-    ) == "gate updated"
+    ) == "gate updated\n"
     assert server.tools["park"](
         "owner/repo#4", "Pause this work", instruction
-    ) == "gate updated"
+    ) == "gate updated\n"
 
     commands = [call[0][2:] for call in calls]
     assert commands == [
@@ -131,13 +140,10 @@ def test_tools_forward_verbatim_instruction_and_supported_arguments(
         ],
     ]
     assert all(
-        call[0][:2] == [connector_server.sys.executable,
-                        str(connector_server.FUNNEL_PATH)]
+        call[0][:2] == [connector_server.sys.executable, str(ROOT / "funnel.py")]
         for call in calls
     )
-    assert all(
-        call[1]["cwd"] == str(connector_server.REPO_ROOT) for call in calls
-    )
+    assert all(call[1]["cwd"] == ROOT for call in calls)
     assert all("shell" not in call[1] for call in calls)
 
 

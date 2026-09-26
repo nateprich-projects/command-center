@@ -98,10 +98,18 @@ def test_derive_row_covers_plan_metrics_and_preserves_rate_pairs():
         "usage.py read_muse windows.seven_day.trailing_72h_dollars / "
         "(MUSE_RATE_LOOKBACK / 86400)"
     )
+    assert row["metrics"]["D"]["D1"]["window_resets_at"]["value"] == metrics._iso(
+        datetime.fromtimestamp(1790308800, tz=timezone.utc)
+    )
     assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["value"]["funnel_tokens"] == 140
     assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["funnel_share"]["numerator"] == 140
     assert row["metrics"]["D"]["D2"]["funnel_vs_personal"]["funnel_share"]["denominator"] == 170
     assert row["metrics"]["D"]["D5"]["graphql_points_per_run"]["value"]["codex"]["graphql_points"]["value"] == 5
+    assert row["metrics"]["D"]["D5"]["graphql_points_per_run"]["value"]["codex"]["points_per_run"] == {
+        "numerator": 5,
+        "denominator": 1,
+        "source": "heartbeat.finish.api_cost.graphql_points / finished runs",
+    }
     assert row["metrics"]["D"]["D6"]["held_hours_by_agent_and_reason"]["muse"]["over_pace"]["value"] == 1200 / 3600.0
     assert row["metrics"]["D"]["D5"]["points_per_brief"]["value"] == 21
     assert row["metrics"]["D"]["D5"]["gh_calls_per_brief"]["value"] == 8
@@ -465,9 +473,22 @@ def test_series_accepts_the_complete_derived_hourly_schema():
     row = metrics.derive_row(
         snapshot, ledgers, usage, outcomes, NOW, commits, lines
     )
+    newer_row = dict(row, hour="2026-09-23T05:00:00Z")
+    newer_metrics = {group: dict(values) for group, values in row["metrics"].items()}
+    newer_metrics["D"].pop("D4")
+    newer_row["metrics"] = newer_metrics
 
-    payload = metrics.series_from_rows([row], NOW)
+    payload = metrics.series_from_rows([row, newer_row], NOW)
 
     assert payload["metrics"]["A"]["A2"]["kind"] == "rate"
     done = payload["metrics"]["C"]["C1"]["by_agent"]["codex"]["done"]
-    assert done["daily"][-1] == 1
+    assert done["daily"][-1] == 2
+    reset = payload["metrics"]["D"]["D1"]["window_resets_at"]
+    assert reset["kind"] == "category"
+    assert reset["daily"][-1] == row["metrics"]["D"]["D1"]["window_resets_at"]["value"]
+    cost = payload["metrics"]["D"]["D4"]
+    assert cost["daily"][-1] is None
+    assert cost["gap"] == row["metrics"]["D"]["D4"]["gap"]
+    points_per_run = payload["metrics"]["D"]["D5"]["graphql_points_per_run"]["codex"]["points_per_run"]
+    assert points_per_run["kind"] == "rate"
+    assert points_per_run["daily"][-1] == 5

@@ -204,6 +204,16 @@ wrong.
   deliberate edit per name. Asked exactly this, with those private repositories named,
   Nate chose "All repos" on 2026-09-23. _(Nate, 2026-09-23.)_
 
+  **On Muse, tiers 1 and 3 run on the contributor model; tier 2 does not.**
+  `muse_model.CONTRIBUTOR_REPOS` names `command-center`, `github-runners`, `workbench`,
+  `Fantasy-GM`, `The-League` and `AFL`, so their Muse calls go to Meta's Discounted
+  Services tier, which may train on them. `career-toolset` and `jeffy-finance-agent`
+  stay on the private model, as does any repository not named. A test holds tier 2 off
+  the list. The five private repositories on it are Nate's deliberate override of the
+  §6.2 FAIL in `docs/meta-model-api-tos-aup-1095.md`. The gate still prices contributor
+  calls at the standard card until a panel reading shows what they really cost.
+  _(Nate, 2026-09-26, #1570: "So tier 1 and tier 3, but not tier 2.")_
+
   **`--approval-mode never` is not a guard.** Measured 2026-09-07: it does **not** fail
   closed. It means *never ask*, and it auto-approved a shell command with no prompt.
 
@@ -301,6 +311,10 @@ wrong.
   line.** The gate lives inside the session, never before it — see `plan.md`,
   "Reading usage".
 - **Missing usage data fails closed.** A run that cannot read its budget does not work.
+- **Exception: Claude's Saturday lane has no budget gate.** `routines/claude-saturday.md`
+  runs until the clock or the provider's own limit stops it and never reads usage;
+  `begin` enforces its Saturday-before-11:15 window instead. See `plan.md`, "Budget".
+  _(Nate, 2026-09-25, #1557.)_
 
 - **Analysis waits for Nate by default:** projects whose tickets change no behaviour never close themselves, whatever their class, and reach `Accept it?` only after findings are posted on the parent issue; see `plan.md`, "Building completion and automatic acceptance", rule 5.
 

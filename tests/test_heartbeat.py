@@ -41,6 +41,12 @@ def start(run, at, ticket=1):
             "ts": int(at), "ticket": ticket}
 
 
+def bind(run, at, ticket=1):
+    return {"run": run, "agent": "claude", "phase": "bind",
+            "ts": int(at), "do": "ticket",
+            "work": "nateprich-projects/command-center#{}".format(ticket)}
+
+
 def finish(run, at, outcome="done"):
     return {"run": run, "agent": "claude", "phase": "finish",
             "ts": int(at), "outcome": outcome}
@@ -161,6 +167,69 @@ def test_finish_records_structured_issue_outcomes(monkeypatch):
     assert records[0]["ticket_count"] == 0
     assert records[0]["needs_decision"] is None
     assert records[0]["shape_status"] == "Shaped"
+    assert "token_usage" not in records[0]
+
+
+def test_finish_records_every_muse_call_id_and_keeps_uncaptured_slots(monkeypatch):
+    records = []
+    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(
+        heartbeat,
+        "append",
+        lambda agent, record: records.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    call_record = {"session_ids": ["session-1", None, "session-3"],
+                   "calls_made": 3}
+    assert heartbeat.main([
+        "finish", "--agent", "muse", "--run", "run-id",
+        "--outcome", "done", "--muse-call-record", json.dumps(call_record),
+    ]) == 0
+
+    assert records[0]["muse_session_ids"] == ["session-1", None, "session-3"]
+    assert records[0]["muse_calls_made"] == 3
+    assert "token_usage" not in records[0]
+
+
+def test_finish_keeps_single_id_bound_and_omits_token_snapshot(monkeypatch):
+    records = []
+    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(
+        heartbeat,
+        "append",
+        lambda agent, record: records.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    assert heartbeat.main([
+        "finish", "--agent", "muse", "--run", "run-id",
+        "--outcome", "done", "--muse-call-record",
+        json.dumps({"session_ids": ["session-1"], "calls_made": 1}),
+    ]) == 0
+
+    assert "muse_session_ids" not in records[0]
+    assert records[0]["muse_calls_made"] == 1
+    assert "token_usage" not in records[0]
+
+
+@pytest.mark.parametrize("call_record", [
+    {"session_ids": ["session-1"], "calls_made": 2},
+    {"session_ids": ["session-1", ""], "calls_made": 2},
+    {"session_ids": ["session-1"], "calls_made": True},
+])
+def test_finish_rejects_malformed_muse_call_records(call_record):
+    with pytest.raises(SystemExit):
+        heartbeat.main([
+            "finish", "--agent", "muse", "--run", "run-id",
+            "--outcome", "done", "--muse-call-record", json.dumps(call_record),
+        ])
 
 
 def test_finish_rejects_negative_ticket_count():
@@ -577,7 +646,85 @@ def test_finish_sums_api_cost_events_from_two_funnel_commands(monkeypatch):
         "gh_calls": 5,
     }
     assert written[0]["graphql_by_caller"] == {
-        "unattributed": {"calls": None, "points": 12, "remaining": None},
+        "unattributed": {
+            "calls": None, "points": 12, "remaining": None, "readings": [],
+        },
+    }
+
+
+def test_api_cost_event_preserves_reset_metadata_and_null_unknowns(monkeypatch):
+    written = []
+    monkeypatch.setattr(
+        heartbeat, "append",
+        lambda agent, record: written.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    heartbeat.record_api_cost("claude", "run-id", {
+        "graphql_points": 7,
+        "gh_calls": 2,
+        "graphql_by_caller": {
+            "standard": {
+                "calls": 2,
+                "points": 7,
+                "remaining": 4993,
+                "readings": [
+                    {
+                        "cost": 7,
+                        "remaining": 4993,
+                        "reset_at": "2026-09-26T10:49:20Z",
+                        "received_at": NOW + 0.25,
+                    },
+                    {
+                        "cost": None,
+                        "remaining": None,
+                        "reset_at": None,
+                        "received_at": NOW + 0.5,
+                    },
+                ],
+            },
+        },
+    })
+
+    assert written[0]["graphql_by_caller"]["standard"]["readings"] == [
+        {
+            "cost": 7,
+            "remaining": 4993,
+            "reset_at": "2026-09-26T10:49:20Z",
+            "received_at": NOW + 0.25,
+        },
+        {
+            "cost": None,
+            "remaining": None,
+            "reset_at": None,
+            "received_at": NOW + 0.5,
+        },
+    ]
+
+
+def test_api_cost_reader_ignores_additive_graphql_readings():
+    records = [{
+        "run": "run-id",
+        "phase": "api_cost",
+        "api_cost": {"graphql_points": 7, "gh_calls": 2},
+        "graphql_by_caller": {
+            "standard": {
+                "calls": 2,
+                "points": 7,
+                "remaining": 4993,
+                "readings": [{
+                    "cost": 7,
+                    "remaining": 4993,
+                    "reset_at": "2026-09-26T10:49:20Z",
+                    "received_at": NOW + 0.25,
+                }],
+            },
+        },
+    }]
+
+    assert heartbeat.api_cost_for_run(records, "run-id") == {
+        "graphql_points": 7,
+        "gh_calls": 2,
     }
 
 
@@ -591,8 +738,22 @@ def test_finish_aggregates_caller_costs_and_keeps_unknowns_unattributed(
             "ts": int(NOW) + 1,
             "api_cost": {"graphql_points": 5, "gh_calls": 2},
             "graphql_by_caller": {
-                "standard": {"calls": 2, "points": 5, "remaining": 100},
-                "unattributed": {"calls": 1, "points": None, "remaining": 90},
+                "standard": {
+                    "calls": 2, "points": 5, "remaining": 100,
+                    "readings": [
+                        {"cost": 2, "remaining": 100, "reset_at": "z",
+                         "received_at": NOW + 1.1},
+                        {"cost": 3, "remaining": 100, "reset_at": "z",
+                         "received_at": NOW + 1.2},
+                    ],
+                },
+                "unattributed": {
+                    "calls": 1, "points": None, "remaining": 90,
+                    "readings": [
+                        {"cost": None, "remaining": 90, "reset_at": None,
+                         "received_at": NOW + 1.3},
+                    ],
+                },
             },
         },
         {
@@ -600,9 +761,27 @@ def test_finish_aggregates_caller_costs_and_keeps_unknowns_unattributed(
             "ts": int(NOW) + 2,
             "api_cost": {"graphql_points": 7, "gh_calls": 1},
             "graphql_by_caller": {
-                "standard": {"calls": 1, "points": 7, "remaining": 80},
-                "publisher": {"calls": 1, "points": 3, "remaining": 75},
-                "unattributed": {"calls": 1, "points": None, "remaining": 70},
+                "standard": {
+                    "calls": 1, "points": 7, "remaining": 80,
+                    "readings": [
+                        {"cost": 7, "remaining": 80, "reset_at": "later",
+                         "received_at": NOW + 2.1},
+                    ],
+                },
+                "publisher": {
+                    "calls": 1, "points": 3, "remaining": 75,
+                    "readings": [
+                        {"cost": 3, "remaining": 75, "reset_at": "later",
+                         "received_at": NOW + 2.2},
+                    ],
+                },
+                "unattributed": {
+                    "calls": 1, "points": None, "remaining": 70,
+                    "readings": [
+                        {"cost": None, "remaining": 70, "reset_at": None,
+                         "received_at": NOW + 2.3},
+                    ],
+                },
             },
         },
     ]
@@ -610,9 +789,33 @@ def test_finish_aggregates_caller_costs_and_keeps_unknowns_unattributed(
     result = heartbeat.graphql_by_caller_for_run(records, "run-id")
 
     assert result == {
-        "publisher": {"calls": 1, "points": 3, "remaining": 75},
-        "standard": {"calls": 3, "points": 12, "remaining": 80},
-        "unattributed": {"calls": 2, "points": None, "remaining": 70},
+        "publisher": {
+            "calls": 1, "points": 3, "remaining": 75,
+            "readings": [
+                {"cost": 3, "remaining": 75, "reset_at": "later",
+                 "received_at": NOW + 2.2},
+            ],
+        },
+        "standard": {
+            "calls": 3, "points": 12, "remaining": 80,
+            "readings": [
+                {"cost": 2, "remaining": 100, "reset_at": "z",
+                 "received_at": NOW + 1.1},
+                {"cost": 3, "remaining": 100, "reset_at": "z",
+                 "received_at": NOW + 1.2},
+                {"cost": 7, "remaining": 80, "reset_at": "later",
+                 "received_at": NOW + 2.1},
+            ],
+        },
+        "unattributed": {
+            "calls": 2, "points": None, "remaining": 70,
+            "readings": [
+                {"cost": None, "remaining": 90, "reset_at": None,
+                 "received_at": NOW + 1.3},
+                {"cost": None, "remaining": 70, "reset_at": None,
+                 "received_at": NOW + 2.3},
+            ],
+        },
     }
 
 
@@ -781,7 +984,11 @@ def test_watchdog_still_reports_genuinely_dying_runs():
     old = NOW - 5 * 3600
     records = []
     for i in range(watchdog.DYING_THRESHOLD):
-        records.append(start("run{}".format(i), old + i * MIN))
+        at = old + i * MIN
+        records.extend([
+            start("run{}".format(i), at),
+            bind("run{}".format(i), at + 1, i),
+        ])
     found = watchdog.assess("claude", records, NOW)
     assert any("never finished" in p for p in found)
 

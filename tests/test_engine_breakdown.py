@@ -75,6 +75,16 @@ def test_sizing_standard_holds_the_unit_and_the_sizing_rules():
     assert "one way to tell it worked" in found
 
 
+def test_sizing_standard_routes_inferred_premises_before_the_build():
+    found = breakdown.sizing_standard()
+    assert "labelled `inferred`" in found
+    assert "first verification step" in found
+    assert "separate `Investigate` project in `Ideas`" in found
+    assert "existing open project in" in found and "`depends_on`" in found
+    assert "A ticket carries no `Class`" in found
+    assert "adds no label or field" in found
+
+
 def test_sizing_standard_excludes_the_protocol_the_runner_owns():
     found = breakdown.sizing_standard()
     assert "gh issue create" not in found

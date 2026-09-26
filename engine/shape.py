@@ -207,6 +207,35 @@ def _require_line(value: object, where: str) -> str:
     return re.sub(r"\s+", " ", _require_text(value, where))
 
 
+def _validate_investigate_possible_defect(plan_markdown: str) -> None:
+    """Require one explicit possible-defect statement for Investigate.
+
+    Only a whole line in the plan narrative counts. A malformed line that
+    starts with the marker also fails closed, even if another valid line is
+    present, so the answer cannot carry conflicting defect statements.
+    """
+    matching_lines = []
+    malformed_line = False
+    for raw_line in plan_markdown.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("Possible defect"):
+            continue
+        match = re.fullmatch(r"Possible defect:[ ]+(.+)", line)
+        if not match or not match.group(1).strip():
+            malformed_line = True
+            continue
+        if line.count("Possible defect:") != 1:
+            malformed_line = True
+            continue
+        matching_lines.append(line)
+
+    if malformed_line or len(matching_lines) != 1:
+        raise ShapeError(
+            "proposed_class Investigate requires exactly one non-empty "
+            "whole line of the form 'Possible defect: <statement>' "
+            "in plan_markdown")
+
+
 def _check_keys(entry: object, keys: Sequence[str], where: str) -> None:
     """Reject a mapping that is missing keys or carries unknown ones."""
     if not isinstance(entry, dict):
@@ -383,15 +412,20 @@ def validate_answer(data: object) -> Dict:
         raise ShapeError(
             "proposed_class {!r} is not a ladder class; choose one of "
             "{}".format(proposed, ", ".join(funnel.LADDER)))
+    decided_from_precedent = _validate_precedent(
+        data["decided_from_precedent"])
+    decided_by_agent = _validate_agent_decisions(
+        data["decided_by_agent"])
+    needs_nate = _validate_needs_nate(data["needs_nate"])
+    plan_markdown = _require_text(data["plan_markdown"], "plan_markdown")
+    if proposed == "Investigate":
+        _validate_investigate_possible_defect(plan_markdown)
     return {
-        "decided_from_precedent": _validate_precedent(
-            data["decided_from_precedent"]),
-        "decided_by_agent": _validate_agent_decisions(
-            data["decided_by_agent"]),
-        "needs_nate": _validate_needs_nate(data["needs_nate"]),
+        "decided_from_precedent": decided_from_precedent,
+        "decided_by_agent": decided_by_agent,
+        "needs_nate": needs_nate,
         "proposed_class": proposed,
-        "plan_markdown": _require_text(
-            data["plan_markdown"], "plan_markdown"),
+        "plan_markdown": plan_markdown,
         "escalated_risk": _validate_escalated_risk(
             data["escalated_risk"]),
         "depends_on": _validate_depends_on(data["depends_on"]),
@@ -808,6 +842,51 @@ def blocked_by_values(depends_on: Sequence[str], repo: str) -> List[str]:
     return values
 
 
+BLOCKED_BY_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      blockedBy(first: 100) {
+        totalCount
+        nodes { number repository { nameWithOwner } }
+      }
+    }
+  }
+}
+"""
+
+
+def read_blocked_by_refs(item) -> List[str]:
+    """Re-read complete native blocker refs after a refused edge write."""
+    owner, separator, name = item.repo.partition("/")
+    if not separator or not owner or not name or "/" in name:
+        raise funnel.GitHubError(
+            "cannot read blocked-by edges for {}: invalid repository ref".format(
+                item.ref
+            )
+        )
+    try:
+        payload = funnel.gh_graphql(
+            BLOCKED_BY_QUERY, owner=owner, name=name, number=item.number
+        )
+    except funnel.GitHubError as exc:
+        raise funnel.GitHubError(
+            "cannot read blocked-by edges for {}: {}".format(item.ref, exc)
+        ) from exc
+    repository = payload.get("repository") if isinstance(payload, dict) else None
+    issue = repository.get("issue") if isinstance(repository, dict) else None
+    connection = issue.get("blockedBy") if isinstance(issue, dict) else None
+    refs = funnel._blocked_by_refs_from_connection(connection)
+    if refs is None:
+        raise funnel.GitHubError(
+            "cannot read a complete blocked-by edge list for {}".format(
+                item.ref
+            )
+        )
+    return refs
+
+
 def fetch_repo_text(repo: str, path: str) -> Tuple[str, bool]:
     """One text file at the repo's default branch, or ("", True).
 
@@ -871,13 +950,49 @@ def _sibling_packet(item) -> Dict:
     }
 
 
+def issue_thread_section(comments: Sequence[Dict]) -> Optional[str]:
+    """Render every issue comment chronologically, preserving each body."""
+    if not isinstance(comments, (list, tuple)):
+        raise funnel.GitHubError("could not read a complete issue thread")
+    if not comments:
+        return None
+    ordered = []
+    for index, row in enumerate(comments):
+        if not isinstance(row, dict) or not isinstance(row.get("body"), str):
+            raise funnel.GitHubError("could not read a complete issue thread")
+        author = row.get("author")
+        if isinstance(author, dict):
+            author = author.get("login")
+        if not isinstance(author, str) or not author.strip():
+            author = "unknown author"
+        created_at = row.get("createdAt") or row.get("created_at")
+        if not isinstance(created_at, str) or not created_at.strip():
+            raise funnel.GitHubError("could not read a complete issue thread")
+        try:
+            timestamp = datetime.fromisoformat(
+                created_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise funnel.GitHubError(
+                "could not read a complete issue thread") from exc
+        if timestamp.tzinfo is None:
+            raise funnel.GitHubError("could not read a complete issue thread")
+        ordered.append((timestamp, index, created_at, author.strip(), row["body"]))
+    ordered.sort(key=lambda row: (row[0], row[1]))
+    blocks = [
+        "### @{} — {}\n\n{}".format(author, created_at, body)
+        for _, _, created_at, author, body in ordered
+    ]
+    return "## Issue thread\n\n" + "\n\n".join(blocks)
+
+
 def build_packet(*, repo: str, idea: Dict,
                  origin_voice: Optional[str],
                  override_target: Optional[str],
                  plan_md: str, plan_md_missing: bool,
                  agents_md: str, agents_md_missing: bool,
                  siblings: Sequence[Dict],
-                 collected_at: str) -> Dict:
+                 collected_at: str,
+                 issue_comments: Optional[Sequence[Dict]] = None) -> Dict:
     """Assemble the packet from already-fetched pieces. Pure: no IO.
 
     Everything the shape question needs in one JSON-serialisable dict:
@@ -898,6 +1013,10 @@ def build_packet(*, repo: str, idea: Dict,
         "sibling_plans": [dict(row) for row in siblings],
         "collected_at": collected_at,
     }
+    issue_thread = issue_thread_section(
+        issue_comments if issue_comments is not None else [])
+    if issue_thread is not None:
+        packet["issue_thread"] = issue_thread
     if (origin_voice == "agent"
             and idea.get("klass") in funnel.SELF_APPROVABLE_CLASSES):
         packet["output_review"] = dict(
@@ -910,8 +1029,20 @@ def collect(repo: Optional[str], idea_number: int, *,
             now: Optional[datetime] = None) -> Dict:
     """Fetch every piece and build the packet. Reads only, no writes."""
     resolved = funnel.resolve_repo(repo)
-    items = (items_loader or funnel.load_items)()
+    if items_loader is None:
+        items = funnel.load_items(shape_issue=(resolved, idea_number))
+    else:
+        items = items_loader()
     idea_item = funnel.find(items, "{}#{}".format(resolved, idea_number))
+    issue_comments = getattr(idea_item, "issue_comments", None)
+    if issue_comments is None and items_loader is not None:
+        # Pure packet fixtures and injected readers can omit the optional
+        # thread; production reads always request it with the Project query.
+        issue_comments = []
+    if not isinstance(issue_comments, list):
+        raise funnel.GitHubError(
+            "could not read comments for {}#{}".format(resolved, idea_number)
+        )
     override = funnel.parse_origin_override(idea_item.body or "")
     plan_md, plan_md_missing = fetch_repo_text(resolved, "plan.md")
     agents_md, agents_md_missing = fetch_repo_text(resolved, "AGENTS.md")
@@ -928,6 +1059,7 @@ def collect(repo: Optional[str], idea_number: int, *,
         siblings=[_sibling_packet(row)
                   for row in sibling_plan_items(items, idea_item)],
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),
+        issue_comments=issue_comments,
     )
 
 
@@ -995,14 +1127,55 @@ def apply_shape(items: list, now: datetime, ref: str,
     for block in carried_blocks:
         body = "{}\n\n{}".format(body, block)
 
+    depends_on = answer.get("depends_on", [])
+    current_blockers = getattr(item, "blocked_by_refs", None)
+    if depends_on and current_blockers is None:
+        raise funnel.GitHubError(
+            "cannot write dependencies for {}: existing blocked-by edges "
+            "are unavailable".format(item.ref)
+        )
+    current_blocker_set = set(current_blockers or [])
+    pending_dependencies = [
+        ref for ref in depends_on if ref not in current_blocker_set
+    ]
     command = ["gh", "issue", "edit", str(item.number), "--repo",
                item.repo, "--body", body]
-    blocked_by = blocked_by_values(answer.get("depends_on", []), item.repo)
+    blocked_by = blocked_by_values(pending_dependencies, item.repo)
     if blocked_by:
         command += ["--add-blocked-by", ",".join(blocked_by)]
     out = funnel._run_gh(command, capture_output=True, text=True)
     if out.returncode != 0:
-        raise funnel.GitHubError(out.stderr.strip())
+        write_error = out.stderr.strip() or "gh issue edit failed"
+        if pending_dependencies:
+            try:
+                confirmed_blockers = read_blocked_by_refs(item)
+            except funnel.GitHubError as exc:
+                raise funnel.GitHubError(
+                    "{}; could not confirm blocked-by edge(s) {} for {}: {}".format(
+                        write_error, ", ".join(pending_dependencies), item.ref, exc
+                    )
+                ) from exc
+            missing_dependencies = [
+                ref for ref in pending_dependencies
+                if ref not in set(confirmed_blockers)
+            ]
+            if missing_dependencies:
+                raise funnel.GitHubError(
+                    "{}; blocked-by edge(s) still missing for {}: {}".format(
+                        write_error, item.ref,
+                        ", ".join(missing_dependencies),
+                    )
+                )
+            # The edge may have been added by a concurrent writer after the
+            # Project snapshot. Confirmed state makes it satisfied; do not
+            # retry the refused issue edit.
+            item.blocked_by_refs = confirmed_blockers
+        else:
+            raise funnel.GitHubError(write_error)
+    elif pending_dependencies:
+        item.blocked_by_refs = list(dict.fromkeys(
+            list(current_blockers or []) + pending_dependencies
+        ))
     # The session keeps this object after the issue-body write. Keep its
     # body aligned with GitHub before a same-session reader evaluates it.
     item.body = body

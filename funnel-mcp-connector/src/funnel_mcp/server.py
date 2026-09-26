@@ -1,4 +1,4 @@
-"""Authenticated MCP server for the Command Center funnel."""
+"""Authenticated remote MCP tools for the Command Center funnel."""
 
 from __future__ import annotations
 
@@ -8,15 +8,13 @@ import sys
 from pathlib import Path
 
 from fastmcp import FastMCP
-from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from fastmcp.server.auth import RemoteAuthProvider, StaticTokenVerifier
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .config import Config, ConfigError, load_config
 
 log = logging.getLogger(__name__)
-REPO_ROOT = Path(__file__).resolve().parents[3]
-FUNNEL_PATH = REPO_ROOT / "funnel.py"
 
 
 def _required_text(value: str, name: str) -> str:
@@ -26,30 +24,51 @@ def _required_text(value: str, name: str) -> str:
     return value
 
 
-def _run_funnel(*args: str) -> str:
-    """Run one established funnel command without a shell or parallel logic."""
+def _command_center_root() -> Path:
+    """Find the checkout that contains the authoritative funnel.py command."""
+    working_root = Path.cwd().resolve()
+    if (working_root / "funnel.py").is_file():
+        return working_root
+
+    source_root = Path(__file__).resolve().parents[3]
+    if (source_root / "funnel.py").is_file():
+        return source_root
+
+    raise RuntimeError(
+        "could not find funnel.py; start the MCP server from the command-center repository"
+    )
+
+
+def _run_funnel(*arguments: str) -> str:
+    """Return exactly the stdout from one funnel.py command."""
+    root = _command_center_root()
+    command = [sys.executable, str(root / "funnel.py"), *arguments]
     try:
-        result = subprocess.run(
-            [sys.executable, str(FUNNEL_PATH), *args],
-            cwd=str(REPO_ROOT),
+        completed = subprocess.run(
+            command,
+            cwd=root,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             check=False,
         )
     except OSError as exc:
-        raise RuntimeError(f"could not launch funnel.py: {exc}") from exc
+        raise RuntimeError("could not start funnel.py: {}".format(exc)) from exc
 
-    output = (result.stdout or "").strip()
-    if result.returncode != 0:
-        detail = (result.stderr or output or "no command output").strip()
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        if not detail:
+            detail = "no error output"
         raise RuntimeError(
-            f"funnel {args[0]} failed with exit code {result.returncode}: {detail}"
+            "funnel.py {} failed with exit status {}: {}".format(
+                arguments[0], completed.returncode, detail
+            )
         )
-    return output or f"funnel {args[0]} completed"
+    return completed.stdout
 
 
 def build_server(config: Config) -> FastMCP:
-    """Build the MCP server and its four user-directed gate tools."""
+    """Build the authenticated MCP server with its read and gate tools."""
     token_verifier = StaticTokenVerifier(
         tokens={
             config.inbound_static_token: {
@@ -58,16 +77,43 @@ def build_server(config: Config) -> FastMCP:
             }
         }
     )
+    auth = RemoteAuthProvider(
+        token_verifier=token_verifier,
+        authorization_servers=[],
+        base_url=config.public_url,
+    )
     server = FastMCP(
         name="command-center",
         instructions=(
-            "Command Center MCP server. The four gate tools record the verbatim "
-            "instruction supplied by Nate with nate-relayed provenance."
+            "Command Center tools that return the output of the matching funnel.py "
+            "command. funnel.py remains the source of truth for project reads and "
+            "ordering. The gate tools approve, start, accept and park record the "
+            "verbatim instruction supplied by Nate with nate-relayed provenance."
         ),
-        auth=token_verifier,
+        auth=auth,
     )
 
-    @server.tool()
+    @server.tool
+    def brief() -> str:
+        """Return the current Command Center brief from `funnel.py brief`."""
+        return _run_funnel("brief")
+
+    @server.tool
+    def ideas() -> str:
+        """Return captured ideas from `funnel.py ideas`."""
+        return _run_funnel("ideas")
+
+    @server.tool
+    def show(ref: str) -> str:
+        """Return an item's details from `funnel.py show <ref>`."""
+        return _run_funnel("show", ref)
+
+    @server.tool
+    def queue() -> str:
+        """Return the ordered Command Center queue from `funnel.py queue`."""
+        return _run_funnel("queue")
+
+    @server.tool
     def approve(ref: str, instruction: str) -> str:
         """Approve a Shaped project after Nate's verbatim instruction is supplied."""
         instruction = _required_text(instruction, "instruction")
@@ -76,7 +122,7 @@ def build_server(config: Config) -> FastMCP:
             "--instruction", instruction,
         )
 
-    @server.tool()
+    @server.tool
     def start(ref: str, instruction: str) -> str:
         """Start a Ready project after Nate's verbatim instruction is supplied."""
         instruction = _required_text(instruction, "instruction")
@@ -85,7 +131,7 @@ def build_server(config: Config) -> FastMCP:
             "--instruction", instruction,
         )
 
-    @server.tool()
+    @server.tool
     def accept(ref: str, instruction: str, no_tickets: bool = False) -> str:
         """Accept a completed project using Nate's verbatim instruction."""
         instruction = _required_text(instruction, "instruction")
@@ -97,7 +143,7 @@ def build_server(config: Config) -> FastMCP:
             args.append("--no-tickets")
         return _run_funnel(*args)
 
-    @server.tool()
+    @server.tool
     def park(ref: str, reason: str, instruction: str) -> str:
         """Park a project with its required reason and verbatim instruction."""
         return _run_funnel(

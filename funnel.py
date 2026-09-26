@@ -1446,19 +1446,105 @@ def needs_nate_signals(plan_body: str) -> List[str]:
 
 
 def plan_is_escalated(plan_body: str) -> List[str]:
-    """Return escalation reasons found across the whole plan body.
+    """Return plan escalation reason names using the plan-only scan region."""
+    return [entry["reason"] for entry in plan_escalation_matches(plan_body)
+            if isinstance(entry.get("reason"), str)]
 
-    Plans have no separate ticket title, so the plan is passed as the body to
-    the shared escalation machinery. The empty-list result is the all-clear
-    used by the self-approval condition.
+
+_PLAN_ATX_HEADING_RE = re.compile(
+    r"^ {0,3}(?P<hashes>#{1,6})(?:[ \t]+(?P<title>.*?)|[ \t]*)$"
+)
+_PLAN_MALFORMED_ATX_RE = re.compile(
+    r"^ {0,3}(?:#{7,}|#{1,6}(?!#)\S).*$"
+)
+_PLAN_MALFORMED_REJECTED_RE = re.compile(
+    r"^ {0,3}#{1,6}(?!#)[ \t]*Rejected\b", re.IGNORECASE
+)
+_PLAN_REJECTED_INLINE_RE = re.compile(
+    r"[ \t]+\(rejected:[^\r\n]*\)[ \t]*$", re.IGNORECASE
+)
+
+
+def _plan_escalation_scan_text(plan_body: str) -> str:
+    """Remove plan-only rejected prose before using the shared word matcher.
+
+    A malformed Rejected heading or a malformed heading inside its section
+    makes the section boundary ambiguous. In that case keep the original body
+    intact so an uncertain parse cannot hide a scan hit.
     """
-    return escalation_reasons("", plan_body)
+    body = plan_body or ""
+    raw_lines = body.splitlines(keepends=True)
+    visible_lines = asserted_text(body).splitlines()
+    if len(visible_lines) > len(raw_lines):
+        return body
+    visible_lines.extend([""] * (len(raw_lines) - len(visible_lines)))
+
+    headings = []
+    malformed = []
+    rejected_sections = []
+    malformed_rejected = False
+    for index, line in enumerate(visible_lines):
+        match = _PLAN_ATX_HEADING_RE.match(line)
+        if match:
+            level = len(match.group("hashes"))
+            title = (match.group("title") or "").strip()
+            title = re.sub(r"[ \t]+#+[ \t]*$", "", title).strip()
+            headings.append((index, level, title))
+            if re.match(r"(?i)^rejected\b", title):
+                if level != 2 or title != "Rejected":
+                    malformed_rejected = True
+                else:
+                    rejected_sections.append(index)
+        elif _PLAN_MALFORMED_ATX_RE.match(line):
+            malformed.append(index)
+            if _PLAN_MALFORMED_REJECTED_RE.match(line):
+                malformed_rejected = True
+
+    if malformed_rejected or len(rejected_sections) > 1:
+        return body
+
+    start = rejected_sections[0] if rejected_sections else None
+    end = len(raw_lines)
+    if start is not None:
+        end = next((index for index, level, _ in headings
+                    if index > start and level <= 2), len(raw_lines))
+        if any(start < index < end for index in malformed):
+            return body
+
+    agent_decision_lines = set()
+    for section_start, level, title in headings:
+        if level != 2 or title != "Decided by the agent":
+            continue
+        section_end = next((index for index, next_level, _ in headings
+                            if index > section_start and next_level <= 2),
+                           len(raw_lines))
+        if any(section_start < index < section_end for index in malformed):
+            continue
+        agent_decision_lines.update(range(section_start + 1, section_end))
+
+    for index, line in enumerate(raw_lines):
+        content = line.rstrip("\r\n")
+        ending = line[len(content):]
+        if start is not None and start <= index < end:
+            raw_lines[index] = ending
+            continue
+        if index in agent_decision_lines:
+            content = _PLAN_REJECTED_INLINE_RE.sub(
+                lambda match: " " * len(match.group(0)), content
+            )
+        raw_lines[index] = content + ending
+    return "".join(raw_lines)
 
 
 def plan_escalation_matches(plan_body: str
                             ) -> List[Dict[str, Optional[str]]]:
-    """Return plan escalation reasons together with their matching lines."""
-    return escalation_matches("", plan_body)
+    """Return plan risks after excluding its recorded rejected alternatives.
+
+    Plan-section knowledge stays here; ticket text still uses the canonical
+    matcher unchanged. If a Rejected boundary cannot be parsed, the whole body
+    is scanned as written.
+    """
+    return escalation_matches("", _plan_escalation_scan_text(plan_body))
 
 
 def plan_needs_nate(plan_body: str) -> bool:

@@ -13,7 +13,8 @@ every minute on the Mac that holds the only Cloudflare credential:
    ``funnel.py brief`` from the run clone when the newest snapshot is older than
    the standing regeneration cadence. While the snapshot is younger, serve it
    and keep the flag for a later tick; after a due brief, keep it only when a
-   successful brief produced a nonpublishable degraded envelope.
+   successful brief produced a nonpublishable degraded envelope. Record that
+   attempt in the flag value so repeated unpublishable briefs wait one cadence.
 
 Spool contract (shared with the #650 writer): ``COMMAND_CENTER_DASHBOARD_SPOOL``
 holds one JSON object per brief with at least ``generated_at`` (ISO-8601);
@@ -261,6 +262,45 @@ def parse_generated_at(value: object) -> Optional[float]:
         return None
 
 
+def _refresh_flag_details(flag: Optional[bytes]
+                          ) -> Tuple[Optional[str], Optional[float]]:
+    """Read the request time and last unpublishable attempt from the flag.
+
+    The Worker writes its request time as a plain ISO timestamp. After an
+    unpublishable refresh brief, the publisher stores both timestamps as JSON
+    at the same key. The Worker only tests whether the key exists.
+    """
+    if flag is None:
+        return None, None
+    raw = flag.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        return raw, None
+    if not isinstance(payload, dict):
+        return raw, None
+    requested_at = payload.get("requested_at")
+    if not isinstance(requested_at, str):
+        requested_at = raw
+    attempted_at = parse_generated_at(payload.get("attempted_at"))
+    return requested_at, attempted_at
+
+
+def _flag_with_attempt(flag: bytes, attempted_epoch: float) -> bytes:
+    """Preserve the refresh request while recording its failed attempt."""
+    requested_at, previous_attempt = _refresh_flag_details(flag)
+    if previous_attempt is not None:
+        attempted_epoch = max(attempted_epoch, previous_attempt)
+    attempted_at = datetime.fromtimestamp(
+        attempted_epoch, tz=timezone.utc
+    ).isoformat().replace("+00:00", "Z")
+    return json.dumps(
+        {"requested_at": requested_at or "", "attempted_at": attempted_at},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
 def is_stale(entry_epoch: Optional[float], now: float,
              after: float = STALE_AFTER_SECONDS) -> bool:
     """A missing snapshot is infinitely stale; otherwise older than ``after``."""
@@ -270,7 +310,9 @@ def is_stale(entry_epoch: Optional[float], now: float,
 
 
 def brief_reason(entry_epoch: Optional[float], now: float,
-                 flagged: bool) -> Optional[str]:
+                 flagged: bool,
+                 last_attempt_epoch: Optional[float] = None
+                 ) -> Optional[str]:
     """Why this tick should run a brief, or None to publish and stop.
 
     A refresh — the page or GitHub's webhook — runs one as soon as the newest
@@ -279,10 +321,12 @@ def brief_reason(entry_epoch: Optional[float], now: float,
     bound, which exists for the case where webhook delivery is broken or was
     never configured.
     """
-    if flagged:
-        if is_stale(entry_epoch, now, STALE_AFTER_SECONDS):
+    if flagged and is_stale(entry_epoch, now, STALE_AFTER_SECONDS):
+        if (last_attempt_epoch is None
+                or now - last_attempt_epoch >= STALE_AFTER_SECONDS):
             return "refresh"
-        return None
+    # The standing cadence is independent of a held refresh retry. A due
+    # cadence brief must not be delayed by the refresh-attempt floor.
     if is_stale(entry_epoch, now, SCHEDULED_AFTER_SECONDS):
         return "scheduled"
     return None
@@ -657,17 +701,27 @@ def tick(spool_dir: Path, env_file: Path, wrangler_toml: Path,
     publish_metrics_series(kv, metrics_py)
 
     flag = kv.get(REFRESH_KEY)
+    requested_at, last_attempt_epoch = _refresh_flag_details(flag)
     requested = (
-        flag.decode("utf-8", errors="replace")[:64] or "(empty)"
-        if flag is not None else None
+        requested_at[:64] or "(empty)"
+        if requested_at is not None else None
     )
     entry_epoch = entry.epoch if entry is not None else None
-    reason = brief_reason(entry_epoch, now, flag is not None)
+    reason = brief_reason(
+        entry_epoch, now, flag is not None, last_attempt_epoch)
     if reason is None:
         if flag is not None:
-            log("refresh requested at {} but the snapshot is younger than "
-                "the {}s regeneration interval; leaving the flag for the "
-                "next tick".format(requested, STALE_AFTER_SECONDS))
+            if (last_attempt_epoch is not None
+                    and is_stale(entry_epoch, now, STALE_AFTER_SECONDS)):
+                log("refresh requested at {}; previous unpublishable brief "
+                    "was {}s ago, inside the {}s retry interval; leaving "
+                    "the flag for a later tick".format(
+                        requested, int(now - last_attempt_epoch),
+                        STALE_AFTER_SECONDS))
+            else:
+                log("refresh requested at {} but the snapshot is younger than "
+                    "the {}s regeneration interval; leaving the flag for the "
+                    "next tick".format(requested, STALE_AFTER_SECONDS))
         return 0
 
     age = ("no snapshot yet" if entry_epoch is None
@@ -698,8 +752,21 @@ def tick(spool_dir: Path, env_file: Path, wrangler_toml: Path,
                 kv.delete(REFRESH_KEY)
                 log("refresh flag cleared")
             else:
-                log("refresh flag kept; brief did not produce a publishable "
-                    "snapshot")
+                if reason == "refresh":
+                    current_flag = kv.get(REFRESH_KEY)
+                    if current_flag is not None:
+                        kv.put(
+                            REFRESH_KEY,
+                            _flag_with_attempt(current_flag, time.time()),
+                        )
+                        log("refresh flag kept; brief did not produce a "
+                            "publishable snapshot; retry interval recorded")
+                    else:
+                        log("refresh flag was cleared while the brief ran; "
+                            "not restoring it")
+                else:
+                    log("refresh flag kept; brief did not produce a "
+                        "publishable snapshot")
         else:
             # Preserve the existing nonzero/timeout handling. The exit-0
             # missing-items envelope is the special degraded result that must

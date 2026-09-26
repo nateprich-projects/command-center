@@ -950,13 +950,49 @@ def _sibling_packet(item) -> Dict:
     }
 
 
+def issue_thread_section(comments: Sequence[Dict]) -> Optional[str]:
+    """Render every issue comment chronologically, preserving each body."""
+    if not isinstance(comments, (list, tuple)):
+        raise funnel.GitHubError("could not read a complete issue thread")
+    if not comments:
+        return None
+    ordered = []
+    for index, row in enumerate(comments):
+        if not isinstance(row, dict) or not isinstance(row.get("body"), str):
+            raise funnel.GitHubError("could not read a complete issue thread")
+        author = row.get("author")
+        if isinstance(author, dict):
+            author = author.get("login")
+        if not isinstance(author, str) or not author.strip():
+            author = "unknown author"
+        created_at = row.get("createdAt") or row.get("created_at")
+        if not isinstance(created_at, str) or not created_at.strip():
+            raise funnel.GitHubError("could not read a complete issue thread")
+        try:
+            timestamp = datetime.fromisoformat(
+                created_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise funnel.GitHubError(
+                "could not read a complete issue thread") from exc
+        if timestamp.tzinfo is None:
+            raise funnel.GitHubError("could not read a complete issue thread")
+        ordered.append((timestamp, index, created_at, author.strip(), row["body"]))
+    ordered.sort(key=lambda row: (row[0], row[1]))
+    blocks = [
+        "### @{} — {}\n\n{}".format(author, created_at, body)
+        for _, _, created_at, author, body in ordered
+    ]
+    return "## Issue thread\n\n" + "\n\n".join(blocks)
+
+
 def build_packet(*, repo: str, idea: Dict,
                  origin_voice: Optional[str],
                  override_target: Optional[str],
                  plan_md: str, plan_md_missing: bool,
                  agents_md: str, agents_md_missing: bool,
                  siblings: Sequence[Dict],
-                 collected_at: str) -> Dict:
+                 collected_at: str,
+                 issue_comments: Optional[Sequence[Dict]] = None) -> Dict:
     """Assemble the packet from already-fetched pieces. Pure: no IO.
 
     Everything the shape question needs in one JSON-serialisable dict:
@@ -977,6 +1013,10 @@ def build_packet(*, repo: str, idea: Dict,
         "sibling_plans": [dict(row) for row in siblings],
         "collected_at": collected_at,
     }
+    issue_thread = issue_thread_section(
+        issue_comments if issue_comments is not None else [])
+    if issue_thread is not None:
+        packet["issue_thread"] = issue_thread
     if (origin_voice == "agent"
             and idea.get("klass") in funnel.SELF_APPROVABLE_CLASSES):
         packet["output_review"] = dict(
@@ -989,8 +1029,20 @@ def collect(repo: Optional[str], idea_number: int, *,
             now: Optional[datetime] = None) -> Dict:
     """Fetch every piece and build the packet. Reads only, no writes."""
     resolved = funnel.resolve_repo(repo)
-    items = (items_loader or funnel.load_items)()
+    if items_loader is None:
+        items = funnel.load_items(shape_issue=(resolved, idea_number))
+    else:
+        items = items_loader()
     idea_item = funnel.find(items, "{}#{}".format(resolved, idea_number))
+    issue_comments = getattr(idea_item, "issue_comments", None)
+    if issue_comments is None and items_loader is not None:
+        # Pure packet fixtures and injected readers can omit the optional
+        # thread; production reads always request it with the Project query.
+        issue_comments = []
+    if not isinstance(issue_comments, list):
+        raise funnel.GitHubError(
+            "could not read comments for {}#{}".format(resolved, idea_number)
+        )
     override = funnel.parse_origin_override(idea_item.body or "")
     plan_md, plan_md_missing = fetch_repo_text(resolved, "plan.md")
     agents_md, agents_md_missing = fetch_repo_text(resolved, "AGENTS.md")
@@ -1007,6 +1059,7 @@ def collect(repo: Optional[str], idea_number: int, *,
         siblings=[_sibling_packet(row)
                   for row in sibling_plan_items(items, idea_item)],
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),
+        issue_comments=issue_comments,
     )
 
 

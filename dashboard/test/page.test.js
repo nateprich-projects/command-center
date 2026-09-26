@@ -7,7 +7,7 @@ import {
   phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
-  renderMetricChart, CHART_WINDOW_DAYS,
+  renderMetricChart, renderRunMetrics, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 } from "../public/app.js";
 
@@ -657,6 +657,63 @@ test("the Execution headline renders six R7/R28 tiles and keeps missing data as 
   }
 });
 
+test("the Runs panel renders C1-C6 by agent and job and preserves their gaps", async () => {
+  const fixture = JSON.parse(await readFile(
+    new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8",
+  ));
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const grid = new TestNode("div");
+    renderRunMetrics(fixture, grid);
+    const panels = grid.querySelectorAll(".run-metric-panel");
+    assert.deepEqual(
+      panels.map((panel) => panel.attributes.get("data-metric")),
+      ["C1", "C2", "C3", "C4", "C5", "C6"],
+    );
+
+    for (const panel of panels) {
+      const paths = panel.querySelectorAll(".run-series-row")
+        .map((row) => row.attributes.get("data-series"));
+      assert.ok(paths.length > 0, panel.attributes.get("data-metric") + " has series");
+      assert.ok(paths.every((path) => !path.endsWith(".finishes")));
+      for (const pair of ["codex.implement", "muse.review", "claude.shape", "claude.breakdown"]) {
+        assert.ok(paths.some((path) => path.includes(pair)),
+          panel.attributes.get("data-metric") + " renders " + pair);
+      }
+      assert.ok(panel.querySelectorAll(".metric-reading").some((reading) => (
+        reading.textContent.includes("R7")
+      )));
+    }
+
+    const fires = fixture.metrics.C.C1.by_agent_and_job.codex.implement;
+    const errorRate = fixture.metrics.C.C3.error_rate_by_agent_and_job.codex.implement;
+    const skippedDay = fires["skipped-over-pace"].daily.findIndex((value) => value > 0);
+    assert.ok(skippedDay >= 0);
+    assert.equal(
+      errorRate.denominators[skippedDay],
+      fires.done.daily[skippedDay] + fires.errored.daily[skippedDay],
+    );
+    assert.ok(errorRate.denominators[skippedDay] < fires.finishes.daily[skippedDay]);
+    assert.match(panels[2].textContent, /skipped fires are excluded/);
+
+    const c1Gap = panels[0].querySelectorAll(".run-series-row")
+      .find((row) => row.attributes.get("data-series").endsWith("muse.review.done"));
+    assert.ok(c1Gap);
+    assert.ok(c1Gap.querySelectorAll(".chart-hit")
+      .some((hit) => hit.textContent.includes("R7 Gap")));
+
+    const c4Paths = panels[3].querySelectorAll(".run-series-row")
+      .map((row) => row.attributes.get("data-series"));
+    assert.ok(c4Paths.some((path) => path.endsWith(".floor")));
+    assert.ok(c4Paths.some((path) => path.endsWith(".unclassified")));
+    assert.match(panels[3].textContent, /unclassified errors stay separate/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
 test("Execution uses a read-only request and the two views route on the same page", async () => {
   const [html, source, fixtureText] = await Promise.all([
     readFile(new URL("../public/index.html", import.meta.url), "utf8"),
@@ -679,6 +736,7 @@ test("Execution uses a read-only request and the two views route on the same pag
   assert.match(html, /href="\/\?tab=execution" data-tab="execution"/);
   assert.match(html, /<main id="funnel-view">/);
   assert.match(html, /<main id="execution-view"[^>]*hidden>/);
+  assert.match(html, /<div id="runs-grid" class="run-metric-grid"><\/div>/);
   assert.equal(tabFromUrl("https://funnel.nateprich.com/?tab=execution&repo=owner%2Frepo"),
     "execution");
   assert.equal(tabFromUrl("https://funnel.nateprich.com/?tab=unknown"), "funnel");

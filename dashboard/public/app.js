@@ -869,12 +869,13 @@ function formatMetricValue(value, format, isDelta = false) {
   if (format === "hours") {
     return formatMetricNumber(value, 2, isDelta) + " h";
   }
+  if (format === "duration-hours") {
+    return formatMetricNumber(value / 3600, 1, isDelta) + " h";
+  }
   return formatMetricNumber(value, 1, isDelta);
 }
 
-function appendMetricRow(tile, label, values, format) {
-  const row = element("div", "metric-series-row");
-  if (label) row.append(element("p", "metric-series-label", label));
+function metricReadings(values, format) {
   const readings = element("dl", "metric-values");
   for (const [name, value, isDelta] of [
     ["R7", values && values.r7, false],
@@ -895,6 +896,13 @@ function appendMetricRow(tile, label, values, format) {
     reading.append(output);
     readings.append(reading);
   }
+  return readings;
+}
+
+function appendMetricRow(tile, label, values, format) {
+  const row = element("div", "metric-series-row");
+  if (label) row.append(element("p", "metric-series-label", label));
+  const readings = metricReadings(values, format);
   row.append(readings);
   tile.append(row);
 }
@@ -920,6 +928,8 @@ const CHART_WINDOW_DAYS = 56;
 const CHART_WIDTH = 320;
 const CHART_HEIGHT = 120;
 const CHART_PAD = { top: 12, right: 44, bottom: 18, left: 4 };
+const COMPACT_CHART_HEIGHT = 52;
+const COMPACT_CHART_PAD = { top: 5, right: 40, bottom: 5, left: 3 };
 
 function svgNode(tag, attributes = {}, text) {
   const node = document.createElementNS(SVG_NS, tag);
@@ -954,7 +964,9 @@ function chartTop(values, format) {
   return top * 1.1 || 1;
 }
 
-function renderMetricChart(series, days, { title = "", format = "count" } = {}) {
+function renderMetricChart(series, days, {
+  title = "", format = "count", compact = false,
+} = {}) {
   const start = Math.max(0, (days || []).length - CHART_WINDOW_DAYS);
   const windowDays = (days || []).slice(start);
   const read = (key) => windowDays.map((_, offset) => {
@@ -966,11 +978,13 @@ function renderMetricChart(series, days, { title = "", format = "count" } = {}) 
   const rule = r28.length ? r28[r28.length - 1] : null;
   const top = chartTop([...r7, rule], format);
 
-  const plotWidth = CHART_WIDTH - CHART_PAD.left - CHART_PAD.right;
-  const plotHeight = CHART_HEIGHT - CHART_PAD.top - CHART_PAD.bottom;
-  const x = (index) => CHART_PAD.left +
+  const height = compact ? COMPACT_CHART_HEIGHT : CHART_HEIGHT;
+  const padding = compact ? COMPACT_CHART_PAD : CHART_PAD;
+  const plotWidth = CHART_WIDTH - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const x = (index) => padding.left +
     (windowDays.length > 1 ? (index / (windowDays.length - 1)) * plotWidth : plotWidth);
-  const y = (value) => CHART_PAD.top + plotHeight - (value / top) * plotHeight;
+  const y = (value) => padding.top + plotHeight - (value / top) * plotHeight;
   const point = (index) => x(index).toFixed(1) + " " + y(r7[index]).toFixed(1);
 
   const latest = r7.length ? r7[r7.length - 1] : null;
@@ -978,8 +992,8 @@ function renderMetricChart(series, days, { title = "", format = "count" } = {}) 
     formatMetricValue(latest, format) + ", R28 " + formatMetricValue(rule, format) +
     ", " + windowDays.length + " days";
   const svg = svgNode("svg", {
-    class: "metric-chart",
-    viewBox: "0 0 " + CHART_WIDTH + " " + CHART_HEIGHT,
+    class: "metric-chart" + (compact ? " metric-chart-compact" : ""),
+    viewBox: "0 0 " + CHART_WIDTH + " " + height,
     role: "img",
     "aria-label": summary,
   });
@@ -988,21 +1002,23 @@ function renderMetricChart(series, days, { title = "", format = "count" } = {}) 
   const hits = svgNode("g", { class: "chart-hits" });
   svg.append(hits);
 
-  const baseline = CHART_PAD.top + plotHeight;
+  const baseline = padding.top + plotHeight;
   svg.append(svgNode("line", {
     class: "chart-axis",
-    x1: CHART_PAD.left, x2: CHART_PAD.left + plotWidth, y1: baseline, y2: baseline,
+    x1: padding.left, x2: padding.left + plotWidth, y1: baseline, y2: baseline,
   }));
 
   if (isMetricNumber(rule)) {
     svg.append(svgNode("line", {
       class: "chart-rule",
-      x1: CHART_PAD.left, x2: CHART_PAD.left + plotWidth, y1: y(rule), y2: y(rule),
+      x1: padding.left, x2: padding.left + plotWidth, y1: y(rule), y2: y(rule),
     }));
     // Labelled at the left end, clear of the R7's end label on the right.
-    svg.append(svgNode("text", {
-      class: "chart-rule-label", x: CHART_PAD.left + 2, y: y(rule) - 4,
-    }, "R28 " + formatMetricValue(rule, format)));
+    if (!compact) {
+      svg.append(svgNode("text", {
+        class: "chart-rule-label", x: padding.left + 2, y: y(rule) - 4,
+      }, "R28 " + formatMetricValue(rule, format)));
+    }
   }
 
   for (const run of chartRuns(r7)) {
@@ -1023,9 +1039,11 @@ function renderMetricChart(series, days, { title = "", format = "count" } = {}) 
     svg.append(svgNode("circle", {
       class: "chart-dot", cx: x(last).toFixed(1), cy: y(latest).toFixed(1), r: 4,
     }));
-    svg.append(svgNode("text", {
-      class: "chart-end-label", x: x(last) + 7, y: y(latest) + 3,
-    }, formatMetricValue(latest, format)));
+    if (!compact) {
+      svg.append(svgNode("text", {
+        class: "chart-end-label", x: x(last) + 7, y: y(latest) + 3,
+      }, formatMetricValue(latest, format)));
+    }
   }
 
   // Hover: one full-height band per day carrying that day's reading, so a gap
@@ -1034,7 +1052,7 @@ function renderMetricChart(series, days, { title = "", format = "count" } = {}) 
   windowDays.forEach((day, index) => {
     const hit = svgNode("rect", {
       class: "chart-hit",
-      x: (x(index) - band / 2).toFixed(1), y: CHART_PAD.top,
+      x: (x(index) - band / 2).toFixed(1), y: padding.top,
       width: band.toFixed(1), height: plotHeight,
     });
     hit.append(svgNode("title", {}, day + " · R7 " + formatMetricValue(r7[index], format) +
@@ -1042,16 +1060,146 @@ function renderMetricChart(series, days, { title = "", format = "count" } = {}) 
     hits.append(hit);
   });
 
-  if (windowDays.length) {
+  if (windowDays.length && !compact) {
     svg.append(svgNode("text", {
-      class: "chart-date", x: CHART_PAD.left, y: CHART_HEIGHT - 4,
+      class: "chart-date", x: padding.left, y: height - 4,
     }, windowDays[0]));
     svg.append(svgNode("text", {
-      class: "chart-date", x: CHART_PAD.left + plotWidth, y: CHART_HEIGHT - 4,
+      class: "chart-date", x: padding.left + plotWidth, y: height - 4,
       "text-anchor": "end",
     }, windowDays[windowDays.length - 1]));
   }
   return svg;
+}
+
+const RUN_METRICS = [
+  {
+    code: "C1",
+    title: "Fires by outcome",
+    description: "Finishes per day by outcome, agent, and job kind.",
+    format: "count",
+    sources: [{
+      path: ["C", "C1", "by_agent_and_job"],
+      excludeKeys: ["finishes"],
+    }],
+  },
+  {
+    code: "C2",
+    title: "Productive and empty-fire share",
+    description: "Done and nothing-to-do finishes over all finishes.",
+    format: "percent",
+    sources: [
+      { path: ["C", "C2", "productive_share"], label: "productive share" },
+      { path: ["C", "C2", "empty_fire_share"], label: "empty-fire share" },
+    ],
+  },
+  {
+    code: "C3",
+    title: "Error rate on engaged runs",
+    description: "Errored ÷ (done + errored); skipped fires are excluded.",
+    format: "percent",
+    sources: [{ path: ["C", "C3", "error_rate_by_agent_and_job"] }],
+  },
+  {
+    code: "C4",
+    title: "Error class",
+    description: "Floor, regression, and unclassified errors stay separate.",
+    format: "count",
+    sources: [{ path: ["C", "C4", "by_agent_and_job"] }],
+  },
+  {
+    code: "C5",
+    title: "Claim losses",
+    description: "Reconciled claims, wall-clock kills, and re-begins per day.",
+    format: "count",
+    sources: [{ path: ["C", "C5", "by_agent_and_job"] }],
+  },
+  {
+    code: "C6",
+    title: "Time to PR and merge",
+    description: "Claim to PR opened, then PR opened to merged; shown in hours.",
+    format: "duration-hours",
+    sources: [{ path: ["C", "C6", "by_agent_and_job"] }],
+  },
+];
+
+function valueAtPath(root, path) {
+  let value = root;
+  for (const part of path) {
+    if (!value || typeof value !== "object") return null;
+    value = value[part];
+  }
+  return value;
+}
+
+function humanizeRunKey(key) {
+  const labels = {
+    claim_to_pr: "claim to PR",
+    pr_to_merge: "PR to merge",
+    wall_clock_kills: "wall-clock kills",
+    reconciled_claims: "reconciled claims",
+    re_begins: "re-begins",
+  };
+  return labels[key] || key;
+}
+
+function runMetricRows(root, definition) {
+  const rows = [];
+  for (const source of definition.sources) {
+    const prefix = source.label ? [source.label] : [];
+    for (const item of metricLeaves(valueAtPath(root, source.path))) {
+      const leafName = item.path[item.path.length - 1];
+      if (source.excludeKeys && source.excludeKeys.includes(leafName)) continue;
+      const parts = [...prefix, ...item.path.map(humanizeRunKey)];
+      rows.push({
+        key: [...source.path, ...item.path].join("."),
+        label: parts.join(" · "),
+        series: item.series,
+      });
+    }
+  }
+  return rows;
+}
+
+function renderRunMetrics(series, container) {
+  if (!container) return;
+  container.replaceChildren();
+  const root = series && series.metrics && typeof series.metrics === "object"
+    ? series.metrics : {};
+  const days = series && Array.isArray(series.days) ? series.days : [];
+  const index = days.length - 1;
+
+  for (const definition of RUN_METRICS) {
+    const panel = element("article", "run-metric-panel");
+    panel.setAttribute("data-metric", definition.code);
+    const heading = element("div", "run-metric-heading");
+    heading.append(element("p", "metric-code", definition.code));
+    heading.append(element("h3", "metric-title", definition.title));
+    heading.append(element("p", "run-metric-description", definition.description));
+    panel.append(heading);
+
+    const list = element("div", "run-series-list");
+    const rows = runMetricRows(root, definition);
+    if (!rows.length) {
+      list.append(element("p", "run-metric-empty metric-gap", "No series available."));
+    }
+    for (const item of rows) {
+      const row = element("div", "run-series-row");
+      row.setAttribute("data-series", item.key);
+      const meta = element("div", "run-series-meta");
+      meta.append(element("p", "run-series-label", item.label));
+      meta.append(metricReadings(metricValues(item.series, index), definition.format));
+      row.append(meta);
+      row.append(renderMetricChart(item.series, days, {
+        title: item.label,
+        format: definition.format,
+        compact: true,
+      }));
+      list.append(row);
+    }
+    panel.append(list);
+    container.append(panel);
+  }
 }
 
 function renderExecutionTiles(series, container) {
@@ -1132,6 +1280,7 @@ async function loadMetrics() {
   metricsLoading = true;
   const status = document.querySelector("#metrics-status");
   const container = document.querySelector("#metrics-grid");
+  const runsContainer = document.querySelector("#runs-grid");
   try {
     const series = await requestMetrics();
     status.textContent = series.as_of
@@ -1139,10 +1288,12 @@ async function loadMetrics() {
       : "Metrics date unknown";
     status.classList.remove("failed");
     renderExecutionTiles(series, container);
+    renderRunMetrics(series, runsContainer);
   } catch (error) {
     status.textContent = error.message || "Metrics unavailable";
     status.classList.add("failed");
     renderExecutionTiles(null, container);
+    renderRunMetrics(null, runsContainer);
     throw error;
   } finally {
     metricsLoading = false;
@@ -1261,6 +1412,6 @@ export {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
   phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,
-  renderExecutionTiles, renderMetricChart, requestMetrics, CHART_WINDOW_DAYS,
+  renderExecutionTiles, renderMetricChart, renderRunMetrics, requestMetrics, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 };

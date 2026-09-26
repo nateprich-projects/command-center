@@ -87,7 +87,7 @@ def build_server(config: Config) -> FastMCP:
         instructions=(
             "Command Center tools that return the output of the matching funnel.py "
             "command. funnel.py remains the source of truth for project reads and "
-            "ordering. The gate tools approve, start, accept and park record the "
+            "ordering. The gate tools approve, accept and park record the "
             "verbatim instruction supplied by Nate with nate-relayed provenance."
         ),
         auth=auth,
@@ -119,15 +119,6 @@ def build_server(config: Config) -> FastMCP:
         instruction = _required_text(instruction, "instruction")
         return _run_funnel(
             "approve", _required_text(ref, "ref"), "--yes",
-            "--instruction", instruction,
-        )
-
-    @server.tool
-    def start(ref: str, instruction: str) -> str:
-        """Start a Ready project after Nate's verbatim instruction is supplied."""
-        instruction = _required_text(instruction, "instruction")
-        return _run_funnel(
-            "start", _required_text(ref, "ref"), "--yes",
             "--instruction", instruction,
         )
 

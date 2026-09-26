@@ -185,7 +185,6 @@ def test_approve_adopts_one_exact_class_before_status_and_records_source(
     ("verb", "status", "expected"),
     [
         ("approve", "Shaped", "Ready"),
-        ("start", "Ready", "Building"),
         ("accept", "Building", "Done"),
     ],
 )
@@ -204,7 +203,7 @@ def test_gate_answers_record_instruction_and_move_to_next_stage(
         children_done=1,
     )
     calls = stub_approve_writes(monkeypatch, item)
-    instruction = "Start this project now.\nUse the approved plan verbatim."
+    instruction = "Answer this gate now.\nUse the approved plan verbatim."
     monkeypatch.setattr(funnel, "drift_since_approval", lambda target: [])
 
     assert funnel.main([

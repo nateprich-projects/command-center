@@ -93,10 +93,10 @@ def test_server_registers_only_the_read_and_gate_tools(
 
     assert set(server.tools) == {
         "brief", "ideas", "show", "queue",
-        "approve", "start", "accept", "park",
+        "approve", "accept", "park",
     }
     assert not set(server.tools) & {
-        "next", "claim", "release", "gate", "heartbeat", "merge",
+        "next", "claim", "release", "gate", "heartbeat", "merge", "start",
     }
 
 
@@ -118,7 +118,6 @@ def test_tools_forward_verbatim_instruction_and_supported_arguments(
     instruction = "  Accept the finished work.\nKeep this wording.  "
 
     assert server.tools["approve"]("owner/repo#1", instruction) == "gate updated\n"
-    assert server.tools["start"]("owner/repo#2", instruction) == "gate updated\n"
     assert server.tools["accept"](
         "owner/repo#3", instruction, no_tickets=True
     ) == "gate updated\n"
@@ -129,7 +128,6 @@ def test_tools_forward_verbatim_instruction_and_supported_arguments(
     commands = [call[0][2:] for call in calls]
     assert commands == [
         ["approve", "owner/repo#1", "--yes", "--instruction", instruction],
-        ["start", "owner/repo#2", "--yes", "--instruction", instruction],
         [
             "accept", "owner/repo#3", "--yes", "--instruction", instruction,
             "--no-tickets",

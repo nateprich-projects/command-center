@@ -13653,13 +13653,6 @@ ANSWERS = {
     "accept": ("Building", "Done", "shipped and accepted"),
 }
 
-# The general-chat connector has one explicit transition that is not a routine
-# funnel gate. Keep it out of ANSWERS so Ready projects remain automatically
-# startable when the first ticket is claimed.
-CONNECTOR_ONLY_ANSWERS = {
-    "start": ("Ready", "Building", "work is starting"),
-}
-
 
 SUB_ISSUES = """
 query($owner: String!, $name: String!, $number: Int!) {
@@ -17031,12 +17024,7 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
     to Done. A note in the source is not a control. Defaulting to a dry run means
     the reflexive way to try one of these is also the harmless way.
     """
-    expected, nxt, meaning = {
-        **ANSWERS,
-        **CONNECTOR_ONLY_ANSWERS,
-    }[verb]
-    if verb in CONNECTOR_ONLY_ANSWERS:
-        instruction = _verbatim_instruction(instruction)
+    expected, nxt, meaning = ANSWERS[verb]
     item = find(items, ref)
 
     if item.status != expected:
@@ -17329,18 +17317,6 @@ def main(argv: Optional[Sequence[str]] = None, *,
                      "project with no tickets is normally waiting to be broken "
                      "down, not waiting to be accepted.",
             )
-    connector_start = sub.add_parser(
-        "start", help=argparse.SUPPRESS,
-    )
-    connector_start.add_argument("ref", help="issue number, owner/repo#number, or URL")
-    connector_start.add_argument(
-        "--yes", action="store_true", dest="confirmed",
-        help="actually do it; without this the command is a dry run",
-    )
-    connector_start.add_argument(
-        "--instruction", type=_verbatim_instruction, required=True,
-        help="verbatim instruction received from Nate; recorded in provenance",
-    )
     capture = sub.add_parser("capture", help="capture an idea into the funnel")
     capture.add_argument("title")
     capture.add_argument("--note", default=None, help="anything worth keeping now")
@@ -17801,7 +17777,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
             )
         if args.command == "reject":
             return cmd_reject(items, now, args.pr, args.note)
-        if args.command in ANSWERS or args.command in CONNECTOR_ONLY_ANSWERS:
+        if args.command in ANSWERS:
             return cmd_answer(items, now, args.command, args.ref, args.confirmed,
                               getattr(args, "no_tickets", False),
                               args.instruction)

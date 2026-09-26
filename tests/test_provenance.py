@@ -41,9 +41,9 @@ def test_provenance_parser_reads_only_its_own_marker():
 
 
 def test_nate_relayed_provenance_preserves_the_verbatim_instruction():
-    instruction = "  Start this project as asked.\nKeep this line too.  "
+    instruction = "  Approve this plan as asked.\nKeep this line too.  "
     body = funnel.append_provenance(
-        "General-chat gate instruction received for `start`.",
+        "General-chat gate instruction received for `approve`.",
         "nate-relayed", at=NOW, instruction=instruction,
     )
 

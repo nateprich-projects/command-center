@@ -4419,3 +4419,4 @@
 {"agent": "codex", "job": "command-center-tickets-weekday-mornings", "phase": "job", "run": "56aeaab70a84", "ts": 1790399202}
 {"agent": "codex", "do": "ticket", "phase": "bind", "run": "56aeaab70a84", "ts": 1790399288, "work": "nateprich-projects/command-center#1525"}
 {"agent": "codex", "api_cost": {"gh_calls": 100, "graphql_points": null}, "graphql_by_caller": {"begin": {"calls": 22, "points": 75, "remaining": 3193}, "unattributed": {"calls": 1, "points": null, "remaining": null}}, "phase": "api_cost", "run": "56aeaab70a84", "ts": 1790399296}
+{"agent": "codex", "api_cost": {"gh_calls": 37, "graphql_points": null}, "graphql_by_caller": {"unattributed": {"calls": 31, "points": null, "remaining": 3163}}, "phase": "api_cost", "run": "81461c6f8de9", "ts": 1790399314}

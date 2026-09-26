@@ -349,6 +349,8 @@ class Wiring:
         self.reviews = []
         self.review_attempts = []
         self.merges = []
+        self.merge_facts = []
+        self.loads = []
         self.pr_reads = []
         self.state_reads = []
         self.merge_code = merge_code
@@ -360,7 +362,7 @@ class Wiring:
         self.review_error = review_error
         self.pr_fact = pr_fact
         monkeypatch.setattr(funnel, "resolve_repo", lambda repo: REPO)
-        monkeypatch.setattr(funnel, "load_items", lambda: ["items"])
+        monkeypatch.setattr(funnel, "load_items", self._load_items)
         monkeypatch.setattr(review_apply, "current_head",
                             lambda repo, pr: self.head)
         monkeypatch.setattr(review_apply.review, "fetch_pr", self._fetch_pr)
@@ -388,9 +390,14 @@ class Wiring:
             raise self.state_error
         return self.pr_fact
 
-    def _merge(self, items, now, repo, pr, confirmed):
+    def _load_items(self, **kwargs):
+        self.loads.append(kwargs)
+        return ["items"]
+
+    def _merge(self, items, now, repo, pr, confirmed, pr_fact=None):
         self.merges.append({"items": items, "repo": repo, "pr": pr,
                             "confirmed": confirmed})
+        self.merge_facts.append(pr_fact)
         if self.merge_error_text:
             print(self.merge_error_text, file=sys.stderr)
         return self.merge_code
@@ -418,6 +425,10 @@ def test_approved_records_then_merges_and_closes(monkeypatch, capsys):
     # Confirmed: the gate merges and cmd_merge closes the ticket.
     assert wiring.merges == [{"items": ["items"], "repo": REPO, "pr": 7,
                               "confirmed": True}]
+    # The board comes without history (#1621); an unreadable PR fact goes
+    # to the gate as empty, which refuses it.
+    assert wiring.loads == [{"include_details": False}]
+    assert wiring.merge_facts == [{}]
 
 
 def test_an_open_mergeable_pr_still_merges(monkeypatch, capsys):
@@ -585,6 +596,10 @@ def test_an_unreadable_pr_after_merge_refusal_fails_closed(
         monkeypatch, capsys):
     wiring = Wiring(monkeypatch, merge_code=1,
                     state_error=funnel.GitHubError("network dropped"))
+    # The gate's own PR read (before the merge) succeeds; only the re-read
+    # after the refusal drops.
+    monkeypatch.setattr(funnel, "_pr_fact_for_number",
+                        lambda repo, pr, **kwargs: None)
 
     code = run_cli(monkeypatch, capsys,
                    ["7", "--repo", REPO, "--answer", "-", "--head", SHA],

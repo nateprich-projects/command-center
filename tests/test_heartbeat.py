@@ -702,6 +702,32 @@ def test_api_cost_event_preserves_reset_metadata_and_null_unknowns(monkeypatch):
     ]
 
 
+def test_api_cost_reader_ignores_additive_graphql_readings():
+    records = [{
+        "run": "run-id",
+        "phase": "api_cost",
+        "api_cost": {"graphql_points": 7, "gh_calls": 2},
+        "graphql_by_caller": {
+            "standard": {
+                "calls": 2,
+                "points": 7,
+                "remaining": 4993,
+                "readings": [{
+                    "cost": 7,
+                    "remaining": 4993,
+                    "reset_at": "2026-09-26T10:49:20Z",
+                    "received_at": NOW + 0.25,
+                }],
+            },
+        },
+    }]
+
+    assert heartbeat.api_cost_for_run(records, "run-id") == {
+        "graphql_points": 7,
+        "gh_calls": 2,
+    }
+
+
 def test_finish_aggregates_caller_costs_and_keeps_unknowns_unattributed(
     monkeypatch,
 ):

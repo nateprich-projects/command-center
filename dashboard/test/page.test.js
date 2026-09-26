@@ -7,7 +7,8 @@ import {
   phoneState, pipState, projectBlocked, projectHold, holdChip, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
-  renderMetricChart, renderBudgetMetrics, renderRunMetrics, renderAttentionMetrics,
+  renderMetricChart, renderBudgetMetrics, renderRunMetrics,
+  renderAttentionMetrics, renderQualityMetrics,
   CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 } from "../public/app.js";
@@ -780,6 +781,57 @@ test("the Runs panel renders C1-C6 by agent and job and preserves their gaps", a
     assert.ok(c4Paths.some((path) => path.endsWith(".floor")));
     assert.ok(c4Paths.some((path) => path.endsWith(".unclassified")));
     assert.match(panels[3].textContent, /unclassified errors stay separate/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("the Quality panel renders B1, B2 and B4 while keeping B3 blind", async () => {
+  const [seriesText, snapshotText, html] = await Promise.all([
+    readFile(new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8"),
+    readFile(new URL("../../tests/fixtures/metrics_snapshot.json", import.meta.url), "utf8"),
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+  ]);
+  const series = JSON.parse(seriesText);
+  const snapshot = JSON.parse(snapshotText);
+  const rework = snapshot.brief.outcome_signals.signals.rework_rate;
+  const expectedRework = rework.rework_attempts / rework.merged_prs;
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const grid = new TestNode("div");
+    renderQualityMetrics(series, grid);
+    const panels = grid.querySelectorAll(".run-metric-panel");
+    assert.deepEqual(
+      panels.map((panel) => panel.attributes.get("data-metric")),
+      ["B1", "B2", "B3", "B4"],
+    );
+
+    assert.match(panels[0].textContent, /First-pass approval/);
+    assert.match(panels[0].textContent, /100\.0%/);
+    assert.match(panels[1].textContent, /25\.0%/);
+    const b2Series = series.metrics.B.B2;
+    const last = series.days.length - 1;
+    assert.equal(b2Series.r7[last], expectedRework);
+    assert.equal(b2Series.r28[last], expectedRework);
+
+    const b3 = panels[2];
+    assert.match(b3.textContent, /Blind input: no capture has recorded a cause yet\./);
+    assert.equal(b3.querySelectorAll(".metric-reading").length, 0);
+    assert.equal(b3.querySelectorAll(".metric-chart").length, 0);
+    assert.equal(series.metrics.B.B3.r7[last], 0.25);
+
+    const b4Rows = panels[3].querySelectorAll(".run-series-row");
+    assert.deepEqual(
+      b4Rows.map((row) => row.querySelector(".run-series-label").textContent),
+      ["infra", "real"],
+    );
+    assert.equal(b4Rows.length, 2);
+    assert.match(panels[3].textContent, /current state, not incident history/);
+
+    assert.ok(html.indexOf('id="quality-grid"') < html.indexOf('id="runs-grid"'));
+    assert.ok(html.indexOf('id="runs-grid"') < html.indexOf('id="budget-grid"'));
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;

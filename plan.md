@@ -385,6 +385,13 @@ rebase. A conflicting branch rejects as stale, as before. **Confirmed by Nate,
   session** (see below). Target ~10% remaining Saturday morning (Claude) and Sunday
   morning (Codex). There is no monthly limit; only the 5-hour and weekly windows exist.
 
+  **Claude's Saturday lane is the exception: it has no budget gate.** Two Desktop
+  scheduled tasks (03:00 and 08:05 Saturday) implement tickets until the clock or the
+  provider's own limit stops them; `begin` starts no Claude work outside Saturday before
+  11:15, and the routine stops in-flight work at 11:45, before the noon reset.
+  **Decided by Nate, 2026-09-25 (#1557):** "I don't want you guesstimating the budget
+  with these Saturday runs. I want these to run until time or usage run out."
+
   **The gate reserves the cost of the run it authorises** — `used + reserve <= allowed`,
   not `used <= allowed`. Nothing can cap a session's spend once it begins, so a bare
   threshold check is a start check rather than a bound: it waves through a run that then

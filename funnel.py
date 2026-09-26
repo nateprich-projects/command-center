@@ -16722,6 +16722,22 @@ def merge_blockers(
     # routines ran the full 35-section reporting read before every merge just
     # to read this counter, and a slow read blocked the merge by timing out
     # (#830). The gate is fail-closed: a tripped counter refuses.
+    #
+    # Begin and the session server load the board without item history, so a
+    # regression item arrives with no `status_since` and the counter silently
+    # read zero on every lane merge (#1596). Read the missing history here,
+    # for regression items only, and refuse when it cannot be read.
+    unread_regressions = [
+        item for item in items
+        if item.title.startswith(REGRESSION_PREFIX)
+        and item.status_since is None
+    ]
+    if unread_regressions:
+        try:
+            hydrate_item_details(items, unread_regressions)
+        except GitHubError as exc:
+            why.append("could not read the rejected-merge history: {}".format(
+                exc))
     counter = rejected_merges(items, now)
     if counter["stop_auto_merging"]:
         why.append("auto-merging is stopped: {} rejected merges in the last "

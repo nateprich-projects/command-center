@@ -7,7 +7,7 @@ import {
   phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
-  renderMetricChart, CHART_WINDOW_DAYS,
+  renderMetricChart, renderBudgetMetrics, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 } from "../public/app.js";
 
@@ -530,10 +530,12 @@ test("the usage line shows rolling 7-day Muse spend against the cap", () => {
 test("the usage line renders from the snapshot root, with no 24-hour companion", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const start = source.indexOf("function renderUsage(");
+  const usage = source.slice(start, source.indexOf("\n}\n", start) + 2);
   assert.match(source, /renderUsage\(snapshot\.usage/);
   assert.match(html, /<div id="usage"><\/div>/);
-  assert.doesNotMatch(source, /five_hour/);
-  assert.doesNotMatch(source, /24-hour/);
+  assert.doesNotMatch(usage, /five_hour/);
+  assert.doesNotMatch(usage, /24-hour/);
 });
 
 test("the fixture's usage row renders as the spend line", async () => {
@@ -651,6 +653,46 @@ test("the Execution headline renders six R7/R28 tiles and keeps missing data as 
       .some((label) => label.textContent === "muse"));
     assert.match(tiles[3].textContent, /0\.1/);
     assert.match(tiles[4].textContent, /\+0\.03 h/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("the Budget panel renders D1-D6, marks Muse pace resets, and explains the D4 gap", async () => {
+  const [fixtureText, html] = await Promise.all([
+    readFile(new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8"),
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+  ]);
+  const fixture = JSON.parse(fixtureText);
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const grid = new TestNode("div");
+    renderBudgetMetrics(fixture, grid);
+    const cards = grid.querySelectorAll(".budget-tile");
+    assert.deepEqual(cards.map((card) => card.attributes.get("data-metric")),
+      ["D1", "D2", "D3", "D4", "D5", "D6"]);
+
+    const muse = cards[0];
+    assert.ok(muse.querySelectorAll(".chart-band").length > 0);
+    assert.ok(muse.querySelectorAll(".chart-reset-marker").length > 0);
+    assert.match(muse.textContent, /Next window reset/);
+
+    assert.match(cards[1].textContent, /funnel share/i);
+    assert.match(cards[1].textContent, /personal share/i);
+    assert.match(cards[2].textContent, /Five-hour window/);
+    assert.match(cards[2].textContent, /Seven-day window/);
+
+    const cost = cards[3];
+    assert.equal(cost.querySelectorAll(".metric-gap").length, 3);
+    assert.match(cost.textContent, /complete priced cost/);
+    assert.match(cards[4].textContent, /points per run/i);
+    assert.match(cards[4].textContent, /resend ratio/i);
+    assert.match(cards[5].textContent, /api reserve/i);
+
+    assert.match(html, /Muse’s ChatGPT-side usage and Claude’s claude\.ai usage are invisible/);
+    assert.match(html, /id="budget-grid"/);
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;

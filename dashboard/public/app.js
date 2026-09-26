@@ -862,6 +862,16 @@ function formatMetricNumber(value, digits, signed = false) {
 
 function formatMetricValue(value, format, isDelta = false) {
   if (!isMetricNumber(value)) return "Gap";
+  if (format === "percent-points") {
+    const points = formatMetricNumber(value, 1, isDelta);
+    return isDelta ? points + " pp" : points + "%";
+  }
+  if (format === "currency") {
+    const amount = "$" + formatMetricNumber(Math.abs(value), 2);
+    if (value < 0) return "-" + amount;
+    return isDelta && value > 0 ? "+" + amount : amount;
+  }
+  if (format === "ratio") return formatMetricNumber(value, 1, isDelta) + "×";
   if (format === "percent") {
     const points = formatMetricNumber(value * 100, 1, isDelta);
     return isDelta ? points + " pp" : points + "%";
@@ -950,13 +960,19 @@ function chartRuns(values) {
 function chartTop(values, format) {
   let top = 0;
   for (const value of values) if (isMetricNumber(value) && value > top) top = value;
+  if (format === "percent-points") return Math.min(100, top * 1.1) || 100;
   if (format === "percent") return Math.min(1, top * 1.1) || 1;
   return top * 1.1 || 1;
 }
 
-function renderMetricChart(series, days, { title = "", format = "count" } = {}) {
+function renderMetricChart(series, days, {
+  title = "", format = "count", bands = [], markers = [],
+} = {}) {
   const start = Math.max(0, (days || []).length - CHART_WINDOW_DAYS);
   const windowDays = (days || []).slice(start);
+  const windowBands = Array.isArray(bands)
+    ? bands.slice(start, start + windowDays.length) : [];
+  const markerDates = new Set(Array.isArray(markers) ? markers : []);
   const read = (key) => windowDays.map((_, offset) => {
     const value = series && Array.isArray(series[key]) ? series[key][start + offset] : null;
     return isMetricNumber(value) ? value : null;
@@ -984,6 +1000,25 @@ function renderMetricChart(series, days, { title = "", format = "count" } = {}) 
     "aria-label": summary,
   });
   svg.append(svgNode("title", {}, summary));
+
+  const bandClasses = { ok: "ok", tight: "tight", over: "over" };
+  const bandsGroup = svgNode("g", { class: "chart-bands" });
+  windowDays.forEach((day, index) => {
+    const bandName = bandClasses[windowBands[index]];
+    if (!bandName) return;
+    const left = index === 0 ? CHART_PAD.left : (x(index - 1) + x(index)) / 2;
+    const right = index === windowDays.length - 1
+      ? CHART_PAD.left + plotWidth : (x(index) + x(index + 1)) / 2;
+    const band = svgNode("rect", {
+      class: "chart-band chart-band-" + bandName,
+      x: left.toFixed(1), y: CHART_PAD.top,
+      width: Math.max(0, right - left).toFixed(1), height: plotHeight,
+    });
+    band.append(svgNode("title", {}, day + " · Pace " + bandName));
+    bandsGroup.append(band);
+  });
+  svg.append(bandsGroup);
+
   // Drawn first so a hovered day shades beneath the line, not over it.
   const hits = svgNode("g", { class: "chart-hits" });
   svg.append(hits);
@@ -993,6 +1028,18 @@ function renderMetricChart(series, days, { title = "", format = "count" } = {}) 
     class: "chart-axis",
     x1: CHART_PAD.left, x2: CHART_PAD.left + plotWidth, y1: baseline, y2: baseline,
   }));
+
+  windowDays.forEach((day, index) => {
+    if (!markerDates.has(day)) return;
+    const markerX = x(index);
+    const marker = svgNode("line", {
+      class: "chart-reset-marker",
+      x1: markerX.toFixed(1), x2: markerX.toFixed(1),
+      y1: CHART_PAD.top, y2: baseline,
+    });
+    marker.append(svgNode("title", {}, "Window reset · " + day));
+    svg.append(marker);
+  });
 
   if (isMetricNumber(rule)) {
     svg.append(svgNode("line", {
@@ -1119,6 +1166,167 @@ function renderExecutionTiles(series, container) {
   }, [{ label: "", values: single(["E", "E4"]) }]);
 }
 
+function appendBudgetTile(container, code, title) {
+  const tile = element("article", "metric-tile budget-tile");
+  tile.setAttribute("data-metric", code);
+  tile.append(element("p", "metric-code", code));
+  tile.append(element("h3", "metric-title", title));
+  container.append(tile);
+  return tile;
+}
+
+function appendBudgetMetric(tile, label, series, days, format, chartOptions = {}) {
+  const index = days.length - 1;
+  appendMetricRow(tile, label, metricValues(series, index), format);
+  tile.append(renderMetricChart(series, days, {
+    title: label,
+    format,
+    ...chartOptions,
+  }));
+}
+
+function appendBudgetDetail(tile, label, value, className = "") {
+  const row = element("p", "budget-detail" + (className ? " " + className : ""));
+  row.append(element("span", "budget-detail-label", label));
+  row.append(element("span", "budget-detail-value", value));
+  tile.append(row);
+}
+
+function appendBudgetGap(tile, message) {
+  if (typeof message === "string" && message) {
+    tile.append(element("p", "metric-gap-reason", message));
+  }
+}
+
+function latestSeriesValue(series, index) {
+  const value = series && Array.isArray(series.daily) ? series.daily[index] : null;
+  return typeof value === "string" ? value : null;
+}
+
+function resetMarkerDates(series, days) {
+  const result = new Set();
+  const availableDays = new Set(days || []);
+  for (const value of (series && Array.isArray(series.daily) ? series.daily : [])) {
+    if (typeof value !== "string" || value.length < 10) continue;
+    const date = value.slice(0, 10);
+    if (availableDays.has(date)) result.add(date);
+  }
+  return [...result];
+}
+
+function resetLabel(value) {
+  if (typeof value !== "string") return "Gap";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "Gap";
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium", timeStyle: "short",
+  }).format(date);
+}
+
+function budgetReasonLabel(value) {
+  return String(value || "").replaceAll("_", " ").replaceAll("-", " ");
+}
+
+function renderBudgetMetrics(series, container) {
+  if (!container) return;
+  container.replaceChildren();
+  const root = series && series.metrics && typeof series.metrics === "object"
+    ? series.metrics : {};
+  const days = series && Array.isArray(series.days) ? series.days : [];
+  const index = days.length - 1;
+  const get = (path) => metricAtPath(root, path);
+  const muse = appendBudgetTile(container, "D1", "Muse $/day and window %");
+  const museDollars = get(["D", "D1", "dollars_per_day"]);
+  const musePercent = get(["D", "D1", "window_used_percent"]);
+  const musePace = get(["D", "D1", "pace_band"]);
+  const museReset = get(["D", "D1", "window_resets_at"]);
+  appendBudgetMetric(muse, "Spend per day", museDollars, days, "currency");
+  appendBudgetMetric(muse, "Seven-day usage", musePercent, days, "percent-points", {
+    bands: musePace && musePace.daily,
+    markers: resetMarkerDates(museReset, days),
+  });
+  const pace = latestSeriesValue(musePace, index);
+  const paceLabels = { ok: "On pace", tight: "Tight", over: "Over" };
+  appendBudgetDetail(
+    muse, "Current pace", paceLabels[pace] || "Gap",
+    pace ? "pace-status pace-" + pace : "metric-gap",
+  );
+  appendBudgetDetail(muse, "Next window reset", resetLabel(latestSeriesValue(museReset, index)));
+  const legend = element("div", "pace-legend");
+  for (const [name, label] of [["ok", "On pace"], ["tight", "Tight"], ["over", "Over"]]) {
+    const item = element("span", "pace-legend-item");
+    item.append(element("i", "pace-swatch pace-swatch-" + name));
+    item.append(element("span", null, label));
+    legend.append(item);
+  }
+  const resetLegend = element("span", "pace-legend-item");
+  resetLegend.append(element("i", "pace-reset-swatch"));
+  resetLegend.append(element("span", null, "Window reset"));
+  legend.append(resetLegend);
+  muse.append(legend);
+  appendBudgetGap(muse, museReset && museReset.gap);
+
+  const codex = appendBudgetTile(container, "D2", "Codex weekly usage");
+  appendBudgetMetric(codex, "Weekly usage", get(["D", "D2", "weekly_used_percent"]), days, "percent-points");
+  appendBudgetMetric(codex, "Funnel share", get(["D", "D2", "funnel_vs_personal", "funnel_share"]), days, "percent");
+  appendBudgetMetric(codex, "Personal share", get(["D", "D2", "funnel_vs_personal", "personal_share"]), days, "percent");
+  appendBudgetGap(codex, root.D && root.D.D2 && root.D.D2.funnel_vs_personal
+    && root.D.D2.funnel_vs_personal.gap);
+
+  const claude = appendBudgetTile(container, "D3", "Claude window usage");
+  for (const [windowName, label] of [["five_hour", "Five-hour window"], ["seven_day", "Seven-day window"]]) {
+    const used = get(["D", "D3", "windows", windowName, "used_percent"]);
+    appendBudgetMetric(claude, label, used, days, "percent-points");
+    const reset = latestSeriesValue(get(["D", "D3", "windows", windowName, "resets_at"]), index);
+    if (reset) appendBudgetDetail(claude, label + " reset", resetLabel(reset));
+  }
+  appendBudgetGap(claude, root.D && root.D.D3 && root.D.D3.gap);
+
+  const cost = appendBudgetTile(container, "D4", "Cost per merged PR by lane");
+  const costLeaves = metricLeaves(root.D && root.D.D4);
+  let costShown = false;
+  for (const item of costLeaves) {
+    if (item.series.kind === "category") continue;
+    const label = item.path.length ? budgetReasonLabel(item.path[item.path.length - 1]) : "By lane";
+    appendBudgetMetric(cost, label, item.series, days, "currency");
+    costShown = true;
+  }
+  if (!costShown) appendBudgetMetric(cost, "By lane", null, days, "currency");
+  appendBudgetGap(cost, root.D && root.D.D4 && root.D.D4.gap);
+
+  const api = appendBudgetTile(container, "D5", "GitHub API and resend ratio");
+  appendBudgetMetric(api, "GraphQL points per brief", get(["D", "D5", "points_per_brief"]), days, "count");
+  const runLeaves = metricLeaves(root.D && root.D.D5 && root.D.D5.graphql_points_per_run);
+  let runShown = false;
+  for (const item of runLeaves) {
+    if (item.path.length < 2 || item.path[item.path.length - 1] !== "points_per_run") continue;
+    appendBudgetMetric(api, budgetReasonLabel(item.path[item.path.length - 2]) + " points per run", item.series, days, "count");
+    runShown = true;
+  }
+  if (!runShown) appendBudgetMetric(api, "Points per run", null, days, "count");
+  appendBudgetMetric(api, "API-reserve skips per day", get(["D", "D5", "api_reserve_skips"]), days, "count");
+  const resendLeaves = metricLeaves(root.D && root.D.D5 && root.D.D5.resend_ratio_by_agent);
+  let resendShown = false;
+  for (const item of resendLeaves) {
+    if (item.path.length !== 1) continue;
+    appendBudgetMetric(api, budgetReasonLabel(item.path[0]) + " resend ratio", item.series, days, "ratio");
+    resendShown = true;
+  }
+  if (!resendShown) appendBudgetMetric(api, "Resend ratio", null, days, "ratio");
+
+  const held = appendBudgetTile(container, "D6", "Held hours by lane and reason");
+  const heldLeaves = metricLeaves(root.D && root.D.D6 && root.D.D6.held_hours_by_agent_and_reason);
+  let heldShown = false;
+  for (const item of heldLeaves) {
+    if (item.path.length < 2) continue;
+    const label = budgetReasonLabel(item.path[0]) + " · " + budgetReasonLabel(item.path[1]);
+    appendBudgetMetric(held, label, item.series, days, "hours");
+    heldShown = true;
+  }
+  if (!heldShown) appendBudgetMetric(held, "By lane and reason", null, days, "hours");
+  appendBudgetGap(held, root.D && root.D.D6 && root.D.D6.gap);
+}
+
 async function requestMetrics(fetchImpl = fetch) {
   const response = await fetchImpl("/api/metrics", { cache: "no-store" });
   if (!response.ok) throw new Error("Metrics returned " + response.status);
@@ -1139,10 +1347,12 @@ async function loadMetrics() {
       : "Metrics date unknown";
     status.classList.remove("failed");
     renderExecutionTiles(series, container);
+    renderBudgetMetrics(series, document.querySelector("#budget-grid"));
   } catch (error) {
     status.textContent = error.message || "Metrics unavailable";
     status.classList.add("failed");
     renderExecutionTiles(null, container);
+    renderBudgetMetrics(null, document.querySelector("#budget-grid"));
     throw error;
   } finally {
     metricsLoading = false;
@@ -1261,6 +1471,6 @@ export {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
   phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,
-  renderExecutionTiles, renderMetricChart, requestMetrics, CHART_WINDOW_DAYS,
+  renderExecutionTiles, renderMetricChart, renderBudgetMetrics, requestMetrics, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 };

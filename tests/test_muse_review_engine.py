@@ -2391,6 +2391,16 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "This call is not the review" not in judge
     assert "Does this diff do what the ticket and the plan say" in judge
     assert "posted PR" in judge
+    assert "packet's CI section first" in judge
+    assert (
+        "successful named check in `ci.checks` for the packet's `head_sha` "
+        "satisfies" in judge
+    )
+    assert "only a run-outcome requirement that check directly proves" in judge
+    assert (
+        "that proved requirement unsure because no Run evidence comment "
+        "exists" in judge
+    )
     assert "Run evidence:" in judge
     assert "command, exit status, output summary" in judge
     assert "never automatic satisfaction" in judge

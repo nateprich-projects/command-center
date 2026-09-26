@@ -1424,6 +1424,12 @@ if ! JUDGE_COUNT="$(python3 -c 'import json,sys; print(len(json.load(open(sys.ar
 fi
 
 judge_header() {
+  # Verified for #1546 (#1339) before changing the contract: origin/main
+  # required a posted PR Run evidence block for run-outcome facts;
+  # engine/review.py's build_packet places head_sha beside ci.checks rows
+  # carrying each check's name, conclusion, state and status. The clause below
+  # depends on both findings and applies only to a check that directly proves
+  # the requirement.
   cat <<'HEADER'
 This is one judge call in a larger review. Judge only the requirements in
 the list below against the supplied review packet. Do not derive additional
@@ -1432,12 +1438,18 @@ verdict. A requirement is met only when the diff satisfies it; use unmet
 when the diff clearly fails it and unsure when the packet cannot resolve it.
 For each result, cite the relevant diff lines or explain the uncertainty.
 
-Judge run-outcome and post-merge runtime requirements against posted PR
-`**Run evidence:**` in `pr_comments`: command, exit status, output summary,
-and environment note. Presence is evidence, never automatic satisfaction;
-malformed or incomplete blocks stay prose. For post-merge runtime facts, a
-throwaway `launchctl submit` probe may produce pre-merge evidence: fire, read,
-post the evidence, end the job. Install nothing; leave the keeper unchanged.
+Judge run-outcome requirements against the packet's CI section first. A
+successful named check in `ci.checks` for the packet's `head_sha` satisfies
+only a run-outcome requirement that check directly proves (for example, an
+`offline` check with `SUCCESS` proves "offline tests are green"). Do not mark
+that proved requirement unsure because no Run evidence comment exists. Judge
+run-outcome requirements the CI section does not prove, and post-merge runtime
+requirements, against posted PR `**Run evidence:**` in `pr_comments`:
+command, exit status, output summary, and environment note. Presence is
+evidence, never automatic satisfaction; malformed or incomplete blocks stay prose.
+For post-merge runtime facts, a throwaway `launchctl submit` probe may
+produce pre-merge evidence: fire, read, post the evidence, end the job.
+Install nothing; leave the keeper unchanged.
 
 Return exactly one JSON object with one result for every assigned requirement
 and no others:

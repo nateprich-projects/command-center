@@ -3,8 +3,10 @@
 Ticket #652: every minute the launchd job pushes the newest spool entry to the
 Cloudflare KV snapshot the Worker in `dashboard/worker.js` reads, and polls the
 `refresh-requested` flag. A set flag runs one `funnel.py brief` only when the
-newest snapshot is older than 10 minutes, then clears the flag. Failures go to
-the publisher's own log (stderr under launchd) and never touch agent runs.
+newest snapshot is older than 10 minutes. A publishable brief clears the flag;
+an exit-0 unpublishable refresh records its attempt in the flag and waits one
+cadence interval before retrying. Failures go to the publisher's own log
+(stderr under launchd) and never touch agent runs.
 
 Every test runs against a fake KV server, fixture spool entries, and a fake
 brief script. No test reads the real `.env`, the real spool, or GitHub.
@@ -426,6 +428,21 @@ def test_refresh_with_stale_snapshot_runs_one_brief_and_clears(
     assert "refresh-requested" not in kv.values
 
 
+def test_first_refresh_with_no_snapshot_and_no_attempt_runs_immediately(
+    tmp_path, kv, monkeypatch, capsys
+):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    kv.values["refresh-requested"] = iso().encode()
+    argv, fake_brief = base_argv(tmp_path, kv, spool)
+
+    code, _, err = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 0
+    assert brief_run_count(fake_brief) == 1
+    assert "no snapshot yet" in err
+
+
 def test_exit_zero_missing_items_envelope_keeps_refresh_flag(
     tmp_path, kv, monkeypatch, capsys
 ):
@@ -447,6 +464,73 @@ def test_exit_zero_missing_items_envelope_keeps_refresh_flag(
     assert kv.deletes_of("refresh-requested") == []
     assert "refresh-requested" in kv.values
     assert "did not produce a publishable snapshot" in err
+    stored_flag = json.loads(kv.values["refresh-requested"].decode())
+    assert stored_flag["requested_at"] == iso()
+    assert publisher.parse_generated_at(stored_flag["attempted_at"]) == pytest.approx(
+        time.time(), abs=1
+    )
+
+
+def test_unpublishable_refresh_retries_only_after_the_shared_interval(
+    tmp_path, kv, monkeypatch, capsys
+):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    start = 1_800_000_000.0
+    now = [start]
+    monkeypatch.setattr(publisher.time, "time", lambda: now[0])
+    entry_path, _ = write_spool_entry(
+        spool, "entry.json", seconds_ago=publisher.STALE_AFTER_SECONDS + 1
+    )
+    kv.values["snapshot"] = entry_path.read_bytes()
+    kv.values["refresh-requested"] = iso().encode()
+    argv, fake_brief = base_argv(tmp_path, kv, spool)
+    write_fake_brief(
+        fake_brief,
+        missing=[{"section": "items", "error": "Project unavailable"}],
+    )
+
+    code, _, _ = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 0
+    assert brief_run_count(fake_brief) == 1
+    stored_flag = json.loads(kv.values["refresh-requested"].decode())
+    assert publisher.parse_generated_at(stored_flag["attempted_at"]) == start
+
+    now[0] = start + publisher.STALE_AFTER_SECONDS - 1
+    code, _, _ = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 0
+    assert brief_run_count(fake_brief) == 1
+    assert "refresh-requested" in kv.values
+    assert json.loads(kv.values["refresh-requested"].decode()) == stored_flag
+
+    now[0] = start + publisher.STALE_AFTER_SECONDS
+    code, _, _ = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 0
+    assert brief_run_count(fake_brief) == 2
+    assert "refresh-requested" in kv.values
+
+
+def test_publishable_refresh_clears_the_attempt_timestamp_with_the_flag(
+    tmp_path, kv, monkeypatch, capsys
+):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    write_spool_entry(spool, "entry.json", seconds_ago=11 * 60)
+    kv.values["refresh-requested"] = json.dumps({
+        "requested_at": iso(),
+        "attempted_at": iso(seconds_ago=publisher.STALE_AFTER_SECONDS + 1),
+    }).encode()
+    argv, fake_brief = base_argv(tmp_path, kv, spool)
+
+    code, _, _ = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 0
+    assert brief_run_count(fake_brief) == 1
+    assert len(kv.deletes_of("refresh-requested")) == 1
+    assert "refresh-requested" not in kv.values
 
 
 def test_refresh_within_the_floor_waits_and_keeps_the_flag(
@@ -495,6 +579,12 @@ def test_refresh_floor_uses_the_shared_regeneration_interval(monkeypatch):
 
     assert publisher.brief_reason(now - 899, now, flagged=True) is None
     assert publisher.brief_reason(now - 901, now, flagged=True) == "refresh"
+    assert publisher.brief_reason(
+        now - 901, now, flagged=True, last_attempt_epoch=now - 899
+    ) is None
+    assert publisher.brief_reason(
+        now - 901, now, flagged=True, last_attempt_epoch=now - 900
+    ) == "refresh"
 
 
 def test_five_minute_refresh_bursts_follow_the_configured_interval(
@@ -565,6 +655,36 @@ def test_an_old_snapshot_runs_a_scheduled_brief_without_any_flag(
     assert brief_run_count(fake_brief) == 1
     assert kv.deletes_of("refresh-requested") == []
     assert "scheduled bound" in err
+
+
+def test_scheduled_regeneration_is_not_held_by_a_refresh_retry(
+    tmp_path, kv, monkeypatch, capsys
+):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    now = [1_800_000_000.0]
+    monkeypatch.setattr(publisher.time, "time", lambda: now[0])
+    write_spool_entry(
+        spool, "entry.json", seconds_ago=publisher.SCHEDULED_AFTER_SECONDS + 1
+    )
+    kv.values["refresh-requested"] = json.dumps({
+        "requested_at": iso(),
+        "attempted_at": iso(),
+    }).encode()
+    argv, fake_brief = base_argv(tmp_path, kv, spool)
+    write_fake_brief(
+        fake_brief,
+        missing=[{"section": "items", "error": "Project unavailable"}],
+    )
+
+    code, _, err = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 0
+    assert brief_run_count(fake_brief) == 1
+    assert "scheduled bound" in err
+    assert "refresh-requested" in kv.values
+    stored_flag = json.loads(kv.values["refresh-requested"].decode())
+    assert stored_flag["attempted_at"] == iso()
 
 
 def test_failed_brief_still_clears_the_flag_and_exits_zero(

@@ -647,6 +647,26 @@ def test_a_scan_hit_holds_with_an_empty_declaration():
         "Shaped", "escalated risk (credentials)")
 
 
+def test_preview_keeps_the_recorded_1503_residual_citation_hit():
+    """The adapter removes the Rejected hit; a later source citation remains."""
+    item = idea(1503, klass="Broken")
+    recorded = (ROOT / "tests/fixtures/escalation_plan_1503_recorded.md").read_text(
+        encoding="utf-8")
+    candidate = shape.validate_answer(answer(
+        proposed_class="Broken",
+        plan_markdown="# Plan\n\n" + recorded,
+        escalated_risk=[]))
+
+    status, reason = shape.preview_decision([item], item, candidate)
+
+    assert status == "Shaped"
+    assert reason == (
+        "escalated risk (data-migration: - The fix is forward-only and the "
+        "14 invalid-JSON lines and the lost escalated fire stand as the "
+        "before-measurement. (source: sibling convention #1393 and #1182 "
+        "no-backfill decisions))")
+
+
 def test_a_clear_declaration_with_a_clear_scan_is_ready():
     status, reason = shape.decide(
         shape.validate_answer(answer(escalated_risk=[])),

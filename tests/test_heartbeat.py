@@ -41,6 +41,12 @@ def start(run, at, ticket=1):
             "ts": int(at), "ticket": ticket}
 
 
+def bind(run, at, ticket=1):
+    return {"run": run, "agent": "claude", "phase": "bind",
+            "ts": int(at), "do": "ticket",
+            "work": "nateprich-projects/command-center#{}".format(ticket)}
+
+
 def finish(run, at, outcome="done"):
     return {"run": run, "agent": "claude", "phase": "finish",
             "ts": int(at), "outcome": outcome}
@@ -844,7 +850,11 @@ def test_watchdog_still_reports_genuinely_dying_runs():
     old = NOW - 5 * 3600
     records = []
     for i in range(watchdog.DYING_THRESHOLD):
-        records.append(start("run{}".format(i), old + i * MIN))
+        at = old + i * MIN
+        records.extend([
+            start("run{}".format(i), at),
+            bind("run{}".format(i), at + 1, i),
+        ])
     found = watchdog.assess("claude", records, NOW)
     assert any("never finished" in p for p in found)
 

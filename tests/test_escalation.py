@@ -62,8 +62,8 @@ def test_the_net_catches_risk_in_this_repository_s_own_vocabulary():
         assert escalation_reasons(title, body) == [reason]
 
 
-def test_rejected_risky_alternatives_still_escalate_a_plan():
-    """A false escalation is safer than silently approving a risky plan."""
+def test_shared_scan_keeps_rejected_text_but_plan_adapter_excludes_it():
+    """Ticket scans keep their scope; plan headings belong in the adapter."""
     body = """## Decided
 Use the existing environment.
 
@@ -71,6 +71,7 @@ Use the existing environment.
 Store credentials in the checkout instead.
 """
     assert escalation_reasons("Keep setup local", body) == ["credentials"]
+    assert funnel.plan_escalation_matches(body) == []
 
 
 def test_safe_exposure_and_subject_matter_prose_do_not_trip_the_net():
@@ -168,18 +169,141 @@ def test_an_unmarked_ordinary_ticket_is_standard():
 
 # -- plans use the same machinery with no separate title ----------------------
 
-def test_plan_escalation_scans_the_whole_body_and_returns_reasons():
-    plan = """
-    ## Decided from precedent
-    Take the single-in-motion lock and keep the gate vocabulary ordinary.
+def test_plan_escalation_excludes_the_rejected_section():
+    plan = (
+        "## Decided from precedent\n"
+        "Take the single-in-motion lock and keep the gate vocabulary ordinary.\n"
+        "\n## Needs Nate\nNothing.\n"
+        "\n## Rejected\n"
+        "Allow destructive or irreversible operations unattended.\n"
+    )
+    assert funnel.plan_escalation_matches(plan) == []
+    assert plan_is_escalated(plan) == []
 
-    ## Needs Nate
-    Nothing.
 
-    ## Rejected
-    Allow destructive or irreversible operations unattended.
-    """
-    assert plan_is_escalated(plan) == ["destructive"]
+def test_the_recorded_1503_shape_keeps_its_remaining_source_citation():
+    """The Rejected backfill hit goes away; its precedent citation remains."""
+    body = (FIXTURES / "escalation_plan_1503_recorded.md").read_text()
+
+    assert funnel.plan_escalation_matches(body) == [{
+        "reason": "data-migration",
+        "line": (
+            "- The fix is forward-only and the 14 invalid-JSON lines and the "
+            "lost escalated fire stand as the before-measurement. (source: "
+            "sibling convention #1393 and #1182 no-backfill decisions)"
+        ),
+    }]
+
+
+def test_a_genuine_backfill_proposal_outside_rejected_still_matches():
+    body = "## Proposal\n\nBackfill the recent entries from the canonical source.\n"
+
+    assert funnel.plan_escalation_matches(body) == [{
+        "reason": "data-migration",
+        "line": "Backfill the recent entries from the canonical source.",
+    }]
+
+
+def test_a_second_rejected_trigger_is_excluded():
+    body = "## Rejected\n\nDelete the stale entries permanently.\n"
+
+    assert funnel.plan_escalation_matches(body) == []
+
+
+def test_a_mixed_plan_returns_only_its_genuine_trigger():
+    body = (
+        "## Proposal\n\nBackfill the recent entries from the canonical source.\n"
+        "\n## Rejected\n\nDelete the stale entries permanently.\n"
+    )
+
+    assert funnel.plan_escalation_matches(body) == [{
+        "reason": "data-migration",
+        "line": "Backfill the recent entries from the canonical source.",
+    }]
+
+
+def test_rejected_section_includes_nested_headings_and_stops_at_higher_heading():
+    body = (
+        "## Rejected\n"
+        "### Earlier approach\nDelete the stale entries permanently.\n"
+        "#### Detail\nBackfill all historical rows.\n"
+        "# Proposal\nBackfill the recent entries from the source.\n"
+    )
+
+    assert funnel.plan_escalation_matches(body) == [{
+        "reason": "data-migration",
+        "line": "Backfill the recent entries from the source.",
+    }]
+
+
+def test_a_malformed_rejected_heading_scans_the_whole_body():
+    body = "##Rejected\n\nBackfill the recent entries from the source.\n"
+
+    assert funnel.plan_escalation_matches(body) == [{
+        "reason": "data-migration",
+        "line": "Backfill the recent entries from the source.",
+    }]
+
+
+def test_a_tab_indented_rejected_heading_is_not_treated_as_a_section():
+    body = "\t## Rejected\n\nBackfill the recent entries from the source.\n"
+
+    assert funnel.plan_escalation_matches(body) == [{
+        "reason": "data-migration",
+        "line": "Backfill the recent entries from the source.",
+    }]
+
+
+def test_a_malformed_boundary_inside_rejected_fails_closed():
+    body = (
+        "## Rejected\n\nNothing will be backfilled.\n"
+        "##Malformed\n\nBackfill the recent entries from the source.\n"
+        "## Proposal\n\nKeep the original store.\n"
+    )
+
+    assert funnel.plan_escalation_matches(body) == [{
+        "reason": "data-migration",
+        "line": "Backfill the recent entries from the source.",
+    }]
+
+
+def test_agent_decision_rejected_clauses_do_not_create_scan_hits():
+    body = (
+        "## Decided by the agent\n\n"
+        "- Use the existing records (rejected: backfill all historical rows; "
+        "delete the old ledger permanently)\n"
+    )
+
+    assert funnel.plan_escalation_matches(body) == []
+
+
+def test_agent_decision_scan_keeps_a_risk_in_the_chosen_decision():
+    body = (
+        "## Decided by the agent\n\n"
+        "- Backfill recent entries (rejected: backfill all years; "
+        "delete the old ledger permanently)\n"
+    )
+
+    assert funnel.plan_escalation_matches(body) == [{
+        "reason": "data-migration",
+        "line": "- Backfill recent entries",
+    }]
+
+
+def test_rejected_wording_outside_agent_decisions_still_scans():
+    body = (
+        "## Notes\n\n"
+        "- The rejected option was (rejected: backfill all historical rows; "
+        "delete the old ledger permanently).\n"
+    )
+
+    assert funnel.plan_escalation_matches(body) == [{
+        "reason": "data-migration",
+        "line": (
+            "- The rejected option was (rejected: backfill all historical "
+            "rows; delete the old ledger permanently)."
+        ),
+    }]
 
 
 def test_lock_and_gate_subject_matter_stays_standard():

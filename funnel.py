@@ -7871,7 +7871,10 @@ def cmd_doctor() -> int:
     project_item_pages = None
     project_item_count = None
     try:
-        items = load_items()
+        items = _call_with_optional_keywords(
+            load_items,
+            include_details=project_load_reads_history("doctor"),
+        )
         project_item_pages, project_item_count = project_item_load_measurement()
     except Exception as exc:
         checks = doctor_checks()
@@ -17430,6 +17433,76 @@ def _needs_decision_comment_body(question: str) -> str:
     return "{} {}".format(NEEDS_DECISION_PREFIX, question)
 
 
+#: Whether each command's shared Project load must carry item history (#1622).
+#:
+#: History is everything ``hydrate_item_details`` adds after the paged list:
+#: ``status_since``, ``status_events``, ``blocked_since``,
+#: ``blocked_cleared_at``, ``first_child_created_at`` and
+#: ``last_child_closed_at`` (see ``_apply_item_timeline_fields`` and
+#: ``_apply_item_detail_fields``). It costs about 14 extra pages, ~100
+#: GraphQL points and most of a minute on the 2026-09 board, so a command that
+#: never reads it loads the compact list instead.
+#:
+#: Each ``False`` below was verified by walking everything the command calls
+#: for a read of those fields, including ``Item.waited`` and
+#: ``question_since``. A command that is not listed -- a new one, or one
+#: somebody forgot -- gets the full load: being slow is recoverable, a gate
+#: age or ordering silently computed from missing history is not. ``begin``
+#: is absent on purpose; it has its own compact load and hydrates only its
+#: candidates. ``snapshot``, ``main-ci`` and ``session-server`` load nothing.
+PROJECT_LOAD_READS_HISTORY: Dict[str, bool] = {
+    # Lock refusals read status, the lock, assignees, blockers and PR facts;
+    # the parent Ready -> Building write only *sets* status_since.
+    "claim": False,
+    # Clears the lock field; reads nothing but the item id.
+    "release": False,
+    # Pinned field plus a provenance comment; the dry run prints the same.
+    "pin": False,
+    "unpin": False,
+    # Writes Parked, closes, comments; the wake line records the current
+    # Status, not when it was entered.
+    "park": False,
+    # Rewrites the plan body's Gates section from the body alone.
+    "answer-gates": False,
+    # Posts a comment, optionally applying the blocked label.
+    "comment": False,
+    # Creates an issue and sets its fields; it reads no loaded item.
+    "capture": False,
+    # Review order is the PR's open time from PR facts, never gate age.
+    "next-review": False,
+    # Writes a verdict on a PR; items only locate an unmergeable PR's ticket.
+    "review": False,
+    # Doctor's consistency checks compare Status with state and merged PRs.
+    # It loads through ``cmd_doctor``, not ``main``, and consults this entry.
+    "doctor": False,
+    # rejected_merges keeps regression items by status_since.
+    "reject": True,
+    # drift_since_approval falls back to status_since; the parking prompt
+    # prints how long each candidate has waited.
+    "approve": True,
+    "accept": True,
+    # Prints the gate age and the rejected-merge history.
+    "show": True,
+    # ideas() orders by status_since and prints how long each has waited.
+    "ideas": True,
+    # merge_blockers -> rejected_merges reads regression items' status_since,
+    # and closing the parent runs drift_since_approval. #1611 hydrates the
+    # regression items in place; until that lands, merge keeps the full load.
+    "merge": True,
+    # item_json prints waited and breakdown latency.
+    "next": True,
+    # startable orders by question_since; awaiting_breakdown by status_since.
+    "queue": True,
+    # Gate ages, parked/blocked/cleared lists, maintenance load, approvals.
+    "brief": True,
+}
+
+
+def project_load_reads_history(command: Optional[str]) -> bool:
+    """Whether ``command`` needs item history; unknown commands say yes."""
+    return PROJECT_LOAD_READS_HISTORY.get(command or "", True)
+
+
 def main(argv: Optional[Sequence[str]] = None, *,
          _items: Optional[List[Item]] = None,
          _items_loader: Optional[Callable[[], List[Item]]] = None,
@@ -17825,7 +17898,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     timings=begin_timings,
                 )
             else:
-                items = _items_loader()
+                items = _call_with_optional_keywords(
+                    _items_loader,
+                    include_details=project_load_reads_history(args.command),
+                )
         elif args.command == "begin":
             # `begin` selects one job after its cheap gates. Keep the initial
             # Project scan compact; cmd_begin hydrates only the candidates it
@@ -17846,7 +17922,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
 
             begin_detail_loader = hydrate_begin_candidates
         else:
-            items = load_items()
+            # PROJECT_LOAD_READS_HISTORY decides; unknown commands load all.
+            items = _call_with_optional_keywords(
+                load_items,
+                include_details=project_load_reads_history(args.command),
+            )
         if args.command == "begin" and begin_detail_loader is None:
             def hydrate_begin_candidates(candidates):
                 return _begin_load_timed(
@@ -18498,6 +18578,14 @@ class FunnelSession:
         self._heartbeat_run: Optional[str] = None
         self._heartbeat_agent: Optional[str] = None
         self._heartbeat_tier: Optional[str] = None
+        # The command being dispatched, and whether the shared view came from
+        # a command that skipped history (PROJECT_LOAD_READS_HISTORY). Such a
+        # view is hydrated once, in place, by the first later command that
+        # reads history, so a cheap first command never leaves a later gate
+        # age computed from missing fields. A view loaded by ``begin`` keeps
+        # its existing contract: begin hydrates only its own candidates.
+        self._command: Optional[str] = None
+        self._history_pending = False
 
     def _load_items(
         self,
@@ -18512,6 +18600,12 @@ class FunnelSession:
                 member_repo_names=member_repo_names,
                 timings=timings,
             )
+            self._history_pending = (
+                not include_details and self._command != "begin"
+            )
+        elif include_details and self._history_pending:
+            hydrate_item_details(self.items)
+            self._history_pending = False
         return self.items
 
     def dispatch(self, argv: Sequence[str], stdin=None):
@@ -18547,8 +18641,12 @@ class FunnelSession:
                 # Reset before the lazy load so its GraphQL work is measured as
                 # part of the first command rather than erased by ``main``.
                 reset_api_usage()
+                self._command = argv[0] if argv else None
+                # A view still owed its history goes back through the loader,
+                # which hydrates it when this command reads history.
+                current = None if self._history_pending else self.items
                 if stdin is None:
-                    code = main(list(argv), _items=self.items,
+                    code = main(list(argv), _items=current,
                                 _items_loader=self._load_items,
                                 _reset_api_usage=False)
                 else:
@@ -18559,7 +18657,7 @@ class FunnelSession:
                     previous_stdin = sys.stdin
                     sys.stdin = io.StringIO(stdin)
                     try:
-                        code = main(list(argv), _items=self.items,
+                        code = main(list(argv), _items=current,
                                     _items_loader=self._load_items,
                                     _reset_api_usage=False)
                     finally:
@@ -18573,6 +18671,7 @@ class FunnelSession:
                 # the next command reloads GitHub state rather than acting on
                 # a stale Project snapshot. Never retry the command here.
                 self.items = None
+                self._history_pending = False
                 self._brief_cache.clear()
                 stdout.seek(0)
                 stdout.truncate(0)

@@ -48,10 +48,15 @@ local checkout, and go back to step 1. Never force-push.
 1. Run `python3 /Users/nateprich/.claude/command-center-run/funnel.py begin --agent claude --role implement`
    and follow the JSON it prints. Note the time; the claim dates from now. Use
    this `begin`'s `run` id for everything in this pass, never an earlier one.
-2. When `do` is `stop`: if `gate` is `error`, wait two minutes and go back to
-   step 1 once; a second error, or any other stop, ends the session. Finish the
-   run with the gate's outcome (`time` is `skipped-outside-window`, `reserve` is
-   `skipped-api-reserve`, otherwise `nothing-to-do`), then stop.
+2. When `do` is `stop`, finish the run with the gate's outcome (`time` is
+   `skipped-outside-window`, `reserve` is `skipped-api-reserve`, otherwise
+   `nothing-to-do`). Then:
+   - `gate: reserve` (the GitHub GraphQL budget is below the floor; it refills
+     within the hour): wait ten minutes, run the clock check, and go back to
+     step 1. Repeat until `begin` passes or the clock check stops you.
+   - `gate: error`: wait two minutes and go back to step 1 once; a second error
+     ends the session.
+   - Any other stop ends the session.
 3. When `do` is `ticket`, the ticket is already claimed. Read `packet`: the
    ticket, its parent plan, and the current-head verdict and blocking list.
    Ignore `packet.prior_run`; for Claude it can name an unrelated session. The

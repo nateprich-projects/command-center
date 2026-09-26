@@ -7,7 +7,8 @@ import {
   phoneState, pipState, projectBlocked, projectHold, holdChip, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
-  renderMetricChart, renderBudgetMetrics, renderRunMetrics, renderAttentionMetrics,
+  renderMetricChart, renderBudgetMetrics, renderRunMetrics,
+  renderAttentionMetrics, renderChurnMetrics,
   CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 } from "../public/app.js";
@@ -790,6 +791,7 @@ test("the Attention panel renders E1-E5 with gaps and no alert styling", async (
   const fixture = JSON.parse(await readFile(
     new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8",
   ));
+
   const previousDocument = globalThis.document;
   globalThis.document = new TestDocument();
   try {
@@ -827,6 +829,53 @@ test("the Attention panel renders E1-E5 with gaps and no alert styling", async (
     assert.match(panels[3].textContent, /Actions per day/);
     assert.match(panels[4].textContent, /Stale locks taken over/);
     assert.match(panels[1].textContent, /R7Gap/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+test("the Churn panel separates repositories, keeps gaps, and pairs brief cost measures", async () => {
+  const [fixtureText, html] = await Promise.all([
+    readFile(new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8"),
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+  ]);
+  const fixture = JSON.parse(fixtureText);
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const grid = new TestNode("div");
+    renderChurnMetrics(fixture, grid);
+    const panels = grid.querySelectorAll(".run-metric-panel");
+    assert.deepEqual(panels.map((panel) => panel.attributes.get("data-metric")),
+      ["F1", "F2", "F3"]);
+
+    const commits = panels[0].querySelectorAll(".run-series-row");
+    assert.deepEqual(commits.map((row) => row.querySelector(".run-series-label").textContent),
+      ["Command Center", "Member repositories"]);
+    assert.ok(commits[0].querySelectorAll(".chart-hit")
+      .some((hit) => hit.textContent.includes("R7 Gap")));
+    assert.ok(commits[1].querySelectorAll(".chart-hit")
+      .some((hit) => hit.textContent.includes("R7 Gap")));
+
+    const lineCount = panels[1].querySelector(".run-series-row");
+    assert.equal(lineCount.querySelector(".run-series-label").textContent, "Lines on main");
+    assert.ok(lineCount.querySelectorAll(".chart-hit")
+      .some((hit) => hit.textContent.includes("R7 Gap")));
+    assert.ok(lineCount.querySelectorAll(".chart-line").length > 1,
+      "the line count chart breaks at the fixture gap");
+
+    const briefCost = panels[2].querySelectorAll(".run-series-row");
+    assert.deepEqual(briefCost.map((row) => row.querySelector(".run-series-label").textContent),
+      ["Project load (seconds)", "Degraded sections per run"]);
+    for (const row of briefCost) {
+      assert.ok(row.querySelectorAll(".chart-hit")
+        .some((hit) => hit.textContent.includes("R7 Gap")));
+      assert.ok(row.querySelectorAll(".metric-reading").some((reading) => (
+        reading.textContent.includes("R28")
+      )));
+    }
+    assert.match(html, /<div id="churn-grid" class="run-metric-grid"><\/div>/);
   } finally {
     if (previousDocument === undefined) delete globalThis.document;
     else globalThis.document = previousDocument;

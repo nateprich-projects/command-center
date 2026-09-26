@@ -922,6 +922,8 @@ function formatMetricValue(value, format, isDelta = false) {
   if (format === "duration-hours") {
     return formatMetricNumber(value / 3600, 1, isDelta) + " h";
   }
+  if (format === "seconds") return formatMetricNumber(value, 1, isDelta) + " s";
+  if (format === "integer") return formatMetricNumber(value, 0, isDelta);
   return formatMetricNumber(value, 1, isDelta);
 }
 
@@ -1352,6 +1354,123 @@ function renderAttentionMetrics(series, container) {
   renderMetricPanels(series, container, ATTENTION_METRICS);
 }
 
+const COMMAND_CENTER_REPO = "nateprich-projects/command-center";
+
+function sumMetricSeries(items, length) {
+  const sum = (key) => Array.from({ length }, (_, index) => {
+    if (!items.length) return null;
+    const values = items.map((item) => item.series[key] && item.series[key][index]);
+    if (values.some((value) => !isMetricNumber(value))) return null;
+    return values.reduce((total, value) => total + value, 0);
+  });
+  return {
+    daily: sum("daily"),
+    r7: sum("r7"),
+    r28: sum("r28"),
+    delta: sum("delta"),
+  };
+}
+
+function renderChurnRow(panel, key, label, metricSeries, days, index, format) {
+  const row = element("div", "run-series-row");
+  row.setAttribute("data-series", key);
+  const meta = element("div", "run-series-meta");
+  meta.append(element("p", "run-series-label", label));
+  meta.append(metricReadings(metricValues(metricSeries, index), format));
+  row.append(meta);
+  row.append(renderMetricChart(metricSeries, days, {
+    title: label,
+    format,
+    compact: true,
+  }));
+  panel.append(row);
+}
+
+function renderChurnMetrics(series, container) {
+  if (!container) return;
+  container.replaceChildren();
+  const root = series && series.metrics && typeof series.metrics === "object"
+    ? series.metrics : {};
+  const days = series && Array.isArray(series.days) ? series.days : [];
+  const index = days.length - 1;
+  const repos = metricLeaves(root.F && root.F.F1);
+  const commandCenter = [];
+  const memberRepos = [];
+  for (const item of repos) {
+    if (item.path.join("/") === COMMAND_CENTER_REPO) commandCenter.push(item);
+    else memberRepos.push(item);
+  }
+
+  const definitions = [
+    {
+      code: "F1",
+      title: "Commits per day",
+      description: "Squash merges on main, split between Command Center and member repositories.",
+      format: "count",
+      rows: [
+        {
+          key: "F.F1.command_center",
+          label: "Command Center",
+          series: sumMetricSeries(commandCenter, days.length),
+        },
+        {
+          key: "F.F1.member_repos",
+          label: "Member repositories",
+          series: sumMetricSeries(memberRepos, days.length),
+        },
+      ],
+    },
+    {
+      code: "F2",
+      title: "funnel.py line count",
+      description: "Lines on main, from the daily line-count report.",
+      format: "integer",
+      rows: [{
+        key: "F.F2",
+        label: "Lines on main",
+        series: metricAtPath(root, ["F", "F2"]),
+      }],
+    },
+    {
+      code: "F3",
+      title: "Brief cost",
+      description: "Project load time and degraded sections per run.",
+      format: "seconds",
+      rows: [
+        {
+          key: "F.F3.project_load_seconds",
+          label: "Project load (seconds)",
+          series: metricAtPath(root, ["F", "F3", "project_load_seconds"]),
+        },
+        {
+          key: "F.F3.degraded_sections",
+          label: "Degraded sections per run",
+          series: metricAtPath(root, ["F", "F3", "degraded_sections"]),
+          format: "count",
+        },
+      ],
+    },
+  ];
+
+  for (const definition of definitions) {
+    const panel = element("article", "run-metric-panel");
+    panel.setAttribute("data-metric", definition.code);
+    const heading = element("div", "run-metric-heading");
+    heading.append(element("p", "metric-code", definition.code));
+    heading.append(element("h3", "metric-title", definition.title));
+    heading.append(element("p", "run-metric-description", definition.description));
+    panel.append(heading);
+
+    for (const row of definition.rows) {
+      renderChurnRow(
+        panel, row.key, row.label, row.series, days, index,
+        row.format || definition.format,
+      );
+    }
+    container.append(panel);
+  }
+}
+
 function renderExecutionTiles(series, container) {
   if (!container) return;
   container.replaceChildren();
@@ -1593,6 +1712,7 @@ async function loadMetrics() {
   const container = document.querySelector("#metrics-grid");
   const runsContainer = document.querySelector("#runs-grid");
   const attentionContainer = document.querySelector("#attention-grid");
+  const churnContainer = document.querySelector("#churn-grid");
   try {
     const series = await requestMetrics();
     status.textContent = series.as_of
@@ -1603,6 +1723,7 @@ async function loadMetrics() {
     renderRunMetrics(series, runsContainer);
     renderBudgetMetrics(series, document.querySelector("#budget-grid"));
     renderAttentionMetrics(series, attentionContainer);
+    renderChurnMetrics(series, churnContainer);
   } catch (error) {
     status.textContent = error.message || "Metrics unavailable";
     status.classList.add("failed");
@@ -1610,6 +1731,7 @@ async function loadMetrics() {
     renderRunMetrics(null, runsContainer);
     renderBudgetMetrics(null, document.querySelector("#budget-grid"));
     renderAttentionMetrics(null, attentionContainer);
+    renderChurnMetrics(null, churnContainer);
     throw error;
   } finally {
     metricsLoading = false;
@@ -1731,6 +1853,7 @@ export {
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,
   renderExecutionTiles, renderMetricChart, renderBudgetMetrics, renderRunMetrics,
   renderAttentionMetrics,
+  renderChurnMetrics,
   requestMetrics, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 };

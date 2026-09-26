@@ -38,8 +38,7 @@ The code template documents these: `generated_at`, `counts_by_gate`,
 `unclassed_captures`, `in_motion`, `wip_limit`, `stale_locks_taken_over`,
 `stranded`, `working_tree_touched`, `maintenance_load`, `disposal`,
 `recorded_cause_regressions`, `command_center_ticket_pr_share`,
-`resend_ratio`, `outcome_signals`, `blocked`, `event_block_inconsistencies`,
-`blocked_human_steps`,
+`resend_ratio`, `outcome_signals`, `blocked`, `blocked_human_steps`,
 `blocked_machine_local_steps`, `suspected_human_steps`, `parked`,
 `closed_itself`, `cleared_blocks`, `awaiting_breakdown`,
 `prose_dependencies`, `unattended_approvals`, `run_summary`, `agent_health`,
@@ -57,15 +56,6 @@ Then `working_tree_touched` when non-empty: `before.head → after.head` with ev
 
 Then `human_steps`, waiting on Nate to go and do, and
 `machine_local_steps`, waiting on a Claude Code session to go and do.
-
-Then `blocked` when non-empty: show each ticket's block reason and conditions.
-For an `event_condition`, name its agent, job and outcome, and render
-`event_wait` as the elapsed time since its `after` timestamp.
-
-Then `event_block_inconsistencies` only when non-empty: show each row's `ref`,
-`title`, `needs` and mismatch direction; include `event_condition` when
-present, and omit the section when the list is empty. These rows diagnose
-disagreement between the event spec and `Needs: external-event`.
 
 Full per-section wording lives in code; render through it:
 

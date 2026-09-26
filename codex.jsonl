@@ -4321,3 +4321,4 @@
 {"agent": "codex", "job": "command-center-tickets-hourly", "phase": "job", "run": "6729b1a87ee7", "ts": 1790390566}
 {"agent": "codex", "note": "reconciled: released nateprich-projects/command-center#1284 after no ticket branch activity within 30 minutes", "outcome": "errored", "phase": "finish", "reconciled_claim": "nateprich-projects/command-center#1284", "run": "162820117389", "ts": 1790390549}
 {"agent": "codex", "do": "ticket", "phase": "bind", "run": "6729b1a87ee7", "ts": 1790390674, "work": "nateprich-projects/Fantasy-GM#312"}
+{"agent": "codex", "api_cost": {"gh_calls": 103, "graphql_points": null}, "graphql_by_caller": {"begin": {"calls": 22, "points": 75, "remaining": 1378}, "unattributed": {"calls": 2, "points": null, "remaining": null}}, "phase": "api_cost", "run": "6729b1a87ee7", "ts": 1790390683}

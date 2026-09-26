@@ -2955,6 +2955,18 @@ def parse_verdict(body: str) -> Optional[Dict]:
     return _marked_json(body, REVIEW_MARKER)
 
 
+def _verdict_from_comment(row: Mapping[str, object]) -> Optional[Dict]:
+    """Read a verdict and retain the timestamp of its GitHub comment."""
+    found = parse_verdict(str(row.get("body") or ""))
+    if found is None:
+        return None
+    verdict = dict(found)
+    created_at = row.get("createdAt") or row.get("created_at")
+    if isinstance(created_at, str) and created_at.strip():
+        verdict["comment_created_at"] = created_at
+    return verdict
+
+
 def parse_provenance(body: str) -> Optional[Dict]:
     """The provenance fields carried by one comment, or None if malformed."""
     found = _marked_json(body, PROVENANCE_MARKER)
@@ -3602,7 +3614,7 @@ def latest_verdict(repo: str, pr) -> Optional[Dict]:
     rows = (_gh_json("gh", "pr", "view", str(pr), "--repo", repo,
                      "--json", "comments") or {}).get("comments", [])
     for row in reversed(rows):
-        found = parse_verdict(row.get("body") or "")
+        found = _verdict_from_comment(row)
         if found:
             return found
     return None
@@ -3662,9 +3674,43 @@ def finished_by_comments(items: Sequence[Item]) -> Set[str]:
     return {ref for ref, (_, marker) in latest.items() if marker}
 
 
-def verdict_covers_head(verdict: Optional[Dict], head_oid: Optional[str]) -> bool:
-    """Whether a verdict judged exactly the commit that is the branch head now."""
-    return bool(verdict) and bool(head_oid) and verdict.get("head_sha") == head_oid
+def verdict_covers_head(
+    verdict: Optional[Dict],
+    head_oid: Optional[str],
+    pr_comments: Optional[Sequence[Mapping[str, object]]] = None,
+) -> bool:
+    """Whether a verdict still covers the branch's current head.
+
+    A requirement-unsure rejection stops covering after a later PR comment:
+    the new evidence needs a fresh judgement. All other verdicts keep their
+    existing same-head coverage. Missing timestamps or comment reads do not
+    establish that evidence arrived later, so they preserve current coverage.
+    """
+    if not verdict or not head_oid or verdict.get("head_sha") != head_oid:
+        return False
+    if verdict.get("verdict") != "rejected":
+        return True
+    blocking = verdict.get("blocking")
+    if not isinstance(blocking, (list, tuple)) or not any(
+        isinstance(reason, str)
+        and reason.startswith("requirement unsure:")
+        for reason in blocking
+    ):
+        return True
+
+    verdict_at = parse_time(verdict.get("comment_created_at"))
+    if verdict_at is None:
+        return True
+    for comment in pr_comments or ():
+        if not isinstance(comment, Mapping):
+            continue
+        created_at = comment.get("createdAt") or comment.get("created_at")
+        comment_at = parse_time(
+            created_at if isinstance(created_at, str) else None
+        )
+        if comment_at is not None and comment_at > verdict_at:
+            return False
+    return True
 
 
 def rejected_at_current_head(verdict: Optional[Dict], head_oid: Optional[str]) -> bool:
@@ -14346,7 +14392,7 @@ def _latest_verdict_from_comments(comments: object) -> Optional[Dict]:
     for row in reversed(comments):
         if not isinstance(row, dict):
             continue
-        found = parse_verdict(row.get("body") or "")
+        found = _verdict_from_comment(row)
         if found:
             return found
     return None
@@ -14643,7 +14689,9 @@ def review_queue(
                 # the next tick reconsiders, because nothing was recorded.
                 continue
             verdict = _row_verdict(row, repo)
-            if verdict_covers_head(verdict, row.get("headRefOid")):
+            if verdict_covers_head(
+                verdict, row.get("headRefOid"), row.get("comments")
+            ):
                 continue  # this exact diff has already been judged
             recorded_risk = getattr(ticket, "risk", None)
             needed = (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 from types import SimpleNamespace
@@ -71,6 +72,21 @@ def _row(pr, ticket, opened, head="abc"):
             "headRefOid": head, "createdAt": opened}
 
 
+def _queue_with_verdict_history(monkeypatch, verdict, verdict_at,
+                                comment_times=()):
+    comments = [{
+        "body": funnel.REVIEW_MARKER + "\n" + json.dumps(verdict),
+        "createdAt": verdict_at,
+    }]
+    comments.extend({"body": "later PR comment", "createdAt": created_at}
+                     for created_at in comment_times)
+    row = _row(10, 1, "2026-09-10T05:00:00Z", head="same")
+    row["comments"] = comments
+    parsed = funnel._latest_verdict_from_comments(comments)
+    facts = _wire(monkeypatch, [row], verdicts={10: parsed})
+    return facts, parsed, funnel.review_queue([_ticket(1)])
+
+
 def test_the_oldest_pr_comes_first_whatever_order_gh_returns(monkeypatch):
     rows = [  # newest first, as `gh pr list` returns them
         _row(30, 3, "2026-09-09T12:16:00Z"),
@@ -92,6 +108,58 @@ def test_a_pr_already_judged_at_its_head_is_still_skipped(monkeypatch):
     queue = funnel.review_queue([_ticket(1), _ticket(2)])
 
     assert [entry["pr"] for entry in queue] == [10]
+
+
+def test_later_pr_comment_requeues_a_requirement_unsure_head(monkeypatch):
+    verdict_at = "2026-09-10T05:00:00Z"
+    unsure = {"verdict": "rejected", "head_sha": "same",
+              "blocking": ["requirement unsure: verify the run"]}
+    facts, parsed, queue = _queue_with_verdict_history(
+        monkeypatch, unsure, verdict_at, ("2026-09-10T05:01:00Z",))
+
+    assert parsed["comment_created_at"] == verdict_at
+    assert [entry["pr"] for entry in queue] == [10]
+    # The engineer still owns the rejected head until a fresh review verdict.
+    assert REPO + "#1" not in funnel.awaiting_review(
+        [_ticket(1)], pr_facts=facts)
+
+
+def test_requirement_unsure_stays_covered_without_a_later_comment(monkeypatch):
+    unsure = {"verdict": "rejected", "head_sha": "same",
+              "blocking": ["requirement unsure: verify the run"]}
+    _, _, queue = _queue_with_verdict_history(
+        monkeypatch, unsure, "2026-09-10T05:00:00Z")
+
+    assert queue == []
+
+
+def test_comment_before_requirement_unsure_verdict_does_not_reopen(monkeypatch):
+    unsure = {"verdict": "rejected", "head_sha": "same",
+              "blocking": ["requirement unsure: verify the run"]}
+    _, _, queue = _queue_with_verdict_history(
+        monkeypatch, unsure, "2026-09-10T05:00:00Z",
+        ("2026-09-10T04:59:00Z",))
+
+    assert queue == []
+
+
+def test_approved_head_stays_covered_after_a_later_comment(monkeypatch):
+    approved = {"verdict": "approved", "head_sha": "same", "blocking": []}
+    _, _, queue = _queue_with_verdict_history(
+        monkeypatch, approved, "2026-09-10T05:00:00Z",
+        ("2026-09-10T05:01:00Z",))
+
+    assert queue == []
+
+
+def test_other_rejection_stays_covered_after_a_later_comment(monkeypatch):
+    rejected = {"verdict": "rejected", "head_sha": "same",
+                "blocking": ["requirement unmet: fix the behavior"]}
+    _, _, queue = _queue_with_verdict_history(
+        monkeypatch, rejected, "2026-09-10T05:00:00Z",
+        ("2026-09-10T05:01:00Z",))
+
+    assert queue == []
 
 
 def test_the_tier_filter_still_applies_after_sorting(monkeypatch):

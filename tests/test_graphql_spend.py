@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
+import heartbeat  # noqa: E402
 
 
 class Proc:
@@ -116,6 +117,67 @@ def test_response_reading_keeps_reset_stamp_and_receipt_time(monkeypatch):
         "reset_at": "2026-09-26T10:49:20Z",
         "received_at": response_at,
     }]
+
+
+def test_response_readings_reconcile_from_graphql_through_heartbeat(
+        monkeypatch):
+    reset()
+    response_at = 1_790_425_555.125
+    reset_at = "2026-09-26T10:49:20Z"
+    responses = [
+        {"data": {"viewer": {}, "rateLimit": {
+            "cost": 7, "remaining": 4993, "resetAt": reset_at,
+        }}},
+        {"data": {"viewer": {}}},
+    ]
+    monkeypatch.setattr(funnel.time, "time", lambda: response_at)
+    monkeypatch.setattr(
+        funnel.subprocess, "run",
+        lambda *args, **kwargs: Proc(responses.pop(0)),
+    )
+    monkeypatch.setattr(
+        funnel, "_heartbeat_context",
+        lambda run, agent: (run or "run-id", agent or "codex"),
+    )
+    written = []
+    monkeypatch.setattr(
+        heartbeat, "append",
+        lambda agent, record: written.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    with funnel.graphql_caller("standard"):
+        funnel.gh_graphql("{viewer{login}}")
+        funnel.gh_graphql("{viewer{login}}")
+    funnel.report_api_cost(run="run-id", agent="codex")
+
+    assert len(written) == 1
+    readings = written[0]["graphql_by_caller"]
+    assert readings["standard"]["readings"] == [{
+        "cost": 7,
+        "remaining": 4993,
+        "reset_at": reset_at,
+        "received_at": response_at,
+    }]
+    assert readings["unattributed"]["readings"] == [{
+        "cost": None,
+        "remaining": None,
+        "reset_at": None,
+        "received_at": response_at,
+    }]
+    assert heartbeat.graphql_points_by_reset_at(
+        written, response_at - 1, response_at + 1,
+    ) == {
+        "by_reset_at": {
+            reset_at: {
+                "buckets": 1,
+                "graphql_points": 7,
+                "unknown_buckets": 0,
+            },
+        },
+        "unattributed_unknown_buckets": 1,
+        "untimed_unknown_buckets": 0,
+    }
 
 
 def test_response_without_rate_limit_keeps_unknown_values_null(monkeypatch):

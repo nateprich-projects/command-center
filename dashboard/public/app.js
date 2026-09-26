@@ -922,6 +922,8 @@ function formatMetricValue(value, format, isDelta = false) {
   if (format === "duration-hours") {
     return formatMetricNumber(value / 3600, 1, isDelta) + " h";
   }
+  if (format === "seconds") return formatMetricNumber(value, 1, isDelta) + " s";
+  if (format === "integer") return formatMetricNumber(value, 0, isDelta);
   return formatMetricNumber(value, 1, isDelta);
 }
 
@@ -1157,6 +1159,111 @@ function renderMetricChart(series, days, {
   return svg;
 }
 
+function appendOutputMetric(container, definition, rows, days, index, note = null) {
+  const tile = element("article", "metric-tile output-metric");
+  tile.setAttribute("data-metric", definition.code);
+  tile.append(element("p", "metric-code", definition.code));
+  tile.append(element("h3", "metric-title", definition.title));
+  for (const row of rows) {
+    const seriesRow = element("div", "output-series");
+    const readings = element("div", "output-readings");
+    appendMetricRow(readings, row.label, metricValues(row.series, index), definition.format);
+    const title = row.label ? definition.title + " — " + row.label : definition.title;
+    seriesRow.append(readings, renderMetricChart(row.series, days, {
+      title,
+      format: definition.format,
+    }));
+    tile.append(seriesRow);
+  }
+  if (note) {
+    const aside = element("p", "metric-aside");
+    aside.append(element("span", null, note.label));
+    aside.append(element(
+      "strong",
+      isMetricNumber(note.value) ? null : "metric-gap",
+      isMetricNumber(note.value) ? note.value + " days" : "Gap",
+    ));
+    tile.append(aside);
+  }
+  container.append(tile);
+}
+
+function renderOutputPanel(series, container) {
+  if (!container) return;
+  container.replaceChildren();
+  const root = series && series.metrics && typeof series.metrics === "object"
+    ? series.metrics : {};
+  const days = series && Array.isArray(series.days) ? series.days : [];
+  const index = days.length - 1;
+  const a = root.A && typeof root.A === "object" ? root.A : {};
+
+  const a1 = a.A1 && typeof a.A1 === "object" ? a.A1 : {};
+  const a1Rows = [];
+  if (isMetricSeries(a1.total)) {
+    a1Rows.push({ label: "All repositories", series: a1.total });
+  }
+  if (a1.by_repo && typeof a1.by_repo === "object") {
+    for (const [repo, candidate] of Object.entries(a1.by_repo)) {
+      if (isMetricSeries(candidate)) a1Rows.push({ label: repo, series: candidate });
+    }
+  }
+  if (!a1Rows.length) a1Rows.push({ label: "All repositories", series: null });
+  appendOutputMetric(container, {
+    code: "A1", title: "Tickets landed / day", format: "count",
+  }, a1Rows, days, index);
+
+  appendOutputMetric(container, {
+    code: "A2", title: "Self-directed share", format: "percent",
+  }, [{ label: "", series: metricAtPath(root, ["A", "A2"]) }], days, index);
+
+  appendOutputMetric(container, {
+    code: "A3", title: "Upkeep share", format: "percent",
+  }, [{ label: "", series: metricAtPath(root, ["A", "A3"]) }], days, index);
+
+  const daysSinceSeries = metricAtPath(root, ["A", "A4", "days_since_last_new_started"]);
+  const daysSinceValue = isMetricSeries(daysSinceSeries) &&
+    Array.isArray(daysSinceSeries.daily) ? daysSinceSeries.daily[index] : null;
+  appendOutputMetric(container, {
+    code: "A4", title: "New work started", format: "count",
+  }, [{
+    label: "New projects entering Building",
+    series: metricAtPath(root, ["A", "A4", "new_projects_started"]),
+  }], days, index, {
+    label: "Days since last New project entered Building",
+    value: daysSinceValue,
+  });
+
+  const a5Rows = [];
+  for (const [key, label] of [
+    ["done", "Done"],
+    ["parked", "Parked"],
+    ["net_open_growth", "Net open growth"],
+  ]) {
+    a5Rows.push({ label, series: metricAtPath(root, ["A", "A5", key]) });
+  }
+  appendOutputMetric(container, {
+    code: "A5", title: "Disposal", format: "count",
+  }, a5Rows, days, index);
+
+  const a6 = a.A6 && typeof a.A6 === "object" ? a.A6 : {};
+  const a6Rows = [];
+  const revertsByRepo = a6.reverts_by_repo && typeof a6.reverts_by_repo === "object"
+    ? a6.reverts_by_repo : {};
+  for (const [repo, candidate] of Object.entries(revertsByRepo)) {
+    if (isMetricSeries(candidate)) a6Rows.push({ label: "Reverts · " + repo, series: candidate });
+  }
+  if (!a6Rows.length) {
+    a6Rows.push({ label: "Reverts on member main", series: null });
+  }
+  a6Rows.push({
+    label: "Tickets reopened after merge",
+    series: metricAtPath(root, ["A", "A6", "reopened_tickets"]),
+  });
+  appendOutputMetric(container, {
+    code: "A6", title: "Reverts and reopens", format: "count",
+  }, a6Rows, days, index);
+}
+
 const RUN_METRICS = [
   {
     code: "C1",
@@ -1350,6 +1457,123 @@ function renderRunMetrics(series, container) {
 
 function renderAttentionMetrics(series, container) {
   renderMetricPanels(series, container, ATTENTION_METRICS);
+}
+
+const COMMAND_CENTER_REPO = "nateprich-projects/command-center";
+
+function sumMetricSeries(items, length) {
+  const sum = (key) => Array.from({ length }, (_, index) => {
+    if (!items.length) return null;
+    const values = items.map((item) => item.series[key] && item.series[key][index]);
+    if (values.some((value) => !isMetricNumber(value))) return null;
+    return values.reduce((total, value) => total + value, 0);
+  });
+  return {
+    daily: sum("daily"),
+    r7: sum("r7"),
+    r28: sum("r28"),
+    delta: sum("delta"),
+  };
+}
+
+function renderChurnRow(panel, key, label, metricSeries, days, index, format) {
+  const row = element("div", "run-series-row");
+  row.setAttribute("data-series", key);
+  const meta = element("div", "run-series-meta");
+  meta.append(element("p", "run-series-label", label));
+  meta.append(metricReadings(metricValues(metricSeries, index), format));
+  row.append(meta);
+  row.append(renderMetricChart(metricSeries, days, {
+    title: label,
+    format,
+    compact: true,
+  }));
+  panel.append(row);
+}
+
+function renderChurnMetrics(series, container) {
+  if (!container) return;
+  container.replaceChildren();
+  const root = series && series.metrics && typeof series.metrics === "object"
+    ? series.metrics : {};
+  const days = series && Array.isArray(series.days) ? series.days : [];
+  const index = days.length - 1;
+  const repos = metricLeaves(root.F && root.F.F1);
+  const commandCenter = [];
+  const memberRepos = [];
+  for (const item of repos) {
+    if (item.path.join("/") === COMMAND_CENTER_REPO) commandCenter.push(item);
+    else memberRepos.push(item);
+  }
+
+  const definitions = [
+    {
+      code: "F1",
+      title: "Commits per day",
+      description: "Squash merges on main, split between Command Center and member repositories.",
+      format: "count",
+      rows: [
+        {
+          key: "F.F1.command_center",
+          label: "Command Center",
+          series: sumMetricSeries(commandCenter, days.length),
+        },
+        {
+          key: "F.F1.member_repos",
+          label: "Member repositories",
+          series: sumMetricSeries(memberRepos, days.length),
+        },
+      ],
+    },
+    {
+      code: "F2",
+      title: "funnel.py line count",
+      description: "Lines on main, from the daily line-count report.",
+      format: "integer",
+      rows: [{
+        key: "F.F2",
+        label: "Lines on main",
+        series: metricAtPath(root, ["F", "F2"]),
+      }],
+    },
+    {
+      code: "F3",
+      title: "Brief cost",
+      description: "Project load time and degraded sections per run.",
+      format: "seconds",
+      rows: [
+        {
+          key: "F.F3.project_load_seconds",
+          label: "Project load (seconds)",
+          series: metricAtPath(root, ["F", "F3", "project_load_seconds"]),
+        },
+        {
+          key: "F.F3.degraded_sections",
+          label: "Degraded sections per run",
+          series: metricAtPath(root, ["F", "F3", "degraded_sections"]),
+          format: "count",
+        },
+      ],
+    },
+  ];
+
+  for (const definition of definitions) {
+    const panel = element("article", "run-metric-panel");
+    panel.setAttribute("data-metric", definition.code);
+    const heading = element("div", "run-metric-heading");
+    heading.append(element("p", "metric-code", definition.code));
+    heading.append(element("h3", "metric-title", definition.title));
+    heading.append(element("p", "run-metric-description", definition.description));
+    panel.append(heading);
+
+    for (const row of definition.rows) {
+      renderChurnRow(
+        panel, row.key, row.label, row.series, days, index,
+        row.format || definition.format,
+      );
+    }
+    container.append(panel);
+  }
 }
 
 function renderExecutionTiles(series, container) {
@@ -1593,6 +1817,8 @@ async function loadMetrics() {
   const container = document.querySelector("#metrics-grid");
   const runsContainer = document.querySelector("#runs-grid");
   const attentionContainer = document.querySelector("#attention-grid");
+  const churnContainer = document.querySelector("#churn-grid");
+  const output = document.querySelector("#output-grid");
   try {
     const series = await requestMetrics();
     status.textContent = series.as_of
@@ -1603,6 +1829,8 @@ async function loadMetrics() {
     renderRunMetrics(series, runsContainer);
     renderBudgetMetrics(series, document.querySelector("#budget-grid"));
     renderAttentionMetrics(series, attentionContainer);
+    renderChurnMetrics(series, churnContainer);
+    renderOutputPanel(series, output);
   } catch (error) {
     status.textContent = error.message || "Metrics unavailable";
     status.classList.add("failed");
@@ -1610,6 +1838,8 @@ async function loadMetrics() {
     renderRunMetrics(null, runsContainer);
     renderBudgetMetrics(null, document.querySelector("#budget-grid"));
     renderAttentionMetrics(null, attentionContainer);
+    renderChurnMetrics(null, churnContainer);
+    renderOutputPanel(null, output);
     throw error;
   } finally {
     metricsLoading = false;
@@ -1731,6 +1961,8 @@ export {
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,
   renderExecutionTiles, renderMetricChart, renderBudgetMetrics, renderRunMetrics,
   renderAttentionMetrics,
+  renderChurnMetrics,
+  renderOutputPanel,
   requestMetrics, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 };

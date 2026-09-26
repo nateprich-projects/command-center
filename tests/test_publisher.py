@@ -428,6 +428,21 @@ def test_refresh_with_stale_snapshot_runs_one_brief_and_clears(
     assert "refresh-requested" not in kv.values
 
 
+def test_first_refresh_with_no_snapshot_and_no_attempt_runs_immediately(
+    tmp_path, kv, monkeypatch, capsys
+):
+    spool = tmp_path / "spool"
+    spool.mkdir()
+    kv.values["refresh-requested"] = iso().encode()
+    argv, fake_brief = base_argv(tmp_path, kv, spool)
+
+    code, _, err = run_publisher(argv, monkeypatch, capsys)
+
+    assert code == 0
+    assert brief_run_count(fake_brief) == 1
+    assert "no snapshot yet" in err
+
+
 def test_exit_zero_missing_items_envelope_keeps_refresh_flag(
     tmp_path, kv, monkeypatch, capsys
 ):

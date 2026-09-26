@@ -108,10 +108,11 @@ status is an unread scan, never zero.
 Then the gate counts (`counts_by_gate`) on one line. Then anything unusual,
 and only if present: `prose_dependencies`, `suspected_human_steps`,
 `unclassed_captures`, `needs_class`, `stale_locks_taken_over`, `stranded`,
-`in_motion` with `wip_limit`, `awaiting_breakdown`, `unattended_merges`,
-`run_summary`, `agent_health`, `resend_ratio`, `rejected_merges`, `degraded`,
-`closed_with_access_vocabulary`. A suspected human step is report-only: do
-not clear its `blocked` label, restate it, or split it here.
+`event_block_inconsistencies`, `in_motion` with `wip_limit`,
+`awaiting_breakdown`, `unattended_merges`, `run_summary`, `agent_health`,
+`resend_ratio`, `rejected_merges`, `degraded`, `closed_with_access_vocabulary`.
+A suspected human step is report-only: do not clear its `blocked` label,
+restate it, or split it here.
 
 Show `run_summary` per agent: starts, ordinary finishes, same-session
 re-begins kept visibly separate; a `skipped-blocked` row is a re-begin only

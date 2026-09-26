@@ -9665,7 +9665,6 @@ def load_items(
                 timings, "item_details",
                 lambda: hydrate_item_details(begin_items),
             )
-        mark_projects_that_carried_human_steps(begin_items)
         return begin_items
     items: List[Item] = []
     cursor = None

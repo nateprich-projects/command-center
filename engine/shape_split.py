@@ -326,7 +326,7 @@ def _parse_decision(entry: object, where: str) -> Dict[str, str]:
     if not isinstance(entry, dict):
         raise ShapeError("{} must be an object".format(where))
     kind = entry.get("kind")
-    if kind not in DECISION_KINDS:
+    if not isinstance(kind, str) or kind not in DECISION_KINDS:
         raise ShapeError("{}.kind must be one of {}".format(
             where, ", ".join(DECISION_KINDS)))
     fields = DECISION_KINDS[kind]

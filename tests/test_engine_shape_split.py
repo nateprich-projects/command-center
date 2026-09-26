@@ -297,6 +297,7 @@ def test_decider_answers_each_assigned_point_exactly_once(
 
 @pytest.mark.parametrize("entry", [
     {"point": "a", "kind": "guess", "claim": "x", "source": "y"},
+    {"point": "a", "kind": [], "claim": "x", "source": "y"},
     {"point": "a", "kind": "precedent", "claim": "x"},
     {"point": "a", "kind": "agent", "decision": "x", "alternative": "y",
      "why": "z", "claim": "extra"},

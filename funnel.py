@@ -10084,6 +10084,68 @@ def _load_begin_anchor_items(
             )
 
 
+class ScopedItems(list):
+    """A Project read that says which view it is.
+
+    ``load_items(scope="begin")`` returns one of these so a ``FunnelSession``
+    that cached it can tell the filtered begin view from the full board. A
+    plain list, as every other load and every test loader returns, reads as
+    the full board.
+    """
+
+    def __init__(self, items: Iterable[Item] = (), scope: str = "full"):
+        super().__init__(items)
+        self.scope = scope
+
+
+def items_scope(items: Optional[Sequence[Item]]) -> str:
+    """The view a loaded item list holds: ``"begin"`` or ``"full"``."""
+    return getattr(items, "scope", None) or "full"
+
+
+#: Session commands the filtered begin view serves as the full board would
+#: (#1591). What each reads from the item list:
+#: - ``begin``: the view is built for it (``BEGIN_ITEM_CONNECTIONS`` and
+#:   ``_begin_anchor_refs``; ``tests/test_begin_scoped_parity.py``).
+#: - ``review``: the PR's ticket, for a claim to hand back. An open ticket is
+#:   in the view; a closed one only matters holding a claim (``claims``).
+#: - ``merge``: ``rejected_merges`` (``regress``), the PR's ticket (open,
+#:   since only open tickets are offered for review) and its parent (an
+#:   anchor). A ticket missing from the view refuses with "no ticket in the
+#:   funnel": it fails closed rather than merging on a partial read.
+#: - ``claim``: ``in_motion`` and ``stale_locks`` read open items only; the
+#:   target and its parent (``effective_class``, ``_begin_parent``).
+#: - ``release`` and ``comment``: the named item alone.
+#: - ``capture``: no item at all.
+#: Everything else (brief, publisher, dashboard, doctor, metrics, queue, show,
+#: next, ...) reads closed items for its own reasons and reloads the full
+#: board first.
+BEGIN_VIEW_COMMANDS = frozenset({
+    "begin", "review", "merge", "release", "claim", "comment", "capture",
+})
+
+#: Of those, the commands that act on one named item. The view serves them
+#: only when the ref or URL matches an item in it exactly: ``find`` resolves a
+#: bare number by uniqueness, and a number unique among the view's items can
+#: be ambiguous on the full board.
+BEGIN_VIEW_REF_COMMANDS = frozenset({"release", "claim", "comment"})
+
+
+def begin_view_serves(command: str, ref: Optional[str],
+                      items: Sequence[Item]) -> bool:
+    """Whether ``command`` reads the same answer from ``items`` as from the
+    full board. Always true for a full read."""
+    if items_scope(items) == "full":
+        return True
+    if command not in BEGIN_VIEW_COMMANDS:
+        return False
+    if command in BEGIN_VIEW_REF_COMMANDS:
+        return ref is not None and any(
+            item.ref == ref or item.url == ref for item in items
+        )
+    return True
+
+
 def load_items(
     include_details: bool = True,
     member_repo_names: Optional[Sequence[str]] = None,
@@ -10119,7 +10181,7 @@ def load_items(
                 timings, "item_details",
                 lambda: hydrate_item_details(begin_items),
             )
-        return begin_items
+        return ScopedItems(begin_items, scope="begin")
     items: List[Item] = []
     cursor = None
     shape_comments: Optional[List[Dict[str, object]]] = None
@@ -18665,6 +18727,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
         time.perf_counter() if brief_timings is not None else None
     )
     begin_detail_loader: Optional[Callable[[Sequence[Item]], None]] = None
+    if _items is not None and not begin_view_serves(
+        args.command, getattr(args, "ref", None), _items
+    ):
+        # A session's first `begin` cached the filtered view. This command
+        # reads closed items that view left out, so the session loader reads
+        # the full board in its place (#1591).
+        _items = None
     try:
         if _items is not None:
             items = _items
@@ -18675,6 +18744,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     include_details=False,
                     member_repo_names=begin_member_repo_names,
                     timings=begin_timings,
+                    scope="begin",
                 )
             else:
                 items = _call_with_optional_keywords(
@@ -18683,13 +18753,15 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
         elif args.command == "begin":
             # `begin` selects one job after its cheap gates. Keep the initial
-            # Project scan compact; cmd_begin hydrates only the candidates it
-            # actually needs to order or hand out.
+            # Project scan compact: every open item and only the closed items
+            # a begin consumer reads (#1591). cmd_begin hydrates only the
+            # candidates it actually needs to order or hand out.
             items = _call_with_optional_keywords(
                 load_items,
                 include_details=False,
                 member_repo_names=begin_member_repo_names,
                 timings=begin_timings,
+                scope="begin",
             )
 
             def hydrate_begin_candidates(candidates):
@@ -19373,20 +19445,36 @@ class FunnelSession:
         include_details: bool = True,
         member_repo_names: Optional[Sequence[str]] = None,
         timings: Optional[Dict[str, object]] = None,
+        scope: Optional[str] = None,
     ) -> List[Item]:
-        if self.items is None:
-            self.items = _call_with_optional_keywords(
-                self._loader,
-                include_details=include_details,
-                member_repo_names=member_repo_names,
-                timings=timings,
-            )
-            self._history_pending = (
-                not include_details and self._command != "begin"
-            )
-        elif include_details and self._history_pending:
-            hydrate_item_details(self.items)
-            self._history_pending = False
+        """Load once per session, or again when the cached read is a
+        narrower view than this command asked for.
+
+        ``main`` asks with ``scope="begin"`` for ``begin`` and with no scope
+        otherwise. A cached full read serves either; a cached begin view
+        serves only a begin-scoped ask, and a full ask replaces it, along with
+        any local mutation state, by a fresh read of GitHub (#1591). A full
+        read loaded without history by a cheaper first command is hydrated
+        once, in place, by the first later command that reads history
+        (PROJECT_LOAD_READS_HISTORY).
+        """
+        if self.items is not None and (
+            scope == "begin" or items_scope(self.items) == "full"
+        ):
+            if include_details and self._history_pending:
+                hydrate_item_details(self.items)
+                self._history_pending = False
+            return self.items
+        self.items = _call_with_optional_keywords(
+            self._loader,
+            include_details=include_details,
+            member_repo_names=member_repo_names,
+            timings=timings,
+            scope=scope,
+        )
+        self._history_pending = (
+            not include_details and self._command != "begin"
+        )
         return self.items
 
     def dispatch(self, argv: Sequence[str], stdin=None):

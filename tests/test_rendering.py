@@ -33,7 +33,6 @@ def test_queue_renders_classes_in_each_section(capsys):
         1, "Building", "Improve", children_total=1, children_done=1,
         body=funnel.origin_block("nate-relayed", at=NOW, run="render-run", agent="codex"),
         origin="Nate",
-        carried_human_step=True,
     )
     unclassed = item(2, "Building", None, children_total=1, children_done=1)
     awaiting_breakdown = item(3, "Ready", "Maintenance", children_total=0)
@@ -117,7 +116,6 @@ def test_queue_keeps_single_repo_output_unchanged(capsys):
         1, "Building", "Improve", children_total=1, children_done=1,
         body=funnel.origin_block("nate-relayed", at=NOW, run="render-run", agent="codex"),
         origin="Nate",
-        carried_human_step=True,
     )
     parent = item(2, "Ready", "New", children_total=1)
     ticket = item(3, parent=parent.ref)

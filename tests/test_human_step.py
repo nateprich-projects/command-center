@@ -131,28 +131,3 @@ def test_needs_steps_split_by_native_and_parent_blockers(
 
     assert [item.number for item in actionable(items)] == [36]
     assert [item.number for item in blocked(items)] == [33, 34, 35]
-
-
-def test_closed_needs_ticket_marks_its_project_as_ever_carried():
-    project = funnel.Item(
-        repo="nateprich/beta", number=1, title="Project",
-        url="https://example.invalid/1", state="OPEN", status="Building",
-        klass="Broken",
-    )
-    closed_human_step = funnel.Item(
-        repo="nateprich/beta", number=2, title="Configure the account",
-        url="https://example.invalid/2", state="CLOSED", parent=project.ref,
-        needs="human",
-    )
-    ordinary_project = funnel.Item(
-        repo="nateprich/beta", number=3, title="Other project",
-        url="https://example.invalid/3", state="OPEN", status="Building",
-        klass="Broken",
-    )
-
-    funnel.mark_projects_that_carried_human_steps(
-        [project, closed_human_step, ordinary_project]
-    )
-
-    assert project.carried_human_step
-    assert not ordinary_project.carried_human_step

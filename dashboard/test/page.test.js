@@ -4,7 +4,7 @@ import test from "node:test";
 
 import {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
-  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
+  phoneState, pipState, projectBlocked, projectHold, holdChip, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
   renderMetricChart, CHART_WINDOW_DAYS,
@@ -294,6 +294,34 @@ test("a row nobody can act on says Blocked where the owner would be", () => {
   assert.equal(ticketHold({ state: "OPEN", blocked: true }), "blocked");
   assert.equal(ticketHold({ state: "OPEN", blocked: false }), null);
   assert.equal(ticketHold({ state: "CLOSED", blocked: true }), null);
+});
+
+test("engine holds the Project fields do not show read on the row (Nate, 2026-09-25)", () => {
+  const until = "2026-09-26T08:09:44+00:00";
+  assert.equal(ticketHold({ state: "OPEN", paused_until: until }), "paused");
+  // A block outranks a pause: the pause only matters once the block lifts.
+  assert.equal(ticketHold({ state: "OPEN", blocked: true, paused_until: until }), "blocked");
+  assert.equal(projectHold({ next_step_blocked: false, next_step_paused_until: until }), "paused");
+  assert.equal(projectHold({ next_step_blocked: true, next_step_paused_until: until }), "blocked");
+  assert.equal(projectHold({ next_step_blocked: false }), null);
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const paused = ownerCell(null, "paused", "until Sat 1:09 AM");
+    assert.equal(paused.textContent, "Paused");
+    assert.ok(paused.className.includes("owner-paused"));
+    const chipNode = holdChip({ state: "OPEN", paused_until: until, paused_failures: 6 });
+    assert.match(chipNode.textContent, /^paused until /);
+    assert.doesNotMatch(chipNode.textContent, /UTC|Z$/);
+    assert.match(chipNode.title, /6 failed runs in a row/);
+    assert.equal(holdChip({ state: "OPEN", finished_by_comments: true }).textContent,
+      "finished — close it");
+    assert.equal(holdChip({ state: "CLOSED", finished_by_comments: true }), null);
+    assert.equal(holdChip({ state: "OPEN" }), null);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
 });
 
 test("the page renders no brief section other than the board and human steps", async () => {

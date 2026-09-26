@@ -206,34 +206,40 @@ def test_a_missing_project_fails_the_load(monkeypatch):
         )
 
 
-def test_a_closed_node_in_the_open_connection_fails_the_load(monkeypatch):
+def test_a_stale_closed_row_in_open_is_dropped_not_fatal(monkeypatch):
+    """On 2026-09-26 the live `is:open` filter still returned #1466 a day
+    after it closed. The row's own state is live, so a closed row the
+    filter mislabels is judged by the closed-set predicates like any other:
+    here it matches none and is dropped, and the load goes on."""
     board = FakeBoard({
         "open": [([_node(1), _node(2, state="CLOSED", reason="COMPLETED",
                                    status="Done")], None)],
     })
 
-    with pytest.raises(funnel.GitHubError, match="owner/repo#2 in state CLOSED"):
-        _load(monkeypatch, board)
+    assert [item.number for item in _load(monkeypatch, board)] == [1]
 
 
-def test_a_closed_node_on_a_later_open_page_also_fails(monkeypatch):
+def test_a_stale_closed_row_in_open_is_kept_when_a_predicate_holds(
+    monkeypatch,
+):
     board = FakeBoard({
         "open": [([_node(1)], "open-1"),
-                 ([_node(2, state="CLOSED", status="Done")], None)],
+                 ([_node(2, state="CLOSED", reason="NOT_PLANNED",
+                         status="Parked")], None)],
     })
 
-    with pytest.raises(funnel.GitHubError, match="in state CLOSED"):
-        _load(monkeypatch, board)
+    assert [item.number for item in _load(monkeypatch, board)] == [1, 2]
 
 
-def test_a_closed_node_in_open_fails_even_outside_the_members(monkeypatch):
+def test_an_open_row_from_a_closed_set_connection_is_kept(monkeypatch):
+    """A reopened issue can still be indexed as closed; its live state says
+    open, so begin sees it whichever connection returned it."""
     board = FakeBoard({
-        "open": [([_node(1), _node(2, state="CLOSED", repo=OTHER_REPO)],
-                  None)],
+        "open": [([_node(1)], None)],
+        "parked": [([_node(7, status="Parked")], None)],
     })
 
-    with pytest.raises(funnel.GitHubError, match="in state CLOSED"):
-        _load(monkeypatch, board)
+    assert [item.number for item in _load(monkeypatch, board)] == [1, 7]
 
 
 def test_an_empty_open_connection_fails_the_load(monkeypatch):
@@ -338,7 +344,9 @@ def test_a_row_the_filter_wrongly_returned_is_dropped(monkeypatch):
 
     items = _load(monkeypatch, board)
 
-    assert [item.number for item in items] == [1, 20, 21, 22, 23, 24, 25]
+    # 13 is a genuine done-drift row (completed, Status Building) and 14
+    # is open, so both are kept whichever connection returned them.
+    assert [item.number for item in items] == [1, 20, 21, 22, 13, 23, 14, 24, 25]
 
 
 def test_a_row_refused_by_one_connection_is_kept_by_another(monkeypatch):

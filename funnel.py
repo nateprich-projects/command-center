@@ -9598,16 +9598,19 @@ def _load_begin_items(
                         ) from exc
                     if item is None:
                         continue  # a draft issue, or a pull request
-                    if alias == "open":
-                        if item.state != "OPEN":
-                            raise GitHubError(
-                                "begin Project connection open returned {} "
-                                "in state {}".format(item.ref, item.state)
-                            )
+                    # The row's own `state` is live; the filter index is
+                    # not. On 2026-09-26 `is:open` still returned #1466 a
+                    # day after it closed. So an open row is kept whichever
+                    # connection returned it (a reopened issue can still be
+                    # indexed as closed), and a closed row is kept only when
+                    # some closed-set predicate holds for it. The filter
+                    # narrows; the predicates decide.
+                    if item.state == "OPEN":
                         open_rows += 1
-                    elif not BEGIN_ITEM_PREDICATES[alias](item):
-                        # The server filter only narrows: a row it returned
-                        # that the predicate refuses is not begin's to see.
+                    elif not any(
+                        predicate(item)
+                        for predicate in BEGIN_ITEM_PREDICATES.values()
+                    ):
                         continue
                     kept.setdefault(item.item_id or item.ref, item)
                 if has_next:

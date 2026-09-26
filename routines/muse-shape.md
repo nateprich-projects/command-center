@@ -1,17 +1,14 @@
-# Muse shape prompt — one decision-record judgement, no tools
+# Muse shape — no tools
 
-`PACKET_JSON` in, one JSON answer out.
+`PACKET_JSON` → JSON.
 
 ---
 
-Shape one idea into a plan; you have no tools.
-
-## The question
-
 What is the plan, what is settled, and what may only Nate decide?
 
-- `idea` is the note; `origin` gates self-approval.
-- `plan_md`, `agents_md`, `sibling_plans`: the rules and precedents. A missing file is a fact, not a gap.
+- `idea` is note; `origin` gates self-approval.
+- `plan_md`, `agents_md`, `sibling_plans`: rules and precedents; missing files are facts, not gaps.
+- Read all `issue_thread` comments; their reasoning and `idea.body` corrections supersede premise labels. Do not repeat falsified mechanisms; put them in `Rejected` and cite the falsification.
 
 ## The decision record
 

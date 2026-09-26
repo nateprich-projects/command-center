@@ -24,6 +24,9 @@ sys.path.insert(0, str(ROOT))
 INVESTIGATE_SHAPE_FIXTURES = json.loads(
     (ROOT / "tests/fixtures/investigate_shape_excerpts.json").read_text(
         encoding="utf-8"))
+ISSUE_THREAD_1195 = json.loads(
+    (ROOT / "tests/fixtures/shape_issue_thread_1195.json").read_text(
+        encoding="utf-8"))
 
 import funnel  # noqa: E402
 from engine import shape  # noqa: E402
@@ -1268,9 +1271,73 @@ def test_collect_reads_the_idea_and_its_siblings(monkeypatch):
                                "override_target": None}
     assert found["plan_md"] == "plan.md text"
     assert found["agents_md"] == "AGENTS.md text"
+    assert "issue_thread" not in found
     assert [row["ref"] for row in found["sibling_plans"]] == \
         [REPO + "#89"]
     assert found["collected_at"] == NOW.isoformat()
+
+
+def test_collect_renders_both_recorded_1195_falsification_comments(monkeypatch):
+    current = idea(1195, issue_comments=ISSUE_THREAD_1195)
+    monkeypatch.setattr(
+        shape, "fetch_repo_text",
+        lambda repo, path: ("{} text".format(path), False))
+
+    found = shape.collect(
+        REPO, 1195, items_loader=lambda: [current], now=NOW)
+
+    thread = found["issue_thread"]
+    assert thread.startswith("## Issue thread\n\n")
+    positions = []
+    for comment in ISSUE_THREAD_1195:
+        entry = "### @{} — {}\n\n{}".format(
+            comment["author"], comment["created_at"], comment["body"]
+        )
+        positions.append(thread.index(entry))
+        assert comment["body"] in thread
+    assert positions == sorted(positions)
+
+
+def test_collect_omits_issue_thread_for_a_successful_empty_read(monkeypatch):
+    current = idea(42, issue_comments=[])
+    monkeypatch.setattr(
+        shape, "fetch_repo_text",
+        lambda repo, path: ("{} text".format(path), False))
+
+    found = shape.collect(
+        REPO, 42, items_loader=lambda: [current], now=NOW)
+
+    assert "issue_thread" not in found
+
+
+def test_collect_requests_the_thread_in_its_project_item_load(monkeypatch):
+    current = idea(42, issue_comments=[])
+    calls = []
+
+    def load_items(**kwargs):
+        calls.append(kwargs)
+        return [current]
+
+    monkeypatch.setattr(funnel, "load_items", load_items)
+    monkeypatch.setattr(
+        shape, "fetch_repo_text",
+        lambda repo, path: ("{} text".format(path), False))
+
+    shape.collect(REPO, 42, now=NOW)
+
+    assert calls == [{"issue_comments_for": (REPO, 42)}]
+
+
+def test_packet_cli_records_an_unreadable_issue_thread(monkeypatch, capsys):
+    def unreadable(**kwargs):
+        assert kwargs == {"issue_comments_for": (REPO, 42)}
+        raise funnel.GitHubError("could not read comments for owner/repo#42")
+
+    monkeypatch.setattr(funnel, "load_items", unreadable)
+
+    assert shape.packet_main(["42", "--repo", REPO]) == 1
+    assert "could not read comments for owner/repo#42" \
+        in capsys.readouterr().err
 
 
 def test_collect_rejects_an_unknown_idea():
@@ -1764,10 +1831,10 @@ def test_the_entry_points_are_executable():
 
 def test_packet_cli_prints_valid_json_with_every_field(
         monkeypatch, capsys):
-    current = idea(42, klass=None)
+    current = idea(42, klass=None, issue_comments=[])
     sibling = idea(89, status="Shaped", body="A sibling plan.")
     monkeypatch.setattr(
-        funnel, "load_items", lambda: [current, sibling])
+        funnel, "load_items", lambda **kwargs: [current, sibling])
     monkeypatch.setattr(
         shape, "fetch_repo_text",
         lambda repo, path: ("{} text".format(path), False))
@@ -1784,7 +1851,8 @@ def test_packet_cli_prints_valid_json_with_every_field(
 
 
 def test_packet_cli_reports_an_unknown_idea(monkeypatch, capsys):
-    monkeypatch.setattr(funnel, "load_items", lambda: [idea(43)])
+    monkeypatch.setattr(
+        funnel, "load_items", lambda **kwargs: [idea(43)])
     assert shape.packet_main(["42", "--repo", REPO]) == 1
     assert "shape-packet:" in capsys.readouterr().err
 

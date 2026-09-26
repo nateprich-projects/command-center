@@ -950,13 +950,36 @@ def _sibling_packet(item) -> Dict:
     }
 
 
+def render_issue_thread(comments: Sequence[Dict[str, object]]) -> Optional[str]:
+    """Render a complete comment list as the packet's Issue thread section."""
+    if not comments:
+        return None
+    entries = []
+    for comment in comments:
+        author = comment.get("author")
+        author_label = (
+            "@{}".format(author) if isinstance(author, str) and author
+            else "[unknown author]"
+        )
+        created_at = comment.get("created_at")
+        body = comment.get("body")
+        if not isinstance(created_at, str) or not isinstance(body, str):
+            raise funnel.GitHubError("could not render a complete issue thread")
+        entries.append(
+            "### {} — {}\n\n{}".format(author_label, created_at, body)
+        )
+    return "## Issue thread\n\n" + "\n\n".join(entries)
+
+
 def build_packet(*, repo: str, idea: Dict,
                  origin_voice: Optional[str],
                  override_target: Optional[str],
                  plan_md: str, plan_md_missing: bool,
                  agents_md: str, agents_md_missing: bool,
                  siblings: Sequence[Dict],
-                 collected_at: str) -> Dict:
+                 collected_at: str,
+                 issue_comments: Optional[Sequence[Dict[str, object]]] = None
+                 ) -> Dict:
     """Assemble the packet from already-fetched pieces. Pure: no IO.
 
     Everything the shape question needs in one JSON-serialisable dict:
@@ -977,6 +1000,9 @@ def build_packet(*, repo: str, idea: Dict,
         "sibling_plans": [dict(row) for row in siblings],
         "collected_at": collected_at,
     }
+    issue_thread = render_issue_thread(issue_comments or ())
+    if issue_thread is not None:
+        packet["issue_thread"] = issue_thread
     if (origin_voice == "agent"
             and idea.get("klass") in funnel.SELF_APPROVABLE_CLASSES):
         packet["output_review"] = dict(
@@ -989,8 +1015,18 @@ def collect(repo: Optional[str], idea_number: int, *,
             now: Optional[datetime] = None) -> Dict:
     """Fetch every piece and build the packet. Reads only, no writes."""
     resolved = funnel.resolve_repo(repo)
-    items = (items_loader or funnel.load_items)()
+    if items_loader is None:
+        items = funnel.load_items(
+            issue_comments_for=(resolved, idea_number)
+        )
+    else:
+        items = items_loader()
     idea_item = funnel.find(items, "{}#{}".format(resolved, idea_number))
+    issue_comments = getattr(idea_item, "issue_comments", None)
+    if items_loader is None and issue_comments is None:
+        raise funnel.GitHubError(
+            "could not read comments for {}#{}".format(resolved, idea_number)
+        )
     override = funnel.parse_origin_override(idea_item.body or "")
     plan_md, plan_md_missing = fetch_repo_text(resolved, "plan.md")
     agents_md, agents_md_missing = fetch_repo_text(resolved, "AGENTS.md")
@@ -1007,6 +1043,7 @@ def collect(repo: Optional[str], idea_number: int, *,
         siblings=[_sibling_packet(row)
                   for row in sibling_plan_items(items, idea_item)],
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),
+        issue_comments=issue_comments,
     )
 
 

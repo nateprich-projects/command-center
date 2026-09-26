@@ -75,6 +75,18 @@ def test_unattended_shaping_can_recover_an_unclassed_agent_idea():
     assert "proposed class:" in normalized
 
 
+def test_muse_shape_uses_the_issue_thread_to_correct_factual_premises():
+    body = (ROOT / "routines" / "muse-shape.md").read_text(
+        encoding="utf-8")
+    normalized = " ".join(body.split()).lower()
+
+    assert "read all `issue_thread` comments" in normalized
+    assert "their reasoning and `idea.body` corrections supersede premise labels" \
+        in normalized
+    assert "do not repeat falsified mechanisms" in normalized
+    assert "put them in `rejected` and cite the falsification" in normalized
+
+
 @pytest.mark.parametrize("routine", ("claude", "zcode"))
 def test_every_capture_line_names_its_repo(routine):
     """With two member repos, a capture without --repo refuses and the

@@ -741,6 +741,10 @@ class Item:
     blocked_cleared_at: Optional[datetime] = None
     closed_at: Optional[datetime] = None
     block_event: Optional[Dict[str, str]] = None
+    # The full issue thread is loaded only for the shape packet's target.
+    # None means it was not requested; an empty list means the read succeeded
+    # and the issue has no comments.
+    issue_comments: Optional[List[Dict[str, object]]] = None
 
     @property
     def ref(self) -> str:
@@ -7839,6 +7843,49 @@ query($login: String!, $number: Int!, $cursor: String) {
 }
 """ % PROJECT_ITEM_PAGE_SIZE
 
+
+ISSUE_COMMENT_PAGE_QUERY = """
+query($threadOwner: String!, $threadName: String!, $threadNumber: Int!, $cursor: String!) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $threadOwner, name: $threadName) {
+    issue(number: $threadNumber) {
+      comments(first: 100, after: $cursor) {
+        totalCount
+        nodes { id body createdAt author { login } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
+def _item_query_with_issue_comments() -> str:
+    """Add one target issue thread to the existing Project item query."""
+    signature = "query($login: String!, $number: Int!, $cursor: String) {"
+    extended_signature = (
+        "query($login: String!, $number: Int!, $cursor: String, "
+        "$threadOwner: String!, $threadName: String!, "
+        "$threadNumber: Int!) {"
+    )
+    query = ITEM_QUERY.replace(signature, extended_signature, 1)
+    if query == ITEM_QUERY:
+        raise RuntimeError("could not add issue comments to ITEM_QUERY")
+    root_close = query.rfind("\n}")
+    if root_close < 0:
+        raise RuntimeError("ITEM_QUERY has no root closing brace")
+    return query[:root_close] + """
+  issue_thread: repository(owner: $threadOwner, name: $threadName) {
+    issue(number: $threadNumber) {
+      comments(first: 100) {
+        totalCount
+        nodes { id body createdAt author { login } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+""" + query[root_close:]
+
 # The paged list is the cheap gate input. History and child timestamps are
 # fetched below only for the candidate items a caller has kept after its cheap
 # checks; they do not belong on every Project row.
@@ -9025,10 +9072,144 @@ def hydrate_item_details(
                 )
 
 
+def _issue_thread_connection(response: object, ref: str) -> dict:
+    repository = (
+        response.get("issue_thread") if isinstance(response, dict) else None
+    )
+    issue = repository.get("issue") if isinstance(repository, dict) else None
+    connection = issue.get("comments") if isinstance(issue, dict) else None
+    if not isinstance(connection, dict):
+        raise GitHubError("could not read comments for {}".format(ref))
+    return connection
+
+
+def _issue_comment_page(
+    connection: object, ref: str, expected_total: Optional[int] = None
+) -> Tuple[List[Dict[str, object]], int, bool, Optional[str]]:
+    if not isinstance(connection, dict):
+        raise GitHubError("could not read comments for {}".format(ref))
+    total = connection.get("totalCount")
+    nodes = connection.get("nodes")
+    page_info = connection.get("pageInfo")
+    if (
+        not isinstance(total, int)
+        or isinstance(total, bool)
+        or total < 0
+        or (expected_total is not None and total != expected_total)
+        or not isinstance(nodes, list)
+        or not isinstance(page_info, dict)
+        or not isinstance(page_info.get("hasNextPage"), bool)
+    ):
+        raise GitHubError("could not read a complete issue thread for {}".format(ref))
+
+    rows: List[Dict[str, object]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            raise GitHubError("could not read a complete issue thread for {}".format(ref))
+        comment_id = node.get("id")
+        body = node.get("body")
+        created_at = node.get("createdAt")
+        author = node.get("author")
+        if (
+            not isinstance(comment_id, str)
+            or not comment_id
+            or not isinstance(body, str)
+            or not isinstance(created_at, str)
+        ):
+            raise GitHubError("could not read a complete issue thread for {}".format(ref))
+        if author is None:
+            author_login = None
+        elif isinstance(author, dict) and (
+            author.get("login") is None
+            or isinstance(author.get("login"), str)
+        ):
+            author_login = author.get("login")
+        else:
+            raise GitHubError("could not read a complete issue thread for {}".format(ref))
+        try:
+            parsed_time = datetime.fromisoformat(
+                created_at.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise GitHubError(
+                "could not order issue comments for {}".format(ref)
+            ) from exc
+        if parsed_time.tzinfo is None:
+            raise GitHubError("could not order issue comments for {}".format(ref))
+        rows.append({
+            "id": comment_id,
+            "author": author_login,
+            "created_at": created_at,
+            "body": body,
+            "_sort_time": parsed_time,
+        })
+
+    has_next = page_info["hasNextPage"]
+    cursor = page_info.get("endCursor")
+    if has_next and (not isinstance(cursor, str) or not cursor):
+        raise GitHubError("could not read a complete issue thread for {}".format(ref))
+    if len(nodes) > total:
+        raise GitHubError("could not read a complete issue thread for {}".format(ref))
+    return rows, total, has_next, cursor if isinstance(cursor, str) else None
+
+
+def _read_issue_comments(
+    first_response: object, repo: str, number: int
+) -> List[Dict[str, object]]:
+    ref = "{}#{}".format(repo, number)
+    connection = _issue_thread_connection(first_response, ref)
+    rows, total, has_next, cursor = _issue_comment_page(connection, ref)
+    fetched = len(rows)
+    seen_cursors: Set[str] = set()
+    seen_comment_ids = {str(row["id"]) for row in rows}
+    while has_next:
+        if cursor is None or cursor in seen_cursors:
+            raise GitHubError("could not read a complete issue thread for {}".format(ref))
+        seen_cursors.add(cursor)
+        try:
+            response = gh_graphql(
+                ISSUE_COMMENT_PAGE_QUERY,
+                threadOwner=repo.split("/", 1)[0],
+                threadName=repo.split("/", 1)[1],
+                threadNumber=number,
+                cursor=cursor,
+            )
+        except GitHubError as exc:
+            raise GitHubError(
+                "could not read comments for {}: {}".format(ref, exc)
+            ) from exc
+        page_rows, page_total, has_next, cursor = _issue_comment_page(
+            _issue_thread_connection(response, ref), ref, expected_total=total
+        )
+        for row in page_rows:
+            comment_id = str(row["id"])
+            if comment_id in seen_comment_ids:
+                raise GitHubError(
+                    "could not read a complete issue thread for {}".format(ref)
+                )
+            seen_comment_ids.add(comment_id)
+        rows.extend(page_rows)
+        fetched += len(page_rows)
+        if fetched > page_total:
+            raise GitHubError("could not read a complete issue thread for {}".format(ref))
+    if fetched != total:
+        raise GitHubError("could not read a complete issue thread for {}".format(ref))
+    rows.sort(key=lambda row: row["_sort_time"])
+    return [
+        {
+            "author": row["author"],
+            "created_at": row["created_at"],
+            "body": row["body"],
+        }
+        for row in rows
+    ]
+
+
 def load_items(
     include_details: bool = True,
     member_repo_names: Optional[Sequence[str]] = None,
     timings: Optional[Dict[str, object]] = None,
+    issue_comments_for: Optional[Tuple[str, int]] = None,
 ) -> List[Item]:
     global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     members = set(
@@ -9038,6 +9219,25 @@ def load_items(
     )
     items: List[Item] = []
     cursor = None
+    issue_comments: Optional[List[Dict[str, object]]] = None
+    if issue_comments_for is not None:
+        if (
+            not isinstance(issue_comments_for, tuple)
+            or len(issue_comments_for) != 2
+        ):
+            raise GitHubError(
+                "issue_comments_for must be a (repo, issue number) tuple"
+            )
+        thread_repo, thread_number = issue_comments_for
+        if (
+            not isinstance(thread_repo, str)
+            or thread_repo.count("/") != 1
+            or not all(thread_repo.split("/", 1))
+            or not isinstance(thread_number, int)
+            or isinstance(thread_number, bool)
+            or thread_number < 1
+        ):
+            raise GitHubError("invalid issue_comments_for target")
     project_started = time.perf_counter() if timings is not None else None
     block_comment_seconds = 0.0
     try:
@@ -9046,7 +9246,29 @@ def load_items(
             if cursor:
                 variables["cursor"] = cursor
             _PROJECT_ITEM_PAGE_COUNT += 1
-            project = gh_graphql(ITEM_QUERY, **variables)["user"]["projectV2"]
+            query = ITEM_QUERY
+            if issue_comments_for is not None and cursor is None:
+                query = _item_query_with_issue_comments()
+                variables.update({
+                    "threadOwner": thread_repo.split("/", 1)[0],
+                    "threadName": thread_repo.split("/", 1)[1],
+                    "threadNumber": thread_number,
+                })
+            try:
+                response = gh_graphql(query, **variables)
+            except GitHubError as exc:
+                if issue_comments_for is not None and cursor is None:
+                    raise GitHubError(
+                        "could not read issue thread for {}#{}: {}".format(
+                            thread_repo, thread_number, exc
+                        )
+                    ) from exc
+                raise
+            if issue_comments_for is not None and cursor is None:
+                issue_comments = _read_issue_comments(
+                    response, thread_repo, thread_number
+                )
+            project = response["user"]["projectV2"]
             if project is None:
                 raise GitHubError(
                     "Project {}/{} not found or not visible".format(
@@ -9093,6 +9315,13 @@ def load_items(
         _begin_load_timed(
             timings, "item_details", lambda: hydrate_item_details(items)
         )
+    if issue_comments_for is not None:
+        target_ref = "{}#{}".format(thread_repo, thread_number)
+        target_item = next(
+            (item for item in items if item.ref == target_ref), None
+        )
+        if target_item is not None:
+            target_item.issue_comments = issue_comments
     mark_projects_that_carried_human_steps(items)
     return items
 

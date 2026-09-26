@@ -162,6 +162,111 @@ def test_project_item_query_uses_maximum_bounded_page():
     assert funnel.PROJECT_ITEM_PAGE_SIZE == 100
 
 
+def test_shape_thread_is_read_with_project_query_and_paged_to_completion(
+    monkeypatch,
+):
+    calls = []
+    project = {
+        "items": {
+            "nodes": [_node(42)],
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+        },
+    }
+    first_comments = {
+        "totalCount": 3,
+        "nodes": [
+            {"id": "c2", "body": "later", "createdAt": "2026-09-25T21:00:00Z",
+             "author": {"login": "second"}},
+            {"id": "c1", "body": "first", "createdAt": "2026-09-25T20:00:00Z",
+             "author": {"login": "first"}},
+        ],
+        "pageInfo": {"hasNextPage": True, "endCursor": "cursor-1"},
+    }
+    second_comments = {
+        "totalCount": 3,
+        "nodes": [
+            {"id": "c3", "body": "middle", "createdAt": "2026-09-25T20:30:00Z",
+             "author": {"login": "third"}},
+        ],
+        "pageInfo": {"hasNextPage": False, "endCursor": "cursor-2"},
+    }
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        if "issue_thread: repository" in query:
+            assert "user(login: $login)" in query
+            assert variables["threadOwner"] == "owner"
+            assert variables["threadName"] == "repo"
+            assert variables["threadNumber"] == 42
+            return {
+                "user": {"projectV2": project},
+                "issue_thread": {"issue": {"comments": first_comments}},
+            }
+        assert query == funnel.ISSUE_COMMENT_PAGE_QUERY
+        assert variables["cursor"] == "cursor-1"
+        return {"issue_thread": {"issue": {"comments": second_comments}}}
+
+    monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    items = funnel.load_items(
+        include_details=False, issue_comments_for=(REPO, 42)
+    )
+
+    assert len(calls) == 2
+    assert items[0].issue_comments == [
+        {"author": "first", "created_at": "2026-09-25T20:00:00Z",
+         "body": "first"},
+        {"author": "third", "created_at": "2026-09-25T20:30:00Z",
+         "body": "middle"},
+        {"author": "second", "created_at": "2026-09-25T21:00:00Z",
+         "body": "later"},
+    ]
+
+
+def test_shape_thread_read_fails_closed_when_connection_is_incomplete(
+    monkeypatch,
+):
+    def graphql(query, **variables):
+        if "issue_thread: repository" in query:
+            return {
+                "user": {
+                    "projectV2": {
+                        "items": {
+                            "nodes": [_node(42)],
+                            "pageInfo": {
+                                "hasNextPage": False,
+                                "endCursor": None,
+                            },
+                        },
+                    },
+                },
+                "issue_thread": {"issue": {"comments": {
+                    "totalCount": 2,
+                    "nodes": [{
+                        "id": "c1",
+                        "body": "partial",
+                        "createdAt": "2026-09-25T20:00:00Z",
+                        "author": {"login": "author"},
+                    }],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }}},
+            }
+        raise AssertionError("an incomplete first page must not be followed")
+
+    monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    try:
+        funnel.load_items(
+            include_details=False, issue_comments_for=(REPO, 42)
+        )
+    except funnel.GitHubError as exc:
+        assert "could not read a complete issue thread" in str(exc)
+    else:
+        raise AssertionError("a partial thread must fail closed")
+
+
 def test_begin_load_adds_phase_durations_to_the_existing_timings_map(
     monkeypatch,
 ):

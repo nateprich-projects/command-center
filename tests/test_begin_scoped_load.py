@@ -460,7 +460,7 @@ def test_the_default_scope_reads_the_full_board_unchanged(monkeypatch):
     assert results[None] == results["default"] == results["full"]
 
 
-def test_an_unknown_scope_or_a_shape_issue_is_refused(monkeypatch):
+def test_an_unknown_scope_is_refused(monkeypatch):
     def no_calls(*args, **kwargs):
         raise AssertionError("the load must refuse before reading GitHub")
 
@@ -468,5 +468,3 @@ def test_an_unknown_scope_or_a_shape_issue_is_refused(monkeypatch):
     monkeypatch.setattr(funnel, "member_repos", no_calls)
     with pytest.raises(ValueError, match="scope"):
         funnel.load_items(scope="brief")
-    with pytest.raises(ValueError, match="shape issue"):
-        funnel.load_items(scope="begin", shape_issue=(REPO, 42))

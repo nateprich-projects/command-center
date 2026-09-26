@@ -1029,15 +1029,29 @@ def collect(repo: Optional[str], idea_number: int, *,
             now: Optional[datetime] = None) -> Dict:
     """Fetch every piece and build the packet. Reads only, no writes."""
     resolved = funnel.resolve_repo(repo)
+    idea_ref = "{}#{}".format(resolved, idea_number)
     if items_loader is None:
         # No packet field reads Project history (status_since, status
         # events, blocked times, child timestamps), so skip the per-item
         # detail batch: it is most of this load's time and points (#1620).
+        # Nor does it read a closed item other than, at most, the idea:
+        # siblings are open plans. So the begin view serves it, and the
+        # idea's thread rides that load's first request (#1625).
         items = funnel.load_items(
-            include_details=False, shape_issue=(resolved, idea_number))
+            include_details=False, shape_issue=(resolved, idea_number),
+            scope="begin")
+        if not any(row.ref == idea_ref for row in items):
+            # The begin view holds every open item and only some closed
+            # ones, so a missing idea is closed or off the board. Refuse
+            # rather than guess: the full load would have found a closed
+            # one, and shaping a closed idea is not a job begin offers.
+            raise funnel.GitHubError(
+                "{} is not in the open board view; shape-packet reads "
+                "only open ideas and the closed items begin "
+                "carries".format(idea_ref))
     else:
         items = items_loader()
-    idea_item = funnel.find(items, "{}#{}".format(resolved, idea_number))
+    idea_item = funnel.find(items, idea_ref)
     issue_comments = getattr(idea_item, "issue_comments", None)
     if issue_comments is None and items_loader is not None:
         # Pure packet fixtures and injected readers can omit the optional

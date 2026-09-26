@@ -9689,14 +9689,26 @@ def _load_begin_items(
     return items
 
 
+#: How far back an open heartbeat start still earns its ticket a fetch into
+#: the filtered begin view: the week agent health reports on.
+HEARTBEAT_ANCHOR_WINDOW = timedelta(days=7)
+
+
 def _heartbeat_bound_refs() -> List[str]:
     """Ticket refs bound to an open heartbeat start, as the orphan reconciler
     reads them, or none from any agent whose heartbeat cannot be read.
 
     Like ``_backoff_rows``, an unreadable heartbeat only drops this source:
     ``reconcile_orphaned_starts`` then finds no candidates, as it would itself.
+
+    Only starts from the last ``HEARTBEAT_ANCHOR_WINDOW`` count. On 2026-09-26
+    45 open starts reached back weeks (command-center#104 among them): runs
+    the brief already reports as dead, each costing a Project connection on
+    every begin. An older orphan simply stays for the watchdog, as it did
+    before the reconciler existed.
     """
     refs: List[str] = []
+    cutoff = time.time() - HEARTBEAT_ANCHOR_WINDOW.total_seconds()
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import heartbeat
@@ -9712,6 +9724,8 @@ def _heartbeat_bound_refs() -> List[str]:
             records = _brief_heartbeat_rows(agent)
             bound = heartbeat.bindings(records)
             for start in heartbeat.open_starts(records):
+                if (start.get("ts") or 0) < cutoff:
+                    continue
                 binding = bound.get(start.get("run"))
                 if binding and binding.get("do") == "ticket":
                     refs.append(str(binding.get("work")))

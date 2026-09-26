@@ -620,26 +620,35 @@ def test_heartbeat_refs_come_from_open_ticket_starts_of_live_agents(
     monkeypatch,
 ):
     import heartbeat
+    import time
+
+    now = int(time.time()) - 60
+    old = now - int(funnel.HEARTBEAT_ANCHOR_WINDOW.total_seconds()) - 60
 
     monkeypatch.setattr(heartbeat, "PROVIDERS",
                         {"alpha": "a", "beta": "b", "gone": "g"})
     monkeypatch.setattr(heartbeat, "RETIRED_AGENTS", frozenset({"gone"}))
     spools = {
         "alpha": [
-            {"run": "a1", "phase": "start", "ts": 1},
-            {"run": "a1", "phase": "bind", "ts": 2, "do": "ticket",
+            {"run": "a1", "phase": "start", "ts": now + 1},
+            {"run": "a1", "phase": "bind", "ts": now + 2, "do": "ticket",
              "work": REPO + "#40"},
-            {"run": "a2", "phase": "start", "ts": 3},
-            {"run": "a2", "phase": "bind", "ts": 4, "do": "review",
+            {"run": "a2", "phase": "start", "ts": now + 3},
+            {"run": "a2", "phase": "bind", "ts": now + 4, "do": "review",
              "work": "12", "repo": REPO},
-            {"run": "a3", "phase": "start", "ts": 5},
-            {"run": "a3", "phase": "bind", "ts": 6, "do": "ticket",
+            {"run": "a3", "phase": "start", "ts": now + 5},
+            {"run": "a3", "phase": "bind", "ts": now + 6, "do": "ticket",
              "work": REPO + "#41"},
-            {"run": "a3", "phase": "finish", "ts": 7, "outcome": "done"},
+            {"run": "a3", "phase": "finish", "ts": now + 7, "outcome": "done"},
+            # An open start older than the window: a dead run the brief
+            # already reports, not worth a Project connection per begin.
+            {"run": "a4", "phase": "start", "ts": old},
+            {"run": "a4", "phase": "bind", "ts": old + 1, "do": "ticket",
+             "work": REPO + "#43"},
         ],
         "gone": [
-            {"run": "g1", "phase": "start", "ts": 1},
-            {"run": "g1", "phase": "bind", "ts": 2, "do": "ticket",
+            {"run": "g1", "phase": "start", "ts": now + 1},
+            {"run": "g1", "phase": "bind", "ts": now + 2, "do": "ticket",
              "work": REPO + "#42"},
         ],
     }

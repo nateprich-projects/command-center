@@ -1,7 +1,7 @@
 [project]
 name = "command-center-mcp"
 version = "0.1.0"
-description = "Authenticated read-only MCP tools for the Command Center funnel"
+description = "Authenticated MCP read and gate tools for the Command Center funnel"
 requires-python = ">=3.12"
 dependencies = [
     "fastmcp==4.0.2",

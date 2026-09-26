@@ -17,6 +17,13 @@ from .config import Config, ConfigError, load_config
 log = logging.getLogger(__name__)
 
 
+def _required_text(value: str, name: str) -> str:
+    """Reject empty tool input without changing the caller's text."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    return value
+
+
 def _command_center_root() -> Path:
     """Find the checkout that contains the authoritative funnel.py command."""
     working_root = Path.cwd().resolve()
@@ -33,7 +40,7 @@ def _command_center_root() -> Path:
 
 
 def _run_funnel(*arguments: str) -> str:
-    """Return exactly the stdout from one read-only funnel.py command."""
+    """Return exactly the stdout from one funnel.py command."""
     root = _command_center_root()
     command = [sys.executable, str(root / "funnel.py"), *arguments]
     try:
@@ -61,7 +68,7 @@ def _run_funnel(*arguments: str) -> str:
 
 
 def build_server(config: Config) -> FastMCP:
-    """Build the authenticated MCP server and its read-only funnel tools."""
+    """Build the authenticated MCP server with its read and gate tools."""
     token_verifier = StaticTokenVerifier(
         tokens={
             config.inbound_static_token: {
@@ -78,9 +85,10 @@ def build_server(config: Config) -> FastMCP:
     server = FastMCP(
         name="command-center",
         instructions=(
-            "Read-only Command Center tools that return the output of the matching "
-            "funnel.py command. funnel.py remains the source of truth for project reads "
-            "and ordering."
+            "Command Center tools that return the output of the matching funnel.py "
+            "command. funnel.py remains the source of truth for project reads and "
+            "ordering. The gate tools approve, accept and park record the "
+            "verbatim instruction supplied by Nate with nate-relayed provenance."
         ),
         auth=auth,
     )
@@ -104,6 +112,36 @@ def build_server(config: Config) -> FastMCP:
     def queue() -> str:
         """Return the ordered Command Center queue from `funnel.py queue`."""
         return _run_funnel("queue")
+
+    @server.tool
+    def approve(ref: str, instruction: str) -> str:
+        """Approve a Shaped project after Nate's verbatim instruction is supplied."""
+        instruction = _required_text(instruction, "instruction")
+        return _run_funnel(
+            "approve", _required_text(ref, "ref"), "--yes",
+            "--instruction", instruction,
+        )
+
+    @server.tool
+    def accept(ref: str, instruction: str, no_tickets: bool = False) -> str:
+        """Accept a completed project using Nate's verbatim instruction."""
+        instruction = _required_text(instruction, "instruction")
+        args = [
+            "accept", _required_text(ref, "ref"), "--yes",
+            "--instruction", instruction,
+        ]
+        if no_tickets:
+            args.append("--no-tickets")
+        return _run_funnel(*args)
+
+    @server.tool
+    def park(ref: str, reason: str, instruction: str) -> str:
+        """Park a project with its required reason and verbatim instruction."""
+        return _run_funnel(
+            "park", _required_text(ref, "ref"),
+            "--reason", _required_text(reason, "reason"),
+            "--instruction", _required_text(instruction, "instruction"),
+        )
 
     @server.custom_route("/healthz", methods=["GET"])
     async def healthz(_request: Request) -> JSONResponse:

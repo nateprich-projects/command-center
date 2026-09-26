@@ -134,7 +134,7 @@ def test_park_sets_status_closes_not_planned_then_posts_the_reason(monkeypatch):
     assert funnel.parse_provenance(posted)["run"] == "run-42"
 
 
-def test_park_with_wake_date_records_and_reads_status_and_reason(monkeypatch):
+def test_park_with_wake_date_records_status_reason_and_instruction(monkeypatch):
     target = funnel.Item(
         repo="nateprich/beta",
         number=42,
@@ -161,10 +161,12 @@ def test_park_with_wake_date_records_and_reads_status_and_reason(monkeypatch):
     monkeypatch.setattr(funnel, "gh_graphql", graphql)
     monkeypatch.setattr(funnel.subprocess, "run", run)
     wake_date = funnel._block_condition_date() + timedelta(days=1)
+    instruction = "Park this through the study, then resume on its wake date."
 
     assert funnel.main([
         "park", "42", "--reason", "Resume after the study",
         "--wake-date", wake_date.isoformat(),
+        "--instruction", instruction,
         "--run", "run-42", "--agent", "claude",
     ]) == 0
 
@@ -181,6 +183,9 @@ def test_park_with_wake_date_records_and_reads_status_and_reason(monkeypatch):
         ),
         "{}Resume after the study".format(funnel.PARK_COMMENT_PREFIX),
     ]
+    provenance = funnel.parse_provenance(posted)
+    assert provenance["voice"] == "nate-relayed"
+    assert provenance["instruction"] == instruction
 
     monkeypatch.setattr(
         funnel, "_issue_comments", lambda item: [{"body": posted}]

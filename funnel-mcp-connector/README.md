@@ -2,8 +2,13 @@
 
 This directory contains the authenticated HTTP MCP connector for Command Center. Its
 read-only `brief`, `ideas`, `show`, and `queue` tools call the matching `funnel.py`
-commands and return their output. The connector does not reimplement project queries or
-ordering.
+commands and return their output. Its gate tools `approve`, `accept`, and `park`
+call the matching `funnel.py` gate commands and record Nate's verbatim
+instruction in a `nate-relayed` provenance block. The connector does not reimplement
+project queries or ordering, and it does not expose `next`, `claim`, `release`,
+`gate`, heartbeat operations, or merge. There is no `start` tool: `plan.md`
+deleted the "Start now?" gate, and a Ready project moves to Building when its
+first ticket is claimed.
 
 ## Local development configuration
 
@@ -29,6 +34,20 @@ For deployment, `GH_TOKEN` comes from
 - `ideas` calls `funnel.py ideas`.
 - `show` accepts an item reference and calls `funnel.py show <ref>`.
 - `queue` calls `funnel.py queue`.
+
+## Gate tools
+
+Each gate tool requires `instruction`: the words Nate used, verbatim. The
+connector cannot verify that Nate said them; the record makes the claim
+auditable afterwards. Each successful gate write posts a comment on the issue
+whose provenance block has voice `nate-relayed` and carries the instruction
+unchanged.
+
+- `approve` calls `funnel.py approve <ref> --yes --instruction <text>`
+  (Shaped to Ready).
+- `accept` calls `funnel.py accept <ref> --yes --instruction <text>`, adding
+  `--no-tickets` when `no_tickets` is true (Building to Done).
+- `park` calls `funnel.py park <ref> --reason <reason> --instruction <text>`.
 
 ## Deploy with Colima
 
@@ -74,7 +93,7 @@ from the two external env files and are not part of the Docker build context.
 After starting, verify the forwarded host port, tunneled metadata and auth
 boundary. The smoke test checks that requests without a token and with an invalid
 token receive 401/403, then initializes an authenticated MCP session and confirms
-the four read tools are registered. Run the restart check after the initial smoke
+the four read tools and the three gate tools are registered. Run the restart check after the initial smoke
 test to confirm Colima brings the container and host port back:
 
 ```sh
@@ -87,5 +106,6 @@ docker exec command-center-mcp python /app/command-center/funnel-mcp-connector/s
 ```
 
 The smoke test exits non-zero if the token is missing, either unauthenticated
-request is accepted, the authenticated MCP exchange fails, or `/healthz` does
-not respond as expected.
+request is accepted, the authenticated MCP exchange fails, the tool list differs
+from the four read tools and the three gate tools, or `/healthz` does not respond
+as expected.

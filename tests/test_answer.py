@@ -182,6 +182,46 @@ def test_approve_adopts_one_exact_class_before_status_and_records_source(
 
 
 @pytest.mark.parametrize(
+    ("verb", "status", "expected"),
+    [
+        ("approve", "Shaped", "Ready"),
+        ("accept", "Building", "Done"),
+    ],
+)
+def test_gate_answers_record_instruction_and_move_to_next_stage(
+    monkeypatch, verb, status, expected
+):
+    item = Item(
+        repo=REPO,
+        number=3,
+        title="Project at a gate",
+        url="https://example.invalid/3",
+        state="OPEN",
+        status=status,
+        item_id="ready-project-id",
+        children_total=1,
+        children_done=1,
+    )
+    calls = stub_approve_writes(monkeypatch, item)
+    instruction = "Answer this gate now.\nUse the approved plan verbatim."
+    monkeypatch.setattr(funnel, "drift_since_approval", lambda target: [])
+
+    assert funnel.main([
+        verb, item.ref, "--yes", "--instruction", instruction,
+    ], _items=[item]) == 0
+
+    assert item.status == expected
+    comment = next(
+        call[1] for call in calls
+        if call[0] == "run" and call[1][1:3] == ["issue", "comment"]
+    )
+    posted = comment[comment.index("--body") + 1]
+    provenance = funnel.parse_provenance(posted)
+    assert provenance["voice"] == "nate-relayed"
+    assert provenance["instruction"] == instruction
+
+
+@pytest.mark.parametrize(
     "body",
     [
         "# Plan\n\nNo proposal.\n",

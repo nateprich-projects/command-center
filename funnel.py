@@ -3475,9 +3475,17 @@ def _heartbeat_context(run: Optional[str], agent: Optional[str]):
     return run, agent
 
 
+def _verbatim_instruction(value: str) -> str:
+    """Validate an instruction while preserving its exact supplied text."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("a non-empty verbatim instruction is required")
+    return value
+
+
 def provenance_block(voice: str, at: Optional[datetime] = None,
                      run: Optional[str] = None,
-                     agent: Optional[str] = None) -> str:
+                     agent: Optional[str] = None,
+                     instruction: Optional[str] = None) -> str:
     """Build the invisible, machine-readable provenance block."""
     if voice not in PROVENANCE_VOICES:
         raise ValueError("unknown provenance voice {!r}".format(voice))
@@ -3488,6 +3496,8 @@ def provenance_block(voice: str, at: Optional[datetime] = None,
         "run": run,
         "voice": voice,
     }
+    if instruction is not None:
+        fields["instruction"] = _verbatim_instruction(instruction)
     return "{}\n\n```json\n{}\n```".format(
         PROVENANCE_MARKER, json.dumps(fields, indent=2, sort_keys=True)
     )
@@ -3495,10 +3505,13 @@ def provenance_block(voice: str, at: Optional[datetime] = None,
 
 def append_provenance(body: str, voice: str, at: Optional[datetime] = None,
                       run: Optional[str] = None,
-                      agent: Optional[str] = None) -> str:
+                      agent: Optional[str] = None,
+                      instruction: Optional[str] = None) -> str:
     """Append one provenance block without changing the supplied body."""
     return "{}\n\n{}".format(
-        body, provenance_block(voice, at=at, run=run, agent=agent)
+        body, provenance_block(
+            voice, at=at, run=run, agent=agent, instruction=instruction
+        )
     )
 
 
@@ -13186,7 +13199,8 @@ def reconcile_parked_wakes(
 
 def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
              run: Optional[str] = None, agent: Optional[str] = None,
-             wake_date: Optional[date] = None) -> int:
+             wake_date: Optional[date] = None,
+             instruction: Optional[str] = None) -> int:
     """Park a project with its durable reason attached to the issue."""
     item = find(items, ref)
     if not item.item_id:
@@ -13228,7 +13242,7 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
          "--body", append_provenance(
              park_comment, "nate-relayed", at=now,
-             run=run, agent=agent)],
+             run=run, agent=agent, instruction=instruction)],
         capture_output=True, text=True,
     )
     if comment.returncode != 0:
@@ -16996,7 +17010,8 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
 
 
 def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
-               confirmed: bool, no_tickets: bool = False) -> int:
+               confirmed: bool, no_tickets: bool = False,
+               instruction: Optional[str] = None) -> int:
     """Answer a gate: move an item to the next stage.
 
     The brief shows what is waiting and asks the question; without this, the
@@ -17077,6 +17092,23 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
             print("and close it as completed")
         print("\nNothing was changed. Re-run with --yes to answer the gate.")
         return 1
+
+    if instruction is not None:
+        instruction = _verbatim_instruction(instruction)
+        record = append_provenance(
+            "General-chat gate instruction received for `{}`.".format(verb),
+            "nate-relayed", at=now, instruction=instruction,
+        )
+        posted = _run_gh(
+            ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+             "--body", record],
+            capture_output=True, text=True,
+        )
+        if posted.returncode != 0:
+            raise GitHubError(
+                "could not record the general-chat instruction for {}: {}"
+                .format(item.ref, posted.stderr.strip())
+            )
 
     if adoption is not None:
         adopted_class, source_line = adoption
@@ -17273,6 +17305,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
             "--yes", action="store_true", dest="confirmed",
             help="actually do it; without this the command is a dry run",
         )
+        answer.add_argument(
+            "--instruction", type=_verbatim_instruction, default=None,
+            help="verbatim instruction received from Nate; recorded in provenance",
+        )
         if verb == "accept":
             answer.add_argument(
                 "--no-tickets", action="store_true",
@@ -17337,6 +17373,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
     park.add_argument(
         "--wake-date", type=_parking_wake_date, default=None,
         help="future YYYY-MM-DD date to restore the prior Project Status",
+    )
+    park.add_argument(
+        "--instruction", type=_verbatim_instruction, default=None,
+        help="verbatim instruction received from Nate; recorded in provenance",
     )
     park.add_argument(
         "--run", default=None,
@@ -17712,7 +17752,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
                              args.run, args.agent)
         if args.command == "park":
             return cmd_park(items, now, args.ref, args.reason,
-                            args.run, args.agent, args.wake_date)
+                            args.run, args.agent, args.wake_date,
+                            args.instruction)
         if args.command == "answer-gates":
             return cmd_answer_gates(items, now, args.ref, args.answer,
                                     args.decider, args.run, args.agent)
@@ -17738,7 +17779,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_reject(items, now, args.pr, args.note)
         if args.command in ANSWERS:
             return cmd_answer(items, now, args.command, args.ref, args.confirmed,
-                              getattr(args, "no_tickets", False))
+                              getattr(args, "no_tickets", False),
+                              args.instruction)
         if args.command == "show":
             return cmd_show(items, now, args.ref)
         if args.command == "ideas":

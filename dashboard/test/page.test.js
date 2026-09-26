@@ -6,7 +6,8 @@ import {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
   phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf,
-  repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
+  repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, renderOutputPanel,
+  requestMetrics,
   renderMetricChart, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 } from "../public/app.js";
@@ -657,6 +658,66 @@ test("the Execution headline renders six R7/R28 tiles and keeps missing data as 
   }
 });
 
+test("Output renders A1-A6 charts and tiles, with project-based upkeep share", async () => {
+  const fixture = JSON.parse(await readFile(
+    new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8",
+  ));
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const grid = new TestNode("div");
+    renderOutputPanel(fixture, grid);
+    const tiles = grid.querySelectorAll(".output-metric");
+
+    assert.deepEqual(
+      tiles.map((tile) => tile.attributes.get("data-metric")),
+      ["A1", "A2", "A3", "A4", "A5", "A6"],
+    );
+    for (const tile of tiles) {
+      assert.ok(tile.querySelectorAll(".metric-chart").length > 0);
+      assert.match(tile.textContent, /R7/);
+      assert.match(tile.textContent, /R28/);
+      assert.match(tile.textContent, /Delta/);
+    }
+    assert.equal(tiles[0].querySelectorAll(".metric-chart").length, 4);
+    assert.equal(tiles[4].querySelectorAll(".metric-chart").length, 3);
+    assert.equal(tiles[5].querySelectorAll(".metric-chart").length, 2);
+    assert.ok(tiles[0].querySelectorAll(".metric-series-label")
+      .some((label) => label.textContent === "command-center"));
+    const landed = fixture.metrics.A.A1;
+    const repoDailyTotal = Object.values(landed.by_repo)
+      .reduce((sum, repo) => sum + repo.daily[40], 0);
+    assert.equal(repoDailyTotal, landed.total.daily[40]);
+    assert.match(tiles[3].textContent, /Days since last New project entered Building/);
+    assert.ok(tiles[2].querySelectorAll(".chart-hit")
+      .some((hit) => /R7 Gap/.test(hit.textContent)));
+
+    const evidence = fixture.fixture_evidence.a3_denominator;
+    const upkeep = fixture.metrics.A.A3;
+    assert.ok(evidence.closed_tickets > evidence.closed_projects);
+    assert.equal(upkeep.numerators[evidence.day_index], evidence.upkeep_projects);
+    assert.equal(upkeep.denominators[evidence.day_index], evidence.closed_projects);
+    assert.equal(
+      upkeep.daily[evidence.day_index],
+      evidence.upkeep_projects / evidence.closed_projects,
+    );
+    const latestUpkeep = upkeep.r7[upkeep.r7.length - 1];
+    assert.ok(tiles[2].textContent.includes(
+      new Intl.NumberFormat("en-US", {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      }).format(latestUpkeep * 100) + "%",
+    ));
+    assert.notEqual(
+      upkeep.daily[evidence.day_index],
+      evidence.upkeep_projects / evidence.closed_tickets,
+    );
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
 test("Execution uses a read-only request and the two views route on the same page", async () => {
   const [html, source, fixtureText] = await Promise.all([
     readFile(new URL("../public/index.html", import.meta.url), "utf8"),
@@ -679,6 +740,8 @@ test("Execution uses a read-only request and the two views route on the same pag
   assert.match(html, /href="\/\?tab=execution" data-tab="execution"/);
   assert.match(html, /<main id="funnel-view">/);
   assert.match(html, /<main id="execution-view"[^>]*hidden>/);
+  assert.match(html, /<div id="output-grid" class="output-grid"><\/div>/);
+  assert.match(source, /renderOutputPanel\(series, output\)/);
   assert.equal(tabFromUrl("https://funnel.nateprich.com/?tab=execution&repo=owner%2Frepo"),
     "execution");
   assert.equal(tabFromUrl("https://funnel.nateprich.com/?tab=unknown"), "funnel");

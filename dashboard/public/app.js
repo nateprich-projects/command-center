@@ -1054,6 +1054,102 @@ function renderMetricChart(series, days, { title = "", format = "count" } = {}) 
   return svg;
 }
 
+function appendOutputMetric(container, definition, rows, days, index, note = null) {
+  const tile = element("article", "metric-tile output-metric");
+  tile.setAttribute("data-metric", definition.code);
+  tile.append(element("p", "metric-code", definition.code));
+  tile.append(element("h4", "metric-title", definition.title));
+  for (const row of rows) {
+    const seriesRow = element("div", "output-series");
+    const readings = element("div", "output-readings");
+    appendMetricRow(readings, row.label, metricValues(row.series, index), definition.format);
+    const title = row.label ? definition.title + " — " + row.label : definition.title;
+    seriesRow.append(readings, renderMetricChart(row.series, days, {
+      title,
+      format: definition.format,
+    }));
+    tile.append(seriesRow);
+  }
+  if (note) {
+    const aside = element("p", "metric-aside");
+    aside.append(element("span", null, note.label));
+    aside.append(element(
+      "strong",
+      isMetricNumber(note.value) ? null : "metric-gap",
+      isMetricNumber(note.value) ? note.value + " days" : "Gap",
+    ));
+    tile.append(aside);
+  }
+  container.append(tile);
+}
+
+function renderOutputPanel(series, container) {
+  if (!container) return;
+  container.replaceChildren();
+  const root = series && series.metrics && typeof series.metrics === "object"
+    ? series.metrics : {};
+  const days = series && Array.isArray(series.days) ? series.days : [];
+  const index = days.length - 1;
+  const a = root.A && typeof root.A === "object" ? root.A : {};
+
+  const a1Rows = [];
+  const a1 = a.A1 && typeof a.A1 === "object" ? a.A1 : {};
+  if (isMetricSeries(a1.total)) {
+    a1Rows.push({ label: "All repositories", series: a1.total });
+  }
+  if (a1.by_repo && typeof a1.by_repo === "object") {
+    for (const [repo, candidate] of Object.entries(a1.by_repo)) {
+      if (isMetricSeries(candidate)) a1Rows.push({ label: repo, series: candidate });
+    }
+  }
+  if (!a1Rows.length) a1Rows.push({ label: "All repositories", series: null });
+  appendOutputMetric(container, {
+    code: "A1", title: "Tickets landed / day", format: "count",
+  }, a1Rows, days, index);
+
+  appendOutputMetric(container, {
+    code: "A2", title: "Self-directed share", format: "percent",
+  }, [{ label: "", series: metricAtPath(root, ["A", "A2"]) }], days, index);
+
+  appendOutputMetric(container, {
+    code: "A3", title: "Upkeep share", format: "percent",
+  }, [{ label: "", series: metricAtPath(root, ["A", "A3"]) }], days, index);
+
+  const a4 = a.A4 && typeof a.A4 === "object" ? a.A4 : {};
+  appendOutputMetric(container, {
+    code: "A4", title: "New work started", format: "count",
+  }, [{
+    label: "New projects entering Building",
+    series: metricAtPath(root, ["A", "A4", "entering_building"]),
+  }], days, index, {
+    label: "Days since last New project entered Building",
+    value: a4.days_since_anything_new_started,
+  });
+
+  const a5Rows = [];
+  for (const [key, label] of [
+    ["done", "Done"],
+    ["parked", "Parked"],
+    ["net_open_growth", "Net open growth"],
+  ]) {
+    a5Rows.push({ label, series: metricAtPath(root, ["A", "A5", key]) });
+  }
+  appendOutputMetric(container, {
+    code: "A5", title: "Disposal", format: "count",
+  }, a5Rows, days, index);
+
+  const a6Rows = [];
+  for (const [key, label] of [
+    ["reverts", "Reverts on member main"],
+    ["reopened_after_merge", "Tickets reopened after merge"],
+  ]) {
+    a6Rows.push({ label, series: metricAtPath(root, ["A", "A6", key]) });
+  }
+  appendOutputMetric(container, {
+    code: "A6", title: "Reverts and reopens", format: "count",
+  }, a6Rows, days, index);
+}
+
 function renderExecutionTiles(series, container) {
   if (!container) return;
   container.replaceChildren();
@@ -1132,6 +1228,7 @@ async function loadMetrics() {
   metricsLoading = true;
   const status = document.querySelector("#metrics-status");
   const container = document.querySelector("#metrics-grid");
+  const output = document.querySelector("#output-grid");
   try {
     const series = await requestMetrics();
     status.textContent = series.as_of
@@ -1139,10 +1236,12 @@ async function loadMetrics() {
       : "Metrics date unknown";
     status.classList.remove("failed");
     renderExecutionTiles(series, container);
+    renderOutputPanel(series, output);
   } catch (error) {
     status.textContent = error.message || "Metrics unavailable";
     status.classList.add("failed");
     renderExecutionTiles(null, container);
+    renderOutputPanel(null, output);
     throw error;
   } finally {
     metricsLoading = false;
@@ -1261,6 +1360,7 @@ export {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
   phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,
-  renderExecutionTiles, renderMetricChart, requestMetrics, CHART_WINDOW_DAYS,
+  renderExecutionTiles, renderOutputPanel, renderMetricChart, requestMetrics,
+  CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 };

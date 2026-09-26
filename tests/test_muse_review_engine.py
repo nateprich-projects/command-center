@@ -2005,15 +2005,15 @@ def _engine_model(repo):
     return args[args.index("--model") + 1]
 
 
-@pytest.mark.parametrize("subject", [
-    "nateprich-projects/command-center",
-    "nateprich-projects/FF-Weekly-Start-Sit",
-    "nateprich-projects/The-League",
+@pytest.mark.parametrize("subject,model", [
+    ("nateprich-projects/command-center", "muse-spark-1.3-contributor"),
+    ("nateprich-projects/The-League", "muse-spark-1.3-contributor"),
+    ("nateprich-projects/career-toolset", "muse-spark-1.3"),
+    ("nateprich-projects/jeffy-finance-agent", "muse-spark-1.3"),
 ])
-def test_a_review_of_a_formerly_cleared_repo_uses_the_private_model(
-        tmp_path, subject):
-    """#1299 cleared these three on 2026-09-22; #1315 withdrew them the
-    same day, and judgement runs on the private model."""
+def test_a_review_carries_the_production_allowlist(tmp_path, subject, model):
+    """#1570 cleared tiers 1 and 3 on 2026-09-26; tier 2 is judged on the
+    private model."""
     proc, repo = _stubbed_runner(
         tmp_path,
         _begin(work={"pr": PR, "repo": subject,
@@ -2022,7 +2022,7 @@ def test_a_review_of_a_formerly_cleared_repo_uses_the_private_model(
         answers=_review_answers(_judge_answer()))
 
     assert proc.returncode == 0, proc.stderr
-    assert _engine_model(repo) == "muse-spark-1.3"
+    assert _engine_model(repo) == model
 
 
 def test_a_review_of_an_allowlisted_repo_carries_the_contributor_model(

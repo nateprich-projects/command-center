@@ -781,6 +781,40 @@ def test_begin_runs_parked_wakes_as_a_reconcile_step(monkeypatch, capsys):
     assert result["woke_parked"] == [items[0].ref]
 
 
+def test_begin_records_a_failed_parked_wakes_batch_and_writes_nothing(
+    monkeypatch, capsys
+):
+    # The wired GraphQL double answers every read with an empty response, so
+    # the batched comment read is partial: the pass is skipped and recorded,
+    # never rendered as "no wake date" (#1592).
+    items = [
+        _closed_project_item(
+            235, status="Parked", state_reason="NOT_PLANNED"
+        )
+    ]
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert "woke_parked" not in result
+    assert [
+        error for error in result["reconcile_errors"]
+        if error["step"] == "parked_wakes"
+    ] == [{
+        "step": "parked_wakes",
+        "error": "could not read comments for {}".format(items[0].ref),
+        "transient": False,
+    }]
+    assert [query for query, _ in graphql_calls if "comments(last:" in query]
+    assert not [
+        call for call in graphql_calls if "comments(last:" not in call[0]
+    ]
+    assert not [call for call in calls if call[:3] == ["gh", "issue", "reopen"]]
+    assert items[0].status == "Parked"
+    assert items[0].state == "CLOSED"
+
+
 def test_begin_retries_an_approval_at_the_current_head(monkeypatch, capsys):
     project, ticket = _ticket(7, 6)
     result, calls = _reconcile_begin(
@@ -1323,6 +1357,11 @@ def test_begin_repairs_closed_terminal_statuses_and_stale_shaping_labels(
     assert already_parked.status == "Parked"
     assert open_item.status == "Ideas"
     assert open_item.labels == ["needs-shaping"]
+    # The already-Parked item is read by the batched parked-wakes pass
+    # (#1592); only the Status writes matter here.
+    graphql_calls = [
+        call for call in graphql_calls if "comments(last:" not in call[0]
+    ]
     assert [variables for query, variables in graphql_calls] == [
         {
             "project": funnel.PROJECT_ID,
@@ -1352,7 +1391,9 @@ def test_begin_repairs_closed_terminal_statuses_and_stale_shaping_labels(
     )
 
     assert "reconciled_statuses" not in result
-    assert not graphql_calls
+    assert not [
+        call for call in graphql_calls if "comments(last:" not in call[0]
+    ]
     assert not [
         call for call in calls
         if call[:3] == ["gh", "issue", "edit"]

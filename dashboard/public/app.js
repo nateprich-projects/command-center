@@ -1264,6 +1264,38 @@ const ATTENTION_METRICS = [
   },
 ];
 
+const QUALITY_METRICS = [
+  {
+    code: "B1",
+    title: "First-pass approval",
+    description: "First approved verdicts ÷ ticket PRs reviewed.",
+    format: "percent",
+    sources: [{ path: ["B", "B1"] }],
+  },
+  {
+    code: "B2",
+    title: "Rework rate",
+    description: "Rework attempts ÷ merged ticket PRs, as outcomes.py defines it.",
+    format: "percent",
+    sources: [{ path: ["B", "B2"] }],
+  },
+  {
+    code: "B3",
+    title: "Fix recurrence",
+    description: "Broken projects with a recorded cause ÷ Broken projects created.",
+    format: "percent",
+    sources: [],
+    gapMessage: "Blind input: no capture has recorded a cause yet.",
+  },
+  {
+    code: "B4",
+    title: "Red main",
+    description: "Current red mains split by infra and real; main_ci reports current state, not incident history.",
+    format: "count",
+    sources: [{ path: ["B", "B4"], includeKeys: ["infra", "real"] }],
+  },
+];
+
 function valueAtPath(root, path) {
   let value = root;
   for (const part of path) {
@@ -1291,6 +1323,7 @@ function metricPanelRows(root, definition) {
     for (const item of metricLeaves(valueAtPath(root, source.path))) {
       const leafName = item.path[item.path.length - 1];
       if (source.excludeKeys && source.excludeKeys.includes(leafName)) continue;
+      if (source.includeKeys && !source.includeKeys.includes(leafName)) continue;
       const parts = [...prefix, ...item.path.map(humanizeRunKey)];
       rows.push({
         key: [...source.path, ...item.path].join("."),
@@ -1323,7 +1356,11 @@ function renderMetricPanels(series, container, definitions) {
     const list = element("div", "run-series-list");
     const rows = metricPanelRows(root, definition);
     if (!rows.length) {
-      list.append(element("p", "run-metric-empty metric-gap", "No series available."));
+      list.append(element(
+        "p",
+        "run-metric-empty metric-gap-reason",
+        definition.gapMessage || "No series available.",
+      ));
     }
     for (const item of rows) {
       const row = element("div", "run-series-row");
@@ -1350,6 +1387,10 @@ function renderRunMetrics(series, container) {
 
 function renderAttentionMetrics(series, container) {
   renderMetricPanels(series, container, ATTENTION_METRICS);
+}
+
+function renderQualityMetrics(series, container) {
+  renderMetricPanels(series, container, QUALITY_METRICS);
 }
 
 function renderExecutionTiles(series, container) {
@@ -1591,6 +1632,7 @@ async function loadMetrics() {
   metricsLoading = true;
   const status = document.querySelector("#metrics-status");
   const container = document.querySelector("#metrics-grid");
+  const qualityContainer = document.querySelector("#quality-grid");
   const runsContainer = document.querySelector("#runs-grid");
   const attentionContainer = document.querySelector("#attention-grid");
   try {
@@ -1600,6 +1642,7 @@ async function loadMetrics() {
       : "Metrics date unknown";
     status.classList.remove("failed");
     renderExecutionTiles(series, container);
+    renderQualityMetrics(series, qualityContainer);
     renderRunMetrics(series, runsContainer);
     renderBudgetMetrics(series, document.querySelector("#budget-grid"));
     renderAttentionMetrics(series, attentionContainer);
@@ -1607,6 +1650,7 @@ async function loadMetrics() {
     status.textContent = error.message || "Metrics unavailable";
     status.classList.add("failed");
     renderExecutionTiles(null, container);
+    renderQualityMetrics(null, qualityContainer);
     renderRunMetrics(null, runsContainer);
     renderBudgetMetrics(null, document.querySelector("#budget-grid"));
     renderAttentionMetrics(null, attentionContainer);
@@ -1730,7 +1774,7 @@ export {
   renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,
   renderExecutionTiles, renderMetricChart, renderBudgetMetrics, renderRunMetrics,
-  renderAttentionMetrics,
+  renderAttentionMetrics, renderQualityMetrics,
   requestMetrics, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 };

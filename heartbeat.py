@@ -955,6 +955,179 @@ def graphql_by_caller_for_run(
     return result
 
 
+def graphql_points_by_reset_at(
+        records: List[Dict], start_at: Optional[float] = None,
+        end_at: Optional[float] = None) -> Dict[str, object]:
+    """Reconcile response point readings by their recorded reset window.
+
+    A finished run uses response readings from its finish snapshot when
+    present; otherwise it uses its individual ``api_cost`` events. Unfinished
+    runs use their events. This includes work recorded before a run died
+    without counting completed work twice. When bounds are supplied, a
+    response belongs to the half-open receipt-time interval
+    ``[start_at, end_at)``. Older aggregate-only entries
+    have no response receipt time or reset stamp; they remain visible as
+    unknowns and are never backfilled from another reading or the finish time.
+
+    The return value is JSON-safe. ``graphql_points`` is null for a reset
+    window if any response in that window has an unreadable cost. Readings
+    without a reset stamp are counted separately as unattributed unknowns.
+    """
+    if (start_at is None) != (end_at is None):
+        raise ValueError("start_at and end_at must be supplied together")
+    start = end = None
+    if start_at is not None:
+        start = _finite_number(start_at)
+        end = _finite_number(end_at)
+        if start is None or end is None or start < 0 or end <= start:
+            raise ValueError("start_at and end_at must be valid increasing timestamps")
+
+    finish_by_run: Dict[str, Dict] = {}
+    events_by_run: Dict[str, List[Dict]] = {}
+    unbound_events: List[Dict] = []
+    for record in distinct_records(records):
+        phase = record.get("phase")
+        run = record.get("run")
+        if phase == "api_cost":
+            if isinstance(run, str) and run:
+                events_by_run.setdefault(run, []).append(record)
+            else:
+                unbound_events.append(record)
+            continue
+        if phase != "finish" or not isinstance(run, str) or not run:
+            continue
+        stamp = _finite_number(record.get("ts"))
+        previous = finish_by_run.get(run)
+        previous_stamp = (
+            _finite_number(previous.get("ts")) if previous is not None else None
+        )
+        if (
+            previous is None
+            or (
+                stamp is not None
+                and (previous_stamp is None or stamp >= previous_stamp)
+            )
+        ):
+            finish_by_run[run] = record
+
+    def has_response_readings(record: Dict) -> bool:
+        callers = record.get("graphql_by_caller")
+        return isinstance(callers, dict) and any(
+            isinstance(entry, dict)
+            and isinstance(entry.get("readings"), list)
+            and bool(entry["readings"])
+            for entry in callers.values()
+        )
+
+    sources: List[Dict] = []
+    for run in sorted(set(finish_by_run) | set(events_by_run)):
+        finished = finish_by_run.get(run)
+        events = events_by_run.get(run, [])
+        if finished is not None and has_response_readings(finished):
+            sources.append(finished)
+        elif events:
+            sources.extend(events)
+        elif finished is not None:
+            sources.append(finished)
+    sources.extend(unbound_events)
+
+    windows: Dict[str, Dict[str, object]] = {}
+    unattributed_unknown_buckets = 0
+    untimed_unknown_buckets = 0
+
+    def in_interval(received_at: object) -> Optional[bool]:
+        if start is None or end is None:
+            return True
+        stamp = _finite_number(received_at)
+        if stamp is None:
+            return None
+        return start <= stamp < end
+
+    def add_unknown_bucket(received_at: object = None) -> None:
+        nonlocal unattributed_unknown_buckets, untimed_unknown_buckets
+        included = in_interval(received_at)
+        if included is None:
+            untimed_unknown_buckets += 1
+        elif included:
+            unattributed_unknown_buckets += 1
+
+    for record in sources:
+        callers = record.get("graphql_by_caller")
+        if not isinstance(callers, dict) or not callers:
+            api = record.get("api_cost")
+            api = api if isinstance(api, dict) else {}
+            points = _api_cost_number(api.get("graphql_points"))
+            calls = _api_cost_number(api.get("gh_calls"))
+            if points is not None or calls is not None and calls > 0:
+                # This old run-level total has no per-response receipt time or
+                # resetAt. Preserve it as unknown rather than dropping it.
+                add_unknown_bucket()
+            continue
+
+        for entry in callers.values():
+            if not isinstance(entry, dict):
+                add_unknown_bucket()
+                continue
+            readings = entry.get("readings")
+            if isinstance(readings, list) and readings:
+                for reading in readings:
+                    if not isinstance(reading, dict):
+                        add_unknown_bucket()
+                        continue
+                    included = in_interval(reading.get("received_at"))
+                    if included is None:
+                        untimed_unknown_buckets += 1
+                        continue
+                    if not included:
+                        continue
+                    reset_at = reading.get("reset_at")
+                    reset_at = (
+                        reset_at.strip()
+                        if isinstance(reset_at, str) and reset_at.strip()
+                        else None
+                    )
+                    cost = _api_cost_number(reading.get("cost"))
+                    if reset_at is None:
+                        unattributed_unknown_buckets += 1
+                        continue
+                    bucket = windows.setdefault(reset_at, {
+                        "buckets": 0, "graphql_points": 0,
+                        "unknown_buckets": 0, "points_readable": True,
+                    })
+                    bucket["buckets"] = int(bucket["buckets"]) + 1
+                    if cost is None:
+                        bucket["unknown_buckets"] = (
+                            int(bucket["unknown_buckets"]) + 1
+                        )
+                        bucket["points_readable"] = False
+                    elif bucket["points_readable"]:
+                        bucket["graphql_points"] = (
+                            int(bucket["graphql_points"]) + cost
+                        )
+            elif (
+                _api_cost_number(entry.get("calls")) != 0
+                or _api_cost_number(entry.get("points")) != 0
+            ):
+                # Aggregate-only caller entries predate response readings.
+                add_unknown_bucket()
+
+    return {
+        "by_reset_at": {
+            reset_at: {
+                "buckets": int(windows[reset_at]["buckets"]),
+                "graphql_points": (
+                    int(windows[reset_at]["graphql_points"])
+                    if windows[reset_at]["points_readable"] else None
+                ),
+                "unknown_buckets": int(windows[reset_at]["unknown_buckets"]),
+            }
+            for reset_at in sorted(windows)
+        },
+        "unattributed_unknown_buckets": unattributed_unknown_buckets,
+        "untimed_unknown_buckets": untimed_unknown_buckets,
+    }
+
+
 def bindings(records: List[Dict]) -> Dict[str, Dict]:
     """The work each run was issued, by run id. The latest binding wins."""
     found: Dict[str, Dict] = {}

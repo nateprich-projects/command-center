@@ -7950,14 +7950,10 @@ query($cursor: String) {
 PROJECT_ITEM_PAGE_SIZE = 100
 PROJECT_ITEM_PREVIOUS_PAGE_SIZE = 50
 
-ITEM_QUERY = """
-query($login: String!, $number: Int!, $cursor: String) {
-  rateLimit { cost remaining resetAt }
-  user(login: $login) {
-    projectV2(number: $number) {
-      items(first: %d, after: $cursor) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
+# The selection every Project item row carries. The full Project query and the
+# filtered begin query (``BEGIN_ITEM_CONNECTIONS``) both read exactly this, so
+# ``_from_node`` sees the same shape from either loader.
+ITEM_NODE_FIELDS = """\
           id
           lock: fieldValueByName(name: "In motion since") {
             ... on ProjectV2ItemFieldTextValue { text }
@@ -7994,12 +7990,88 @@ query($login: String!, $number: Int!, $cursor: String) {
               }
             }
           }
-        }
+"""
+
+ITEM_QUERY = """
+query($login: String!, $number: Int!, $cursor: String) {
+  rateLimit { cost remaining resetAt }
+  user(login: $login) {
+    projectV2(number: $number) {
+      items(first: %d, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+%s        }
       }
     }
   }
 }
-""" % PROJECT_ITEM_PAGE_SIZE
+""" % (PROJECT_ITEM_PAGE_SIZE, ITEM_NODE_FIELDS)
+
+# The begin load (#1591): every open item, plus only the closed items a begin
+# consumer reads, each set as its own server-side filtered connection. Each
+# filter stands for one Python predicate in ``BEGIN_ITEM_PREDICATES``; the
+# loader re-checks every closed row against it, so a filter can only narrow
+# what begin sees, never widen it. The regression search is a phrase match
+# on the title and may return open rows too; ``open`` covers those anyway.
+BEGIN_ITEM_CONNECTIONS: Tuple[Tuple[str, str], ...] = (
+    ("open", "is:open"),
+    ("claims", "is:closed has:in-motion-since"),
+    ("parked", "is:closed status:Parked no:parent-issue"),
+    ("doneDrift",
+     "is:closed no:parent-issue reason:completed -status:Done"),
+    ("parkDrift",
+     'is:closed no:parent-issue reason:"not planned" -status:Parked'),
+    ("shaping", "is:closed label:needs-shaping"),
+    ("regress", '"Regression from PR"'),
+)
+
+
+def _begin_item_query(aliases: Sequence[str]) -> str:
+    """One aliased Project query carrying only the named begin connections.
+
+    Each connection has its own cursor variable. A request declares only the
+    aliases still paging, because GraphQL refuses a declared variable that the
+    document does not use. The filter strings are JSON-quoted, which is also a
+    valid GraphQL string literal for them.
+    """
+    filters = dict(BEGIN_ITEM_CONNECTIONS)
+    unknown = [alias for alias in aliases if alias not in filters]
+    if unknown or not aliases:
+        raise ValueError(
+            "unknown begin item connection(s): {}".format(
+                ", ".join(unknown) or "none"
+            )
+        )
+    declarations = "".join(
+        ", ${}Cursor: String".format(alias) for alias in aliases
+    )
+    connections = "".join(
+        "      {alias}: items(first: {size}, after: ${alias}Cursor, "
+        "query: {query}) {{\n"
+        "        pageInfo {{ hasNextPage endCursor }}\n"
+        "        nodes {{ ...BeginItem }}\n"
+        "      }}\n".format(
+            alias=alias, size=PROJECT_ITEM_PAGE_SIZE,
+            query=json.dumps(filters[alias]),
+        )
+        for alias in aliases
+    )
+    return (
+        "\nquery($login: String!, $number: Int!{declarations}) {{\n"
+        "  rateLimit {{ cost remaining resetAt }}\n"
+        "  user(login: $login) {{\n"
+        "    projectV2(number: $number) {{\n"
+        "{connections}"
+        "    }}\n"
+        "  }}\n"
+        "}}\n"
+        "\nfragment BeginItem on ProjectV2Item {{\n"
+        "{fields}"
+        "}}\n"
+    ).format(
+        declarations=declarations, connections=connections,
+        fields=ITEM_NODE_FIELDS,
+    )
 
 
 SHAPE_ISSUE_COMMENTS_PAGE_QUERY = """
@@ -9337,18 +9409,263 @@ def hydrate_item_details(
                 )
 
 
+# A closed issue's state reason is the authoritative terminal choice; this is
+# the Status it names. Shared by the closed-item reconcile and the begin load.
+CLOSE_REASON_STATUS = {
+    "COMPLETED": "Done",
+    "NOT_PLANNED": "Parked",
+}
+
+
+def _close_reason_status(item: Item) -> Optional[str]:
+    """The terminal Status a closed issue's state reason names, if any."""
+    reason = str(item.state_reason or "").upper().replace("-", "_")
+    return CLOSE_REASON_STATUS.get(reason)
+
+
+def _is_closed_claim(item: Item) -> bool:
+    """A claim left on a ticket GitHub already says is closed."""
+    return item.state == "CLOSED" and item.in_motion_since is not None
+
+
+def _is_parked_wake_candidate(item: Item) -> bool:
+    """A parentless Parked item, open or closed, that a dated park may wake."""
+    return (
+        not item.parent
+        and item.status == "Parked"
+        and item.state in ("CLOSED", "OPEN")
+    )
+
+
+def _is_closed_parked(item: Item) -> bool:
+    return item.state == "CLOSED" and _is_parked_wake_candidate(item)
+
+
+def _is_closed_done_drift(item: Item) -> bool:
+    """A closed parentless issue completed on GitHub but not Done here."""
+    return (
+        item.state == "CLOSED"
+        and not item.parent
+        and _close_reason_status(item) == "Done"
+        and item.status != "Done"
+    )
+
+
+def _is_closed_park_drift(item: Item) -> bool:
+    """A closed parentless issue not planned on GitHub but not Parked here."""
+    return (
+        item.state == "CLOSED"
+        and not item.parent
+        and _close_reason_status(item) == "Parked"
+        and item.status != "Parked"
+    )
+
+
+def _is_closed_needs_shaping(item: Item) -> bool:
+    return item.state == "CLOSED" and "needs-shaping" in item.labels
+
+
+def _is_regression_item(item: Item) -> bool:
+    return item.title.startswith(REGRESSION_PREFIX)
+
+
+def _is_open_item(item: Item) -> bool:
+    return item.state == "OPEN"
+
+
+# The Python predicate each ``BEGIN_ITEM_CONNECTIONS`` filter stands for. The
+# ``open`` connection is not narrowed by its predicate: a closed row there
+# means the filter itself is wrong, and the load refuses rather than drops it.
+BEGIN_ITEM_PREDICATES: Dict[str, Callable[[Item], bool]] = {
+    "open": _is_open_item,
+    "claims": _is_closed_claim,
+    "parked": _is_closed_parked,
+    "doneDrift": _is_closed_done_drift,
+    "parkDrift": _is_closed_park_drift,
+    "shaping": _is_closed_needs_shaping,
+    "regress": _is_regression_item,
+}
+
+
+def _begin_project_from_response(response: object) -> dict:
+    user = response.get("user") if isinstance(response, dict) else None
+    if not isinstance(user, dict) or "projectV2" not in user:
+        raise GitHubError("begin Project item response was malformed")
+    project = user["projectV2"]
+    if project is None:
+        raise GitHubError(
+            "Project {}/{} not found or not visible".format(
+                PROJECT_OWNER, PROJECT_NUMBER
+            )
+        )
+    if not isinstance(project, dict):
+        raise GitHubError("begin Project item response was malformed")
+    return project
+
+
+def _begin_connection_page(
+    project: dict, alias: str,
+) -> Tuple[List[dict], bool, Optional[str]]:
+    """Read one alias's page, failing closed on anything incomplete."""
+    connection = project.get(alias)
+    nodes = connection.get("nodes") if isinstance(connection, dict) else None
+    page_info = (
+        connection.get("pageInfo") if isinstance(connection, dict) else None
+    )
+    if (
+        not isinstance(nodes, list)
+        or not all(isinstance(node, dict) for node in nodes)
+        or not isinstance(page_info, dict)
+        or not isinstance(page_info.get("hasNextPage"), bool)
+    ):
+        raise GitHubError(
+            "begin Project connection {} was malformed".format(alias)
+        )
+    has_next = page_info["hasNextPage"]
+    cursor = page_info.get("endCursor")
+    if has_next and (not isinstance(cursor, str) or not cursor):
+        raise GitHubError(
+            "begin Project connection {} has a next page but no cursor"
+            .format(alias)
+        )
+    return nodes, has_next, cursor if has_next else None
+
+
+def _load_begin_items(
+    members: Set[str],
+    timings: Optional[Dict[str, object]],
+) -> List[Item]:
+    """Page the filtered begin connections and return the member items.
+
+    Every connection pages on its own cursor; a request carries only the
+    connections that still have a next page. A row is kept once, by Project
+    item id, when the predicate its connection stands for holds.
+    """
+    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
+    paging = [alias for alias, _query in BEGIN_ITEM_CONNECTIONS]
+    cursors: Dict[str, str] = {}
+    seen_cursors: Dict[str, Set[str]] = {alias: set() for alias in paging}
+    kept: Dict[str, Item] = {}
+    open_rows = 0
+    items: List[Item] = []
+    project_started = time.perf_counter() if timings is not None else None
+    block_comment_seconds = 0.0
+    try:
+        while paging:
+            variables: Dict[str, object] = {
+                "login": PROJECT_OWNER, "number": PROJECT_NUMBER,
+            }
+            for alias in paging:
+                if alias in cursors:
+                    variables[alias + "Cursor"] = cursors[alias]
+            _PROJECT_ITEM_PAGE_COUNT += 1
+            response = gh_graphql(_begin_item_query(paging), **variables)
+            project = _begin_project_from_response(response)
+            still_paging: List[str] = []
+            for alias in paging:
+                nodes, has_next, cursor = _begin_connection_page(
+                    project, alias
+                )
+                _PROJECT_ITEM_ROW_COUNT += len(nodes)
+                for node in nodes:
+                    try:
+                        item = _from_node(node)
+                    except (KeyError, TypeError, AttributeError) as exc:
+                        raise GitHubError(
+                            "begin Project connection {} returned a "
+                            "malformed row".format(alias)
+                        ) from exc
+                    if item is None:
+                        continue  # a draft issue, or a pull request
+                    # The row's own `state` is live; the filter index is
+                    # not. On 2026-09-26 `is:open` still returned #1466 a
+                    # day after it closed. So an open row is kept whichever
+                    # connection returned it (a reopened issue can still be
+                    # indexed as closed), and a closed row is kept only when
+                    # some closed-set predicate holds for it. The filter
+                    # narrows; the predicates decide.
+                    if item.state == "OPEN":
+                        open_rows += 1
+                    elif not any(
+                        predicate(item)
+                        for predicate in BEGIN_ITEM_PREDICATES.values()
+                    ):
+                        continue
+                    kept.setdefault(item.item_id or item.ref, item)
+                if has_next:
+                    if cursor in seen_cursors[alias]:
+                        raise GitHubError(
+                            "begin Project connection {} did not advance"
+                            .format(alias)
+                        )
+                    seen_cursors[alias].add(cursor)
+                    cursors[alias] = cursor
+                    still_paging.append(alias)
+            paging = still_paging
+        if open_rows == 0:
+            raise GitHubError(
+                "begin Project connection open returned no items"
+            )
+        for item in kept.values():
+            # Membership is the topic, exactly as in the full load.
+            if item.repo not in members:
+                continue
+            if item.state == "OPEN" and item.is_blocked:
+                comment_started = time.perf_counter()
+                try:
+                    _load_block_comment(item)
+                finally:
+                    block_comment_seconds += (
+                        time.perf_counter() - comment_started
+                    )
+            items.append(item)
+    finally:
+        if project_started is not None:
+            project_elapsed = max(
+                0.0,
+                time.perf_counter() - project_started - block_comment_seconds,
+            )
+            _record_begin_load_phase(
+                timings, "project_items", project_elapsed,
+            )
+            _record_begin_load_phase(
+                timings, "block_comments", block_comment_seconds
+            )
+    return items
+
+
 def load_items(
     include_details: bool = True,
     member_repo_names: Optional[Sequence[str]] = None,
     timings: Optional[Dict[str, object]] = None,
     shape_issue: Optional[Tuple[str, int]] = None,
+    scope: Optional[str] = None,
 ) -> List[Item]:
+    """Load the funnel's Project items.
+
+    ``scope`` None or ``"full"`` reads every Project item. ``"begin"`` reads
+    every open item and only the closed items a begin consumer needs, through
+    ``BEGIN_ITEM_CONNECTIONS`` (#1591).
+    """
     global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
+    if scope not in (None, "full", "begin"):
+        raise ValueError("unknown load_items scope {!r}".format(scope))
+    if scope == "begin" and shape_issue is not None:
+        # The shape lane reads the full board; nothing asks for both yet.
+        raise ValueError("the begin load does not read a shape issue thread")
     members = set(
         member_repo_names
         if member_repo_names is not None
         else _begin_load_timed(timings, "member_repos", member_repos)
     )
+    if scope == "begin":
+        begin_items = _load_begin_items(members, timings)
+        if include_details:
+            _begin_load_timed(
+                timings, "item_details",
+                lambda: hydrate_item_details(begin_items),
+            )
+        return begin_items
     items: List[Item] = []
     cursor = None
     shape_comments: Optional[List[Dict[str, object]]] = None
@@ -10881,7 +11198,7 @@ def blocked_items(items: Iterable[Item]) -> List[Item]:
     )
 
 
-def _blocked_item_json(item: Item) -> Dict[str, object]:
+def _blocked_item_json(item: Item, now: datetime) -> Dict[str, object]:
     """Render one blocked item from the parsed block-comment state."""
     rendered = {
         "ref": item.ref,
@@ -10894,16 +11211,45 @@ def _blocked_item_json(item: Item) -> Dict[str, object]:
     blocked_until = _item_blocked_until(item)
     if blocked_until is not None:
         rendered["blocked_until"] = blocked_until.isoformat()
+    if item.block_event is not None:
+        rendered["event_condition"] = dict(item.block_event)
+        after = parse_time(item.block_event.get("after"))
+        if after is not None:
+            elapsed = max(timedelta(0), now - after)
+            rendered["event_wait"] = humanise(elapsed)
+            rendered["event_wait_seconds"] = round(
+                elapsed.total_seconds(), 3
+            )
+    mismatch = _event_block_mismatch(item)
+    if mismatch is not None:
+        rendered["event_mismatch"] = mismatch
     if item.needs_decision is not None:
         rendered["needs_decision"] = item.needs_decision
     return rendered
 
 
-def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+def blocked_json(
+    items: Iterable[Item], now: datetime,
+) -> List[Dict[str, object]]:
     """The brief's blocked section, reusing one load-time comment fetch."""
-    return [_blocked_item_json(item) for item in blocked_items(items)]
+    return [_blocked_item_json(item, now) for item in blocked_items(items)]
 
 
+def _event_block_mismatch(item: Item) -> Optional[str]:
+    """How a blocked ticket's event spec and Needs routing disagree, if at all.
+
+    Only tickets are checked, and only when their block comments were read:
+    an unread comment cannot show whether a spec is there.
+    """
+    if item.parent is None or item.block_comments_error:
+        return None
+    if item.block_event is not None:
+        if item.needs == "external-event":
+            return None
+        return "well-formed event spec without Needs: external-event"
+    if item.needs == "external-event":
+        return "Needs: external-event without a well-formed event spec"
+    return None
 # Approval may adopt an unset Class only from an explicit, whole-line
 # proposal: no agent infers or writes a Class from plan prose on Nate's
 # behalf. The value match below is exact, so a fuzzy line stays with him.
@@ -12498,7 +12844,7 @@ def cmd_brief(
         cleared_blocks = named_section(
             "cleared_blocks", lambda: cleared_blocks_json(items, now)
         )
-        blocked = section("blocked", lambda: blocked_json(items), [])
+        blocked = section("blocked", lambda: blocked_json(items, now), [])
         human = section("human_steps", lambda: human_step_json(items, now), [])
         machine_local = section(
             "machine_local_steps",
@@ -13101,12 +13447,7 @@ def reconcile_parked_wakes(
     `begin` records the reason and this fire makes no wake writes at all.
     """
     candidates = sorted(
-        (
-            item for item in items
-            if not item.parent
-            and item.status == "Parked"
-            and item.state in ("CLOSED", "OPEN")
-        ),
+        (item for item in items if _is_parked_wake_candidate(item)),
         key=lambda item: (item.repo, item.number),
     )
     if not candidates:
@@ -15770,8 +16111,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if released_claims:
         out["released_claims"] = released_claims
     review_phase_boundary("reconcile_orphaned_starts")
+    # Begin already holds the ticket PR snapshot; without it the reconcile
+    # ran its own `ticket_pr_facts` scan inside the reply budget (#1591).
     orphaned = attempt_reconcile(
-        "orphaned_starts", reconcile_orphaned_starts, items, now)
+        "orphaned_starts", reconcile_orphaned_starts, items, now, pr_facts)
     if orphaned:
         out["reconciled_starts"] = orphaned
     if reconcile_errors:
@@ -16744,17 +17087,12 @@ def reconcile_closed_items(items: Sequence[Item]) -> List[str]:
     open issue is never changed by this unattended repair.
     """
     repaired: List[str] = []
-    terminal_statuses = {
-        "COMPLETED": "Done",
-        "NOT_PLANNED": "Parked",
-    }
     candidates = sorted(
         (item for item in items if item.state == "CLOSED"),
         key=lambda item: (item.repo, item.number),
     )
     for item in candidates:
-        reason = str(item.state_reason or "").upper().replace("-", "_")
-        target = terminal_statuses.get(reason)
+        target = _close_reason_status(item)
         changed = False
 
         if target is not None and not item.parent and item.status != target:
@@ -16801,10 +17139,7 @@ def reconcile_closed_claims(items: Sequence[Item]) -> List[str]:
     """Release claims left on tickets which GitHub already says are closed."""
     released: List[str] = []
     candidates = sorted(
-        (
-            item for item in items
-            if item.state == "CLOSED" and item.in_motion_since is not None
-        ),
+        (item for item in items if _is_closed_claim(item)),
         key=lambda item: (item.repo, item.number),
     )
     for item in candidates:

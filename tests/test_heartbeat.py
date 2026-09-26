@@ -819,6 +819,152 @@ def test_finish_aggregates_caller_costs_and_keeps_unknowns_unattributed(
     }
 
 
+def test_graphql_points_reconcile_into_the_recorded_reset_window():
+    record = finish("run-id", NOW + 10)
+    record["graphql_by_caller"] = {
+        "standard": {
+            "calls": 1,
+            "points": 12,
+            "remaining": 4988,
+            "readings": [{
+                "cost": 12,
+                "remaining": 4988,
+                "reset_at": "2026-09-26T13:00:00Z",
+                "received_at": NOW + 5,
+            }],
+        },
+    }
+
+    event = dict(record, phase="api_cost", ts=int(NOW + 6))
+    assert heartbeat.graphql_points_by_reset_at(
+        [record, event], NOW, NOW + 10,
+    ) == {
+        "by_reset_at": {
+            "2026-09-26T13:00:00Z": {
+                "buckets": 1,
+                "graphql_points": 12,
+                "unknown_buckets": 0,
+            },
+        },
+        "unattributed_unknown_buckets": 0,
+        "untimed_unknown_buckets": 0,
+    }
+
+
+def test_graphql_points_count_null_reset_bucket_as_unknown_not_zero():
+    record = api_event("run-id", None, 1, at=NOW + 10)
+    record["graphql_by_caller"] = {
+        "unattributed": {
+            "calls": 1,
+            "points": None,
+            "remaining": None,
+            "readings": [{
+                "cost": None,
+                "remaining": None,
+                "reset_at": None,
+                "received_at": NOW + 5,
+            }],
+        },
+    }
+
+    result = heartbeat.graphql_points_by_reset_at(
+        [record], NOW, NOW + 10,
+    )
+
+    assert result == {
+        "by_reset_at": {},
+        "unattributed_unknown_buckets": 1,
+        "untimed_unknown_buckets": 0,
+    }
+
+
+def test_graphql_points_keep_aggregate_unknown_when_caller_map_is_empty():
+    record = finish("run-id", NOW + 10)
+    record["api_cost"] = {"graphql_points": 12, "gh_calls": 2}
+    record["graphql_by_caller"] = {}
+
+    assert heartbeat.graphql_points_by_reset_at([record]) == {
+        "by_reset_at": {},
+        "unattributed_unknown_buckets": 1,
+        "untimed_unknown_buckets": 0,
+    }
+
+
+def test_graphql_points_keep_mixed_reset_windows_across_hour_boundary():
+    record = finish("run-id", NOW + 7200)
+    record["graphql_by_caller"] = {
+        "standard": {
+            "calls": 2,
+            "points": 19,
+            "remaining": 4981,
+            "readings": [
+                {
+                    "cost": 8,
+                    "remaining": 4992,
+                    "reset_at": "2026-09-26T14:00:00Z",
+                    "received_at": NOW + 3599,
+                },
+                {
+                    "cost": 11,
+                    "remaining": 4981,
+                    "reset_at": "2026-09-26T15:00:00Z",
+                    "received_at": NOW + 3601,
+                },
+            ],
+        },
+    }
+
+    assert heartbeat.graphql_points_by_reset_at(
+        [record], NOW, NOW + 7200,
+    ) == {
+        "by_reset_at": {
+            "2026-09-26T14:00:00Z": {
+                "buckets": 1,
+                "graphql_points": 8,
+                "unknown_buckets": 0,
+            },
+            "2026-09-26T15:00:00Z": {
+                "buckets": 1,
+                "graphql_points": 11,
+                "unknown_buckets": 0,
+            },
+        },
+        "unattributed_unknown_buckets": 0,
+        "untimed_unknown_buckets": 0,
+    }
+
+
+def test_graphql_points_with_known_reset_and_null_cost_stay_unknown():
+    record = finish("run-id", NOW + 10)
+    record["graphql_by_caller"] = {
+        "unattributed": {
+            "calls": 1,
+            "points": None,
+            "remaining": 4990,
+            "readings": [{
+                "cost": None,
+                "remaining": 4990,
+                "reset_at": "2026-09-26T13:00:00Z",
+                "received_at": NOW + 5,
+            }],
+        },
+    }
+
+    assert heartbeat.graphql_points_by_reset_at(
+        [record], NOW, NOW + 10,
+    ) == {
+        "by_reset_at": {
+            "2026-09-26T13:00:00Z": {
+                "buckets": 1,
+                "graphql_points": None,
+                "unknown_buckets": 1,
+            },
+        },
+        "unattributed_unknown_buckets": 0,
+        "untimed_unknown_buckets": 0,
+    }
+
+
 def test_finish_reports_null_api_cost_without_funnel_commands(monkeypatch):
     records = [start("run-id", NOW)]
     written = []

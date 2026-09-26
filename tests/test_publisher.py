@@ -450,14 +450,18 @@ def test_exit_zero_missing_items_envelope_keeps_refresh_flag(
     spool.mkdir()
     entry_path, _ = write_spool_entry(spool, "entry.json", seconds_ago=11 * 60)
     kv.values["snapshot"] = entry_path.read_bytes()
-    kv.values["refresh-requested"] = iso().encode()
+    # Read the clock once: a second boundary can pass during the run (#1584).
+    requested_at = iso()
+    kv.values["refresh-requested"] = requested_at.encode()
     argv, fake_brief = base_argv(tmp_path, kv, spool)
     write_fake_brief(
         fake_brief,
         missing=[{"section": "items", "error": "Project unavailable"}],
     )
 
+    before = time.time()
     code, _, err = run_publisher(argv, monkeypatch, capsys)
+    after = time.time()
 
     assert code == 0
     assert brief_run_count(fake_brief) == 1
@@ -465,10 +469,10 @@ def test_exit_zero_missing_items_envelope_keeps_refresh_flag(
     assert "refresh-requested" in kv.values
     assert "did not produce a publishable snapshot" in err
     stored_flag = json.loads(kv.values["refresh-requested"].decode())
-    assert stored_flag["requested_at"] == iso()
-    assert publisher.parse_generated_at(stored_flag["attempted_at"]) == pytest.approx(
-        time.time(), abs=1
-    )
+    assert stored_flag["requested_at"] == requested_at
+    attempted = publisher.parse_generated_at(stored_flag["attempted_at"])
+    # attempted_at is truncated to the second.
+    assert int(before) <= attempted <= after
 
 
 def test_unpublishable_refresh_retries_only_after_the_shared_interval(

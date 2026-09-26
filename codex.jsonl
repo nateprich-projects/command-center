@@ -4528,3 +4528,4 @@
 {"agent": "codex", "do": "ticket", "phase": "bind", "run": "42f09362342c", "ts": 1790409158, "work": "nateprich-projects/command-center#1285"}
 {"agent": "codex", "api_cost": {"gh_calls": 39, "graphql_points": null}, "graphql_by_caller": {"unattributed": {"calls": 31, "points": null, "remaining": 4450}}, "phase": "api_cost", "run": "0ab97a68ceb4", "ts": 1790409160}
 {"agent": "codex", "api_cost": {"gh_calls": 105, "graphql_points": null}, "graphql_by_caller": {"begin": {"calls": 22, "points": 75, "remaining": 4452}, "unattributed": {"calls": 1, "points": null, "remaining": null}}, "phase": "api_cost", "run": "42f09362342c", "ts": 1790409165}
+{"agent": "codex", "api_cost": {"gh_calls": 37, "graphql_points": null}, "graphql_by_caller": {"unattributed": {"calls": 31, "points": null, "remaining": 4378}}, "phase": "api_cost", "run": "344923d5bebd", "ts": 1790409242}

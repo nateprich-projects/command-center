@@ -963,9 +963,16 @@ def precheck_ci(packet: dict) -> List[str]:
 
 def precheck_verdict(packet: dict) -> List[str]:
     """Row 4: a verdict already covering this head needs no new review."""
-    if packet.get("verdict") is None:
-        return []
-    if packet.get("verdict_head_sha") != packet.get("head_sha"):
+    comments_section = packet.get("pr_comments")
+    comments = (
+        comments_section.get("comments")
+        if isinstance(comments_section, dict)
+        and isinstance(comments_section.get("comments"), list)
+        else None
+    )
+    if not funnel.verdict_covers_head(
+        packet.get("verdict"), packet.get("head_sha"), comments
+    ):
         return []
     return ["verdict: a verdict already covers head {}".format(
         str(packet.get("head_sha"))[:12])]

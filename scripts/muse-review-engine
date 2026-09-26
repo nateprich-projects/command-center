@@ -1424,6 +1424,12 @@ if ! JUDGE_COUNT="$(python3 -c 'import json,sys; print(len(json.load(open(sys.ar
 fi
 
 judge_header() {
+  # Verified for #1546 (#1339) before changing the contract: origin/main
+  # required a posted PR Run evidence block for run-outcome facts;
+  # engine/review.py's build_packet places head_sha beside ci.checks rows
+  # carrying each check's name, conclusion, state and status. The clause below
+  # depends on both findings and applies only to a check that directly proves
+  # the requirement.
   cat <<'HEADER'
 This is one judge call in a larger review. Judge only the requirements in
 the list below against the supplied review packet. Do not derive additional

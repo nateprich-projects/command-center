@@ -649,6 +649,7 @@ BRIEF_SECTION_BUDGETS = {
     # 1091-item board at 20.93 s, 25.17 s, 22.94 s.
     "cleared_blocks": 30.0,
     "blocked": 0.25,
+    "event_block_inconsistencies": 0.25,
     "human_steps": 0.25,
     "machine_local_steps": 0.25,
     "blocked_human_steps": 0.25,
@@ -10903,7 +10904,7 @@ def blocked_items(items: Iterable[Item]) -> List[Item]:
     )
 
 
-def _blocked_item_json(item: Item) -> Dict[str, object]:
+def _blocked_item_json(item: Item, now: datetime) -> Dict[str, object]:
     """Render one blocked item from the parsed block-comment state."""
     rendered = {
         "ref": item.ref,
@@ -10916,14 +10917,55 @@ def _blocked_item_json(item: Item) -> Dict[str, object]:
     blocked_until = _item_blocked_until(item)
     if blocked_until is not None:
         rendered["blocked_until"] = blocked_until.isoformat()
+    if item.block_event is not None:
+        rendered["event_condition"] = dict(item.block_event)
+        after = parse_time(item.block_event.get("after"))
+        if after is not None:
+            elapsed = max(timedelta(0), now - after)
+            rendered["event_wait"] = humanise(elapsed)
+            rendered["event_wait_seconds"] = round(
+                elapsed.total_seconds(), 3
+            )
     if item.needs_decision is not None:
         rendered["needs_decision"] = item.needs_decision
     return rendered
 
 
-def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+def blocked_json(
+    items: Iterable[Item], now: datetime,
+) -> List[Dict[str, object]]:
     """The brief's blocked section, reusing one load-time comment fetch."""
-    return [_blocked_item_json(item) for item in blocked_items(items)]
+    return [_blocked_item_json(item, now) for item in blocked_items(items)]
+
+
+def event_block_inconsistencies_json(
+    items: Iterable[Item],
+) -> List[Dict[str, object]]:
+    """Flag blocked tickets whose event spec and Needs routing disagree."""
+    found: List[Dict[str, object]] = []
+    for item in blocked_items(items):
+        if item.parent is None or item.block_comments_error:
+            continue
+        if item.block_event is not None:
+            if item.needs == "external-event":
+                continue
+            mismatch = "well-formed event spec without Needs: external-event"
+        elif item.needs == "external-event":
+            mismatch = "Needs: external-event without a well-formed event spec"
+        else:
+            continue
+
+        row = {
+            "ref": item.ref,
+            "title": item.title,
+            "url": item.url,
+            "needs": item.needs,
+            "mismatch": mismatch,
+        }
+        if item.block_event is not None:
+            row["event_condition"] = dict(item.block_event)
+        found.append(row)
+    return found
 
 
 # Approval may adopt an unset Class only from an explicit, whole-line
@@ -12520,7 +12562,12 @@ def cmd_brief(
         cleared_blocks = named_section(
             "cleared_blocks", lambda: cleared_blocks_json(items, now)
         )
-        blocked = section("blocked", lambda: blocked_json(items), [])
+        blocked = section("blocked", lambda: blocked_json(items, now), [])
+        event_block_inconsistencies = section(
+            "event_block_inconsistencies",
+            lambda: event_block_inconsistencies_json(items),
+            [],
+        )
         human = section("human_steps", lambda: human_step_json(items, now), [])
         machine_local = section(
             "machine_local_steps",
@@ -12638,6 +12685,7 @@ def cmd_brief(
             "closed_itself": closed_itself,
             "cleared_blocks": cleared_blocks,
             "blocked": blocked,
+            "event_block_inconsistencies": event_block_inconsistencies,
             "human_steps": human,
             "machine_local_steps": machine_local,
             "blocked_human_steps": blocked_human,

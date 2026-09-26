@@ -36,8 +36,7 @@ If the command fails, show the error. Do not query GitHub yourself.
 The code template documents these: `generated_at`, `counts_by_gate`,
 `items`, `waiting_on`, `waited`, `class`, `pinned`, `needs_class`,
 `unclassed_captures`, `in_motion`, `wip_limit`, `stale_locks_taken_over`,
-`event_block_inconsistencies`, `stranded`, `working_tree_touched`,
-`maintenance_load`, `disposal`,
+`stranded`, `working_tree_touched`, `maintenance_load`, `disposal`,
 `recorded_cause_regressions`, `command_center_ticket_pr_share`,
 `resend_ratio`, `outcome_signals`, `blocked`, `blocked_human_steps`,
 `blocked_machine_local_steps`, `suspected_human_steps`, `parked`,
@@ -57,10 +56,6 @@ Then `working_tree_touched` when non-empty: `before.head → after.head` with ev
 
 Then `human_steps`, waiting on Nate to go and do, and
 `machine_local_steps`, waiting on a Claude Code session to go and do.
-When `event_block_inconsistencies` is non-empty, link each blocked ticket,
-state its `mismatch`, and include `event_condition` when present. These rows
-are diagnostics for disagreement between the event spec and
-`Needs: external-event`.
 
 Full per-section wording lives in code; render through it:
 

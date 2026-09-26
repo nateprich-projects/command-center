@@ -435,6 +435,28 @@ def test_mixed_open_starts_report_independent_bound_and_never_bound_counts():
     )
 
 
+def test_never_bound_threshold_is_independent_of_bound_open_starts():
+    rows = [
+        _start("bound-one", 180),
+        _bind("bound-one", 179),
+        _start("bound-two", 150),
+        _bind("bound-two", 149),
+        _start("orphan-one", 170),
+        _start("orphan-two", 160),
+        _start("orphan-three", 140),
+    ]
+
+    conditions = assess("codex", rows, NOW.timestamp())
+    dying_conditions = [
+        condition for condition in conditions
+        if "runs this week" in condition or "begins this week" in condition
+    ]
+
+    assert len(dying_conditions) == 1
+    assert "3 begins this week that started and never returned a job" in dying_conditions[0]
+    assert "runs this week" not in dying_conditions[0]
+
+
 def test_finished_bound_run_is_in_neither_dying_condition():
     rows = [
         _start("finished", 180),

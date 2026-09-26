@@ -182,3 +182,46 @@ def test_reconcile_releases_a_bound_claim_with_no_branch_after_30_minutes(
     assert finish["phase"] == "finish"
     assert finish["outcome"] == "errored"
     assert finish["reconciled_claim"] == ticket.ref
+
+
+def test_the_shared_begin_snapshot_gives_identical_reconciled_starts(monkeypatch):
+    """#1591 ticket #1606: begin now hands the reconcile its own PR snapshot
+    instead of letting it scan again. Real reconcile, both ways: the closed
+    starts and the finish records written must be identical, and the shared
+    path must never scan."""
+    project = _project(1)
+    merged = _ticket(9, project)
+    unmerged = _ticket(10, project)
+    elsewhere = _ticket(11, project)
+    spools = {
+        "codex": (_open_work_start("a", merged.ref)
+                  + _open_work_start("b", unmerged.ref, ts=200)),
+        "claude": _open_work_start("c", elsewhere.ref, ts=300, agent="claude"),
+        "muse": _merge_finish("m1", 70) + _merge_finish("m2", 72, ts=950),
+    }
+    facts = {
+        merged.ref: {"number": 70, "state": "MERGED",
+                     "mergedAt": "2026-09-10T07:00:00Z"},
+        unmerged.ref: {"number": 71, "state": "OPEN"},
+        elsewhere.ref: {"number": 72, "state": "MERGED",
+                        "mergedAt": "2026-09-10T07:30:00Z"},
+    }
+    items = [project, merged, unmerged, elsewhere]
+
+    own_appended = _wire(monkeypatch, spools, facts)
+    own = funnel.reconcile_orphaned_starts(items, NOW)
+
+    # Begin's snapshot covers every ticket on the board, not only candidates.
+    begin_snapshot = dict(facts)
+    begin_snapshot[REPO + "#99"] = {"number": 99, "state": "OPEN"}
+    shared_appended = _wire(monkeypatch, spools, facts)
+
+    def scan(rows):
+        raise AssertionError("the shared snapshot must be used, not a rescan")
+
+    monkeypatch.setattr(funnel, "ticket_pr_facts", scan)
+    shared = funnel.reconcile_orphaned_starts(items, NOW, begin_snapshot)
+
+    assert own and shared == own
+    assert sorted(c["run"] for c in own) == ["a", "c"]
+    assert shared_appended == own_appended

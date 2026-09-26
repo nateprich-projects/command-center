@@ -2223,6 +2223,97 @@ def test_begin_offers_shape_when_needs_decision_blocks_breakdown(monkeypatch, ca
     assert result["work"]["ref"] == idea.ref
 
 
+def _backoff_row(ref):
+    until = NOW + funnel.BACKOFF_COOLDOWN
+    return {"ref": ref, "failures": 11, "until": until,
+            "reason": "backoff: 11 consecutive failed runs"}
+
+
+def _shape_idea(number, risk="escalated"):
+    return funnel.Item(
+        repo="nateprich/example",
+        number=number,
+        title="Idea {}".format(number),
+        url="https://github.com/nateprich/example/issues/{}".format(number),
+        state="OPEN",
+        status="Ideas",
+        klass="Broken",
+        origin="agent",
+        risk=risk,
+        needs="none",
+        labels=["needs-shaping"],
+        body="Risk: {}".format(risk),
+    )
+
+
+def test_review_lane_skips_a_backed_off_shape_and_says_so(monkeypatch, capsys):
+    """#1581: #1195's shape failed eleven times in a row because the review
+    lane never read the backoff the ticket path honours."""
+    stuck = _shape_idea(1195)
+    next_idea = _shape_idea(1196)
+
+    monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [])
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+    monkeypatch.setattr(funnel, "_backed_off_work",
+                        lambda items, now: {stuck.ref: _backoff_row(stuck.ref)})
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+
+    assert funnel.cmd_begin(
+        [stuck, next_idea], NOW, "muse", "escalated", False, True
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "shape"
+    assert result["work"]["ref"] == next_idea.ref
+    assert [row["ref"] for row in result["backed_off"]] == [stuck.ref]
+    assert result["backed_off"][0]["failures"] == 11
+
+
+def test_review_lane_skips_a_backed_off_breakdown(monkeypatch, capsys):
+    project = funnel.Item(
+        repo="nateprich/example",
+        number=40,
+        title="A Ready plan",
+        url="https://github.com/nateprich/example/issues/40",
+        state="OPEN",
+        status="Ready",
+        klass="Broken",
+    )
+    monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [])
+    monkeypatch.setattr(funnel, "awaiting_breakdown", lambda items: [project])
+    monkeypatch.setattr(funnel, "shapeable_idea", lambda items, tier, reading: None)
+    monkeypatch.setattr(funnel, "_backed_off_work",
+                        lambda items, now: {project.ref: _backoff_row(project.ref)})
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+
+    assert funnel.cmd_begin(
+        [project], NOW, "zcode", "standard", False, True
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "stop"
+    assert [row["ref"] for row in result["backed_off"]] == [project.ref]
+
+
+def test_review_lane_skips_the_backoff_read_with_no_issue_job(monkeypatch, capsys):
+    """The heartbeat read costs seconds of the reply budget; a fire with no
+    breakdown or shape candidate must not pay for it."""
+    work = {"pr": 7, "repo": "nateprich/beta", "ref": "nateprich/beta#19"}
+    monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [work])
+    monkeypatch.setattr(funnel, "awaiting_breakdown", lambda items: [])
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("backoff read with nothing to filter")
+
+    monkeypatch.setattr(funnel, "_backed_off_work", unexpected)
+
+    result = _begin(monkeypatch, capsys, breakdown=True)
+
+    assert result["do"] == "review"
+
+
 def test_breakdown_work_carries_plan_access_signals(monkeypatch, capsys):
     item = SimpleNamespace(
         ref="nateprich-projects/command-center#25",

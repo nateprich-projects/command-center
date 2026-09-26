@@ -49,10 +49,11 @@ def soon(seconds):
 
 
 def test_both_windows_are_rendered_and_cached(cache):
+    week = soon(86400 * 2)
     out = run(
         session(
             five_hour={"used_percentage": 23.5, "resets_at": soon(3600)},
-            seven_day={"used_percentage": 41.2, "resets_at": soon(86400 * 2)},
+            seven_day={"used_percentage": 41.2, "resets_at": week},
         ),
         cache,
     )
@@ -60,7 +61,8 @@ def test_both_windows_are_rendered_and_cached(cache):
 
     written = json.loads(cache.read_text())
     assert written["five_hour"]["used_percentage"] == 23.5
-    assert written["seven_day"]["resets_at"] == pytest.approx(soon(86400 * 2), abs=5)
+    # statusline.sh copies this reset value into the cache unchanged.
+    assert written["seven_day"]["resets_at"] == week
     assert written["captured_at"] > 0
 
 

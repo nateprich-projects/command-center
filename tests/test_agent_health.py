@@ -61,6 +61,17 @@ def _finish(run, minutes_ago):
     }
 
 
+def _bind(run, minutes_ago):
+    return {
+        "run": run,
+        "phase": "bind",
+        "ts": NOW.timestamp() - minutes_ago * 60,
+        "agent": "codex",
+        "do": "ticket",
+        "work": "nateprich-projects/command-center#1532",
+    }
+
+
 def _error_rows():
     return [
         {
@@ -359,7 +370,25 @@ def test_finished_start_is_not_reported_as_open():
     assert assess("codex", rows, NOW.timestamp()) == []
 
 
-def test_three_open_starts_keep_the_dying_condition():
+def test_three_bound_open_starts_keep_only_the_rate_limit_condition():
+    rows = [
+        _start("one", 180),
+        _start("two", 150),
+        _start("three", 130),
+        _bind("one", 179),
+        _bind("two", 149),
+        _bind("three", 129),
+    ]
+
+    conditions = assess("codex", rows, NOW.timestamp())
+
+    assert len(conditions) == 1
+    assert "3 runs this week that started and never finished" in conditions[0]
+    assert "Check whether the reserves in `usage.py` are too low." in conditions[0]
+    assert "never returned a job" not in conditions[0]
+
+
+def test_three_never_bound_open_starts_get_only_the_begin_condition():
     rows = [
         _start("one", 180),
         _start("two", 150),
@@ -369,8 +398,51 @@ def test_three_open_starts_keep_the_dying_condition():
     conditions = assess("codex", rows, NOW.timestamp())
 
     assert len(conditions) == 1
-    assert "started and never finished" in conditions[0]
-    assert "Check whether the reserves in `usage.py` are too low." in conditions[0]
+    assert "3 begins this week that started and never returned a job" in conditions[0]
+    assert "passed the 180 s budget (#1519)" in conditions[0]
+    assert "This is not a usage-reserve problem." in conditions[0]
+    assert "usage.py" not in conditions[0]
+
+
+def test_mixed_open_starts_report_independent_bound_and_never_bound_counts():
+    rows = [
+        _start("bound-one", 180),
+        _start("bound-two", 150),
+        _start("bound-three", 130),
+        _bind("bound-one", 179),
+        _bind("bound-two", 149),
+        _bind("bound-three", 129),
+        _start("orphan-one", 170),
+        _start("orphan-two", 160),
+        _start("orphan-three", 140),
+        _start("orphan-four", 125),
+    ]
+
+    conditions = assess("codex", rows, NOW.timestamp())
+    dying_conditions = [
+        condition for condition in conditions
+        if "runs this week" in condition or "begins this week" in condition
+    ]
+
+    assert len(dying_conditions) == 2
+    assert any(
+        "3 runs this week that started and never finished" in condition
+        for condition in dying_conditions
+    )
+    assert any(
+        "4 begins this week that started and never returned a job" in condition
+        for condition in dying_conditions
+    )
+
+
+def test_finished_bound_run_is_in_neither_dying_condition():
+    rows = [
+        _start("finished", 180),
+        _bind("finished", 179),
+        _finish("finished", 178),
+    ]
+
+    assert assess("codex", rows, NOW.timestamp()) == []
 
 
 def test_begin_timeout_finishes_are_classified_from_the_record():

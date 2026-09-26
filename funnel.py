@@ -9409,6 +9409,25 @@ def hydrate_item_details(
                 )
 
 
+def hydrate_regression_history(items: Sequence[Item]) -> None:
+    """Read Status history for regression items that arrived without it.
+
+    ``rejected_merges`` counts ``Regression from PR #`` items by their
+    ``status_since``. A board loaded with ``include_details=False`` carries no
+    history, and the counter then silently reads zero (#1596). Only regression
+    items still lacking ``status_since`` are read, so a board that already has
+    its history costs nothing here. A failed read raises ``GitHubError``: the
+    caller fails its packet or refuses its merge, never counts zero.
+    """
+    unread = [
+        item for item in items
+        if item.title.startswith(REGRESSION_PREFIX)
+        and item.status_since is None
+    ]
+    if unread:
+        hydrate_item_details(items, unread)
+
+
 # A closed issue's state reason is the authoritative terminal choice; this is
 # the Status it names. Shared by the closed-item reconcile and the begin load.
 CLOSE_REASON_STATUS = {
@@ -17235,17 +17254,11 @@ def merge_blockers(
     # regression item arrives with no `status_since` and the counter silently
     # read zero on every lane merge (#1596). Read the missing history here,
     # for regression items only, and refuse when it cannot be read.
-    unread_regressions = [
-        item for item in items
-        if item.title.startswith(REGRESSION_PREFIX)
-        and item.status_since is None
-    ]
-    if unread_regressions:
-        try:
-            hydrate_item_details(items, unread_regressions)
-        except GitHubError as exc:
-            why.append("could not read the rejected-merge history: {}".format(
-                exc))
+    try:
+        hydrate_regression_history(items)
+    except GitHubError as exc:
+        why.append("could not read the rejected-merge history: {}".format(
+            exc))
     counter = rejected_merges(items, now)
     if counter["stop_auto_merging"]:
         why.append("auto-merging is stopped: {} rejected merges in the last "

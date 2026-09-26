@@ -29,7 +29,8 @@ SHA = "abc123def456"
 def project_risk(monkeypatch):
     monkeypatch.setattr(
         funnel, "load_items",
-        lambda: [type("Row", (), {"ref": REPO + "#9", "risk": "standard"})()],
+        lambda **kwargs: [
+            type("Row", (), {"ref": REPO + "#9", "risk": "standard"})()],
     )
 OTHER_SHA = "7890fedcba98"
 HEAD_DATE = "2026-09-13T12:00:00Z"

@@ -1946,17 +1946,30 @@ def fetch_verdict(repo: str, pr_number: int) -> Optional[dict]:
     return funnel.latest_verdict(repo, pr_number)
 
 
+def load_board_items() -> list:
+    """The board without item history, the default packet loader (#1621).
+
+    The packet needs history only for regression items, which
+    ``fetch_stop_counter`` reads. The full history read cost about a
+    minute and a hundred GraphQL points per packet.
+    """
+    return funnel.load_items(include_details=False)
+
+
 def fetch_stop_counter(
         items_loader: Optional[Callable[[], list]] = None,
         now: Optional[datetime] = None) -> dict:
     """The rejected-merges counter funnel.rejected_merges computes.
 
     Reused rather than re-derived: two definitions of "stop" would
-    disagree exactly when the bar has failed.
+    disagree exactly when the bar has failed. Regression items that
+    arrive without history are read here; an unreadable history raises
+    and fails the packet rather than counting zero.
     """
-    loader = items_loader or funnel.load_items
+    items = (items_loader or load_board_items)()
+    funnel.hydrate_regression_history(items)
     return dict(funnel.rejected_merges(
-        loader(), now or datetime.now(timezone.utc)))
+        items, now or datetime.now(timezone.utc)))
 
 
 def collect(repo: Optional[str], pr_number: int, *,
@@ -1972,7 +1985,7 @@ def collect(repo: Optional[str], pr_number: int, *,
     the packet falls back to the PR reads with ``scope_source`` ``"pr"``.
     """
     resolved = funnel.resolve_repo(repo)
-    loaded_items = (items_loader or funnel.load_items)()
+    loaded_items = (items_loader or load_board_items)()
     project_rows = {item.ref: item for item in loaded_items}
     pr_view = fetch_pr(resolved, pr_number)
     ref = funnel.ticket_ref_from_branch(

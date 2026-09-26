@@ -41,6 +41,12 @@ def start(run, at, ticket=1):
             "ts": int(at), "ticket": ticket}
 
 
+def bind(run, at, ticket=1):
+    return {"run": run, "agent": "claude", "phase": "bind",
+            "ts": int(at), "do": "ticket",
+            "work": "nateprich-projects/command-center#{}".format(ticket)}
+
+
 def finish(run, at, outcome="done"):
     return {"run": run, "agent": "claude", "phase": "finish",
             "ts": int(at), "outcome": outcome}
@@ -161,6 +167,69 @@ def test_finish_records_structured_issue_outcomes(monkeypatch):
     assert records[0]["ticket_count"] == 0
     assert records[0]["needs_decision"] is None
     assert records[0]["shape_status"] == "Shaped"
+    assert "token_usage" not in records[0]
+
+
+def test_finish_records_every_muse_call_id_and_keeps_uncaptured_slots(monkeypatch):
+    records = []
+    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(
+        heartbeat,
+        "append",
+        lambda agent, record: records.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    call_record = {"session_ids": ["session-1", None, "session-3"],
+                   "calls_made": 3}
+    assert heartbeat.main([
+        "finish", "--agent", "muse", "--run", "run-id",
+        "--outcome", "done", "--muse-call-record", json.dumps(call_record),
+    ]) == 0
+
+    assert records[0]["muse_session_ids"] == ["session-1", None, "session-3"]
+    assert records[0]["muse_calls_made"] == 3
+    assert "token_usage" not in records[0]
+
+
+def test_finish_keeps_single_id_bound_and_omits_token_snapshot(monkeypatch):
+    records = []
+    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "usage_snapshot", lambda agent: None)
+    monkeypatch.setattr(heartbeat, "repo_state", lambda: None)
+    monkeypatch.setattr(heartbeat, "detect_model", lambda agent: {})
+    monkeypatch.setattr(
+        heartbeat,
+        "append",
+        lambda agent, record: records.append(record) or "spooled",
+    )
+    monkeypatch.setattr(heartbeat, "_report", lambda kept: None)
+
+    assert heartbeat.main([
+        "finish", "--agent", "muse", "--run", "run-id",
+        "--outcome", "done", "--muse-call-record",
+        json.dumps({"session_ids": ["session-1"], "calls_made": 1}),
+    ]) == 0
+
+    assert "muse_session_ids" not in records[0]
+    assert records[0]["muse_calls_made"] == 1
+    assert "token_usage" not in records[0]
+
+
+@pytest.mark.parametrize("call_record", [
+    {"session_ids": ["session-1"], "calls_made": 2},
+    {"session_ids": ["session-1", ""], "calls_made": 2},
+    {"session_ids": ["session-1"], "calls_made": True},
+])
+def test_finish_rejects_malformed_muse_call_records(call_record):
+    with pytest.raises(SystemExit):
+        heartbeat.main([
+            "finish", "--agent", "muse", "--run", "run-id",
+            "--outcome", "done", "--muse-call-record", json.dumps(call_record),
+        ])
 
 
 def test_finish_rejects_negative_ticket_count():
@@ -781,7 +850,11 @@ def test_watchdog_still_reports_genuinely_dying_runs():
     old = NOW - 5 * 3600
     records = []
     for i in range(watchdog.DYING_THRESHOLD):
-        records.append(start("run{}".format(i), old + i * MIN))
+        at = old + i * MIN
+        records.extend([
+            start("run{}".format(i), at),
+            bind("run{}".format(i), at + 1, i),
+        ])
     found = watchdog.assess("claude", records, NOW)
     assert any("never finished" in p for p in found)
 

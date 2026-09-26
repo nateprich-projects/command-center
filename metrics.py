@@ -923,6 +923,7 @@ def derive_row(
     readings = usage_readings or {}
     muse = readings.get("muse") if isinstance(readings, Mapping) else None
     muse_week = _usage_window(muse, "seven_day")
+    muse_reset_at = _timestamp(muse_week.get("resets_at") if muse_week else None)
     pace_band = muse.get("pace_band") if isinstance(muse, Mapping) else None
     muse_rate_days = None
     try:
@@ -949,6 +950,11 @@ def derive_row(
             muse_week.get("used_percent") if muse_week else None,
             "usage.py read_muse windows.seven_day.used_percent",
             "Muse usage reading is unavailable",
+        ),
+        "window_resets_at": _fact(
+            _iso(muse_reset_at) if muse_reset_at else None,
+            "usage.py read_muse windows.seven_day.resets_at",
+            "Muse seven-day reset time is unavailable",
         ),
         "pace_band": _fact(
             pace_band,
@@ -1110,6 +1116,12 @@ def derive_row(
             "graphql_points": _count(
                 points if points_complete else None,
                 "heartbeat.finish.api_cost.graphql_points",
+                "one or more run point counts are unavailable",
+            ),
+            "points_per_run": _rate_pair(
+                points if points_complete else None,
+                len(agent_finishes) if points_complete else None,
+                "heartbeat.finish.api_cost.graphql_points / finished runs",
                 "one or more run point counts are unavailable",
             ),
             "gh_calls": _count(
@@ -1981,6 +1993,7 @@ def _flatten_series_row(row: Mapping[str, object]):
         leaves[path] = {
             "kind": kind,
             "source": source,
+            "gap": gap if isinstance(gap, str) and gap else None,
             "valid": valid,
             "value": value,
             "numerator": numerator,
@@ -2184,6 +2197,7 @@ def series_from_rows(rows: Sequence[Mapping[str, object]],
         for index in range(SERIES_DAYS)
     ]
     flattened_by_day: Dict[str, List[Tuple[Dict, set, set]]] = {}
+    latest_observations: Dict[Tuple[str, ...], Dict[str, object]] = {}
     kinds: Dict[Tuple[str, ...], str] = {}
     seen_hours = set()
     latest_source_at: Optional[datetime] = None
@@ -2214,6 +2228,7 @@ def series_from_rows(rows: Sequence[Mapping[str, object]],
     in_window.sort(key=lambda item: item[0])
     for _, day_name, flattened in in_window:
         flattened_by_day.setdefault(day_name, []).append(flattened)
+        latest_observations.update(flattened[0])
 
     # Some fields are unavailable for an hour as one code-level gap, while
     # their normal shape has nested leaves. Keep those gaps on the code state
@@ -2256,6 +2271,10 @@ def series_from_rows(rows: Sequence[Mapping[str, object]],
             "r28": [_series_render_number(item) if item is not None else None for item in r28],
             "delta": [_series_render_number(item) if item is not None else None for item in delta],
         }
+        latest_observation = latest_observations.get(path)
+        latest_gap = latest_observation.get("gap") if latest_observation else None
+        if isinstance(latest_gap, str) and latest_gap:
+            leaf["gap"] = latest_gap
         if sources:
             leaf["source"] = sources[-1]
         if kind in ("rate", "weighted_mean"):

@@ -4,10 +4,10 @@ import test from "node:test";
 
 import {
   STAGES, age, boardColumns, failureState, museUsageText, nextOwner, ownerCell,
-  phoneState, pipState, projectBlocked, renderPhoneBoard, ticketHold, unblocksChip,
+  phoneState, pipState, projectBlocked, projectHold, holdChip, renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf,
   repoOptions, rowTier, shortRepo, visible, renderExecutionTiles, requestMetrics,
-  renderMetricChart, CHART_WINDOW_DAYS,
+  renderMetricChart, renderBudgetMetrics, renderRunMetrics, CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 } from "../public/app.js";
 
@@ -296,6 +296,34 @@ test("a row nobody can act on says Blocked where the owner would be", () => {
   assert.equal(ticketHold({ state: "CLOSED", blocked: true }), null);
 });
 
+test("engine holds the Project fields do not show read on the row (Nate, 2026-09-25)", () => {
+  const until = "2026-09-26T08:09:44+00:00";
+  assert.equal(ticketHold({ state: "OPEN", paused_until: until }), "paused");
+  // A block outranks a pause: the pause only matters once the block lifts.
+  assert.equal(ticketHold({ state: "OPEN", blocked: true, paused_until: until }), "blocked");
+  assert.equal(projectHold({ next_step_blocked: false, next_step_paused_until: until }), "paused");
+  assert.equal(projectHold({ next_step_blocked: true, next_step_paused_until: until }), "blocked");
+  assert.equal(projectHold({ next_step_blocked: false }), null);
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const paused = ownerCell(null, "paused", "until Sat 1:09 AM");
+    assert.equal(paused.textContent, "Paused");
+    assert.ok(paused.className.includes("owner-paused"));
+    const chipNode = holdChip({ state: "OPEN", paused_until: until, paused_failures: 6 });
+    assert.match(chipNode.textContent, /^paused until /);
+    assert.doesNotMatch(chipNode.textContent, /UTC|Z$/);
+    assert.match(chipNode.title, /6 failed runs in a row/);
+    assert.equal(holdChip({ state: "OPEN", finished_by_comments: true }).textContent,
+      "finished — close it");
+    assert.equal(holdChip({ state: "CLOSED", finished_by_comments: true }), null);
+    assert.equal(holdChip({ state: "OPEN" }), null);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
 test("the page renders no brief section other than the board and human steps", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   for (const dropped of [
@@ -530,10 +558,12 @@ test("the usage line shows rolling 7-day Muse spend against the cap", () => {
 test("the usage line renders from the snapshot root, with no 24-hour companion", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   const html = await readFile(new URL("../public/index.html", import.meta.url), "utf8");
+  const start = source.indexOf("function renderUsage(");
+  const usage = source.slice(start, source.indexOf("\n}\n", start) + 2);
   assert.match(source, /renderUsage\(snapshot\.usage/);
   assert.match(html, /<div id="usage"><\/div>/);
-  assert.doesNotMatch(source, /five_hour/);
-  assert.doesNotMatch(source, /24-hour/);
+  assert.doesNotMatch(usage, /five_hour/);
+  assert.doesNotMatch(usage, /24-hour/);
 });
 
 test("the fixture's usage row renders as the spend line", async () => {
@@ -657,6 +687,104 @@ test("the Execution headline renders six R7/R28 tiles and keeps missing data as 
   }
 });
 
+test("the Budget panel renders D1-D6, marks Muse pace resets, and explains the D4 gap", async () => {
+  const [fixtureText, html] = await Promise.all([
+    readFile(new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8"),
+    readFile(new URL("../public/index.html", import.meta.url), "utf8"),
+  ]);
+  const fixture = JSON.parse(fixtureText);
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const grid = new TestNode("div");
+    renderBudgetMetrics(fixture, grid);
+    const cards = grid.querySelectorAll(".budget-tile");
+    assert.deepEqual(cards.map((card) => card.attributes.get("data-metric")),
+      ["D1", "D2", "D3", "D4", "D5", "D6"]);
+
+    const muse = cards[0];
+    assert.ok(muse.querySelectorAll(".chart-band").length > 0);
+    assert.ok(muse.querySelectorAll(".chart-reset-marker").length > 0);
+    assert.match(muse.textContent, /Next window reset/);
+
+    assert.match(cards[1].textContent, /funnel share/i);
+    assert.match(cards[1].textContent, /personal share/i);
+    assert.match(cards[2].textContent, /Five-hour window/);
+    assert.match(cards[2].textContent, /Seven-day window/);
+
+    const cost = cards[3];
+    assert.equal(cost.querySelectorAll(".metric-gap").length, 3);
+    assert.match(cost.textContent, /complete priced cost/);
+    assert.match(cards[4].textContent, /points per run/i);
+    assert.match(cards[4].textContent, /resend ratio/i);
+    assert.match(cards[5].textContent, /api reserve/i);
+
+    assert.match(html, /Muse’s ChatGPT-side usage and Claude’s claude\.ai usage are invisible/);
+    assert.match(html, /id="budget-grid"/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
+
+test("the Runs panel renders C1-C6 by agent and job and preserves their gaps", async () => {
+  const fixture = JSON.parse(await readFile(
+    new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8",
+  ));
+  const previousDocument = globalThis.document;
+  globalThis.document = new TestDocument();
+  try {
+    const grid = new TestNode("div");
+    renderRunMetrics(fixture, grid);
+    const panels = grid.querySelectorAll(".run-metric-panel");
+    assert.deepEqual(
+      panels.map((panel) => panel.attributes.get("data-metric")),
+      ["C1", "C2", "C3", "C4", "C5", "C6"],
+    );
+
+    for (const panel of panels) {
+      const paths = panel.querySelectorAll(".run-series-row")
+        .map((row) => row.attributes.get("data-series"));
+      assert.ok(paths.length > 0, panel.attributes.get("data-metric") + " has series");
+      assert.ok(paths.every((path) => !path.endsWith(".finishes")));
+      for (const pair of ["codex.implement", "muse.review", "claude.shape", "claude.breakdown"]) {
+        assert.ok(paths.some((path) => path.includes(pair)),
+          panel.attributes.get("data-metric") + " renders " + pair);
+      }
+      assert.ok(panel.querySelectorAll(".metric-reading").some((reading) => (
+        reading.textContent.includes("R7")
+      )));
+    }
+
+    const fires = fixture.metrics.C.C1.by_agent_and_job.codex.implement;
+    const errorRate = fixture.metrics.C.C3.error_rate_by_agent_and_job.codex.implement;
+    const skippedDay = fires["skipped-over-pace"].daily.findIndex((value) => value > 0);
+    assert.ok(skippedDay >= 0);
+    assert.equal(
+      errorRate.denominators[skippedDay],
+      fires.done.daily[skippedDay] + fires.errored.daily[skippedDay],
+    );
+    assert.ok(errorRate.denominators[skippedDay] < fires.finishes.daily[skippedDay]);
+    assert.match(panels[2].textContent, /skipped fires are excluded/);
+
+    const c1Gap = panels[0].querySelectorAll(".run-series-row")
+      .find((row) => row.attributes.get("data-series").endsWith("muse.review.done"));
+    assert.ok(c1Gap);
+    assert.ok(c1Gap.querySelectorAll(".chart-hit")
+      .some((hit) => hit.textContent.includes("R7 Gap")));
+
+    const c4Paths = panels[3].querySelectorAll(".run-series-row")
+      .map((row) => row.attributes.get("data-series"));
+    assert.ok(c4Paths.some((path) => path.endsWith(".floor")));
+    assert.ok(c4Paths.some((path) => path.endsWith(".unclassified")));
+    assert.match(panels[3].textContent, /unclassified errors stay separate/);
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  }
+});
+
 test("Execution uses a read-only request and the two views route on the same page", async () => {
   const [html, source, fixtureText] = await Promise.all([
     readFile(new URL("../public/index.html", import.meta.url), "utf8"),
@@ -679,6 +807,7 @@ test("Execution uses a read-only request and the two views route on the same pag
   assert.match(html, /href="\/\?tab=execution" data-tab="execution"/);
   assert.match(html, /<main id="funnel-view">/);
   assert.match(html, /<main id="execution-view"[^>]*hidden>/);
+  assert.match(html, /<div id="runs-grid" class="run-metric-grid"><\/div>/);
   assert.equal(tabFromUrl("https://funnel.nateprich.com/?tab=execution&repo=owner%2Frepo"),
     "execution");
   assert.equal(tabFromUrl("https://funnel.nateprich.com/?tab=unknown"), "funnel");

@@ -12,7 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
+import heartbeat
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+NO_DIFF_FINISH = (
+    pathlib.Path(__file__).parent / "fixtures" /
+    "no_diff_done_finish.json"
+)
 sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
@@ -222,6 +228,13 @@ def test_packet_main_passes_the_agent_to_the_prior_run_digest(
         {"declined": "stale", "extra": True},
         {"done": True, "summary": "x", "departures": [],
          "declined": "stale"},
+        {"done": True, "summary": "x", "departures": [], "evidence": []},
+        {"done": True, "summary": "x", "departures": [],
+         "evidence": "https://github.com/nateprich-projects/repo/issues/1"},
+        {"done": True, "summary": "x", "departures": [],
+         "evidence": [""]},
+        {"done": True, "summary": "x", "departures": [],
+         "evidence": [None]},
         {"blocked_on_human": {"reason": "entering a credential",
                               "action": "x"},
          "declined": "stale"},
@@ -233,6 +246,265 @@ def test_answer_validation_fails_closed(tmp_path, value):
     path.write_text(json.dumps(value))
     with pytest.raises(implement.ImplementError):
         implement.read_answer(str(path))
+
+
+def test_done_answer_accepts_optional_nonempty_evidence_list():
+    found = implement.parse_answer(json.dumps({
+        **answer(),
+        "evidence": [
+            " https://github.com/nateprich-projects/repo/issues/12 ",
+        ],
+    }))
+
+    assert found["evidence"] == [
+        "https://github.com/nateprich-projects/repo/issues/12",
+    ]
+
+
+def test_no_diff_with_verified_evidence_closes_and_finishes(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: [{"run": "run-42", "phase": "start", "ts": 1000}],
+    )
+    evidence = [
+        "https://github.com/nateprich-projects/project/issues/12"
+        "#issuecomment-91",
+        "https://github.com/nateprich-projects/project/pull/8",
+        "https://github.com/nateprich-projects/project/issues/9",
+    ]
+    responses = {
+        "repos/nateprich-projects/project/issues/comments/91": {
+            "id": 91,
+            "url": "https://api.github.com/repos/nateprich-projects/"
+                   "project/issues/comments/91",
+            "html_url": evidence[0],
+            "created_at": "1970-01-01T00:16:40Z",
+        },
+        "repos/nateprich-projects/project/pulls/8": {
+            "number": 8,
+            "url": "https://api.github.com/repos/nateprich-projects/"
+                   "project/pulls/8",
+            "html_url": evidence[1],
+            "state": "closed",
+            "closed_at": "1970-01-01T00:16:41Z",
+        },
+        "repos/nateprich-projects/project/issues/9": {
+            "number": 9,
+            "url": "https://api.github.com/repos/nateprich-projects/"
+                   "project/issues/9",
+            "html_url": evidence[2],
+            "state": "closed",
+            "closed_at": "1970-01-01T00:16:42Z",
+        },
+    }
+    reads = []
+
+    def read_api(endpoint):
+        reads.append(endpoint)
+        return responses.get(endpoint)
+
+    monkeypatch.setattr(funnel, "_gh_api_json", read_api)
+    effects = {"closed": [], "released": [], "finished": []}
+
+    def close(repo, number, *, cwd):
+        effects["closed"].append((repo, number, cwd))
+
+    result = implement.finish_done(
+        {**answer(), "evidence": evidence},
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        pr_effect=lambda *args: pytest.fail("no-diff completion must not open a PR"),
+        close_effect=close,
+    )
+
+    assert reads == list(responses)
+    assert result == {
+        "number": 42,
+        "url": ticket(42)["url"],
+        "closed": True,
+    }
+    assert effects["closed"] == [(REPO, 42, clone)]
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][:3] == ("codex", "run-42", "done")
+    assert effects["finished"][0][3] == json.loads(
+        NO_DIFF_FINISH.read_text()
+    )["note"]
+    for url in evidence:
+        assert url in effects["finished"][0][3]
+
+
+def test_no_diff_without_evidence_fails_named_without_effects(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: pytest.fail("missing evidence must fail before the heartbeat read"),
+    )
+    effects = {"closed": [], "released": [], "finished": []}
+
+    with pytest.raises(
+        implement.ImplementError,
+        match="done answer produced no change and named no evidence",
+    ):
+        implement.finish_done(
+            answer(),
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            close_effect=lambda *args, **kwargs: effects["closed"].append(args),
+        )
+
+    assert effects == {"closed": [], "released": [], "finished": []}
+
+
+def test_no_diff_fails_closed_when_heartbeat_start_cannot_be_read(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(heartbeat, "read_github", lambda agent: [])
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint: pytest.fail("unreadable start must fail before artifact reads"),
+    )
+    url = "https://github.com/nateprich-projects/project/issues/12#issuecomment-91"
+    effects = {"closed": [], "released": [], "finished": []}
+
+    with pytest.raises(
+        implement.ImplementError,
+        match="could not read heartbeat start for run run-42",
+    ):
+        implement.finish_done(
+            {**answer(), "evidence": [url]},
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            close_effect=lambda *args, **kwargs: effects["closed"].append(args),
+        )
+
+    assert effects == {"closed": [], "released": [], "finished": []}
+
+
+def test_no_diff_rejects_evidence_created_before_run_start(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: [{"run": "run-42", "phase": "start", "ts": 2000}],
+    )
+    url = (
+        "https://github.com/nateprich-projects/project/issues/12"
+        "#issuecomment-91"
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint: {
+            "id": 91,
+            "url": "https://api.github.com/repos/nateprich-projects/"
+                   "project/issues/comments/91",
+            "html_url": url,
+            "created_at": "1970-01-01T00:16:40Z",
+        },
+    )
+    effects = {"closed": [], "released": [], "finished": []}
+
+    with pytest.raises(
+        implement.ImplementError,
+        match="evidence URL .* was created before this run started",
+    ) as raised:
+        implement.finish_done(
+            {**answer(), "evidence": [url]},
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            close_effect=lambda *args, **kwargs: effects["closed"].append(args),
+        )
+
+    assert url in str(raised.value)
+    assert effects == {"closed": [], "released": [], "finished": []}
+
+
+def test_no_diff_fails_closed_when_evidence_cannot_be_read(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: [{"run": "run-42", "phase": "start", "ts": 1000}],
+    )
+    url = "https://github.com/nateprich-projects/project/issues/12#issuecomment-91"
+    monkeypatch.setattr(funnel, "_gh_api_json", lambda endpoint: None)
+    effects = {"closed": [], "released": [], "finished": []}
+
+    with pytest.raises(
+        implement.ImplementError,
+        match="could not read evidence URL",
+    ) as raised:
+        implement.finish_done(
+            {**answer(), "evidence": [url]},
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            close_effect=lambda *args, **kwargs: effects["closed"].append(args),
+        )
+
+    assert url in str(raised.value)
+    assert effects == {"closed": [], "released": [], "finished": []}
+
+
+def test_done_with_diff_ignores_evidence(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: pytest.fail("the diff path must ignore evidence"),
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint: pytest.fail("the diff path must ignore evidence"),
+    )
+    prs = []
+    effects = {"released": [], "finished": []}
+
+    result = implement.finish_done(
+        {**answer(), "evidence": ["https://example.com/ignored"]},
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        pr_effect=lambda repo, context, found_ticket, body: (
+            prs.append(body) or {"number": 91, "url": "https://github.com/owner/repo/pull/91"}
+        ),
+    )
+
+    assert result["number"] == 91
+    assert prs and "Summary:\nAdded the bounded implementation runner." in prs[0]
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][:3] == ("codex", "run-42", "done")
 
 
 def test_finish_ticket_pushes_opens_pr_releases_and_finishes(tmp_path, monkeypatch):

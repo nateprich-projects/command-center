@@ -325,6 +325,10 @@ def _matches(agent: str, path: str, session_id: str) -> bool:
         # zai-exec names each run's log exactly; a substring match could let
         # one run's id claim another's file.
         return os.path.basename(path) == "model-io-{}.jsonl".format(session_id)
+    if agent == "muse":
+        # Muse journals live below one directory per session. Match that path
+        # component exactly so an id cannot claim another session's journal.
+        return session_id in os.path.normpath(path).split(os.sep)
     if session_id not in path:
         return False
     return True
@@ -383,3 +387,100 @@ def usage_for_session(
         kind: totals[kind] if readable[kind] else None
         for kind in TOKEN_KINDS
     }
+
+
+def usage_for_sessions(
+    agent: str,
+    session_ids: object,
+    calls_made: object,
+    started_at: Optional[datetime] = None,
+    finished_at: Optional[datetime] = None,
+) -> Tuple[Optional[Dict[str, Optional[int]]], Dict[str, object]]:
+    """Sum session usage only when every recorded call has readable usage.
+
+    A missing id or journal is coverage information, not a zero-cost call. A
+    malformed persisted list is a fault and is never partially summed.
+    """
+    made = _number(calls_made)
+    problems = set()
+    slots = session_ids if isinstance(session_ids, list) else None
+    if slots is None:
+        problems.add("malformed_session_id_list")
+        slots = []
+    if made is None:
+        problems.add("invalid_calls_made")
+    elif made != len(slots):
+        problems.add("call_count_mismatch")
+
+    captured_ids = []
+    seen = set()
+    captured_calls = 0
+    for value in slots:
+        if value is None:
+            continue
+        if (not isinstance(value, str) or not value.strip()
+                or value != value.strip()):
+            problems.add("malformed_session_id")
+            continue
+        captured_calls += 1
+        if value in seen:
+            problems.add("duplicate_session_id")
+            continue
+        seen.add(value)
+        captured_ids.append(value)
+
+    uncaptured = (
+        max(0, made - captured_calls) if made is not None else None
+    )
+    coverage: Dict[str, object] = {
+        "status": "fault" if problems else "partial",
+        "captured_calls": captured_calls,
+        "made_calls": made,
+        "readable_journals": 0,
+        "unreadable_journals": captured_calls,
+        "uncaptured_calls": uncaptured,
+    }
+    if problems:
+        coverage["reasons"] = sorted(problems)
+        return None, coverage
+
+    totals = {kind: 0 for kind in TOKEN_KINDS}
+    readable_journals = 0
+    for session_id in captured_ids:
+        try:
+            usage = usage_for_session(
+                agent,
+                session_id,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+        except Exception:
+            usage = None
+        if not isinstance(usage, Mapping):
+            continue
+        values = {}
+        for kind in TOKEN_KINDS:
+            value = usage.get(kind)
+            if (isinstance(value, bool) or not isinstance(value, int)
+                    or value < 0):
+                break
+            values[kind] = value
+        else:
+            readable_journals += 1
+            for kind in TOKEN_KINDS:
+                totals[kind] += values[kind]
+
+    coverage["readable_journals"] = readable_journals
+    coverage["unreadable_journals"] = captured_calls - readable_journals
+    reasons = set()
+    if uncaptured:
+        reasons.add("uncaptured_session_ids")
+    if readable_journals < captured_calls:
+        reasons.add("unreadable_session_journals_or_usage")
+    if reasons:
+        coverage["status"] = "partial"
+        coverage["reasons"] = sorted(reasons)
+        return None, coverage
+
+    coverage["status"] = "complete"
+    return totals, coverage

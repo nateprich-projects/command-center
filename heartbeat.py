@@ -93,6 +93,7 @@ OUTCOMES = [
     "config-drift",        # a Codex run's settings differ from codex_run.py (#1316);
                            # not `skipped-*`, which the watchdog treats as healthy
     "skipped-provider-quota",  # the model provider refused: its usage window is spent
+    "skipped-outside-window",  # Claude's Saturday-morning window is closed (#1557)
     "budget-exhausted",     # begin could not start after the GraphQL pool hit zero
     "errored",             # tried and failed
 ]
@@ -173,6 +174,36 @@ def _non_negative_int(value: str) -> int:
 def _optional_text(value: str) -> Optional[str]:
     """Treat the empty CLI value as the explicit JSON null it represents."""
     return value if value else None
+
+
+def _muse_call_record(value: str) -> Dict[str, object]:
+    """Parse the ephemeral call capture summary written by Muse's runner."""
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("must be a Muse call record JSON object")
+    if not isinstance(parsed, dict) or set(parsed) != {"session_ids", "calls_made"}:
+        raise argparse.ArgumentTypeError(
+            "must contain exactly session_ids and calls_made"
+        )
+    session_ids = parsed.get("session_ids")
+    calls_made = parsed.get("calls_made")
+    if (
+        not isinstance(session_ids, list)
+        or isinstance(calls_made, bool)
+        or not isinstance(calls_made, int)
+        or calls_made < 0
+        or calls_made != len(session_ids)
+        or any(
+            session_id is not None
+            and (not isinstance(session_id, str) or not session_id.strip())
+            for session_id in session_ids
+        )
+    ):
+        raise argparse.ArgumentTypeError(
+            "session_ids must contain one non-empty id or null per call"
+        )
+    return parsed
 
 
 #: Which pool an agent spends. Deliberately separate from the model: routing will
@@ -1819,6 +1850,10 @@ def main(argv=None) -> int:
         "--needs-decision", type=_optional_text, default=None,
         help="structured breakdown question; an empty value means none",
     )
+    finish.add_argument(
+        "--muse-call-record", type=_muse_call_record, default=None,
+        help="JSON session-id list and calls-made count from Muse exec results",
+    )
     finish.add_argument("--human-intervention", action="store_true",
                         help="Nate had to step in for this run to progress")
     finish.add_argument("--note", default=None)
@@ -1927,15 +1962,18 @@ def main(argv=None) -> int:
             "human_intervention_required": args.human_intervention or None,
             "repo": repo_state(),
             "runtime": runtime,
-            "token_usage": token_usage_for_run(
-                args.agent, records, run_id, finished_at
-            ),
             "api_cost": api_cost_for_run(records, run_id),
             "graphql_by_caller": graphql_by_caller_for_run(
                 records, run_id
             ),
             **detect_model(args.agent),
         }
+        if args.agent != "muse":
+            # Muse usage is derived from its session ids at read time. Do not
+            # freeze a first-session snapshot into the finish record.
+            record["token_usage"] = token_usage_for_run(
+                args.agent, records, run_id, finished_at
+            )
         job = job_for_run(records, run_id, args.agent)
         if job is not None:
             record["job"] = job
@@ -1946,6 +1984,15 @@ def main(argv=None) -> int:
         if args.ticket_count is not None:
             record["ticket_count"] = args.ticket_count
             record["needs_decision"] = args.needs_decision
+        if args.muse_call_record is not None:
+            if args.agent != "muse":
+                raise HeartbeatError("Muse call records require --agent muse")
+            record["muse_calls_made"] = args.muse_call_record["calls_made"]
+            # A one-call run is already bound by the start record's session_id;
+            # keep the id-list shape stable and add the list when later calls
+            # need distinct ids.
+            if args.muse_call_record["calls_made"] > 1:
+                record["muse_session_ids"] = args.muse_call_record["session_ids"]
         metric = input_usage(args.agent)
         if metric is not None:
             record["input_usage"] = metric

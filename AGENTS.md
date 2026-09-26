@@ -301,6 +301,10 @@ wrong.
   line.** The gate lives inside the session, never before it — see `plan.md`,
   "Reading usage".
 - **Missing usage data fails closed.** A run that cannot read its budget does not work.
+- **Exception: Claude's Saturday lane has no budget gate.** `routines/claude-saturday.md`
+  runs until the clock or the provider's own limit stops it and never reads usage;
+  `begin` enforces its Saturday-before-11:15 window instead. See `plan.md`, "Budget".
+  _(Nate, 2026-09-25, #1557.)_
 
 - **Analysis waits for Nate by default:** projects whose tickets change no behaviour never close themselves, whatever their class, and reach `Accept it?` only after findings are posted on the parent issue; see `plan.md`, "Building completion and automatic acceptance", rule 5.
 

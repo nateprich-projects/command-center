@@ -547,6 +547,19 @@ def _merge_wired(monkeypatch, issue_state="OPEN", close_rc=0, close_err="",
 
     def fake_graphql(query, **variables):
         graphql_calls.append((query, variables))
+        if query == funnel.CLOSED_ITSELF_TICKETS:
+            # The parent's tickets, as its sub-issues read would list them.
+            parent = "{owner}/{name}#{number}".format(**variables)
+            nodes = [
+                {"number": row.number, "title": row.title, "state": row.state,
+                 "url": row.url, "repository": {"nameWithOwner": row.repo}}
+                for row in rows if row.parent == parent
+            ]
+            return {"repository": {"issue": {"subIssues": {
+                "totalCount": len(nodes),
+                "nodes": nodes,
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }}}}
         data = pr(**(pr_fields or {}))
         data.setdefault("number", 7)
         data.setdefault("url", "https://example.invalid/7")

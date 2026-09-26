@@ -76,6 +76,27 @@ calendar date with the label and comment instead.
 sentence in the body, add the `blocked` label, and comment
 `**Blocked until 2026-10-04:**`.
 
+For a wait on an external event, keep the ticket `blocked`, set `Needs` to
+`external-event`, and post a comment with the supported event form:
+
+````markdown
+**Blocked until event:**
+```json
+{
+  "agent": "<agent>",
+  "job": "<job>",
+  "outcome": "errored",
+  "after": "YYYY-MM-DDTHH:MM:SSZ"
+}
+```
+````
+
+Replace the agent, job and UTC timestamp with the event to wait for. The
+supported condition is a heartbeat finish with outcome `errored`, recorded
+after `after`; other event kinds are not supported. Keep the spec and
+`Needs: external-event` together: a malformed or unsupported spec still asks
+`Unblock?`, and the brief flags either side when they disagree.
+
 ## Coverage
 
 Cover the plan's stated outcome, not its headings. Reread the plan, trace

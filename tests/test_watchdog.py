@@ -39,6 +39,12 @@ def start(run, ago_hours, ticket=1):
             "agent": "codex", "ticket": ticket}
 
 
+def bind(run, ago_hours, ticket=1):
+    return {"run": run, "phase": "bind", "ts": NOW - ago_hours * HOUR,
+            "agent": "codex", "do": "ticket",
+            "work": "nateprich-projects/command-center#{}".format(ticket)}
+
+
 def finish(run, ago_hours, outcome="done", note=None):
     return {"run": run, "phase": "finish", "ts": NOW - ago_hours * HOUR,
             "agent": "codex", "outcome": outcome, "note": note}
@@ -281,7 +287,10 @@ def test_sparse_silence_floor_reaches_the_watchdog_issue_body(monkeypatch):
 def test_three_unfinished_runs_are_reported_as_dying():
     """The rate-limit death signature — and the one condition a single outcome
     line could never detect."""
-    rows = [start("a", 5, 11), start("b", 4, 12), start("c", 3, 13)]
+    rows = [
+        start("a", 5, 11), start("b", 4, 12), start("c", 3, 13),
+        bind("a", 4.999, 11), bind("b", 3.999, 12), bind("c", 2.999, 13),
+    ]
     problems = watchdog.assess("codex", rows, NOW)
     assert any("started and never finished" in p for p in problems)
     assert any("11, 12, 13" in p for p in problems)
@@ -289,7 +298,11 @@ def test_three_unfinished_runs_are_reported_as_dying():
 
 def test_the_dying_report_points_at_the_reserves():
     """The likely cause is a budget reserve set too low, so say so."""
-    rows = [start(str(i), 5 - i, i) for i in range(3)]
+    rows = [
+        row
+        for i in range(3)
+        for row in (start(str(i), 5 - i, i), bind(str(i), 4.999 - i, i))
+    ]
     problems = watchdog.assess("codex", rows, NOW)
     assert any("usage.py" in p for p in problems)
 

@@ -13116,6 +13116,11 @@ def reconcile_parked_wakes(
     funnel never guesses where to put an item. Reopen first so the shared
     guarded Status writer can safely restore an active stage; if that write
     fails, the still-Parked item is eligible for an idempotent retry next run.
+
+    Every candidate's comments are read before any write (#1592): one batched
+    GraphQL pass for the bounded tails, then a complete read only for an issue
+    whose full tail holds no park header. A failed or partial read raises, so
+    `begin` records the reason and this fire makes no wake writes at all.
     """
     candidates = sorted(
         (
@@ -13126,17 +13131,25 @@ def reconcile_parked_wakes(
         ),
         key=lambda item: (item.repo, item.number),
     )
+    if not candidates:
+        return []
     woke: List[str] = []
     today = _block_condition_date(now)
 
+    tails = _batched_issue_comments(candidates)
+    parks: Dict[str, Optional[Dict[str, object]]] = {}
     for item in candidates:
-        parsed = None
-        for comment in reversed(_issue_comments(item)):
-            if not isinstance(comment, dict):
-                continue
-            parsed = parse_park_comment(comment.get("body") or "")
-            if parsed is not None:
-                break
+        tail = tails[item.ref]
+        parsed = _latest_park_comment(tail)
+        if parsed is None and len(tail) >= CLOSED_ITSELF_COMMENT_PAGE_SIZE:
+            # A full tail may have cut the park comment off. Reading that as
+            # "no wake date" would strand the item silently, so page the whole
+            # thread for this one issue instead.
+            parsed = _latest_park_comment(_issue_comments(item))
+        parks[item.ref] = parsed
+
+    for item in candidates:
+        parsed = parks[item.ref]
         if parsed is None:
             continue
 
@@ -13182,6 +13195,19 @@ def reconcile_parked_wakes(
         woke.append(item.ref)
 
     return woke
+
+
+def _latest_park_comment(
+    comments: Sequence[object],
+) -> Optional[Dict[str, object]]:
+    """Parse the newest park header in oldest-first comments, if any."""
+    for comment in reversed(comments):
+        if not isinstance(comment, dict):
+            continue
+        parsed = parse_park_comment(comment.get("body") or "")
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,

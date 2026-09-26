@@ -10881,7 +10881,7 @@ def blocked_items(items: Iterable[Item]) -> List[Item]:
     )
 
 
-def _blocked_item_json(item: Item) -> Dict[str, object]:
+def _blocked_item_json(item: Item, now: datetime) -> Dict[str, object]:
     """Render one blocked item from the parsed block-comment state."""
     rendered = {
         "ref": item.ref,
@@ -10894,16 +10894,45 @@ def _blocked_item_json(item: Item) -> Dict[str, object]:
     blocked_until = _item_blocked_until(item)
     if blocked_until is not None:
         rendered["blocked_until"] = blocked_until.isoformat()
+    if item.block_event is not None:
+        rendered["event_condition"] = dict(item.block_event)
+        after = parse_time(item.block_event.get("after"))
+        if after is not None:
+            elapsed = max(timedelta(0), now - after)
+            rendered["event_wait"] = humanise(elapsed)
+            rendered["event_wait_seconds"] = round(
+                elapsed.total_seconds(), 3
+            )
+    mismatch = _event_block_mismatch(item)
+    if mismatch is not None:
+        rendered["event_mismatch"] = mismatch
     if item.needs_decision is not None:
         rendered["needs_decision"] = item.needs_decision
     return rendered
 
 
-def blocked_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+def blocked_json(
+    items: Iterable[Item], now: datetime,
+) -> List[Dict[str, object]]:
     """The brief's blocked section, reusing one load-time comment fetch."""
-    return [_blocked_item_json(item) for item in blocked_items(items)]
+    return [_blocked_item_json(item, now) for item in blocked_items(items)]
 
 
+def _event_block_mismatch(item: Item) -> Optional[str]:
+    """How a blocked ticket's event spec and Needs routing disagree, if at all.
+
+    Only tickets are checked, and only when their block comments were read:
+    an unread comment cannot show whether a spec is there.
+    """
+    if item.parent is None or item.block_comments_error:
+        return None
+    if item.block_event is not None:
+        if item.needs == "external-event":
+            return None
+        return "well-formed event spec without Needs: external-event"
+    if item.needs == "external-event":
+        return "Needs: external-event without a well-formed event spec"
+    return None
 # Approval may adopt an unset Class only from an explicit, whole-line
 # proposal: no agent infers or writes a Class from plan prose on Nate's
 # behalf. The value match below is exact, so a fuzzy line stays with him.
@@ -12498,7 +12527,7 @@ def cmd_brief(
         cleared_blocks = named_section(
             "cleared_blocks", lambda: cleared_blocks_json(items, now)
         )
-        blocked = section("blocked", lambda: blocked_json(items), [])
+        blocked = section("blocked", lambda: blocked_json(items, now), [])
         human = section("human_steps", lambda: human_step_json(items, now), [])
         machine_local = section(
             "machine_local_steps",

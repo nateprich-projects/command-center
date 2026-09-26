@@ -53,6 +53,12 @@ either is non-empty, as advisory lists with `reason`, `blocked_reason` and
 `blockers`. Waiting work, not actionable work: never fold them into the
 queues above or the total.
 
+Then `blocked`, whenever non-empty: show each ticket's block reason and
+conditions. For an `event_condition`, name its agent, job and outcome, and
+render `event_wait` as the elapsed time since its `after` timestamp. Flag a
+row carrying `event_mismatch` as inconsistent and say its direction: the
+event spec and `Needs: external-event` disagree.
+
 Then `closed_itself`, newest first, with title and closed-at time. Say
 "closed itself with drift" naming every drift signal when `drift` is
 non-empty; say "closed itself cleanly" when empty.

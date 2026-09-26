@@ -4240,3 +4240,4 @@
 {"agent": "codex", "api_cost": {"gh_calls": 46, "graphql_points": null}, "graphql_by_caller": {"unattributed": {"calls": 38, "points": null, "remaining": 1288}}, "phase": "api_cost", "run": "0eea441a5bb6", "ts": 1790383425}
 {"agent": "codex", "do": "ticket", "phase": "bind", "run": "e38a02a7b8ec", "ts": 1790383466, "work": "nateprich-projects/Fantasy-GM#260"}
 {"agent": "codex", "api_cost": {"gh_calls": 105, "graphql_points": null}, "graphql_by_caller": {"begin": {"calls": 22, "points": 75, "remaining": 1214}, "unattributed": {"calls": 1, "points": null, "remaining": null}}, "phase": "api_cost", "run": "e38a02a7b8ec", "ts": 1790383472}
+{"agent": "codex", "api_cost": {"gh_calls": 40, "graphql_points": null}, "graphql_by_caller": {"unattributed": {"calls": 31, "points": null, "remaining": 1119}}, "phase": "api_cost", "run": "acc2112a0c76", "ts": 1790383519}

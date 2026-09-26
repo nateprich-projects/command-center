@@ -93,6 +93,7 @@ OUTCOMES = [
     "config-drift",        # a Codex run's settings differ from codex_run.py (#1316);
                            # not `skipped-*`, which the watchdog treats as healthy
     "skipped-provider-quota",  # the model provider refused: its usage window is spent
+    "skipped-outside-window",  # Claude's Saturday-morning window is closed (#1557)
     "budget-exhausted",     # begin could not start after the GraphQL pool hit zero
     "errored",             # tried and failed
 ]

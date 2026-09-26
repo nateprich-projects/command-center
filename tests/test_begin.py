@@ -1807,7 +1807,9 @@ def test_the_role_refusal_comes_before_the_project_read(monkeypatch, capsys):
 
 def test_codex_implements_both_tiers_and_muse_reviews():
     assert funnel.AGENTS_BY_ROLE["implement"] == {
-        "codex": frozenset(funnel.TIERS)}
+        "codex": frozenset(funnel.TIERS),
+        "claude": frozenset(funnel.TIERS + (None,)),
+    }
     assert funnel._begin_role_refusal("codex", "standard", "implement") is None
     assert funnel._begin_role_refusal("codex", "escalated", "implement") is None
     assert funnel._begin_role_refusal("muse", "standard", "review") is None
@@ -2019,6 +2021,8 @@ def test_main_supplies_repo_readiness_to_an_implementing_begin_path(
     monkeypatch, agent
 ):
     _allow_begin(monkeypatch)
+    # Claude's lane is closed outside Saturday morning (#1557).
+    monkeypatch.setattr(funnel, "_local_time", lambda now: SATURDAY_0500)
     project, ticket = _ticket(74, 75)
     rows = [project, ticket]
     readiness = {
@@ -3288,3 +3292,102 @@ def test_plan_needs_nate_reads_only_the_visible_open_categories():
         "## Needs Nate\n\n"
         "- Gates: answered 2026-09-24T06:00:00Z by Nate. Agents may.\n"
     ) is False
+
+
+# Claude's Saturday-morning implement lane (#1557).
+
+SATURDAY_0500 = datetime(2026, 9, 26, 5, 0)
+SATURDAY_1114 = datetime(2026, 9, 26, 11, 14)
+SATURDAY_1115 = datetime(2026, 9, 26, 11, 15)
+FRIDAY_2300 = datetime(2026, 9, 25, 23, 0)
+
+
+def test_claude_window_is_saturday_before_eleven_fifteen():
+    assert funnel.claude_window_refusal(SATURDAY_0500) is None
+    assert funnel.claude_window_refusal(SATURDAY_1114) is None
+    assert "11:15" in funnel.claude_window_refusal(SATURDAY_1115)
+    assert "Saturdays only" in funnel.claude_window_refusal(FRIDAY_2300)
+
+
+def test_claude_implements_every_tier_and_untiered():
+    for tier in funnel.TIERS + (None,):
+        assert funnel._begin_role_refusal("claude", tier, "implement") is None
+
+
+def test_claude_outside_the_window_stops_before_usage_or_project(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(funnel, "_start_begin_heartbeat",
+                        lambda agent: "run-id")
+    monkeypatch.setattr(funnel, "_local_time", lambda now: SATURDAY_1115)
+    monkeypatch.setattr(usage, "read_agent", lambda *args: pytest.fail(
+        "the Claude lane reads no budget"))
+    monkeypatch.setattr(funnel, "load_items", lambda *args, **kwargs:
+                        pytest.fail("a closed window reads no Project"))
+
+    assert funnel.main(["begin", "--agent", "claude", "--role",
+                        "implement"]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["gate"] == "time"
+    assert result["do"] == "stop"
+
+
+def test_claude_inside_the_window_is_unmetered():
+    import usage as usage_module
+
+    original = funnel._local_time
+    try:
+        funnel._local_time = lambda now: SATURDAY_0500
+        saved = usage_module.read_agent
+        usage_module.read_agent = lambda *args: pytest.fail(
+            "the Claude lane reads no budget")
+        try:
+            import heartbeat
+
+            start = funnel._start_begin_heartbeat
+            funnel._start_begin_heartbeat = lambda agent: "run-id"
+            try:
+                out, reading = funnel._begin_preflight(
+                    NOW, "claude", False, None)
+            finally:
+                funnel._start_begin_heartbeat = start
+        finally:
+            usage_module.read_agent = saved
+    finally:
+        funnel._local_time = original
+    assert out["gate"] == "ok"
+    assert out["unmetered"] is True
+    assert reading["unmetered"] is True
+
+
+def test_claude_ticket_begin_carries_the_packet_and_claude_vendor_block(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(funnel, "_local_time", lambda now: SATURDAY_0500)
+    project, ticket = _ticket(81, 80)
+    calls = []
+    monkeypatch.setattr(
+        funnel,
+        "implementation_packet",
+        lambda repo, number, agent: (
+            calls.append((repo, number, agent)) or {"repo": repo}
+        ),
+    )
+
+    result, _ = _implementing_begin(
+        monkeypatch, capsys, [project, ticket], agent="claude", tier=None,
+        caller_role="implement",
+    )
+
+    assert result["do"] == "ticket"
+    assert result["vendor"] == funnel.CLAUDE_IMPLEMENT_VENDOR
+    assert "finish-ticket --agent claude" in (
+        result["vendor"]["answer_handoff"])
+    assert calls == [(ticket.repo, ticket.number, "claude")]
+
+
+def test_skipped_outside_window_is_a_heartbeat_outcome():
+    import heartbeat
+
+    assert "skipped-outside-window" in heartbeat.OUTCOMES

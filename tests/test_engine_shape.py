@@ -24,6 +24,9 @@ sys.path.insert(0, str(ROOT))
 INVESTIGATE_SHAPE_FIXTURES = json.loads(
     (ROOT / "tests/fixtures/investigate_shape_excerpts.json").read_text(
         encoding="utf-8"))
+SHAPE_THREAD_1195 = json.loads(
+    (ROOT / "tests/fixtures/shape_thread_1195.json").read_text(
+        encoding="utf-8"))
 
 import funnel  # noqa: E402
 from engine import shape  # noqa: E402
@@ -91,6 +94,7 @@ def idea(number=42, **kw):
         "blocked_by_refs": [],
         "body": body,
         "labels": ["needs-shaping"],
+        "issue_comments": [],
     }
     data.update(kw)
     return Item(**data)
@@ -1752,6 +1756,86 @@ def test_collect_performs_no_subprocess_call(monkeypatch):
     assert found["idea"]["ref"] == REPO + "#42"
 
 
+def test_issue_thread_section_is_chronological_and_verbatim():
+    later_body = "Second comment, with its trailing lines.\n\n"
+    section = shape.issue_thread_section([
+        {"author": {"login": "nate"},
+         "createdAt": "2026-09-25T02:00:00Z", "body": later_body},
+        {"author": {"login": "muse"},
+         "createdAt": "2026-09-25T01:00:00Z", "body": "First comment."},
+    ])
+    assert section.startswith("## Issue thread\n\n### @muse —")
+    assert section.index("First comment.") < section.index(
+        "Second comment, with its trailing lines.")
+    assert "### @nate — 2026-09-25T02:00:00Z\n\n" + later_body in section
+
+
+def test_issue_thread_section_is_absent_for_an_empty_thread():
+    assert shape.issue_thread_section([]) is None
+
+
+def test_recorded_1195_shape_packet_carries_both_falsification_comments(
+        monkeypatch):
+    recorded = SHAPE_THREAD_1195
+    issue = recorded["issue"]
+    repo = issue["url"].split("/issues/", 1)[0].removeprefix(
+        "https://github.com/")
+    current = idea(
+        issue["number"], repo=repo, title=issue["title"],
+        url=issue["url"], body=issue["body"],
+        issue_comments=recorded["comments"],
+    )
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [current])
+    monkeypatch.setattr(
+        shape, "fetch_repo_text",
+        lambda repo, path: ("{} text".format(path), False))
+    packet = shape.collect(repo, issue["number"], now=NOW)
+    thread = packet["issue_thread"]
+    assert len(recorded["comments"]) == 2
+    assert packet["idea"]["body"] == issue["body"]
+    for comment in recorded["comments"]:
+        assert comment["body"] in thread
+    assert thread.index(recorded["comments"][0]["body"]) < thread.index(
+        recorded["comments"][1]["body"])
+
+
+def test_issue_thread_section_fails_closed_without_timestamp():
+    with pytest.raises(funnel.GitHubError, match="complete issue thread"):
+        shape.issue_thread_section([
+            {"author": {"login": "nate"}, "body": "Missing time."},
+        ])
+
+
+def test_collect_requests_thread_with_the_project_item_read(monkeypatch):
+    comments = [{
+        "author": {"login": "nate"},
+        "createdAt": "2026-09-25T01:00:00Z",
+        "body": "The old premise is false.",
+    }]
+    current = idea(42, issue_comments=comments)
+    received = {}
+
+    def load_items(**kwargs):
+        received.update(kwargs)
+        return [current]
+
+    monkeypatch.setattr(funnel, "load_items", load_items)
+    monkeypatch.setattr(
+        shape, "fetch_repo_text",
+        lambda repo, path: ("{} text".format(path), False))
+    found = shape.collect(REPO, 42, now=NOW)
+    assert received == {"shape_issue": (REPO, 42)}
+    assert "## Issue thread" in found["issue_thread"]
+    assert "The old premise is false." in found["issue_thread"]
+
+
+def test_collect_fails_closed_when_thread_was_not_read(monkeypatch):
+    current = idea(42, issue_comments=None)
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [current])
+    with pytest.raises(funnel.GitHubError, match="could not read comments"):
+        shape.collect(REPO, 42, now=NOW)
+
+
 def test_the_entry_points_are_executable():
     for name in ("shape-packet", "shape-apply"):
         entry = ROOT / name
@@ -1767,7 +1851,7 @@ def test_packet_cli_prints_valid_json_with_every_field(
     current = idea(42, klass=None)
     sibling = idea(89, status="Shaped", body="A sibling plan.")
     monkeypatch.setattr(
-        funnel, "load_items", lambda: [current, sibling])
+        funnel, "load_items", lambda **kwargs: [current, sibling])
     monkeypatch.setattr(
         shape, "fetch_repo_text",
         lambda repo, path: ("{} text".format(path), False))
@@ -1781,12 +1865,23 @@ def test_packet_cli_prints_valid_json_with_every_field(
     assert found["agents_md"] == "AGENTS.md text"
     assert [row["ref"] for row in found["sibling_plans"]] == \
         [REPO + "#89"]
+    assert "issue_thread" not in found
 
 
 def test_packet_cli_reports_an_unknown_idea(monkeypatch, capsys):
-    monkeypatch.setattr(funnel, "load_items", lambda: [idea(43)])
+    monkeypatch.setattr(
+        funnel, "load_items", lambda **kwargs: [idea(43)])
     assert shape.packet_main(["42", "--repo", REPO]) == 1
     assert "shape-packet:" in capsys.readouterr().err
+
+
+def test_packet_cli_reports_an_unreadable_issue_thread(monkeypatch, capsys):
+    def unreadable(**kwargs):
+        raise funnel.GitHubError("could not read comments for {}#42".format(REPO))
+
+    monkeypatch.setattr(funnel, "load_items", unreadable)
+    assert shape.packet_main(["42", "--repo", REPO]) == 1
+    assert "could not read comments" in capsys.readouterr().err
 
 
 def test_apply_cli_reads_the_answer_from_stdin(

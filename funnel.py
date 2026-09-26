@@ -753,6 +753,10 @@ class Item:
     block_comments_error: Optional[str] = None
     satisfied_block_record: Optional[Dict[str, object]] = None
     open_blockers: List[str] = field(default_factory=list)
+    # The shape packet can request the target idea's complete issue thread
+    # in the same GraphQL operation that loads Project items. Other funnel
+    # callers leave this unset and do not pay for comment reads.
+    issue_comments: Optional[List[Dict[str, object]]] = None
     dead_blockers: List[str] = field(default_factory=list)
     # Complete native Issue.blockedBy refs from the Project item query.
     # None means that the connection was missing, malformed, or truncated.
@@ -7885,6 +7889,117 @@ query($login: String!, $number: Int!, $cursor: String) {
 }
 """ % PROJECT_ITEM_PAGE_SIZE
 
+
+SHAPE_ISSUE_COMMENTS_PAGE_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $cursor: String!) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      comments(first: 100, after: $cursor) {
+        nodes { author { login } body createdAt }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
+def _item_query_with_shape_comments(repo: str, number: int) -> str:
+    """Add the target idea's first comment page to the Project item query."""
+    try:
+        owner, name = repo.split("/", 1)
+    except ValueError as exc:
+        raise GitHubError("invalid repository ref {}".format(repo)) from exc
+    if (not owner or not name or not isinstance(number, int)
+            or isinstance(number, bool) or number < 1):
+        raise GitHubError("invalid shape issue ref {}#{}".format(repo, number))
+    closing = ITEM_QUERY.rfind("\n}")
+    if closing < 0:
+        raise GitHubError("could not extend the Project item query")
+    issue_field = (
+        "\n  shapeIssue: repository(owner: {}, name: {}) {{\n"
+        "    issue(number: {}) {{\n"
+        "      comments(first: 100) {{\n"
+        "        nodes {{ author {{ login }} body createdAt }}\n"
+        "        pageInfo {{ hasNextPage endCursor }}\n"
+        "      }}\n"
+        "    }}\n"
+        "  }}\n"
+    ).format(json.dumps(owner), json.dumps(name), number)
+    return ITEM_QUERY[:closing] + issue_field + ITEM_QUERY[closing:]
+
+
+def _shape_issue_comments_from_response(
+    data: object, repo: str, number: int,
+) -> List[Dict[str, object]]:
+    """Read every issue comment, failing closed on an incomplete connection."""
+    repository = data.get("shapeIssue") if isinstance(data, dict) else None
+    issue = repository.get("issue") if isinstance(repository, dict) else None
+    connection = issue.get("comments") if isinstance(issue, dict) else None
+    comments: List[Dict[str, object]] = []
+    cursors = set()
+
+    def add_page(page: object) -> Tuple[bool, Optional[str]]:
+        if not isinstance(page, dict):
+            raise GitHubError(
+                "could not read comments for {}#{}".format(repo, number)
+            )
+        nodes = page.get("nodes")
+        page_info = page.get("pageInfo")
+        if (not isinstance(nodes, list) or not isinstance(page_info, dict)
+                or not isinstance(page_info.get("hasNextPage"), bool)):
+            raise GitHubError(
+                "could not read a complete comments connection for {}#{}".
+                format(repo, number)
+            )
+        for node in nodes:
+            if not isinstance(node, dict):
+                raise GitHubError(
+                    "could not read a complete comments connection for {}#{}".
+                    format(repo, number)
+                )
+            comments.append(node)
+        has_next = page_info["hasNextPage"]
+        cursor = page_info.get("endCursor")
+        if has_next and (not isinstance(cursor, str) or not cursor):
+            raise GitHubError(
+                "comments pagination is incomplete for {}#{}".
+                format(repo, number)
+            )
+        return has_next, cursor if isinstance(cursor, str) else None
+
+    if not isinstance(connection, dict):
+        raise GitHubError("could not read comments for {}#{}".format(
+            repo, number
+        ))
+    has_next, cursor = add_page(connection)
+    owner, name = repo.split("/", 1)
+    while has_next:
+        if cursor in cursors:
+            raise GitHubError(
+                "comments pagination did not advance for {}#{}".
+                format(repo, number)
+            )
+        cursors.add(cursor)
+        page_data = gh_graphql(
+            SHAPE_ISSUE_COMMENTS_PAGE_QUERY,
+            owner=owner, name=name, number=number, cursor=cursor,
+        )
+        page_repository = (
+            page_data.get("repository")
+            if isinstance(page_data, dict) else None
+        )
+        page_issue = (
+            page_repository.get("issue")
+            if isinstance(page_repository, dict) else None
+        )
+        page_connection = (
+            page_issue.get("comments") if isinstance(page_issue, dict) else None
+        )
+        has_next, cursor = add_page(page_connection)
+    return comments
+
 # The paged list is the cheap gate input. History and child timestamps are
 # fetched below only for the candidate items a caller has kept after its cheap
 # checks; they do not belong on every Project row.
@@ -9075,6 +9190,7 @@ def load_items(
     include_details: bool = True,
     member_repo_names: Optional[Sequence[str]] = None,
     timings: Optional[Dict[str, object]] = None,
+    shape_issue: Optional[Tuple[str, int]] = None,
 ) -> List[Item]:
     global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     members = set(
@@ -9084,6 +9200,7 @@ def load_items(
     )
     items: List[Item] = []
     cursor = None
+    shape_comments: Optional[List[Dict[str, object]]] = None
     project_started = time.perf_counter() if timings is not None else None
     block_comment_seconds = 0.0
     try:
@@ -9092,7 +9209,15 @@ def load_items(
             if cursor:
                 variables["cursor"] = cursor
             _PROJECT_ITEM_PAGE_COUNT += 1
-            project = gh_graphql(ITEM_QUERY, **variables)["user"]["projectV2"]
+            query = ITEM_QUERY
+            if shape_issue is not None and cursor is None:
+                query = _item_query_with_shape_comments(*shape_issue)
+            response = gh_graphql(query, **variables)
+            if shape_issue is not None and cursor is None:
+                shape_comments = _shape_issue_comments_from_response(
+                    response, *shape_issue
+                )
+            project = response["user"]["projectV2"]
             if project is None:
                 raise GitHubError(
                     "Project {}/{} not found or not visible".format(
@@ -9135,6 +9260,16 @@ def load_items(
             _record_begin_load_phase(
                 timings, "block_comments", block_comment_seconds
             )
+    if shape_issue is not None:
+        if shape_comments is None:
+            raise GitHubError(
+                "could not read comments for {}#{}".format(*shape_issue)
+            )
+        target_ref = "{}#{}".format(*shape_issue)
+        for item in items:
+            if item.ref == target_ref:
+                item.issue_comments = shape_comments
+                break
     if include_details:
         _begin_load_timed(
             timings, "item_details", lambda: hydrate_item_details(items)

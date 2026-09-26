@@ -55,9 +55,13 @@ queues above or the total.
 
 Then `blocked`, whenever non-empty: show each ticket's block reason and
 conditions. For an `event_condition`, name its agent, job and outcome, and
-render `event_wait` as the elapsed time since its `after` timestamp. Flag a
-row carrying `event_mismatch` as inconsistent and say its direction: the
-event spec and `Needs: external-event` disagree.
+render `event_wait` as the elapsed time since its `after` timestamp.
+
+Then `event_block_inconsistencies`, only when non-empty: each row shows
+`ref`, `title`, `needs`, and the mismatch direction; include
+`event_condition` when present, and omit the section when the list is empty.
+These rows are diagnostics for disagreement between the event spec and
+`Needs: external-event`.
 
 Then `closed_itself`, newest first, with title and closed-at time. Say
 "closed itself with drift" naming every drift signal when `drift` is
@@ -105,8 +109,9 @@ status is an unread scan, never zero.
 Then the gate counts (`counts_by_gate`) on one line. Then anything unusual,
 and only if present: `prose_dependencies`, `suspected_human_steps`,
 `unclassed_captures`, `needs_class`, `stale_locks_taken_over`, `stranded`,
-`in_motion` with `wip_limit`, `awaiting_breakdown`, `unattended_merges`,
-`run_summary`, `agent_health`, `resend_ratio`, `rejected_merges`, `degraded`,
+`event_block_inconsistencies`, `in_motion` with `wip_limit`,
+`awaiting_breakdown`, `unattended_merges`, `run_summary`, `agent_health`,
+`resend_ratio`, `rejected_merges`, `degraded`,
 `closed_with_access_vocabulary`. A suspected human step is report-only: do
 not clear its `blocked` label, restate it, or split it here.
 

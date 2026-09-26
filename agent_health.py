@@ -449,19 +449,31 @@ def assess(
                     )
                 )
 
+    bound_runs = set(heartbeat.bindings(rows))
     dying = [
         r for r in open_starts
         if now - (r.get("ts") or 0) > unfinished_seconds
         and now - (r.get("ts") or 0) < week
     ]
-    if len(dying) >= dying_threshold:
+    bound_dying = [r for r in dying if r.get("run") in bound_runs]
+    never_bound = [r for r in dying if r.get("run") not in bound_runs]
+    if len(bound_dying) >= dying_threshold:
         problems.append(
             "`{}` has {} runs this week that started and never finished — "
             "tickets {}. That is what a session killed mid-work by a rate limit "
             "looks like. Check whether the reserves in `usage.py` are too low.".format(
                 agent,
-                len(dying),
-                ", ".join(str(r.get("ticket")) for r in dying[-5:]),
+                len(bound_dying),
+                ", ".join(str(r.get("ticket")) for r in bound_dying[-5:]),
+            )
+        )
+    if len(never_bound) >= dying_threshold:
+        problems.append(
+            "`{}` has {} begins this week that started and never returned a job — "
+            "the begin reply most likely passed the 180 s budget (#1519). "
+            "This is not a usage-reserve problem.".format(
+                agent,
+                len(never_bound),
             )
         )
 

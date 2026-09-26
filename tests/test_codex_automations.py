@@ -21,6 +21,7 @@ EVERY_HOUR = ("RRULE:FREQ=WEEKLY;BYDAY=SU,MO,TU,WE,TH,FR,SA;BYHOUR="
               + ",".join(str(hour) for hour in range(24))
               + ";BYMINUTE=4;BYSECOND=0")
 WEEKEND = "RRULE:FREQ=WEEKLY;BYDAY=SA,SU;BYHOUR=2,3;BYMINUTE=4;BYSECOND=0"
+_NO_ERROR_FIELD = object()
 
 
 def _automation(root, name, *, model="gpt-6-luna", effort="max",
@@ -63,6 +64,41 @@ def _manifest_set(root, **overrides):
         if spec.pop("absent", False):
             continue
         _automation(root, name, **spec)
+
+
+def _write_rollout(root, timestamp, *, source="automation",
+                   error=_NO_ERROR_FIELD, malformed=False):
+    directory = pathlib.Path(root) / "2026" / "09" / "26"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / ("rollout-2026-09-26T{}.jsonl".format(timestamp))
+    if malformed:
+        metadata = {"type": "session_meta",
+                    "payload": {"thread_source": source}}
+        path.write_text(json.dumps(metadata) + '\n{"type":"event_msg"\n')
+        return path
+
+    events = [
+        {"type": "session_meta", "payload": {"thread_source": source}},
+        {"type": "response_item", "payload": {
+            "private_transcript": "PRIVATE_MEMBER_REPO_TRANSCRIPT"}},
+    ]
+    task_complete = {"type": "task_complete"}
+    if error is not _NO_ERROR_FIELD:
+        task_complete["error"] = error
+    events.append({"type": "event_msg", "payload": task_complete})
+    path.write_text("".join(json.dumps(event) + "\n" for event in events))
+    return path
+
+
+def _write_automation_window(root, *, errors=0):
+    timestamps = ["13-41-00", "13-42-00", "13-43-00", "13-44-00",
+                  "13-45-00"]
+    for index, timestamp in enumerate(timestamps):
+        error = {"message": "failure at rollout {}".format(timestamp)}
+        _write_rollout(
+            root, timestamp,
+            error=error if index >= len(timestamps) - errors else _NO_ERROR_FIELD,
+        )
 
 
 # --- the manifest -----------------------------------------------------------
@@ -248,25 +284,115 @@ def test_notes_report_status_and_memory_size(tmp_path):
 
 def test_a_matching_set_passes_with_its_notes(tmp_path):
     _manifest_set(tmp_path)
+    rollouts = tmp_path / "sessions"
+    _write_automation_window(rollouts)
 
-    check = funnel.check_codex_automations(str(tmp_path))
+    check = funnel.check_codex_automations(
+        str(tmp_path), rollout_root=rollouts)
 
     assert check.ok is True
     assert check.name == "codex automations"
     assert "command-center-tickets-hourly: PAUSED" in check.found
+    expected_notes = codex_run.automation_findings(str(tmp_path))["notes"]
+    assert check.found == "\n".join("  " + note for note in expected_notes)
+    assert "rollout" not in check.found
 
 
 def test_drift_fails_with_the_edit_procedure(tmp_path):
     _manifest_set(tmp_path, **{
         "command-center-tickets-hourly": {"model": "gpt-5.6-luna"}})
+    rollouts = tmp_path / "sessions"
+    _write_automation_window(rollouts)
 
-    check = funnel.check_codex_automations(str(tmp_path))
+    check = funnel.check_codex_automations(
+        str(tmp_path), rollout_root=rollouts)
 
     assert check.ok is False
     assert "model expected gpt-6-luna, found gpt-5.6-luna" in check.found
     assert "memory" not in check.found  # notes are not things to fix
     assert check.fix == funnel.CODEX_AUTOMATIONS_FIX
     assert "quit the ChatGPT app" in check.fix
+
+
+def test_recorded_nine_run_401_streak_fails_and_redacts_error_tokens(tmp_path):
+    _manifest_set(tmp_path)
+    rollouts = tmp_path / "sessions"
+    timestamps = ["15-11-00", "15-31-00", "15-42-00", "15-51-00",
+                  "16-00-00", "16-05-00", "16-11-00", "16-20-00",
+                  "16-31-00"]
+    error = {
+        "message": "401 Incorrect API key: sk-proj-0123456789abcdefgh",
+        "codex_error_info": "Authorization: Bearer " + "a" * 40,
+    }
+    for timestamp in timestamps:
+        _write_rollout(rollouts, timestamp, error=error)
+
+    check = funnel.check_codex_automations(
+        str(tmp_path), rollout_root=rollouts)
+
+    assert check.ok is False
+    assert "5 of 5 newest Codex automation rollouts errored" in check.found
+    assert "401 Incorrect API key" in check.found
+    assert "[REDACTED]" in check.found
+    assert "sk-proj-0123456789abcdefgh" not in check.found
+    assert "a" * 40 not in check.found
+    assert "PRIVATE_MEMBER_REPO_TRANSCRIPT" not in check.found
+
+
+def test_mixed_rollouts_fail_with_count_and_newest_error_only(tmp_path):
+    _manifest_set(tmp_path)
+    rollouts = tmp_path / "sessions"
+    _write_automation_window(rollouts, errors=2)
+
+    check = funnel.check_codex_automations(
+        str(tmp_path), rollout_root=rollouts)
+
+    assert check.ok is False
+    assert "2 of 5 newest Codex automation rollouts errored" in check.found
+    assert "failure at rollout 13-45-00" in check.found
+    assert "failure at rollout 13-44-00" not in check.found
+    assert "PRIVATE_MEMBER_REPO_TRANSCRIPT" not in check.found
+
+
+def test_personal_thread_error_does_not_fail_automation_row(tmp_path):
+    _manifest_set(tmp_path)
+    rollouts = tmp_path / "sessions"
+    _write_automation_window(rollouts)
+    _write_rollout(
+        rollouts, "13-50-00", source="user",
+        error={"message": "personal thread failure"},
+    )
+
+    check = funnel.check_codex_automations(
+        str(tmp_path), rollout_root=rollouts)
+
+    assert check.ok is True
+    assert "rollout" not in check.found
+    assert "personal thread failure" not in check.found
+
+
+def test_unreadable_rollout_directory_reports_unknown(tmp_path):
+    _manifest_set(tmp_path)
+
+    check = funnel.check_codex_automations(
+        str(tmp_path), rollout_root=tmp_path / "missing-sessions")
+
+    assert check.ok is False
+    assert "unknown" in check.found.lower()
+
+
+def test_unparseable_rollout_set_reports_unknown(tmp_path):
+    _manifest_set(tmp_path)
+    rollouts = tmp_path / "sessions"
+    _write_automation_window(rollouts)
+    _write_rollout(rollouts, "13-50-00", malformed=True)
+
+    check = funnel.check_codex_automations(
+        str(tmp_path), rollout_root=rollouts)
+
+    assert check.ok is False
+    assert "unknown" in check.found.lower()
+    assert "PRIVATE_MEMBER_REPO_TRANSCRIPT" not in check.found
 
 
 def test_a_reader_that_raises_is_a_finding(monkeypatch):

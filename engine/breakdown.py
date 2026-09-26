@@ -50,6 +50,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import funnel  # noqa: E402
+from engine.shape import issue_thread_section  # noqa: E402
 
 
 class BreakdownError(Exception):
@@ -153,7 +154,7 @@ def sizing_standard(skill_text: Optional[str] = None) -> str:
 
 
 def fetch_plan(repo: str, number: int) -> dict:
-    """The project issue behind the breakdown: identity plus its plan body."""
+    """Read the project plan and its complete parent issue thread."""
     data = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo, "--json",
         "number,title,url,body,state")
@@ -161,6 +162,7 @@ def fetch_plan(repo: str, number: int) -> dict:
         raise funnel.GitHubError(
             "could not read project {}#{}".format(repo, number))
     data["ref"] = "{}#{}".format(repo, number)
+    data["issue_comments"] = funnel.read_issue_comments(repo, number)
     return data
 
 
@@ -196,10 +198,11 @@ def fetch_siblings(repo: str, number: int) -> List[dict]:
 
 def build_packet(*, repo: str, number: int, plan: dict,
                  siblings: Sequence[dict], sizing: str,
-                 collected_at: str) -> Dict:
+                 collected_at: str,
+                 issue_comments: Optional[Sequence[Dict]] = None) -> Dict:
     """Assemble the packet from already-fetched pieces. Pure: no IO."""
     plan = plan or {}
-    return {
+    packet = {
         "project": {
             "ref": "{}#{}".format(repo, number),
             "repo": repo,
@@ -214,6 +217,11 @@ def build_packet(*, repo: str, number: int, plan: dict,
         "sizing_standard_source": SIZING_SKILL_PATH,
         "collected_at": collected_at,
     }
+    issue_thread = issue_thread_section(
+        issue_comments if issue_comments is not None else [])
+    if issue_thread is not None:
+        packet["issue_thread"] = issue_thread
+    return packet
 
 
 def collect(project: str, repo: Optional[str] = None, *,
@@ -224,13 +232,15 @@ def collect(project: str, repo: Optional[str] = None, *,
     text = (project or "").strip()
     default = funnel.resolve_repo(repo) if text.isdigit() else repo
     resolved_repo, number = parse_project_ref(project, default)
+    plan = fetch_plan(resolved_repo, number)
     return build_packet(
         repo=resolved_repo,
         number=number,
-        plan=fetch_plan(resolved_repo, number),
+        plan=plan,
         siblings=fetch_siblings(resolved_repo, number),
         sizing=sizing_standard(),
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),
+        issue_comments=plan.get("issue_comments"),
     )
 
 

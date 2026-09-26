@@ -17456,9 +17456,10 @@ PROJECT_LOAD_READS_HISTORY: Dict[str, bool] = {
     "show": True,
     # ideas() orders by status_since and prints how long each has waited.
     "ideas": True,
-    # merge_blockers -> rejected_merges reads regression items' status_since,
-    # and closing the parent runs drift_since_approval. #1611 hydrates the
-    # regression items in place; until that lands, merge keeps the full load.
+    # merge_blockers -> rejected_merges reads regression items' status_since.
+    # #1611 hydrates those items when merge starts from a compact begin/session
+    # view, but this CLI command reads history and keeps the full load under
+    # ticket 3 of #1616.
     "merge": True,
     # item_json prints waited and breakdown latency.
     "next": True,

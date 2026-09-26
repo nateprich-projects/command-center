@@ -67,6 +67,7 @@ BEGIN_FETCH_POOL_SIZE = 4
 # reading the real ~/.claude.
 CHECKOUT_ROOT = pathlib.Path(__file__).resolve().parent
 CLAUDE_DIR = pathlib.Path.home() / ".claude"
+CODEX_ROLLOUT_ROOT = pathlib.Path.home() / ".codex" / "sessions"
 
 #: The vendor-specific facts a Codex implementation run needs in addition to
 #: the ticket packet. Keep these structured and code-owned: the shortened
@@ -7421,7 +7422,147 @@ CODEX_AUTOMATIONS_FIX = (
     "manifest, relaunch, and rerun funnel doctor (#1321)")
 
 
-def check_codex_automations(root: Optional[str] = None) -> Check:
+CODEX_AUTOMATION_ROLLOUT_ERROR_FIX = (
+    "resolve the newest Codex automation rollout error, then rerun funnel doctor")
+CODEX_AUTOMATION_ROLLOUT_UNKNOWN_FIX = (
+    "restore readable Codex automation rollouts, then rerun funnel doctor")
+CODEX_AUTOMATION_ROLLOUT_LIMIT = 5
+
+_CODEX_SENSITIVE_ERROR_KEY = re.compile(
+    r"(?i)(?:api|access|refresh|auth)?[_-]?(?:key|token|secret|credential|password|authorization)"
+)
+_CODEX_SENSITIVE_ERROR_ASSIGNMENT = re.compile(
+    r"(?i)([\"']?\b(?:[a-z0-9_-]*(?:key|token|secret|credential|password|authorization))"
+    r"\b[\"']?\s*[:=]\s*[\"']?)([^\"'\s,;}\]]+)([\"']?)"
+)
+_CODEX_BEARER_TOKEN = re.compile(
+    r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/-]{8,}"
+)
+_CODEX_KNOWN_TOKEN = re.compile(
+    r"(?i)\b(?:sk|sess|rk|pk|ghp|gho|ghu|ghs|github_pat|xox[baprs])[-_]"
+    r"[A-Za-z0-9_-]{8,}\b"
+)
+_CODEX_LONG_TOKEN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9+/=_-]{32,}(?![A-Za-z0-9])")
+
+
+def _codex_rollout_thread_source(path: pathlib.Path) -> str:
+    """Read only the session source marker needed to classify one rollout."""
+    with path.open("r", encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if not isinstance(event, dict) or event.get("type") != "session_meta":
+                raise ValueError("rollout has no readable session metadata")
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                raise ValueError("rollout session metadata is malformed")
+            source = payload.get("thread_source")
+            if not isinstance(source, str) or not source.strip():
+                raise ValueError("rollout thread source is missing")
+            return source
+    raise ValueError("rollout is empty")
+
+
+def _codex_rollout_error(path: pathlib.Path) -> Any:
+    """Extract only task_complete.error; reject malformed rollout JSONL."""
+    found = None
+    with path.open("r", encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError("rollout record is malformed")
+            payload = event.get("payload")
+            if (event.get("type") == "event_msg"
+                    and isinstance(payload, dict)
+                    and payload.get("type") == "task_complete"
+                    and "error" in payload
+                    and payload.get("error") is not None):
+                found = payload["error"]
+    return found
+
+
+def _redact_codex_error_value(value: Any) -> Any:
+    """Redact key and token material inside the isolated error field."""
+    if isinstance(value, dict):
+        return {
+            key: ("[REDACTED]" if _CODEX_SENSITIVE_ERROR_KEY.search(str(key))
+                  else _redact_codex_error_value(child))
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_codex_error_value(child) for child in value]
+    if not isinstance(value, str):
+        return value
+
+    text = _CODEX_SENSITIVE_ERROR_ASSIGNMENT.sub(
+        lambda match: match.group(1) + "[REDACTED]" + match.group(3), value)
+    text = _CODEX_BEARER_TOKEN.sub(r"\1[REDACTED]", text)
+    text = _CODEX_KNOWN_TOKEN.sub("[REDACTED]", text)
+    return _CODEX_LONG_TOKEN.sub("[REDACTED]", text)
+
+
+def _render_codex_error(value: Any) -> str:
+    """Render a redacted copy of the error field, never its rollout record."""
+    safe = _redact_codex_error_value(value)
+    rendered = json.dumps(safe, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"))
+    if len(rendered) > 1200:
+        rendered = rendered[:1200] + "… [truncated]"
+    return rendered
+
+
+def read_codex_automation_rollout_errors(
+        root: Optional[os.PathLike] = None) -> Optional[List[str]]:
+    """Read errors from the newest five automation rollouts in place.
+
+    ``None`` means the set could not be classified or parsed completely, so
+    callers must report unknown rather than healthy. Only task_complete.error
+    is retained or returned from each selected rollout.
+    """
+    rollout_root = pathlib.Path(root) if root is not None else CODEX_ROLLOUT_ROOT
+    if not rollout_root.is_dir():
+        return None
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    try:
+        paths = []
+        for directory, directories, filenames in os.walk(
+                str(rollout_root), onerror=raise_walk_error):
+            directories.sort()
+            for filename in filenames:
+                if filename.startswith("rollout-") and filename.endswith(".jsonl"):
+                    paths.append(pathlib.Path(directory) / filename)
+        paths.sort(key=lambda path: path.as_posix(), reverse=True)
+        if not paths:
+            return None
+
+        selected = []
+        for path in paths:
+            if _codex_rollout_thread_source(path) == "automation":
+                selected.append(path)
+                if len(selected) == CODEX_AUTOMATION_ROLLOUT_LIMIT:
+                    break
+        if len(selected) != CODEX_AUTOMATION_ROLLOUT_LIMIT:
+            return None
+
+        errors = []
+        for path in selected:
+            error = _codex_rollout_error(path)
+            if error is not None:
+                errors.append(_render_codex_error(error))
+        return errors
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def check_codex_automations(
+        root: Optional[str] = None,
+        *, rollout_root: Optional[os.PathLike] = None) -> Check:
     """Report Codex automations whose settings differ from the manifest.
 
     The app holds each automation's model, effort, schedule and status
@@ -7442,11 +7583,27 @@ def check_codex_automations(root: Optional[str] = None) -> Check:
                      "could not read the Codex automations ({})".format(
                          str(exc) or type(exc).__name__),
                      CODEX_AUTOMATIONS_FIX)
-    if findings["drift"]:
-        # Drift lines only: the doctor appends the fix to every line of a
-        # failing row, and a status note is not something to fix.
-        return Check(name, False, "\n".join(
-            "  " + line for line in findings["drift"]), CODEX_AUTOMATIONS_FIX)
+    rollout_errors = read_codex_automation_rollout_errors(rollout_root)
+    if findings["drift"] or rollout_errors is None or rollout_errors:
+        # Only actionable findings go in a failing row; ordinary status notes
+        # are not things to fix.
+        lines = ["  " + line for line in findings["drift"]]
+        fixes = []
+        if findings["drift"]:
+            fixes.append(CODEX_AUTOMATIONS_FIX)
+        if rollout_errors is None:
+            lines.append(
+                "  Codex automation rollout status unknown: the newest five "
+                "automation rollouts could not be read or parsed")
+            fixes.append(CODEX_AUTOMATION_ROLLOUT_UNKNOWN_FIX)
+        elif rollout_errors:
+            lines.append(
+                "  {} of {} newest Codex automation rollouts errored; newest "
+                "error: {}".format(
+                    len(rollout_errors), CODEX_AUTOMATION_ROLLOUT_LIMIT,
+                    rollout_errors[0]))
+            fixes.append(CODEX_AUTOMATION_ROLLOUT_ERROR_FIX)
+        return Check(name, False, "\n".join(lines), "; ".join(fixes))
     return Check(name, True, "\n".join(
         "  " + note for note in findings["notes"]), "")
 

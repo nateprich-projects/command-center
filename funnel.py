@@ -15766,8 +15766,10 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
     if released_claims:
         out["released_claims"] = released_claims
     review_phase_boundary("reconcile_orphaned_starts")
+    # Begin already holds the ticket PR snapshot; without it the reconcile
+    # ran its own `ticket_pr_facts` scan inside the reply budget (#1591).
     orphaned = attempt_reconcile(
-        "orphaned_starts", reconcile_orphaned_starts, items, now)
+        "orphaned_starts", reconcile_orphaned_starts, items, now, pr_facts)
     if orphaned:
         out["reconciled_starts"] = orphaned
     if reconcile_errors:

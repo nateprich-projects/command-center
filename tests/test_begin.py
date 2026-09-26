@@ -1567,6 +1567,39 @@ def test_ticket_branch_facts_failure_stops_with_an_error_gate(
     assert "could not establish ticket branch facts" in result["why"]
 
 
+def test_cmd_begin_hands_its_branch_facts_to_the_orphaned_start_reconcile(
+    monkeypatch, capsys
+):
+    """#1591: the reconcile ran its own `ticket_pr_facts` scan, 12-18 s of
+    the reply budget, when begin already held the same snapshot."""
+    _allow_begin(monkeypatch)
+    project, ticket = _ticket(88, 89)
+    facts = {ticket.ref: {"branch_exists": True}}
+    orphan_calls = []
+    monkeypatch.setattr(
+        funnel,
+        "ticket_pr_facts",
+        lambda rows: (_ for _ in ()).throw(
+            AssertionError("begin's snapshot must be reused")
+        ),
+    )
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+    monkeypatch.setattr(
+        funnel,
+        "reconcile_orphaned_starts",
+        lambda items, now, pr_facts=None: orphan_calls.append(pr_facts) or [],
+    )
+    monkeypatch.setattr(funnel, "awaiting_review", lambda rows: set())
+
+    assert funnel.cmd_begin(
+        [project, ticket], NOW, "zcode", "standard", False,
+        _pr_facts=facts,
+        _pr_facts_elapsed=0.25,
+    ) == 0
+
+    assert orphan_calls == [facts]
+
+
 def test_cmd_begin_uses_preloaded_branch_facts_and_records_parallel_time(
     monkeypatch, capsys
 ):

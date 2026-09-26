@@ -568,6 +568,33 @@ def test_packet_carries_every_field():
     json.dumps(found)  # the packet is JSON by contract
 
 
+def test_packet_ci_section_renders_per_check_conclusions_at_its_head():
+    found = review.build_packet(
+        repo=REPO,
+        pr_number=7,
+        pr_view=pr_view(statusCheckRollup=[
+            {"name": "offline", "conclusion": "SUCCESS",
+             "status": "COMPLETED"},
+        ]),
+        diff="diff --git a/funnel.py b/funnel.py\n",
+        ticket=ticket(),
+        plan_md="# design record",
+        plan_md_missing=False,
+        open_prs=[],
+        verdict=verdict(),
+        stop_counter=dict(STOP_COUNTER),
+        collected_at="2026-09-13T00:00:00+00:00",
+        pr_comments=empty_pr_comments(),
+    )
+
+    assert found["head_sha"] == SHA
+    assert found["ci"]["state"] == "green"
+    assert found["ci"]["checks"] == [
+        {"name": "offline", "conclusion": "SUCCESS", "state": None,
+         "status": "COMPLETED"},
+    ]
+
+
 # -- prior instalments of the same ticket (#908) ----------------------------
 
 def merged_row(number, branch="ticket/9", **kw):

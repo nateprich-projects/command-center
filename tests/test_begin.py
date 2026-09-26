@@ -781,6 +781,40 @@ def test_begin_runs_parked_wakes_as_a_reconcile_step(monkeypatch, capsys):
     assert result["woke_parked"] == [items[0].ref]
 
 
+def test_begin_records_a_failed_parked_wakes_batch_and_writes_nothing(
+    monkeypatch, capsys
+):
+    # The wired GraphQL double answers every read with an empty response, so
+    # the batched comment read is partial: the pass is skipped and recorded,
+    # never rendered as "no wake date" (#1592).
+    items = [
+        _closed_project_item(
+            235, status="Parked", state_reason="NOT_PLANNED"
+        )
+    ]
+
+    result, calls, graphql_calls = _begin_with_reconcile_wired(
+        monkeypatch, capsys, items
+    )
+
+    assert "woke_parked" not in result
+    assert [
+        error for error in result["reconcile_errors"]
+        if error["step"] == "parked_wakes"
+    ] == [{
+        "step": "parked_wakes",
+        "error": "could not read comments for {}".format(items[0].ref),
+        "transient": False,
+    }]
+    assert [query for query, _ in graphql_calls if "comments(last:" in query]
+    assert not [
+        call for call in graphql_calls if "comments(last:" not in call[0]
+    ]
+    assert not [call for call in calls if call[:3] == ["gh", "issue", "reopen"]]
+    assert items[0].status == "Parked"
+    assert items[0].state == "CLOSED"
+
+
 def test_begin_retries_an_approval_at_the_current_head(monkeypatch, capsys):
     project, ticket = _ticket(7, 6)
     result, calls = _reconcile_begin(
@@ -1323,6 +1357,11 @@ def test_begin_repairs_closed_terminal_statuses_and_stale_shaping_labels(
     assert already_parked.status == "Parked"
     assert open_item.status == "Ideas"
     assert open_item.labels == ["needs-shaping"]
+    # The already-Parked item is read by the batched parked-wakes pass
+    # (#1592); only the Status writes matter here.
+    graphql_calls = [
+        call for call in graphql_calls if "comments(last:" not in call[0]
+    ]
     assert [variables for query, variables in graphql_calls] == [
         {
             "project": funnel.PROJECT_ID,
@@ -1352,7 +1391,9 @@ def test_begin_repairs_closed_terminal_statuses_and_stale_shaping_labels(
     )
 
     assert "reconciled_statuses" not in result
-    assert not graphql_calls
+    assert not [
+        call for call in graphql_calls if "comments(last:" not in call[0]
+    ]
     assert not [
         call for call in calls
         if call[:3] == ["gh", "issue", "edit"]
@@ -2221,6 +2262,97 @@ def test_begin_offers_shape_when_needs_decision_blocks_breakdown(monkeypatch, ca
 
     assert result["do"] == "shape"
     assert result["work"]["ref"] == idea.ref
+
+
+def _backoff_row(ref):
+    until = NOW + funnel.BACKOFF_COOLDOWN
+    return {"ref": ref, "failures": 11, "until": until,
+            "reason": "backoff: 11 consecutive failed runs"}
+
+
+def _shape_idea(number, risk="escalated"):
+    return funnel.Item(
+        repo="nateprich/example",
+        number=number,
+        title="Idea {}".format(number),
+        url="https://github.com/nateprich/example/issues/{}".format(number),
+        state="OPEN",
+        status="Ideas",
+        klass="Broken",
+        origin="agent",
+        risk=risk,
+        needs="none",
+        labels=["needs-shaping"],
+        body="Risk: {}".format(risk),
+    )
+
+
+def test_review_lane_skips_a_backed_off_shape_and_says_so(monkeypatch, capsys):
+    """#1581: #1195's shape failed eleven times in a row because the review
+    lane never read the backoff the ticket path honours."""
+    stuck = _shape_idea(1195)
+    next_idea = _shape_idea(1196)
+
+    monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [])
+    monkeypatch.setattr(usage, "shaping_allowed", lambda reading: True)
+    monkeypatch.setattr(funnel, "_backed_off_work",
+                        lambda items, now: {stuck.ref: _backoff_row(stuck.ref)})
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+
+    assert funnel.cmd_begin(
+        [stuck, next_idea], NOW, "muse", "escalated", False, True
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "shape"
+    assert result["work"]["ref"] == next_idea.ref
+    assert [row["ref"] for row in result["backed_off"]] == [stuck.ref]
+    assert result["backed_off"][0]["failures"] == 11
+
+
+def test_review_lane_skips_a_backed_off_breakdown(monkeypatch, capsys):
+    project = funnel.Item(
+        repo="nateprich/example",
+        number=40,
+        title="A Ready plan",
+        url="https://github.com/nateprich/example/issues/40",
+        state="OPEN",
+        status="Ready",
+        klass="Broken",
+    )
+    monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [])
+    monkeypatch.setattr(funnel, "awaiting_breakdown", lambda items: [project])
+    monkeypatch.setattr(funnel, "shapeable_idea", lambda items, tier, reading: None)
+    monkeypatch.setattr(funnel, "_backed_off_work",
+                        lambda items, now: {project.ref: _backoff_row(project.ref)})
+    _allow_begin(monkeypatch)
+    monkeypatch.setattr(funnel, "reconcile_approved_merges", lambda *args: [])
+
+    assert funnel.cmd_begin(
+        [project], NOW, "zcode", "standard", False, True
+    ) == 0
+    result = json.loads(capsys.readouterr().out)
+
+    assert result["do"] == "stop"
+    assert [row["ref"] for row in result["backed_off"]] == [project.ref]
+
+
+def test_review_lane_skips_the_backoff_read_with_no_issue_job(monkeypatch, capsys):
+    """The heartbeat read costs seconds of the reply budget; a fire with no
+    breakdown or shape candidate must not pay for it."""
+    work = {"pr": 7, "repo": "nateprich/beta", "ref": "nateprich/beta#19"}
+    monkeypatch.setattr(funnel, "review_queue", lambda items, tier: [work])
+    monkeypatch.setattr(funnel, "awaiting_breakdown", lambda items: [])
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("backoff read with nothing to filter")
+
+    monkeypatch.setattr(funnel, "_backed_off_work", unexpected)
+
+    result = _begin(monkeypatch, capsys, breakdown=True)
+
+    assert result["do"] == "review"
 
 
 def test_breakdown_work_carries_plan_access_signals(monkeypatch, capsys):

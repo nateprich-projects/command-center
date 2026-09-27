@@ -20,6 +20,7 @@ the plan rejected?
 - Check each `parent.comments` for Accept artifacts.
 - `plan_md` is design context; when `plan_md_missing` is true, judge against tickets alone.
 - `diff` and `changed_files` are the proposed change at `head_sha`.
+- `pr_body` (the PR description) and `pr_departures` (its Departures entries) are the implementer's own claims: cite them, weigh them against the diff. A record asked for in the description is read from `pr_body`. A departure never meets its requirement by itself.
 - `verdict` is newest, judged at `verdict_head_sha`; an older rejection is answered unless the fault repeats.
 - `ticket_prior_prs` names merged slices; judge only what this diff adds.
 - `plan_premises` groups parent-plan entries. An available empty `premises` list is valid; `available: false` means unreadable or malformed.

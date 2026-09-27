@@ -1734,6 +1734,12 @@ checkable claim per entry, in the words of the ticket or the plan wherever it
 states one. Every later judge reads this list and nothing else, so a
 requirement missing here is never checked, and a vague one cannot be answered.
 
+The packet's `pr_body` (the PR description) and `pr_departures` (the entries
+of its Departures section) are the implementer's own claims. You may cite
+them as evidence of what the implementer recorded and why, never as a source
+of requirements: they add, drop or soften nothing. List a line a departure
+explains like any other, so its judge can weigh the departure.
+
 Answer with exactly one JSON object and nothing else:
 
 {"requirements": ["the first requirement", "the second requirement"]}
@@ -1878,7 +1884,9 @@ judge_header() {
   # engine/review.py's build_packet places head_sha beside ci.checks rows
   # carrying each check's name, conclusion, state and status. The clause below
   # depends on both findings and applies only to a check that directly proves
-  # the requirement.
+  # the requirement. The PR-description paragraph is #1720: the packet carries
+  # the body and its Departures labelled as the implementer's claims, and the
+  # verdict rules are unchanged, so a departure is weighed, never met by itself.
   cat <<'HEADER'
 This is one judge call in a larger review. Judge only the requirements in
 the list below against the supplied review packet. Do not derive additional
@@ -1899,6 +1907,14 @@ evidence, never automatic satisfaction; malformed or incomplete blocks stay pros
 For post-merge runtime facts, a throwaway `launchctl submit` probe may
 produce pre-merge evidence: fire, read, post the evidence, end the job.
 Install nothing; leave the keeper unchanged.
+
+The packet's `pr_body` (the PR description) and `pr_departures` (the entries
+of its Departures section) are the implementer's own claims, and you may cite
+them as evidence. A requirement to record something in the PR description is
+judged against `pr_body`: whether the record is there is a fact, and what it
+asserts is still a claim. Weigh every claim against the diff. A departure
+explains why a line differs; it is weighed, and it never counts as meeting its
+requirement by itself.
 
 Return exactly one JSON object with one result for every assigned requirement
 and no others:

@@ -41,7 +41,7 @@ gate unless an agent is actively working it.
 | Status | Meaning | Needs Nate |
 |---|---|---|
 | Ideas | Captured, undecided. Unbounded and guilt-free. | No |
-| Shaped | Grilled; a plan exists | **When `Needs: human`, `Risk: escalated`, or `Origin: Nate`** |
+| Shaped | Grilled; a plan exists | **When `Needs: human`, a risk the shaper declares, or `Origin: Nate`** |
 | Ready | Broken into issues | No |
 | Building | Codex is working it | Only when all children close and the project is not self-closing |
 | Done | Shipped and accepted (`state_reason: completed`) | No |
@@ -639,13 +639,16 @@ GitHub. The `shape` skill implements that surface: `funnel ideas` lists what is 
 body and moves the item to `Shaped`.
 
 That last step is not approval in itself. It records that a plan now exists. Whether it
-then waits for Nate comes from the canonical routing fields. `Needs: human`,
-`Risk: escalated`, or `Origin: Nate` stops at `Shaped`; an agent-origin, standard-risk
-plan with `Needs: none` advances to `Ready`.
+then waits for Nate comes from the canonical routing fields and the risk the plan
+declares. `Needs: human`, a risk the shaper declares (the typed `escalated_risk`, or a
+`Risk: escalated` line in the plan), or `Origin: Nate` stops at `Shaped`; an agent-origin
+plan with `Needs: none` and no declared risk advances to `Ready`. A hit from the wording
+scan alone raises `Risk` to `escalated` and posts its reasons on the issue, but does not
+stop the plan (#1679, Nate 2026-09-27).
 
 `Ready` remains authorisation to create tickets, and the breakdown routine still treats it
 that way. What changed is who may write it: the funnel may, on the narrow condition above,
-and an agent may never write it to bypass an open question or escalated risk.
+and an agent may never write it to bypass an open question or a declared risk.
 
 `funnel brief` still excludes Ideas from every count — it is unbounded and guilt-free, and
 counting it turns it into pressure — so `funnel ideas` is **asked for, never pushed**.

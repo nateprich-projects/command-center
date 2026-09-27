@@ -2839,6 +2839,7 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "PACKET_JSON" not in lister
     assert "has `deferred_answer`" in lister
     assert "Do not emit a live-evidence" in lister
+    assert "Use its `referenced_evidence.records`" in lister
 
     judge = (repo / "muse.prompt.2").read_text()
     # The lister framing does not survive; this call judges only its assigned
@@ -2865,6 +2866,8 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "deferred-premise requirement" in judge
     assert "mark that deferral requirement met, not" in judge
     assert "without `deferred_answer` still follows the normal" in judge
+    assert "inspect the entry's" in judge
+    assert "`referenced_evidence.records`" in judge
 
 
 def test_rejected_1612_premise_is_carried_as_a_visible_deferral(tmp_path):
@@ -2883,9 +2886,10 @@ def test_rejected_1612_premise_is_carried_as_a_visible_deferral(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(**packet),
         answers=(
-            _requirements_answer(requirement),
+            _requirements_answer(fixture["rejected_requirement"]),
             _judge_answer(
                 requirement,
+                status="unsure",
                 evidence=("plan_premises[0].premises[0].deferred_answer "
                           "matches the inferred premise and ticket #1598")),
         ))
@@ -2927,7 +2931,7 @@ def test_a_missing_checkable_inferred_premise_still_rejects(tmp_path):
 
     assert proc.returncode == 0, proc.stderr
     lister = (repo / "muse.prompt.1").read_text()
-    assert "unresolved or unavailable probes remain `unsure`" in lister
+    assert "leave it `unsure` when a required record is unavailable" in lister
     applied = json.loads((repo / "apply.answer").read_text())
     assert applied["verdict"] == "rejected"
     assert any("requirement unsure:" in row for row in applied["blocking"])

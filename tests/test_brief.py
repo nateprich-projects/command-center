@@ -1455,11 +1455,14 @@ def test_brief_marks_an_over_budget_informational_section_degraded(
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
 
-    assert brief["working_tree_touched"] == []
+    assert brief["working_tree_touched"] is None
     assert any(
         row["section"] == "working_tree_touched"
         for row in brief["degraded"]
     )
+    assert [row["section"] for row in brief["missing"]] == [
+        "working_tree_touched"
+    ]
     assert brief["timings"]["working_tree_touched"] == 0.0
 
 
@@ -1521,14 +1524,8 @@ def test_brief_degrades_a_slow_section_without_losing_the_rest(
     assert brief["items"] == []
     assert brief["total_needing_nate"] == 0
     assert brief["counts_by_gate"]["Ready"] == 1
-    named = [entry["section"] for entry in brief["missing"]]
-    if section == "cleared_blocks":
-        # This one reads as news when empty — "nothing was unblocked" — so an
-        # unread section names itself rather than degrading to [] (#1211).
-        assert named == [section]
-        assert brief[section] is None
-    else:
-        assert section not in named
+    assert [entry["section"] for entry in brief["missing"]] == [section]
+    assert brief[section] is None
 
 
 def test_closed_itself_degrades_explicitly_when_over_budget(
@@ -1544,7 +1541,8 @@ def test_closed_itself_degrades_explicitly_when_over_budget(
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
 
-    assert brief["closed_itself"] == []
+    assert brief["closed_itself"] is None
+    assert [row["section"] for row in brief["missing"]] == ["closed_itself"]
     assert {
         "section": "closed_itself",
         "elapsed_seconds": 0.0,
@@ -1552,6 +1550,156 @@ def test_closed_itself_degrades_explicitly_when_over_budget(
         "reason": "brief budget exhausted before the section started",
     } in brief["degraded"]
     assert brief["counts_by_gate"]["Ready"] == 0
+
+
+def _make_brief_readers_safe(monkeypatch):
+    """Keep timeout fixtures independent of GitHub and the local checkout."""
+    readers = {
+        "parked_json": [],
+        "closed_itself_json": [],
+        "cleared_blocks_json": [],
+        "unattended_merges": [],
+        "unattended_approvals": [],
+        "agent_run_summary": [],
+        "agent_health": [],
+        "working_tree_touched": [],
+        "rejected_merges": {},
+    }
+    for name, value in readers.items():
+        monkeypatch.setattr(
+            funnel,
+            name,
+            lambda *args, _value=value, **kwargs: _value,
+        )
+
+
+@pytest.mark.parametrize(
+    ("section", "field"),
+    [
+        ("closed_itself", "closed_itself"),
+        ("maintenance_load", "maintenance_load"),
+        ("rejected_merges", "rejected_merges"),
+        ("items", "items"),
+    ],
+)
+def test_brief_budget_skips_publish_unknown_for_each_empty_shape(
+    monkeypatch, capsys, section, field
+):
+    _make_brief_readers_safe(monkeypatch)
+    monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS, section, 0.0)
+
+    assert funnel.cmd_brief([], NOW, deadline=0.0) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief[field] is None
+    assert section in {row["section"] for row in brief["missing"]}
+    if section == "items":
+        assert brief["total_needing_nate"] is None
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "reader"),
+    [
+        ("closed_itself", "closed_itself", "closed_itself_json"),
+        ("maintenance_load", "maintenance_load", "maintenance_load"),
+        ("rejected_merges", "rejected_merges", "rejected_merges"),
+        ("items", "items", "awaiting_decision"),
+    ],
+)
+def test_brief_timeouts_publish_unknown_for_each_empty_shape(
+    monkeypatch, capsys, section, field, reader
+):
+    _make_brief_readers_safe(monkeypatch)
+
+    def timeout(*args, **kwargs):
+        raise funnel.BriefSectionTimeout(section, "section read timed out")
+
+    monkeypatch.setattr(funnel, reader, timeout)
+    assert funnel.cmd_brief([], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief[field] is None
+    assert section in {row["section"] for row in brief["missing"]}
+    assert any(row["section"] == section for row in brief["degraded"])
+    if section == "items":
+        assert brief["total_needing_nate"] is None
+
+
+def test_pure_sections_survive_an_exhausted_shared_deadline(
+    monkeypatch, capsys
+):
+    snapshot_at = datetime(2026, 9, 26, 15, 57, 30, tzinfo=timezone.utc)
+    repo = "nateprich/beta"
+    project = funnel.Item(
+        repo=repo, number=1, title="Slow brief project",
+        url="https://example.invalid/1", state="OPEN", status="Building",
+        klass="Broken", children_total=5,
+    )
+    human_steps = [
+        funnel.Item(
+            repo=repo, number=number, title="Human step {}".format(number),
+            url="https://example.invalid/{}".format(number), state="OPEN",
+            parent=project.ref, needs="human",
+            created_at=snapshot_at - timedelta(days=1),
+        )
+        for number in (2, 3, 4)
+    ]
+    machine_local = funnel.Item(
+        repo=repo, number=5, title="Local step",
+        url="https://example.invalid/5", state="OPEN", parent=project.ref,
+        needs="claude-code-environment",
+    )
+    blocked_human = funnel.Item(
+        repo=repo, number=6, title="Blocked human step",
+        url="https://example.invalid/6", state="OPEN", parent=project.ref,
+        needs="human", labels=["blocked"],
+    )
+    blocked_machine_local = funnel.Item(
+        repo=repo, number=7, title="Blocked local step",
+        url="https://example.invalid/7", state="OPEN", parent=project.ref,
+        needs="claude-code-environment", labels=["blocked"],
+    )
+    mismatch = funnel.Item(
+        repo=repo, number=8, title="Closed at Building",
+        url="https://example.invalid/8", state="CLOSED", status="Building",
+    )
+    items = [
+        project, *human_steps, machine_local, blocked_human,
+        blocked_machine_local, mismatch,
+    ]
+
+    assert funnel.cmd_brief(items, snapshot_at, deadline=0.0) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert [row["ref"] for row in brief["human_steps"]] == [
+        item.ref for item in human_steps
+    ]
+    assert [row["ref"] for row in brief["machine_local_steps"]] == [
+        machine_local.ref
+    ]
+    assert {row["ref"] for row in brief["blocked"]} == {
+        blocked_human.ref, blocked_machine_local.ref,
+    }
+    assert [row["ref"] for row in brief["blocked_human_steps"]] == [
+        blocked_human.ref
+    ]
+    assert [row["ref"] for row in brief["blocked_machine_local_steps"]] == [
+        blocked_machine_local.ref
+    ]
+    assert [row["ref"] for row in brief["status_state_mismatches"]] == [
+        mismatch.ref
+    ]
+    for section in funnel.BRIEF_PURE_SECTIONS:
+        assert brief[section] is not None, section
+    assert brief["total_needing_nate"] == len(brief["items"])
+    assert brief["counts_by_gate"]["Building"] == 1
+    missing = {row["section"] for row in brief["missing"]}
+    assert {"parked", "closed_itself", "cleared_blocks"} <= missing
+    assert not {
+        "human_steps", "machine_local_steps", "blocked_human_steps",
+        "blocked_machine_local_steps", "status_state_mismatches",
+    } & missing
+    assert brief["pending_wakes"] is None
 
 
 def test_ticket_pr_facts_budget_covers_the_observed_max():
@@ -1699,6 +1847,9 @@ def test_both_sections_still_read_as_lists_when_they_succeed(capsys):
     assert funnel.cmd_brief([], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
 
+    assert brief["items"] == []
+    assert brief["total_needing_nate"] == 0
+    assert brief["human_steps"] == []
     assert brief["parked"] == []
     assert brief["pending_wakes"] == []
     assert brief["cleared_blocks"] == []

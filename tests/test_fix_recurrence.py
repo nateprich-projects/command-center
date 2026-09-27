@@ -2,7 +2,9 @@
 
 import json
 import os
+import pathlib
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -223,6 +225,8 @@ def test_removed_code_line_starting_with_dashes_is_not_a_header(tmp_path):
     result = fr.measure(root, {11: 1100, 12: 1200}, NOW)
 
     assert (result["numerator"], result["denominator"]) == (1, 2)
+    # Hunks outside any function are never hotspots.
+    assert result["hotspots"] == []
 
 
 def test_paths_with_spaces_and_noprefix_config_are_read(tmp_path):
@@ -505,3 +509,40 @@ def test_blame_boundary_lines_never_count_as_recent(tmp_path, monkeypatch,
     result = fr.measure(root, {43: 4300, 44: 4400}, NOW)
 
     assert result["numerator"] == 0
+
+
+def test_two_of_three_lines_from_another_fix_is_a_majority(tmp_path):
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["a = 1", "b = 2", "c = 3"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("run", ["a = 10", "b = 20", "c = 3"])},
+            "Fix two (#45) (#145)", NOW - timedelta(days=2))
+    _commit(root, {"app.py": _body("run", ["a = 11", "b = 21", "c = 31"])},
+            "Fix three (#46) (#146)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {45: 4500, 46: 4600}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (1, 2)
+
+
+def test_the_installed_script_honours_now_far_from_the_wall_clock(repo, tmp_path):
+    """Run the real entry point, as the watch does, at a --now years away."""
+    snap = tmp_path / "snap.json"
+    snap.write_text(json.dumps({"recorded_cause_regressions": {
+        "broken_fix_tickets": [{"ticket": t, "project": p}
+                               for t, p in FIXES.items()]}}))
+    script = pathlib.Path(fr.__file__).resolve()
+
+    done = subprocess.run(
+        [sys.executable, str(script), "--snapshot", str(snap),
+         "--repo", str(repo), "--now", NOW.isoformat()],
+        capture_output=True, text=True, check=True,
+    )
+    later = subprocess.run(
+        [sys.executable, str(script), "--snapshot", str(snap),
+         "--repo", str(repo), "--now", (NOW + timedelta(days=400)).isoformat()],
+        capture_output=True, text=True, check=True,
+    )
+
+    assert json.loads(done.stdout)["numerator"] == 1
+    assert json.loads(later.stdout)["denominator"] == 0

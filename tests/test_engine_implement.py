@@ -765,8 +765,10 @@ def test_finish_ticket_removes_owner_only_codex_run_checkout_after_push(
     effects = {"released": [], "finished": []}
 
     def open_pr(repo, context, found_ticket, body):
-        assert not clone.exists()
-        assert context["root"] == clone.parent
+        # The pushed branch is durable now, but gh still needs the local repo
+        # as its working directory to create or update the PR.
+        assert clone.is_dir()
+        assert context["root"] == clone
         assert run_git("--git-dir", str(remote), "show-ref").stdout.find(
             "refs/heads/ticket/42") >= 0
         return {
@@ -775,7 +777,7 @@ def test_finish_ticket_removes_owner_only_codex_run_checkout_after_push(
         }
 
     def finish(*args):
-        assert not clone.exists()
+        assert clone.is_dir()
         effects["finished"].append(args)
 
     result = implement.finish_done(
@@ -825,6 +827,7 @@ def test_finish_ticket_removes_codex_run_checkout_after_recording_not_kept(
         needs_effect=lambda *args: None,
         block_effect=lambda *args, **kwargs: None,
         comment_effect=lambda *args, **kwargs: None,
+        sub_issues_effect=lambda *args: [],
     )
 
     assert effects["released"] == [REPO + "#42"]

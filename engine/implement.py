@@ -2021,10 +2021,6 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         # local file-list check, even when an existing branch was merged.
         _check_no_run_scratch(context["root"])
         _push_ticket_branch(context["root"], context["branch"])
-        checkout_parent = context["root"].parent
-        if _remove_codex_run_checkout(
-                context["root"], context["number"], agent):
-            context["root"] = checkout_parent
     except StrayFileError as exc:
         release(ref)
         heartbeat_finish(agent, run, "errored", str(exc), ref)

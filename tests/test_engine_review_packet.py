@@ -1126,7 +1126,10 @@ def test_review_checklist_probes_inferred_premises_against_live_evidence():
     assert "plan_premises" in text
     assert "labelled `inferred`" in text
     assert "live" in text and "evidence" in text
-    assert "Do not\nre-derive" in text
+    assert "without re-deriving the premise from plan prose" in text
+    assert "`deferred_answer`" in text
+    assert "do not probe for current live evidence" in text
+    assert "unavailable probes remain `unsure`" in text
 
 
 def test_a_ticket_without_a_comments_list_gets_an_empty_one():

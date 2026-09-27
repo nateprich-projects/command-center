@@ -2837,6 +2837,8 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "print('the thing')" in lister
     assert '"head_sha": "{}"'.format(HEAD) in lister
     assert "PACKET_JSON" not in lister
+    assert "has `deferred_answer`" in lister
+    assert "Do not emit a live-evidence" in lister
 
     judge = (repo / "muse.prompt.2").read_text()
     # The lister framing does not survive; this call judges only its assigned
@@ -2860,6 +2862,72 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "malformed or incomplete blocks stay prose" in judge
     assert "throwaway `launchctl submit` probe" in judge
     assert "Install nothing; leave the keeper unchanged" in judge
+    assert "deferred-premise requirement" in judge
+    assert "mark that deferral requirement met, not" in judge
+    assert "without `deferred_answer` still follows the normal" in judge
+
+
+def test_rejected_1612_premise_is_carried_as_a_visible_deferral(tmp_path):
+    fixture = json.loads(
+        (ROOT / "tests" / "fixtures" / "review_rejected_1612.json")
+        .read_text())
+    premise = fixture["packet"]["plan_premises"][0]["premises"][0]
+    premise["deferred_answer"] = fixture["expected_deferred_answer"]
+    requirement = (
+        "Defer the inferred premise 'The split framer may itself still go "
+        "silent' to its evidence pointer 'ticket 4, #1600, checks' until "
+        "ticket #1598 is complete."
+    )
+    packet = dict(fixture["packet"])
+    packet["plan_md"] = "# Plan\n"
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(**packet),
+        answers=_review_answers(_judge_answer(
+            requirement,
+            evidence=("plan_premises[0].premises[0].deferred_answer "
+                      "matches the inferred premise and ticket #1598"))))
+
+    assert proc.returncode == 0, proc.stderr
+    lister = (repo / "muse.prompt.1").read_text()
+    assert "ticket 4, #1600, checks" in lister
+    assert "`deferred_answer`" in lister
+    judge = (repo / "muse.prompt.2").read_text()
+    assert "ticket 4, #1600, checks" in judge
+    applied = json.loads((repo / "apply.answer").read_text())
+    assert applied["verdict"] == "approved"
+    assert applied["unsure"] == []
+    assert applied["requirements"][0]["requirement"] == requirement
+    assert fixture["rejected_requirement"] not in [
+        entry["requirement"] for entry in applied["requirements"]]
+
+
+def test_a_missing_checkable_inferred_premise_still_rejects(tmp_path):
+    requirement = (
+        "Probe the inferred premise 'the missing setting is enabled' using "
+        "its evidence pointer #1700; unresolved evidence remains unsure."
+    )
+    plan_premises = [{
+        "parent_ref": "owner/repo#1",
+        "ticket_refs": ["owner/repo#6"],
+        "available": True,
+        "premises": [{
+            "claim": "the missing setting is enabled",
+            "evidence": "#1700",
+            "label": "inferred",
+        }],
+    }]
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(plan_premises=plan_premises),
+        answers=_review_answers(_judge_answer(
+            requirement, status="unsure",
+            evidence="the packet contains no evidence for #1700")))
+
+    assert proc.returncode == 0, proc.stderr
+    lister = (repo / "muse.prompt.1").read_text()
+    assert "unresolved or unavailable probes remain `unsure`" in lister
+    applied = json.loads((repo / "apply.answer").read_text())
+    assert applied["verdict"] == "rejected"
+    assert any("requirement unsure:" in row for row in applied["blocking"])
 
 
 def test_the_pr_body_reaches_the_lister_and_judge_as_the_implementers_claims(

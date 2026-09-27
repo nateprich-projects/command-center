@@ -250,6 +250,7 @@ test("the waiting panel distinguishes unreadable sections from completed empty v
   const emptyPanel = renderWaitingFixture(empty.brief);
   assert.match(emptyPanel.textContent, /Nothing is waiting on you\./);
   assert.doesNotMatch(emptyPanel.textContent, /could not be read/i);
+  assert.equal(emptyPanel.querySelectorAll(".waiting-section").length, 0);
 
   const unreadablePanel = renderWaitingFixture(unreadable.brief);
   assert.match(unreadablePanel.textContent, /Decisions waiting on you/);
@@ -260,6 +261,28 @@ test("the waiting panel distinguishes unreadable sections from completed empty v
   assert.match(unreadablePanel.textContent, /Status\/state mismatches could not be read\./);
   assert.doesNotMatch(unreadablePanel.textContent, /Maintenance load could not be read/);
   assert.match(unreadablePanel.textContent, /The total waiting on you could not be read\./);
+
+  const unreadableDecisions = renderWaitingFixture({
+    ...empty.brief,
+    total_needing_nate: null,
+    items: null,
+    human_steps: [],
+  });
+  assert.match(unreadableDecisions.textContent, /Decisions waiting on you/);
+  assert.match(unreadableDecisions.textContent, /Could not be read\./);
+  assert.doesNotMatch(unreadableDecisions.textContent, /Actions waiting on you/);
+  assert.doesNotMatch(unreadableDecisions.textContent, /No actions are waiting on you/);
+
+  const unreadableActions = renderWaitingFixture({
+    ...empty.brief,
+    total_needing_nate: null,
+    items: [],
+    human_steps: null,
+  });
+  assert.doesNotMatch(unreadableActions.textContent, /Decisions waiting on you/);
+  assert.match(unreadableActions.textContent, /Actions waiting on you/);
+  assert.match(unreadableActions.textContent, /Could not be read\./);
+  assert.doesNotMatch(unreadableActions.textContent, /No decisions are waiting on you/);
 
   const everySectionUnreadable = renderWaitingFixture({
     ...empty.brief,

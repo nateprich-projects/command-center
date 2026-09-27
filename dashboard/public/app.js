@@ -1,10 +1,11 @@
 // The dashboard renders exactly what the publisher sent, in the order it sent
 // it: funnel.py owns ordering, and a second opinion here is how two views of
 // the same board drift apart. Nate, 2026-09-15: the page carries the board and
-// human steps, and no other brief values. It does surface when any nullable
-// brief section could not be read, rather than making that state look empty.
-// The repository filter drops only what it hides and keeps the order of what
+// human steps, and no other brief section. The one thing the page drops is
+// what the viewer's repository filter hides, and it keeps the order of what
 // remains (Nate, 2026-09-24).
+// Nate's #1595/#1660 notes (2026-09-26): null means "could not be read"; a
+// computed empty value remains empty.
 
 
 // Stages that open collapsed: finished and stopped work is reference, not
@@ -715,7 +716,7 @@ function humanStepRow(step) {
   return row;
 }
 
-function waitingSection(title, value, rows, renderRow, emptyText) {
+function waitingSection(title, value, rows, renderRow) {
   const section = element("div", "waiting-section");
   const head = element("div", "waiting-head");
   head.append(element("h3", null, title));
@@ -723,10 +724,6 @@ function waitingSection(title, value, rows, renderRow, emptyText) {
   section.append(head);
   if (!Array.isArray(value)) {
     section.append(element("p", "unreadable", "Could not be read."));
-    return section;
-  }
-  if (!rows.length) {
-    section.append(element("p", "empty", emptyText));
     return section;
   }
   const list = element("ul", "waiting-list");
@@ -755,20 +752,20 @@ function renderWaiting(brief) {
     container.append(document.querySelector("#empty-state").content.cloneNode(true));
   } else {
     // Keep the two rendered brief sections in the same order as /funnel:
-    // Nate's decisions first, then work he owes. The value itself determines
-    // whether each section is empty or unreadable.
+    // Nate's decisions first, then work he owes. Hide completed empty lists;
+    // preserve a section when its value is unreadable or it has visible rows.
     const sections = element("div", "brief-sections");
-    sections.append(waitingSection(
-      "Decisions waiting on you", brief.items, decisions, decisionRow,
-      selectedRepo ? `Nothing in ${shortRepo(selectedRepo)} is waiting on you.`
-        : "No decisions are waiting on you.",
-    ));
-    sections.append(waitingSection(
-      "Actions waiting on you", brief.human_steps, steps, humanStepRow,
-      selectedRepo ? `Nothing in ${shortRepo(selectedRepo)} is waiting on you.`
-        : "No actions are waiting on you.",
-    ));
-    container.append(sections);
+    if (!decisionsKnown || decisions.length) {
+      sections.append(waitingSection(
+        "Decisions waiting on you", brief.items, decisions, decisionRow,
+      ));
+    }
+    if (!stepsKnown || steps.length) {
+      sections.append(waitingSection(
+        "Actions waiting on you", brief.human_steps, steps, humanStepRow,
+      ));
+    }
+    if (sections.childElementCount) container.append(sections);
   }
 
   if (!totalKnown) {

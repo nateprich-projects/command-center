@@ -29,7 +29,8 @@ OTHER_SHA = "7890fedcba98"
 def project_risk(monkeypatch):
     monkeypatch.setattr(
         funnel, "load_items",
-        lambda: [type("Row", (), {"ref": REPO + "#9", "risk": "standard"})()],
+        lambda **kwargs: [
+            type("Row", (), {"ref": REPO + "#9", "risk": "standard"})()],
     )
 
 

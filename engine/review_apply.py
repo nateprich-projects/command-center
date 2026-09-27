@@ -400,6 +400,33 @@ def _classify_not_open_refusal(repo: str, pr: int,
     return 0
 
 
+def load_merge_items(repo: str, pr_fact: Optional[dict]) -> list:
+    """The board without history, plus history for the merge subject (#1621).
+
+    The full board history cost about a minute and a hundred GraphQL points
+    per merge. The merge path reads history only for regression items (read
+    by ``merge_blockers``) and for the branch ticket and its project, whose
+    ``status_since`` is the drift fallback when the project auto-closes. A
+    failed read raises, and ``apply_approved`` treats that as a refused merge.
+    """
+    items = funnel.load_items(include_details=False)
+    branch = pr_fact.get("headRefName") if isinstance(pr_fact, dict) else None
+    ref = funnel.ticket_ref_from_branch(repo, branch or "")
+    if ref is None:
+        return items
+    ticket = next((item for item in items if item.ref == ref), None)
+    if ticket is None:
+        return items
+    subjects = [ticket]
+    parent = next(
+        (item for item in items if ticket.parent and item.ref == ticket.parent),
+        None)
+    if parent is not None:
+        subjects.append(parent)
+    funnel.hydrate_item_details(items, subjects)
+    return items
+
+
 def apply_approved(repo: str, pr: int, blocking: List[str], note: Optional[str],
                    ci: str, run: Optional[str], agent: Optional[str],
                    approved_head: Optional[str] = None) -> int:
@@ -419,8 +446,15 @@ def apply_approved(repo: str, pr: int, blocking: List[str], note: Optional[str],
         raise
     merge_error = None
     try:
+        # Read after the verdict is written, as cmd_merge's own read did,
+        # so the gate sees this run's approval. The branch in this fact
+        # picks the ticket whose history is read. A missing fact goes in
+        # as empty, so the gate refuses ("could not be read") instead of
+        # reading again and gating a branch whose history was not loaded.
+        pr_fact = funnel._pr_fact_for_number(repo, pr, include_comments=True)
         merge_status = funnel.cmd_merge(
-            funnel.load_items(), datetime.now(timezone.utc), repo, pr, True)
+            load_merge_items(repo, pr_fact), datetime.now(timezone.utc),
+            repo, pr, True, pr_fact=pr_fact if pr_fact is not None else {})
     except funnel.GitHubError as exc:
         # The remote merge command can lose a race with a merge after the gate's read.
         # Re-read GitHub before deciding whether that failure was terminal.

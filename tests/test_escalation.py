@@ -530,3 +530,16 @@ def test_plan_scan_ignores_prose_quoted_risk_terms(quoted):
     )
 
     assert funnel.plan_escalation_matches(body) == []
+
+
+def test_ticket_1680_every_escalation_category_has_a_proposal_action():
+    """A category missing from the action table crashed the scan (#1678)."""
+    assert set(funnel.ESCALATION_PATTERNS) <= set(funnel._PLAN_PROPOSAL_ACTIONS)
+
+
+@pytest.mark.parametrize("body", [
+    "## What it is\n\nNo permission model changes.\n",
+    "## What it is\n\nThe plan does not grant permissions to anyone.\n",
+])
+def test_ticket_1680_negated_authorisation_mentions_do_not_escalate(body):
+    assert funnel.plan_escalation_matches(body) == []

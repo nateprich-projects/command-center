@@ -18,5 +18,15 @@
     "source": "Decided by the agent: concurrent writes",
     "body": "## Decided by the agent\n\n- Perform concurrent writes to partitioned records during replay.\n",
     "expected_reasons": ["concurrency"]
+  },
+  {
+    "source": "What it is: verb-led permissions change (#1678)",
+    "body": "## What it is\n\nThis ticket will grant write permissions to the deploy key.\n",
+    "expected_reasons": ["authorisation"]
+  },
+  {
+    "source": "Decided by the agent: add an auth scheme (#1678)",
+    "body": "## Decided by the agent\n\n- Add OAuth to the connector before cutover.\n",
+    "expected_reasons": ["authorisation"]
   }
 ]

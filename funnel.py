@@ -1493,6 +1493,15 @@ _PLAN_REJECTED_INLINE_RE = re.compile(
 
 _PLAN_QUOTE_PAIRS = {"\"": "\"", "“": "”", "‘": "’", "«": "»"}
 _PLAN_PROPOSAL_ACTIONS = {
+    "authorisation": re.compile(
+        r"\b(?:add|adds|added|adding|broaden(?:s|ed|ing)?|"
+        r"change(?:s|d|ing)?|configure(?:s|d|ing)?|elevate(?:s|d|ing)?|"
+        r"enable(?:s|d|ing)?|expand(?:s|ed|ing)?|grant(?:s|ed|ing)?|"
+        r"introduce(?:s|d|ing)?|reduce(?:s|d|ing)?|require(?:s|d|ing)?|"
+        r"revoke(?:s|d|ing)?|tighten(?:s|ed|ing)?|update(?:s|d|ing)?|"
+        r"use(?:s|d|ing)?)\b",
+        re.IGNORECASE,
+    ),
     "credentials": re.compile(
         r"\b(?:access(?:es|ed|ing)?|change(?:s|d|ing)?|create(?:s|d|ing)?|"
         r"expose(?:s|d|ing)?|grant(?:s|ed|ing)?|handle(?:s|d|ing)?|"
@@ -1543,6 +1552,14 @@ _PLAN_DIRECT_PROPOSAL_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 _PLAN_DIRECT_ACTIONS = {
+    # The authorisation pattern's own terms can carry the verb: "authorise
+    # the client", or "grant ... permissions" (#1678).
+    "authorisation": re.compile(
+        r"\b(?:authori[sz](?:e|es|ed|ing)|"
+        r"(?:broaden|chang|elevat|expand|grant|reduc|revok|tighten)\w*"
+        r"(?:\s+[\w'’-]+){0,4}\s+permissions?)\b",
+        re.IGNORECASE,
+    ),
     "data-migration": re.compile(r"\b(?:backfill|migrat\w*)\b", re.IGNORECASE),
     "destructive": re.compile(
         r"\b(?:force[- ]push|hard[- ]delete|permanently\s+delete|"

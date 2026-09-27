@@ -47,9 +47,9 @@ def test_the_zai_cutoff_is_2026_09_27_0600_pacific():
 
 
 def test_zcode_is_live_until_the_zai_cutoff_and_retired_from_it():
-    """zcode is the engine's z.ai standard tier from 2026-09-23; its
-    silence alarms while it runs, and stops alarming by itself when the plan
-    expires, with no edit to make."""
+    """zcode was the engine's z.ai standard tier from 2026-09-23; its
+    silence alarmed while it ran, and stops alarming by itself at the
+    cutoff (2026-09-27 06:00 PDT since #1694), with no edit to make."""
     assert heartbeat.retired_agents(ZAI_CUTOFF - 1) == frozenset()
     assert heartbeat.retired_agents(ZAI_CUTOFF) == {"zcode"}
     assert heartbeat.retired_agents(ZAI_CUTOFF + 86400) == {"zcode"}

@@ -229,9 +229,10 @@ def retired_agents(now: Optional[float] = None) -> frozenset:
     died. zcode was retired on 2026-09-09 by Nate's decision: measured over
     24h it did work in 18 of 93 runs and was refused on the z.ai pace line in
     63, while Muse carried every job it had on the separate Meta pool (#431).
-    It runs again, as the engine's z.ai standard tier, from 2026-09-23 until
-    ``ZAI_STANDARD_UNTIL``, and retires again at that instant by itself, so
-    its silence after the plan expires is not read as a lane that died.
+    It ran again, as the engine's z.ai standard tier, from 2026-09-23 until
+    ``ZAI_STANDARD_UNTIL`` (2026-09-27 06:00 PDT, #1694), and retires again
+    at that instant by itself, so its silence after the cutoff is not read
+    as a lane that died.
     codex was retired from 2026-09-18 to 2026-09-22, while Muse implemented
     both tiers (#1106). It returned when its automations went live again
     (Nate, #1315, #1325): Codex implements both tiers, so its silence is a

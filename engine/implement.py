@@ -54,6 +54,15 @@ class StrayFileError(ImplementError):
     """The ticket branch contains run scratch that must not reach a PR."""
 
 
+class SupersededRunError(ImplementError):
+    """A finish cannot establish that this run still owns the ticket claim."""
+
+    def __init__(self, ref: str, reason: str):
+        self.ref = ref
+        self.reason = reason
+        super().__init__("superseded {}: {}".format(ref, reason))
+
+
 #: The blocked_on_human reason enum: the four specific human capabilities
 #: from the implement answer schema (#794). These are prose in the created
 #: sub-issue for Nate to read; the machine signal is Needs=human on the
@@ -1772,15 +1781,85 @@ def post_agent_comment(repo: str, number: int, body: str, *,
                 repo, number, (proc.stderr or "").strip()))
 
 
-def release_claim(ref: str) -> None:
-    """Release through funnel's one lock implementation.
+def _claim_state(ref: str, run: Optional[str], agent: str
+                 ) -> Tuple[str, List[funnel.Item]]:
+    """Resolve the holder from the timestamped Project claim and heartbeat binds.
 
-    Releasing finds one item and clears its lock field; fetch it by ref and
-    fall back to the compact board if the Project filter misses (#1623).
+    The Project field intentionally remains a timestamp. The run identity is
+    the latest heartbeat binding for this ticket at or after that timestamp.
+    A missing, conflicting, or unreadable binding is unknown and fails closed.
     """
-    items = funnel.load_project_items_by_refs([ref])
-    if items is None or len(items) != 1 or items[0].ref != ref:
-        items = funnel.load_items(include_details=False)
+    try:
+        items = funnel.load_project_items_by_refs([ref])
+        if items is None or len(items) != 1 or items[0].ref != ref:
+            items = funnel.load_items(include_details=False)
+        item = funnel.find(items, ref)
+    except Exception as exc:
+        raise SupersededRunError(ref, "claim could not be read") from exc
+    lock = item.in_motion_since
+    if lock is None:
+        # Empty and unparseable lock values have always meant unlocked.
+        return "empty", items
+    if not run:
+        return "unknown", items
+    try:
+        import heartbeat
+
+        records = []
+        for owner_agent in funnel.AGENTS_BY_ROLE.get("implement", {}):
+            records.extend(heartbeat.read(owner_agent))
+        bindings = heartbeat.bindings(records)
+    except Exception as exc:
+        raise SupersededRunError(ref, "heartbeat bindings could not be read") from exc
+
+    try:
+        claim_ts = int(lock.timestamp())
+    except Exception as exc:
+        raise SupersededRunError(ref, "claim timestamp is unreadable") from exc
+    candidates = []
+    for bound_run, binding in bindings.items():
+        bound_ts = binding.get("ts")
+        if (
+            binding.get("do") == "ticket"
+            and str(binding.get("work")) == ref
+            and isinstance(bound_ts, int)
+            and not isinstance(bound_ts, bool)
+            and bound_ts >= claim_ts
+        ):
+            candidates.append((bound_ts, bound_run))
+    if not candidates:
+        return "unknown", items
+    latest_ts = max(ts for ts, _bound_run in candidates)
+    holders = {bound_run for ts, bound_run in candidates if ts == latest_ts}
+    if len(holders) != 1:
+        return "unknown", items
+    return ("owned" if next(iter(holders)) == run else "other"), items
+
+
+def _require_current_claim(ref: str, run: Optional[str], agent: str) -> str:
+    """Refuse writes when another run holds the claim or its owner is unknown."""
+    state, _items = _claim_state(ref, run, agent)
+    if state not in ("owned", "empty"):
+        reason = (
+            "another run holds the claim"
+            if state == "other" else "claim holder is unknown"
+        )
+        raise SupersededRunError(ref, reason)
+    return state
+
+
+def release_claim(ref: str, *, run: Optional[str] = None,
+                  agent: str = "codex") -> None:
+    """Release only this run's claim; an empty claim is already released."""
+    state, items = _claim_state(ref, run, agent)
+    if state == "empty":
+        return
+    if state != "owned":
+        reason = (
+            "another run holds the claim"
+            if state == "other" else "claim holder is unknown"
+        )
+        raise SupersededRunError(ref, reason)
     result = funnel.cmd_release(items, datetime.now(timezone.utc), ref)
     if result != 0:
         raise ImplementError("could not release {}".format(ref))
@@ -1829,7 +1908,8 @@ def _failure_note(exc: ImplementError, kept: str = "") -> str:
     return note
 
 
-def _push_ticket_branch(root: pathlib.Path, branch: str) -> None:
+def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
+                        run: Optional[str], agent: str) -> None:
     """Push the ticket branch as a fast-forward, even after a rebase (#890).
 
     A stale-PR verdict asks the engineer to rebase onto main, which rewrites
@@ -1838,8 +1918,10 @@ def _push_ticket_branch(root: pathlib.Path, branch: str) -> None:
     is not an ancestor of HEAD, record it with an ``ours`` merge: the tree is
     exactly this run's, the old commits stay in the history, and the push is a
     fast-forward. Never a force-push; main squash-merges, so the extra merge
-    commit never reaches it.
+    commit never reaches it. The ownership guard runs immediately before the
+    remote branch can be changed.
     """
+    _require_current_claim(ref, run, agent)
     fetched = _run(["git", "fetch", "origin",
                     "+refs/heads/{0}:refs/remotes/origin/{0}".format(branch)],
                    cwd=root, check=False)
@@ -1851,10 +1933,12 @@ def _push_ticket_branch(root: pathlib.Path, branch: str) -> None:
             _run(["git", "merge", "-s", "ours", "--no-edit", "-m",
                   "Record the previous {} tip before pushing the rebased branch".format(branch),
                   remote_ref], cwd=root)
+    _require_current_claim(ref, run, agent)
     _run(["git", "push", "--set-upstream", "origin", branch], cwd=root)
 
 
-def _keep_work(root: pathlib.Path, number: int, branch: str, *,
+def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
+               run: Optional[str], agent: str,
                reason: str = "tests failing") -> str:
     """Commit and push explicit paths, so a failure loses time only.
 
@@ -1874,8 +1958,10 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *,
                      cwd=root).stdout.strip()
         if not ahead.isdigit() or int(ahead) < 1:
             return "no work to keep"
-        _push_ticket_branch(root, branch)
+        _push_ticket_branch(root, branch, ref=ref, run=run, agent=agent)
         return "work kept on {}".format(branch)
+    except SupersededRunError:
+        raise
     except ImplementError as exc:
         first = str(exc).splitlines()[0] if str(exc) else "unknown error"
         return "work NOT kept: {}".format(first[:120])
@@ -1884,7 +1970,7 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *,
 def _recover_answer_error(
         exc: ImplementError, *, run: str, agent: str = "codex",
         repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
-        release: Callable[[str], None] = release_claim,
+        release: Optional[Callable[[str], None]] = None,
         heartbeat_finish: Callable[[str, str, str, str, str], None]
         = finish_heartbeat) -> bool:
     """Keep a dirty checkout and close its run after an unreadable answer.
@@ -1899,11 +1985,14 @@ def _recover_answer_error(
         return False
     resolved = resolve_checkout_repo(context["root"], repo)
     ref = "{}#{}".format(resolved, context["number"])
+    release_effect = release or (
+        lambda target: release_claim(target, run=run, agent=agent)
+    )
     kept = _keep_work(
         context["root"], context["number"], context["branch"],
-        reason="answer unreadable",
+        ref=ref, run=run, agent=agent, reason="answer unreadable",
     )
-    release(ref)
+    release_effect(ref)
     first = str(exc).splitlines()[0] if str(exc) else "unknown answer error"
     note = "answer error: {} | {}".format(first[:200], kept)
     heartbeat_finish(agent, run, "errored", note, ref)
@@ -1913,7 +2002,7 @@ def _recover_answer_error(
 def finish_done(answer: dict, *, run: str, agent: str = "codex",
                 repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
                 test_commands: Optional[Sequence[Sequence[str]]] = None,
-                release: Callable[[str], None] = release_claim,
+                release: Optional[Callable[[str], None]] = None,
                 heartbeat_finish: Callable[[str, str, str, str, str], None]
                 = finish_heartbeat,
                 pr_effect: Callable[[str, dict, dict, str], dict]
@@ -1926,6 +2015,9 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     resolved = resolve_checkout_repo(context["root"], repo)
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
+    release_effect = release or (
+        lambda target: release_claim(target, run=run, agent=agent)
+    )
     try:
         tests, test_source = run_tests(context["root"], test_commands)
     except ImplementError as exc:
@@ -1933,8 +2025,11 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         # commit and push the ticket branch without opening a PR, release the
         # claim, and finish errored naming what failed, so the next run
         # continues the branch instead of starting again from main.
-        kept = _keep_work(context["root"], context["number"], context["branch"])
-        release(ref)
+        kept = _keep_work(
+            context["root"], context["number"], context["branch"],
+            ref=ref, run=run, agent=agent,
+        )
+        release_effect(ref)
         heartbeat_finish(agent, run, "errored", _failure_note(exc, kept), ref)
         raise
     continued = _remote_branch_exists(context["root"], context["branch"])
@@ -1950,7 +2045,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             close_effect(
                 resolved, context["number"], cwd=context["root"],
             )
-            release(ref)
+            release_effect(ref)
             note = "no-diff close as completed; verified evidence: {}".format(
                 ", ".join(evidence))
             if extra_note:
@@ -1958,18 +2053,21 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             heartbeat_finish(agent, run, "done", note, ref)
             return {"number": context["number"], "url": ticket["url"],
                     "closed": True}
-        _push_ticket_branch(context["root"], context["branch"])
+        _push_ticket_branch(
+            context["root"], context["branch"],
+            ref=ref, run=run, agent=agent,
+        )
         # Re-read immediately before the PR effect so the guard remains the
         # last local file-list check, even when an existing branch was merged.
         _check_no_run_scratch(context["root"])
     except StrayFileError as exc:
-        release(ref)
+        release_effect(ref)
         heartbeat_finish(agent, run, "errored", str(exc), ref)
         raise
     body = render_pr_body(ticket, answer, continued=continued, tests=tests,
                          test_source=test_source)
     pr = pr_effect(resolved, context, ticket, body)
-    release(ref)
+    release_effect(ref)
     note = "PR #{}".format(pr["number"])
     if test_source is not None:
         note += " (tests: {})".format(test_source)
@@ -1982,7 +2080,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
 def finish_blocked_on_human(
         blocked: dict, *, run: str, agent: str = "codex",
         repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
-        release: Callable[[str], None] = release_claim,
+        release: Optional[Callable[[str], None]] = None,
         heartbeat_finish: Callable[[str, str, str, str, str], None]
         = finish_heartbeat,
         create_effect: Callable[..., dict] = create_human_step_issue,
@@ -2015,6 +2113,9 @@ def finish_blocked_on_human(
     resolved = resolve_checkout_repo(context["root"], repo)
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
+    release_effect = release or (
+        lambda target: release_claim(target, run=run, agent=agent)
+    )
     parent = ticket.get("parent") or {}
     parent_number = parent.get("number")
     if not isinstance(parent_number, int):
@@ -2031,7 +2132,7 @@ def finish_blocked_on_human(
     if closed:
         return _finish_closed_human_step(
             blocked, str(closed[-1]["ref"]), ticket=ticket, resolved=resolved,
-            context=context, run=run, agent=agent, release=release,
+            context=context, run=run, agent=agent, release=release_effect,
             heartbeat_finish=heartbeat_finish, block_effect=block_effect,
             comment_effect=comment_effect, comments_effect=comments_effect,
             head_effect=head_effect, route_needs_effect=route_needs_effect,
@@ -2054,7 +2155,7 @@ def finish_blocked_on_human(
     except funnel.GitHubError as exc:
         raise funnel.GitHubError(
             "{} (already created: {})".format(exc, created["ref"]))
-    release(ref)
+    release_effect(ref)
     note = "stopped: human step filed as #{}; ticket blocked; no PR opened".format(
         created["number"])
     if extra_note:
@@ -2124,7 +2225,7 @@ def _finish_closed_human_step(
 def finish_declined(
         reason: str, *, run: str, agent: str = "codex",
         repo: Optional[str] = None, cwd: Optional[os.PathLike] = None,
-        release: Callable[[str], None] = release_claim,
+        release: Optional[Callable[[str], None]] = None,
         heartbeat_finish: Callable[[str, str, str, str, str], None]
         = finish_heartbeat,
         block_effect: Callable[..., None] = mark_ticket_blocked,
@@ -2147,6 +2248,9 @@ def finish_declined(
     resolved = resolve_checkout_repo(context["root"], repo)
     ticket = fetch_ticket(resolved, context["number"])
     ref = ticket["ref"]
+    release_effect = release or (
+        lambda target: release_claim(target, run=run, agent=agent)
+    )
     decline_class, decline_target = classify_decline_reason(
         reason, resolved, ticket.get("body") or "")
     if decline_class == "defer-note-proof":
@@ -2154,7 +2258,7 @@ def finish_declined(
             resolved, context["number"], reason,
             run=run, agent=agent, cwd=context["root"],
         )
-        release(ref)
+        release_effect(ref)
         note = "closed as completed: allowed defer-note proof"
         if extra_note:
             note += "; " + extra_note.strip()
@@ -2266,7 +2370,7 @@ def finish_declined(
             human_needs_effect(ticket["url"], ref)
             block_effect(resolved, context["number"], cwd=context["root"])
             routing_failed = True
-    release(ref)
+    release_effect(ref)
     first = reason.splitlines()[0] if reason else "no reason given"
     if len(first) > 200:
         first = first[:197].rstrip() + "..."
@@ -2315,7 +2419,46 @@ def dry_run_main() -> int:
     return 0
 
 
+def _record_superseded_finish(args: argparse.Namespace, ref: str,
+                              reason: str) -> int:
+    """Finish a refused run without releasing, committing, or pushing work."""
+    if not args.run:
+        print("finish-ticket: cannot record superseded finish without --run",
+              file=sys.stderr)
+        return 1
+    note = "superseded: {}; work not kept".format(reason)
+    try:
+        finish_heartbeat(args.agent, args.run, "errored", note, ref)
+    except (funnel.GitHubError, ImplementError, OSError,
+            subprocess.SubprocessError) as exc:
+        print("finish-ticket: {}; heartbeat finish failed: {}".format(
+            note, exc), file=sys.stderr)
+        return 1
+    print(json.dumps({
+        "ticket": ref, "superseded": True, "work_kept": False,
+    }, sort_keys=True))
+    return 0
+
+
 def _finish_ticket(args: argparse.Namespace) -> int:
+    try:
+        try:
+            context = checkout_context()
+        except ImplementError:
+            # The effect functions validate the checkout before writing. Keep
+            # their CLI routing seams usable by callers without a checkout.
+            context = None
+        if context is not None:
+            resolved = resolve_checkout_repo(context["root"], args.repo)
+            ref = "{}#{}".format(resolved, context["number"])
+            _require_current_claim(ref, args.run, args.agent)
+    except SupersededRunError as exc:
+        return _record_superseded_finish(args, exc.ref, exc.reason)
+    except (funnel.GitHubError, ImplementError, OSError,
+            subprocess.SubprocessError) as exc:
+        print("finish-ticket: {}".format(exc), file=sys.stderr)
+        return 1
+
     try:
         if args.answer_file is not None:
             answer = read_answer(args.answer_file)
@@ -2327,7 +2470,13 @@ def _finish_ticket(args: argparse.Namespace) -> int:
         try:
             _recover_answer_error(
                 exc, run=args.run, agent=args.agent, repo=args.repo,
-                release=release_claim, heartbeat_finish=finish_heartbeat,
+                release=lambda target: release_claim(
+                    target, run=args.run, agent=args.agent),
+                heartbeat_finish=finish_heartbeat,
+            )
+        except SupersededRunError as recovery_exc:
+            return _record_superseded_finish(
+                args, recovery_exc.ref, recovery_exc.reason,
             )
         except (funnel.GitHubError, ImplementError, OSError,
                 subprocess.SubprocessError) as recovery_exc:
@@ -2343,18 +2492,26 @@ def _finish_ticket(args: argparse.Namespace) -> int:
         if "done" in answer:
             result = finish_done(
                 answer, run=args.run, agent=args.agent, repo=args.repo,
+                release=lambda target: release_claim(
+                    target, run=args.run, agent=args.agent),
                 extra_note=args.note,
             )
         elif "blocked_on_human" in answer:
             result = finish_blocked_on_human(
                 answer["blocked_on_human"], run=args.run, agent=args.agent,
-                repo=args.repo, extra_note=args.note,
+                repo=args.repo, release=lambda target: release_claim(
+                    target, run=args.run, agent=args.agent),
+                extra_note=args.note,
             )
         else:
             result = finish_declined(
                 answer["declined"], run=args.run, agent=args.agent,
-                repo=args.repo, extra_note=args.note,
+                repo=args.repo, release=lambda target: release_claim(
+                    target, run=args.run, agent=args.agent),
+                extra_note=args.note,
             )
+    except SupersededRunError as exc:
+        return _record_superseded_finish(args, exc.ref, exc.reason)
     except (funnel.GitHubError, ImplementError, OSError,
             subprocess.SubprocessError) as exc:
         print("finish-ticket: {}".format(exc), file=sys.stderr)

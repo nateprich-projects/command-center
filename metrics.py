@@ -620,8 +620,8 @@ def _fix_recurrence_pair(result: Optional[Mapping[str, object]]) -> Dict:
     return pair
 
 
-def measure_fix_recurrence(snapshot: Mapping[str, object],
-                           at: datetime) -> Dict[str, object]:
+def measure_fix_recurrence(snapshot: Mapping[str, object], at: datetime,
+                           repo: Optional[Path] = None) -> Dict[str, object]:
     """Measure fix-on-fix in this checkout for the window ending ``at``.
 
     The snapshot supplies the Broken-fix tickets (#1683); git supplies the
@@ -632,7 +632,7 @@ def measure_fix_recurrence(snapshot: Mapping[str, object],
     try:
         projects = fix_recurrence.fix_projects_from_snapshot(snapshot)
         return fix_recurrence.measure(
-            Path(__file__).resolve().parent, projects, at)
+            repo or Path(__file__).resolve().parent, projects, at)
     except (fix_recurrence.RecurrenceError, OSError, ValueError) as exc:
         return {"gap": "fix recurrence could not be measured: {}".format(exc)}
 
@@ -2000,6 +2000,12 @@ def _series_kind(path: Tuple[str, ...]) -> str:
     return "mean"
 
 
+#: Leaves whose definition changed: an hour measured under another source is
+#: not an observation of the current leaf, so old and new never blend in one
+#: series (#1685: B3 moved from capture markers to fix_recurrence.py).
+SERIES_LEAF_SOURCES = {("B", "B3"): FIX_RECURRENCE_SOURCE}
+
+
 def _flatten_series_row(row: Mapping[str, object]):
     """Return numeric/categorical leaves plus code-level gap information."""
     root = row.get("metrics")
@@ -2115,6 +2121,10 @@ def _flatten_series_row(row: Mapping[str, object]):
             code_path = (group, code)
             present_codes.add(code_path)
             walk(value, code_path)
+    for leaf_path, expected in SERIES_LEAF_SOURCES.items():
+        for path in [key for key in leaves if key[:len(leaf_path)] == leaf_path]:
+            if leaves[path].get("source") != expected:
+                del leaves[path]
     return leaves, present_codes, code_gaps
 
 

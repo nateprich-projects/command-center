@@ -583,3 +583,84 @@ def test_derive_cli_reads_a_fix_recurrence_fixture(tmp_path, capsys):
     row = json.loads(capsys.readouterr().out)
     assert (row["metrics"]["B"]["B3"]["numerator"],
             row["metrics"]["B"]["B3"]["denominator"]) == (1, 4)
+
+
+def _git_repo_with_fix_on_fix(root):
+    """Two Broken fixes for different projects, the second rewriting the first."""
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.com",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.com")
+
+    def commit(text, subject, when):
+        (root / "app.py").write_text("def run():\n    a = {}\n".format(text))
+        stamp = when.strftime("%Y-%m-%dT%H:%M:%S+0000")
+        env.update(GIT_AUTHOR_DATE=stamp, GIT_COMMITTER_DATE=stamp)
+        subprocess.run(["git", "-C", str(root), "add", "app.py"], check=True, env=env)
+        subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", subject],
+                       check=True, env=env)
+
+    subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+    commit(1, "Initial", NOW - timedelta(days=30))
+    commit(2, "Fix (#11) (#101)", NOW - timedelta(days=2))
+    commit(3, "Fix again (#21) (#102)", NOW - timedelta(days=1))
+
+
+def test_measure_fix_recurrence_reads_the_snapshot_tickets_against_git(tmp_path):
+    """#1685 Accept: a fixture hour with the field yields the expected pair."""
+    repo = tmp_path / "repo"
+    _git_repo_with_fix_on_fix(repo)
+    snapshot = {"brief": {"recorded_cause_regressions": {"broken_fix_tickets": [
+        {"ticket": 11, "project": 10}, {"ticket": 21, "project": 20}]}}}
+
+    result = metrics.measure_fix_recurrence(snapshot, NOW, repo=repo)
+    b3 = metrics._fix_recurrence_pair(result)
+
+    assert (b3["numerator"], b3["denominator"]) == (1, 2)
+
+
+def test_live_derive_measures_at_the_hour_end_with_the_snapshot(monkeypatch, capsys):
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    calls = []
+
+    def fake_measure(snap, at, repo=None):
+        calls.append((snap, at))
+        return {"numerator": 2, "denominator": 5}
+
+    monkeypatch.setattr(metrics, "_read_snapshot", lambda path: snapshot)
+    monkeypatch.setattr(metrics, "_live_inputs",
+                        lambda now: (ledgers, usage, outcomes, commits, lines))
+    monkeypatch.setattr(metrics, "measure_fix_recurrence", fake_measure)
+
+    assert metrics.main(["derive", "--dry-run", "--now", NOW.isoformat()]) == 0
+
+    row = json.loads(capsys.readouterr().out)
+    assert calls == [(snapshot, metrics._interval(NOW)[1])]
+    assert (row["metrics"]["B"]["B3"]["numerator"],
+            row["metrics"]["B"]["B3"]["denominator"]) == (2, 5)
+
+
+def test_series_never_blends_b3_rows_from_the_retired_definition():
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    day = datetime(2026, 9, 20, tzinfo=timezone.utc)
+
+    def row(hour, b3):
+        built = metrics.derive_row(snapshot, ledgers, usage, outcomes,
+                                   day + timedelta(hours=hour, minutes=30),
+                                   commits, lines, fix_recurrence_result=b3)
+        return built
+
+    old_style = [row(h, None) for h in range(1, 25)]
+    for item in old_style:
+        item["metrics"]["B"]["B3"] = {
+            "numerator": 3, "denominator": 237,
+            "source": "brief.recorded_cause_regressions.with_recorded_cause/broken_projects",
+        }
+    new_day = [row(h, {"numerator": 16, "denominator": 93})
+               for h in range(25, 49)]
+
+    series = metrics.series_from_rows(old_style + new_day,
+                                      day + timedelta(days=2, hours=1))
+    b3 = series["metrics"]["B"]["B3"]
+    days = series["days"]
+
+    assert b3["daily"][days.index("2026-09-20")] is None
+    assert b3["daily"][days.index("2026-09-21")] == pytest.approx(16 / 93)

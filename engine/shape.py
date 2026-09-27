@@ -642,7 +642,8 @@ def review_agent_shape_output(
     Scope and priority. Clear waits on named tickets move to ``depends_on``;
     concrete scope questions and questions whose category is unclear remain
     open. Hypothetical implementation bugs are not risks in the proposed
-    plan. The shared self-approval predicate remains the sole gate.
+    plan, unless the wording scan finds the same kind of action in it
+    (#1721). The shared self-approval predicate remains the sole gate.
     """
     reviewed = copy.deepcopy(answer)
     rejected = []
@@ -688,9 +689,19 @@ def review_agent_shape_output(
             "generic Scope permission to implement agent-origin work")
 
     risks = reviewed["escalated_risk"]
+    hypothetical = [entry for entry in risks
+                    if _HYPOTHETICAL_IMPLEMENTATION_RISK.search(
+                        entry["why"])]
+    # A hypothetical-bug why is dropped only when the plan's own wording
+    # does not propose that kind of action. Once the scan stopped holding
+    # plans (#1721), dropping a declaration the scan corroborates would
+    # release a plan the shaper itself called risky.
+    corroborated = {
+        entry.get("reason") for entry in _plan_escalation_matches(reviewed)
+    } if hypothetical else set()
     kept_risks = [entry for entry in risks
-                  if not _HYPOTHETICAL_IMPLEMENTATION_RISK.search(
-                      entry["why"])]
+                  if entry not in hypothetical
+                  or entry["reason"] in corroborated]
     if len(kept_risks) != len(risks):
         reviewed["escalated_risk"] = kept_risks
         rejected.append(

@@ -68,8 +68,10 @@ consistently:
 - **"Is the plan good?" becomes conditional.** A plan produced by grilling Nate, with
   everything else settled from written precedent, is a transcription of answers he already
   gave — approving it is the same room with a different sign. The `Origin`, `Risk`, and
-  `Needs` Project fields record the routing terms. Agent-origin, standard-risk plans with
-  `Needs: none` advance to `Ready`; the other combinations stop at `Shaped`.
+  `Needs` Project fields record the routing terms. Agent-origin plans with `Needs: none`
+  and no risk the shaper declares advance to `Ready`; a wording-scan hit alone raises
+  `Risk` to `escalated` and posts its reasons but does not stop them (#1679, Nate
+  2026-09-27); the other combinations stop at `Shaped`.
 - **"Accept it?" remains the human gate** for work whose class and origin make its
   completion a Nate decision. Whether the thing is worth keeping is not checkable,
   and no agent may decide it.

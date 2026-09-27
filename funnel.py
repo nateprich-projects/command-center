@@ -16249,24 +16249,21 @@ def scan_only_escalation_note(reasons: Sequence[str]) -> str:
     return "scan-only escalation{} raises the review tier".format(named)
 
 
-def _shaped_risk_facts(item: Item, body: str) -> Tuple[bool, bool]:
-    """Whether a Shaped plan's Risk holds it, and whether Needs is a scan hold.
+def _shaped_risk_holds(item: Item, body: str) -> bool:
+    """Whether a Shaped plan's Risk still holds it (#1721).
 
-    Until #1721 an escalated Risk held a plan whoever set it, and a plan held
-    only by the wording scan was written ``Needs: human`` with
-    ``Risk: escalated`` (#1644). Now only a declared risk holds, so an
-    escalated plan whose body declares none is released, and its
-    ``Needs: human`` is read as the scan hold's record when the body asks
-    no open question either. Unset or unknown Risk, and an escalated Risk on
-    a body the load did not carry, still hold as before.
+    Until #1721 an escalated Risk held a plan whoever set it. Now only a
+    declared risk holds, so an escalated plan whose body declares none is
+    not held by its Risk. Unset or unknown Risk, and an escalated Risk on a
+    body the load did not carry, still hold as before. ``Needs: human``
+    keeps its own hold whatever the Risk: after #1721 the shape runner never
+    writes it for a scan hit, so it records some other reason to wait.
     """
     if item.risk == "standard":
-        return False, False
+        return False
     if item.risk != "escalated" or not body.strip():
-        return True, False
-    if plan_declared_risks(body):
-        return True, False
-    return False, item.needs == "human" and not plan_needs_nate(body)
+        return True
+    return bool(plan_declared_risks(body))
 
 
 def shaped_self_approvable(item: Item,
@@ -16274,19 +16271,17 @@ def shaped_self_approvable(item: Item,
     """Re-evaluate one Shaped plan with the existing self-approval rule.
 
     Only a declared risk holds (#1721): an escalated Risk the wording scan
-    set alone no longer does, and neither does the ``Needs: human`` that
-    recorded that scan hold.
+    set alone no longer does.
     """
     body = _loaded_item_body(item)
     override = parse_origin_override(body)
     override_target = override["target"] if override is not None else None
-    risk_holds, scan_needs_hold = _shaped_risk_facts(item, body)
     return self_approval_eligible(
         effective_class(item, by_ref),
         item.origin,
         override_target,
-        needs_nate=item.needs == "human" and not scan_needs_hold,
-        escalated=risk_holds,
+        needs_nate=item.needs == "human",
+        escalated=_shaped_risk_holds(item, body),
         state=item.state,
     )
 
@@ -16324,24 +16319,10 @@ def sweep_shaped_self_approvals(
             klass, owner_basis
         )
         # Eligible with an escalated Risk means the scan set it and nothing
-        # declared it (#1721): it stays escalated for the review tier, and a
-        # Needs human that only recorded the scan hold is cleared first, so a
-        # failed Status write leaves the plan for the next pass, not a Ready
-        # plan that still names Nate as its next actor.
+        # declared it (#1721): it stays escalated for the review tier.
         scan_only = item.risk == "escalated"
         if scan_only:
             reason += "; " + scan_only_escalation_note(plan_is_escalated(body))
-        if scan_only and item.needs == "human":
-            try:
-                if not item.item_id:
-                    raise GitHubError(
-                        "{} is not in the Project".format(item.ref)
-                    )
-                write_project_select(item.item_id, "Needs", "none", item.ref)
-            except (OSError, subprocess.SubprocessError, GitHubError) as exc:
-                errors.append({"ref": item.ref, "error": str(exc)})
-                continue
-            item.needs = "none"
 
         try:
             status_error = _write_status(item, "Ready", now)

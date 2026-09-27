@@ -1814,6 +1814,76 @@ def test_apply_holds_a_declared_risk_with_a_clean_scan(
     assert "escalated risk (data-migration)" in capsys.readouterr().out
 
 
+def test_apply_holds_a_hypothetical_bug_why_the_scan_corroborates(
+        monkeypatch, capsys):
+    """Review of PR #1740: the output review dropped a declaration whose why
+    names a hypothetical bug, and with the union gone nothing held the plan.
+    The shaper called it risky and the plan does rotate the api-key, so it
+    waits for Nate."""
+    item = idea(42, klass="Broken")
+    project_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            project_writes.append((field, value)),
+    )
+    calls = stub_gh(monkeypatch, item)
+    candidate = answer(
+        proposed_class="Broken",
+        plan_markdown="# Plan\n\nWe will rotate the deploy api-key monthly.\n",
+        escalated_risk=[{
+            "reason": "credentials",
+            "why": "a bug in the implementation could leak the api-key",
+        }])
+
+    reviewed, rejected = shape.review_shape_output_for_item(
+        [item], item, shape.validate_answer(candidate))
+    assert rejected == []
+    assert reviewed["escalated_risk"] == candidate["escalated_risk"]
+    assert shape.preview_decision([item], item, reviewed)[0] == "Shaped"
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref, candidate,
+        run="shape-run", agent="muse") == 0
+    assert item.status == "Shaped"
+    assert project_writes == [("Risk", "escalated"), ("Needs", "human")]
+    assert gh_calls(calls, "gh", "issue", "comment") == []
+    assert funnel.plan_declared_risks(item.body) == ["credentials"]
+    assert "held at Shaped: escalated risk (credentials: " \
+        in capsys.readouterr().out
+
+
+def test_apply_holds_a_risk_escalated_line_end_to_end(monkeypatch, capsys):
+    """A `Risk: escalated` line is a declaration: the plan holds, and no
+    scan comment says it was not held."""
+    item = idea(42, klass="Broken")
+    project_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            project_writes.append((field, value)),
+    )
+    calls = stub_gh(monkeypatch, item)
+    candidate = answer(
+        proposed_class="Broken",
+        plan_markdown=("# Plan\n\nRisk: escalated — destructive\n\n"
+                       "Permanently delete expired records.\n"),
+        escalated_risk=[])
+
+    assert shape.preview_decision(
+        [item], item, shape.validate_answer(candidate))[0] == "Shaped"
+    assert shape.apply_shape(
+        [item], NOW, item.ref, candidate,
+        run="shape-run", agent="muse") == 0
+    assert item.status == "Shaped"
+    assert project_writes == [("Risk", "escalated"), ("Needs", "human")]
+    assert gh_calls(calls, "gh", "issue", "comment") == []
+    output = capsys.readouterr().out
+    assert ("held at Shaped: escalated risk (declared: destructive: "
+            "Risk: escalated — destructive)") in output
+    assert "review tier raised" not in output
+
+
 def test_apply_holds_a_declared_risk_even_when_the_scan_also_hits(
         monkeypatch, capsys):
     item = idea(42)

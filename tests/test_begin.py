@@ -3722,20 +3722,21 @@ def _sweep(monkeypatch, items):
     return advanced, writes, fields, comments
 
 
-def test_sweep_releases_a_stranded_scan_only_shaped_plan(monkeypatch):
-    """#1721: #1195's body, held by a Siblings checked line with Needs human
-    and Risk escalated as #1644 wrote it, is swept to Ready. Risk stays
-    escalated for the review tier; Needs human, the hold's record, clears."""
+def test_sweep_releases_an_escalated_plan_that_declares_no_risk(
+        monkeypatch):
+    """#1721: #1195's body, whose Needs Nate question has been answered, so
+    Needs is none, is held only by a Risk the Siblings checked line set. It
+    is swept to Ready and Risk stays escalated for the review tier."""
     fixture = next(entry for entry in SCAN_ONLY_HOLDS
                    if "#1195 " in entry["source"])
-    stranded = _held_plan(305, fixture["body"])
+    stranded = _held_plan(305, fixture["body"], needs="none")
     assert funnel.plan_needs_nate(stranded.body) is False
 
     advanced, writes, fields, comments = _sweep(monkeypatch, [stranded])
 
     assert advanced == [{"ref": stranded.ref, "status": "Ready"}]
     assert writes == [(stranded.ref, "Ready")]
-    assert fields == [(stranded.ref, "Needs", "none")]
+    assert fields == []
     assert (stranded.status, stranded.risk, stranded.needs) == (
         "Ready", "escalated", "none")
     assert len(comments) == 1
@@ -3755,6 +3756,8 @@ def test_sweep_keeps_a_declared_risk_at_shaped(monkeypatch):
         307, "# Plan\n\n## Risk rationale\n\nSee the thread.\n")
     marker = _held_plan(
         308, "# Plan\n\nRisk: escalated — destructive\n", needs="none")
+    for plan in (rationale, unreadable_rationale):
+        plan.needs = "none"
 
     advanced, writes, fields, comments = _sweep(
         monkeypatch, [rationale, unreadable_rationale, marker])
@@ -3769,15 +3772,30 @@ def test_sweep_keeps_a_declared_risk_at_shaped(monkeypatch):
                                      marker)} == {"Shaped"}
 
 
-def test_sweep_still_holds_what_the_scan_hold_did_not_explain(monkeypatch):
+def test_sweep_keeps_needs_human_holding_whatever_the_risk(monkeypatch):
+    """After #1721 the shape runner never writes Needs human for a scan hit,
+    so Needs human records some other hold (a later class change, a hand
+    set, a trimmed marker) and keeps holding: the sweep infers nothing from
+    an escalated Risk with no declared risk and no question in the body."""
+    fixture = SCAN_ONLY_HOLDS[0]
+    assert funnel.plan_needs_nate(fixture["body"]) is False
+    needs_human = _held_plan(314, fixture["body"])
+
+    advanced, writes, fields, comments = _sweep(monkeypatch, [needs_human])
+
+    assert (advanced, writes, fields, comments) == ([], [], [], [])
+    assert (needs_human.status, needs_human.needs) == ("Shaped", "human")
+
+
+def test_sweep_still_holds_what_the_risk_change_does_not_touch(monkeypatch):
     fixture = SCAN_ONLY_HOLDS[0]
     open_question = _held_plan(
         309, fixture["body"] + "\n## Needs Nate\n\n"
         "- Gates: Who may write Ready?\n")
-    unloaded = _held_plan(310, fixture["body"])
+    unloaded = _held_plan(310, fixture["body"], needs="none")
     unloaded.body = None
     unknown_risk = _held_plan(311, fixture["body"], risk=None, needs="none")
-    nate_origin = _held_plan(312, fixture["body"])
+    nate_origin = _held_plan(312, fixture["body"], needs="none")
     nate_origin.origin = "Nate"
     standard_human = _held_plan(
         313, fixture["body"], risk="standard", needs="human")

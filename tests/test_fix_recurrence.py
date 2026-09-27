@@ -546,3 +546,57 @@ def test_the_installed_script_honours_now_far_from_the_wall_clock(repo, tmp_path
 
     assert json.loads(done.stdout)["numerator"] == 1
     assert json.loads(later.stdout)["denominator"] == 0
+
+
+def _spread(lines, n=12):
+    """Put far-apart lines in one function so edits form separate hunks."""
+    body = ["x{} = {}".format(i, i) for i in range(n)]
+    for index, text in lines.items():
+        body[index] = text
+    return _body("run", body)
+
+
+@pytest.mark.parametrize("recent_first", [True, False])
+def test_the_majority_is_taken_over_every_hunk_of_a_commit(tmp_path,
+                                                           recent_first):
+    """One recent-fix line in one hunk, two old lines in another: 1 of 3."""
+    root = _new_repo(tmp_path)
+    recent, old = (0, 10) if recent_first else (10, 0)
+    _commit(root, {"app.py": _spread({})}, "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _spread({recent: "r = 1"})},
+            "Fix one line (#47) (#147)", NOW - timedelta(days=2))
+    _commit(root, {"app.py": _spread({recent: "r = 2", old: "o = 2",
+                                      old + 1: "p = 2"})},
+            "Fix three lines (#48) (#148)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {47: 4700, 48: 4800}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (0, 2)
+
+
+@pytest.mark.parametrize("recent_file", ["a.py", "b.py"])
+def test_the_majority_is_taken_over_every_file_of_a_commit(tmp_path,
+                                                           recent_file):
+    root = _new_repo(tmp_path)
+    other = "b.py" if recent_file == "a.py" else "a.py"
+    two = _body("run", ["m = 1", "n = 1"])
+    _commit(root, {recent_file: _body("run", ["r = 1"]), other: two},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {recent_file: _body("run", ["r = 2"])},
+            "Fix one file (#49) (#149)", NOW - timedelta(days=2))
+    _commit(root, {recent_file: _body("run", ["r = 3"]),
+                   other: _body("run", ["m = 2", "n = 2"])},
+            "Fix both files (#50) (#150)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {49: 4900, 50: 5000}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (0, 2)
+
+
+def test_now_accepts_a_z_suffix():
+    assert fr._parse_now("2026-09-27T12:00:00Z") == NOW
+
+
+def test_markdown_anywhere_is_not_code():
+    assert not fr.is_code_path("README.md")
+    assert not fr.is_code_path("engine/NOTES.md")

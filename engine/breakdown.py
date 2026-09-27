@@ -24,7 +24,8 @@ first mutation: at least one ticket or a question but never both, both enums
 exact, every dependency resolving to a sibling index or an existing open
 issue, and no dependency cycles. The apply path resumes matching sub-issues
 from GitHub by title, creates missing ones with native blocked-by edges,
-writes the canonical Origin, Risk and Needs fields, and posts the
+writes the canonical Origin, Risk and Needs fields — Risk escalated on every
+ticket when the project's own Risk is escalated (#1757) — and posts the
 coverage comment; the question path posts the
 needs-decision comment and labels the project blocked — unless the plan
 body already carries a valid answered-Gates marker (#1274), in which case
@@ -194,6 +195,42 @@ def fetch_siblings(repo: str, number: int) -> List[dict]:
         })
     siblings.sort(key=lambda entry: entry["number"])
     return siblings
+
+
+def fetch_project_risk(ref: str) -> Optional[str]:
+    """Read the project's own Risk field, or None when it is unset (#1757).
+
+    Since #1679 an escalation-scan hit raises the project's Risk instead of
+    holding the plan, so the escalated reviewer judges its tickets; this read
+    is how breakdown carries that promise onto them. It goes through funnel's
+    by-ref Project read and, when the Project filter misses, the history-free
+    board, as implement's release and shape-apply do (#1623), rather than a
+    query of its own.
+
+    Every failure raises, and so does a project with no Project row or a Risk
+    outside the enum: the row is the only place the field lives, and a
+    breakdown that cannot tell whether its project is escalated must create
+    nothing rather than tickets that might be judged at the wrong tier.
+    """
+    try:
+        items = funnel.load_project_items_by_refs([ref])
+        if items is None or len(items) != 1 or items[0].ref != ref:
+            items = funnel.load_items(include_details=False)
+    except funnel.GitHubError as exc:
+        raise funnel.GitHubError(
+            "could not read the Risk of project {}: {}".format(ref, exc)
+        ) from exc
+    rows = [item for item in items if getattr(item, "ref", None) == ref]
+    if len(rows) != 1:
+        raise funnel.GitHubError(
+            "could not read the Risk of project {}: the Project read found "
+            "{} rows for it".format(ref, len(rows)))
+    risk = rows[0].risk
+    if risk is not None and risk not in RISK_OPTIONS:
+        raise funnel.GitHubError(
+            "could not read the Risk of project {}: {!r} is not one of "
+            "{}".format(ref, risk, ", ".join(RISK_OPTIONS)))
+    return risk
 
 
 def build_packet(*, repo: str, number: int, plan: dict,
@@ -508,13 +545,18 @@ def coverage_comment_body(project_ref: str, created: Sequence[dict]) -> str:
 
     Each entry names what the runner wrote — the ref, the code-owned risk,
     the Needs field, and the native edges — so a later reader sees the
-    breakdown without opening every ticket.
+    breakdown without opening every ticket. A Risk taken from an escalated
+    project rather than the answer says so (#1757), so a reader can tell the
+    model's judgement from the project's.
     """
     lines = ["Breakdown of {} created {} ticket{}:".format(
         project_ref, len(created), "" if len(created) == 1 else "s")]
     for ticket in created:
+        risk = ticket["risk"]
+        if ticket.get("risk_inherited"):
+            risk += ", inherited from the project"
         entry = "- {}: {} (Risk: {}, Needs: {}".format(
-            ticket["ref"], ticket["title"], ticket["risk"], ticket["needs"])
+            ticket["ref"], ticket["title"], risk, ticket["needs"])
         if ticket.get("blocked_by"):
             entry += "; blocked by {}".format(
                 ", ".join(ticket["blocked_by"]))
@@ -739,6 +781,7 @@ def match_existing_siblings(tickets: Sequence[dict],
 
 
 def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
+                 project_risk: Optional[str] = None,
                  run: Optional[str] = None,
                  agent: Optional[str] = None) -> List[dict]:
     """Resume or create each ticket, then cover the parent.
@@ -750,7 +793,15 @@ def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
     coverage comment lists each blocker before its dependents. A failure
     names the issues already present, so the next attempt starts from
     GitHub's truth rather than this run's memory.
+
+    Under an escalated ``project_risk`` every ticket, created or resumed, is
+    written escalated whatever the answer said (#1757): the #1679 approval
+    promises the escalated reviewer for scan-escalated work, and the model
+    copying the project's tier is a judgement that can be missed. Under a
+    standard project, or one with no Risk, the answer's per-ticket risk
+    stands, escalated included.
     """
+    inherit = project_risk == "escalated"
     created_numbers: Dict[int, int] = {}
     created_refs: Dict[int, str] = {}
     order = creation_order(tickets)
@@ -772,13 +823,16 @@ def apply_create(repo: str, parent_number: int, tickets: Sequence[dict], *,
             created_refs[index] = ref
             item_id = add_to_project(url)
             funnel.write_project_select(item_id, "Origin", "agent", ref)
-            funnel.write_project_select(item_id, "Risk", ticket["risk"], ref)
+            funnel.write_project_select(
+                item_id, "Risk",
+                "escalated" if inherit else ticket["risk"], ref)
             write_needs(item_id, ticket["needs"], ref)
         created = [{
             "ref": created_refs[index],
             "number": created_numbers[index],
             "title": tickets[index]["title"],
-            "risk": tickets[index]["risk"],
+            "risk": "escalated" if inherit else tickets[index]["risk"],
+            "risk_inherited": inherit,
             "needs": tickets[index]["needs"],
             "blocked_by": display_blockers(
                 tickets[index], created_refs, repo),
@@ -843,8 +897,12 @@ def apply(repo: str, number: int, normalized: dict, *,
                     "already_answered": answered}
         apply_question(repo, number, question, run=run, agent=agent)
         return {"project": project_ref, "needs_decision": question}
+    # Read before the first sibling read or creation, so an unreadable Risk
+    # leaves nothing half-applied (#1757). The question path above writes no
+    # Risk, so it does not pay for this read.
+    project_risk = fetch_project_risk(project_ref)
     created = apply_create(repo, number, normalized.get("tickets", []),
-                           run=run, agent=agent)
+                           project_risk=project_risk, run=run, agent=agent)
     return {"project": project_ref, "created": created}
 
 

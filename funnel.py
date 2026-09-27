@@ -1017,7 +1017,7 @@ def _acceptance_waiting_reason(
     if question != GATES["Building"]:
         return None
     body = item.body if isinstance(item.body, str) else ""
-    if ANALYSIS_MARKER in body:
+    if parse_analysis_marker(body) is not None:
         return "Analysis review"
     return "Ordinary accept"
 
@@ -2969,12 +2969,71 @@ def parse_analysis_marker(body: str) -> Optional[bool]:
 
     A valid marker carries ``{"analysis": true}``. Any marker occurrence that
     cannot be read in that shape is malformed and still opts into the safe
-    outcome: wait for Nate rather than silently closing the project.
+    outcome: wait for Nate rather than silently closing the project. A marker
+    is carried only when declared on its own line outside quotes and fenced
+    code; a prose example is absent.
     """
-    if not isinstance(body, str) or ANALYSIS_MARKER not in body:
+    if not isinstance(body, str):
         return None
 
-    found = _marked_json(body, ANALYSIS_MARKER)
+    # _marked_json intentionally finds marker strings anywhere in a body.
+    # For this marker, prose can quote the declaration as an example, so mask
+    # every occurrence except a standalone declaration outside quoted and
+    # fenced Markdown. Keep the surrounding text for the JSON reader.
+    lines = []
+    marker_found = False
+    fence_char = None
+    fence_size = 0
+    in_quote = False
+    opening_fence = r"^ {0,3}(`{3,}|~{3,})(.*)$"
+    closing_fence = r"^ {0,3}(`{3,}|~{3,})[ \t]*$"
+    for line in body.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        if fence_char is not None:
+            closing = re.fullmatch(closing_fence, content)
+            if (closing is not None and closing.group(1)[0] == fence_char
+                    and len(closing.group(1)) >= fence_size):
+                fence_char = None
+                fence_size = 0
+            lines.append(line.replace(
+                ANALYSIS_MARKER, "<!-- ignored-analysis-marker-example -->"))
+            continue
+
+        opening = re.match(opening_fence, content)
+        if opening is not None:
+            run, info = opening.group(1), opening.group(2)
+            if run[0] != "`" or "`" not in info:
+                fence_char, fence_size = run[0], len(run)
+                lines.append(line.replace(
+                    ANALYSIS_MARKER,
+                    "<!-- ignored-analysis-marker-example -->"))
+                continue
+
+        if re.match(r"^ {0,3}>", content):
+            in_quote = True
+            lines.append(line.replace(
+                ANALYSIS_MARKER, "<!-- ignored-analysis-marker-example -->"))
+            continue
+        if not content.strip():
+            in_quote = False
+        elif in_quote:
+            # Markdown permits unprefixed lazy continuation lines in a quote.
+            lines.append(line.replace(
+                ANALYSIS_MARKER, "<!-- ignored-analysis-marker-example -->"))
+            continue
+
+        if re.fullmatch(
+            r" {0,3}" + re.escape(ANALYSIS_MARKER) + r"[ \t]*", content
+        ):
+            marker_found = True
+            lines.append(line)
+        else:
+            lines.append(line.replace(
+                ANALYSIS_MARKER, "<!-- ignored-analysis-marker-example -->"))
+
+    if not marker_found:
+        return None
+    found = _marked_json("".join(lines), ANALYSIS_MARKER)
     if found is not None:
         return found.get("analysis") is True
     return False

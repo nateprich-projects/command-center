@@ -3,10 +3,11 @@
 Paste this into a **Codex Scheduled** task. Keep the task’s tier and schedule
 outside the prompt.
 
-Configure the sandbox with write access only to Codex’s per-session directory
-and `~/.claude/command-center-heartbeat`. Give
-`/Users/nateprich/.claude/command-center-run` read-and-execute access only. Codex
-may require that read-only root’s resolved target in sandbox configuration; the
+Configure the sandbox with write access only to Codex’s per-session directory,
+`~/.claude/command-center-heartbeat`, and the documented runtime root’s
+`codex-runs/` subtree. Give `/Users/nateprich/.claude/command-center-run`
+read-and-execute access only, except that `codex-runs/` subtree is writable. Codex may
+require the runtime root’s resolved target in sandbox configuration; the
 resolved spelling belongs there and nowhere in commands or prompts.
 
 Never invoke the Codex CLI headlessly. The in-app schedule is the authorised
@@ -33,11 +34,16 @@ and Command Center path spelling.
 For a no-diff ticket, its `Accept` names the GitHub-artifact evidence channel the
 finish check verifies: a comment, rename event, closed PR, or posted measurement.
 
-Clone `packet.repo` inside the current per-session workspace. Work on
-`ticket/<number>` from `origin/main`. If the remote branch exists, establish its
-contents before continuing or resetting it; never discard unknown work. A
-rejected verdict at the current head requires a new pushed head addressing every
-blocking item. Keep all checkout, scratch, and build files inside the workspace.
+Create a unique owner-only (`0700`) directory under the documented runtime
+root’s `codex-runs/` subtree, named
+`ticket-<number>-<YYYYMMDDTHHMMSSffffffZ>` using a UTC timestamp. Clone
+`packet.repo` into that directory. Work on `ticket/<number>` from `origin/main`.
+If the remote branch exists, establish its contents before continuing or
+resetting it; never discard unknown work. A rejected verdict at the current head
+requires a new pushed head addressing every blocking item. Keep scratch and
+build files inside this checkout. `finish-ticket` removes this run directory
+after a successful push or a finish that records work not kept; if a push fails,
+it leaves the directory for diagnosis.
 
 Implement only what the ticket and plan require. Do not change project `Status`
 or `Class`, do not merge, and do not repair unrelated defects. Make the code

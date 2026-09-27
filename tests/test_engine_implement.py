@@ -86,10 +86,13 @@ def run_git(*args, cwd=None):
     )
 
 
-def make_clone(tmp_path):
+def make_clone(tmp_path, clone_path=None):
     remote = tmp_path / "origin.git"
     seed = tmp_path / "seed"
-    clone = tmp_path / "clone"
+    clone = (
+        pathlib.Path(clone_path)
+        if clone_path is not None else tmp_path / "clone"
+    )
     run_git("init", "--bare", "--quiet", str(remote))
     run_git("init", "--quiet", "-b", "main", str(seed))
     run_git("config", "user.name", "Fixture", cwd=seed)
@@ -100,10 +103,25 @@ def make_clone(tmp_path):
     run_git("remote", "add", "origin", str(remote), cwd=seed)
     run_git("push", "--quiet", "-u", "origin", "main", cwd=seed)
     run_git("--git-dir", str(remote), "symbolic-ref", "HEAD", "refs/heads/main")
+    if clone_path is not None:
+        clone.parent.mkdir(parents=True, exist_ok=True)
+        clone.mkdir(mode=0o700)
     run_git("clone", "--quiet", str(remote), str(clone))
     run_git("config", "user.name", "Fixture", cwd=clone)
     run_git("config", "user.email", "fixture@example.test", cwd=clone)
     run_git("switch", "--quiet", "-c", "ticket/42", cwd=clone)
+    return remote, clone
+
+
+def make_codex_run_clone(tmp_path, monkeypatch, number=42):
+    runtime_root = tmp_path / "runtime"
+    runs_root = runtime_root / "codex-runs"
+    runs_root.mkdir(parents=True, mode=0o700)
+    checkout = runs_root / (
+        "ticket-{}-20260927T163000123456Z".format(number))
+    monkeypatch.setattr(funnel, "CLAUDE_DIR", str(runtime_root))
+    remote, clone = make_clone(tmp_path, clone_path=checkout)
+    clone.chmod(0o700)
     return remote, clone
 
 
@@ -494,7 +512,8 @@ def test_done_with_diff_ignores_evidence(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)
     (clone / "implemented.txt").write_text("done\n")
-    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
     monkeypatch.setattr(
         heartbeat, "read_github",
         lambda agent: pytest.fail("the diff path must ignore evidence"),
@@ -732,6 +751,127 @@ def test_finish_ticket_releases_and_errors_when_tests_fail(tmp_path, monkeypatch
     subject = run_git("--git-dir", str(remote), "log", "-1", "--format=%s",
                       "ticket/42").stdout.strip()
     assert subject == "WIP #42: tests failing"
+
+
+def test_finish_ticket_removes_owner_only_codex_run_checkout_after_push(
+        tmp_path, monkeypatch):
+    remote, clone = make_codex_run_clone(tmp_path, monkeypatch)
+    sibling = clone.parent / "ticket-42-20260927T163001123456Z"
+    sibling.mkdir(mode=0o700)
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.chdir(clone)
+    effects = {"released": [], "finished": []}
+
+    def open_pr(repo, context, found_ticket, body):
+        assert not clone.exists()
+        assert context["root"] == clone.parent
+        assert run_git("--git-dir", str(remote), "show-ref").stdout.find(
+            "refs/heads/ticket/42") >= 0
+        return {
+            "number": 99,
+            "url": "https://github.com/{}/pull/99".format(REPO),
+        }
+
+    def finish(*args):
+        assert not clone.exists()
+        effects["finished"].append(args)
+
+    result = implement.finish_done(
+        answer(),
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        release=effects["released"].append,
+        heartbeat_finish=finish,
+        pr_effect=open_pr,
+    )
+
+    assert result["number"] == 99
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][:3] == ("codex", "run-42", "done")
+    assert not clone.exists()
+    assert sibling.is_dir()
+    assert pathlib.Path.cwd() == clone.parent
+
+
+def test_finish_ticket_removes_codex_run_checkout_after_recording_not_kept(
+        tmp_path, monkeypatch):
+    _, clone = make_codex_run_clone(tmp_path, monkeypatch)
+    (clone / "unfinished.txt").write_text("not kept\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"released": [], "finished": []}
+
+    def finish(*args):
+        assert clone.is_dir()
+        assert (clone / "unfinished.txt").exists()
+        effects["finished"].append(args)
+
+    implement.finish_blocked_on_human(
+        blocked()["blocked_on_human"],
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=finish,
+        create_effect=lambda *args, **kwargs: {
+            "number": 43,
+            "ref": REPO + "#43",
+            "url": "https://github.com/{}/issues/43".format(REPO),
+        },
+        needs_effect=lambda *args: None,
+        block_effect=lambda *args, **kwargs: None,
+        comment_effect=lambda *args, **kwargs: None,
+    )
+
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][2] == "skipped-human-step"
+    assert not clone.exists()
+
+
+def test_finish_ticket_keeps_codex_run_checkout_when_push_fails(
+        tmp_path, monkeypatch):
+    _, clone = make_codex_run_clone(tmp_path, monkeypatch)
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        implement, "_push_ticket_branch",
+        lambda *args: (_ for _ in ()).throw(
+            implement.ImplementError("git push failed: remote unavailable")),
+    )
+    effects = {"released": [], "finished": []}
+
+    with pytest.raises(implement.ImplementError, match="SystemExit"):
+        implement.finish_done(
+            answer(),
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "raise SystemExit(3)"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=lambda *args: pytest.fail("failed tests must not open a PR"),
+        )
+
+    assert effects["released"] == [REPO + "#42"]
+    assert "work NOT kept: git push failed" in effects["finished"][0][3]
+    assert clone.is_dir()
+    assert (clone / "implemented.txt").exists()
+
+
+def test_codex_run_cleanup_leaves_checkout_outside_runtime_root(
+        tmp_path, monkeypatch):
+    runtime_root = tmp_path / "runtime"
+    (runtime_root / "codex-runs").mkdir(parents=True)
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(funnel, "CLAUDE_DIR", str(runtime_root))
+
+    assert not implement._remove_codex_run_checkout(clone, 42, "codex")
+    assert clone.is_dir()
 
 
 def test_a_failure_note_names_the_failing_tests():

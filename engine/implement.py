@@ -1619,7 +1619,8 @@ def remote_ticket_head(root: pathlib.Path, branch: str) -> Optional[str]:
     """
     ref = "refs/heads/{}".format(branch)
     proc = _run(["git", "ls-remote", "--exit-code", "--heads", "origin", ref],
-                cwd=root, check=False)
+                cwd=root, check=False,
+                timeout=REMOTE_GIT_TIMEOUT_SECONDS)
     if proc.returncode == 2:
         return None
     if proc.returncode != 0:

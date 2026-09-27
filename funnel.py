@@ -3041,6 +3041,9 @@ def checks_still_running(checks: Sequence[dict]) -> bool:
     return ci_rollup_state(entries) == "unknown"
 
 
+_LINE_LEADING_MARKER_RE = re.compile(r"(?m)^[ \t]*<!-- command-center-")
+
+
 def _marked_json_blocks(body: str, marker: str) -> List[Tuple[Dict, str]]:
     """Return parseable JSON blocks owned by ``marker``, newest first.
 
@@ -3061,9 +3064,12 @@ def _marked_json_blocks(body: str, marker: str) -> List[Tuple[Dict, str]]:
     blocks = []
     for marker_at in reversed(marker_positions):
         rest = body[marker_at + len(marker):]
-        next_marker = rest.find("<!-- command-center-")
-        if next_marker >= 0:
-            rest = rest[:next_marker]
+        # Only a marker that begins a line starts another block. A reviewer
+        # model that quotes an earlier verdict puts marker text inside its
+        # own JSON strings, and cutting there lost every such verdict (#1688).
+        next_marker = _LINE_LEADING_MARKER_RE.search(rest)
+        if next_marker:
+            rest = rest[:next_marker.start()]
 
         fenced = re.search(
             r"```json[ \t]*\r?\n(.*?)\r?\n```", rest, flags=re.DOTALL

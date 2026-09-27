@@ -6,6 +6,7 @@ import hashlib
 import json
 import pathlib
 import shlex
+import signal
 import stat
 import subprocess
 import sys
@@ -2543,3 +2544,143 @@ def test_checkout_repo_falls_back_to_gh_for_a_non_github_origin(
     monkeypatch.setattr(
         funnel, "_gh_json", lambda *args: {"nameWithOwner": REPO})
     assert implement.resolve_checkout_repo(tmp_path, None) == REPO
+
+
+def test_run_passes_a_measured_bound_to_each_command_kind(
+        tmp_path, monkeypatch):
+    seen = []
+
+    class CompletedCommand:
+        pid = 1
+        returncode = 0
+        stdin = stdout = stderr = None
+
+        def __init__(self, command):
+            self.command = command
+
+        def communicate(self, input=None, timeout=None):
+            seen.append((self.command, timeout))
+            return "", ""
+
+    monkeypatch.setattr(
+        implement.subprocess, "Popen",
+        lambda command, **kwargs: CompletedCommand(command),
+    )
+    commands = [
+        (["git", "status"], implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "push", "origin", "ticket/42"],
+         implement.REMOTE_GIT_TIMEOUT_SECONDS),
+        (["make", "test"], implement.TEST_COMMAND_TIMEOUT_SECONDS),
+        ([sys.executable, "-m", "pytest", "-q"],
+         implement.TEST_COMMAND_TIMEOUT_SECONDS),
+        ([sys.executable, "-m", "compileall", "engine"],
+         implement.OTHER_COMMAND_TIMEOUT_SECONDS),
+    ]
+
+    for command, _ in commands:
+        implement._run(command, cwd=tmp_path)
+
+    assert seen == commands
+    assert all(timeout < implement.CLAIM_TTL_SECONDS
+               for _, timeout in seen)
+
+
+def test_slow_command_finishes_before_its_bound(tmp_path):
+    result = implement._run(
+        [sys.executable, "-c",
+         "import time; time.sleep(0.05); print('finished')"],
+        cwd=tmp_path, timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "finished"
+
+
+def test_run_tests_applies_test_bound_to_shell_wrapped_command(
+        tmp_path, monkeypatch):
+    seen = []
+
+    def record(command, **kwargs):
+        seen.append(kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(implement, "_run", record)
+    implement.run_tests(
+        tmp_path, [["sh", "-c", "python3 -m pytest tests/ -q"]])
+
+    assert seen[0]["timeout"] == implement.TEST_COMMAND_TIMEOUT_SECONDS
+
+
+def test_timed_out_test_is_abandoned_and_finished_without_keeping_work(
+        tmp_path, monkeypatch):
+    remote, clone = make_clone(tmp_path)
+    (clone / "implemented.txt").write_text("unfinished\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"released": [], "finished": []}
+    real_popen = subprocess.Popen
+    spawned = []
+    killed = []
+
+    class NeverReturns:
+        pid = 23456
+        returncode = None
+        stdin = stdout = stderr = None
+
+        def __init__(self, command):
+            self.command = command
+            self.timeout = None
+            self.waited = False
+            self.killed = False
+
+        def communicate(self, input=None, timeout=None):
+            self.timeout = timeout
+            raise subprocess.TimeoutExpired(self.command, timeout)
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, *args, **kwargs):
+            self.waited = True
+            raise AssertionError("timeout handling must not wait for the child")
+
+    def fake_popen(command, **kwargs):
+        if command == ["make", "test"]:
+            process = NeverReturns(command)
+            spawned.append(process)
+            return process
+        return real_popen(command, **kwargs)
+
+    monkeypatch.setattr(implement.subprocess, "Popen", fake_popen)
+    if implement.os.name == "posix":
+        monkeypatch.setattr(
+            implement.os, "killpg",
+            lambda pid, sig: killed.append((pid, sig)),
+        )
+
+    with pytest.raises(implement.CommandTimeoutError, match="make test timed out"):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[["make", "test"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=lambda *args: pytest.fail(
+                "a timed-out checkout must not open a PR"),
+        )
+
+    (process,) = spawned
+    assert process.timeout == implement.TEST_COMMAND_TIMEOUT_SECONDS
+    assert process.waited is False
+    if implement.os.name == "posix":
+        assert killed == [(process.pid, signal.SIGKILL)]
+    else:
+        assert process.killed is True
+    assert effects["released"] == [REPO + "#42"]
+    (finished,) = effects["finished"]
+    assert finished[:3] == ("codex", "run-42", "errored")
+    assert finished[3].endswith("work NOT kept")
+
+    # Restore the real process launcher before checking the bare remote.
+    monkeypatch.setattr(implement.subprocess, "Popen", real_popen)
+    refs = run_git("--git-dir", str(remote), "show-ref").stdout
+    assert "ticket/42" not in refs

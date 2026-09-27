@@ -134,6 +134,12 @@ _DECLINED_PENDING_GATE_ANSWER = re.compile(
     r".{0,100}\b(?:answer|response)\b)",
     re.IGNORECASE | re.DOTALL,
 )
+_DECLINED_GATE_ANSWER_ISSUE = re.compile(
+    r"https?://github\.com/"
+    r"(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/"
+    r"(?P<number>[1-9][0-9]*)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
 
 
 def _declined_conflict_pointer(reason: str) -> Optional[str]:
@@ -179,6 +185,56 @@ def declined_review_routing_comment(reason: str, pointer: str) -> str:
     ))
 
 
+def declined_unsatisfiable_acceptance_comment(
+        reason: str, acceptance_digest: str) -> str:
+    """Render a durable route back to shaping until the acceptance changes."""
+    excerpt = (reason or "").strip()
+    if len(excerpt) > 1200:
+        excerpt = excerpt[:1197].rstrip() + "..."
+    record = {
+        "type": "unsatisfiable-acceptance",
+        "decline_excerpt": excerpt,
+        "acceptance_digest": acceptance_digest,
+    }
+    return "\n".join((
+        "**Review routing: Unsatisfiable acceptance**",
+        "",
+        DECLINE_REVIEW_ROUTING_MARKER,
+        "```json",
+        json.dumps(record, ensure_ascii=False, indent=2),
+        "```",
+    ))
+
+
+def declined_pending_gate_answer_comment(reason: str, gate_ref: str) -> str:
+    """Render a durable route that waits for one named gate answer."""
+    excerpt = (reason or "").strip()
+    if len(excerpt) > 1200:
+        excerpt = excerpt[:1197].rstrip() + "..."
+    record = {
+        "type": "pending-gate-answer",
+        "decline_excerpt": excerpt,
+        "gate_ref": gate_ref,
+    }
+    return "\n".join((
+        "**Review routing: Pending gate answer**",
+        "",
+        DECLINE_REVIEW_ROUTING_MARKER,
+        "```json",
+        json.dumps(record, ensure_ascii=False, indent=2),
+        "```",
+    ))
+
+
+def _declined_gate_answer_ref(reason: str) -> Optional[str]:
+    """Return one unambiguous issue named by a pending-gate decline."""
+    refs = {
+        "{}#{}".format(match.group("repo"), match.group("number"))
+        for match in _DECLINED_GATE_ANSWER_ISSUE.finditer(reason or "")
+    }
+    return next(iter(refs)) if len(refs) == 1 else None
+
+
 def classify_decline_reason(reason: str, ticket_repo: str,
                             ticket_body: str = ""
                             ) -> Tuple[str, Optional[str]]:
@@ -221,7 +277,10 @@ def classify_decline_reason(reason: str, ticket_repo: str,
     if pointer is not None:
         return "accept-body-conflict", pointer
     if _DECLINED_PENDING_GATE_ANSWER.search(reason or ""):
-        return "pending-gate-answer", None
+        gate_ref = _declined_gate_answer_ref(reason)
+        if gate_ref is not None:
+            return "pending-gate-answer", gate_ref
+        return "unknown", None
     if (_DECLINED_ACCEPTANCE_IMPOSSIBLE.search(reason or "")
             or (_DECLINED_ACCEPTANCE_TERM.search(reason or "")
                 and _DECLINED_NO_CHANGE_CAN_CLEAR.search(reason or ""))):

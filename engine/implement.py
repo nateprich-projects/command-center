@@ -18,6 +18,7 @@ this module cannot create a dependency cycle.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -37,7 +38,10 @@ import funnel  # noqa: E402
 from decline_classifier import (  # noqa: E402
     DECLINE_REVIEW_ROUTING_MARKER,
     classify_decline_reason,
+    declined_pending_gate_answer_comment as _declined_pending_gate_answer_comment,
     declined_review_routing_comment as _declined_review_routing_comment,
+    declined_unsatisfiable_acceptance_comment
+    as _declined_unsatisfiable_acceptance_comment,
 )
 from engine import shape  # noqa: E402
 
@@ -1919,6 +1923,34 @@ def finish_declined(
             human_needs_effect(ticket["url"], ref)
             block_effect(resolved, context["number"], cwd=context["root"])
             routing_failed = True
+    elif unsatisfiable_acceptance_routed or pending_gate_answer_routed:
+        try:
+            if unsatisfiable_acceptance_routed:
+                digest = hashlib.sha256(
+                    (ticket.get("body") or "").encode("utf-8")
+                ).hexdigest()
+                routing_comment = (
+                    _declined_unsatisfiable_acceptance_comment(reason, digest)
+                )
+            elif isinstance(decline_target, str):
+                routing_comment = _declined_pending_gate_answer_comment(
+                    reason, decline_target,
+                )
+            else:
+                raise ImplementError(
+                    "pending gate decline has no named gate answer"
+                )
+            comment_effect(
+                resolved, context["number"], routing_comment,
+                run=run, agent=agent, cwd=context["root"],
+            )
+        except (funnel.GitHubError, ImplementError, OSError,
+                subprocess.SubprocessError):
+            # The route comment is the durable queue hold. If it cannot be
+            # recorded, put the ticket back in Nate's visible queue.
+            human_needs_effect(ticket["url"], ref)
+            block_effect(resolved, context["number"], cwd=context["root"])
+            routing_failed = True
     release(ref)
     first = reason.splitlines()[0] if reason else "no reason given"
     if len(first) > 200:
@@ -1929,9 +1961,17 @@ def finish_declined(
     elif prerequisite_agent_routed:
         note += "; prerequisite already landed; returned to agent queue"
     elif unsatisfiable_acceptance_routed:
-        note += "; acceptance cannot be met; returned to agent queue"
+        note += (
+            "; acceptance cannot be met; routed for reshaping"
+            if not routing_failed else
+            "; reshaping route failed; ticket left blocked"
+        )
     elif pending_gate_answer_routed:
-        note += "; waiting for gate answer as an external event"
+        note += (
+            "; waiting for the named gate answer"
+            if not routing_failed else
+            "; gate-answer route failed; ticket left blocked"
+        )
     elif routing_failed:
         note += "; review routing failed; ticket left blocked"
     if extra_note:

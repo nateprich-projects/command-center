@@ -22,6 +22,7 @@ from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
 import errno
 import glob
+import hashlib
 import hmac
 import inspect
 import io
@@ -751,6 +752,7 @@ class Item:
     blocked_until: Optional[date] = None
     needs_decision: Optional[str] = None
     decline_reason: Optional[str] = None
+    decline_route: Optional[Dict[str, object]] = None
     unparseable_block_comments: List[str] = field(default_factory=list)
     block_comments_error: Optional[str] = None
     satisfied_block_record: Optional[Dict[str, object]] = None
@@ -1716,6 +1718,62 @@ def required_tier(title: str, body: str, failed_before: bool = False) -> str:
     return "escalated" if escalation_reasons(title, body, failed_before) else "standard"
 
 
+def _decline_route_withholds_startability(
+    item: Item, by_ref: Dict[str, Item],
+) -> bool:
+    """Keep routed declines out of implementation until their route clears."""
+    route = item.decline_route
+    if not isinstance(route, dict):
+        return False
+    if (
+        item.needs == "agent"
+        and route.get("type") == "unsatisfiable-acceptance"
+    ):
+        if not isinstance(item.body, str):
+            return True
+        current_digest = hashlib.sha256(
+            item.body.encode("utf-8")
+        ).hexdigest()
+        return current_digest == route.get("acceptance_digest")
+    if (
+        item.needs == "external-event"
+        and route.get("type") == "pending-gate-answer"
+    ):
+        gate_ref = route.get("gate_ref")
+        gate = by_ref.get(gate_ref) if isinstance(gate_ref, str) else None
+        return (
+            gate is None
+            or not isinstance(gate.body, str)
+            or parse_gates_answer(gate.body) is None
+        )
+    return False
+
+
+def clear_answered_decline_routes(
+    items: Sequence[Item],
+) -> List[Dict[str, str]]:
+    """Clear Needs after a pending gate answer has been recorded."""
+    by_ref = {item.ref: item for item in items}
+    cleared = []
+    for item in items:
+        route = item.decline_route
+        if (
+            item.state != "OPEN"
+            or item.needs != "external-event"
+            or not isinstance(route, dict)
+            or route.get("type") != "pending-gate-answer"
+            or _decline_route_withholds_startability(item, by_ref)
+        ):
+            continue
+        if not item.item_id:
+            raise GitHubError("{} is not in the Project".format(item.ref))
+        gate_ref = str(route["gate_ref"])
+        write_project_select(item.item_id, "Needs", "none", item.ref)
+        item.needs = "none"
+        cleared.append({"ref": item.ref, "gate_ref": gate_ref})
+    return cleared
+
+
 def _startable_without_repo_readiness(
     item: Item,
     by_ref: Dict[str, Item],
@@ -1732,6 +1790,11 @@ def _startable_without_repo_readiness(
         or item.open_blockers
         or item.children_total
         or needs not in NEEDS_OPTIONS
+        or (
+            needs in ("agent", "external-event")
+            and item.block_comments_error is not None
+        )
+        or (needs == "external-event" and item.decline_route is None)
         # The Needs field is the only capability signal (#826). A
         # claude-code-environment ticket is the middle outcome: Claude Code
         # may work it, while every other requester must leave it in the
@@ -1739,6 +1802,8 @@ def _startable_without_repo_readiness(
         # established for the marker this field replaced.
         or (human or (machine_local and agent != "claude"))
     ):
+        return False
+    if _decline_route_withholds_startability(item, by_ref):
         return False
     if item.ref in awaiting_review:
         return False
@@ -3312,6 +3377,62 @@ def parse_decline_comment(bodies: Iterable[str]) -> Optional[str]:
             continue
         reason = body[len(DECLINED_PREFIX):].strip()
         return reason.splitlines()[0].strip() if reason else ""
+    return None
+
+
+def parse_decline_route_comment(
+    bodies: Iterable[str],
+) -> Optional[Dict[str, object]]:
+    """Read the durable route belonging to the newest agent decline."""
+    rows = list(bodies)
+    latest_run = None
+    for body in reversed(rows):
+        if not isinstance(body, str) or not body.startswith(DECLINED_PREFIX):
+            continue
+        provenance = parse_provenance(body)
+        if (
+            provenance is not None
+            and provenance.get("voice") == "agent"
+            and isinstance(provenance.get("run"), str)
+            and provenance.get("run")
+        ):
+            latest_run = provenance["run"]
+            break
+    if latest_run is None:
+        return None
+
+    for body in reversed(rows):
+        if (
+            not isinstance(body, str)
+            or DECLINE_ROUTING_REVIEW_MARKER not in body
+        ):
+            continue
+        record = _marked_json(body, DECLINE_ROUTING_REVIEW_MARKER)
+        provenance = parse_provenance(body)
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("decline_excerpt"), str)
+            or provenance is None
+            or provenance.get("voice") != "agent"
+            or provenance.get("run") != latest_run
+        ):
+            continue
+        route_type = record.get("type")
+        if route_type == "unsatisfiable-acceptance":
+            digest = record.get("acceptance_digest")
+            if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+                return record
+        elif route_type == "pending-gate-answer":
+            gate_ref = record.get("gate_ref")
+            if (
+                isinstance(gate_ref, str)
+                and re.fullmatch(
+                    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*",
+                    gate_ref,
+                )
+            ):
+                return record
+        return None
     return None
 
 
@@ -9927,7 +10048,10 @@ def _load_begin_items(
             # Membership is the topic, exactly as in the full load.
             if item.repo not in members:
                 continue
-            if item.state == "OPEN" and item.is_blocked:
+            if item.state == "OPEN" and (
+                item.is_blocked
+                or item.needs in ("agent", "external-event")
+            ):
                 comment_started = time.perf_counter()
                 try:
                     _load_block_comment(item)
@@ -10070,7 +10194,10 @@ def _load_project_items_by_refs(refs: Sequence[str]) -> Dict[str, Item]:
                         "without the issue itself".format(ref)
                     )
                 continue
-            if match.state == "OPEN" and match.is_blocked:
+            if match.state == "OPEN" and (
+                match.is_blocked
+                or match.needs in ("agent", "external-event")
+            ):
                 _load_block_comment(match)
             found[ref] = match
     return found
@@ -10203,7 +10330,10 @@ def load_items(
                     # them from `blockedBy` in the Project query. They used to
                     # be fetched here instead, one REST call per open ticket —
                     # do not restore a per-item dependency read in this loop.
-                    if item.state == "OPEN" and item.is_blocked:
+                    if item.state == "OPEN" and (
+                        item.is_blocked
+                        or item.needs in ("agent", "external-event")
+                    ):
                         comment_started = time.perf_counter()
                         try:
                             _load_block_comment(item)
@@ -14868,6 +14998,7 @@ def _load_block_comment(item: Item) -> None:
         ) = parsed
     item.needs_decision = parse_needs_decision_comment(bodies)
     item.decline_reason = parse_decline_comment(bodies)
+    item.decline_route = parse_decline_route_comment(bodies)
     for body in reversed(bodies):
         record = parse_satisfied_block_comment(body)
         if record is not None:
@@ -16618,6 +16749,11 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         )
         if cleared:
             out["cleared_blocks"] = cleared
+        cleared_decline_routes = attempt_reconcile(
+            "answered_decline_routes", clear_answered_decline_routes, items
+        )
+        if cleared_decline_routes:
+            out["cleared_decline_routes"] = cleared_decline_routes
         abandoned = attempt_reconcile(
             "abandoned_claims", reconcile_abandoned_claims,
             items, now, pr_facts,

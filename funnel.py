@@ -655,6 +655,7 @@ BRIEF_SECTION_BUDGETS = {
     # 1091-item board at 20.93 s, 25.17 s, 22.94 s.
     "cleared_blocks": 30.0,
     "blocked": 0.25,
+    "held_at_accept": 0.25,
     "human_steps": 0.25,
     "machine_local_steps": 0.25,
     "blocked_human_steps": 0.25,
@@ -707,6 +708,7 @@ BRIEF_PURE_SECTIONS = frozenset({
     "counts_by_gate",
     "in_motion",
     "blocked",
+    "held_at_accept",
     "human_steps",
     "machine_local_steps",
     "blocked_human_steps",
@@ -1050,6 +1052,36 @@ def _acceptance_waiting_reason(
     if parse_analysis_marker(body) is not None:
         return "Analysis review"
     return "Ordinary accept"
+
+
+def is_held_at_accept(item: Item) -> bool:
+    """Whether a finished project is held at Accept by Nate (#1725).
+
+    Nate's hold is recorded in the ordinary blocked form (``funnel hold``,
+    #1724): the ``blocked`` label with a ``**Blocked until ...:**`` or
+    ``**Blocked on #N:**`` comment. That named condition already keeps the
+    project out of ``total_needing_nate`` and out of the "Ordinary accept"
+    list, because ``gate_question`` asks nothing of a conditioned block; what
+    it did not do is say so. The brief listed the hold as blocked work.
+
+    Only a project that would otherwise ask "Accept it?" is held there: open,
+    at Building, every ticket closed, and not one that closes itself (the
+    unattended close ignores ``blocked``, so such a block holds nothing). A
+    block with no date or issue condition still asks "Unblock or park?", and
+    an event condition is an agent's wait, so both stay blocked work.
+    """
+    return (
+        item.state == "OPEN"
+        and item.parent is None
+        and item.status == "Building"
+        and item.is_blocked
+        and item.children_all_closed
+        and not _can_close_itself(item)
+        and (
+            bool(item.block_references)
+            or _item_blocked_until(item) is not None
+        )
+    )
 
 
 def question_since(item: Item) -> Optional[datetime]:
@@ -12339,8 +12371,65 @@ def _blocked_item_json(item: Item, now: datetime) -> Dict[str, object]:
 def blocked_json(
     items: Iterable[Item], now: datetime,
 ) -> List[Dict[str, object]]:
-    """The brief's blocked section, reusing one load-time comment fetch."""
-    return [_blocked_item_json(item, now) for item in blocked_items(items)]
+    """The brief's blocked section, reusing one load-time comment fetch.
+
+    A finished project Nate holds at Accept is not blocked work: it is listed
+    in ``held_at_accept`` instead (#1725).
+    """
+    return [
+        _blocked_item_json(item, now) for item in blocked_items(items)
+        if not is_held_at_accept(item)
+    ]
+
+
+def _held_at_accept_condition(item: Item) -> str:
+    """Say in words what lifts an Accept hold: a date, issues closing, or both."""
+    parts = []
+    blocked_until = _item_blocked_until(item)
+    if blocked_until is not None:
+        parts.append(blocked_until.isoformat())
+    if item.block_references:
+        parts.append("{} {}".format(
+            " and ".join(item.block_references),
+            "closes" if len(item.block_references) == 1 else "close",
+        ))
+    return "until " + " and ".join(parts)
+
+
+def _held_at_accept_item_json(item: Item) -> Dict[str, object]:
+    """Render one Accept hold with its condition and Nate's reason (#1725).
+
+    The block parser keeps everything after the header as the reason, the
+    provenance trailer included, so the reason is cut at that marker.
+    """
+    reason = _visible_comment(item.block_reason or "").strip()
+    rendered = {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "condition": _held_at_accept_condition(item),
+        "conditions": list(item.block_references),
+        "reason": reason or None,
+        "held_since": (
+            item.blocked_since.isoformat() if item.blocked_since else None
+        ),
+    }
+    blocked_until = _item_blocked_until(item)
+    if blocked_until is not None:
+        rendered["blocked_until"] = blocked_until.isoformat()
+    return rendered
+
+
+def held_at_accept_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """The brief's held-at-Accept section, in the blocked section's order.
+
+    Neither a decision nor blocked work: the hold lifts itself when its
+    condition is met, and the project then asks "Accept it?" again.
+    """
+    return [
+        _held_at_accept_item_json(item) for item in blocked_items(items)
+        if is_held_at_accept(item)
+    ]
 
 
 def _event_block_mismatch(item: Item) -> Optional[str]:
@@ -13952,6 +14041,7 @@ def cmd_brief(
             "cleared_blocks", lambda: cleared_blocks_json(items, now)
         )
         blocked = section("blocked", lambda: blocked_json(items, now))
+        held = section("held_at_accept", lambda: held_at_accept_json(items))
         human = section("human_steps", lambda: human_step_json(items, now))
         machine_local = section(
             "machine_local_steps",
@@ -14036,6 +14126,7 @@ def cmd_brief(
         counts = pure_values["counts_by_gate"]
         running = pure_values["in_motion"]
         blocked = pure_values["blocked"]
+        held = pure_values["held_at_accept"]
         human = pure_values["human_steps"]
         machine_local = pure_values["machine_local_steps"]
         blocked_human = pure_values["blocked_human_steps"]
@@ -14092,6 +14183,7 @@ def cmd_brief(
             "closed_itself": closed_itself,
             "cleared_blocks": cleared_blocks,
             "blocked": blocked,
+            "held_at_accept": held,
             "human_steps": human,
             "machine_local_steps": machine_local,
             "blocked_human_steps": blocked_human,
@@ -14234,6 +14326,81 @@ def claim_ticket(
     # implementation so `funnel begin` (#349) and `funnel claim` promote alike.
     _begin_parent(items, target)
     return None
+
+
+def _ticket_branch_ref_sha(repo: str, ref: str) -> Optional[str]:
+    """Read one Git ref, returning None only when GitHub says it is absent."""
+    endpoint = "repos/{}/git/ref/{}".format(repo, ref[len("refs/"):])
+    result = _run_gh(
+        _gh_api_command(endpoint), capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        response = "{}\n{}".format(
+            getattr(result, "stderr", ""), getattr(result, "stdout", "")
+        )
+        if re.search(r"\bHTTP\s+404\b", response, re.IGNORECASE):
+            return None
+        raise GitHubError("could not read Git ref in {}".format(repo))
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        raise GitHubError("GitHub returned an unreadable Git ref in {}".format(repo))
+    if not isinstance(payload, dict) or payload.get("ref") != ref:
+        raise GitHubError("GitHub returned an unexpected Git ref in {}".format(repo))
+    object_data = payload.get("object")
+    sha = object_data.get("sha") if isinstance(object_data, dict) else None
+    if not isinstance(sha, str) or not sha.strip():
+        raise GitHubError("GitHub returned a Git ref without a commit in {}".format(repo))
+    return sha
+
+
+def ensure_ticket_branch(repo: str, number: int) -> str:
+    """Plant ``ticket/<number>`` at main, preserving any existing remote ref.
+
+    This runs after a ticket claim and before its heartbeat binding. Once the
+    run is bound, abandoned-claim recovery can use this branch as its liveness
+    marker. The main SHA is captured before creating the ref; a raced creation
+    is read back and left untouched rather than replaced.
+    """
+    if (not isinstance(repo, str)
+            or not isinstance(number, int) or isinstance(number, bool) or number < 1
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)):
+        raise GitHubError("cannot establish a ticket branch for this repository")
+
+    branch_ref = "refs/heads/ticket/{}".format(number)
+    existing = _ticket_branch_ref_sha(repo, branch_ref)
+    if existing is not None:
+        return existing
+
+    base_sha = _ticket_branch_ref_sha(repo, "refs/heads/main")
+    if base_sha is None:
+        raise GitHubError("main is missing in {}".format(repo))
+
+    result = _run_gh(
+        ["gh", "api", "-X", "POST", "repos/{}/git/refs".format(repo),
+         "-f", "ref=" + branch_ref, "-f", "sha=" + base_sha],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, ValueError):
+            payload = None
+        object_data = payload.get("object") if isinstance(payload, dict) else None
+        created_sha = object_data.get("sha") if isinstance(object_data, dict) else None
+        if (isinstance(payload, dict) and payload.get("ref") == branch_ref
+                and created_sha == base_sha):
+            return base_sha
+
+    # A competing creator may have won between the first read and the POST.
+    # Accept that ref without changing its tip; otherwise fail closed.
+    existing = _ticket_branch_ref_sha(repo, branch_ref)
+    if existing is not None:
+        return existing
+    raise GitHubError("could not push {} at the run base in {}".format(
+        branch_ref, repo
+    ))
 
 
 def cmd_claim(
@@ -17516,33 +17683,55 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     work=item_json(ticket, now, {i.ref: i for i in items}),
                 )
                 if agent in IMPLEMENT_VENDORS:
-                    # Bind immediately after the claim, before the packet's
-                    # slower ticket/plan/verdict reads. A process abandoned
-                    # during that load is then attributable and recoverable by
-                    # the next begin's reconciliation.
-                    _bind_run(agent, out)
                     try:
-                        out["packet"] = implementation_packet(
-                            ticket.repo, ticket.number, agent
-                        )
-                    except (GitHubError, OSError, subprocess.SubprocessError) as exc:
-                        # A packet-less implementation run is not actionable.
-                        # Undo the claim before returning a stop envelope so the
-                        # next poll can recover without waiting for the TTL.
+                        ensure_ticket_branch(ticket.repo, ticket.number)
+                    except (GitHubError, OSError,
+                            subprocess.SubprocessError) as exc:
+                        # A branchless claim still means begin was abandoned.
+                        # Release a claim whose liveness marker could not be
+                        # planted, then stop before issuing implementation work.
                         try:
                             write_lock(ticket, None)
-                        except GitHubError as release_exc:
-                            out["release_error"] = str(release_exc)
+                        except GitHubError:
+                            out["release_error"] = "could not release the ticket claim"
                         out.pop("work", None)
                         out.update(
                             do="stop",
                             gate="error",
-                            why="could not assemble implementation packet: {}".format(
-                                exc
+                            why="could not establish ticket branch for {}#{} ({})".format(
+                                ticket.repo, ticket.number, type(exc).__name__
                             ),
                         )
                     else:
-                        out["vendor"] = IMPLEMENT_VENDORS[agent]
+                        # Bind after the branch is durable and before the
+                        # packet's slower ticket/plan/verdict reads. A process
+                        # abandoned during that load is then attributable and
+                        # recoverable by the next begin's reconciliation.
+                        _bind_run(agent, out)
+                        try:
+                            out["packet"] = implementation_packet(
+                                ticket.repo, ticket.number, agent
+                            )
+                        except (GitHubError, OSError,
+                                subprocess.SubprocessError) as exc:
+                            # A packet-less implementation run is not
+                            # actionable. Undo the claim before returning a
+                            # stop envelope so the next poll can recover
+                            # without waiting for the TTL.
+                            try:
+                                write_lock(ticket, None)
+                            except GitHubError as release_exc:
+                                out["release_error"] = str(release_exc)
+                            out.pop("work", None)
+                            out.update(
+                                do="stop",
+                                gate="error",
+                                why="could not assemble implementation packet: {}".format(
+                                    exc
+                                ),
+                            )
+                        else:
+                            out["vendor"] = IMPLEMENT_VENDORS[agent]
         if "bound" not in out:
             _bind_run(agent, out)
         print(json.dumps(out, indent=2))

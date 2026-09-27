@@ -690,6 +690,21 @@ def test_coverage_comment_names_what_the_runner_wrote():
         "blocked by #101, other/repo#7)")
 
 
+def test_coverage_comment_marks_a_risk_inherited_from_the_project():
+    found = breakdown.coverage_comment_body("owner/repo#1", [
+        {"ref": "owner/repo#101", "title": "first", "risk": "escalated",
+         "risk_inherited": True, "needs": "none", "blocked_by": []},
+        {"ref": "owner/repo#102", "title": "second", "risk": "escalated",
+         "risk_inherited": False, "needs": "human", "blocked_by": ["#101"]},
+    ])
+    assert found.splitlines()[1:] == [
+        "- owner/repo#101: first (Risk: escalated, inherited from the "
+        "project, Needs: none)",
+        "- owner/repo#102: second (Risk: escalated, Needs: human; "
+        "blocked by #101)",
+    ]
+
+
 def test_coverage_comment_singularises_one_ticket():
     found = breakdown.coverage_comment_body("owner/repo#1", [
         {"ref": "owner/repo#101", "title": "only",
@@ -823,14 +838,32 @@ def test_non_frozen_breakdown_ticket_does_not_read_the_freeze(monkeypatch):
 
 # -- apply ---------------------------------------------------------------------
 
+def project_row(ref, risk=None):
+    """The parent's Project row as funnel's by-ref read returns it."""
+    repo, _, number = ref.partition("#")
+    return funnel.Item(
+        repo=repo, number=int(number), title="the plan",
+        url="https://github.com/{}/issues/{}".format(repo, number),
+        state="OPEN", risk=risk)
+
+
+def risk_writes(calls):
+    """The Risk writes in order, as (ref, value)."""
+    return [(ref, value) for _item, field, value, ref in calls["fields"]
+            if field == "Risk"]
+
+
 def stub_apply(monkeypatch, **kw):
     """Replace every GitHub effect with a recorder. Returns the calls dict.
 
     The Project add itself stays real: `gh` is stubbed one layer down so
-    every apply test proves the Needs id comes from item-add's answer.
+    every apply test proves the Needs id comes from item-add's answer. The
+    parent's Risk comes through funnel's by-ref Project read, stubbed with
+    ``project_risk`` (unset by default) or replaced by ``project_rows``.
     """
     calls: dict = {"created": [], "added": [], "needs": [], "comments": [],
-                   "labels": [], "plans": [], "sibling_reads": []}
+                   "labels": [], "plans": [], "sibling_reads": [],
+                   "risk_reads": [], "fields": []}
     next_number = {"n": 100}
 
     def fake_plan(repo, number):
@@ -885,7 +918,19 @@ def stub_apply(monkeypatch, **kw):
     def fake_label(repo, number):
         calls["labels"].append((repo, number))
 
+    def fake_project_rows(refs, **kwargs):
+        calls["risk_reads"].append(list(refs))
+        if "project_rows" in kw:
+            return kw["project_rows"](refs)
+        return [project_row(ref, risk=kw.get("project_risk")) for ref in refs]
+
+    def fake_field(item_id, field, value, ref):
+        calls["fields"].append((item_id, field, value, ref))
+
     monkeypatch.setattr(breakdown, "fetch_plan", fake_plan)
+    monkeypatch.setattr(funnel, "load_project_items_by_refs",
+                        fake_project_rows)
+    monkeypatch.setattr(funnel, "write_project_select", fake_field)
     monkeypatch.setattr(breakdown, "fetch_siblings", fake_siblings)
     monkeypatch.setattr(breakdown, "create_ticket", fake_create)
     monkeypatch.setattr(funnel, "_run_gh", fake_run_gh)
@@ -956,6 +1001,7 @@ def test_the_question_path_posts_and_labels_without_tickets(monkeypatch):
     assert (repo, number) == (REPO, 1)
     assert body.startswith("**Needs a decision:** tabs or spaces?")
     assert calls["labels"] == [(REPO, 1)]
+    assert calls["risk_reads"] == []  # no ticket, so no Risk to inherit
     assert result == {"project": "owner/repo#1",
                       "needs_decision": "tabs or spaces?"}
 
@@ -1229,6 +1275,181 @@ def test_a_genuine_project_add_failure_keeps_the_created_issue_list(
 
     assert calls["needs"] == [("item-101", "none", "owner/repo#101")]
     assert calls["comments"] == []
+
+
+# -- the project's Risk (#1757) -----------------------------------------------
+#
+# Since #1679 a plan only the escalation scan flags raises its project's Risk
+# to escalated instead of waiting at Shaped, "so the escalated reviewer judges
+# the implementation". The answer's per-ticket risk is the model's judgement;
+# an escalated project overrides it on every ticket so the promise holds.
+
+def test_an_escalated_project_escalates_a_standard_ticket(monkeypatch):
+    calls = stub_apply(monkeypatch, project_risk="escalated")
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="first", risk="standard"),
+        raw_ticket(title="second", risk="escalated"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert calls["risk_reads"] == [["owner/repo#1"]]
+    assert risk_writes(calls) == [("owner/repo#101", "escalated"),
+                                  ("owner/repo#102", "escalated")]
+    assert [(row["risk"], row["risk_inherited"])
+            for row in result["created"]] == [("escalated", True),
+                                              ("escalated", True)]
+    body = calls["comments"][0][2]
+    assert body == breakdown.coverage_comment_body(
+        "owner/repo#1", result["created"])
+    assert body.splitlines()[1:] == [
+        "- owner/repo#101: first (Risk: escalated, inherited from the "
+        "project, Needs: none)",
+        "- owner/repo#102: second (Risk: escalated, inherited from the "
+        "project, Needs: none)",
+    ]
+
+
+@pytest.mark.parametrize("project_risk", ["standard", None])
+def test_a_standard_or_unset_project_keeps_each_tickets_own_risk(
+        monkeypatch, project_risk):
+    calls = stub_apply(monkeypatch, project_risk=project_risk)
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="first", risk="standard"),
+        raw_ticket(title="second", risk="escalated"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert risk_writes(calls) == [("owner/repo#101", "standard"),
+                                  ("owner/repo#102", "escalated")]
+    assert [(row["risk"], row["risk_inherited"])
+            for row in result["created"]] == [("standard", False),
+                                              ("escalated", False)]
+    assert "inherited" not in calls["comments"][0][2]
+
+
+def test_an_escalated_ticket_under_a_standard_project_stays_escalated(
+        monkeypatch):
+    calls = stub_apply(monkeypatch, project_risk="standard")
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="only", risk="escalated"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    breakdown.apply(REPO, 1, normalized)
+
+    assert calls["risk_reads"] == [["owner/repo#1"]]
+    assert risk_writes(calls) == [("owner/repo#101", "escalated")]
+    assert calls["comments"][0][2].splitlines()[1] == (
+        "- owner/repo#101: only (Risk: escalated, Needs: none)")
+
+
+def test_a_resumed_breakdown_under_an_escalated_project_writes_escalated(
+        monkeypatch):
+    # "first" survived an earlier half-applied run; its Risk write is
+    # repeated, so a resumed ticket is escalated as surely as a new one.
+    calls = stub_apply(monkeypatch, project_risk="escalated",
+                       siblings=[sibling(201, title="first")])
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="first", risk="standard"),
+        raw_ticket(title="second", risk="standard"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    result = breakdown.apply(REPO, 1, normalized)
+
+    assert [row["ticket"]["title"] for row in calls["created"]] == ["second"]
+    assert risk_writes(calls) == [("owner/repo#201", "escalated"),
+                                  ("owner/repo#101", "escalated")]
+    assert [row["risk_inherited"] for row in result["created"]] == [
+        True, True]
+    assert calls["comments"][0][2].count(
+        "Risk: escalated, inherited from the project") == 2
+
+
+def test_a_project_filter_miss_reads_the_risk_from_the_board(monkeypatch):
+    calls = stub_apply(monkeypatch, project_rows=lambda refs: None)
+    board_reads = []
+
+    def board(include_details=True):
+        board_reads.append(include_details)
+        return [project_row("owner/repo#1", risk="escalated")]
+
+    monkeypatch.setattr(funnel, "load_items", board)
+    errors, normalized, _ = validate({"tickets": [raw_ticket()]})
+    assert errors == []
+    assert normalized is not None
+
+    breakdown.apply(REPO, 1, normalized)
+
+    assert board_reads == [False]
+    assert risk_writes(calls) == [("owner/repo#101", "escalated")]
+
+
+def _read_fails(refs):
+    raise funnel.GitHubError("HTTP 502 Bad Gateway")
+
+
+def _board_fails(include_details=True):
+    raise funnel.GitHubError("HTTP 502 Bad Gateway")
+
+
+@pytest.mark.parametrize("project_rows, board", [
+    # The by-ref read itself fails.
+    (_read_fails, None),
+    # The filter misses and the board read fails.
+    (lambda refs: None, _board_fails),
+    # Neither read finds the project's row.
+    (lambda refs: None, lambda include_details=True: []),
+    # A Risk outside the enum is no reading at all.
+    (lambda refs: [project_row(refs[0], risk="high")], None),
+], ids=["read-fails", "board-fails", "no-row", "unknown-value"])
+def test_an_unreadable_project_risk_creates_nothing(
+        monkeypatch, project_rows, board):
+    calls = stub_apply(monkeypatch, project_rows=project_rows)
+    if board is not None:
+        monkeypatch.setattr(funnel, "load_items", board)
+    errors, normalized, _ = validate({"tickets": [
+        raw_ticket(title="first"), raw_ticket(title="second"),
+    ]})
+    assert errors == []
+    assert normalized is not None
+
+    with pytest.raises(funnel.GitHubError,
+                       match="could not read the Risk of project "
+                             "owner/repo#1"):
+        breakdown.apply(REPO, 1, normalized)
+
+    assert calls["risk_reads"] == [["owner/repo#1"]]
+    assert calls["sibling_reads"] == []
+    assert calls["created"] == []
+    assert calls["added"] == []
+    assert calls["fields"] == []
+    assert calls["needs"] == []
+    assert calls["comments"] == []
+
+
+def test_apply_main_reports_an_unreadable_project_risk(
+        monkeypatch, tmp_path, capsys):
+    calls = stub_apply(monkeypatch, project_rows=_read_fails)
+    monkeypatch.setattr(breakdown, "fetch_issue_state", lambda ref: "OPEN")
+    answer = tmp_path / "answer.json"
+    answer.write_text(json.dumps({"tickets": [raw_ticket()]}))
+
+    assert breakdown.apply_main(
+        ["owner/repo#1", "--answer", str(answer)]) == 1
+
+    err = capsys.readouterr().err
+    assert "could not read the Risk of project owner/repo#1" in err
+    assert "Traceback" not in err
+    assert calls["created"] == []
 
 
 def test_apply_main_rejects_an_invalid_answer_with_exit_2(

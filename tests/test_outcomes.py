@@ -837,6 +837,73 @@ def test_closed_ticket_list_requests_comments_for_the_full_walk(monkeypatch):
     assert "comments" in calls[0][-1]
 
 
+def _closed_rows(count):
+    return [
+        {"number": number, "title": "t", "url": "u",
+         "closedAt": "2026-09-01T00:00:00Z", "stateReason": "COMPLETED",
+         "comments": []}
+        for number in range(1, count + 1)
+    ]
+
+
+def test_closed_ticket_scan_of_todays_size_derives_at_the_default_ceiling(
+    monkeypatch,
+):
+    # command-center had 1,017 closed issues on 2026-09-27; the old 1,000-row
+    # ceiling refused that scan outright (#1751).
+    requested = []
+
+    def gh_json(*args):
+        requested.append(args[args.index("--limit") + 1])
+        return _closed_rows(1017)
+
+    monkeypatch.setattr(outcomes, "gh_json", gh_json)
+
+    assert len(outcomes.list_closed_tickets(REPO)) == 1017
+    assert requested == [str(outcomes.PR_SCAN_LIMIT + 1)]
+    assert outcomes.PR_SCAN_LIMIT >= 10000
+
+
+def test_closed_ticket_scan_past_the_ceiling_still_refuses(monkeypatch):
+    monkeypatch.setattr(
+        outcomes, "gh_json",
+        lambda *args: _closed_rows(outcomes.PR_SCAN_LIMIT + 1),
+    )
+
+    with pytest.raises(outcomes.OutcomeError, match="refusing partial"):
+        outcomes.list_closed_tickets(REPO)
+
+
+def test_repository_walk_scans_prs_to_the_default_ceiling(monkeypatch):
+    seen = []
+
+    def index(repo, limit, include_comments=False):
+        seen.append(limit)
+        return {}, False
+
+    monkeypatch.setattr(outcomes, "list_closed_tickets", lambda repo, limit: [])
+    monkeypatch.setattr(funnel, "ticket_pr_index", index)
+    monkeypatch.setattr(outcomes, "read_heartbeat_records", lambda: {})
+    monkeypatch.setattr(outcomes, "_repository_issue_events", lambda repo: {})
+
+    assert outcomes.derive_repository(REPO, now=NOW) == []
+    assert seen == [outcomes.PR_SCAN_LIMIT]
+
+
+def test_repository_walk_refuses_a_pr_scan_truncated_at_the_default_ceiling(
+    monkeypatch,
+):
+    monkeypatch.setattr(outcomes, "list_closed_tickets", lambda repo, limit: [])
+    monkeypatch.setattr(
+        funnel, "ticket_pr_index",
+        lambda repo, limit, include_comments=False: ({}, True),
+    )
+    monkeypatch.setattr(outcomes, "read_heartbeat_records", lambda: {})
+
+    with pytest.raises(outcomes.OutcomeError, match="PR scan .* exceeded 10000"):
+        outcomes.derive_repository(REPO, now=NOW)
+
+
 def test_remote_append_uses_sha_and_retries_a_contents_conflict(monkeypatch):
     existing = outcomes.derive_outcome(ticket(1), now=NOW)
     addition = outcomes.derive_outcome(ticket(2), now=NOW)

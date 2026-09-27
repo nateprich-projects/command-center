@@ -54,3 +54,24 @@ def test_an_indented_marker_line_is_still_a_boundary():
     )
 
     assert funnel.parse_verdict(body) is None
+
+
+def test_run_evidence_comment_quoting_a_marker_still_parses():
+    """Ticket #1689 test (2): the same reader backs run evidence."""
+    from engine import review
+
+    body = (
+        "**Run evidence:**\n\n```json\n"
+        '{{\n  "command": "funnel.py review 1667",\n  "exit_status": 0,\n'
+        '  "output_summary": "the earlier comment began with {} and {}",\n'
+        '  "environment_note": "Mac mini run clone"\n}}\n```\n\n{}\n\n'
+        '```json\n{{"agent": "claude", "voice": "agent"}}\n```\n'
+        .format(funnel.REVIEW_MARKER, funnel.PROVENANCE_MARKER,
+                funnel.PROVENANCE_MARKER)
+    )
+
+    parsed = review.parse_run_evidence_comment(body)
+
+    assert parsed is not None
+    assert parsed["exit_status"] == 0
+    assert funnel.REVIEW_MARKER in parsed["output_summary"]

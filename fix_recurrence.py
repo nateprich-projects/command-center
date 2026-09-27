@@ -141,23 +141,33 @@ def _hunks(repo: Path, sha: str) -> List[Tuple[str, int, int, Optional[str]]]:
 
 
 def _blame(repo: Path, sha: str, path: str,
-           ranges: Sequence[Tuple[int, int]], since: datetime) -> List[str]:
-    """The commit that last wrote each listed line of ``path`` before ``sha``."""
+           ranges: Sequence[Tuple[int, int]], since: datetime
+           ) -> List[Optional[str]]:
+    """The commit that last wrote each listed line of ``path`` before ``sha``.
+
+    ``--since`` only bounds how far blame walks. When the walk stops, git
+    credits every older line to the *boundary* commit, which did not write
+    it; such lines come back as ``None`` so they can never read as a recent
+    fix, whatever ``since`` is (#1687 review 6).
+    """
     # An empty ignore-revs file overrides any blame.ignoreRevsFile setting.
     args = ["blame", "--porcelain", "--ignore-revs-file", "",
             "--since={}".format(since.isoformat())]
     for start, count in ranges:
         args += ["-L", "{},+{}".format(start, count)]
     out = _git(repo, *args, sha + "^", "--", path)
-    authors = []
+    authors: List[Optional[str]] = []
+    boundary: Set[str] = set()
     current = None
     for line in out.splitlines():
         header = re.match(r"^([0-9a-f]{40}) \d+ \d+", line)
         if header:
             current = header.group(1)
+        elif line == "boundary" and current:
+            boundary.add(current)
         elif line.startswith("\t") and current:
             authors.append(current)
-    return authors
+    return [None if author in boundary else author for author in authors]
 
 
 def measure(repo: Path, fix_projects: Mapping[int, int], now: datetime,
@@ -196,7 +206,7 @@ def measure(repo: Path, fix_projects: Mapping[int, int], now: datetime,
         for path, ranges in by_path.items():
             for author in _blame(repo, sha, path, ranges, when - window):
                 lines += 1
-                earlier = fix_sha.get(author)
+                earlier = fix_sha.get(author) if author else None
                 if (earlier and earlier[1] != project
                         and when - window <= earlier[0] < when):
                     recent_fix += 1

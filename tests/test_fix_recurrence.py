@@ -478,3 +478,30 @@ def test_the_measured_window_is_seven_days_to_the_hour(tmp_path):
     result = fr.measure(root, {41: 4100, 42: 4200}, NOW)
 
     assert result["denominator"] == 1
+
+
+@pytest.mark.parametrize("since_shift", [timedelta(0), timedelta(hours=1),
+                                         timedelta(days=1)])
+def test_blame_boundary_lines_never_count_as_recent(tmp_path, monkeypatch,
+                                                    since_shift):
+    """A fix just inside the edge touching other lines must not be credited
+    with old lines, however far --since sits from the cause window."""
+    root = _new_repo(tmp_path)
+    fix_at = NOW - timedelta(hours=1)
+    _commit(root, {"app.py": _body("one", ["a = 1"]) + _body("two", ["b = 1"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("one", ["a = 1"]) + _body("two", ["b = 2"])},
+            "Other lines (#43) (#143)",
+            fix_at - timedelta(days=7) + timedelta(minutes=30))
+    _commit(root, {"app.py": _body("one", ["a = 3"]) + _body("two", ["b = 2"])},
+            "Fix old lines (#44) (#144)", fix_at)
+    real_blame = fr._blame
+
+    def shifted(repo, sha, path, ranges, since):
+        return real_blame(repo, sha, path, ranges, since + since_shift)
+
+    monkeypatch.setattr(fr, "_blame", shifted)
+
+    result = fr.measure(root, {43: 4300, 44: 4400}, NOW)
+
+    assert result["numerator"] == 0

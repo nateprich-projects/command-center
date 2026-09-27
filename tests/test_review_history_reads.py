@@ -64,6 +64,7 @@ class Board:
         self.item_filters = []
         self.full_load_calls = 0
         self.events = []
+        self.missing_refs = set()
         self.writes = []
         self.fail_history = False
 
@@ -172,6 +173,8 @@ class Board:
                         == repo
                         and node["content"]["number"] == number
                     ]
+                    if query_filter in self.missing_refs:
+                        nodes = []
                 project[alias] = {
                     "nodes": nodes,
                     "pageInfo": {"hasNextPage": False, "endCursor": None},
@@ -341,6 +344,30 @@ def test_packet_reads_the_pr_before_loading_project_items(monkeypatch):
 
     assert board.events[0] == "pr"
     assert board.events[1] == "project"
+
+
+def test_packet_falls_back_when_a_ticket_ref_is_missing(monkeypatch):
+    wire_packet(monkeypatch)
+    board = Board(recent_regressions=1)
+    board.missing_refs.add(REPO + "#10")
+    install(monkeypatch, board)
+
+    old = review.collect(
+        REPO, 7, items_loader=lambda: funnel.load_items(), now=NOW,
+    )
+    old_board = board
+    board = Board(recent_regressions=1)
+    board.missing_refs.add(REPO + "#10")
+    install(monkeypatch, board)
+    new = review.collect(REPO, 7, now=NOW)
+
+    assert json.dumps(new, sort_keys=True) == json.dumps(old, sort_keys=True)
+    assert old_board.full_load_calls == 1
+    assert board.full_load_calls == 1
+    assert board.item_filters[:2] == [
+        "repo:owner/repo #9",
+        "repo:owner/repo #10",
+    ]
 
 
 def test_an_unreadable_regression_history_fails_the_packet(

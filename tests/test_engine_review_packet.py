@@ -30,7 +30,7 @@ def project_risk(monkeypatch):
     row = type("Row", (), {"ref": REPO + "#9", "risk": "standard"})()
     monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
     monkeypatch.setattr(
-        funnel, "load_items_by_refs",
+        funnel, "load_project_items_by_refs",
         lambda refs, member_repo_names=None: [row] if row.ref in refs else [],
     )
     monkeypatch.setattr(

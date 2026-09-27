@@ -2004,22 +2004,27 @@ def collect(repo: Optional[str], pr_number: int, *,
         seen.add((closing_repo, closing_number))
         tickets.append(fetch_ticket(closing_repo, closing_number))
 
-    # The PR supplies the bounded ticket refs. Read only those Project rows
-    # and the filtered regression set, instead of scanning the entire board.
-    # Keep the loader injection point for packet parity fixtures and callers
-    # that intentionally provide a complete board snapshot.
+    # The PR supplies the bounded ticket refs. Reuse the existing by-ref
+    # Project loader, then read the filtered regression set for the packet's
+    # stop counter. A by-ref miss falls back to the history-free full board,
+    # preserving the previous packet when a ticket is absent from the Project.
+    # Keep the loader injection point for parity fixtures and callers that
+    # intentionally provide a complete board snapshot.
     if items_loader is None:
         members = funnel.member_repos()
-        by_ref = {
-            item.ref: item for item in funnel.load_items_by_refs(
-                [row["ref"] for row in tickets
-                 if isinstance(row.get("ref"), str)],
-                member_repo_names=members,
-            )
-        }
-        for item in funnel.load_regression_items(member_repo_names=members):
-            by_ref.setdefault(item.ref, item)
-        loaded_items = list(by_ref.values())
+        refs = [row["ref"] for row in tickets
+                if isinstance(row.get("ref"), str)]
+        loaded_items = funnel.load_project_items_by_refs(
+            refs, member_repo_names=members,
+        )
+        if loaded_items is None:
+            loaded_items = funnel.load_items(include_details=False)
+        else:
+            by_ref = {item.ref: item for item in loaded_items}
+            for item in funnel.load_regression_items(
+                    member_repo_names=members):
+                by_ref.setdefault(item.ref, item)
+            loaded_items = list(by_ref.values())
     else:
         loaded_items = items_loader()
     project_rows = {item.ref: item for item in loaded_items}

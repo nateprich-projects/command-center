@@ -260,6 +260,36 @@ test("the waiting panel distinguishes unreadable sections from completed empty v
   assert.match(unreadablePanel.textContent, /Status\/state mismatches could not be read\./);
   assert.doesNotMatch(unreadablePanel.textContent, /Maintenance load could not be read/);
   assert.match(unreadablePanel.textContent, /The total waiting on you could not be read\./);
+
+  const everySectionUnreadable = renderWaitingFixture({
+    ...empty.brief,
+    total_needing_nate: null,
+    items: null,
+    human_steps: null,
+    machine_local_steps: null,
+    blocked: null,
+    blocked_human_steps: null,
+    status_state_mismatches: null,
+    counts_by_gate: null,
+    maintenance_load: null,
+    disposal: null,
+    resend_ratio: null,
+    rejected_merges: null,
+  });
+  for (const message of [
+    "Machine-local steps could not be read.",
+    "Blocked items could not be read.",
+    "Blocked human steps could not be read.",
+    "Status/state mismatches could not be read.",
+    "Counts by gate could not be read.",
+    "Maintenance load could not be read.",
+    "Disposal could not be read.",
+    "Resend ratio could not be read.",
+    "Rejected merges could not be read.",
+    "The total waiting on you could not be read.",
+  ]) {
+    assert.ok(everySectionUnreadable.textContent.includes(message), message);
+  }
 });
 
 test("the dropdown lists every repository once, alphabetically, and keeps the choice", () => {

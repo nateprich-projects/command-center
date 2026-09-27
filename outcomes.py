@@ -35,8 +35,12 @@ NATE_LOGIN = "nateprich"
 # Outcome derivation asks for a larger whole-repository scan, and refuses to
 # write if even that scan is truncated rather than silently under-counting
 # attempts.  Backfill has its own ticket; this bound keeps the normal job
-# finite while covering the current repository history.
-PR_SCAN_LIMIT = 1000
+# finite while covering the current repository history.  It was 1,000 until
+# command-center passed 1,017 closed issues (and 655 PRs) on 2026-09-27, which
+# would have refused every daily derive from 09-28 (#1751).  Closed issues grow
+# by roughly 50 a day, so 10,000 leaves months before the refusal can fire
+# again; when it does, it still refuses rather than write a partial record.
+PR_SCAN_LIMIT = 10000
 
 # zcode is read whether or not it is live: its 2026-09 app records are history,
 # and from 2026-09-23 to 2026-10-06 09:00 PDT it is the engine's z.ai standard tier.

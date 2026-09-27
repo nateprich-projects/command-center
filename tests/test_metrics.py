@@ -522,3 +522,64 @@ def test_series_accepts_the_complete_derived_hourly_schema():
     points_per_run = payload["metrics"]["D"]["D5"]["graphql_points_per_run"]["codex"]["points_per_run"]
     assert points_per_run["kind"] == "rate"
     assert points_per_run["daily"][-1] == 5
+
+
+def test_b3_reads_the_fix_recurrence_measurement():
+    """#1685: Panel B3 is fix-on-fix from git, not capture markers."""
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    result = {
+        "numerator": 15, "denominator": 88, "share": 0.17,
+        "hotspots": [{"path": "funnel.py", "function": "cmd_begin",
+                      "count": 9, "projects": [1, 2], "extra": "dropped"}],
+    }
+
+    b3 = metrics.derive_row(
+        snapshot, ledgers, usage, outcomes, NOW, commits, lines,
+        fix_recurrence_result=result,
+    )["metrics"]["B"]["B3"]
+
+    assert (b3["numerator"], b3["denominator"]) == (15, 88)
+    assert "gap" not in b3
+    assert b3["source"] == metrics.FIX_RECURRENCE_SOURCE
+    assert b3["hotspots"] == [{"path": "funnel.py", "function": "cmd_begin",
+                               "count": 9, "projects": [1, 2]}]
+
+
+@pytest.mark.parametrize("result, reason", [
+    (None, "not measured"),
+    ({"gap": "fix recurrence could not be measured: no broken_fix_tickets"},
+     "no broken_fix_tickets"),
+    ({"numerator": 0, "denominator": 0}, "no denominator"),
+])
+def test_b3_is_a_gap_never_zero_without_a_measurement(result, reason):
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+
+    b3 = metrics.derive_row(
+        snapshot, ledgers, usage, outcomes, NOW, commits, lines,
+        fix_recurrence_result=result,
+    )["metrics"]["B"]["B3"]
+
+    assert b3["numerator"] is None and b3["denominator"] is None
+    assert reason in b3["gap"]
+
+
+def test_measure_fix_recurrence_reports_a_missing_field_as_a_gap():
+    result = metrics.measure_fix_recurrence(
+        {"brief": {"recorded_cause_regressions": {}}}, NOW)
+
+    assert "broken_fix_tickets" in result["gap"]
+
+
+def test_derive_cli_reads_a_fix_recurrence_fixture(tmp_path, capsys):
+    fixture = tmp_path / "fix.json"
+    fixture.write_text(json.dumps({"numerator": 1, "denominator": 4}))
+
+    code = metrics.main([
+        "derive", "--snapshot", str(FIXTURES / "metrics_snapshot.json"),
+        "--fix-recurrence", str(fixture), "--now", NOW.isoformat(),
+    ])
+
+    assert code == 0
+    row = json.loads(capsys.readouterr().out)
+    assert (row["metrics"]["B"]["B3"]["numerator"],
+            row["metrics"]["B"]["B3"]["denominator"]) == (1, 4)

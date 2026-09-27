@@ -17,6 +17,7 @@ pattern list is a safety boundary for tickets written before markers existed.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 
@@ -181,18 +182,11 @@ def test_plan_escalation_excludes_the_rejected_section():
     assert plan_is_escalated(plan) == []
 
 
-def test_the_recorded_1503_shape_keeps_its_remaining_source_citation():
-    """The Rejected backfill hit goes away; its precedent citation remains."""
+def test_the_recorded_1503_shape_does_not_escalate_a_no_backfill_citation():
+    """A sibling citation about no backfill is not a plan to backfill."""
     body = (FIXTURES / "escalation_plan_1503_recorded.md").read_text()
 
-    assert funnel.plan_escalation_matches(body) == [{
-        "reason": "data-migration",
-        "line": (
-            "- The fix is forward-only and the 14 invalid-JSON lines and the "
-            "lost escalated fire stand as the before-measurement. (source: "
-            "sibling convention #1393 and #1182 no-backfill decisions)"
-        ),
-    }]
+    assert funnel.plan_escalation_matches(body) == []
 
 
 def test_a_genuine_backfill_proposal_outside_rejected_still_matches():
@@ -290,20 +284,14 @@ def test_agent_decision_scan_keeps_a_risk_in_the_chosen_decision():
     }]
 
 
-def test_rejected_wording_outside_agent_decisions_still_scans():
+def test_rejected_wording_in_notes_is_not_a_proposal():
     body = (
         "## Notes\n\n"
         "- The rejected option was (rejected: backfill all historical rows; "
         "delete the old ledger permanently).\n"
     )
 
-    assert funnel.plan_escalation_matches(body) == [{
-        "reason": "data-migration",
-        "line": (
-            "- The rejected option was (rejected: backfill all historical "
-            "rows; delete the old ledger permanently)."
-        ),
-    }]
+    assert funnel.plan_escalation_matches(body) == []
 
 
 def test_lock_and_gate_subject_matter_stays_standard():
@@ -491,3 +479,54 @@ def test_a_negated_sentence_in_prose_still_matches_and_is_not_this_fix():
 def test_empty_and_missing_text_are_unchanged():
     assert funnel.asserted_text("") == ""
     assert funnel.escalation_reasons("", "") == []
+
+
+def test_ticket_1643_named_false_gate_fixtures_do_not_escalate():
+    """Keep the live false-hit bodies out of the escalated lane."""
+    fixtures = json.loads(
+        (FIXTURES / "escalation_plan_false_gates.json").read_text()
+    )
+    for fixture in fixtures:
+        actual = funnel.plan_escalation_matches(fixture["body"])
+        assert actual == [], "{} used to match {}".format(
+            fixture["source"], fixture["pre_change_reasons"]
+        )
+
+
+def test_plan_scan_ignores_risky_actions_inside_code_blocks():
+    fence = "```"
+    code_blocks = [
+        "{}python\nRisk: escalated — data-migration\n"
+        "This plan will migrate every row.\n{}".format(
+            fence, fence
+        ),
+        "~~~text\nThis plan will migrate every row.\n~~~",
+        "    This plan will migrate every row.\n",
+        "\tThis plan will migrate every row.\n",
+    ]
+    for block in code_blocks:
+        body = "## What it is\n\n{}\n".format(block)
+        assert funnel.plan_escalation_matches(body) == []
+
+
+def test_ticket_1643_affirmative_proposal_fixtures_still_escalate():
+    fixtures = json.loads(
+        (FIXTURES / "escalation_plan_true_proposals.json").read_text()
+    )
+    for fixture in fixtures:
+        actual = funnel.plan_escalation_matches(fixture["body"])
+        assert [match["reason"] for match in actual] == \
+            fixture["expected_reasons"], fixture["source"]
+
+
+@pytest.mark.parametrize("quoted", [
+    '"401 Incorrect API key"',
+    "“401 Incorrect API key”",
+    "‘access token’",
+])
+def test_plan_scan_ignores_prose_quoted_risk_terms(quoted):
+    body = "## What it is\n\nThe report says {}; no credentials change.\n".format(
+        quoted
+    )
+
+    assert funnel.plan_escalation_matches(body) == []

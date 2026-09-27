@@ -1,0 +1,91 @@
+  PID  PPID     ELAPSED COMMAND
+  668   647 10-23:22:28 ./externals/node20/bin/node ./bin/RunnerService.js
+ 3974 27580       41:46 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+ 3975 27580       41:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+ 3976 27580       41:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+ 3977 27580       41:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+ 4013  3977       41:45 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+10916 27580    01:43:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+10917 27580    01:43:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+10918 27580    01:43:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+10919 27580    01:43:16 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+10927 10918    01:43:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+17564 27580       15:28 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+17565 27580       15:28 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+17566 27580       15:28 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+17567 27580       15:28 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+17598 17565       15:28 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+20410 27580       37:15 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+20411 27580       37:15 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+20412 27580       37:15 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+20413 27580       37:15 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+20421 20413       37:15 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+24382 27580       14:28 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+24383 27580       14:28 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+24384 27580       14:28 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+24385 27580       14:28 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+24392 24384       14:28 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+24527 27580    01:12:16 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+24528 27580    01:12:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+24529 27580    01:12:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+24530 27580    01:12:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+24534 24529    01:12:15 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+25300 27580       35:29 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+25301 27580       35:29 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+25302 27580       35:29 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+25303 27580       35:29 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+25315 25301       35:28 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+26463 27580    01:11:28 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+26464 27580    01:11:28 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+26465 27580    01:11:28 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+26466 27580    01:11:28 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+26496 26465    01:11:27 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+27580 27512    03:41:23 /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex -c features.code_mode_host=true app-server --analytics-default-enabled -c plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled=true
+28041 27580    03:40:34 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+28042 27580    03:40:34 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+28043 27580    03:40:34 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+28044 27580    03:40:34 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+28046 28041    03:40:34 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+28414 27580    03:39:40 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+28415 27580    03:39:40 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+28416 27580    03:39:40 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+28417 27580    03:39:40 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+28435 28416    03:39:40 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+29254 27580    03:37:46 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+29255 27580    03:37:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+29256 27580    03:37:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+29257 27580    03:37:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+29264 29255    03:37:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+29314 27580    03:37:36 /Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex-code-mode-host
+32271 27580       32:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+32272 27580       32:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+32273 27580       32:16 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+32274 27580       32:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+32307 32272       32:15 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+33325 27580    01:10:04 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+33326 27580    01:10:04 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+33328 27580    01:10:04 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+33329 27580    01:10:04 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+33346 33328    01:10:04 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+37240 27580       12:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+37241 27580       12:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+37242 27580       12:16 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+37243 27580       12:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+37252 37243       12:15 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+48742 27580    02:38:46 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+48743 27580    02:38:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+48744 27580    02:38:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+48745 27580    02:38:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+48750 48744    02:38:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+60073 32711 02-21:07:03 zcode-node-repl-mcp
+61253 27580       03:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+61254 27580       03:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+61255 27580       03:16 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+61256 27580       03:16 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+61275 61256       03:15 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+74987 27580       00:00 gh pr checks 301
+81950 27580       22:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+81951 27580       22:46 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+81952 27580       22:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+81953 27580       22:46 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+81955 81952       22:45 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl

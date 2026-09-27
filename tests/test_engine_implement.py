@@ -2424,6 +2424,9 @@ def _spy_run(monkeypatch):
     real_run = implement._run
 
     def spy(argv, **kwargs):
+        if (len(argv) >= 3 and argv[1] == "-c" and
+                "sys.version_info" in argv[2]):
+            return real_run(argv, **kwargs)
         seen.append((list(argv), kwargs.get("env") or {}))
         return real_run([sys.executable, "-c", "pass"], **kwargs)
 
@@ -2567,10 +2570,29 @@ def test_run_passes_a_measured_bound_to_each_command_kind(
         lambda command, **kwargs: CompletedCommand(command),
     )
     commands = [
+        (["git", "rev-parse", "--show-toplevel"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
         (["git", "status"], implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "diff", "--name-only"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "add", "--", "engine/implement.py"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "commit", "-m", "Finish #42"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "rev-list", "--count", "origin/main..HEAD"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "merge", "-s", "ours", "origin/ticket/42"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "fetch", "origin", "ticket/42"],
+         implement.REMOTE_GIT_TIMEOUT_SECONDS),
+        (["git", "ls-remote", "--heads", "origin", "ticket/42"],
+         implement.REMOTE_GIT_TIMEOUT_SECONDS),
         (["git", "push", "origin", "ticket/42"],
          implement.REMOTE_GIT_TIMEOUT_SECONDS),
-        (["make", "test"], implement.TEST_COMMAND_TIMEOUT_SECONDS),
+        (["make", "check", "test"],
+         implement.TEST_COMMAND_TIMEOUT_SECONDS),
         ([sys.executable, "-m", "pytest", "-q"],
          implement.TEST_COMMAND_TIMEOUT_SECONDS),
         ([sys.executable, "-m", "compileall", "engine"],
@@ -2605,10 +2627,15 @@ def test_run_tests_applies_test_bound_to_shell_wrapped_command(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(implement, "_run", record)
-    implement.run_tests(
-        tmp_path, [["sh", "-c", "python3 -m pytest tests/ -q"]])
+    implement.run_tests(tmp_path, [
+        ["sh", "-c", "python3 -m pytest tests/ -q"],
+        ["sh", "-c", "make check test"],
+    ])
 
-    assert seen[0]["timeout"] == implement.TEST_COMMAND_TIMEOUT_SECONDS
+    assert [call["timeout"] for call in seen] == [
+        implement.TEST_COMMAND_TIMEOUT_SECONDS,
+        implement.TEST_COMMAND_TIMEOUT_SECONDS,
+    ]
 
 
 def test_timed_out_test_is_abandoned_and_finished_without_keeping_work(

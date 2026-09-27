@@ -1357,24 +1357,124 @@ def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = N
 
 
 
-def declined_prerequisite_is_open(ref: str) -> bool:
-    """Verify that a declined prerequisite exists and is still open."""
+DECLINED_PREREQUISITE_QUERY = """
+query($owner: String!, $name: String!, $number: Int!) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      number
+      state
+      subIssuesSummary { total completed }
+    }
+  }
+}
+"""
+
+
+def read_declined_prerequisite(ref: str) -> Optional[Dict[str, object]]:
+    """Read a named issue and its complete child-ticket completion summary."""
     match = shape.REF_RE.fullmatch(ref)
     if match is None:
-        return False
-    repo = "{}/{}".format(match.group("owner"), match.group("repo"))
-    data = funnel._gh_json(
-        "gh", "issue", "view", match.group("number"), "--repo", repo,
-        "--json", "number,state",
+        return None
+    owner = match.group("owner")
+    name = match.group("repo")
+    number = int(match.group("number"))
+    data = funnel.gh_graphql(
+        DECLINED_PREREQUISITE_QUERY,
+        owner=owner,
+        name=name,
+        number=number,
     )
-    if not isinstance(data, dict):
-        return False
+    repository = data.get("repository") if isinstance(data, dict) else None
+    issue = repository.get("issue") if isinstance(repository, dict) else None
+    if not isinstance(issue, dict):
+        return None
     try:
-        number = int(data.get("number"))
+        returned_number = int(issue.get("number"))
     except (TypeError, ValueError):
-        return False
-    return (number == int(match.group("number"))
-            and str(data.get("state", "")).upper() == "OPEN")
+        return None
+    state = str(issue.get("state") or "").upper()
+    summary = issue.get("subIssuesSummary")
+    if returned_number != number or state not in {"OPEN", "CLOSED"}:
+        return None
+    facts: Dict[str, object] = {
+        "number": number,
+        "state": state,
+    }
+    if isinstance(summary, dict):
+        total = summary.get("total")
+        completed = summary.get("completed")
+        if (
+            isinstance(total, int) and not isinstance(total, bool)
+            and isinstance(completed, int) and not isinstance(completed, bool)
+            and total >= 0 and 0 <= completed <= total
+        ):
+            facts["children_total"] = total
+            facts["children_completed"] = completed
+    return facts
+
+
+def prerequisite_project_landed(
+        facts: Optional[Dict[str, object]]) -> Optional[bool]:
+    """Return whether a project with child tickets has completed every ticket."""
+    if not isinstance(facts, dict):
+        return None
+    total = facts.get("children_total")
+    completed = facts.get("children_completed")
+    if (
+        not isinstance(total, int) or isinstance(total, bool)
+        or not isinstance(completed, int) or isinstance(completed, bool)
+        or total <= 0 or completed < 0 or completed > total
+    ):
+        return None
+    return completed == total
+
+
+def _landed_prerequisite_evidence(
+        ref: str, facts: Dict[str, object]) -> str:
+    """Explain the GitHub facts that disprove a closed-project decline."""
+    match = shape.REF_RE.fullmatch(ref)
+    if match is None:
+        raise ImplementError("cannot render invalid prerequisite ref")
+    total = int(facts["children_total"])
+    url = "https://github.com/{}/{}/issues/{}".format(
+        match.group("owner"), match.group("repo"), match.group("number"),
+    )
+    return (
+        "**Prerequisite check:** GitHub reports [{}]({}) has all {} child "
+        "tickets completed ({}/{}). The project is landed by ticket "
+        "completion; its own PR link and drift or rejected-review records "
+        "do not change that result."
+    ).format(ref, url, total, total, total)
+
+
+def clear_declined_ticket_block(repo: str, number: int, *,
+                                cwd: pathlib.Path) -> None:
+    """Remove a stale human block after a named prerequisite is verified landed."""
+    data = funnel._gh_json(
+        "gh", "issue", "view", str(number), "--repo", repo,
+        "--json", "labels",
+    )
+    labels = data.get("labels") if isinstance(data, dict) else None
+    if not isinstance(labels, list) or any(
+        not isinstance(label, dict) or not isinstance(label.get("name"), str)
+        for label in labels
+    ):
+        raise funnel.GitHubError(
+            "could not read labels for {}#{}".format(repo, number)
+        )
+    if not any(label.get("name") == "blocked" for label in labels):
+        return
+    proc = funnel._run_gh(
+        ["gh", "issue", "edit", str(number), "--repo", repo,
+         "--remove-label", "blocked"],
+        cwd=str(cwd), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise funnel.GitHubError(
+            "could not remove stale blocked label from {}#{}: {}".format(
+                repo, number, (proc.stderr or "").strip())
+        )
 
 
 def add_declined_prerequisite_edge(repo: str, number: int, prerequisite: str,
@@ -1705,8 +1805,9 @@ def finish_declined(
         needs_effect: Callable[[str, str], None] = write_declined_needs,
         human_needs_effect: Callable[[str, str], None]
         = write_declined_human_needs,
-        prerequisite_open_effect: Callable[[str], bool]
-        = declined_prerequisite_is_open,
+        prerequisite_facts_effect: Callable[[str], Optional[Dict[str, object]]]
+        = read_declined_prerequisite,
+        clear_block_effect: Callable[..., None] = clear_declined_ticket_block,
         prerequisite_edge_effect: Callable[..., None]
         = add_declined_prerequisite_edge,
         defer_note_close_effect: Callable[..., None]
@@ -1734,12 +1835,24 @@ def finish_declined(
         decline_class == "accept-body-conflict" and decline_target is not None
     )
     prerequisite_recorded = False
+    prerequisite_agent_routed = False
+    prerequisite_evidence: Optional[str] = None
     if accept_conflict_routed:
         # Keep this in an agent lane so review and shaping can see the ticket.
         needs_effect(ticket["url"], ref)
     elif decline_class == "prerequisite-ticket" and decline_target is not None:
         try:
-            if prerequisite_open_effect(decline_target):
+            prerequisite_facts = prerequisite_facts_effect(decline_target)
+            landed = prerequisite_project_landed(prerequisite_facts)
+            if landed is True:
+                prerequisite_evidence = _landed_prerequisite_evidence(
+                    decline_target, prerequisite_facts or {},
+                )
+                prerequisite_agent_routed = True
+            elif (
+                isinstance(prerequisite_facts, dict)
+                and prerequisite_facts.get("state") == "OPEN"
+            ):
                 prerequisite_edge_effect(
                     resolved, context["number"], decline_target,
                     cwd=context["root"],
@@ -1749,15 +1862,24 @@ def finish_declined(
                 OSError, subprocess.SubprocessError):
             # A failed lookup or edge write keeps today's visible block.
             prerequisite_recorded = False
-    if not prerequisite_recorded and not accept_conflict_routed:
+    if (not prerequisite_recorded and not accept_conflict_routed
+            and not prerequisite_agent_routed):
         # Unknown declines and failed prerequisite handoffs have no machine-
         # readable condition that can clear them. Ask Nate instead of leaving
         # a blocked ticket in the silent Needs=agent lane.
         human_needs_effect(ticket["url"], ref)
         block_effect(resolved, context["number"], cwd=context["root"])
-    comment_effect(resolved, context["number"],
-                   "{} {}".format(funnel.DECLINED_PREFIX, reason),
+    declined_comment = "{} {}".format(funnel.DECLINED_PREFIX, reason)
+    if prerequisite_evidence is not None:
+        declined_comment += "\n\n" + prerequisite_evidence
+    comment_effect(resolved, context["number"], declined_comment,
                    run=run, agent=agent, cwd=context["root"])
+    if prerequisite_agent_routed:
+        # Record proof before returning a false decline to the agent queue.
+        clear_block_effect(
+            resolved, context["number"], cwd=context["root"],
+        )
+        needs_effect(ticket["url"], ref)
     routing_failed = False
     if accept_conflict_routed:
         try:
@@ -1778,6 +1900,8 @@ def finish_declined(
     note = "declined: {}".format(first)
     if accept_conflict_routed and not routing_failed:
         note += "; routed to review for Accept/body conflict"
+    elif prerequisite_agent_routed:
+        note += "; prerequisite already landed; returned to agent queue"
     elif routing_failed:
         note += "; review routing failed; ticket left blocked"
     if extra_note:

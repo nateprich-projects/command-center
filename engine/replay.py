@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
-"""Replay a private review packet through the read-only review path.
+"""Replay a private review packet through the live review engine.
+
+Each replay runs ``scripts/muse-review-engine``'s replay entry from this
+checkout: the same lister, judges and derived answer the review lanes run,
+on the given packet and routine, recording nothing (#1730). Replay used to
+make one max call over the routine and packet, and on a large packet that
+call went silent past Muse's stream-idle limit where the lanes' split would
+not have (#1698).
 
 Packet paths are relative to Command Center's documented runtime root unless
-absolute. The model sees the routine and packet; stdout contains verdicts only.
+absolute. The model sees the routine and packet; stdout contains verdicts
+only, and the engine's own output is never passed on.
 """
 
 from __future__ import annotations
@@ -15,22 +23,24 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Callable, Optional, Sequence
+from typing import Optional, Sequence
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 import agent_health  # noqa: E402
 import funnel  # noqa: E402
-import muse_call  # noqa: E402
-import muse_model  # noqa: E402
 import usage  # noqa: E402
 from engine import review_apply  # noqa: E402
 
 
 DEFAULT_RUNS = 3
 EXPECTED_VERDICTS = ("approved", "rejected")
-REPO_REF = "nateprich-projects/command-center"
 RUNTIME_ROOT = pathlib.Path(funnel.CLAUDE_DIR)
+#: The checkout this module runs from. The engine runs from it with
+#: MUSE_REVIEW_ENGINE_REPO pointing at it, so a branch replays with the
+#: branch's engine, routine and judges rather than the maintained clone's.
+CHECKOUT = pathlib.Path(__file__).resolve().parents[1]
+ENGINE = CHECKOUT / "scripts" / "muse-review-engine"
 ROUTINE_DEFAULT = (
     pathlib.Path(__file__).resolve().parents[1]
     / "routines" / "muse-review.md"
@@ -84,34 +94,11 @@ def resolve_routine_path(routine: str | pathlib.Path) -> pathlib.Path:
     return path
 
 
-def render_prompt(packet_path: pathlib.Path,
-                  routine_path: pathlib.Path) -> str:
-    """Substitute the JSON packet into the routine's agent-facing prompt."""
-    try:
-        raw_packet = packet_path.read_text(encoding="utf-8")
-        packet = json.loads(raw_packet)
-        routine = routine_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise ReplayError("could not read replay inputs") from exc
-    if not isinstance(packet, dict):
-        raise ReplayError("packet must contain a JSON object")
-
-    lines = routine.splitlines()
-    try:
-        separator = lines.index("---")
-    except ValueError as exc:
-        raise ReplayError("routine must contain an agent prompt after ---") from exc
-    template = "\n".join(lines[separator + 1:])
-    if not template.strip() or template.count("PACKET_JSON") != 1:
-        raise ReplayError("routine must contain one PACKET_JSON placeholder")
-    return template.replace("PACKET_JSON", raw_packet, 1)
-
-
 def score_answer(raw: str) -> Optional[str]:
     """Score one answer with the same parser and decision rule as review-apply.
 
-    ``None`` marks a malformed answer so the caller can make the one retry
-    allowed by the live review path.
+    ``None`` marks an answer review-apply would refuse. The engine derives
+    every answer in code, so a replay fails on one rather than guessing.
     """
     try:
         parsed = review_apply.parse_answer(raw)
@@ -119,23 +106,6 @@ def score_answer(raw: str) -> Optional[str]:
         return None
     verdict, _blocking, _note = review_apply.decide(parsed)
     return verdict
-
-
-def replay_one(prompt: str, call_model: Callable[[str], str]) -> str:
-    """Make one replay, with the live path's retry for malformed output."""
-    raw = call_model(prompt)
-    verdict = score_answer(raw)
-    if verdict is not None:
-        return verdict
-
-    retry = (
-        prompt.rstrip()
-        + "\n\nYour previous answer could not be parsed. Reply again with "
-        "exactly one valid JSON object and nothing else."
-    )
-    verdict = score_answer(call_model(retry))
-    # A malformed final answer fails closed as rejected in review-apply.
-    return verdict or "rejected"
 
 
 def all_match(verdicts: Sequence[str], expected: str) -> bool:
@@ -159,8 +129,10 @@ def check_budget(runs: int, now: Optional[float] = None) -> None:
     if not isinstance(seven_day, dict):
         raise ReplayError("Muse budget could not be read")
 
-    # `begin` reserves one Muse session. A replay reserves one per model call,
-    # so apply the same per-session reserve N times before starting any calls.
+    # `begin` reserves one Muse session per lane run, and each replay is one
+    # engine run: its lister, judges and their retries are that run's calls,
+    # as they are a lane's. So apply the same per-run reserve once per
+    # replay, N times in all, before the first engine run starts (#1730).
     reading_for_replays = dict(reading)
     windows_for_replays = dict(windows)
     seven_for_replays = dict(seven_day)
@@ -180,77 +152,70 @@ def check_budget(runs: int, now: Optional[float] = None) -> None:
         raise ReplayError("Muse budget gate is closed")
 
 
-def _model_call(prompt: str, *, runtime_root: pathlib.Path,
-                model: str, muse_bin: str,
-                timeout_seconds: int) -> str:
-    """Invoke Muse with the same max-effort, no-tools flags as live review."""
+def _engine_run(packet_path: pathlib.Path, routine_path: pathlib.Path, *,
+                runtime_root: pathlib.Path) -> str:
+    """Run the engine's replay entry once and return its derived answer.
+
+    The answer path sits in a fresh owner-only directory under the runtime
+    root, and the engine refuses a path that already exists, so what is read
+    back can only be this run's. Its stdout and stderr are captured and
+    dropped: the stderr of a failing judge can quote a requirement drawn from
+    a private ticket. A non-zero exit or a missing answer is a failed replay.
+    """
     try:
         with tempfile.TemporaryDirectory(
                 prefix="command-center-review-replay-", dir=runtime_root) as tmp:
-            private_dir = pathlib.Path(tmp)
-            prompt_path = private_dir / "prompt.md"
-            raw_path = private_dir / "muse.jsonl"
-            workspace = private_dir / "workspace"
-            workspace.mkdir(mode=0o700)
-            prompt_path.write_text(prompt, encoding="utf-8")
-            prompt_path.chmod(0o600)
-            command = [
-                muse_bin, "exec", "--model", model, "--json",
-                "--reasoning-effort", "max",
-                "--disable-shell", "--disable-write", "--disable-web-tools",
-                "--max-model-steps", "60", "--no-foreign-personal-context",
-                "--workspace", str(workspace), "--prompt-file", str(prompt_path),
-            ]
+            answer_path = pathlib.Path(tmp) / "answer.json"
+            env = dict(
+                os.environ,
+                MUSE_REVIEW_ENGINE_REPO=str(CHECKOUT),
+                MUSE_REVIEW_ENGINE_REPLAY_PACKET=str(packet_path),
+                MUSE_REVIEW_ENGINE_REPLAY_ROUTINE=str(routine_path),
+                MUSE_REVIEW_ENGINE_REPLAY_ANSWER=str(answer_path),
+            )
+            # The escalated tier at max, which is Muse's whatever the z.ai
+            # cutoff says; /bin/bash because launchd runs the lanes with it.
             result = subprocess.run(
-                command, capture_output=True, text=True, check=False,
-                timeout=timeout_seconds,
+                ["/bin/bash", str(ENGINE), "escalated", "max"],
+                env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                check=False,
             )
             if result.returncode != 0:
-                raise ReplayError("Muse call failed")
-            raw_path.write_text(result.stdout, encoding="utf-8")
-            raw_path.chmod(0o600)
-            _session_id, answer = muse_call.result(raw_path)
-            return answer
+                raise ReplayError("the review engine failed")
+            try:
+                return answer_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ReplayError("the review engine wrote no answer") from exc
     except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
-        raise ReplayError("Muse call failed") from exc
+        raise ReplayError("the review engine could not run") from exc
 
 
 def replay(packet: str | pathlib.Path, routine: str | pathlib.Path, *,
            runs: int = DEFAULT_RUNS, expected: str,
-           runtime_root: str | pathlib.Path = RUNTIME_ROOT,
-           model: Optional[str] = None, muse_bin: Optional[str] = None,
-           timeout_seconds: Optional[int] = None) -> dict:
-    """Replay one packet N times and return verdict-only summary data."""
+           runtime_root: str | pathlib.Path = RUNTIME_ROOT) -> dict:
+    """Replay one packet N times and return verdict-only summary data.
+
+    Any run that fails, or leaves an answer review-apply would refuse, fails
+    the whole replay with no verdicts: a lister that went silent records no
+    verdict on a live PR either, and counting it as rejected would turn that
+    stall into a plausible-looking must-approve failure (#1698).
+    """
     if isinstance(runs, bool) or not isinstance(runs, int) or runs < 1:
         raise ReplayError("runs must be a positive integer")
     if expected not in EXPECTED_VERDICTS:
         raise ReplayError("expected verdict must be approved or rejected")
-    if timeout_seconds is None:
-        try:
-            timeout_seconds = int(os.environ.get(
-                "MUSE_REVIEW_ENGINE_BOUND_SECONDS", "1200"))
-        except ValueError as exc:
-            raise ReplayError("invalid review timeout configuration") from exc
-    if timeout_seconds < 1:
-        raise ReplayError("invalid review timeout configuration")
-    # Reserve for one initial answer and the live path's one malformed-answer
-    # retry per replay. Successful runs usually spend only the first call.
-    check_budget(runs * 2)
+    check_budget(runs)
     root = pathlib.Path(runtime_root).expanduser().resolve()
     packet_path = resolve_packet_path(packet, root)
     routine_path = resolve_routine_path(routine)
-    prompt = render_prompt(packet_path, routine_path)
-    selected_model = model or muse_model.model_for(REPO_REF)
-    selected_bin = muse_bin or os.environ.get(
-        "MUSE_BIN", str(pathlib.Path.home() / ".local" / "bin" / "muse"))
 
-    def call_model(current_prompt: str) -> str:
-        return _model_call(
-            current_prompt, runtime_root=root, model=selected_model,
-            muse_bin=selected_bin, timeout_seconds=timeout_seconds,
-        )
-
-    verdicts = [replay_one(prompt, call_model) for _ in range(runs)]
+    verdicts = []
+    for _ in range(runs):
+        verdict = score_answer(
+            _engine_run(packet_path, routine_path, runtime_root=root))
+        if verdict is None:
+            raise ReplayError("the review engine wrote an unscorable answer")
+        verdicts.append(verdict)
     return {
         "expected": expected,
         "verdicts": verdicts,

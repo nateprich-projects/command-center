@@ -29,6 +29,11 @@ MUSE_QUOTA_HOLD_FILE="${MUSE_QUOTA_HOLD_FILE:-$HOME/.claude/command-center-muse-
 #: misparse cannot park the lanes for a day.
 MUSE_QUOTA_FALLBACK_SECONDS="${MUSE_QUOTA_FALLBACK_SECONDS:-3600}"
 
+#: 0 writes the hold alone, without the heartbeat record of the hit below.
+#: Set by the review replay, which parks the lanes like any other caller but
+#: makes no heartbeat write and no GitHub call (#1730). Every lane keeps 1.
+MUSE_QUOTA_HOLD_RECORD="${MUSE_QUOTA_HOLD_RECORD:-1}"
+
 # Echo the reset stamp while a recorded hold is still in the future, and
 # return non-zero when there is no live hold. A hold that has passed, or one
 # that cannot be read, is removed rather than trusted: a lane that cannot
@@ -79,6 +84,7 @@ muse_quota_record() {
   local repo_root
   repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   MUSE_QUOTA_FALLBACK_SECONDS="$MUSE_QUOTA_FALLBACK_SECONDS" \
+  MUSE_QUOTA_HOLD_RECORD="$MUSE_QUOTA_HOLD_RECORD" \
     python3 - "$1" "$MUSE_QUOTA_HOLD_FILE" "${2:-}" "$repo_root" <<'PY'
 import datetime
 import os
@@ -133,6 +139,10 @@ try:
         handle.write(written + "\n")
 except OSError:
     raise SystemExit(1)
+
+if os.environ.get("MUSE_QUOTA_HOLD_RECORD", "1") == "0":
+    print(written)
+    raise SystemExit(0)
 
 # Heartbeat is the state of record. Its spool is write-ahead and best-effort,
 # so a telemetry problem must never prevent the provider hold from taking effect.

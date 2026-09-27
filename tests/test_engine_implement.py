@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import pathlib
@@ -2569,11 +2570,25 @@ def test_run_passes_a_measured_bound_to_each_command_kind(
         implement.subprocess, "Popen",
         lambda command, **kwargs: CompletedCommand(command),
     )
+    # This is the finish-ticket inventory: checkout/repository resolution,
+    # staged and unstaged path discovery, remote-branch inspection, commit,
+    # rebase-preserving push, and the test command families run_tests accepts.
     commands = [
         (["git", "rev-parse", "--show-toplevel"],
          implement.LOCAL_GIT_TIMEOUT_SECONDS),
-        (["git", "status"], implement.LOCAL_GIT_TIMEOUT_SECONDS),
-        (["git", "diff", "--name-only"],
+        (["git", "branch", "--show-current"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "remote", "get-url", "origin"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "diff", "--name-only", "-z"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "diff", "--cached", "--name-only", "-z"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "ls-files", "--others", "--exclude-standard", "-z"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "diff", "--name-only", "-z", "origin/main...HEAD"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "ls-files", "-z", "--", "engine/implement.py"],
          implement.LOCAL_GIT_TIMEOUT_SECONDS),
         (["git", "add", "--", "engine/implement.py"],
          implement.LOCAL_GIT_TIMEOUT_SECONDS),
@@ -2583,13 +2598,17 @@ def test_run_passes_a_measured_bound_to_each_command_kind(
          implement.LOCAL_GIT_TIMEOUT_SECONDS),
         (["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
          implement.LOCAL_GIT_TIMEOUT_SECONDS),
-        (["git", "merge", "-s", "ours", "origin/ticket/42"],
+        (["git", "merge", "-s", "ours", "--no-edit", "-m",
+          "Record the previous ticket/42 tip before pushing the rebased branch",
+          "origin/ticket/42"],
          implement.LOCAL_GIT_TIMEOUT_SECONDS),
-        (["git", "fetch", "origin", "ticket/42"],
+        (["git", "ls-remote", "--exit-code", "--heads", "origin",
+          "refs/heads/ticket/42"],
          implement.REMOTE_GIT_TIMEOUT_SECONDS),
-        (["git", "ls-remote", "--heads", "origin", "ticket/42"],
+        (["git", "fetch", "origin",
+          "+refs/heads/ticket/42:refs/remotes/origin/ticket/42"],
          implement.REMOTE_GIT_TIMEOUT_SECONDS),
-        (["git", "push", "origin", "ticket/42"],
+        (["git", "push", "--set-upstream", "origin", "ticket/42"],
          implement.REMOTE_GIT_TIMEOUT_SECONDS),
         (["make", "check", "test"],
          implement.TEST_COMMAND_TIMEOUT_SECONDS),
@@ -2605,6 +2624,35 @@ def test_run_passes_a_measured_bound_to_each_command_kind(
     assert seen == commands
     assert all(timeout < implement.CLAIM_TTL_SECONDS
                for _, timeout in seen)
+
+
+def test_every_subprocess_callsite_has_an_explicit_timeout():
+    source = pathlib.Path(implement.__file__).read_text()
+    tree = ast.parse(source)
+    run_calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_run"
+    ]
+    direct_runs = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "subprocess"
+        and node.func.attr == "run"
+    ]
+
+    def has_timeout(call):
+        return any(keyword.arg == "timeout" for keyword in call.keywords)
+
+    assert run_calls
+    assert [call.lineno for call in run_calls if not has_timeout(call)] == []
+    # Packet collection is the sole direct subprocess.run path; it already has
+    # its own 30-second cap and is outside finish-ticket's _run inventory.
+    assert len(direct_runs) == 1
+    assert all(has_timeout(call) for call in direct_runs)
 
 
 def test_slow_command_finishes_before_its_bound(tmp_path):

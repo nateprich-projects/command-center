@@ -461,15 +461,18 @@ def checkout_context(cwd: Optional[os.PathLike] = None) -> dict:
     """Derive ticket identity from a real clone on ticket/<n>."""
     here = pathlib.Path(cwd or os.getcwd()).resolve()
     root = pathlib.Path(
-        _run(["git", "rev-parse", "--show-toplevel"], cwd=here).stdout.strip()
+        _run(["git", "rev-parse", "--show-toplevel"], cwd=here,
+             timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
     ).resolve()
-    branch = _run(["git", "branch", "--show-current"], cwd=root).stdout.strip()
+    branch = _run(["git", "branch", "--show-current"], cwd=root,
+                  timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
     match = re.fullmatch(r"ticket/([1-9][0-9]*)", branch)
     if match is None:
         raise ImplementError(
             "finish-ticket requires branch ticket/<number>, found {!r}".format(branch)
         )
-    _run(["git", "remote", "get-url", "origin"], cwd=root)
+    _run(["git", "remote", "get-url", "origin"], cwd=root,
+         timeout=LOCAL_GIT_TIMEOUT_SECONDS)
     return {"root": root, "branch": branch, "number": int(match.group(1))}
 
 
@@ -920,7 +923,7 @@ def resolve_checkout_repo(root: pathlib.Path, explicit: Optional[str]) -> str:
     if explicit:
         return explicit
     remote = _run(["git", "remote", "get-url", "origin"], cwd=root,
-                  check=False).stdout.strip()
+                  check=False, timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
     match = _GITHUB_REMOTE_RE.match(remote)
     if match:
         return match.group(1)
@@ -981,6 +984,7 @@ def _remote_branch_exists(root: pathlib.Path, branch: str) -> bool:
          "refs/heads/{}".format(branch)],
         cwd=root,
         check=False,
+        timeout=REMOTE_GIT_TIMEOUT_SECONDS,
     )
     if proc.returncode not in (0, 2):
         detail = (proc.stderr or proc.stdout or "").strip()
@@ -1005,7 +1009,8 @@ _RUN_SCRATCH_DIRECTORIES = frozenset({".scratch", "scratch", ".tmp", "tmp"})
 
 def _git_name_paths(root: pathlib.Path, command: Sequence[str]) -> List[str]:
     """Return NUL-delimited Git paths without losing unusual filenames."""
-    raw = _run(["git", *command], cwd=root).stdout
+    raw = _run(["git", *command], cwd=root,
+               timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout
     return [path for path in raw.split("\0") if path]
 
 
@@ -1055,7 +1060,8 @@ def _stage_explicit_paths(root: pathlib.Path, paths: Sequence[str]) -> None:
     """Stage exactly the observed paths, never a blanket add or status sweep."""
     selected = _addable_paths(root, paths)
     if selected:
-        _run(["git", "add", "--", *selected], cwd=root)
+        _run(["git", "add", "--", *selected], cwd=root,
+             timeout=LOCAL_GIT_TIMEOUT_SECONDS)
 
 
 def _is_run_scratch(path: str) -> bool:
@@ -1110,12 +1116,13 @@ def _commit_if_needed(root: pathlib.Path, number: int, summary: str, *,
             subject = subject[:57].rstrip() + "..."
         _run(
             ["git", "commit", "-m", "Finish #{}: {}".format(number, subject)],
-            cwd=root,
+            cwd=root, timeout=LOCAL_GIT_TIMEOUT_SECONDS,
         )
         return True
     _check_no_run_scratch(root)
     ahead = _run(
-        ["git", "rev-list", "--count", "origin/main..HEAD"], cwd=root
+        ["git", "rev-list", "--count", "origin/main..HEAD"], cwd=root,
+        timeout=LOCAL_GIT_TIMEOUT_SECONDS,
     ).stdout.strip()
     if not ahead.isdigit():
         raise ImplementError("could not read changes ahead of origin/main")
@@ -1733,16 +1740,20 @@ def _push_ticket_branch(root: pathlib.Path, branch: str) -> None:
     """
     fetched = _run(["git", "fetch", "origin",
                     "+refs/heads/{0}:refs/remotes/origin/{0}".format(branch)],
-                   cwd=root, check=False)
+                   cwd=root, check=False,
+                   timeout=REMOTE_GIT_TIMEOUT_SECONDS)
     if fetched.returncode == 0:
         remote_ref = "origin/{}".format(branch)
         ancestor = _run(["git", "merge-base", "--is-ancestor", remote_ref, "HEAD"],
-                        cwd=root, check=False)
+                        cwd=root, check=False,
+                        timeout=LOCAL_GIT_TIMEOUT_SECONDS)
         if ancestor.returncode != 0:
             _run(["git", "merge", "-s", "ours", "--no-edit", "-m",
                   "Record the previous {} tip before pushing the rebased branch".format(branch),
-                  remote_ref], cwd=root)
-    _run(["git", "push", "--set-upstream", "origin", branch], cwd=root)
+                  remote_ref], cwd=root,
+                 timeout=LOCAL_GIT_TIMEOUT_SECONDS)
+    _run(["git", "push", "--set-upstream", "origin", branch], cwd=root,
+         timeout=REMOTE_GIT_TIMEOUT_SECONDS)
 
 
 def _keep_work(root: pathlib.Path, number: int, branch: str, *,
@@ -1758,11 +1769,13 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *,
             _stage_explicit_paths(root, paths)
             _check_no_run_scratch(root, about_to_commit=paths)
             _run(["git", "commit", "-m",
-                  "WIP #{}: {}".format(number, reason)], cwd=root)
+                  "WIP #{}: {}".format(number, reason)], cwd=root,
+                 timeout=LOCAL_GIT_TIMEOUT_SECONDS)
         else:
             _check_no_run_scratch(root)
         ahead = _run(["git", "rev-list", "--count", "origin/main..HEAD"],
-                     cwd=root).stdout.strip()
+                     cwd=root,
+                     timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
         if not ahead.isdigit() or int(ahead) < 1:
             return "no work to keep"
         _push_ticket_branch(root, branch)

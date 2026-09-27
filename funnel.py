@@ -14236,6 +14236,81 @@ def claim_ticket(
     return None
 
 
+def _ticket_branch_ref_sha(repo: str, ref: str) -> Optional[str]:
+    """Read one Git ref, returning None only when GitHub says it is absent."""
+    endpoint = "repos/{}/git/ref/{}".format(repo, ref[len("refs/"):])
+    result = _run_gh(
+        _gh_api_command(endpoint), capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        response = "{}\n{}".format(
+            getattr(result, "stderr", ""), getattr(result, "stdout", "")
+        )
+        if re.search(r"\bHTTP\s+404\b", response, re.IGNORECASE):
+            return None
+        raise GitHubError("could not read Git ref in {}".format(repo))
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        raise GitHubError("GitHub returned an unreadable Git ref in {}".format(repo))
+    if not isinstance(payload, dict) or payload.get("ref") != ref:
+        raise GitHubError("GitHub returned an unexpected Git ref in {}".format(repo))
+    object_data = payload.get("object")
+    sha = object_data.get("sha") if isinstance(object_data, dict) else None
+    if not isinstance(sha, str) or not sha.strip():
+        raise GitHubError("GitHub returned a Git ref without a commit in {}".format(repo))
+    return sha
+
+
+def ensure_ticket_branch(repo: str, number: int) -> str:
+    """Plant ``ticket/<number>`` at main, preserving any existing remote ref.
+
+    This runs after a ticket claim and before its heartbeat binding. Once the
+    run is bound, abandoned-claim recovery can use this branch as its liveness
+    marker. The main SHA is captured before creating the ref; a raced creation
+    is read back and left untouched rather than replaced.
+    """
+    if (not isinstance(repo, str)
+            or not isinstance(number, int) or isinstance(number, bool) or number < 1
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)):
+        raise GitHubError("cannot establish a ticket branch for this repository")
+
+    branch_ref = "refs/heads/ticket/{}".format(number)
+    existing = _ticket_branch_ref_sha(repo, branch_ref)
+    if existing is not None:
+        return existing
+
+    base_sha = _ticket_branch_ref_sha(repo, "refs/heads/main")
+    if base_sha is None:
+        raise GitHubError("main is missing in {}".format(repo))
+
+    result = _run_gh(
+        ["gh", "api", "-X", "POST", "repos/{}/git/refs".format(repo),
+         "-f", "ref=" + branch_ref, "-f", "sha=" + base_sha],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, ValueError):
+            payload = None
+        object_data = payload.get("object") if isinstance(payload, dict) else None
+        created_sha = object_data.get("sha") if isinstance(object_data, dict) else None
+        if (isinstance(payload, dict) and payload.get("ref") == branch_ref
+                and created_sha == base_sha):
+            return base_sha
+
+    # A competing creator may have won between the first read and the POST.
+    # Accept that ref without changing its tip; otherwise fail closed.
+    existing = _ticket_branch_ref_sha(repo, branch_ref)
+    if existing is not None:
+        return existing
+    raise GitHubError("could not push {} at the run base in {}".format(
+        branch_ref, repo
+    ))
+
+
 def cmd_claim(
     items: List[Item],
     now: datetime,
@@ -17516,33 +17591,55 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     work=item_json(ticket, now, {i.ref: i for i in items}),
                 )
                 if agent in IMPLEMENT_VENDORS:
-                    # Bind immediately after the claim, before the packet's
-                    # slower ticket/plan/verdict reads. A process abandoned
-                    # during that load is then attributable and recoverable by
-                    # the next begin's reconciliation.
-                    _bind_run(agent, out)
                     try:
-                        out["packet"] = implementation_packet(
-                            ticket.repo, ticket.number, agent
-                        )
-                    except (GitHubError, OSError, subprocess.SubprocessError) as exc:
-                        # A packet-less implementation run is not actionable.
-                        # Undo the claim before returning a stop envelope so the
-                        # next poll can recover without waiting for the TTL.
+                        ensure_ticket_branch(ticket.repo, ticket.number)
+                    except (GitHubError, OSError,
+                            subprocess.SubprocessError) as exc:
+                        # A branchless claim still means begin was abandoned.
+                        # Release a claim whose liveness marker could not be
+                        # planted, then stop before issuing implementation work.
                         try:
                             write_lock(ticket, None)
-                        except GitHubError as release_exc:
-                            out["release_error"] = str(release_exc)
+                        except GitHubError:
+                            out["release_error"] = "could not release the ticket claim"
                         out.pop("work", None)
                         out.update(
                             do="stop",
                             gate="error",
-                            why="could not assemble implementation packet: {}".format(
-                                exc
+                            why="could not establish ticket branch for {}#{} ({})".format(
+                                ticket.repo, ticket.number, type(exc).__name__
                             ),
                         )
                     else:
-                        out["vendor"] = IMPLEMENT_VENDORS[agent]
+                        # Bind after the branch is durable and before the
+                        # packet's slower ticket/plan/verdict reads. A process
+                        # abandoned during that load is then attributable and
+                        # recoverable by the next begin's reconciliation.
+                        _bind_run(agent, out)
+                        try:
+                            out["packet"] = implementation_packet(
+                                ticket.repo, ticket.number, agent
+                            )
+                        except (GitHubError, OSError,
+                                subprocess.SubprocessError) as exc:
+                            # A packet-less implementation run is not
+                            # actionable. Undo the claim before returning a
+                            # stop envelope so the next poll can recover
+                            # without waiting for the TTL.
+                            try:
+                                write_lock(ticket, None)
+                            except GitHubError as release_exc:
+                                out["release_error"] = str(release_exc)
+                            out.pop("work", None)
+                            out.update(
+                                do="stop",
+                                gate="error",
+                                why="could not assemble implementation packet: {}".format(
+                                    exc
+                                ),
+                            )
+                        else:
+                            out["vendor"] = IMPLEMENT_VENDORS[agent]
         if "bound" not in out:
             _bind_run(agent, out)
         print(json.dumps(out, indent=2))

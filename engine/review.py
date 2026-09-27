@@ -1949,9 +1949,9 @@ def fetch_verdict(repo: str, pr_number: int) -> Optional[dict]:
 def load_board_items() -> list:
     """The full Project board without item history.
 
-    The packet needs history only for regression items, which
-    ``fetch_stop_counter`` reads. The full history read cost about a
-    minute and a hundred GraphQL points per packet.
+    ``collect`` uses the PR's ticket refs and filtered regression
+    connection instead. The full history read cost about a minute and a
+    hundred GraphQL points per packet.
     """
     return funnel.load_items(include_details=False)
 

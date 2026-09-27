@@ -20,6 +20,7 @@ What tickets does this plan break into — or what one question blocks
 breaking it at all?
 
 - `project` is the plan to break down: `body` is the whole design.
+- `project.body` is canonical; `issue_thread`, when present, is context, and corrections in the current body supersede it.
 - `siblings` are tickets already filed under it. Never re-plan one:
   cover only what no sibling covers.
 - `sizing_standard` is the sizing authority. Size by that section,

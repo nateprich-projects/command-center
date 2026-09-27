@@ -347,7 +347,10 @@ def _issue_packet_stub(noun):
         "with (root / 'packet.calls').open('a') as fh:\n"
         "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
         "if os.environ.get('PACKET_STATUS', '0') != '0':\n"
-        "    sys.stderr.write('could not read the " + noun + " packet for {}\\n'.format(sys.argv[1]))\n"
+        "    error = os.environ.get('PACKET_ERROR')\n"
+        "    if error is None:\n"
+        "        error = 'could not read the " + noun + " packet for {}\\n'.format(sys.argv[1])\n"
+        "    sys.stderr.write(error)\n"
         "    raise SystemExit(1)\n"
         "sys.stdout.write((root / 'packet.json').read_text())\n"
     )
@@ -2054,6 +2057,25 @@ def test_an_issue_packet_failure_finishes_errored_without_a_model_call(
         "--note {}-packet failed for {}: could not read the {} packet "
         "for {}\n".format(job, ref, job, packet_arg)
     )
+
+
+def test_a_failed_breakdown_comments_read_records_its_reason_without_applying(
+        tmp_path):
+    ref = BREAKDOWN_REF
+    reason = "could not read a complete comments connection for {}\n".format(
+        ref)
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("breakdown"), _issue_packet("breakdown"),
+        extra_env={"PACKET_STATUS": "1", "PACKET_ERROR": reason})
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 0
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    assert "breakdown-packet failed: " + reason.strip() in proc.stderr
+    heartbeat = _heartbeat_without_muse_call_record(repo)
+    assert "breakdown-packet failed for {}: {}".format(
+        ref, reason.strip()) in heartbeat
 
 
 @pytest.mark.parametrize("job", ("breakdown", "shape"))

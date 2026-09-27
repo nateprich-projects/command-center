@@ -18,7 +18,9 @@
 # verdict before handing the answer to review-apply. Breakdown answers one
 # JSON question. Shape on Muse asks one framer, then sibling checks, deciders
 # and an auditor in parallel, and merges their answers in code (#1599); shape
-# on z.ai answers one JSON question. Calls retry once on a parse error.
+# on z.ai answers one JSON question. Calls retry once on a parse error; a
+# shape part or a judge chunk whose call goes stream-idle is also asked once
+# more, and each writes one timing line to stderr (#1719).
 # Breakdown rides the standard tier only; shape follows wherever begin offers
 # it.
 #
@@ -765,6 +767,53 @@ model_failed() {
   exit 1
 }
 
+# --- split calls: one stream-idle retry and a timing line (#1719) -----------
+#
+# Muse gives up on a call whose provider stream stays silent for 180 seconds
+# and says so on stderr: `model stream idle timeout after 180000ms`. From the
+# shape split's deploy (2026-09-26 17:21 PDT) to 04:04 PDT the next morning it
+# ended 3 of 11 escalated shapes — the framer once, a decider twice — and each
+# shaped on its next whole-run attempt; review judges at max met it too
+# (#1669). The silence says nothing about the question, so a shape part or a
+# judge chunk that meets it is asked once more before the run fails or the
+# chunk fails closed, and the parts that already answered keep their answers.
+# Only this timeout: a quota refusal still parks the lanes, a wall-clock kill
+# (124) is the bound's own verdict even when an earlier idle line sits in the
+# diagnostic, and any other failure still fails at once. The retry goes
+# through call_model_files like the parse retry, so it is unbound and never
+# resumes the silent session (#1413).
+model_stream_idle() {
+  local status="$1"
+  local diag_path="$2"
+  (( status != 0 && status != 124 )) || return 1
+  grep -qF 'model stream idle timeout' "$diag_path" 2>/dev/null
+}
+
+# One stderr line per shape part and per judge chunk, which the schedule's
+# error log keeps: #1600's closing evidence is each part's wall time, and a
+# heartbeat only times the whole run. The name is the call's directory in
+# RUN_DIR; elapsed is whole seconds over every call the part made, and calls
+# says how many that was, so a parse or stream-idle retry is not mistaken for
+# one slow call. The outcome is `done`, `retried-done` when the part answered
+# only after its stream-idle retry, or `failed` when it has no answer — a
+# judge chunk that failed closed to `unsure` included.
+#
+#   muse-review-engine: timing shape.decider.0 elapsed=412s calls=2 outcome=retried-done
+log_call_timing() {
+  local name="$1"
+  local started="$2"
+  local calls="$3"
+  local answered="$4"
+  local idle_retried="$5"
+  local outcome="failed"
+  if (( answered && idle_retried )); then
+    outcome="retried-done"
+  elif (( answered )); then
+    outcome="done"
+  fi
+  echo "muse-review-engine: timing $name elapsed=$(( $(date +%s) - started ))s calls=$calls outcome=$outcome" >&2
+}
+
 # --- breakdown and shape: the standard-tier issue jobs -----------------------
 # One shared path for both: no precheck, no head to pin. The packet is the
 # plan or the idea, the model answers one JSON object with the same tool
@@ -867,7 +916,8 @@ retry_issue_prompt() {
 # packet where PACKET_JSON stands: the routine file stays as it is
 # (routines/ is protected), and the header replaces its answer format.
 #
-# Every part must answer. A model failure, a timeout or a second parse
+# Every part must answer. A model failure (a stream-idle one after its one
+# retry, #1719), a timeout or a second parse
 # failure in any part ends the run errored with nothing applied, so the idea
 # keeps needs-shaping and the next run asks again. A failed part never
 # becomes a question for Nate: unlike an `unsure` requirement, a missing
@@ -1120,11 +1170,30 @@ build_shape_part_prompt() {
   } >"$call_dir/prompt.txt"
 }
 
-# One part and its one parse retry, in RUN_DIR/shape.<name>. Returns 0 with
-# result.json written, or 1 with a `failed` note for the finish record, plus a
-# `model-status` file when the model call itself failed. Never exits: the
-# later parts run in the background, and the caller decides the run.
+# One part, in RUN_DIR/shape.<name>, then its timing line (#1719). Returns 0
+# with result.json written, or 1 with a `failed` note for the finish record,
+# plus a `model-status` file when the model call itself failed. Never exits:
+# the later parts run in the background, and the caller decides the run.
 run_shape_part() {
+  local name="$1"
+  local started
+  local part_status
+  # Set by shape_part_calls, which runs in this shell: bash locals are
+  # dynamically scoped, so its assignments land here for the timing line.
+  local calls=0
+  local answered=0
+  local idle_retried=0
+  started="$(date +%s)"
+  shape_part_calls "$name"
+  part_status=$?
+  log_call_timing "shape.$name" "$started" "$calls" "$answered" \
+    "$idle_retried"
+  return "$part_status"
+}
+
+# The part's calls: one parse retry and one stream-idle retry, each at most
+# once and neither spending the other's. Returns as run_shape_part does.
+shape_part_calls() {
   local name="$1"
   local kind="${name%%.*}"
   local call_dir="$RUN_DIR/shape.$name"
@@ -1133,18 +1202,28 @@ run_shape_part() {
   local parse_status
   local parse_err
   local note
+  local retried=""
 
   build_shape_part_prompt "$kind" "$call_dir"
   while true; do
+    calls=$((calls + 1))
     call_model_files "$call_dir/prompt.txt" "$call_dir/answer.json" \
       "$call_dir/diag.txt"
     muse_status=$?
     if (( muse_status != 0 )); then
+      # The same prompt again, whichever attempt went silent.
+      if (( ! idle_retried )) \
+        && model_stream_idle "$muse_status" "$call_dir/diag.txt"; then
+        idle_retried=1
+        retried=" after its stream-idle retry"
+        echo "muse-review-engine: shape $name went stream-idle; asking it once more: $(head -c 300 "$call_dir/diag.txt" 2>/dev/null)" >&2
+        continue
+      fi
       printf '%s\n' "$muse_status" >"$call_dir/model-status"
       if (( muse_status == 124 )); then
         note="shape $name was killed after $((BOUND_SECONDS / 60)) minutes: it exceeded the wall-clock bound (#392)"
       else
-        note="shape $name: muse exec failed (exit $muse_status): $(head -c 1000 "$call_dir/diag.txt" 2>/dev/null)"
+        note="shape $name: muse exec failed (exit $muse_status)$retried: $(head -c 1000 "$call_dir/diag.txt" 2>/dev/null)"
       fi
       printf '%s' "$note" >"$call_dir/failed"
       echo "muse-review-engine: $note" >&2
@@ -1154,6 +1233,7 @@ run_shape_part() {
     shape_split parse "$kind" "$call_dir" 2>"$call_dir/parse.txt"
     parse_status=$?
     if (( parse_status == 0 )); then
+      answered=1
       return 0
     fi
     parse_err="$(cat "$call_dir/parse.txt")"
@@ -2017,7 +2097,31 @@ with open(sys.argv[4], "w") as handle:
 PY
 }
 
+# One judge chunk, then its timing line (#1719). Returns 0 with result.json
+# written — the chunk's judgements, or `unsure` for each requirement when it
+# failed closed — or with a `quota` marker and no result on a spent z.ai
+# window; 1 only when not even the failed-closed result could be recorded.
 run_judge_chunk() {
+  local index="$1"
+  local call_dir="$2"
+  local started
+  local chunk_status
+  # Set by judge_chunk_calls, which runs in this shell: bash locals are
+  # dynamically scoped, so its assignments land here for the timing line.
+  local calls=0
+  local answered=0
+  local idle_retried=0
+  started="$(date +%s)"
+  judge_chunk_calls "$index" "$call_dir"
+  chunk_status=$?
+  log_call_timing "judge.$index" "$started" "$calls" "$answered" \
+    "$idle_retried"
+  return "$chunk_status"
+}
+
+# The chunk's calls: one parse retry and one stream-idle retry, each at most
+# once and neither spending the other's. Returns as run_judge_chunk does.
+judge_chunk_calls() {
   local index="$1"
   local call_dir="$2"
   local requirements_path="$call_dir/requirements.json"
@@ -2031,9 +2135,11 @@ run_judge_chunk() {
   local parse_status
   local parse_err
   local evidence
+  local retried=""
 
   build_judge_prompt "$requirements_path" "$prompt_path"
   while true; do
+    calls=$((calls + 1))
     call_model_files "$prompt_path" "$answer_path" "$diag_path"
     muse_status=$?
     if (( muse_status != 0 )); then
@@ -2046,11 +2152,20 @@ run_judge_chunk() {
         echo "muse-review-engine: judge chunk $index met a spent z.ai window" >&2
         return 0
       fi
+      # A silent stream is not a judgement either: the same prompt once more
+      # before the chunk fails closed, whichever attempt went silent.
+      if (( ! idle_retried )) \
+        && model_stream_idle "$muse_status" "$diag_path"; then
+        idle_retried=1
+        retried=" after its stream-idle retry"
+        echo "muse-review-engine: judge chunk $index went stream-idle; asking it once more: $(head -c 300 "$diag_path" 2>/dev/null)" >&2
+        continue
+      fi
       if (( muse_status == 124 )); then
         evidence="judge call timed out after ${BOUND_SECONDS} seconds"
       else
         diagnostic="$(head -c 1000 "$diag_path" 2>/dev/null || true)"
-        evidence="judge call failed (exit $muse_status)"
+        evidence="judge call failed (exit $muse_status)$retried"
         if [[ -n "$diagnostic" ]]; then
           evidence="$evidence: $diagnostic"
         fi
@@ -2069,6 +2184,7 @@ run_judge_chunk() {
       "$result_path" 2>"$parse_diag"
     parse_status=$?
     if (( parse_status == 0 )); then
+      answered=1
       return 0
     fi
     parse_err="$(cat "$parse_diag")"

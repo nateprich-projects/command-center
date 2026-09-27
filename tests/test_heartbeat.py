@@ -330,7 +330,9 @@ def test_usage_snapshot_reads_the_agent_own_provider(monkeypatch):
         },
     }
     monkeypatch.setattr(heartbeat.time, "time", lambda: now)
-    monkeypatch.setattr(usage, "read_claude", lambda: readings["claude"])
+    monkeypatch.setattr(
+        usage, "read_claude_plan_history", lambda timestamp: readings["claude"]
+    )
     monkeypatch.setattr(usage, "read_codex", lambda: readings["codex"])
     monkeypatch.setattr(usage, "read_zai", lambda timestamp: readings["zcode"])
 

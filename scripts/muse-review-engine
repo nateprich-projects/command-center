@@ -38,8 +38,9 @@
 #    tool to disable because none is ever offered, and it refuses any reply
 #    that a model other than glm-5.3 answered (LEARNINGS.md, 2026-09-06).
 #
-# The standard tier routes to z.ai while now < 2026-10-07 00:00 Beijing time
-# (1791302400, 2026-10-06 09:00 PDT), on Nate's decision of 2026-09-23:
+# The standard tier routed to z.ai while now < 2026-09-27 06:00 PDT
+# (1790514000; #1694). The first cutoff, 2026-10-07 00:00 Beijing time
+# (1791302400, 2026-10-06 09:00 PDT), was Nate's decision of 2026-09-23:
 # Muse's week was nearly spent until its Sunday 17:00 PDT reset, and his
 # cancelled z.ai Coding Plan stays active until it expires on 2026-10-07, so
 # its credits are use-it-or-lose-it. The cutoff is the start of the expiry day
@@ -98,7 +99,10 @@ esac
 # own five-hour and weekly windows and stops the lane when either is spent.
 # No fallback to Muse on a spent z.ai window: the standard lane records a skip
 # and waits, and Muse's week is left to the escalated tier it was kept for.
-ZAI_STANDARD_UNTIL="${MUSE_REVIEW_ENGINE_ZAI_UNTIL:-1791302400}"
+# That assumed Muse's week was nearly spent; on 2026-09-27 z.ai's weekly
+# window was spent until 2026-10-03 while Muse had used 19% of its week, so
+# the cutoff was brought forward instead (#1694).
+ZAI_STANDARD_UNTIL="${MUSE_REVIEW_ENGINE_ZAI_UNTIL:-1790514000}"
 BACKEND="muse"
 AGENT="muse"
 if [[ "$TIER" == "standard" && "$ZAI_STANDARD_UNTIL" =~ ^[0-9]+$ ]] \

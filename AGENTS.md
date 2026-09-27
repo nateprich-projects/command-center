@@ -161,13 +161,21 @@ wrong.
   2026-09-18 to 2026-09-22 Muse implemented both tiers, because Codex's Plus week was
   nearly spent. _(confirmed by Nate 2026-09-22)_
 
-  **z.ai judges the standard tier from 2026-09-23 until 2026-10-07 00:00 Beijing time
-  (2026-10-06 09:00 PDT), ahead of the z.ai plan's expiry** (Nate, 2026-09-23; #1411).
+  **z.ai judged the standard tier from 2026-09-23 until 2026-09-27 06:00 PDT** (Nate,
+  2026-09-23, #1411; cutoff brought forward 2026-09-27, #1694). The first cutoff was
+  2026-10-07 00:00 Beijing time (2026-10-06 09:00 PDT), ahead of the plan's expiry. It was
+  brought forward because z.ai's weekly window was spent (99.8% on 2026-09-27, reopening
+  2026-10-03 00:22 PDT), which stopped every standard-tier review, breakdown and shape for
+  six days while Muse's week, at 19% used, expired unspent. The runner's rule against
+  falling back to Muse assumed Muse's week was nearly spent, which no longer held; the
+  change was made under Nate's 2026-09-27 instruction to override directives strongly
+  likely to be creating problems. _(agent change 2026-09-27, #1694)_ The rest of this
+  paragraph describes the bridge as it ran.
   Muse keeps the escalated tier. Muse's week was nearly spent until its Sunday
   2026-09-27 17:00 PDT reset, and Nate's z.ai GLM Coding Plan (Lite: 2,000 credits per
   five hours, 10,000 per week) is cancelled but active until it expires on 2026-10-07,
   so its credits are use-it-or-lose-it. `scripts/muse-review-engine` routes on the
-  clock: a `standard` run before 1791302400 runs as agent `zcode` and asks GLM-5.3
+  clock: a `standard` run before 1790514000 runs as agent `zcode` and asks GLM-5.3
   through `scripts/zai-exec`, one Messages call with no tools offered to z.ai's
   Anthropic-compatible endpoint, refused unless `glm-5.3` is the model that answered.
   The same review and breakdown questions, packets and apply steps serve both

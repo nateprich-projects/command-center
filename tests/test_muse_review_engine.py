@@ -3012,7 +3012,7 @@ def test_the_engine_cutoff_is_the_one_heartbeat_retires_zcode_at():
     runner = SCRIPT.read_text()
     assert 'MUSE_REVIEW_ENGINE_ZAI_UNTIL:-{}}}'.format(
         heartbeat.ZAI_STANDARD_UNTIL) in runner
-    assert heartbeat.ZAI_STANDARD_UNTIL == 1791302400
+    assert heartbeat.ZAI_STANDARD_UNTIL == 1790514000
 
 
 def test_a_standard_review_before_the_cutoff_runs_on_zai_as_zcode(tmp_path):

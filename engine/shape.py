@@ -433,6 +433,22 @@ def validate_answer(data: object) -> Dict:
     }
 
 
+def _without_proposed_class_lines(plan_markdown: str) -> str:
+    """The model's narrative minus any whole-line ``Proposed class:`` line.
+
+    The runner owns that line and appends it from ``proposed_class``. A
+    model that also wrote one left the body with two, which
+    ``funnel.proposed_class_for_approval`` reads as ambiguous, so approval
+    could not adopt the Class (#1697, #1723). Matching with the funnel's
+    own pattern drops exactly the lines approval would count, fuzzy values
+    included, and leaves prose that merely mentions the phrase.
+    """
+    return "".join(
+        line for line in plan_markdown.splitlines(keepends=True)
+        if funnel.PROPOSED_CLASS_LINE_RE.fullmatch(line) is None
+    )
+
+
 def render_plan(answer: Dict) -> str:
     """Render the issue body from validated answer fields.
 
@@ -442,10 +458,11 @@ def render_plan(answer: Dict) -> str:
     agent decided itself, the sequencing dependencies where any wait
     (#1053), and only the Needs Nate categories with open questions.
     Canonical Risk and Needs values live in Project fields. Takes a
-    validated answer; ``apply_shape`` validates before calling.
+    validated answer; ``apply_shape`` validates before calling. The body
+    carries exactly one ``Proposed class:`` line, the runner's (#1723).
     """
-    lines = [answer["plan_markdown"].rstrip(), "",
-             "## Premises", ""]
+    lines = [_without_proposed_class_lines(answer["plan_markdown"]).rstrip(),
+             "", "## Premises", ""]
     premises = answer["premises"]
     if premises:
         for entry in premises:

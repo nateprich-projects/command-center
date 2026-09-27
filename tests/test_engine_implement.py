@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import shlex
@@ -31,6 +32,23 @@ ACCEPT_BODY_CONFLICT_REASON = (
     "plan's active #794 routine freeze. Only tickets under #794 or #1044 "
     "are exempt; #1257 is under #1251, and the current verdict confirms "
     "the conflict. No change was made; wait for #794 to land."
+)
+LIVE_1453_UNSATISFIABLE_ACCEPTANCE = (
+    "The ticket's acceptance requires a heartbeat finish for agent fantasy-gm "
+    "and job com.nateprich.ff-weekly-start-sit.daily, but fantasy-gm is not in "
+    "heartbeat.PROVIDERS and the live FF#230 comment says that daily does not "
+    "publish Command Center heartbeats. The live comment already has the "
+    "requested canonical event form, so no in-scope change can make the "
+    "specified event clear. Parent plan #1403 needs a supported event source "
+    "or revised acceptance before this ticket can proceed. I left the existing "
+    "ticket/1453 branch contents untouched."
+)
+LIVE_1497_PENDING_GATE_ANSWER = (
+    "Unlanded prerequisite: Nate's “Is the plan good?” gate answer for Command "
+    "Center issue 1195 (https://github.com/nateprich-projects/command-center/"
+    "issues/1195) is pending. funnel.py show 1195 reports Shaped at that gate, "
+    "so the escalated shape lane cannot yet produce the required post-fix "
+    "re-shape. No source change was made."
 )
 
 
@@ -1049,6 +1067,26 @@ def test_finish_declined_requeues_false_ff_225_claim_with_evidence(
         tmp_path, monkeypatch, ff_225_landed_prerequisite_facts):
     _, clone = make_clone(tmp_path)
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    summaries = []
+
+    def read_ticket_completion(query, *, owner, name, number):
+        summaries.append((query, owner, name, number))
+        return {
+            "repository": {
+                "issue": {
+                    "number": number,
+                    "state": "CLOSED",
+                    "subIssuesSummary": {
+                        "total": ff_225_landed_prerequisite_facts[
+                            "children_total"],
+                        "completed": ff_225_landed_prerequisite_facts[
+                            "children_completed"],
+                    },
+                },
+            },
+        }
+
+    monkeypatch.setattr(funnel, "gh_graphql", read_ticket_completion)
     reason = (
         "Named prerequisite nateprich-projects/Fantasy-GM#225 is unlanded: "
         "it self-closed after plan drift and a rejected review verdict, "
@@ -1071,8 +1109,6 @@ def test_finish_declined_requeues_false_ff_225_claim_with_evidence(
         needs_effect=lambda url, ref: effects["needs"].append((url, ref)),
         human_needs_effect=lambda url, ref: effects["human_needs"].append(
             (url, ref)),
-        prerequisite_facts_effect=lambda ref: (
-            ff_225_landed_prerequisite_facts),
         clear_block_effect=lambda repo, number, **kwargs:
             effects["cleared"].append((repo, number, kwargs)),
         prerequisite_edge_effect=lambda *args, **kwargs: pytest.fail(
@@ -1082,14 +1118,24 @@ def test_finish_declined_requeues_false_ff_225_claim_with_evidence(
     assert result == {"ticket": REPO + "#42", "declined": reason}
     assert effects["blocked"] == []
     assert effects["human_needs"] == []
+    assert len(summaries) == 1
+    query, owner, name, number = summaries[0]
+    assert (owner, name, number) == ("nateprich-projects", "Fantasy-GM", 225)
+    assert "subIssuesSummary { total completed }" in query
+    assert ff_225_landed_prerequisite_facts["parent_merge_pr"] is None
+    assert ff_225_landed_prerequisite_facts["drift"]
     assert effects["cleared"] == [(REPO, 42, {"cwd": clone})]
     assert effects["needs"] == [(ticket()["url"], REPO + "#42")]
     posted = effects["comments"][0][0][2]
     assert posted.startswith("**Declined:** {}".format(reason))
     assert "Fantasy-GM#225" in posted
+    assert "**False unlanded-prerequisite check:**" in posted
     assert "all 5 child tickets completed (5/5)" in posted
     assert effects["released"] == [REPO + "#42"]
-    assert "prerequisite already landed; returned to agent queue" in (
+    assert (
+        "false unlanded-prerequisite claim disproved by closed child tickets; "
+        "returned to agent queue"
+    ) in (
         effects["finished"][0][3])
 
 
@@ -1417,6 +1463,243 @@ def test_finish_declined_falls_back_to_blocked_for_non_prerequisite_cases(
         assert effects["edges"] == [(REPO, 42, REPO + "#165")]
 
 
+@pytest.mark.parametrize(("reason", "route"), [
+    (LIVE_1453_UNSATISFIABLE_ACCEPTANCE, "agent"),
+    (LIVE_1497_PENDING_GATE_ANSWER, "external-event"),
+])
+def test_finish_declined_routes_no_clearable_condition_shapes_without_blocking(
+        tmp_path, monkeypatch, reason, route):
+    """The live #1453/#1497 declines must not manufacture an Unblock gate."""
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"blocked": [], "comments": [], "released": [], "finished": [],
+               "agent": [], "external": [], "cleared": []}
+
+    result = implement.finish_declined(
+        reason,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda url, ref: effects["agent"].append((url, ref)),
+        human_needs_effect=lambda *args: pytest.fail(
+            "a no-clearable-condition decline must not reach Nate"),
+        external_event_needs_effect=lambda url, ref: effects["external"].append(
+            (url, ref)),
+        prerequisite_facts_effect=lambda ref: pytest.fail(
+            "these decline shapes are not named prerequisite tickets"),
+        clear_block_effect=lambda repo, number, **kwargs:
+            effects["cleared"].append((repo, number, kwargs)),
+    )
+
+    assert result == {"ticket": REPO + "#42", "declined": reason}
+    assert effects["blocked"] == []
+    assert effects["cleared"] == [(REPO, 42, {"cwd": clone})]
+    assert effects["agent"] == (
+        [(ticket()["url"], REPO + "#42")] if route == "agent" else [])
+    assert effects["external"] == (
+        [(ticket()["url"], REPO + "#42")]
+        if route == "external-event" else [])
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["comments"][0][0][2] == "**Declined:** {}".format(reason)
+    assert effects["finished"][0][:3] == (
+        "codex", "run-42", "skipped-blocked")
+    route_note = (
+        "routed for reshaping" if route == "agent"
+        else "waiting for the named gate answer"
+    )
+    assert route_note in effects["finished"][0][3]
+    route_record = funnel._marked_json(
+        effects["comments"][1][0][2],
+        implement.DECLINE_REVIEW_ROUTING_MARKER,
+    )
+    if route == "agent":
+        assert route_record["type"] == "unsatisfiable-acceptance"
+        assert route_record["acceptance_digest"] == hashlib.sha256(
+            ticket()["body"].encode("utf-8")
+        ).hexdigest()
+    else:
+        assert route_record["type"] == "pending-gate-answer"
+        assert route_record["gate_ref"] == "nateprich-projects/command-center#1195"
+
+
+def test_unsatisfiable_decline_is_withheld_until_acceptance_changes():
+    parent = funnel.Item(
+        repo=REPO, number=7, title="the settled plan", url="https://example/7",
+        state="OPEN", status="Ready", klass="Improve",
+    )
+    body = "Accept: a condition no agent can satisfy"
+    item = funnel.Item(
+        repo=REPO, number=42, title="implementation", url="https://example/42",
+        state="OPEN", body=body, needs="agent", parent=parent.ref,
+        decline_route={
+            "type": "unsatisfiable-acceptance",
+            "acceptance_digest": hashlib.sha256(
+                body.encode("utf-8")
+            ).hexdigest(),
+        },
+    )
+
+    assert funnel.startable([parent, item]) == []
+
+    item.body = body + "\n\nAccept revised after shaping."
+    assert [row.ref for row in funnel.startable([parent, item])] == [item.ref]
+
+
+def test_pending_gate_decline_waits_then_clears_needs(monkeypatch):
+    parent = funnel.Item(
+        repo=REPO, number=7, title="the settled plan", url="https://example/7",
+        state="OPEN", status="Ready", klass="Improve",
+    )
+    gate = funnel.Item(
+        repo="nateprich-projects/command-center", number=1195,
+        title="answer the gate", url="https://example/1195",
+        state="OPEN", body="Gates: is the plan good?",
+    )
+    item = funnel.Item(
+        repo=REPO, number=42, title="implementation", url="https://example/42",
+        state="OPEN", body="Accept: wait for the gate", needs="external-event",
+        parent=parent.ref, item_id="project-item-42",
+        decline_route={
+            "type": "pending-gate-answer",
+            "gate_ref": gate.ref,
+        },
+    )
+    rows = [parent, gate, item]
+    writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            writes.append((item_id, field, value, ref)),
+    )
+
+    assert funnel.startable(rows) == []
+    gate.body = "Gates: is the plan good?\n\n" + funnel.gates_answer_block(
+        "the plan is good", "Nate",
+    )
+
+    assert funnel.clear_answered_decline_routes(rows) == [
+        {"ref": item.ref, "gate_ref": gate.ref}
+    ]
+    assert writes == [
+        ("project-item-42", "Needs", "none", item.ref)
+    ]
+    assert item.needs == "none"
+    assert [row.ref for row in funnel.startable(rows)] == [item.ref]
+
+
+def test_decline_route_comment_matches_the_latest_decline_run():
+    reason = LIVE_1453_UNSATISFIABLE_ACCEPTANCE
+    body = ticket()["body"]
+    now = funnel.datetime.now(funnel.timezone.utc)
+    earlier_decline = funnel.append_provenance(
+        "**Declined:** an earlier reason", "agent", at=now,
+        run="run-old", agent="codex",
+    )
+    earlier_route = funnel.append_provenance(
+        implement._declined_unsatisfiable_acceptance_comment(
+            "an earlier reason", hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        ),
+        "agent", at=now, run="run-old", agent="codex",
+    )
+    latest_decline = funnel.append_provenance(
+        "**Declined:** {}".format(reason), "agent", at=now,
+        run="run-new", agent="codex",
+    )
+
+    assert funnel.parse_decline_route_comment(
+        [earlier_decline, earlier_route, latest_decline]
+    ) is None
+
+    latest_route = funnel.append_provenance(
+        implement._declined_unsatisfiable_acceptance_comment(
+            reason, hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        ),
+        "agent", at=now, run="run-new", agent="codex",
+    )
+    route = funnel.parse_decline_route_comment(
+        [earlier_decline, earlier_route, latest_decline, latest_route]
+    )
+    assert route is not None
+    assert route["type"] == "unsatisfiable-acceptance"
+
+
+def test_write_declined_external_event_needs_uses_canonical_field(monkeypatch):
+    from engine import breakdown as breakdown_engine
+
+    calls = []
+    monkeypatch.setattr(
+        breakdown_engine, "add_to_project", lambda url: "project-item-id")
+    monkeypatch.setattr(
+        breakdown_engine, "write_needs",
+        lambda item_id, needs, ref: calls.append((item_id, needs, ref)),
+    )
+
+    implement.write_declined_external_event_needs(
+        ticket()["url"], REPO + "#42",
+    )
+
+    assert calls == [("project-item-id", "external-event", REPO + "#42")]
+
+
+def test_finish_declined_keeps_a_clearable_human_condition_blocked(
+        tmp_path, monkeypatch):
+    """A real owner decision still gets the existing blocked/Unblock route."""
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    reason = (
+        "Nate can clear this by answering whether the requested scope is "
+        "acceptable."
+    )
+    blocked_item = funnel.Item(
+        repo=REPO,
+        number=42,
+        title="implement the bounded runner",
+        url=ticket()["url"],
+        state="OPEN",
+        parent=REPO + "#7",
+    )
+    effects = {"blocked": [], "comments": [], "released": [], "finished": [],
+               "human": []}
+
+    def record_block(*args, **kwargs):
+        effects["blocked"].append((args, kwargs))
+        blocked_item.labels.append("blocked")
+
+    def record_human_needs(url, ref):
+        effects["human"].append((url, ref))
+        blocked_item.needs = "human"
+
+    implement.finish_declined(
+        reason,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=record_block,
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda *args: pytest.fail(
+            "a clearable human condition must not be routed to agents"),
+        human_needs_effect=record_human_needs,
+        external_event_needs_effect=lambda *args: pytest.fail(
+            "a direct owner decision is not a pending gate event"),
+    )
+
+    assert len(effects["blocked"]) == 1
+    assert effects["blocked"][0][0][1] == 42
+    assert effects["human"] == [(ticket()["url"], REPO + "#42")]
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][2] == "skipped-blocked"
+    assert funnel.gate_question(blocked_item) == "Unblock?"
+
+
 @pytest.mark.parametrize(("reason", "ticket_repo", "expected"), [
     ("Unlanded prerequisite #165 is still open.", REPO,
      ("prerequisite-ticket", REPO + "#165")),
@@ -1448,6 +1731,16 @@ def test_classify_decline_reason_uses_only_named_prerequisite_reference(
 ])
 def test_classify_decline_reason_routes_only_pointed_accept_conflicts(
         reason, expected):
+    assert implement.classify_decline_reason(reason, REPO) == expected
+
+
+@pytest.mark.parametrize(("reason", "expected"), [
+    (LIVE_1453_UNSATISFIABLE_ACCEPTANCE,
+     ("unsatisfiable-acceptance", None)),
+    (LIVE_1497_PENDING_GATE_ANSWER,
+     ("pending-gate-answer", "nateprich-projects/command-center#1195")),
+])
+def test_classify_decline_reason_routes_unactionable_shapes(reason, expected):
     assert implement.classify_decline_reason(reason, REPO) == expected
 
 

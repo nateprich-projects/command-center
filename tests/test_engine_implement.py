@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import shlex
@@ -1481,10 +1482,123 @@ def test_finish_declined_routes_no_clearable_condition_shapes_without_blocking(
     assert effects["finished"][0][:3] == (
         "codex", "run-42", "skipped-blocked")
     route_note = (
-        "returned to agent queue" if route == "agent"
-        else "waiting for gate answer as an external event"
+        "routed for reshaping" if route == "agent"
+        else "waiting for the named gate answer"
     )
     assert route_note in effects["finished"][0][3]
+    route_record = funnel._marked_json(
+        effects["comments"][1][0][2],
+        implement.DECLINE_REVIEW_ROUTING_MARKER,
+    )
+    if route == "agent":
+        assert route_record["type"] == "unsatisfiable-acceptance"
+        assert route_record["acceptance_digest"] == hashlib.sha256(
+            ticket()["body"].encode("utf-8")
+        ).hexdigest()
+    else:
+        assert route_record["type"] == "pending-gate-answer"
+        assert route_record["gate_ref"] == "nateprich-projects/command-center#1195"
+
+
+def test_unsatisfiable_decline_is_withheld_until_acceptance_changes():
+    parent = funnel.Item(
+        repo=REPO, number=7, title="the settled plan", url="https://example/7",
+        state="OPEN", status="Ready", klass="Improve",
+    )
+    body = "Accept: a condition no agent can satisfy"
+    item = funnel.Item(
+        repo=REPO, number=42, title="implementation", url="https://example/42",
+        state="OPEN", body=body, needs="agent", parent=parent.ref,
+        decline_route={
+            "type": "unsatisfiable-acceptance",
+            "acceptance_digest": hashlib.sha256(
+                body.encode("utf-8")
+            ).hexdigest(),
+        },
+    )
+
+    assert funnel.startable([parent, item]) == []
+
+    item.body = body + "\n\nAccept revised after shaping."
+    assert [row.ref for row in funnel.startable([parent, item])] == [item.ref]
+
+
+def test_pending_gate_decline_waits_then_clears_needs(monkeypatch):
+    parent = funnel.Item(
+        repo=REPO, number=7, title="the settled plan", url="https://example/7",
+        state="OPEN", status="Ready", klass="Improve",
+    )
+    gate = funnel.Item(
+        repo="nateprich-projects/command-center", number=1195,
+        title="answer the gate", url="https://example/1195",
+        state="OPEN", body="Gates: is the plan good?",
+    )
+    item = funnel.Item(
+        repo=REPO, number=42, title="implementation", url="https://example/42",
+        state="OPEN", body="Accept: wait for the gate", needs="external-event",
+        parent=parent.ref, item_id="project-item-42",
+        decline_route={
+            "type": "pending-gate-answer",
+            "gate_ref": gate.ref,
+        },
+    )
+    rows = [parent, gate, item]
+    writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            writes.append((item_id, field, value, ref)),
+    )
+
+    assert funnel.startable(rows) == []
+    gate.body = "Gates: is the plan good?\n\n" + funnel.gates_answer_block(
+        "the plan is good", "Nate",
+    )
+
+    assert funnel.clear_answered_decline_routes(rows) == [
+        {"ref": item.ref, "gate_ref": gate.ref}
+    ]
+    assert writes == [
+        ("project-item-42", "Needs", "none", item.ref)
+    ]
+    assert item.needs == "none"
+    assert [row.ref for row in funnel.startable(rows)] == [item.ref]
+
+
+def test_decline_route_comment_matches_the_latest_decline_run():
+    reason = LIVE_1453_UNSATISFIABLE_ACCEPTANCE
+    body = ticket()["body"]
+    now = funnel.datetime.now(funnel.timezone.utc)
+    earlier_decline = funnel.append_provenance(
+        "**Declined:** an earlier reason", "agent", at=now,
+        run="run-old", agent="codex",
+    )
+    earlier_route = funnel.append_provenance(
+        implement._declined_unsatisfiable_acceptance_comment(
+            "an earlier reason", hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        ),
+        "agent", at=now, run="run-old", agent="codex",
+    )
+    latest_decline = funnel.append_provenance(
+        "**Declined:** {}".format(reason), "agent", at=now,
+        run="run-new", agent="codex",
+    )
+
+    assert funnel.parse_decline_route_comment(
+        [earlier_decline, earlier_route, latest_decline]
+    ) is None
+
+    latest_route = funnel.append_provenance(
+        implement._declined_unsatisfiable_acceptance_comment(
+            reason, hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        ),
+        "agent", at=now, run="run-new", agent="codex",
+    )
+    route = funnel.parse_decline_route_comment(
+        [earlier_decline, earlier_route, latest_decline, latest_route]
+    )
+    assert route is not None
+    assert route["type"] == "unsatisfiable-acceptance"
 
 
 def test_write_declined_external_event_needs_uses_canonical_field(monkeypatch):
@@ -1596,7 +1710,7 @@ def test_classify_decline_reason_routes_only_pointed_accept_conflicts(
     (LIVE_1453_UNSATISFIABLE_ACCEPTANCE,
      ("unsatisfiable-acceptance", None)),
     (LIVE_1497_PENDING_GATE_ANSWER,
-     ("pending-gate-answer", None)),
+     ("pending-gate-answer", "nateprich-projects/command-center#1195")),
 ])
 def test_classify_decline_reason_routes_unactionable_shapes(reason, expected):
     assert implement.classify_decline_reason(reason, REPO) == expected

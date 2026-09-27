@@ -579,6 +579,9 @@ def test_the_closed_freeze_owner_is_fetched_so_the_freeze_stays_inert(
 def test_a_closed_parent_is_fetched_so_its_ticket_stays_startable(
     monkeypatch,
 ):
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args, **kwargs: {"comments": []},
+    )
     parent = _node(3, state="CLOSED", reason="COMPLETED", status="Building")
     board = FakeBoard(
         {"open": [([_node(1), _node(5, parent=3, needs="agent")], None)]},

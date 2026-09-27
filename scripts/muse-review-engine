@@ -1732,9 +1732,9 @@ requirement missing here is never checked, and a vague one cannot be answered.
 
 For a `plan_premises` entry labelled `inferred` that has `deferred_answer`,
 include a requirement that preserves its exact evidence pointer and says it is
-deferred until the named `reviewed_ticket` is complete. Do not emit a
-live-evidence probe requirement for that premise. An inferred entry without
-`deferred_answer` keeps the normal probe requirement.
+deferred until the named `reviewed_ticket` is complete. Do not emit a live-evidence
+probe requirement for that premise. An inferred entry without `deferred_answer`
+keeps the normal probe requirement; unresolved or unavailable probes remain `unsure`.
 
 Answer with exactly one JSON object and nothing else:
 

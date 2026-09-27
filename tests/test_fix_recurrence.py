@@ -429,3 +429,52 @@ def test_an_unrelated_commit_between_two_fixes_does_not_hide_the_cause(tmp_path)
     result = fr.measure(root, {35: 3500, 36: 3600}, NOW)
 
     assert (result["numerator"], result["denominator"]) == (1, 1)
+
+
+def test_a_non_broken_ticket_commit_is_never_a_cause(tmp_path):
+    """Only Broken fixes count as causes: rewriting feature work is not recurrence."""
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["a = 1"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("run", ["a = 2"])},
+            "Feature (#37) (#137)", NOW - timedelta(days=2))
+    _commit(root, {"app.py": _body("run", ["a = 3"])},
+            "Fix (#38) (#138)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {38: 3800}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (0, 1)
+
+
+@pytest.mark.parametrize("cause_age, counted", [
+    (timedelta(days=6, hours=23), True),
+    (timedelta(days=7, hours=1), False),
+])
+def test_the_cause_must_fall_within_seven_days_of_the_fix(tmp_path, cause_age,
+                                                          counted):
+    root = _new_repo(tmp_path)
+    fix_at = NOW - timedelta(hours=1)
+    _commit(root, {"app.py": _body("run", ["a = 1"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("run", ["a = 2"])},
+            "Cause (#39) (#139)", fix_at - cause_age)
+    _commit(root, {"app.py": _body("run", ["a = 3"])},
+            "Fix (#40) (#140)", fix_at)
+
+    result = fr.measure(root, {39: 3900, 40: 4000}, NOW)
+
+    assert result["numerator"] == (1 if counted else 0)
+
+
+def test_the_measured_window_is_seven_days_to_the_hour(tmp_path):
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("one", ["a = 1"]) + _body("two", ["b = 1"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("one", ["a = 2"]) + _body("two", ["b = 1"])},
+            "Just outside (#41) (#141)", NOW - timedelta(days=7, hours=1))
+    _commit(root, {"app.py": _body("one", ["a = 2"]) + _body("two", ["b = 2"])},
+            "Just inside (#42) (#142)", NOW - timedelta(days=6, hours=23))
+
+    result = fr.measure(root, {41: 4100, 42: 4200}, NOW)
+
+    assert result["denominator"] == 1

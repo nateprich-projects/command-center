@@ -16187,18 +16187,106 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     return None
 
 
+def is_risk_marker_reason(reason: object) -> bool:
+    """Whether an escalation reason comes from a ``Risk: escalated`` line.
+
+    ``escalation_matches`` reports that line as ``declared`` or
+    ``declared: <what>``. The plan's writer stated the risk, so it is a
+    declaration, not a wording hit, and it still holds a plan (#1721).
+    """
+    return isinstance(reason, str) and (
+        reason == "declared" or reason.startswith("declared:")
+    )
+
+
+_PLAN_RISK_RATIONALE_RE = re.compile(
+    r"^ {0,3}#{1,6}[ \t]+Risk rationale[ \t]*$", re.IGNORECASE | re.MULTILINE
+)
+_PLAN_SECTION_END_RE = re.compile(
+    r"^ {0,3}#{1,6}[ \t]+|^[ \t]*<!-- command-center-[\w-]+ -->", re.MULTILINE
+)
+_PLAN_RISK_RATIONALE_ENTRY_RE = re.compile(
+    r"^[ \t]*[-*][ \t]+(?P<reason>[\w-]+)[ \t]*:"
+)
+
+
+def plan_declared_risks(plan_body: str) -> List[str]:
+    """Risks a plan body declares, as distinct from wording-scan hits (#1721).
+
+    The shape runner renders the shaper's typed ``escalated_risk`` as a
+    ``Risk rationale`` section, and a hand-written plan may carry a
+    ``Risk: escalated`` line. Either one is a declaration and holds a plan at
+    Shaped; a hit from ``plan_escalation_matches`` alone only raises the
+    review tier. A rationale heading with no readable entry still counts as
+    ``declared``, so a malformed record holds rather than releases.
+    """
+    text = asserted_text(plan_body or "")
+    declared: List[str] = []
+    heading = _PLAN_RISK_RATIONALE_RE.search(text)
+    if heading is not None:
+        section = text[heading.end():]
+        boundary = _PLAN_SECTION_END_RE.search(section)
+        if boundary is not None:
+            section = section[:boundary.start()]
+        for line in section.splitlines():
+            entry = _PLAN_RISK_RATIONALE_ENTRY_RE.match(line)
+            if (entry is not None
+                    and entry.group("reason") in ESCALATION_PATTERNS
+                    and entry.group("reason") not in declared):
+                declared.append(entry.group("reason"))
+        if not declared:
+            declared.append("declared")
+    for match in plan_escalation_matches(plan_body or ""):
+        reason = match.get("reason")
+        if is_risk_marker_reason(reason) and reason not in declared:
+            declared.append(str(reason))
+    return declared
+
+
+def scan_only_escalation_note(reasons: Sequence[str]) -> str:
+    """Self-approval wording for a scan hit that no longer holds (#1721)."""
+    named = " ({})".format(", ".join(reasons)) if reasons else ""
+    return "scan-only escalation{} raises the review tier".format(named)
+
+
+def _shaped_risk_facts(item: Item, body: str) -> Tuple[bool, bool]:
+    """Whether a Shaped plan's Risk holds it, and whether Needs is a scan hold.
+
+    Until #1721 an escalated Risk held a plan whoever set it, and a plan held
+    only by the wording scan was written ``Needs: human`` with
+    ``Risk: escalated`` (#1644). Now only a declared risk holds, so an
+    escalated plan whose body declares none is released, and its
+    ``Needs: human`` is read as the scan hold's record when the body asks
+    no open question either. Unset or unknown Risk, and an escalated Risk on
+    a body the load did not carry, still hold as before.
+    """
+    if item.risk == "standard":
+        return False, False
+    if item.risk != "escalated" or not body.strip():
+        return True, False
+    if plan_declared_risks(body):
+        return True, False
+    return False, item.needs == "human" and not plan_needs_nate(body)
+
+
 def shaped_self_approvable(item: Item,
                            by_ref: Dict[str, Item]) -> bool:
-    """Re-evaluate one Shaped plan with the existing self-approval rule."""
+    """Re-evaluate one Shaped plan with the existing self-approval rule.
+
+    Only a declared risk holds (#1721): an escalated Risk the wording scan
+    set alone no longer does, and neither does the ``Needs: human`` that
+    recorded that scan hold.
+    """
     body = _loaded_item_body(item)
     override = parse_origin_override(body)
     override_target = override["target"] if override is not None else None
+    risk_holds, scan_needs_hold = _shaped_risk_facts(item, body)
     return self_approval_eligible(
         effective_class(item, by_ref),
         item.origin,
         override_target,
-        needs_nate=item.needs == "human",
-        escalated=item.risk != "standard",
+        needs_nate=item.needs == "human" and not scan_needs_hold,
+        escalated=risk_holds,
         state=item.state,
     )
 
@@ -16235,6 +16323,25 @@ def sweep_shaped_self_approvals(
         reason = "needs_nate all null; class {} self-approvable; {}".format(
             klass, owner_basis
         )
+        # Eligible with an escalated Risk means the scan set it and nothing
+        # declared it (#1721): it stays escalated for the review tier, and a
+        # Needs human that only recorded the scan hold is cleared first, so a
+        # failed Status write leaves the plan for the next pass, not a Ready
+        # plan that still names Nate as its next actor.
+        scan_only = item.risk == "escalated"
+        if scan_only:
+            reason += "; " + scan_only_escalation_note(plan_is_escalated(body))
+        if scan_only and item.needs == "human":
+            try:
+                if not item.item_id:
+                    raise GitHubError(
+                        "{} is not in the Project".format(item.ref)
+                    )
+                write_project_select(item.item_id, "Needs", "none", item.ref)
+            except (OSError, subprocess.SubprocessError, GitHubError) as exc:
+                errors.append({"ref": item.ref, "error": str(exc)})
+                continue
+            item.needs = "none"
 
         try:
             status_error = _write_status(item, "Ready", now)
@@ -16244,7 +16351,9 @@ def sweep_shaped_self_approvals(
             errors.append({"ref": item.ref, "error": status_error})
             continue
 
-        basis = "{}; no escalated risk".format(reason)
+        basis = "{}; {}".format(
+            reason, "no declared risk" if scan_only else "no escalated risk"
+        )
         authority_signals = needs_nate_signals(body)
         if authority_signals:
             basis += "; authority signals: {}".format(

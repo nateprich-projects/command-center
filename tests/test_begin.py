@@ -3682,6 +3682,113 @@ def test_shape_lane_rechecks_stranded_self_approvals_before_new_ideas(
     assert "no escalated risk" in marker
 
 
+SCAN_ONLY_HOLDS = json.loads(
+    (ROOT / "tests/fixtures/escalation_plan_scan_only_holds.json").read_text(
+        encoding="utf-8"))
+
+
+def _held_plan(number, body, *, risk="escalated", needs="human"):
+    """A Shaped plan as the shape runner left it, with its canonical fields."""
+    plan = _shaped_plan(number)
+    plan.body = body + "\n" + funnel.origin_block(
+        "agent", at=NOW, run="shape-run", agent="muse")
+    plan.risk = risk
+    plan.needs = needs
+    return plan
+
+
+def _sweep(monkeypatch, items):
+    writes, fields, comments = [], [], []
+
+    def write_status(item, status, now):
+        writes.append((item.ref, status))
+        item.status = status
+        return None
+
+    def run_gh(argv, **kwargs):
+        if argv[:3] == ["gh", "issue", "comment"]:
+            comments.append(argv[-1])
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(funnel, "_write_status", write_status)
+    monkeypatch.setattr(funnel, "_run_gh", run_gh)
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref: fields.append((ref, field, value)),
+    )
+    advanced, errors = funnel.sweep_shaped_self_approvals(
+        items, NOW, run="begin-run", agent="muse")
+    assert errors == []
+    return advanced, writes, fields, comments
+
+
+def test_sweep_releases_a_stranded_scan_only_shaped_plan(monkeypatch):
+    """#1721: #1195's body, held by a Siblings checked line with Needs human
+    and Risk escalated as #1644 wrote it, is swept to Ready. Risk stays
+    escalated for the review tier; Needs human, the hold's record, clears."""
+    fixture = next(entry for entry in SCAN_ONLY_HOLDS
+                   if "#1195 " in entry["source"])
+    stranded = _held_plan(305, fixture["body"])
+    assert funnel.plan_needs_nate(stranded.body) is False
+
+    advanced, writes, fields, comments = _sweep(monkeypatch, [stranded])
+
+    assert advanced == [{"ref": stranded.ref, "status": "Ready"}]
+    assert writes == [(stranded.ref, "Ready")]
+    assert fields == [(stranded.ref, "Needs", "none")]
+    assert (stranded.status, stranded.risk, stranded.needs) == (
+        "Ready", "escalated", "none")
+    assert len(comments) == 1
+    assert funnel.parse_self_approval(comments[0]) == (
+        "needs_nate all null; class Broken self-approvable; origin agent; "
+        "scan-only escalation (data-migration) raises the review tier; "
+        "no declared risk")
+
+
+def test_sweep_keeps_a_declared_risk_at_shaped(monkeypatch):
+    rationale = _held_plan(
+        306,
+        "# Plan\n\nBackfill the ledger.\n\nProposed class: Broken\n\n"
+        "## Risk rationale\n\n"
+        "- data-migration: backfills the ledger table\n")
+    unreadable_rationale = _held_plan(
+        307, "# Plan\n\n## Risk rationale\n\nSee the thread.\n")
+    marker = _held_plan(
+        308, "# Plan\n\nRisk: escalated — destructive\n", needs="none")
+
+    advanced, writes, fields, comments = _sweep(
+        monkeypatch, [rationale, unreadable_rationale, marker])
+
+    assert (advanced, writes, fields, comments) == ([], [], [], [])
+    assert funnel.plan_declared_risks(rationale.body) == ["data-migration"]
+    assert funnel.plan_declared_risks(unreadable_rationale.body) == [
+        "declared"]
+    assert funnel.plan_declared_risks(marker.body) == [
+        "declared: destructive"]
+    assert {plan.status for plan in (rationale, unreadable_rationale,
+                                     marker)} == {"Shaped"}
+
+
+def test_sweep_still_holds_what_the_scan_hold_did_not_explain(monkeypatch):
+    fixture = SCAN_ONLY_HOLDS[0]
+    open_question = _held_plan(
+        309, fixture["body"] + "\n## Needs Nate\n\n"
+        "- Gates: Who may write Ready?\n")
+    unloaded = _held_plan(310, fixture["body"])
+    unloaded.body = None
+    unknown_risk = _held_plan(311, fixture["body"], risk=None, needs="none")
+    nate_origin = _held_plan(312, fixture["body"])
+    nate_origin.origin = "Nate"
+    standard_human = _held_plan(
+        313, fixture["body"], risk="standard", needs="human")
+
+    advanced, writes, fields, comments = _sweep(
+        monkeypatch,
+        [open_question, unloaded, unknown_risk, nate_origin, standard_human])
+
+    assert (advanced, writes, fields, comments) == ([], [], [], [])
+
+
 def test_plan_needs_nate_ignores_omitted_null_categories():
     body = (
         "## Needs Nate\n\n"

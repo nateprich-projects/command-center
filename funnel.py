@@ -1475,6 +1475,12 @@ def plan_is_escalated(plan_body: str) -> List[str]:
 _PLAN_ATX_HEADING_RE = re.compile(
     r"^ {0,3}(?P<hashes>#{1,6})(?:[ \t]+(?P<title>.*?)|[ \t]*)$"
 )
+_PLAN_FENCE_OPEN_RE = re.compile(
+    r"^ {0,3}(?P<marker>`{3,}|~{3,})"
+)
+_PLAN_FENCE_CLOSE_RE = re.compile(
+    r"^ {0,3}(?P<marker>`+|~+)[ \t]*$"
+)
 _PLAN_MALFORMED_ATX_RE = re.compile(
     r"^ {0,3}(?:#{7,}|#{1,6}(?!#)\S).*$"
 )
@@ -1554,6 +1560,33 @@ _PLAN_NEGATED_PREFIX_RE = re.compile(
 )
 
 
+def _strip_plan_code_blocks(text: str) -> str:
+    """Blank fenced and indented Markdown code blocks, preserving lines."""
+    visible: List[str] = []
+    fence: Optional[str] = None
+    for line in (text or "").splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        ending = line[len(content):]
+        if fence is not None:
+            closing = _PLAN_FENCE_CLOSE_RE.match(content)
+            if (closing
+                    and closing.group("marker")[0] == fence[0]
+                    and len(closing.group("marker")) >= len(fence)):
+                fence = None
+            visible.append(ending)
+            continue
+        opening = _PLAN_FENCE_OPEN_RE.match(content)
+        if opening:
+            fence = opening.group("marker")
+            visible.append(ending)
+            continue
+        if content.startswith("    ") or content.startswith("\t"):
+            visible.append(ending)
+            continue
+        visible.append(line)
+    return "".join(visible)
+
+
 def _strip_plan_prose_quotes(text: str) -> str:
     """Blank balanced prose quotations while preserving offsets and lines."""
     if not text:
@@ -1612,13 +1645,14 @@ def _plan_match_is_proposed(text: str, match: re.Match,
 
 
 def _plan_escalation_scan_text(plan_body: str) -> str:
-    """Remove plan-only rejected prose before using the shared word matcher.
+    """Remove code blocks and rejected prose before using the shared matcher.
 
     A malformed Rejected heading or a malformed heading inside its section
     makes the section boundary ambiguous. In that case keep the original body
-    intact so an uncertain parse cannot hide a scan hit.
+    intact outside code blocks so an uncertain parse cannot hide an asserted
+    scan hit.
     """
-    body = plan_body or ""
+    body = _strip_plan_code_blocks(plan_body or "")
     raw_lines = body.splitlines(keepends=True)
     visible_lines = _strip_plan_prose_quotes(asserted_text(body)).splitlines()
     if len(visible_lines) > len(raw_lines):

@@ -493,6 +493,22 @@ def test_ticket_1643_named_false_gate_fixtures_do_not_escalate():
         )
 
 
+def test_plan_scan_ignores_risky_actions_inside_code_blocks():
+    fence = "```"
+    code_blocks = [
+        "{}python\nRisk: escalated — data-migration\n"
+        "This plan will migrate every row.\n{}".format(
+            fence, fence
+        ),
+        "~~~text\nThis plan will migrate every row.\n~~~",
+        "    This plan will migrate every row.\n",
+        "\tThis plan will migrate every row.\n",
+    ]
+    for block in code_blocks:
+        body = "## What it is\n\n{}\n".format(block)
+        assert funnel.plan_escalation_matches(body) == []
+
+
 def test_ticket_1643_affirmative_proposal_fixtures_still_escalate():
     fixtures = json.loads(
         (FIXTURES / "escalation_plan_true_proposals.json").read_text()

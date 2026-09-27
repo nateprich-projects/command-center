@@ -58,5 +58,25 @@
     "source": "#1576",
     "body": "The fix is forward-only; the three 2026-09-25/26 failed finish runs stand as the before-measurement with no backfill or re-run. (source: sibling convention, the no-backfill decisions in #1393 and #1182, followed by #1514 through #1545)",
     "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1540: Decided from precedent",
+    "body": "## Decided from precedent\n- The measurement is forward-only; the 2026-09-24 to 09-26 windows and the 44 reserve-skips stand as the before-measurement with no backfill (source: sibling convention, the no-backfill decisions in #1393 and #1182)\n",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1595: Decided from precedent",
+    "body": "## Decided from precedent\n- The fix is forward-only; the 2026-09-26 snapshot and its eleven-minute serve window stand as the before-measurement with no backfill or re-publish. (source: sibling convention, the no-backfill decisions in #1393 and #1182, followed by #1514 through #1582)\n",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1582: Decided from precedent",
+    "body": "## Decided from precedent\n- The fix is forward-only: the 2026-09-26 census, the 70.3 percent alert and the manual reap stand as the before-measurement with no backfill. (source: sibling convention, the no-backfill decisions in #1393 and #1182, followed by #1514 through #1576)\n",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1632: sibling citation",
+    "body": "## Siblings checked\n- #1626 (Shaped) — review-lister deadlock fix on #1581's tickets; engine code, not AGENTS.md; keep both.\n",
+    "pre_change_reasons": ["concurrency"]
   }
 ]

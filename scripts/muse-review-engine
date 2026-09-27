@@ -1829,6 +1829,12 @@ check the cited issues and PRs; support or contradict the premise from those
 records, and leave it `unsure` when a required record is unavailable or the
 evidence does not resolve the claim.
 
+For a `measured` or `documented` entry with verified `label_error`, include a
+requirement to reject it explicitly as a labeling error and preserve its exact
+evidence pointer. Do not defer that entry or leave it `unsure`: the packet has
+verified that the pointer names an open ticket that cannot run before the
+reviewed ticket.
+
 Answer with exactly one JSON object and nothing else:
 
 {"requirements": ["the first requirement", "the second requirement"]}
@@ -1848,7 +1854,7 @@ import json
 import sys
 
 sys.path.insert(0, sys.argv[1])
-from engine.review import normalize_deferred_premise_requirements
+from engine.review import normalize_plan_premise_requirements
 
 answer_path, out_path, packet_path = sys.argv[2], sys.argv[3], sys.argv[4]
 
@@ -1889,7 +1895,7 @@ if not requirements:
     # verdict would be an approval nobody checked.
     malformed("'requirements' must name at least one requirement")
 packet = json.load(open(packet_path))
-requirements = normalize_deferred_premise_requirements(packet, requirements)
+requirements = normalize_plan_premise_requirements(packet, requirements)
 if not requirements:
     malformed("'requirements' must name at least one requirement")
 with open(out_path, "w") as handle:
@@ -2003,6 +2009,14 @@ probe rule in the review question. For that probe, inspect the entry's
 `referenced_evidence.records`: use their issue, PR and comment details to
 support or contradict the claim. A missing or unreadable required record
 leaves the requirement unsure.
+
+For a labeling-error requirement, verify that the matching packet entry is
+labelled `measured` or `documented`, its `label_error.evidence_pointer` exactly
+matches the entry's `evidence`, and `label_error.reviewed_ticket` matches
+`ticket.ref`. If those fields match, the packet proves the evidence pointer is
+an open ticket that cannot run before this review. That label is inconsistent:
+reject it as a labeling error and mark the requirement `unmet`; never defer it
+or mark it `unsure`.
 
 Judge run-outcome requirements against the packet's CI section first. A
 successful named check in `ci.checks` for the packet's `head_sha` satisfies
@@ -2295,7 +2309,7 @@ import os
 import sys
 
 sys.path.insert(0, sys.argv[1])
-from engine.review import (derive_judge_answer, mark_verified_deferred_requirements,
+from engine.review import (derive_judge_answer, mark_verified_premise_requirements,
                            uncertain_judge_results)
 
 requirements = json.load(open(sys.argv[2]))
@@ -2317,7 +2331,7 @@ for index in range(chunk_count):
             .format(exc))
     results.extend(chunk_results)
 packet = json.load(open(sys.argv[7]))
-results = mark_verified_deferred_requirements(packet, results)
+results = mark_verified_premise_requirements(packet, results)
 answer = derive_judge_answer(requirements, results)
 with open(sys.argv[6], "w") as handle:
     json.dump(answer, handle, indent=2)

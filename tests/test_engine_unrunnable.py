@@ -96,7 +96,7 @@ def test_rejected_1612_packet_carries_a_verified_deferred_answer(monkeypatch):
     fixture = rejected_1612_fixture()
     packet = fixture["packet"]
 
-    result = review.annotate_unrunnable_inferred_premises(packet)
+    result = review.annotate_unrunnable_premises(packet)
 
     assert result is packet
     premise = packet["plan_premises"][0]["premises"][0]
@@ -111,7 +111,7 @@ def test_lister_requirement_is_normalized_to_the_verified_deferral():
         fixture["expected_deferred_answer"])
     probe = fixture["rejected_requirement"]
 
-    result = review.normalize_deferred_premise_requirements(packet, [probe])
+    result = review.normalize_plan_premise_requirements(packet, [probe])
 
     assert result == [
         "Defer the inferred premise 'The split framer may itself still go "
@@ -126,10 +126,10 @@ def test_verified_deferral_does_not_remain_unsure_at_judgement():
     packet = fixture["packet"]
     packet["plan_premises"][0]["premises"][0]["deferred_answer"] = (
         fixture["expected_deferred_answer"])
-    requirement = review.normalize_deferred_premise_requirements(
+    requirement = review.normalize_plan_premise_requirements(
         packet, [fixture["rejected_requirement"]])[0]
 
-    result = review.mark_verified_deferred_requirements(packet, [{
+    result = review.mark_verified_premise_requirements(packet, [{
         "requirement": requirement,
         "status": "unsure",
         "evidence": "the model could not resolve this",
@@ -152,7 +152,7 @@ def test_unverified_deferred_fields_keep_the_probe_requirement():
         "reviewed_ticket": REPO + "#1597",
     }
 
-    assert review.normalize_deferred_premise_requirements(
+    assert review.normalize_plan_premise_requirements(
         packet, [fixture["rejected_requirement"]]) == [
             fixture["rejected_requirement"]]
 
@@ -261,15 +261,78 @@ def test_unreadable_referenced_inferred_evidence_is_not_reported_empty(
 
 
 @pytest.mark.parametrize("label", ["measured", "documented"])
-def test_only_inferred_premises_get_deferred_answers(monkeypatch, label):
+def test_unrunnable_measured_and_documented_premises_are_label_errors(
+        monkeypatch, label):
     install_github_fixture(monkeypatch, live_fixture())
     packet = rejected_1612_fixture()["packet"]
     premise = packet["plan_premises"][0]["premises"][0]
     premise["label"] = label
 
-    review.annotate_unrunnable_inferred_premises(packet)
+    review.annotate_unrunnable_premises(packet)
 
     assert "deferred_answer" not in premise
+    assert premise["label_error"] == {
+        "status": "verified",
+        "label": label,
+        "evidence_pointer": "ticket 4, #1600, checks",
+        "reviewed_ticket": REVIEWED,
+        "reason": (
+            "live issue state shows the named evidence ticket is open and "
+            "cannot run before the reviewed ticket is complete"),
+    }
+
+
+@pytest.mark.parametrize("label", ["measured", "documented"])
+def test_verified_forward_label_error_becomes_a_canonical_rejection(
+        monkeypatch, label):
+    install_github_fixture(monkeypatch, live_fixture())
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+    premise = packet["plan_premises"][0]["premises"][0]
+    premise["label"] = label
+    review.annotate_unrunnable_premises(packet)
+
+    result = review.normalize_plan_premise_requirements(
+        packet, [fixture["rejected_requirement"]])
+
+    assert result == [
+        "Reject the {} premise 'The split framer may itself still go silent' "
+        "as a labeling error because its evidence pointer 'ticket 4, #1600, "
+        "checks' names an open ticket that cannot run before ticket #1598 is "
+        "complete.".format(label)
+    ]
+    marked = review.mark_verified_premise_requirements(packet, [{
+        "requirement": result[0],
+        "status": "unsure",
+        "evidence": "the evidence is not available yet",
+    }])
+    assert marked == [{
+        "requirement": result[0],
+        "status": "unmet",
+        "evidence": (
+            "Verified labeling error: the measured/documented premise's "
+            "evidence pointer names an open ticket that cannot run before "
+            "the reviewed ticket is complete."),
+    }]
+
+
+def test_unverified_label_error_fields_keep_the_model_probe():
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+    premise = packet["plan_premises"][0]["premises"][0]
+    premise.update({
+        "label": "measured",
+        "label_error": {
+            "status": "verified",
+            "label": "measured",
+            "evidence_pointer": "ticket 4, #1600, checks",
+            "reviewed_ticket": REPO + "#1597",
+        },
+    })
+
+    assert review.normalize_plan_premise_requirements(
+        packet, [fixture["rejected_requirement"]]) == [
+            fixture["rejected_requirement"]]
 
 
 def test_a_checkable_inferred_pointer_keeps_the_probe_path(monkeypatch):
@@ -278,7 +341,7 @@ def test_a_checkable_inferred_pointer_keeps_the_probe_path(monkeypatch):
     premise = packet["plan_premises"][0]["premises"][0]
     premise["evidence"] = "#1700"
 
-    review.annotate_unrunnable_inferred_premises(packet)
+    review.annotate_unrunnable_premises(packet)
 
     assert "deferred_answer" not in premise
 

@@ -1579,10 +1579,10 @@ def evidence_ticket_is_unrunnable(evidence_pointer: object,
     """Whether an open ticket named by evidence cannot run before this review.
 
     Bare ``#n`` pointers are scoped to the reviewed ticket's repository.
-    An open evidence ticket is deferred only when GitHub's live sub-issue
-    order puts it later in the same plan, or its native blocked-by graph
-    reaches the ticket under review. A closed or missing issue does not defer
-    the premise, so genuinely checkable evidence remains a review requirement.
+    An open evidence ticket is considered forward-only when GitHub's live
+    sub-issue order puts it later in the same plan, or its native blocked-by
+    graph reaches the ticket under review. A closed or missing issue is not
+    forward-only, so genuinely checkable evidence remains a review requirement.
     """
     reviewed_parts = _issue_ref_parts(reviewed_ticket_ref)
     if reviewed_parts is None:
@@ -1610,13 +1610,13 @@ def evidence_ticket_is_unrunnable(evidence_pointer: object,
     return False
 
 
-def annotate_unrunnable_inferred_premises(packet: Dict) -> Dict:
-    """Expose code-verified evidence deferrals in a live review packet.
+def annotate_unrunnable_premises(packet: Dict) -> Dict:
+    """Record live-verified deferrals and premise-label errors in a packet.
 
     ``build_packet`` stays pure. ``collect`` calls this after assembling its
-    packet so only a live GitHub read can add ``deferred_answer``. Other
-    premise labels, unavailable plan groups, and unresolved issue reads keep
-    the existing review path.
+    packet so only live GitHub state can add ``deferred_answer`` for inferred
+    premises or ``label_error`` for measured/documented premises. Unavailable
+    plan groups and unresolved issue reads keep the existing review path.
     """
     ticket = packet.get("ticket")
     reviewed_ref = ticket.get("ref") if isinstance(ticket, dict) else None
@@ -1636,8 +1636,10 @@ def annotate_unrunnable_inferred_premises(packet: Dict) -> Dict:
         if not isinstance(premises, list):
             continue
         for premise in premises:
-            if (not isinstance(premise, dict)
-                    or premise.get("label") != "inferred"):
+            if not isinstance(premise, dict):
+                continue
+            label = premise.get("label")
+            if label not in {"inferred", "measured", "documented"}:
                 continue
             evidence = premise.get("evidence")
             if not isinstance(evidence, str) or not evidence.strip():
@@ -1647,19 +1649,32 @@ def annotate_unrunnable_inferred_premises(packet: Dict) -> Dict:
                     checked[evidence] = evidence_ticket_is_unrunnable(
                         evidence, reviewed_ref)
                 except funnel.GitHubError:
-                    # No verified deferral: preserve the existing probe path.
+                    # No verified forward pointer: preserve the probe path.
                     checked[evidence] = False
             if checked[evidence]:
-                premise["deferred_answer"] = {
-                    "status": "deferred",
-                    "evidence_pointer": evidence,
-                    "reviewed_ticket": reviewed_ref,
-                    "reason": (
-                        "live issue state shows the named evidence ticket is "
-                        "open and cannot run before the reviewed ticket is "
-                        "complete"
-                    ),
-                }
+                if label == "inferred":
+                    premise["deferred_answer"] = {
+                        "status": "deferred",
+                        "evidence_pointer": evidence,
+                        "reviewed_ticket": reviewed_ref,
+                        "reason": (
+                            "live issue state shows the named evidence ticket "
+                            "is open and cannot run before the reviewed ticket "
+                            "is complete"
+                        ),
+                    }
+                else:
+                    premise["label_error"] = {
+                        "status": "verified",
+                        "label": label,
+                        "evidence_pointer": evidence,
+                        "reviewed_ticket": reviewed_ref,
+                        "reason": (
+                            "live issue state shows the named evidence ticket "
+                            "is open and cannot run before the reviewed ticket "
+                            "is complete"
+                        ),
+                    }
     return packet
 
 
@@ -1707,18 +1722,73 @@ def _deferred_premise_requirement(premise: Dict[str, str]) -> str:
                        else premise["reviewed_ticket"])
     return ("Defer the inferred premise '{}' to its evidence pointer '{}' "
             "until ticket {} is complete.").format(
-                premise["claim"], premise["evidence"], reviewed_ticket)
+        premise["claim"], premise["evidence"], reviewed_ticket)
 
 
-def normalize_deferred_premise_requirements(
+def _verified_label_error_premises(packet: Dict) -> List[Dict[str, str]]:
+    """Return only live-verified measured/documented forward-pointer errors."""
+    ticket = packet.get("ticket")
+    reviewed_ref = ticket.get("ref") if isinstance(ticket, dict) else None
+    if not isinstance(reviewed_ref, str):
+        return []
+    groups = packet.get("plan_premises")
+    if not isinstance(groups, list):
+        return []
+    verified: List[Dict[str, str]] = []
+    for group in groups:
+        if not isinstance(group, dict) or group.get("available") is not True:
+            continue
+        premises = group.get("premises")
+        if not isinstance(premises, list):
+            continue
+        for premise in premises:
+            if not isinstance(premise, dict):
+                continue
+            label = premise.get("label")
+            claim = premise.get("claim")
+            evidence = premise.get("evidence")
+            error = premise.get("label_error")
+            if (label not in {"measured", "documented"}
+                    or not isinstance(claim, str) or not claim
+                    or not isinstance(evidence, str) or not evidence
+                    or not isinstance(error, dict)
+                    or error.get("status") != "verified"
+                    or error.get("label") != label
+                    or error.get("evidence_pointer") != evidence
+                    or error.get("reviewed_ticket") != reviewed_ref):
+                continue
+            verified.append({
+                "claim": claim,
+                "evidence": evidence,
+                "label": label,
+                "reviewed_ticket": reviewed_ref,
+            })
+    return verified
+
+
+def _label_error_premise_requirement(premise: Dict[str, str]) -> str:
+    parts = _issue_ref_parts(premise["reviewed_ticket"])
+    reviewed_ticket = ("#{}".format(parts[1]) if parts
+                       else premise["reviewed_ticket"])
+    return ("Reject the {} premise '{}' as a labeling error because its "
+            "evidence pointer '{}' names an open ticket that cannot run "
+            "before ticket {} is complete.").format(
+                premise["label"], premise["claim"], premise["evidence"],
+                reviewed_ticket)
+
+
+def normalize_plan_premise_requirements(
         packet: Dict, requirements: Sequence[str]) -> List[str]:
-    """Replace model probe requirements with verified, pointer-preserving rows.
+    """Replace model probe requirements with verified canonical premise rows.
 
     The runner verifies these fields itself, so a lister wording lapse cannot
-    turn a verified deferral back into an unsure live-evidence probe.
+    turn a verified deferral into an unsure probe or hide a verified label
+    error behind one.
     """
     deferred = _verified_deferred_premises(packet)
-    if not deferred:
+    label_errors = _verified_label_error_premises(packet)
+    verified = deferred + label_errors
+    if not verified:
         return list(requirements)
 
     kept: List[str] = []
@@ -1727,38 +1797,50 @@ def normalize_deferred_premise_requirements(
         if any(premise["claim"].casefold() in text
                or (premise["evidence"].casefold() in text
                    and "premise" in text)
-               for premise in deferred):
+               for premise in verified):
             continue
         kept.append(requirement)
 
-    for premise in deferred:
-        canonical = _deferred_premise_requirement(premise)
+    for premise, canonical in (
+            [(row, _deferred_premise_requirement(row)) for row in deferred]
+            + [(row, _label_error_premise_requirement(row))
+               for row in label_errors]):
         if canonical not in kept:
             kept.append(canonical)
     return kept
 
 
-def mark_verified_deferred_requirements(
+def mark_verified_premise_requirements(
         packet: Dict, results: Sequence[Dict]) -> List[Dict]:
-    """Satisfy canonical deferral checks from the matching packet evidence."""
+    """Resolve canonical premise checks from matching verified packet fields."""
     verified = {
         _deferred_premise_requirement(premise): (
+            "met",
             "Verified packet deferral: the inferred premise's evidence pointer "
             "and reviewed ticket match its live deferred_answer.")
         for premise in _verified_deferred_premises(packet)
     }
+    verified.update({
+        _label_error_premise_requirement(premise): (
+            "unmet",
+            "Verified labeling error: the measured/documented premise's "
+            "evidence pointer names an open ticket that cannot run before "
+            "the reviewed ticket is complete.")
+        for premise in _verified_label_error_premises(packet)
+    })
     marked: List[Dict] = []
     for result in results:
         if not isinstance(result, dict):
             marked.append(result)
             continue
         requirement = result.get("requirement")
-        evidence = verified.get(requirement)
-        if evidence is None:
+        resolution = verified.get(requirement)
+        if resolution is None:
             marked.append(result)
             continue
+        status, evidence = resolution
         resolved = dict(result)
-        resolved["status"] = "met"
+        resolved["status"] = status
         resolved["evidence"] = evidence
         marked.append(resolved)
     return marked
@@ -2891,7 +2973,7 @@ def collect(repo: Optional[str], pr_number: int, *,
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),
     )
     # Keep build_packet pure; unrunnability depends on fresh GitHub state.
-    packet = annotate_unrunnable_inferred_premises(packet)
+    packet = annotate_unrunnable_premises(packet)
     return attach_inferred_premise_evidence(packet, resolved)
 
 

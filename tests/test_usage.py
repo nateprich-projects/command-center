@@ -435,9 +435,9 @@ def test_newest_app_sample_for_signed_in_org_beats_other_sources(tmp_path, monke
                                                "resets_at": int(now + 600)}}))
     transcript(tmp_path / "a.jsonl", [("claude-opus-5", 99999, _at(now, 1))])
     plan_usage_history(tmp_path, monkeypatch, [
-        plan_sample(now - 300, 41, 57),
-        plan_sample(now, 99, 99, org="another-org"),
         plan_sample(now - 1800, 33, 44),
+        plan_sample(now, 99, 99, org="another-org"),
+        plan_sample(now - 300, 41, 57),
     ])
     monkeypatch.setattr(usage, "CLAUDE_CACHE", str(cache))
     monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))

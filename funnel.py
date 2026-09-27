@@ -715,6 +715,7 @@ BRIEF_PURE_SECTIONS = frozenset({
     "maintenance_load",
     "disposal",
     "status_state_mismatches",
+    "rejected_merges",
 })
 
 # No brief section feeds a gate any more: the merge gate reads the
@@ -13551,10 +13552,11 @@ def _brief_timed(
     deadline: Optional[float] = None,
     budget: Optional[float] = None,
 ) -> object:
-    """Run one brief section, enforce its budget, and record its timing.
+    """Run one brief section, enforce its start budget, and record its timing.
 
-    An over-budget section degrades into an explicit record and yields
-    ``_BRIEF_UNAVAILABLE``; no section fails the whole brief.
+    A section skipped before it starts or whose reader times out is unavailable.
+    A reader that finishes over budget keeps its computed value and records the
+    degradation; no section fails the whole brief.
     """
     degraded = degraded if degraded is not None else []
     budget = float(
@@ -13598,7 +13600,7 @@ def _brief_timed(
         degraded.append(_brief_degraded_record(
             section, elapsed, budget, reason
         ))
-        return _BRIEF_UNAVAILABLE
+        return value
     return value
 
 
@@ -13624,8 +13626,10 @@ def cmd_brief(
         deadline = time.perf_counter() + BRIEF_TOTAL_BUDGET_SECONDS
     cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
     cache_token = _ACTIVE_BRIEF_CACHE.set(cache)
+    deferred_pure: Dict[str, Callable[[], object]] = {}
+    deferred_section = object()
 
-    def section(name: str, reader: Callable[[], object]):
+    def run_section(name: str, reader: Callable[[], object]):
         value = _brief_timed(
             name,
             lambda: _brief_read(name, reader, missing),
@@ -13643,6 +13647,12 @@ def cmd_brief(
             return None
         return value
 
+    def section(name: str, reader: Callable[[], object]):
+        if name in BRIEF_PURE_SECTIONS:
+            deferred_pure[name] = reader
+            return deferred_section
+        return run_section(name, reader)
+
     def decision_payload():
         decisions = awaiting_decision(items)
         by_ref = {i.ref: i for i in items}
@@ -13652,9 +13662,9 @@ def cmd_brief(
 
     try:
         decision_result = section("items", decision_payload)
-        if decision_result is None:
+        if decision_result is deferred_section or decision_result is None:
             decisions = None
-            by_ref = {i.ref: i for i in items}
+            by_ref = None
             decision_rows = None
         else:
             decisions, by_ref, decision_rows = decision_result
@@ -13674,7 +13684,6 @@ def cmd_brief(
             lambda: in_motion(items, now, pr_facts=pr_facts),
         )
         parked = section("parked", lambda: parked_json(items))
-        pending_wakes = pending_wakes_json(parked)
         closed_itself = section(
             "closed_itself",
             lambda: closed_itself_json(items, now, brief_cache=cache),
@@ -13746,6 +13755,42 @@ def cmd_brief(
             "status_state_mismatches",
             lambda: status_state_mismatches(items),
         )
+
+        # The reader-bound sections have now had their deadline-bounded turn.
+        # These renderers use only the loaded Project items and preloaded PR
+        # facts, so run them even when those reads exhausted the shared budget.
+        pure_values = {
+            "items": run_section("items", deferred_pure.pop("items")),
+        }
+        decision_result = pure_values["items"]
+        if decision_result is None:
+            decisions = None
+            by_ref = {i.ref: i for i in items}
+            decision_rows = None
+        else:
+            decisions, by_ref, decision_rows = decision_result
+        pure_values.update({
+            name: run_section(name, reader)
+            for name, reader in deferred_pure.items()
+        })
+        counts = pure_values["counts_by_gate"]
+        running = pure_values["in_motion"]
+        blocked = pure_values["blocked"]
+        human = pure_values["human_steps"]
+        machine_local = pure_values["machine_local_steps"]
+        blocked_human = pure_values["blocked_human_steps"]
+        blocked_machine_local = pure_values["blocked_machine_local_steps"]
+        closed_access = pure_values["closed_with_access_vocabulary"]
+        unclassed = pure_values["unclassed_captures"]
+        needs = pure_values["needs_class"]
+        breakdown = pure_values["awaiting_breakdown"]
+        stranded = pure_values["stranded"]
+        stale = pure_values["stale_locks_taken_over"]
+        maintenance = pure_values["maintenance_load"]
+        disposal_report = pure_values["disposal"]
+        rejected = pure_values["rejected_merges"]
+        status_mismatches = pure_values["status_state_mismatches"]
+        pending_wakes = pending_wakes_json(parked)
 
         blocked_comment_errors = [
             "{}: {}".format(item.ref, item.block_comments_error)

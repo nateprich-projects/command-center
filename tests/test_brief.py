@@ -1440,7 +1440,7 @@ def test_brief_timings_identify_a_slow_stage_without_changing_payload(
     assert max(brief["timings"], key=brief["timings"].get) == "closed_itself"
 
 
-def test_brief_marks_an_over_budget_informational_section_degraded(
+def test_brief_skips_a_zero_budget_informational_section_as_unknown(
     monkeypatch, capsys
 ):
     item = funnel.Item(
@@ -1464,6 +1464,32 @@ def test_brief_marks_an_over_budget_informational_section_degraded(
         "working_tree_touched"
     ]
     assert brief["timings"]["working_tree_touched"] == 0.0
+
+
+def test_brief_keeps_a_completed_over_budget_section_value(
+    monkeypatch, capsys
+):
+    _make_brief_readers_safe(monkeypatch)
+    clock = [0.0]
+    monkeypatch.setattr(funnel.time, "perf_counter", lambda: clock[0])
+
+    def slow_but_complete(now):
+        clock[0] += 1.01
+        return [{"at": now.isoformat()}]
+
+    monkeypatch.setattr(funnel, "working_tree_touched", slow_but_complete)
+
+    assert funnel.cmd_brief([], NOW, deadline=10.0) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["working_tree_touched"] == [{"at": NOW.isoformat()}]
+    assert [row["section"] for row in brief["degraded"]] == [
+        "working_tree_touched"
+    ]
+    assert brief["degraded"][0]["reason"] == "section exceeded its time budget"
+    assert "working_tree_touched" not in {
+        row["section"] for row in brief["missing"]
+    }
 
 
 @pytest.mark.parametrize(
@@ -1576,8 +1602,12 @@ def _make_brief_readers_safe(monkeypatch):
 @pytest.mark.parametrize(
     ("section", "field"),
     [
+        ("human_steps", "human_steps"),
         ("closed_itself", "closed_itself"),
+        ("counts_by_gate", "counts_by_gate"),
         ("maintenance_load", "maintenance_load"),
+        ("disposal", "disposal"),
+        ("resend_ratio", "resend_ratio"),
         ("rejected_merges", "rejected_merges"),
         ("items", "items"),
     ],
@@ -1598,23 +1628,30 @@ def test_brief_budget_skips_publish_unknown_for_each_empty_shape(
 
 
 @pytest.mark.parametrize(
-    ("section", "field", "reader"),
+    ("section", "field"),
     [
-        ("closed_itself", "closed_itself", "closed_itself_json"),
-        ("maintenance_load", "maintenance_load", "maintenance_load"),
-        ("rejected_merges", "rejected_merges", "rejected_merges"),
-        ("items", "items", "awaiting_decision"),
+        ("human_steps", "human_steps"),
+        ("closed_itself", "closed_itself"),
+        ("counts_by_gate", "counts_by_gate"),
+        ("maintenance_load", "maintenance_load"),
+        ("disposal", "disposal"),
+        ("resend_ratio", "resend_ratio"),
+        ("rejected_merges", "rejected_merges"),
+        ("items", "items"),
     ],
 )
 def test_brief_timeouts_publish_unknown_for_each_empty_shape(
-    monkeypatch, capsys, section, field, reader
+    monkeypatch, capsys, section, field
 ):
     _make_brief_readers_safe(monkeypatch)
+    original_read = funnel._brief_read
 
-    def timeout(*args, **kwargs):
-        raise funnel.BriefSectionTimeout(section, "section read timed out")
+    def timeout_target(name, read, missing, default=None):
+        if name == section:
+            raise funnel.BriefSectionTimeout(section, "section read timed out")
+        return original_read(name, read, missing, default)
 
-    monkeypatch.setattr(funnel, reader, timeout)
+    monkeypatch.setattr(funnel, "_brief_read", timeout_target)
     assert funnel.cmd_brief([], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
 
@@ -1625,9 +1662,29 @@ def test_brief_timeouts_publish_unknown_for_each_empty_shape(
         assert brief["total_needing_nate"] is None
 
 
+def test_brief_raised_reader_publishes_unknown_and_missing(
+    monkeypatch, capsys
+):
+    _make_brief_readers_safe(monkeypatch)
+
+    def failed_read(_items):
+        raise RuntimeError("issue comment read failed")
+
+    monkeypatch.setattr(funnel, "parked_json", failed_read)
+    assert funnel.cmd_brief([], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["parked"] is None
+    assert [row for row in brief["missing"] if row["section"] == "parked"] == [
+        {"section": "parked", "error": "issue comment read failed"}
+    ]
+    assert not any(row["section"] == "parked" for row in brief["degraded"])
+
+
 def test_pure_sections_survive_an_exhausted_shared_deadline(
     monkeypatch, capsys
 ):
+    _make_brief_readers_safe(monkeypatch)
     snapshot_at = datetime(2026, 9, 26, 15, 57, 30, tzinfo=timezone.utc)
     repo = "nateprich/beta"
     project = funnel.Item(
@@ -1668,7 +1725,23 @@ def test_pure_sections_survive_an_exhausted_shared_deadline(
         blocked_machine_local, mismatch,
     ]
 
-    assert funnel.cmd_brief(items, snapshot_at, deadline=0.0) == 0
+    clock = [0.0]
+    monkeypatch.setattr(funnel.time, "perf_counter", lambda: clock[0])
+    timed_sections = []
+    real_timed = funnel._brief_timed
+
+    def track_timed(section, *args, **kwargs):
+        timed_sections.append(section)
+        return real_timed(section, *args, **kwargs)
+
+    def slow_parked_read(_items):
+        clock[0] += 4.0
+        return []
+
+    monkeypatch.setattr(funnel, "_brief_timed", track_timed)
+    monkeypatch.setattr(funnel, "parked_json", slow_parked_read)
+
+    assert funnel.cmd_brief(items, snapshot_at, deadline=3.0) == 0
     brief = json.loads(capsys.readouterr().out)
 
     assert [row["ref"] for row in brief["human_steps"]] == [
@@ -1694,12 +1767,23 @@ def test_pure_sections_survive_an_exhausted_shared_deadline(
     assert brief["total_needing_nate"] == len(brief["items"])
     assert brief["counts_by_gate"]["Building"] == 1
     missing = {row["section"] for row in brief["missing"]}
-    assert {"parked", "closed_itself", "cleared_blocks"} <= missing
+    assert {"closed_itself", "cleared_blocks"} <= missing
+    assert brief["parked"] == []
+    assert "parked" not in missing
     assert not {
         "human_steps", "machine_local_steps", "blocked_human_steps",
         "blocked_machine_local_steps", "status_state_mismatches",
     } & missing
-    assert brief["pending_wakes"] is None
+    assert brief["pending_wakes"] == []
+    last_reader_bound = max(
+        index for index, name in enumerate(timed_sections)
+        if name not in funnel.BRIEF_PURE_SECTIONS
+    )
+    first_pure = min(
+        index for index, name in enumerate(timed_sections)
+        if name in funnel.BRIEF_PURE_SECTIONS
+    )
+    assert last_reader_bound < first_pure
 
 
 def test_ticket_pr_facts_budget_covers_the_observed_max():
@@ -1843,13 +1927,16 @@ def test_a_timed_out_cleared_blocks_section_reads_as_unread_not_empty(
     assert [row["section"] for row in brief["missing"]] == ["cleared_blocks"]
 
 
-def test_both_sections_still_read_as_lists_when_they_succeed(capsys):
+def test_genuinely_empty_sections_still_read_as_empty(capsys):
     assert funnel.cmd_brief([], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
 
     assert brief["items"] == []
     assert brief["total_needing_nate"] == 0
     assert brief["human_steps"] == []
+    assert brief["blocked"] == []
+    assert brief["blocked_human_steps"] == []
+    assert brief["machine_local_steps"] == []
     assert brief["parked"] == []
     assert brief["pending_wakes"] == []
     assert brief["cleared_blocks"] == []

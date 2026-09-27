@@ -707,3 +707,217 @@ def test_session_dispatch_restores_stdin_when_main_raises(monkeypatch):
     )
     assert result == (2, "", "funnel: boom\n")
     assert sys.stdin is original_stdin
+
+
+# --------------------------------------------------------------------------
+# The filtered begin view in a session (#1591)
+# --------------------------------------------------------------------------
+
+_VIEW_REPO = "owner/repo"
+
+
+def _view_item(number, state="OPEN"):
+    return funnel.Item(
+        repo=_VIEW_REPO, number=number, title="item {}".format(number),
+        url="https://github.com/{}/issues/{}".format(_VIEW_REPO, number),
+        state=state, item_id="item-{}".format(number),
+    )
+
+
+class _ScopedLoader:
+    """A session loader that answers ``scope="begin"`` with a tagged view
+    and anything else with the full board, recording each read."""
+
+    def __init__(self, full_error=None):
+        self.scopes = []
+        self.view = None
+        self.full = None
+        self.full_error = full_error
+
+    def __call__(self, include_details=True, member_repo_names=None,
+                 timings=None, scope=None):
+        self.scopes.append(scope)
+        if scope == "begin":
+            self.view = funnel.ScopedItems([_view_item(7)], scope="begin")
+            return self.view
+        if self.full_error is not None:
+            raise funnel.GitHubError(self.full_error)
+        self.full = [_view_item(7), _view_item(3, state="CLOSED")]
+        return self.full
+
+
+def _begin_in_a_session(monkeypatch, loader):
+    """Dispatch a review-lane begin whose own gates and selection are
+    stubbed, so the test is about which Project read the session holds."""
+    begun = []
+    monkeypatch.setattr(
+        funnel, "_begin_preflight",
+        lambda now, agent, idle, tier=None: ({"agent": agent}, {}))
+    monkeypatch.setattr(funnel, "_begin_api_reserve_preflight",
+                        lambda *args, **kwargs: None)
+
+    def member_repos(after_first_response=None):
+        if after_first_response is not None:
+            after_first_response({"rateLimit": {"cost": 1,
+                                                "remaining": 5_000}})
+        return [_VIEW_REPO]
+
+    monkeypatch.setattr(funnel, "member_repos", member_repos)
+    monkeypatch.setattr(
+        funnel, "cmd_begin",
+        lambda items, *args, **kwargs: begun.append(items) or 0)
+    monkeypatch.setattr(funnel, "report_api_cost",
+                        lambda run=None, agent=None: None)
+    monkeypatch.setattr(funnel, "report_graphql_spend", lambda: None)
+
+    session = funnel.FunnelSession(loader=loader)
+    code, _out, err = session.dispatch(
+        ["begin", "--agent", "muse", "--tier", "escalated",
+         "--role", "review"])
+    assert code == 0, err
+    assert loader.scopes == ["begin"]
+    assert begun == [loader.view]
+    assert funnel.items_scope(session.items) == "begin"
+    return session
+
+
+def test_begin_on_the_cli_asks_for_the_filtered_view(monkeypatch):
+    scopes = []
+
+    def load_items(include_details=True, member_repo_names=None,
+                   timings=None, shape_issue=None, scope=None):
+        scopes.append((include_details, scope))
+        return funnel.ScopedItems([], scope="begin")
+
+    monkeypatch.setattr(funnel, "load_items", load_items)
+    monkeypatch.setattr(
+        funnel, "_begin_preflight",
+        lambda now, agent, idle, tier=None: ({"agent": agent}, {}))
+    monkeypatch.setattr(funnel, "_begin_api_reserve_preflight",
+                        lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        funnel, "member_repos",
+        lambda after_first_response=None: (
+            after_first_response({"rateLimit": {"cost": 1,
+                                                "remaining": 5_000}})
+            or [_VIEW_REPO]))
+    monkeypatch.setattr(funnel, "cmd_begin", lambda items, *a, **k: 0)
+
+    assert funnel.main(["begin", "--agent", "muse", "--tier", "escalated",
+                        "--role", "review"]) == 0
+    assert scopes == [(False, "begin")]
+
+
+def test_the_begin_loader_tags_its_view_and_the_full_load_does_not(
+    monkeypatch,
+):
+    monkeypatch.setattr(funnel, "_load_begin_items",
+                        lambda members, timings, *args, **kwargs: [_view_item(7)])
+    monkeypatch.setattr(funnel, "_load_begin_anchor_items",
+                        lambda items, members, timings: [])
+    view = funnel.load_items(include_details=False,
+                             member_repo_names=[_VIEW_REPO], scope="begin")
+    assert funnel.items_scope(view) == "begin"
+    assert [item.ref for item in view] == [_VIEW_REPO + "#7"]
+    assert funnel.items_scope([]) == "full"
+    assert funnel.items_scope(None) == "full"
+
+
+@pytest.mark.parametrize("command", [
+    ["queue"],
+    ["next-review", "--tier", "standard"],
+])
+def test_a_session_reloads_the_full_board_after_begin_for_other_commands(
+    monkeypatch, command,
+):
+    loader = _ScopedLoader()
+    session = _begin_in_a_session(monkeypatch, loader)
+    seen = []
+    monkeypatch.setattr(funnel, "repo_readiness_for_items",
+                        lambda items: {})
+    monkeypatch.setattr(
+        funnel, "cmd_queue",
+        lambda items, now, repo_readiness=None: seen.append(items) or 0)
+    monkeypatch.setattr(
+        funnel, "cmd_next_review",
+        lambda items, tier: seen.append(items) or 0)
+
+    assert session.dispatch(command)[0] == 0
+    assert loader.scopes == ["begin", None]
+    assert seen == [loader.full]
+    assert session.items is loader.full
+    assert funnel.items_scope(session.items) == "full"
+
+    # The session keeps the full read for the commands that follow.
+    assert session.dispatch(command)[0] == 0
+    assert loader.scopes == ["begin", None]
+
+
+def test_a_session_brief_after_begin_reads_the_full_board(monkeypatch):
+    # The brief reports a failed full read as a missing section rather than
+    # serving the begin view, which proves the read happened before it ran.
+    loader = _ScopedLoader(full_error="full board read")
+    session = _begin_in_a_session(monkeypatch, loader)
+
+    code, out, _err = session.dispatch(["brief"])
+
+    assert code == 0
+    assert loader.scopes == ["begin", None]
+    missing = json.loads(out)["missing"]
+    assert missing[0]["section"] == "items"
+    assert "full board read" in missing[0]["error"]
+
+
+def test_a_session_merge_after_begin_uses_the_begin_view(monkeypatch):
+    loader = _ScopedLoader()
+    session = _begin_in_a_session(monkeypatch, loader)
+    merged = []
+    monkeypatch.setattr(
+        funnel, "cmd_merge",
+        lambda items, now, repo, pr, confirmed: merged.append(items) or 0)
+
+    assert session.dispatch(
+        ["merge", "12", "--repo", _VIEW_REPO, "--yes"])[0] == 0
+    assert loader.scopes == ["begin"]
+    assert merged == [loader.view]
+
+
+@pytest.mark.parametrize("ref, reloads", [
+    (_VIEW_REPO + "#7", False),
+    ("https://github.com/{}/issues/7".format(_VIEW_REPO), False),
+    # A bare number is resolved by uniqueness, which the view cannot judge.
+    ("7", True),
+    # A closed item the view left out.
+    (_VIEW_REPO + "#3", True),
+])
+def test_a_session_release_after_begin_reloads_only_for_a_ref_outside_it(
+    monkeypatch, ref, reloads,
+):
+    loader = _ScopedLoader()
+    session = _begin_in_a_session(monkeypatch, loader)
+    released = []
+    monkeypatch.setattr(
+        funnel, "cmd_release",
+        lambda items, now, target: released.append((items, target)) or 0)
+
+    assert session.dispatch(["release", ref])[0] == 0
+    if reloads:
+        assert loader.scopes == ["begin", None]
+        assert released == [(loader.full, ref)]
+    else:
+        assert loader.scopes == ["begin"]
+        assert released == [(loader.view, ref)]
+
+
+def test_the_begin_view_serves_only_the_listed_commands():
+    view = funnel.ScopedItems([_view_item(7)], scope="begin")
+    for command in ("begin", "review", "merge", "capture"):
+        assert funnel.begin_view_serves(command, None, view)
+    for command in ("claim", "release", "comment"):
+        assert funnel.begin_view_serves(command, _VIEW_REPO + "#7", view)
+        assert not funnel.begin_view_serves(command, None, view)
+    for command in ("brief", "queue", "next", "show", "doctor", "metrics",
+                    "next-review", "park", "reject", "approve", "accept"):
+        assert not funnel.begin_view_serves(command, None, view)
+    # A full read serves everything.
+    assert funnel.begin_view_serves("brief", None, [_view_item(7)])

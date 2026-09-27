@@ -110,6 +110,51 @@ PLAN_PREMISE_ROW_RE = re.compile(
     r"^- (?P<claim>.+?) \(label: (?P<label>[^;]+); "
     r"evidence: (?P<evidence>.+)\)$")
 
+# Evidence pointers are prose, but ticket references inside them have the
+# same forms GitHub renders elsewhere: owner/repo#n, #n, or an issue URL.
+EVIDENCE_ISSUE_REF_RE = re.compile(
+    r"(?P<url>https?://github\.com/(?P<url_owner>[A-Za-z0-9_.-]+)/"
+    r"(?P<url_repo>[A-Za-z0-9_.-]+)/issues/(?P<url_number>[1-9][0-9]*)/?)"
+    r"|(?<![A-Za-z0-9_.-])(?P<full>(?P<owner>[A-Za-z0-9_.-]+)/"
+    r"(?P<repo>[A-Za-z0-9_.-]+)#(?P<number>[1-9][0-9]*))"
+    r"|(?<![A-Za-z0-9_/])#(?P<bare_number>[1-9][0-9]*)")
+ISSUE_REF_RE = re.compile(
+    r"\A(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)"
+    r"#(?P<number>[1-9][0-9]*)\Z")
+ISSUE_URL_RE = re.compile(
+    r"\Ahttps?://github\.com/(?P<owner>[A-Za-z0-9_.-]+)/"
+    r"(?P<repo>[A-Za-z0-9_.-]+)/issues/(?P<number>[1-9][0-9]*)/?\Z")
+
+EVIDENCE_ISSUE_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      state
+      blockedBy(first: 100, after: $after) {
+        totalCount
+        pageInfo { hasNextPage endCursor }
+        nodes { number repository { nameWithOwner } }
+      }
+    }
+  }
+}
+"""
+
+PLAN_SUBISSUES_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      subIssues(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { number repository { nameWithOwner } }
+      }
+    }
+  }
+}
+"""
+
 #: How many of the ticket's comments the packet carries, and how much of
 #: each. The newest comments win: a decision recorded late in a long ticket
 #: (#821 retiring the drift checks, which the shadow review of #985 missed
@@ -1173,6 +1218,311 @@ def packet_plan_premises(tickets: Sequence[Optional[dict]]) -> List[Dict]:
         if isinstance(ticket_ref, str) and ticket_ref not in group["ticket_refs"]:
             group["ticket_refs"].append(ticket_ref)
     return list(grouped.values())
+
+
+def _issue_ref_parts(value: object, default_repo: Optional[str] = None
+                     ) -> Optional[Tuple[str, int]]:
+    """Split a GitHub issue ref or URL, with bare #n scoped to a repo."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    match = ISSUE_REF_RE.fullmatch(text)
+    if match:
+        return "{}/{}".format(match.group("owner"), match.group("repo")), int(
+            match.group("number"))
+    match = ISSUE_URL_RE.fullmatch(text)
+    if match:
+        return "{}/{}".format(match.group("owner"), match.group("repo")), int(
+            match.group("number"))
+    if default_repo:
+        match = re.fullmatch(r"#([1-9][0-9]*)", text)
+        if match:
+            return default_repo, int(match.group(1))
+    return None
+
+
+def _issue_ref(repo: str, number: int) -> str:
+    return "{}#{}".format(repo, number)
+
+
+def _issue_ref_key(ref: str) -> Tuple[str, int]:
+    parts = _issue_ref_parts(ref)
+    if parts is None:
+        raise funnel.GitHubError("GitHub returned an invalid issue ref")
+    repo, number = parts
+    return repo.casefold(), number
+
+
+def _evidence_issue_refs(evidence_pointer: object,
+                         default_repo: str) -> List[str]:
+    """Find explicit and repo-local issue refs in one evidence pointer."""
+    if not isinstance(evidence_pointer, str):
+        return []
+    refs: List[str] = []
+    seen = set()
+    for match in EVIDENCE_ISSUE_REF_RE.finditer(evidence_pointer):
+        if match.group("url_number"):
+            repo = "{}/{}".format(match.group("url_owner"),
+                                  match.group("url_repo"))
+            number = int(match.group("url_number"))
+        elif match.group("number"):
+            repo = "{}/{}".format(match.group("owner"),
+                                  match.group("repo"))
+            number = int(match.group("number"))
+        else:
+            repo = default_repo
+            number = int(match.group("bare_number"))
+        ref = _issue_ref(repo, number)
+        key = _issue_ref_key(ref)
+        if key not in seen:
+            seen.add(key)
+            refs.append(ref)
+    return refs
+
+
+def _read_evidence_issue(ref: str) -> Optional[Dict[str, object]]:
+    """Read one issue's current state and complete native blocked-by edges."""
+    parts = _issue_ref_parts(ref)
+    if parts is None:
+        raise funnel.GitHubError("cannot read an invalid evidence ticket ref")
+    repo, number = parts
+    owner, name = repo.split("/", 1)
+    after: Optional[str] = None
+    state: Optional[str] = None
+    blockers: List[str] = []
+    blocker_keys = set()
+    total_count: Optional[int] = None
+    while True:
+        variables = {"owner": owner, "name": name, "number": number}
+        if after is not None:
+            variables["after"] = after
+        payload = funnel.gh_graphql(EVIDENCE_ISSUE_QUERY, **variables)
+        repository = payload.get("repository") if isinstance(payload, dict) else None
+        issue = repository.get("issue") if isinstance(repository, dict) else None
+        if issue is None:
+            if after is None:
+                return None
+            raise funnel.GitHubError(
+                "evidence ticket changed during dependency read")
+        page_state = issue.get("state")
+        if page_state not in ("OPEN", "CLOSED"):
+            raise funnel.GitHubError(
+                "evidence ticket has an unreadable state")
+        if state is None:
+            state = page_state
+        elif state != page_state:
+            raise funnel.GitHubError(
+                "evidence ticket changed during dependency read")
+        connection = issue.get("blockedBy")
+        nodes = connection.get("nodes") if isinstance(connection, dict) else None
+        page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
+        count = connection.get("totalCount") if isinstance(connection, dict) else None
+        if (not isinstance(nodes, list)
+                or not isinstance(page_info, dict)
+                or not isinstance(page_info.get("hasNextPage"), bool)
+                or not isinstance(count, int) or isinstance(count, bool)
+                or count < 0):
+            raise funnel.GitHubError(
+                "evidence ticket has an incomplete blocked-by connection")
+        if total_count is None:
+            total_count = count
+        elif total_count != count:
+            raise funnel.GitHubError(
+                "evidence ticket dependencies changed during read")
+        for blocker in nodes:
+            if not isinstance(blocker, dict):
+                raise funnel.GitHubError(
+                    "evidence ticket has an invalid blocked-by edge")
+            blocker_repo = (blocker.get("repository") or {}).get(
+                "nameWithOwner")
+            blocker_number = blocker.get("number")
+            if (not isinstance(blocker_repo, str)
+                    or not isinstance(blocker_number, int)
+                    or isinstance(blocker_number, bool)
+                    or blocker_number < 1):
+                raise funnel.GitHubError(
+                    "evidence ticket has an invalid blocked-by edge")
+            blocker_ref = _issue_ref(blocker_repo, blocker_number)
+            blocker_key = _issue_ref_key(blocker_ref)
+            if blocker_key in blocker_keys:
+                raise funnel.GitHubError(
+                    "evidence ticket repeated a blocked-by edge")
+            blocker_keys.add(blocker_key)
+            blockers.append(blocker_ref)
+        if not page_info["hasNextPage"]:
+            if total_count != len(blockers):
+                raise funnel.GitHubError(
+                    "evidence ticket has a partial blocked-by connection")
+            return {"state": state, "blocked_by": blockers}
+        next_after = page_info.get("endCursor")
+        if not isinstance(next_after, str) or not next_after or next_after == after:
+            raise funnel.GitHubError(
+                "evidence ticket has an invalid blocked-by cursor")
+        after = next_after
+
+
+def _read_issue_parent_ref(ref: str) -> Optional[str]:
+    """Read an issue's live parent, if it has one."""
+    parts = _issue_ref_parts(ref)
+    if parts is None:
+        raise funnel.GitHubError("cannot read an invalid ticket ref")
+    repo, number = parts
+    parent = funnel._gh_json(
+        "gh", "api", "repos/{}/issues/{}/parent".format(repo, number))
+    if not isinstance(parent, dict):
+        return None
+    parent_number = parent.get("number")
+    repository = parent.get("repository")
+    parent_repo = (repository.get("full_name")
+                   if isinstance(repository, dict) else None)
+    if not isinstance(parent_repo, str) or "/" not in parent_repo:
+        parent_repo = repo
+    if (not isinstance(parent_number, int)
+            or isinstance(parent_number, bool)
+            or parent_number < 1):
+        return None
+    return _issue_ref(parent_repo, parent_number)
+
+
+def _read_plan_ticket_order(plan_ref: str) -> List[str]:
+    """Read the plan's sub-issues in GitHub's returned order."""
+    parts = _issue_ref_parts(plan_ref)
+    if parts is None:
+        raise funnel.GitHubError("cannot read an invalid plan ref")
+    repo, number = parts
+    owner, name = repo.split("/", 1)
+    after: Optional[str] = None
+    refs: List[str] = []
+    seen = set()
+    while True:
+        variables = {"owner": owner, "name": name, "number": number}
+        if after is not None:
+            variables["after"] = after
+        payload = funnel.gh_graphql(PLAN_SUBISSUES_QUERY, **variables)
+        repository = payload.get("repository") if isinstance(payload, dict) else None
+        issue = repository.get("issue") if isinstance(repository, dict) else None
+        if issue is None:
+            if after is None:
+                return []
+            raise funnel.GitHubError("plan changed during sub-issue read")
+        connection = issue.get("subIssues")
+        nodes = connection.get("nodes") if isinstance(connection, dict) else None
+        page_info = connection.get("pageInfo") if isinstance(connection, dict) else None
+        if (not isinstance(nodes, list)
+                or not isinstance(page_info, dict)
+                or not isinstance(page_info.get("hasNextPage"), bool)):
+            raise funnel.GitHubError("plan has an incomplete sub-issue connection")
+        for child in nodes:
+            if not isinstance(child, dict):
+                raise funnel.GitHubError("plan has an invalid sub-issue")
+            child_repo = (child.get("repository") or {}).get("nameWithOwner")
+            child_number = child.get("number")
+            if (not isinstance(child_repo, str)
+                    or not isinstance(child_number, int)
+                    or isinstance(child_number, bool)
+                    or child_number < 1):
+                raise funnel.GitHubError("plan has an invalid sub-issue")
+            child_ref = _issue_ref(child_repo, child_number)
+            child_key = _issue_ref_key(child_ref)
+            if child_key in seen:
+                raise funnel.GitHubError("plan repeated a sub-issue")
+            seen.add(child_key)
+            refs.append(child_ref)
+        if not page_info["hasNextPage"]:
+            return refs
+        next_after = page_info.get("endCursor")
+        if not isinstance(next_after, str) or not next_after or next_after == after:
+            raise funnel.GitHubError("plan has an invalid sub-issue cursor")
+        after = next_after
+
+
+def _ticket_is_later_sibling(reviewed_ref: str, evidence_ref: str,
+                             parent_cache: Dict[Tuple[str, int], Optional[str]],
+                             order_cache: Dict[Tuple[str, int], List[str]]) -> bool:
+    """Whether an open evidence ticket follows the reviewed ticket in its plan."""
+    reviewed_key = _issue_ref_key(reviewed_ref)
+    evidence_key = _issue_ref_key(evidence_ref)
+    if reviewed_key not in parent_cache:
+        parent_cache[reviewed_key] = _read_issue_parent_ref(reviewed_ref)
+    if evidence_key not in parent_cache:
+        parent_cache[evidence_key] = _read_issue_parent_ref(evidence_ref)
+    reviewed_parent = parent_cache[reviewed_key]
+    evidence_parent = parent_cache[evidence_key]
+    if (not reviewed_parent or not evidence_parent
+            or _issue_ref_key(reviewed_parent) != _issue_ref_key(evidence_parent)):
+        return False
+    parent_key = _issue_ref_key(reviewed_parent)
+    if parent_key not in order_cache:
+        order_cache[parent_key] = _read_plan_ticket_order(reviewed_parent)
+    positions = {
+        _issue_ref_key(ticket_ref): position
+        for position, ticket_ref in enumerate(order_cache[parent_key])
+    }
+    reviewed_position = positions.get(reviewed_key)
+    evidence_position = positions.get(evidence_key)
+    return (reviewed_position is not None and evidence_position is not None
+            and evidence_position > reviewed_position)
+
+
+def _has_dependency_path(evidence: Dict[str, object], reviewed_ref: str,
+                         issue_cache: Dict[Tuple[str, int], Optional[Dict[str, object]]]
+                         ) -> bool:
+    """Walk native blocked-by edges from evidence toward its prerequisites."""
+    reviewed_key = _issue_ref_key(reviewed_ref)
+    queue = list(evidence.get("blocked_by") or [])
+    visited = set()
+    while queue:
+        blocker_ref = queue.pop(0)
+        if not isinstance(blocker_ref, str):
+            continue
+        blocker_key = _issue_ref_key(blocker_ref)
+        if blocker_key == reviewed_key:
+            return True
+        if blocker_key in visited:
+            continue
+        visited.add(blocker_key)
+        if blocker_key not in issue_cache:
+            issue_cache[blocker_key] = _read_evidence_issue(blocker_ref)
+        blocker = issue_cache[blocker_key]
+        if blocker is not None:
+            queue.extend(blocker.get("blocked_by") or [])
+    return False
+
+
+def evidence_ticket_is_unrunnable(evidence_pointer: object,
+                                  reviewed_ticket_ref: str) -> bool:
+    """Whether an open ticket named by evidence cannot run before this review.
+
+    Bare ``#n`` pointers are scoped to the reviewed ticket's repository.
+    An open evidence ticket is deferred only when GitHub's live sub-issue
+    order puts it later in the same plan, or its native blocked-by graph
+    reaches the ticket under review. A closed or missing issue does not defer
+    the premise, so genuinely checkable evidence remains a review requirement.
+    """
+    reviewed_parts = _issue_ref_parts(reviewed_ticket_ref)
+    if reviewed_parts is None:
+        raise ValueError("reviewed_ticket_ref must be a GitHub issue ref")
+    reviewed_repo, reviewed_number = reviewed_parts
+    reviewed_ref = _issue_ref(reviewed_repo, reviewed_number)
+    reviewed_key = _issue_ref_key(reviewed_ref)
+    issue_cache: Dict[Tuple[str, int], Optional[Dict[str, object]]] = {}
+    parent_cache: Dict[Tuple[str, int], Optional[str]] = {}
+    order_cache: Dict[Tuple[str, int], List[str]] = {}
+    for evidence_ref in _evidence_issue_refs(evidence_pointer, reviewed_repo):
+        evidence_key = _issue_ref_key(evidence_ref)
+        if evidence_key == reviewed_key:
+            continue
+        if evidence_key not in issue_cache:
+            issue_cache[evidence_key] = _read_evidence_issue(evidence_ref)
+        evidence = issue_cache[evidence_key]
+        if evidence is None or evidence.get("state") != "OPEN":
+            continue
+        if _ticket_is_later_sibling(reviewed_ref, evidence_ref,
+                                    parent_cache, order_cache):
+            return True
+        if _has_dependency_path(evidence, reviewed_ref, issue_cache):
+            return True
+    return False
 
 
 def _comment_connection_page(connection: object, label: str

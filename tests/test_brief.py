@@ -404,6 +404,160 @@ def test_brief_comment_tail_cache_is_shared_between_sections(monkeypatch):
     assert len(calls) == 1
 
 
+def test_connector_gate_answers_keep_verbatim_instruction_and_provenance():
+    approved = _approval_item(86, NOW - timedelta(hours=3))
+    accepted_at = NOW - timedelta(hours=2)
+    accepted = funnel.Item(
+        repo="nateprich/beta", number=87, title="Accepted project",
+        url="https://example.invalid/87", state="CLOSED", status="Done",
+        closed_at=accepted_at,
+        status_events=[{
+            "previous_status": "Building", "status": "Done",
+            "at": accepted_at,
+        }],
+    )
+    parked_at = NOW - timedelta(hours=1)
+    parked = funnel.Item(
+        repo="nateprich/beta", number=88, title="Parked project",
+        url="https://example.invalid/88", state="CLOSED", status="Parked",
+        closed_at=parked_at,
+        status_events=[{
+            "previous_status": "Building", "status": "Parked",
+            "at": parked_at,
+        }],
+    )
+
+    def comment(verb, instruction, at, *, voice="nate-relayed"):
+        visible = (
+            funnel.PARK_COMMENT_PREFIX + "not now"
+            if verb == "park"
+            else "General-chat gate instruction received for `{}`.".format(verb)
+        )
+        body = funnel.append_provenance(
+            visible, voice, at=at, run="run-{}".format(verb),
+            agent="codex", instruction=instruction,
+        )
+        return {
+            "body": body,
+            "createdAt": at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    approve_instruction = "  Approve this plan.\n\nKeep the blank line.  "
+    approved_at = NOW - timedelta(hours=3)
+    accepted_instruction = "Accept the shipped project."
+    parked_instruction = "Park this until next quarter."
+    comments = {
+        approved.ref: [
+            comment("approve", approve_instruction, approved_at),
+            comment(
+                "approve", "agent-authored instruction",
+                NOW - timedelta(minutes=30), voice="agent",
+            ),
+        ],
+        accepted.ref: [
+            comment("accept", accepted_instruction, accepted_at),
+            comment(
+                "accept", "old instruction",
+                NOW - timedelta(days=31),
+            ),
+        ],
+        parked.ref: [
+            comment("park", parked_instruction, parked_at),
+        ],
+    }
+
+    class FixtureCommentCache:
+        def comment_tails(self, candidates):
+            return {item.ref: comments.get(item.ref, []) for item in candidates}
+
+    records = funnel.connector_gate_answers(
+        [approved, accepted, parked], NOW, brief_cache=FixtureCommentCache()
+    )
+
+    assert records == [
+        {
+            "ref": parked.ref,
+            "title": parked.title,
+            "url": parked.url,
+            "gate": "park",
+            "at": parked_at.isoformat(),
+            "instruction": parked_instruction,
+            "provenance": {
+                "voice": "nate-relayed", "at": parked_at.isoformat(),
+                "agent": "codex", "run": "run-park",
+            },
+        },
+        {
+            "ref": accepted.ref,
+            "title": accepted.title,
+            "url": accepted.url,
+            "gate": "accept",
+            "at": accepted_at.isoformat(),
+            "instruction": accepted_instruction,
+            "provenance": {
+                "voice": "nate-relayed", "at": accepted_at.isoformat(),
+                "agent": "codex", "run": "run-accept",
+            },
+        },
+        {
+            "ref": approved.ref,
+            "title": approved.title,
+            "url": approved.url,
+            "gate": "approve",
+            "at": approved_at.isoformat(),
+            "instruction": approve_instruction,
+            "provenance": {
+                "voice": "nate-relayed", "at": approved_at.isoformat(),
+                "agent": "codex", "run": "run-approve",
+            },
+        },
+    ]
+
+
+def test_brief_keeps_connector_answer_records_out_of_gate_counts(
+    monkeypatch, capsys
+):
+    approved = _approval_item(89, NOW - timedelta(hours=1))
+    instruction = "Approve this plan verbatim.\nDo not paraphrase it."
+    at = NOW - timedelta(hours=1)
+    body = funnel.append_provenance(
+        "General-chat gate instruction received for `approve`.",
+        "nate-relayed", at=at, run="connector-run", agent="codex",
+        instruction=instruction,
+    )
+    calls = []
+
+    def gh_graphql(query, **variables):
+        calls.append(query)
+        return {
+            "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},
+            "repo0": {
+                "issue0": {
+                    "comments": {"nodes": [{
+                        "body": body,
+                        "createdAt": at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    }]}
+                }
+            },
+        }
+
+    monkeypatch.setattr(funnel, "gh_graphql", gh_graphql)
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([approved], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["connector_gate_answers"][0]["instruction"] == instruction
+    assert (
+        brief["connector_gate_answers"][0]["provenance"]["voice"]
+        == "nate-relayed"
+    )
+    assert brief["counts_by_gate"]["Ready"] == 1
+    assert sum(brief["counts_by_gate"].values()) == 1
+    assert len(brief["connector_gate_answers"]) == 1
+    assert len(calls) == 1
+
+
 def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
     monkeypatch, capsys
 ):

@@ -97,6 +97,8 @@ def test_window_excludes_older_fixes(repo):
 
     assert (result["numerator"], result["denominator"]) == (0, 0)
     assert result["share"] is None
+    # Commits in the 7-14 day look-back feed the blame, never the hotspots.
+    assert result["hotspots"] == []
 
 
 def test_code_path_excludes_tests_docs_and_data():
@@ -135,6 +137,7 @@ def test_cli_prints_json_and_exits_nonzero_on_missing_field(repo, tmp_path,
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps({"recorded_cause_regressions": {}}))
     assert fr.main(["--snapshot", str(bad), "--repo", str(repo)]) == 2
+    assert "broken_fix_tickets" in capsys.readouterr().err
 
 
 def _new_repo(tmp_path, name="r"):
@@ -395,3 +398,34 @@ def test_examples_count_exactly_the_hunk_lines(tmp_path):
 
     assert [(row["ticket"], row["lines"], row["recent_fix_lines"])
             for row in result["examples"]] == [(32, 2, 2)]
+
+
+def test_blame_looks_back_seven_days_from_each_commit_not_from_now(tmp_path):
+    """A fix early in the window must not credit old lines to a fix before it."""
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("one", ["a = 1"]) + _body("two", ["b = 1"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("one", ["a = 1"]) + _body("two", ["b = 2"])},
+            "Fix other lines (#33) (#133)", NOW - timedelta(days=9))
+    _commit(root, {"app.py": _body("one", ["a = 3"]) + _body("two", ["b = 2"])},
+            "Fix old lines (#34) (#134)", NOW - timedelta(days=6))
+
+    result = fr.measure(root, {33: 3300, 34: 3400}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (0, 1)
+
+
+def test_an_unrelated_commit_between_two_fixes_does_not_hide_the_cause(tmp_path):
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("one", ["a = 1"]) + _body("two", ["b = 1"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("one", ["a = 2"]) + _body("two", ["b = 1"])},
+            "Fix (#35) (#135)", NOW - timedelta(days=10))
+    _commit(root, {"app.py": _body("one", ["a = 2"]) + _body("two", ["b = 9"])},
+            "Unrelated edit", NOW - timedelta(days=8))
+    _commit(root, {"app.py": _body("one", ["a = 3"]) + _body("two", ["b = 9"])},
+            "Fix again (#36) (#136)", NOW - timedelta(days=6))
+
+    result = fr.measure(root, {35: 3500, 36: 3600}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (1, 1)

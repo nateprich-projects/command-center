@@ -3756,20 +3756,25 @@ def test_sweep_keeps_a_declared_risk_at_shaped(monkeypatch):
         307, "# Plan\n\n## Risk rationale\n\nSee the thread.\n")
     marker = _held_plan(
         308, "# Plan\n\nRisk: escalated — destructive\n", needs="none")
-    for plan in (rationale, unreadable_rationale):
+    list_marker = _held_plan(
+        315, "# Plan\n\n- Risk: escalated — destructive\n")
+    bold_marker = _held_plan(
+        316, "# Plan\n\n**Risk:** escalated — destructive\n")
+    plans = [rationale, unreadable_rationale, marker, list_marker,
+             bold_marker]
+    for plan in plans:
         plan.needs = "none"
 
-    advanced, writes, fields, comments = _sweep(
-        monkeypatch, [rationale, unreadable_rationale, marker])
+    advanced, writes, fields, comments = _sweep(monkeypatch, plans)
 
     assert (advanced, writes, fields, comments) == ([], [], [], [])
     assert funnel.plan_declared_risks(rationale.body) == ["data-migration"]
     assert funnel.plan_declared_risks(unreadable_rationale.body) == [
         "declared"]
-    assert funnel.plan_declared_risks(marker.body) == [
-        "declared: destructive"]
-    assert {plan.status for plan in (rationale, unreadable_rationale,
-                                     marker)} == {"Shaped"}
+    for plan in (marker, list_marker, bold_marker):
+        assert funnel.plan_declared_risks(plan.body) == [
+            "declared: destructive"]
+    assert {plan.status for plan in plans} == {"Shaped"}
 
 
 def test_sweep_keeps_needs_human_holding_whatever_the_risk(monkeypatch):

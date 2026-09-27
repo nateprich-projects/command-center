@@ -16372,18 +16372,6 @@ def shapeable_idea(items: Sequence[Item], tier: Optional[str],
     return None
 
 
-def is_risk_marker_reason(reason: object) -> bool:
-    """Whether an escalation reason comes from a ``Risk: escalated`` line.
-
-    ``escalation_matches`` reports that line as ``declared`` or
-    ``declared: <what>``. The plan's writer stated the risk, so it is a
-    declaration, not a wording hit, and it still holds a plan (#1721).
-    """
-    return isinstance(reason, str) and (
-        reason == "declared" or reason.startswith("declared:")
-    )
-
-
 _PLAN_RISK_RATIONALE_RE = re.compile(
     r"^ {0,3}#{1,6}[ \t]+Risk rationale[ \t]*$", re.IGNORECASE | re.MULTILINE
 )
@@ -16391,40 +16379,65 @@ _PLAN_SECTION_END_RE = re.compile(
     r"^ {0,3}#{1,6}[ \t]+|^[ \t]*<!-- command-center-[\w-]+ -->", re.MULTILINE
 )
 _PLAN_RISK_RATIONALE_ENTRY_RE = re.compile(
-    r"^[ \t]*[-*][ \t]+(?P<reason>[\w-]+)[ \t]*:"
+    r"^[ \t]*[-*+][ \t]+(?P<reason>[\w-]+)[ \t]*:"
+)
+#: A rationale section that says it holds nothing ("None recorded.", the
+#: form render_plan uses for an empty list) is not a declaration.
+_PLAN_RISK_RATIONALE_NONE_RE = re.compile(r"(?i)\A(?:none|no)\b")
+#: ``Risk: escalated`` as a plan writer states it: a bare line, a list item
+#: or bold (``- Risk: escalated``, ``**Risk:** escalated``). ``RISK_LINE``
+#: reads only the bare form; the #1034 union caught the others by accident.
+_PLAN_RISK_MARKER_RE = re.compile(
+    r"^[ \t]*(?:[-*+][ \t]+)?[*_]{0,2}Risk[*_]{0,2}[ \t]*:[ \t]*[*_]{0,2}"
+    r"[ \t]*escalated\b[*_]{0,2}(?P<what>.*)$",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
 def plan_declared_risks(plan_body: str) -> List[str]:
     """Risks a plan body declares, as distinct from wording-scan hits (#1721).
 
-    The shape runner renders the shaper's typed ``escalated_risk`` as a
-    ``Risk rationale`` section, and a hand-written plan may carry a
-    ``Risk: escalated`` line. Either one is a declaration and holds a plan at
-    Shaped; a hit from ``plan_escalation_matches`` alone only raises the
-    review tier. A rationale heading with no readable entry still counts as
-    ``declared``, so a malformed record holds rather than releases.
+    The one definition of a declared risk: ``engine/shape.py`` reads it from
+    the rendered scan body beside the typed ``escalated_risk`` list, and the
+    Shaped sweep reads it from the stored body, where the runner has rendered
+    that list as a ``Risk rationale`` section. A declaration is a
+    ``Risk rationale`` section, however it got into the body, or a
+    ``Risk: escalated`` line; either holds a plan at Shaped, while a hit from
+    ``plan_escalation_matches`` alone only raises the review tier. The text is
+    the one that scan reads, so quoted, code and Rejected text declares
+    nothing. A rationale section with prose but no readable entry counts as
+    ``declared``, so a malformed record holds rather than releases; one that
+    is empty or says ``None`` declares nothing.
     """
-    text = asserted_text(plan_body or "")
+    text = _strip_plan_prose_quotes(
+        asserted_text(_plan_escalation_scan_text(plan_body or ""))
+    )
     declared: List[str] = []
-    heading = _PLAN_RISK_RATIONALE_RE.search(text)
-    if heading is not None:
+
+    def add(reason: str) -> None:
+        if reason not in declared:
+            declared.append(reason)
+
+    for heading in _PLAN_RISK_RATIONALE_RE.finditer(text):
         section = text[heading.end():]
         boundary = _PLAN_SECTION_END_RE.search(section)
         if boundary is not None:
             section = section[:boundary.start()]
+        content = section.strip()
+        if not content or _PLAN_RISK_RATIONALE_NONE_RE.match(content):
+            continue
+        readable = False
         for line in section.splitlines():
             entry = _PLAN_RISK_RATIONALE_ENTRY_RE.match(line)
             if (entry is not None
-                    and entry.group("reason") in ESCALATION_PATTERNS
-                    and entry.group("reason") not in declared):
-                declared.append(entry.group("reason"))
-        if not declared:
-            declared.append("declared")
-    for match in plan_escalation_matches(plan_body or ""):
-        reason = match.get("reason")
-        if is_risk_marker_reason(reason) and reason not in declared:
-            declared.append(str(reason))
+                    and entry.group("reason") in ESCALATION_PATTERNS):
+                readable = True
+                add(entry.group("reason"))
+        if not readable:
+            add("declared")
+    for marker in _PLAN_RISK_MARKER_RE.finditer(text):
+        stated = marker.group("what").strip(" \t*_—-:").strip()
+        add("declared: " + stated if stated else "declared")
     return declared
 
 

@@ -1262,8 +1262,17 @@ def apply_shape(items: list, now: datetime, ref: str,
     # the writes below can observe.
     status, reason = preview_decision(items, item, answer)
     authority_signals = funnel.needs_nate_signals(rendered)
+    matches = _plan_escalation_matches(answer)
+    declared = declared_risks(answer)
+    # The runner's record of what the decision held on (#1721). The Shaped
+    # sweep releases an escalated Risk only on this record, never on prose
+    # alone, which a malformed fence or quote in the narrative can blank.
+    risk_record = funnel.shape_risk_block(
+        declared, [entry["reason"] for entry in matches
+                   if isinstance(entry.get("reason"), str)])
     body = funnel.append_provenance(
-        rendered, voice, at=now, run=run, agent=agent)
+        "{}\n\n{}\n".format(rendered.rstrip("\n"), risk_record),
+        voice, at=now, run=run, agent=agent)
     for block in carried_blocks:
         body = "{}\n\n{}".format(body, block)
 
@@ -1332,13 +1341,10 @@ def apply_shape(items: list, now: datetime, ref: str,
             item=item.item_id, field=funnel.CLASS_FIELD_ID,
             option=funnel._option_id(funnel.CLASS_FIELD_ID,
                                      answer["proposed_class"]))
-    matches = _plan_escalation_matches(answer)
     # A declaration the shaper wrote into the plan holds it just as the typed
     # list does, so it must also write Risk escalated: the sweep reads a
     # standard Risk as no hold at all.
-    risk = "escalated" if (
-        declared_risks(answer) or matches
-    ) else "standard"
+    risk = "escalated" if (declared or matches) else "standard"
     scan_only = scan_only_matches(answer, matches)
     needs = "human" if status == "Shaped" else "none"
     funnel.write_project_select(item.item_id, "Risk", risk, item.ref)

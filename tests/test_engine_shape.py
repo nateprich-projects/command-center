@@ -734,6 +734,31 @@ DECLARED_IN_PLAN = [
         "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
         "**Risk:** escalated — credentials\n",
         ["declared: credentials"], id="bold marker"),
+    pytest.param(
+        "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
+        "1. Risk: escalated — credentials\n",
+        ["declared: credentials"], id="numbered marker"),
+    pytest.param(
+        "# Plan\n\n## Risk: escalated — credentials\n\n"
+        "We will rotate the deploy api-key monthly.\n",
+        ["declared: credentials"], id="heading marker"),
+    pytest.param(
+        "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
+        "## Risk rationale:\n\n- credentials: rotates the key\n",
+        ["credentials"], id="rationale heading with a colon"),
+    pytest.param(
+        "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
+        "## Risk rationale ##\n\n- credentials: rotates the key\n",
+        ["credentials"], id="rationale heading with closing hashes"),
+    pytest.param(
+        "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
+        "## Risk rationale (credentials)\n\n- credentials: rotates the key\n",
+        ["credentials"], id="rationale heading naming its reason"),
+    pytest.param(
+        "# Plan\n\nWe will rotate the deploy api-key monthly.\n\n"
+        "## Risk rationale\n\n"
+        "No secret leaves the box, but it rotates the key.\n",
+        ["declared"], id="rationale prose opening No"),
 ]
 
 
@@ -758,6 +783,7 @@ def test_a_declaration_written_into_the_plan_holds(
         "Shaped", "escalated", "human")
     assert gh_calls(calls, "gh", "issue", "comment") == []
     assert funnel.plan_declared_risks(item.body) == declared
+    assert funnel.parse_shape_risk_record(item.body)["declared"] == declared
     assert "review tier" not in capsys.readouterr().out
 
 
@@ -790,6 +816,83 @@ def test_a_plan_written_declaration_writes_risk_escalated_without_a_scan_hit(
     assert project_writes == [("Risk", "escalated"), ("Needs", "human")]
     item.needs = "none"
     assert funnel.shaped_self_approvable(item, {item.ref: item}) is False
+
+
+GATES_QUESTION = {"exposure": None, "gates": ["Who may write Ready?"],
+                  "scope": None, "preference": None}
+REAL_CREDENTIALS = [{"reason": "credentials",
+                     "why": "rotates the deploy api-key"}]
+
+
+def _shape_answer_gates_and_sweep(monkeypatch, plan_markdown,
+                                  escalated_risk):
+    """Shape a plan held by a Gates question, answer it as Nate does, and
+    run the real Shaped sweep over the stored body."""
+    item = idea(42, klass="Broken")
+    stub_gh(monkeypatch, item)
+    assert shape.apply_shape(
+        [item], NOW, item.ref,
+        answer(proposed_class="Broken", plan_markdown=plan_markdown,
+               escalated_risk=escalated_risk, needs_nate=GATES_QUESTION),
+        run="shape-run", agent="muse") == 0
+    assert (item.status, item.risk, item.needs) == (
+        "Shaped", "escalated", "human")
+    item.body = funnel.answered_gates_body(item.body, "yes", "Nate", at=NOW)
+    item.needs = "human" if funnel.plan_needs_nate(item.body) else "none"
+    assert item.needs == "none"
+
+    def write_status(target, status, now):
+        target.status = status
+        return None
+
+    monkeypatch.setattr(funnel, "_write_status", write_status)
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda argv, **kwargs: SimpleNamespace(
+            returncode=0, stdout="", stderr=""))
+    advanced, errors = funnel.sweep_shaped_self_approvals(
+        [item], NOW, run="begin-run", agent="muse")
+    assert errors == []
+    return item, advanced
+
+
+@pytest.mark.parametrize("plan_markdown,risks", [
+    pytest.param("# Plan\n\n```\nlog\n", REAL_CREDENTIALS,
+                 id="unclosed backtick fence"),
+    pytest.param("# Plan\n\n~~~\nlog\n", REAL_CREDENTIALS,
+                 id="unclosed tilde fence"),
+    pytest.param("# Plan\n\n````\nlog\n```\n\nDo it.\n", REAL_CREDENTIALS,
+                 id="four-backtick fence closed by three"),
+    pytest.param('Ship the 3" panel.\n',
+                 [{"reason": "credentials",
+                   "why": 'rotates the 4" deploy api-key'}],
+                 id="straight quotes spanning the rationale"),
+    pytest.param("# Plan\n\nKeep the ‘legacy path working.\n",
+                 [{"reason": "credentials",
+                   "why": "rotates Nate’s deploy api-key"}],
+                 id="curly opener and an apostrophe"),
+])
+def test_a_declared_risk_holds_after_its_gates_answer_despite_bad_markdown(
+        monkeypatch, plan_markdown, risks):
+    """Review of PR #1740: prose readers blank a rendered Risk rationale
+    under a malformed fence or quote, so the sweep released a declared risk
+    once Nate answered the Gates question. The runner's record holds it."""
+    item, advanced = _shape_answer_gates_and_sweep(
+        monkeypatch, plan_markdown, risks)
+    assert advanced == []
+    assert item.status == "Shaped"
+    assert funnel.parse_shape_risk_record(item.body)["declared"] == [
+        "credentials"]
+
+
+def test_a_scan_only_plan_is_swept_once_its_gates_answer_lands(monkeypatch):
+    item, advanced = _shape_answer_gates_and_sweep(
+        monkeypatch, "# Plan\n\nWe will rotate the deploy api-key monthly.\n",
+        [])
+    assert funnel.parse_shape_risk_record(item.body) == {
+        "declared": [], "scan": ["credentials"]}
+    assert advanced == [{"ref": item.ref, "status": "Ready"}]
+    assert (item.status, item.risk) == ("Ready", "escalated")
 
 
 def test_a_none_rationale_in_the_plan_declares_nothing():
@@ -1807,6 +1910,8 @@ def test_apply_advances_a_scan_only_plan_with_risk_escalated(
     assert item.needs == "none"
     assert project_writes == [("Risk", "escalated"), ("Needs", "none")]
     assert "needs-shaping" not in item.labels
+    assert funnel.parse_shape_risk_record(item.body) == {
+        "declared": [], "scan": ["credentials"]}
 
     comments = [call[1][-1]
                 for call in gh_calls(calls, "gh", "issue", "comment")]
@@ -1971,7 +2076,9 @@ def test_apply_holds_a_declared_risk_with_a_clean_scan(
     assert "- data-migration: backfills the ledger table" in item.body
     assert "Risk: escalated" not in item.body
     assert not funnel.plan_is_escalated(item.body)
-    # The body's rationale is what the Shaped sweep reads as declared.
+    # The runner's record and the body's rationale both carry the hold.
+    assert funnel.parse_shape_risk_record(item.body) == {
+        "declared": ["data-migration"], "scan": []}
     assert funnel.plan_declared_risks(item.body) == ["data-migration"]
     assert "escalated risk (data-migration)" in capsys.readouterr().out
 

@@ -1485,6 +1485,131 @@ _PLAN_REJECTED_INLINE_RE = re.compile(
     r"[ \t]+\(rejected:[^\r\n]*\)[ \t]*$", re.IGNORECASE
 )
 
+_PLAN_QUOTE_PAIRS = {"\"": "\"", "“": "”", "‘": "’", "«": "»"}
+_PLAN_PROPOSAL_ACTIONS = {
+    "credentials": re.compile(
+        r"\b(?:access(?:es|ed|ing)?|change(?:s|d|ing)?|create(?:s|d|ing)?|"
+        r"expose(?:s|d|ing)?|grant(?:s|ed|ing)?|handle(?:s|d|ing)?|"
+        r"load(?:s|ed|ing)?|read(?:s|ing)?|replace(?:s|d|ing)?|"
+        r"revoke(?:s|d|ing)?|rotate(?:s|d|ing)?|store(?:s|d|ing)?|"
+        r"supply|supplies|supplied|supplying|touch(?:es|ed|ing)?|"
+        r"use(?:s|d|ing)?|write|writes|written|writing|"
+        r"update(?:s|d|ing)?)\b",
+        re.IGNORECASE,
+    ),
+    "data-migration": re.compile(
+        r"\b(?:apply|applies|applied|applying|convert(?:s|ed|ing)?|"
+        r"copy|copies|copied|copying|execute(?:s|d|ing)?|import(?:s|ed|ing)?|"
+        r"load(?:s|ed|ing)?|perform(?:s|ed|ing)?|populate(?:s|d|ing)?|"
+        r"rebuild(?:s|ing)?|rebuilt|replay(?:s|ed|ing)?|run|runs|ran|"
+        r"seed(?:s|ed|ing)?|transform(?:s|ed|ing)?|update(?:s|d|ing)?)\b",
+        re.IGNORECASE,
+    ),
+    "destructive": re.compile(
+        r"\b(?:delete|deletes|deleted|deleting|drop|drops|dropped|dropping|"
+        r"force[- ]push|hard[- ]delete|purge|purges|purged|purging|"
+        r"remove|removes|removed|removing|rewrite|rewrites|rewrote|rewriting|"
+        r"permanently delete)\b",
+        re.IGNORECASE,
+    ),
+    "concurrency": re.compile(
+        r"\b(?:add|adds|added|adding|allow|allows|allowed|allowing|"
+        r"coordinate|coordinates|coordinated|coordinating|create|creates|"
+        r"created|creating|enable|enables|enabled|enabling|fix|fixes|fixed|"
+        r"fixing|handle|handles|handled|handling|implement|implements|"
+        r"implemented|implementing|introduce|introduces|introduced|"
+        r"introducing|perform|performs|performed|performing|run|runs|ran|"
+        r"serialize|serializes|serialized|serializing|synchronize|"
+        r"synchronizes|synchronized|synchronizing|support|supports|supported|"
+        r"supporting|use|uses|used|using|write|writes|written|writing|"
+        r"commit|commits|committed|committing)\b",
+        re.IGNORECASE,
+    ),
+}
+_PLAN_DIRECT_PROPOSAL_PREFIX_RE = re.compile(
+    r"^\s*(?:[-*+]\s*)?(?:(?:proposal|decision|implementation)\s*:?\s*)?"
+    r"(?:(?:we|i|our|this(?:\s+(?:plan|project|change|"
+    r"implementation|system|service|worker|job|process|ticket))?|the\s+"
+    r"(?:plan|project|change|implementation|system|service|worker|job|"
+    r"process|ticket))\s+"
+    r"(?:(?:will|shall|must|should|can|need\s+to|needs\s+to|plan\s+to|"
+    r"plans\s+to|intend\s+to|intends\s+to|is\s+going\s+to)\s+)?)?$",
+    re.IGNORECASE,
+)
+_PLAN_DIRECT_ACTIONS = {
+    "data-migration": re.compile(r"\b(?:backfill|migrat\w*)\b", re.IGNORECASE),
+    "destructive": re.compile(
+        r"\b(?:force[- ]push|hard[- ]delete|permanently\s+delete|"
+        r"drop\s+(?:the\s+)?(?:table|branch)|rewrite\s+history)\b",
+        re.IGNORECASE,
+    ),
+}
+_PLAN_CLAUSE_BOUNDARY_RE = re.compile(
+    r"[.!?;—–]|\n[ \t]*\n|\n(?=[ \t]*(?:[-*+]\s+|#{1,6}[ \t]+))"
+)
+_PLAN_NEGATED_PREFIX_RE = re.compile(
+    r"\bno[- \t]*$|\b(?:no|not|never|without|nothing|none|neither|nor)\b"
+    r"(?:[- \t]+[\w'’-]+){0,5}[ \t]*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_plan_prose_quotes(text: str) -> str:
+    """Blank balanced prose quotations while preserving offsets and lines."""
+    if not text:
+        return text or ""
+    stack = []
+    spans = []
+    for index, char in enumerate(text):
+        if stack:
+            if char == stack[-1][0]:
+                start = stack.pop()[1]
+                spans.append((start, index + 1))
+            elif char in _PLAN_QUOTE_PAIRS:
+                stack.append((_PLAN_QUOTE_PAIRS[char], index))
+        elif char in _PLAN_QUOTE_PAIRS:
+            stack.append((_PLAN_QUOTE_PAIRS[char], index))
+    # An unmatched quote is ambiguous, so leave the body searchable.
+    if stack:
+        return text
+    characters = list(text)
+    for start, end in spans:
+        for index in range(start, end):
+            if characters[index] not in "\r\n":
+                characters[index] = " "
+    return "".join(characters)
+
+
+def _plan_clause_prefix(text: str, match_start: int) -> str:
+    """Return only the current sentence or Markdown list clause prefix."""
+    start = 0
+    for boundary in _PLAN_CLAUSE_BOUNDARY_RE.finditer(text, 0, match_start):
+        start = boundary.end()
+    prefix = text[start:match_start]
+    prefix = re.sub(r"(?m)^\s*#{1,6}[ \t]+[^\n]*(?:\n|$)", "", prefix)
+    return re.sub(r"^\s*(?:[-*+]\s*)?", "", prefix)
+
+
+def _plan_match_is_proposed(text: str, match: re.Match,
+                            reason: str) -> bool:
+    """Require an affirmative action in the same clause as the risk term."""
+    prefix = _plan_clause_prefix(text, match.start())
+    if _PLAN_NEGATED_PREFIX_RE.search(prefix + match.group(0)):
+        return False
+    action = _PLAN_PROPOSAL_ACTIONS[reason]
+    for action_match in reversed(list(action.finditer(prefix))):
+        intervening_words = re.findall(
+            r"[\w'’-]+", prefix[action_match.end():]
+        )
+        if len(intervening_words) <= 4:
+            return True
+    direct_action = _PLAN_DIRECT_ACTIONS.get(reason)
+    return bool(
+        direct_action
+        and direct_action.search(match.group(0))
+        and _PLAN_DIRECT_PROPOSAL_PREFIX_RE.fullmatch(prefix)
+    )
+
 
 def _plan_escalation_scan_text(plan_body: str) -> str:
     """Remove plan-only rejected prose before using the shared word matcher.
@@ -1495,7 +1620,7 @@ def _plan_escalation_scan_text(plan_body: str) -> str:
     """
     body = plan_body or ""
     raw_lines = body.splitlines(keepends=True)
-    visible_lines = asserted_text(body).splitlines()
+    visible_lines = _strip_plan_prose_quotes(asserted_text(body)).splitlines()
     if len(visible_lines) > len(raw_lines):
         return body
     visible_lines.extend([""] * (len(raw_lines) - len(visible_lines)))
@@ -1559,13 +1684,35 @@ def _plan_escalation_scan_text(plan_body: str) -> str:
 
 def plan_escalation_matches(plan_body: str
                             ) -> List[Dict[str, Optional[str]]]:
-    """Return plan risks after excluding its recorded rejected alternatives.
+    """Return risks a plan affirmatively proposes after removing quoted text.
 
-    Plan-section knowledge stays here; ticket text still uses the canonical
-    matcher unchanged. If a Rejected boundary cannot be parsed, the whole body
-    is scanned as written.
+    Plan-only section and proposal rules stay here; ticket text still uses the
+    canonical matcher unchanged. If a Rejected boundary cannot be parsed, the
+    whole asserted body is scanned, but a risk term still needs an affirmative
+    action in its sentence or list clause. If a Risk marker is present, its
+    existing authority remains unchanged.
     """
-    return escalation_matches("", _plan_escalation_scan_text(plan_body))
+    text = _strip_plan_prose_quotes(
+        asserted_text(_plan_escalation_scan_text(plan_body))
+    )
+    if RISK_LINE.search(text):
+        return escalation_matches("", text)
+
+    found: List[Dict[str, Optional[str]]] = []
+    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            if not _plan_match_is_proposed(text, match, name):
+                continue
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.start())
+            if line_end < 0:
+                line_end = len(text)
+            found.append({
+                "reason": name,
+                "line": text[line_start:line_end].strip(),
+            })
+            break
+    return found
 
 
 def plan_needs_nate(plan_body: str) -> bool:

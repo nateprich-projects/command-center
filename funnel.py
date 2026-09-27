@@ -1497,6 +1497,20 @@ _PLAN_REJECTED_INLINE_RE = re.compile(
 
 _PLAN_QUOTE_PAIRS = {"\"": "\"", "“": "”", "‘": "’", "«": "»"}
 _PLAN_PROPOSAL_ACTIONS = {
+    # Every inflection is spelled out: an optional suffix on a stem that
+    # ends in "e" matches "changeing", never "changing" (#1681 review).
+    "authorisation": re.compile(
+        r"\b(?:add|adds|added|adding|broaden|broadens|broadened|broadening|"
+        r"change|changes|changed|changing|configure|configures|"
+        r"configured|configuring|elevate|elevates|elevated|elevating|"
+        r"enable|enables|enabled|enabling|expand|expands|expanded|"
+        r"expanding|grant|grants|granted|granting|introduce|"
+        r"introduces|introduced|introducing|reduce|reduces|reduced|"
+        r"reducing|require|requires|required|requiring|revoke|revokes|"
+        r"revoked|revoking|tighten|tightens|tightened|tightening|"
+        r"update|updates|updated|updating|use|uses|used|using)\b",
+        re.IGNORECASE,
+    ),
     "credentials": re.compile(
         r"\b(?:access(?:es|ed|ing)?|change(?:s|d|ing)?|create(?:s|d|ing)?|"
         r"expose(?:s|d|ing)?|grant(?:s|ed|ing)?|handle(?:s|d|ing)?|"
@@ -1547,6 +1561,14 @@ _PLAN_DIRECT_PROPOSAL_PREFIX_RE = re.compile(
     re.IGNORECASE,
 )
 _PLAN_DIRECT_ACTIONS = {
+    # The authorisation pattern's own terms can carry the verb: "authorise
+    # the client", or "grant ... permissions" (#1678).
+    "authorisation": re.compile(
+        r"\b(?:authori[sz](?:e|es|ed|ing)|"
+        r"(?:broaden|chang|elevat|expand|grant|reduc|revok|tighten)\w*"
+        r"(?:\s+[\w'’-]+){0,4}\s+permissions?)\b",
+        re.IGNORECASE,
+    ),
     "data-migration": re.compile(r"\b(?:backfill|migrat\w*)\b", re.IGNORECASE),
     "destructive": re.compile(
         r"\b(?:force[- ]push|hard[- ]delete|permanently\s+delete|"

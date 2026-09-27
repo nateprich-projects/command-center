@@ -53,6 +53,12 @@ either is non-empty, as advisory lists with `reason`, `blocked_reason` and
 `blockers`. Waiting work, not actionable work: never fold them into the
 queues above or the total.
 
+Then `held_at_accept`, whenever non-empty: list each finished project as
+held at Accept by Nate, with its `condition` and `reason`. Not a decision
+and not blocked work: never fold it into the decision list or `blocked`, and
+never count it in `total_needing_nate`. The hold lifts itself when its
+condition is met, and the project then asks "Accept it?" again.
+
 Then `blocked`, whenever non-empty: show each ticket's block reason and
 conditions. For an `event_condition`, name its agent, job and outcome, and
 render `event_wait` as the elapsed time since its `after` timestamp. Flag a

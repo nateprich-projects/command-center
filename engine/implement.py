@@ -1854,13 +1854,63 @@ def _push_ticket_branch(root: pathlib.Path, branch: str) -> None:
     _run(["git", "push", "--set-upstream", "origin", branch], cwd=root)
 
 
+def _remove_codex_run_checkout(root: pathlib.Path, number: int,
+                               agent: str) -> bool:
+    """Remove only this Codex ticket checkout under the runtime codex-runs/.
+
+    The per-run clone is named ``ticket-<number>-<UTC timestamp>`` and is
+    owner-only. Restrict removal to that exact direct child; finish-ticket also
+    runs from session workspaces and other agents' checkouts, which must remain
+    untouched.
+    """
+    if agent != "codex":
+        return False
+    checkout = pathlib.Path(root)
+    runs_root = pathlib.Path(funnel.CLAUDE_DIR) / "codex-runs"
+    if checkout.is_symlink() or runs_root.is_symlink():
+        return False
+    try:
+        runs_root = runs_root.resolve(strict=True)
+        checkout = checkout.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    match = re.fullmatch(
+        r"ticket-([1-9][0-9]*)-([0-9]{8}T[0-9]{12}Z)", checkout.name,
+    )
+    if (match is None or int(match.group(1)) != number
+            or checkout.parent != runs_root):
+        return False
+    try:
+        info = checkout.stat()
+        if (not checkout.is_dir() or info.st_uid != os.getuid()
+                or info.st_mode & 0o077):
+            return False
+        current = pathlib.Path.cwd().resolve()
+        try:
+            current.relative_to(checkout)
+        except ValueError:
+            pass
+        else:
+            # Keep later GitHub/heartbeat calls in a live working directory.
+            os.chdir(runs_root)
+        shutil.rmtree(checkout)
+        return True
+    except OSError:
+        # Cleanup is best-effort after the durable finish effect. Never turn a
+        # completed push or recorded non-kept result into a stranded claim.
+        return False
+
+
 def _keep_work(root: pathlib.Path, number: int, branch: str, *,
-               reason: str = "tests failing") -> str:
+               reason: str = "tests failing") -> Tuple[str, bool]:
     """Commit and push explicit paths, so a failure loses time only.
 
     Never opens a PR. Returns a short phrase for the heartbeat note. The same
     pre-PR scratch check applies here so a WIP branch cannot carry run debris.
+    The second result is true if the push path failed; that checkout is kept
+    for diagnosis.
     """
+    push_attempted = False
     try:
         paths = _working_tree_paths(root)
         if paths:
@@ -1873,12 +1923,13 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *,
         ahead = _run(["git", "rev-list", "--count", "origin/main..HEAD"],
                      cwd=root).stdout.strip()
         if not ahead.isdigit() or int(ahead) < 1:
-            return "no work to keep"
+            return "no work to keep", False
+        push_attempted = True
         _push_ticket_branch(root, branch)
-        return "work kept on {}".format(branch)
+        return "work kept on {}".format(branch), False
     except ImplementError as exc:
         first = str(exc).splitlines()[0] if str(exc) else "unknown error"
-        return "work NOT kept: {}".format(first[:120])
+        return "work NOT kept: {}".format(first[:120]), push_attempted
 
 
 def _recover_answer_error(
@@ -1899,7 +1950,7 @@ def _recover_answer_error(
         return False
     resolved = resolve_checkout_repo(context["root"], repo)
     ref = "{}#{}".format(resolved, context["number"])
-    kept = _keep_work(
+    kept, push_failed = _keep_work(
         context["root"], context["number"], context["branch"],
         reason="answer unreadable",
     )
@@ -1907,6 +1958,8 @@ def _recover_answer_error(
     first = str(exc).splitlines()[0] if str(exc) else "unknown answer error"
     note = "answer error: {} | {}".format(first[:200], kept)
     heartbeat_finish(agent, run, "errored", note, ref)
+    if not push_failed:
+        _remove_codex_run_checkout(context["root"], context["number"], agent)
     return True
 
 
@@ -1933,9 +1986,13 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
         # commit and push the ticket branch without opening a PR, release the
         # claim, and finish errored naming what failed, so the next run
         # continues the branch instead of starting again from main.
-        kept = _keep_work(context["root"], context["number"], context["branch"])
+        kept, push_failed = _keep_work(
+            context["root"], context["number"], context["branch"])
         release(ref)
         heartbeat_finish(agent, run, "errored", _failure_note(exc, kept), ref)
+        if not push_failed:
+            _remove_codex_run_checkout(
+                context["root"], context["number"], agent)
         raise
     continued = _remote_branch_exists(context["root"], context["branch"])
     try:
@@ -1956,15 +2013,18 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             if extra_note:
                 note += "; " + extra_note.strip()
             heartbeat_finish(agent, run, "done", note, ref)
+            _remove_codex_run_checkout(
+                context["root"], context["number"], agent)
             return {"number": context["number"], "url": ticket["url"],
                     "closed": True}
-        _push_ticket_branch(context["root"], context["branch"])
-        # Re-read immediately before the PR effect so the guard remains the
-        # last local file-list check, even when an existing branch was merged.
+        # Re-read immediately before pushing so the guard remains the last
+        # local file-list check, even when an existing branch was merged.
         _check_no_run_scratch(context["root"])
+        _push_ticket_branch(context["root"], context["branch"])
     except StrayFileError as exc:
         release(ref)
         heartbeat_finish(agent, run, "errored", str(exc), ref)
+        _remove_codex_run_checkout(context["root"], context["number"], agent)
         raise
     body = render_pr_body(ticket, answer, continued=continued, tests=tests,
                          test_source=test_source)
@@ -1976,6 +2036,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "done", note, ref)
+    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return pr
 
 
@@ -2001,8 +2062,8 @@ def finish_blocked_on_human(
         extra_note: Optional[str] = None) -> dict:
     """File the human step, block the ticket, release, and finish. No PR.
 
-    No test run, commit, or push happens here: the checkout holds an
-    unfinished implementation and must stay exactly as the model left it.
+    No test run, commit, or push happens here: the finish records the
+    implementation as not kept, then removes this run's Codex checkout.
     A failure after the sub-issue exists names it, so the retry starts
     from GitHub's truth rather than filing a second one.
 
@@ -2060,6 +2121,7 @@ def finish_blocked_on_human(
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-human-step", note, ref)
+    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return {"ticket": ref,
             "human_step": {"number": created["number"],
                            "ref": created["ref"],
@@ -2159,6 +2221,7 @@ def finish_declined(
         if extra_note:
             note += "; " + extra_note.strip()
         heartbeat_finish(agent, run, "done", note, ref)
+        _remove_codex_run_checkout(context["root"], context["number"], agent)
         return {"ticket": ref, "declined": reason}
     accept_conflict_routed = (
         decline_class == "accept-body-conflict" and decline_target is not None
@@ -2295,6 +2358,7 @@ def finish_declined(
     if extra_note:
         note += "; " + extra_note.strip()
     heartbeat_finish(agent, run, "skipped-blocked", note, ref)
+    _remove_codex_run_checkout(context["root"], context["number"], agent)
     return {"ticket": ref, "declined": reason}
 
 

@@ -45,6 +45,8 @@ def _bindings_never_touch_the_real_spool(monkeypatch):
             "prior_run": None,
         },
     )
+    monkeypatch.setattr(funnel, "ensure_ticket_branch",
+                        lambda repo, number: "fixture-sha")
 
 
 def _allow_begin(monkeypatch):
@@ -1773,6 +1775,10 @@ def test_codex_begin_binds_before_loading_the_implementation_packet(
     project, ticket = _ticket(89, 88)
     events = []
     monkeypatch.setattr(
+        funnel, "ensure_ticket_branch",
+        lambda repo, number: events.append(("branch", repo, number)),
+    )
+    monkeypatch.setattr(
         heartbeat,
         "record_binding",
         lambda agent, run, do, work, repo=None: (
@@ -1789,7 +1795,11 @@ def test_codex_begin_binds_before_loading_the_implementation_packet(
     result, _ = _implementing_begin(monkeypatch, capsys, [project, ticket])
 
     assert result["do"] == "ticket"
-    assert events == [("bind", ticket.ref), ("packet", ticket.ref)]
+    assert events == [
+        ("branch", ticket.repo, ticket.number),
+        ("bind", ticket.ref),
+        ("packet", ticket.ref),
+    ]
 
 
 def test_codex_stop_and_non_codex_ticket_do_not_carry_the_vendor_packet(
@@ -1830,6 +1840,49 @@ def test_codex_packet_failure_releases_the_claim_and_stops(
     assert "work" not in result
     assert "packet source unavailable" in result["why"]
     assert writes[-1] == (ticket.ref, None)
+
+
+def test_codex_begin_releases_claim_when_ticket_branch_cannot_be_pushed(
+        monkeypatch, capsys):
+    project, ticket = _ticket(86, 84)
+    monkeypatch.setattr(
+        funnel, "ensure_ticket_branch",
+        lambda *args: (_ for _ in ()).throw(
+            funnel.GitHubError("push refused")
+        ),
+    )
+    monkeypatch.setattr(
+        funnel, "implementation_packet",
+        lambda *args: pytest.fail("packet must not load without a branch"),
+    )
+
+    result, writes = _implementing_begin(monkeypatch, capsys, [project, ticket])
+
+    assert result["do"] == "stop"
+    assert result["gate"] == "error"
+    assert "could not establish ticket branch" in result["why"]
+    assert "work" not in result
+    assert "bound" not in result
+    assert writes[0][0] == ticket.ref and writes[0][1] is not None
+    assert writes[-1] == (ticket.ref, None)
+
+
+def test_codex_begin_does_not_plant_a_branch_for_an_already_claimed_ticket(
+        monkeypatch, capsys):
+    project, ticket = _ticket(87, 84)
+    monkeypatch.setattr(
+        funnel, "ensure_ticket_branch",
+        lambda *args: pytest.fail("claimed ticket must be refused first"),
+    )
+
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, [project, ticket],
+        current_claims={ticket.ref: NOW - timedelta(seconds=1)},
+    )
+
+    assert result["do"] == "stop"
+    assert "work" not in result
+    assert writes == []
 
 
 def test_ticket_branch_facts_failure_stops_with_an_error_gate(
@@ -3906,12 +3959,22 @@ def test_claude_ticket_begin_carries_the_packet_and_claude_vendor_block(
 ):
     monkeypatch.setattr(funnel, "_local_time", lambda now: SATURDAY_0500)
     project, ticket = _ticket(81, 80)
-    calls = []
+    events = []
+    monkeypatch.setattr(
+        funnel, "ensure_ticket_branch",
+        lambda repo, number: events.append(("branch", repo, number)),
+    )
+    import heartbeat
+
+    monkeypatch.setattr(
+        heartbeat, "record_binding",
+        lambda agent, run, do, work, repo=None: events.append(("bind", work)),
+    )
     monkeypatch.setattr(
         funnel,
         "implementation_packet",
         lambda repo, number, agent: (
-            calls.append((repo, number, agent)) or {"repo": repo}
+            events.append(("packet", repo, number, agent)) or {"repo": repo}
         ),
     )
 
@@ -3924,7 +3987,11 @@ def test_claude_ticket_begin_carries_the_packet_and_claude_vendor_block(
     assert result["vendor"] == funnel.CLAUDE_IMPLEMENT_VENDOR
     assert "finish-ticket --agent claude" in (
         result["vendor"]["answer_handoff"])
-    assert calls == [(ticket.repo, ticket.number, "claude")]
+    assert events == [
+        ("branch", ticket.repo, ticket.number),
+        ("bind", ticket.ref),
+        ("packet", ticket.repo, ticket.number, "claude"),
+    ]
 
 
 def test_skipped_outside_window_is_a_heartbeat_outcome():

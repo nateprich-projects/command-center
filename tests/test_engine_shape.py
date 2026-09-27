@@ -100,6 +100,22 @@ def idea(number=42, **kw):
     return Item(**data)
 
 
+def stub_project_ref_load(monkeypatch, *items):
+    """Serve exact Project refs without reaching GitHub."""
+    by_ref = {item.ref: item for item in items}
+    monkeypatch.setattr(
+        funnel, "member_repos",
+        lambda: sorted({item.repo for item in items}),
+    )
+
+    def load(refs, **_kwargs):
+        if any(ref not in by_ref for ref in refs):
+            return None
+        return [by_ref[ref] for ref in refs]
+
+    monkeypatch.setattr(funnel, "load_project_items_by_refs", load)
+
+
 def stub_gh(monkeypatch, item):
     """Stub the GitHub reads and writes apply_shape performs."""
     calls = []
@@ -1908,6 +1924,7 @@ def test_packet_cli_reports_an_unreadable_issue_thread(monkeypatch, capsys):
 def test_apply_cli_reads_the_answer_from_stdin(
         monkeypatch, capsys):
     item = idea(42)
+    stub_project_ref_load(monkeypatch, item)
     monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [item])
     monkeypatch.setattr(
         sys, "stdin", io.StringIO(json.dumps(answer())))
@@ -2022,6 +2039,7 @@ def test_apply_cli_validate_only_reports_the_decision_without_writing(
     """Decide from the same inputs as the live path and report, without
     touching the idea; the runner uses this to validate a retried answer."""
     item = idea(42)
+    stub_project_ref_load(monkeypatch, item)
     monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [item])
 
     def fail(*args, **kwargs):
@@ -2045,6 +2063,7 @@ def test_apply_cli_validate_only_reports_the_decision_without_writing(
 def test_apply_cli_validate_only_previews_a_shaped_decision(
         monkeypatch, capsys):
     item = idea(42)
+    stub_project_ref_load(monkeypatch, item)
     monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [item])
 
     def fail(*args, **kwargs):

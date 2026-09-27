@@ -1,13 +1,11 @@
-"""Shape and finish-ticket loads skip Project item history (#1620).
+"""Shape and finish-ticket loads fetch only the Project items they use (#1623).
 
-``shape-packet``, ``shape-apply`` and ``release_claim`` read nothing from the
-per-item history batch (status_since, status_events, blocked times, child
-timestamps), so they load the compact board only. Each test here runs the
-caller twice against one fixture board served through a fake ``gh_graphql``:
-once with the old full load forced back on, once as shipped. The output and
-every write must be identical, the old run must actually have hydrated
-history (so the parity is not vacuous), and the new run must make no
-``nodes(ids:`` detail request.
+``shape-packet`` remains a history-free board reader. ``shape-apply`` reads
+its idea and parent by ref; ``release_claim`` reads its ticket by ref. Each
+changed caller is compared with the old full-board behavior against one
+fixture board served through a fake ``gh_graphql``. Output and writes must
+match, and the new path must make no ``nodes(ids:`` history request. A
+by-ref miss must fall back to the full board without history.
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ from __future__ import annotations
 import copy
 import json
 import pathlib
+import re
 import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -140,6 +139,8 @@ class Board:
     def __init__(self):
         self.pages = copy.deepcopy(PAGES)
         self.queries = []
+        self.ref_queries = []
+        self.missing_refs = set()
         self.writes = []
         self.argv = []
 
@@ -148,6 +149,8 @@ class Board:
         compact = " ".join(query.split())
         if "nodes(ids:" in compact:
             return self._details(variables)
+        if re.search(r"r\d+: items\(first: \d+, query:", compact):
+            return self._refs_page(query)
         if "items(first:" in compact:
             return self._page(query, variables)
         if query in (funnel.SET_FIELD, funnel.SET_LOCK):
@@ -164,6 +167,30 @@ class Board:
             ]}}
         raise AssertionError("unexpected GraphQL request: {}".format(
             compact[:120]))
+
+    def _refs_page(self, query):
+        compact = " ".join(query.split())
+        matches = re.findall(
+            r'r(\d+): items\(first: \d+, query: "repo:([^ ]+) #(\d+)"\)',
+            compact,
+        )
+        refs = ["{}#{}".format(repo, number) for _, repo, number in matches]
+        self.ref_queries.append(refs)
+        rows = [node for page in self.pages for node in page]
+        project = {}
+        for alias, repo, number in matches:
+            ref = "{}#{}".format(repo, number)
+            row = next((node for node in rows
+                        if node["content"]["repository"]["nameWithOwner"]
+                        == repo
+                        and str(node["content"]["number"]) == number), None)
+            nodes = [] if ref in self.missing_refs or row is None else [
+                copy.deepcopy(row)]
+            project["r{}".format(alias)] = {
+                "nodes": nodes,
+                "pageInfo": {"hasNextPage": False, "endCursor": None},
+            }
+        return {"user": {"projectV2": project}}
 
     def _page(self, query, variables):
         index = int(variables.get("cursor") or 0)
@@ -215,6 +242,7 @@ class Board:
 
 
 REAL_LOAD_ITEMS = funnel.load_items
+REAL_LOAD_PROJECT_ITEMS_BY_REFS = funnel.load_project_items_by_refs
 
 
 class FixedDatetime(datetime):
@@ -223,9 +251,10 @@ class FixedDatetime(datetime):
         return NOW if tz is not None else NOW.replace(tzinfo=None)
 
 
-def _serve(monkeypatch, *, full):
-    """Install a fresh board; ``full`` forces the old detail-hydrating load."""
+def _serve(monkeypatch, *, full, missing_refs=()):
+    """Install a fresh board; ``full`` forces the old full-board path."""
     board = Board()
+    board.missing_refs.update(missing_refs)
     monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
     monkeypatch.setattr(funnel, "gh_graphql", board.graphql)
     monkeypatch.setattr(funnel.subprocess, "run", board.run)
@@ -255,20 +284,31 @@ def _serve(monkeypatch, *, full):
         ])
         return items
 
+    def load_project_items_by_refs(refs, **kwargs):
+        if full:
+            return None
+        return REAL_LOAD_PROJECT_ITEMS_BY_REFS(refs, **kwargs)
+
     monkeypatch.setattr(funnel, "load_items", load_items)
+    monkeypatch.setattr(funnel, "load_project_items_by_refs",
+                        load_project_items_by_refs)
     board.loaded = loaded
     return board
 
 
 def _assert_parity_shape(old, new):
-    """The old load hydrated history; the new load asked for none."""
+    """The baseline had history; the by-ref path asked for none."""
     assert old.detail_requests, "fixture must exercise the history batch"
     empty = (None, [], None, None, None, None)
     assert all(row != empty for row in old.loaded[0]), (
         "every row of the old load must carry history for the parity to "
         "mean anything")
     assert new.detail_requests == []
-    assert all(row == empty for row in new.loaded[0])
+    assert all(
+        row == empty
+        for loaded_rows in new.loaded
+        for row in loaded_rows
+    )
 
 
 def _run_both(monkeypatch, call):
@@ -348,6 +388,7 @@ def test_shape_apply_validate_only_is_identical_without_history(
         "Ready" if needs_nate is None else "Shaped")
     assert old.writes == new.writes == []
     assert old.argv == new.argv == []
+    assert new.ref_queries == [[REPO + "#{}".format(IDEA)]]
 
 
 @pytest.mark.parametrize("needs_nate", [
@@ -375,6 +416,48 @@ def test_shape_apply_live_writes_are_identical_without_history(
     }.items())) in new.writes
     assert any(args[:4] == ("gh", "issue", "edit", str(IDEA))
                for args in new.argv)
+    assert new.ref_queries == [[REPO + "#{}".format(IDEA)]]
+
+
+def test_shape_apply_reads_its_parent_by_ref(monkeypatch, capsys, tmp_path):
+    answer = _answer_file(tmp_path)
+    argv = [str(IDEA), "--repo", REPO, "--answer", answer, "--validate-only"]
+    results = []
+    for full in (True, False):
+        with monkeypatch.context() as patch:
+            board = _serve(patch, full=full)
+            # Effective Class comes from the parent when the idea is a child.
+            board.pages[0][0]["class"] = {"name": "New"}
+            board.pages[1][0]["content"]["parent"] = {
+                "number": 10, "repository": {"nameWithOwner": REPO},
+            }
+            results.append((board, _apply(capsys, argv)))
+    (old, old_out), (new, new_out) = results
+    _assert_parity_shape(old, new)
+    assert new_out == old_out
+    assert new_out[0] == 0
+    assert json.loads(new_out[1])["status"] == "Shaped"
+    assert new.ref_queries == [[REPO + "#{}".format(IDEA)], [REPO + "#10"]]
+
+
+def test_shape_apply_falls_back_when_parent_by_ref_misses(
+        monkeypatch, capsys, tmp_path):
+    answer = _answer_file(tmp_path)
+    argv = [str(IDEA), "--repo", REPO, "--answer", answer, "--validate-only"]
+    with monkeypatch.context() as patch:
+        board = _serve(patch, full=False, missing_refs=[REPO + "#10"])
+        board.pages[1][0]["content"]["parent"] = {
+            "number": 10, "repository": {"nameWithOwner": REPO},
+        }
+        code, out, _err = _apply(capsys, argv)
+    assert code == 0
+    assert json.loads(out)["status"] == "Ready"
+    assert board.ref_queries == [[REPO + "#{}".format(IDEA)], [REPO + "#10"]]
+    assert len(board.loaded) == 1
+    empty = (None, [], None, None, None, None)
+    assert all(row == empty for row in board.loaded[0])
+    assert board.detail_requests == []
+    assert funnel.ITEM_QUERY in board.queries
 
 
 def test_release_claim_releases_the_same_item_without_history(monkeypatch):
@@ -383,6 +466,25 @@ def test_release_claim_releases_the_same_item_without_history(monkeypatch):
         monkeypatch, lambda: implement.release_claim(ref))
     assert new.writes == old.writes
     assert new.writes == [("SET_LOCK", sorted({
+        "project": funnel.PROJECT_ID, "item": "PVTI_{}".format(TICKET),
+        "field": funnel.LOCK_FIELD_ID, "value": "",
+    }.items()))]
+    assert new.ref_queries == [[ref]]
+
+
+def test_release_claim_falls_back_to_compact_board_on_by_ref_miss(
+        monkeypatch):
+    ref = "{}#{}".format(REPO, TICKET)
+    with monkeypatch.context() as patch:
+        board = _serve(patch, full=False, missing_refs=[ref])
+        implement.release_claim(ref)
+    assert board.ref_queries == [[ref]]
+    assert len(board.loaded) == 1
+    empty = (None, [], None, None, None, None)
+    assert all(row == empty for row in board.loaded[0])
+    assert board.detail_requests == []
+    assert funnel.ITEM_QUERY in board.queries
+    assert board.writes == [("SET_LOCK", sorted({
         "project": funnel.PROJECT_ID, "item": "PVTI_{}".format(TICKET),
         "field": funnel.LOCK_FIELD_ID, "value": "",
     }.items()))]

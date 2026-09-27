@@ -1432,10 +1432,12 @@ def post_agent_comment(repo: str, number: int, body: str, *,
 def release_claim(ref: str) -> None:
     """Release through funnel's one lock implementation.
 
-    Releasing finds one item and clears its lock field; no history field is
-    read, so the Project history batch is skipped (#1620).
+    Releasing finds one item and clears its lock field; fetch it by ref and
+    fall back to the compact board if the Project filter misses (#1623).
     """
-    items = funnel.load_items(include_details=False)
+    items = funnel.load_project_items_by_refs([ref])
+    if items is None or len(items) != 1 or items[0].ref != ref:
+        items = funnel.load_items(include_details=False)
     result = funnel.cmd_release(items, datetime.now(timezone.utc), ref)
     if result != 0:
         raise ImplementError("could not release {}".format(ref))

@@ -2882,10 +2882,13 @@ def test_rejected_1612_premise_is_carried_as_a_visible_deferral(tmp_path):
     packet["plan_md"] = "# Plan\n"
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(**packet),
-        answers=_review_answers(_judge_answer(
-            requirement,
-            evidence=("plan_premises[0].premises[0].deferred_answer "
-                      "matches the inferred premise and ticket #1598"))))
+        answers=(
+            _requirements_answer(requirement),
+            _judge_answer(
+                requirement,
+                evidence=("plan_premises[0].premises[0].deferred_answer "
+                          "matches the inferred premise and ticket #1598")),
+        ))
 
     assert proc.returncode == 0, proc.stderr
     lister = (repo / "muse.prompt.1").read_text()

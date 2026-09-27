@@ -112,6 +112,7 @@ def _hunks(repo: Path, sha: str) -> List[Tuple[str, int, int, Optional[str]]]:
     removed code line that begins ``-- `` is never taken for one.
     """
     diff = _git(repo, "diff", "-U0", "--no-color", "--no-ext-diff",
+                "-M", "--inter-hunk-context=0",
                 "--src-prefix=a/", "--dst-prefix=b/", sha + "^", sha)
     old_path: Optional[str] = None
     in_header = False
@@ -125,11 +126,8 @@ def _hunks(repo: Path, sha: str) -> List[Tuple[str, int, int, Optional[str]]]:
             old_path = _diff_path(line)
             continue
         if in_header and line.startswith("+++ "):
-            new_path = _diff_path(line)
+            # A new file has no old lines to blame; old_path stays None.
             in_header = False
-            if old_path is None and new_path and is_code_path(new_path):
-                # A new file has no old lines; record it for hotspots only.
-                hunks.append((new_path, 0, 0, None))
             continue
         if line.startswith("@@"):
             in_header = False
@@ -145,7 +143,9 @@ def _hunks(repo: Path, sha: str) -> List[Tuple[str, int, int, Optional[str]]]:
 def _blame(repo: Path, sha: str, path: str,
            ranges: Sequence[Tuple[int, int]], since: datetime) -> List[str]:
     """The commit that last wrote each listed line of ``path`` before ``sha``."""
-    args = ["blame", "--porcelain", "--since={}".format(since.isoformat())]
+    # An empty ignore-revs file overrides any blame.ignoreRevsFile setting.
+    args = ["blame", "--porcelain", "--ignore-revs-file", "",
+            "--since={}".format(since.isoformat())]
     for start, count in ranges:
         args += ["-L", "{},+{}".format(start, count)]
     out = _git(repo, *args, sha + "^", "--", path)

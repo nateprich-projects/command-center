@@ -147,13 +147,15 @@ def _new_repo(tmp_path, name="r"):
 def test_ticket_accept_scenario_three_fix_commits(tmp_path):
     """#1684 Accept, literally: one cross-fix rewrite, one older, one tests."""
     root = _new_repo(tmp_path)
-    _commit(root, {"app.py": _body("run", ["a = 1", "b = 2"])},
+    _commit(root, {"app.py": _body("run", ["a = 1", "b = 2"]),
+                   "tests/test_app.py": "def test_x():\n    assert 1\n"},
             "Initial", NOW - timedelta(days=30))
     _commit(root, {"app.py": _body("run", ["a = 10", "b = 20"])},
             "Older lines (#1) (#101)", NOW - timedelta(days=3))
     _commit(root, {"app.py": _body("run", ["a = 11", "b = 21"])},
             "Rewrite the fix (#2) (#102)", NOW - timedelta(days=2))
-    _commit(root, {"tests/test_app.py": "def test_x():\n    pass\n"},
+    # Edits existing test lines, so only the non-test filter keeps it out.
+    _commit(root, {"tests/test_app.py": "def test_x():\n    assert 2\n"},
             "Tests only (#3) (#103)", NOW - timedelta(days=1))
 
     result = fr.measure(root, {1: 100, 2: 200, 3: 300}, NOW)
@@ -205,11 +207,12 @@ def test_hotspots_leave_out_a_function_only_one_project_touched(tmp_path):
 
 def test_removed_code_line_starting_with_dashes_is_not_a_header(tmp_path):
     root = _new_repo(tmp_path)
-    _commit(root, {"query.sql": "select 1;\n-- one\n-- two\n"},
+    pad = "".join("select {};\n".format(n) for n in range(10))
+    _commit(root, {"query.sql": "-- one\n" + pad + "-- two\n"},
             "Initial", NOW - timedelta(days=30))
-    _commit(root, {"query.sql": "select 1;\n-- uno\n-- dos\n"},
+    _commit(root, {"query.sql": "-- uno\n" + pad + "-- dos\n"},
             "Fix (#11) (#111)", NOW - timedelta(days=2))
-    _commit(root, {"query.sql": "select 1;\n-- eins\n-- zwei\n"},
+    _commit(root, {"query.sql": "-- eins\n" + pad + "-- zwei\n"},
             "Fix again (#12) (#112)", NOW - timedelta(days=1))
 
     result = fr.measure(root, {11: 1100, 12: 1200}, NOW)
@@ -251,3 +254,35 @@ def test_a_root_commit_naming_a_ticket_is_skipped(tmp_path):
 ])
 def test_code_path_rules(path, code):
     assert fr.is_code_path(path) is code
+
+
+def test_look_back_reaches_a_fix_just_before_the_window(tmp_path):
+    """History spans two windows, so an early-window fix sees its cause."""
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["a = 1", "b = 2"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("run", ["a = 10", "b = 20"])},
+            "Earlier fix (#16) (#116)", NOW - timedelta(days=10))
+    _commit(root, {"app.py": _body("run", ["a = 11", "b = 21"])},
+            "Early-window fix (#17) (#117)", NOW - timedelta(days=6))
+
+    result = fr.measure(root, {16: 1600, 17: 1700}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (1, 1)
+
+
+def test_a_pure_insertion_is_counted_for_hotspots_only(tmp_path):
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["a = 1"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("run", ["a = 1", "b = 2"])},
+            "Insert (#18) (#118)", NOW - timedelta(days=2))
+    _commit(root, {"app.py": _body("run", ["a = 1", "b = 2", "c = 3"])},
+            "Insert more (#19) (#119)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {18: 1800, 19: 1900}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (0, 0)
+    assert [(row["function"], row["count"]) for row in result["hotspots"]] == [
+        ("run", 2)
+    ]

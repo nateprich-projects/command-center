@@ -1155,7 +1155,8 @@ def test_inferred_premise_packet_loads_explicitly_cited_evidence(monkeypatch):
     def fake_ticket(repo, number):
         if number == 9:
             return ticket(parent=parent)
-        return ticket(number=number, ref=repo + "#" + str(number), parent=None)
+        return ticket(number=number, ref=repo + "#" + str(number),
+                      parent=None, state="OPEN")
 
     monkeypatch.setattr(review, "fetch_ticket", fake_ticket)
     monkeypatch.setattr(

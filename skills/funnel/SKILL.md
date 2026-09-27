@@ -71,6 +71,12 @@ Offer the top `launch` command. Do not run it.
 only on his explicit instruction naming item and gate, then comment who
 decided and what moved. Moving to `Shaped` records a plan, not approval.
 
+To hold a finished project at Accept on his instruction, use `funnel hold
+<ref> (--until YYYY-MM-DD | --on N ...) --reason "<why>"`, never prose: it
+writes the `blocked` label and a canonical block comment, which lifts itself
+when the condition is met. Dry run unless `--yes`; it refuses a project that
+closes itself, since the unattended close ignores `blocked` (#1724).
+
 ### Adopt an explicit Proposed class at approval
 
 With Class unset, `approve --yes` adopts exactly one non-empty whole-line

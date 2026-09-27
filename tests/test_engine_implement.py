@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import shlex
@@ -31,6 +32,23 @@ ACCEPT_BODY_CONFLICT_REASON = (
     "plan's active #794 routine freeze. Only tickets under #794 or #1044 "
     "are exempt; #1257 is under #1251, and the current verdict confirms "
     "the conflict. No change was made; wait for #794 to land."
+)
+LIVE_1453_UNSATISFIABLE_ACCEPTANCE = (
+    "The ticket's acceptance requires a heartbeat finish for agent fantasy-gm "
+    "and job com.nateprich.ff-weekly-start-sit.daily, but fantasy-gm is not in "
+    "heartbeat.PROVIDERS and the live FF#230 comment says that daily does not "
+    "publish Command Center heartbeats. The live comment already has the "
+    "requested canonical event form, so no in-scope change can make the "
+    "specified event clear. Parent plan #1403 needs a supported event source "
+    "or revised acceptance before this ticket can proceed. I left the existing "
+    "ticket/1453 branch contents untouched."
+)
+LIVE_1497_PENDING_GATE_ANSWER = (
+    "Unlanded prerequisite: Nate's “Is the plan good?” gate answer for Command "
+    "Center issue 1195 (https://github.com/nateprich-projects/command-center/"
+    "issues/1195) is pending. funnel.py show 1195 reports Shaped at that gate, "
+    "so the escalated shape lane cannot yet produce the required post-fix "
+    "re-shape. No source change was made."
 )
 
 
@@ -842,7 +860,7 @@ def test_finish_blocked_on_human_files_blocks_comments_and_finishes(
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
 
     effects = {"created": [], "blocked": [], "comments": [], "released": [],
-               "finished": [], "needs": []}
+               "finished": [], "needs": [], "siblings": []}
 
     def create(repo, parent, title, body, **kwargs):
         effects["created"].append((repo, parent, title, body))
@@ -863,6 +881,8 @@ def test_finish_blocked_on_human_files_blocks_comments_and_finishes(
         comment_effect=lambda *args, **kwargs: effects["comments"].append(
             (args, kwargs)),
         needs_effect=lambda url, ref: effects["needs"].append((url, ref)),
+        sub_issues_effect=lambda repo, number: effects["siblings"].append(
+            (repo, number)) or [],
     )
 
     assert result == {"ticket": REPO + "#42",
@@ -891,6 +911,8 @@ def test_finish_blocked_on_human_files_blocks_comments_and_finishes(
          "stopped: human step filed as #43; ticket blocked; no PR opened",
          REPO + "#42")
     ]
+    # The parent's steps were read before filing (#1726).
+    assert effects["siblings"] == [(REPO, 7)]
 
     refs = run_git("--git-dir", str(remote), "show-ref").stdout
     assert "ticket/42" not in refs
@@ -940,7 +962,313 @@ def test_finish_blocked_on_human_names_what_exists_when_comment_fails(
                 "url": "https://github.com/{}/issues/43".format(REPO)},
             block_effect=lambda *args, **kwargs: None,
             comment_effect=fail_comment,
+            sub_issues_effect=lambda repo, number: [],
         )
+
+
+# A human step Nate closed as not planned is never filed again for the same
+# ticket (#1726). Synthetic fixtures: steps are sub-issues of parent #7, the
+# ticket is #42, and the head is the pushed tip of ticket/42.
+CLOSED_STEP_HEAD = "a" * 40
+
+
+def human_step_row(number, *, ticket_number=42, state="CLOSED",
+                   state_reason="NOT_PLANNED", repo=REPO):
+    return {
+        "ref": "{}#{}".format(repo, number),
+        "repo": repo,
+        "number": number,
+        "state": state,
+        "state_reason": state_reason,
+        "body": implement.render_human_step_body(
+            parent_number=7, ticket_number=ticket_number,
+            reason="an account or billing setting",
+            action="Turn on the dashboard toggle"),
+    }
+
+
+def run_blocked_with_siblings(clone, rows, effects, *, comments=(),
+                              head=CLOSED_STEP_HEAD, run="run-42",
+                              comment_effect=None):
+    """Run the blocked finish with every read stubbed and every effect kept."""
+    def keep_comment(repo, number, body, **kwargs):
+        effects["comments"].append(body)
+
+    return implement.finish_blocked_on_human(
+        blocked("an account or billing setting",
+                "Turn on the dashboard toggle again")["blocked_on_human"],
+        run=run,
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        create_effect=lambda *args, **kwargs: effects["created"].append(
+            args) or {"number": 43, "ref": REPO + "#43",
+                      "url": "https://github.com/{}/issues/43".format(REPO)},
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=comment_effect or keep_comment,
+        needs_effect=lambda url, ref: effects["step_needs"].append(ref),
+        sub_issues_effect=lambda repo, number: list(rows),
+        comments_effect=lambda repo, number: effects["comment_reads"].append(
+            number) or list(comments),
+        head_effect=lambda root, branch: effects["head_reads"].append(
+            branch) or head,
+        route_needs_effect=lambda url, ref: effects["agent_needs"].append(ref),
+        human_needs_effect=lambda url, ref: effects["human_needs"].append(ref),
+    )
+
+
+def closed_step_effects():
+    return {"created": [], "blocked": [], "comments": [], "released": [],
+            "finished": [], "step_needs": [], "comment_reads": [],
+            "head_reads": [], "agent_needs": [], "human_needs": []}
+
+
+def route_record(comment):
+    assert implement.DECLINE_REVIEW_ROUTING_MARKER in comment
+    return json.loads(comment.split("```json\n", 1)[1].split("\n```", 1)[0])
+
+
+def as_posted(body, run):
+    """What post_agent_comment actually leaves on the ticket."""
+    return funnel.append_provenance(body, "agent", run=run, agent="codex")
+
+
+def test_a_closed_not_planned_step_for_the_ticket_routes_without_filing(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = closed_step_effects()
+    # An older closed step and the newest one: the newest is cited.
+    rows = [human_step_row(50), human_step_row(57), human_step_row(44,
+            state="OPEN", ticket_number=41)]
+
+    result = run_blocked_with_siblings(clone, rows, effects)
+
+    assert result == {"ticket": REPO + "#42",
+                      "closed_human_step": REPO + "#57",
+                      "routed": "review"}
+    # Nothing filed, nothing blocked, no Needs for Nate.
+    assert effects["created"] == []
+    assert effects["step_needs"] == []
+    assert effects["blocked"] == []
+    assert effects["human_needs"] == []
+    # Needs stays with the agents, and one comment cites the closed step.
+    assert effects["agent_needs"] == [REPO + "#42"]
+    (comment,) = effects["comments"]
+    assert comment.startswith("**Review routing: Closed human step**\n\n")
+    assert REPO + "#57" in comment.split(
+        implement.DECLINE_REVIEW_ROUTING_MARKER, 1)[0]
+    assert route_record(comment) == {
+        "type": "closed-human-step",
+        "human_step": REPO + "#57",
+        "head_sha": CLOSED_STEP_HEAD,
+        "requested_reason": "an account or billing setting",
+        "requested_action": "Turn on the dashboard toggle again",
+    }
+    assert effects["head_reads"] == ["ticket/42"]
+    assert effects["comment_reads"] == [42]
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"] == [
+        ("codex", "run-42", "skipped-blocked",
+         "human step not filed: {}#57 was closed as not planned; routed to "
+         "review and shaping".format(REPO),
+         REPO + "#42")
+    ]
+
+
+def test_a_second_run_at_an_unchanged_head_hands_the_ticket_to_nate(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    rows = [human_step_row(57)]
+    first = closed_step_effects()
+    run_blocked_with_siblings(clone, rows, first, run="run-1")
+    posted = [as_posted(body, "run-1") for body in first["comments"]]
+
+    second = closed_step_effects()
+    result = run_blocked_with_siblings(
+        clone, rows, second, comments=posted, run="run-2")
+
+    assert result == {"ticket": REPO + "#42",
+                      "closed_human_step": REPO + "#57",
+                      "routed": "human"}
+    # Neither files nor re-routes.
+    assert second["created"] == []
+    assert second["step_needs"] == []
+    assert second["agent_needs"] == []
+    assert second["human_needs"] == [REPO + "#42"]
+    (comment,) = second["comments"]
+    assert implement.DECLINE_REVIEW_ROUTING_MARKER not in comment
+    assert comment.startswith(
+        "**Needs Nate: closed human step {}#57**".format(REPO))
+    assert CLOSED_STEP_HEAD[:12] in comment
+    assert second["released"] == [REPO + "#42"]
+    assert second["finished"] == [
+        ("codex", "run-2", "skipped-blocked",
+         "human step not filed: {}#57 was closed as not planned; already "
+         "routed at this head; Needs human".format(REPO),
+         REPO + "#42")
+    ]
+
+
+@pytest.mark.parametrize("change", ["new head", "other step", "not agent"])
+def test_a_route_for_another_head_or_step_routes_again(
+        tmp_path, monkeypatch, change):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    earlier = implement.render_closed_step_route(
+        REPO + ("#50" if change == "other step" else "#57"),
+        CLOSED_STEP_HEAD, blocked()["blocked_on_human"])
+    # A relayed comment quoting the record is not the runner's route.
+    posted = (funnel.append_provenance(earlier, "nate-relayed")
+              if change == "not agent" else as_posted(earlier, "run-1"))
+    effects = closed_step_effects()
+
+    result = run_blocked_with_siblings(
+        clone, [human_step_row(57)], effects, comments=[posted],
+        head="b" * 40 if change == "new head" else CLOSED_STEP_HEAD)
+
+    assert result["routed"] == "review"
+    assert effects["agent_needs"] == [REPO + "#42"]
+    assert effects["human_needs"] == []
+    assert effects["created"] == []
+
+
+def test_a_second_run_with_no_pushed_branch_also_hands_to_nate(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    rows = [human_step_row(57)]
+    first = closed_step_effects()
+    run_blocked_with_siblings(clone, rows, first, head=None, run="run-1")
+    assert route_record(first["comments"][0])["head_sha"] is None
+
+    second = closed_step_effects()
+    result = run_blocked_with_siblings(
+        clone, rows, second, head=None, run="run-2",
+        comments=[as_posted(body, "run-1") for body in first["comments"]])
+
+    assert result["routed"] == "human"
+    assert second["human_needs"] == [REPO + "#42"]
+    assert "no pushed branch" in second["comments"][0]
+
+
+@pytest.mark.parametrize("row", [
+    human_step_row(57, ticket_number=41),
+    human_step_row(57, ticket_number=420),
+    human_step_row(57, ticket_number=4),
+    human_step_row(57, state="OPEN", state_reason=""),
+    human_step_row(57, state_reason="COMPLETED"),
+    human_step_row(57, repo="other/tools"),
+], ids=["other ticket", "longer number", "shorter number", "open",
+        "completed", "other repo"])
+def test_a_step_for_another_ticket_or_open_or_completed_changes_nothing(
+        tmp_path, monkeypatch, row):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = closed_step_effects()
+
+    result = run_blocked_with_siblings(clone, [row], effects)
+
+    assert result["human_step"]["ref"] == REPO + "#43"
+    assert len(effects["created"]) == 1
+    assert effects["step_needs"] == [REPO + "#43"]
+    ((_, number), kwargs), = effects["blocked"]
+    assert number == 42 and kwargs["blocked_by"] == 43
+    assert effects["comments"] == [
+        "**Blocked on #43:** Complete the human step before resuming "
+        "this ticket."]
+    assert effects["finished"][0][2] == "skipped-human-step"
+    # The closed-step path's reads and routes never ran.
+    assert effects["comment_reads"] == []
+    assert effects["head_reads"] == []
+    assert effects["agent_needs"] == []
+    assert effects["human_needs"] == []
+
+
+def test_a_failed_closed_step_route_falls_back_to_nate_and_blocked(
+        tmp_path, monkeypatch):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = closed_step_effects()
+
+    def fail_comment(*args, **kwargs):
+        raise funnel.GitHubError("could not post the review handoff")
+
+    result = run_blocked_with_siblings(
+        clone, [human_step_row(57)], effects, comment_effect=fail_comment)
+
+    assert result["routed"] == "blocked"
+    assert effects["created"] == []
+    assert effects["human_needs"] == [REPO + "#42"]
+    ((_, number), kwargs), = effects["blocked"]
+    assert number == 42 and kwargs.get("blocked_by") is None
+    assert effects["finished"][0][2] == "skipped-blocked"
+    assert effects["finished"][0][3].endswith(
+        "review routing failed; ticket left blocked")
+
+
+def test_read_parent_sub_issues_pages_every_step_with_its_close_reason(
+        monkeypatch):
+    pages = [
+        {"totalCount": 2,
+         "nodes": [{"number": 50, "state": "CLOSED",
+                    "stateReason": "NOT_PLANNED", "body": "first",
+                    "repository": {"nameWithOwner": REPO}}],
+         "pageInfo": {"hasNextPage": True, "endCursor": "c1"}},
+        {"totalCount": 2,
+         "nodes": [{"number": 9, "state": "OPEN", "stateReason": None,
+                    "body": None,
+                    "repository": {"nameWithOwner": "other/tools"}}],
+         "pageInfo": {"hasNextPage": False, "endCursor": "c2"}},
+    ]
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append(variables)
+        return {"repository": {"issue": {"subIssues": pages[len(calls) - 1]}}}
+
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    rows = implement.read_parent_sub_issues(REPO, 7)
+
+    assert rows == [
+        {"ref": REPO + "#50", "repo": REPO, "number": 50, "state": "CLOSED",
+         "state_reason": "NOT_PLANNED", "body": "first"},
+        {"ref": "other/tools#9", "repo": "other/tools", "number": 9,
+         "state": "OPEN", "state_reason": "", "body": ""},
+    ]
+    assert calls == [
+        {"owner": "owner", "name": "repo", "number": 7},
+        {"owner": "owner", "name": "repo", "number": 7, "after": "c1"},
+    ]
+
+
+def test_read_parent_sub_issues_fails_closed_on_a_short_read(monkeypatch):
+    monkeypatch.setattr(funnel, "gh_graphql", lambda query, **variables: {
+        "repository": {"issue": {"subIssues": {
+            "totalCount": 3, "nodes": [],
+            "pageInfo": {"hasNextPage": False, "endCursor": None}}}}})
+
+    with pytest.raises(funnel.GitHubError, match="read 0 of 3"):
+        implement.read_parent_sub_issues(REPO, 7)
+
+
+def test_remote_ticket_head_reads_the_pushed_tip_or_none(tmp_path):
+    _, clone = make_clone(tmp_path)
+    assert implement.remote_ticket_head(clone, "ticket/42") is None
+
+    run_git("push", "--quiet", "origin", "ticket/42", cwd=clone)
+    tip = run_git("rev-parse", "HEAD", cwd=clone).stdout.strip()
+    assert implement.remote_ticket_head(clone, "ticket/42") == tip
+
+    # A local commit that was never pushed does not move the head.
+    (clone / "local.txt").write_text("unpushed\n")
+    run_git("add", "local.txt", cwd=clone)
+    run_git("commit", "--quiet", "-m", "local", cwd=clone)
+    assert implement.remote_ticket_head(clone, "ticket/42") == tip
 
 
 def test_finish_declined_labels_comments_releases_and_finishes(
@@ -1049,6 +1377,26 @@ def test_finish_declined_requeues_false_ff_225_claim_with_evidence(
         tmp_path, monkeypatch, ff_225_landed_prerequisite_facts):
     _, clone = make_clone(tmp_path)
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    summaries = []
+
+    def read_ticket_completion(query, *, owner, name, number):
+        summaries.append((query, owner, name, number))
+        return {
+            "repository": {
+                "issue": {
+                    "number": number,
+                    "state": "CLOSED",
+                    "subIssuesSummary": {
+                        "total": ff_225_landed_prerequisite_facts[
+                            "children_total"],
+                        "completed": ff_225_landed_prerequisite_facts[
+                            "children_completed"],
+                    },
+                },
+            },
+        }
+
+    monkeypatch.setattr(funnel, "gh_graphql", read_ticket_completion)
     reason = (
         "Named prerequisite nateprich-projects/Fantasy-GM#225 is unlanded: "
         "it self-closed after plan drift and a rejected review verdict, "
@@ -1071,8 +1419,6 @@ def test_finish_declined_requeues_false_ff_225_claim_with_evidence(
         needs_effect=lambda url, ref: effects["needs"].append((url, ref)),
         human_needs_effect=lambda url, ref: effects["human_needs"].append(
             (url, ref)),
-        prerequisite_facts_effect=lambda ref: (
-            ff_225_landed_prerequisite_facts),
         clear_block_effect=lambda repo, number, **kwargs:
             effects["cleared"].append((repo, number, kwargs)),
         prerequisite_edge_effect=lambda *args, **kwargs: pytest.fail(
@@ -1082,14 +1428,24 @@ def test_finish_declined_requeues_false_ff_225_claim_with_evidence(
     assert result == {"ticket": REPO + "#42", "declined": reason}
     assert effects["blocked"] == []
     assert effects["human_needs"] == []
+    assert len(summaries) == 1
+    query, owner, name, number = summaries[0]
+    assert (owner, name, number) == ("nateprich-projects", "Fantasy-GM", 225)
+    assert "subIssuesSummary { total completed }" in query
+    assert ff_225_landed_prerequisite_facts["parent_merge_pr"] is None
+    assert ff_225_landed_prerequisite_facts["drift"]
     assert effects["cleared"] == [(REPO, 42, {"cwd": clone})]
     assert effects["needs"] == [(ticket()["url"], REPO + "#42")]
     posted = effects["comments"][0][0][2]
     assert posted.startswith("**Declined:** {}".format(reason))
     assert "Fantasy-GM#225" in posted
+    assert "**False unlanded-prerequisite check:**" in posted
     assert "all 5 child tickets completed (5/5)" in posted
     assert effects["released"] == [REPO + "#42"]
-    assert "prerequisite already landed; returned to agent queue" in (
+    assert (
+        "false unlanded-prerequisite claim disproved by closed child tickets; "
+        "returned to agent queue"
+    ) in (
         effects["finished"][0][3])
 
 
@@ -1417,6 +1773,243 @@ def test_finish_declined_falls_back_to_blocked_for_non_prerequisite_cases(
         assert effects["edges"] == [(REPO, 42, REPO + "#165")]
 
 
+@pytest.mark.parametrize(("reason", "route"), [
+    (LIVE_1453_UNSATISFIABLE_ACCEPTANCE, "agent"),
+    (LIVE_1497_PENDING_GATE_ANSWER, "external-event"),
+])
+def test_finish_declined_routes_no_clearable_condition_shapes_without_blocking(
+        tmp_path, monkeypatch, reason, route):
+    """The live #1453/#1497 declines must not manufacture an Unblock gate."""
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"blocked": [], "comments": [], "released": [], "finished": [],
+               "agent": [], "external": [], "cleared": []}
+
+    result = implement.finish_declined(
+        reason,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda url, ref: effects["agent"].append((url, ref)),
+        human_needs_effect=lambda *args: pytest.fail(
+            "a no-clearable-condition decline must not reach Nate"),
+        external_event_needs_effect=lambda url, ref: effects["external"].append(
+            (url, ref)),
+        prerequisite_facts_effect=lambda ref: pytest.fail(
+            "these decline shapes are not named prerequisite tickets"),
+        clear_block_effect=lambda repo, number, **kwargs:
+            effects["cleared"].append((repo, number, kwargs)),
+    )
+
+    assert result == {"ticket": REPO + "#42", "declined": reason}
+    assert effects["blocked"] == []
+    assert effects["cleared"] == [(REPO, 42, {"cwd": clone})]
+    assert effects["agent"] == (
+        [(ticket()["url"], REPO + "#42")] if route == "agent" else [])
+    assert effects["external"] == (
+        [(ticket()["url"], REPO + "#42")]
+        if route == "external-event" else [])
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["comments"][0][0][2] == "**Declined:** {}".format(reason)
+    assert effects["finished"][0][:3] == (
+        "codex", "run-42", "skipped-blocked")
+    route_note = (
+        "routed for reshaping" if route == "agent"
+        else "waiting for the named gate answer"
+    )
+    assert route_note in effects["finished"][0][3]
+    route_record = funnel._marked_json(
+        effects["comments"][1][0][2],
+        implement.DECLINE_REVIEW_ROUTING_MARKER,
+    )
+    if route == "agent":
+        assert route_record["type"] == "unsatisfiable-acceptance"
+        assert route_record["acceptance_digest"] == hashlib.sha256(
+            ticket()["body"].encode("utf-8")
+        ).hexdigest()
+    else:
+        assert route_record["type"] == "pending-gate-answer"
+        assert route_record["gate_ref"] == "nateprich-projects/command-center#1195"
+
+
+def test_unsatisfiable_decline_is_withheld_until_acceptance_changes():
+    parent = funnel.Item(
+        repo=REPO, number=7, title="the settled plan", url="https://example/7",
+        state="OPEN", status="Ready", klass="Improve",
+    )
+    body = "Accept: a condition no agent can satisfy"
+    item = funnel.Item(
+        repo=REPO, number=42, title="implementation", url="https://example/42",
+        state="OPEN", body=body, needs="agent", parent=parent.ref,
+        decline_route={
+            "type": "unsatisfiable-acceptance",
+            "acceptance_digest": hashlib.sha256(
+                body.encode("utf-8")
+            ).hexdigest(),
+        },
+    )
+
+    assert funnel.startable([parent, item]) == []
+
+    item.body = body + "\n\nAccept revised after shaping."
+    assert [row.ref for row in funnel.startable([parent, item])] == [item.ref]
+
+
+def test_pending_gate_decline_waits_then_clears_needs(monkeypatch):
+    parent = funnel.Item(
+        repo=REPO, number=7, title="the settled plan", url="https://example/7",
+        state="OPEN", status="Ready", klass="Improve",
+    )
+    gate = funnel.Item(
+        repo="nateprich-projects/command-center", number=1195,
+        title="answer the gate", url="https://example/1195",
+        state="OPEN", body="Gates: is the plan good?",
+    )
+    item = funnel.Item(
+        repo=REPO, number=42, title="implementation", url="https://example/42",
+        state="OPEN", body="Accept: wait for the gate", needs="external-event",
+        parent=parent.ref, item_id="project-item-42",
+        decline_route={
+            "type": "pending-gate-answer",
+            "gate_ref": gate.ref,
+        },
+    )
+    rows = [parent, gate, item]
+    writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            writes.append((item_id, field, value, ref)),
+    )
+
+    assert funnel.startable(rows) == []
+    gate.body = "Gates: is the plan good?\n\n" + funnel.gates_answer_block(
+        "the plan is good", "Nate",
+    )
+
+    assert funnel.clear_answered_decline_routes(rows) == [
+        {"ref": item.ref, "gate_ref": gate.ref}
+    ]
+    assert writes == [
+        ("project-item-42", "Needs", "none", item.ref)
+    ]
+    assert item.needs == "none"
+    assert [row.ref for row in funnel.startable(rows)] == [item.ref]
+
+
+def test_decline_route_comment_matches_the_latest_decline_run():
+    reason = LIVE_1453_UNSATISFIABLE_ACCEPTANCE
+    body = ticket()["body"]
+    now = funnel.datetime.now(funnel.timezone.utc)
+    earlier_decline = funnel.append_provenance(
+        "**Declined:** an earlier reason", "agent", at=now,
+        run="run-old", agent="codex",
+    )
+    earlier_route = funnel.append_provenance(
+        implement._declined_unsatisfiable_acceptance_comment(
+            "an earlier reason", hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        ),
+        "agent", at=now, run="run-old", agent="codex",
+    )
+    latest_decline = funnel.append_provenance(
+        "**Declined:** {}".format(reason), "agent", at=now,
+        run="run-new", agent="codex",
+    )
+
+    assert funnel.parse_decline_route_comment(
+        [earlier_decline, earlier_route, latest_decline]
+    ) is None
+
+    latest_route = funnel.append_provenance(
+        implement._declined_unsatisfiable_acceptance_comment(
+            reason, hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        ),
+        "agent", at=now, run="run-new", agent="codex",
+    )
+    route = funnel.parse_decline_route_comment(
+        [earlier_decline, earlier_route, latest_decline, latest_route]
+    )
+    assert route is not None
+    assert route["type"] == "unsatisfiable-acceptance"
+
+
+def test_write_declined_external_event_needs_uses_canonical_field(monkeypatch):
+    from engine import breakdown as breakdown_engine
+
+    calls = []
+    monkeypatch.setattr(
+        breakdown_engine, "add_to_project", lambda url: "project-item-id")
+    monkeypatch.setattr(
+        breakdown_engine, "write_needs",
+        lambda item_id, needs, ref: calls.append((item_id, needs, ref)),
+    )
+
+    implement.write_declined_external_event_needs(
+        ticket()["url"], REPO + "#42",
+    )
+
+    assert calls == [("project-item-id", "external-event", REPO + "#42")]
+
+
+def test_finish_declined_keeps_a_clearable_human_condition_blocked(
+        tmp_path, monkeypatch):
+    """A real owner decision still gets the existing blocked/Unblock route."""
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    reason = (
+        "Nate can clear this by answering whether the requested scope is "
+        "acceptable."
+    )
+    blocked_item = funnel.Item(
+        repo=REPO,
+        number=42,
+        title="implement the bounded runner",
+        url=ticket()["url"],
+        state="OPEN",
+        parent=REPO + "#7",
+    )
+    effects = {"blocked": [], "comments": [], "released": [], "finished": [],
+               "human": []}
+
+    def record_block(*args, **kwargs):
+        effects["blocked"].append((args, kwargs))
+        blocked_item.labels.append("blocked")
+
+    def record_human_needs(url, ref):
+        effects["human"].append((url, ref))
+        blocked_item.needs = "human"
+
+    implement.finish_declined(
+        reason,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=record_block,
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda *args: pytest.fail(
+            "a clearable human condition must not be routed to agents"),
+        human_needs_effect=record_human_needs,
+        external_event_needs_effect=lambda *args: pytest.fail(
+            "a direct owner decision is not a pending gate event"),
+    )
+
+    assert len(effects["blocked"]) == 1
+    assert effects["blocked"][0][0][1] == 42
+    assert effects["human"] == [(ticket()["url"], REPO + "#42")]
+    assert effects["released"] == [REPO + "#42"]
+    assert effects["finished"][0][2] == "skipped-blocked"
+    assert funnel.gate_question(blocked_item) == "Unblock?"
+
+
 @pytest.mark.parametrize(("reason", "ticket_repo", "expected"), [
     ("Unlanded prerequisite #165 is still open.", REPO,
      ("prerequisite-ticket", REPO + "#165")),
@@ -1448,6 +2041,16 @@ def test_classify_decline_reason_uses_only_named_prerequisite_reference(
 ])
 def test_classify_decline_reason_routes_only_pointed_accept_conflicts(
         reason, expected):
+    assert implement.classify_decline_reason(reason, REPO) == expected
+
+
+@pytest.mark.parametrize(("reason", "expected"), [
+    (LIVE_1453_UNSATISFIABLE_ACCEPTANCE,
+     ("unsatisfiable-acceptance", None)),
+    (LIVE_1497_PENDING_GATE_ANSWER,
+     ("pending-gate-answer", "nateprich-projects/command-center#1195")),
+])
+def test_classify_decline_reason_routes_unactionable_shapes(reason, expected):
     assert implement.classify_decline_reason(reason, REPO) == expected
 
 

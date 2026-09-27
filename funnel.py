@@ -22,6 +22,7 @@ from collections import namedtuple
 from concurrent.futures import ThreadPoolExecutor
 import errno
 import glob
+import hashlib
 import hmac
 import inspect
 import io
@@ -779,6 +780,7 @@ class Item:
     blocked_until: Optional[date] = None
     needs_decision: Optional[str] = None
     decline_reason: Optional[str] = None
+    decline_route: Optional[Dict[str, object]] = None
     unparseable_block_comments: List[str] = field(default_factory=list)
     block_comments_error: Optional[str] = None
     satisfied_block_record: Optional[Dict[str, object]] = None
@@ -1947,6 +1949,62 @@ def required_tier(title: str, body: str, failed_before: bool = False) -> str:
     return "escalated" if escalation_reasons(title, body, failed_before) else "standard"
 
 
+def _decline_route_withholds_startability(
+    item: Item, by_ref: Dict[str, Item],
+) -> bool:
+    """Keep routed declines out of implementation until their route clears."""
+    route = item.decline_route
+    if not isinstance(route, dict):
+        return False
+    if (
+        item.needs == "agent"
+        and route.get("type") == "unsatisfiable-acceptance"
+    ):
+        if not isinstance(item.body, str):
+            return True
+        current_digest = hashlib.sha256(
+            item.body.encode("utf-8")
+        ).hexdigest()
+        return current_digest == route.get("acceptance_digest")
+    if (
+        item.needs == "external-event"
+        and route.get("type") == "pending-gate-answer"
+    ):
+        gate_ref = route.get("gate_ref")
+        gate = by_ref.get(gate_ref) if isinstance(gate_ref, str) else None
+        return (
+            gate is None
+            or not isinstance(gate.body, str)
+            or parse_gates_answer(gate.body) is None
+        )
+    return False
+
+
+def clear_answered_decline_routes(
+    items: Sequence[Item],
+) -> List[Dict[str, str]]:
+    """Clear Needs after a pending gate answer has been recorded."""
+    by_ref = {item.ref: item for item in items}
+    cleared = []
+    for item in items:
+        route = item.decline_route
+        if (
+            item.state != "OPEN"
+            or item.needs != "external-event"
+            or not isinstance(route, dict)
+            or route.get("type") != "pending-gate-answer"
+            or _decline_route_withholds_startability(item, by_ref)
+        ):
+            continue
+        if not item.item_id:
+            raise GitHubError("{} is not in the Project".format(item.ref))
+        gate_ref = str(route["gate_ref"])
+        write_project_select(item.item_id, "Needs", "none", item.ref)
+        item.needs = "none"
+        cleared.append({"ref": item.ref, "gate_ref": gate_ref})
+    return cleared
+
+
 def _startable_without_repo_readiness(
     item: Item,
     by_ref: Dict[str, Item],
@@ -1963,6 +2021,11 @@ def _startable_without_repo_readiness(
         or item.open_blockers
         or item.children_total
         or needs not in NEEDS_OPTIONS
+        or (
+            needs in ("agent", "external-event")
+            and item.block_comments_error is not None
+        )
+        or (needs == "external-event" and item.decline_route is None)
         # The Needs field is the only capability signal (#826). A
         # claude-code-environment ticket is the middle outcome: Claude Code
         # may work it, while every other requester must leave it in the
@@ -1970,6 +2033,8 @@ def _startable_without_repo_readiness(
         # established for the marker this field replaced.
         or (human or (machine_local and agent != "claude"))
     ):
+        return False
+    if _decline_route_withholds_startability(item, by_ref):
         return False
     if item.ref in awaiting_review:
         return False
@@ -3608,6 +3673,62 @@ def parse_decline_comment(bodies: Iterable[str]) -> Optional[str]:
             continue
         reason = body[len(DECLINED_PREFIX):].strip()
         return reason.splitlines()[0].strip() if reason else ""
+    return None
+
+
+def parse_decline_route_comment(
+    bodies: Iterable[str],
+) -> Optional[Dict[str, object]]:
+    """Read the durable route belonging to the newest agent decline."""
+    rows = list(bodies)
+    latest_run = None
+    for body in reversed(rows):
+        if not isinstance(body, str) or not body.startswith(DECLINED_PREFIX):
+            continue
+        provenance = parse_provenance(body)
+        if (
+            provenance is not None
+            and provenance.get("voice") == "agent"
+            and isinstance(provenance.get("run"), str)
+            and provenance.get("run")
+        ):
+            latest_run = provenance["run"]
+            break
+    if latest_run is None:
+        return None
+
+    for body in reversed(rows):
+        if (
+            not isinstance(body, str)
+            or DECLINE_ROUTING_REVIEW_MARKER not in body
+        ):
+            continue
+        record = _marked_json(body, DECLINE_ROUTING_REVIEW_MARKER)
+        provenance = parse_provenance(body)
+        if (
+            not isinstance(record, dict)
+            or not isinstance(record.get("decline_excerpt"), str)
+            or provenance is None
+            or provenance.get("voice") != "agent"
+            or provenance.get("run") != latest_run
+        ):
+            continue
+        route_type = record.get("type")
+        if route_type == "unsatisfiable-acceptance":
+            digest = record.get("acceptance_digest")
+            if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+                return record
+        elif route_type == "pending-gate-answer":
+            gate_ref = record.get("gate_ref")
+            if (
+                isinstance(gate_ref, str)
+                and re.fullmatch(
+                    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*",
+                    gate_ref,
+                )
+            ):
+                return record
+        return None
     return None
 
 
@@ -10240,7 +10361,10 @@ def _load_begin_items(
             # Membership is the topic, exactly as in the full load.
             if item.repo not in members:
                 continue
-            if item.state == "OPEN" and item.is_blocked:
+            if item.state == "OPEN" and (
+                item.is_blocked
+                or item.needs in ("agent", "external-event")
+            ):
                 comment_started = time.perf_counter()
                 try:
                     _load_block_comment(item)
@@ -10383,7 +10507,10 @@ def _load_project_items_by_refs(refs: Sequence[str]) -> Dict[str, Item]:
                         "without the issue itself".format(ref)
                     )
                 continue
-            if match.state == "OPEN" and match.is_blocked:
+            if match.state == "OPEN" and (
+                match.is_blocked
+                or match.needs in ("agent", "external-event")
+            ):
                 _load_block_comment(match)
             found[ref] = match
     return found
@@ -10623,7 +10750,10 @@ def load_items(
                     # them from `blockedBy` in the Project query. They used to
                     # be fetched here instead, one REST call per open ticket —
                     # do not restore a per-item dependency read in this loop.
-                    if item.state == "OPEN" and item.is_blocked:
+                    if item.state == "OPEN" and (
+                        item.is_blocked
+                        or item.needs in ("agent", "external-event")
+                    ):
                         comment_started = time.perf_counter()
                         try:
                             _load_block_comment(item)
@@ -14503,6 +14633,110 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
     return 0
 
 
+def _hold_refusal(item: Item) -> Optional[str]:
+    """Why ``item`` cannot be held at Accept, or ``None`` when it can (#1724).
+
+    A hold means something only where ``gate_question`` would otherwise ask
+    "Accept it?": an open Building project with every ticket closed that does
+    not close itself. The unattended close (``_auto_closeable_project``)
+    never reads ``blocked``, so a hold on a project that closes itself would
+    be recorded and then ignored.
+    """
+    if item.parent is not None:
+        return "{} is a ticket; only a finished project waits at Accept".format(
+            item.ref)
+    if item.state != "OPEN":
+        return "{} is {}; only an open project waits at Accept".format(
+            item.ref, item.state)
+    if item.status != "Building":
+        return (
+            "{} is at {}, not Building; only a finished Building project "
+            "waits at Accept".format(item.ref, item.status or "no status")
+        )
+    if item.children_total == 0:
+        return (
+            "{} has no tickets; it is waiting to be broken down, not "
+            "waiting at Accept".format(item.ref)
+        )
+    if not item.children_all_closed:
+        return (
+            "{} still has open tickets ({}/{} closed); it is not waiting at "
+            "Accept yet".format(
+                item.ref, item.children_done, item.children_total)
+        )
+    if _can_close_itself(item):
+        return (
+            "{} closes itself when its tickets close (Class {}), and the "
+            "unattended close ignores `blocked`, so a hold would do "
+            "nothing".format(item.ref, item.klass or "unset")
+        )
+    return None
+
+
+def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
+             until: Optional[date] = None, on: Sequence[str] = (),
+             confirmed: bool = False, run: Optional[str] = None,
+             agent: Optional[str] = None,
+             instruction: Optional[str] = None) -> int:
+    """Record Nate's hold on a finished project at Accept (#1724).
+
+    A hold written as prose ("Accept held by Nate ...") is read by nothing, so
+    the project kept asking "Accept it?". The ``blocked`` label with a
+    parseable ``**Blocked until/on ...:**`` comment already takes an item out
+    of his queue, shows its condition, and is lifted by
+    ``clear_satisfied_blocks`` once that condition is met; this verb writes
+    exactly that form, in Nate's relayed voice.
+
+    **Dry run unless ``confirmed``**, like the gate answers: holding is
+    Nate's call at his own gate.
+    """
+    item = find(items, ref)
+    refusal = _hold_refusal(item)
+    if refusal is not None:
+        raise GitHubError(refusal)
+    if (until is None) == (not on):
+        raise GitHubError("a hold needs exactly one of --until or --on")
+    if until is not None and until <= _block_condition_date(now):
+        raise GitHubError("hold date must be after today's UTC date")
+    body = _hold_comment_body(reason, until=until, on=on)
+
+    if not confirmed:
+        print("would hold {} at Accept ({}) with the blocked label and:".format(
+            item.ref, item.title))
+        print(body)
+        print("\nNothing was changed. Re-run with --yes to record the hold.")
+        return 1
+
+    # Comment first, as ``comment --needs-decision`` does: a label without
+    # its condition would read as a silent block asking "Unblock or park?",
+    # while a comment without its label changes nothing and is superseded by
+    # the retry's newer copy.
+    comment = _run_gh(
+        ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+         "--body", append_provenance(
+             body, "nate-relayed", at=now,
+             run=run, agent=agent, instruction=instruction)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+    edit = _run_gh(
+        ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
+         "--add-label", "blocked"],
+        capture_output=True, text=True,
+    )
+    if edit.returncode != 0:
+        raise GitHubError(
+            "recorded the hold comment on {}, but could not add its blocked "
+            "label: {}".format(item.ref, edit.stderr.strip())
+        )
+    if not item.is_blocked:
+        item.labels.append("blocked")
+
+    print("{} held at Accept\n{}".format(item.ref, body))
+    return 0
+
+
 def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
                      answer: str, decider: str,
                      run: Optional[str] = None,
@@ -15301,6 +15535,7 @@ def _load_block_comment(item: Item) -> None:
         ) = parsed
     item.needs_decision = parse_needs_decision_comment(bodies)
     item.decline_reason = parse_decline_comment(bodies)
+    item.decline_route = parse_decline_route_comment(bodies)
     for body in reversed(bodies):
         record = parse_satisfied_block_comment(body)
         if record is not None:
@@ -17051,6 +17286,11 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
         )
         if cleared:
             out["cleared_blocks"] = cleared
+        cleared_decline_routes = attempt_reconcile(
+            "answered_decline_routes", clear_answered_decline_routes, items
+        )
+        if cleared_decline_routes:
+            out["cleared_decline_routes"] = cleared_decline_routes
         abandoned = attempt_reconcile(
             "abandoned_claims", reconcile_abandoned_claims,
             items, now, pr_facts,
@@ -18673,6 +18913,51 @@ def _needs_decision_comment_body(question: str) -> str:
     return "{} {}".format(NEEDS_DECISION_PREFIX, question)
 
 
+def _hold_reference(value: str) -> str:
+    """Normalise one ``hold --on`` issue number exactly as ``--blocked-on``."""
+    try:
+        return _blocked_reference(value)
+    except argparse.ArgumentTypeError:
+        raise argparse.ArgumentTypeError(
+            "a positive issue number is required for --on"
+        )
+
+
+def _hold_until_date(value: str) -> date:
+    """Require a future calendar date for ``hold --until`` before loading.
+
+    ``satisfied_block_refs`` counts a date on or before today's UTC date as
+    met, so a hold dated today would be lifted by the next clear pass.
+    """
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        raise argparse.ArgumentTypeError("hold date must use YYYY-MM-DD")
+    try:
+        until = date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "hold date must be a valid YYYY-MM-DD calendar date"
+        )
+    if until <= _block_condition_date():
+        raise argparse.ArgumentTypeError(
+            "hold date must be after today's UTC date"
+        )
+    return until
+
+
+def _hold_comment_body(reason: str, until: Optional[date] = None,
+                       on: Sequence[str] = ()) -> str:
+    """Render an Accept hold as the block header ``BLOCK_COMMENT_RE`` owns.
+
+    Exactly one condition: a hold on both a date and an issue would parse,
+    but the verb offers one so the brief can say plainly what lifts it.
+    """
+    if (until is None) == (not on):
+        raise ValueError("a hold needs exactly one of a date or issues")
+    if until is not None:
+        return "**Blocked until {}:** {}".format(until.isoformat(), reason)
+    return _blocked_comment_body(on, reason)
+
+
 #: Whether each command's shared Project load must carry item history (#1622).
 #:
 #: History is everything ``hydrate_item_details`` adds after the paged list:
@@ -18940,6 +19225,41 @@ def main(argv: Optional[Sequence[str]] = None, *,
         help="heartbeat run id; otherwise infer a unique open local start",
     )
     comment.add_argument(
+        "--agent", default=None,
+        help="agent that wrote the comment; otherwise read the heartbeat spool",
+    )
+    hold = sub.add_parser(
+        "hold",
+        help="Nate's hold on a finished project at Accept, recorded as a "
+             "conditioned block — dry run without --yes",
+    )
+    hold.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    hold_condition = hold.add_mutually_exclusive_group(required=True)
+    hold_condition.add_argument(
+        "--until", type=_hold_until_date, default=None, metavar="YYYY-MM-DD",
+        help="hold until this future date (UTC); the block lifts itself then",
+    )
+    hold_condition.add_argument(
+        "--on", nargs="+", type=_hold_reference, default=None, metavar="N",
+        help="hold until these issues in the project's repository close",
+    )
+    hold.add_argument(
+        "--reason", required=True, type=_comment_reason,
+        help="why Nate is holding it (required)",
+    )
+    hold.add_argument(
+        "--yes", action="store_true", dest="confirmed",
+        help="actually do it; without this the command is a dry run",
+    )
+    hold.add_argument(
+        "--instruction", type=_verbatim_instruction, default=None,
+        help="verbatim instruction received from Nate; recorded in provenance",
+    )
+    hold.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    hold.add_argument(
         "--agent", default=None,
         help="agent that wrote the comment; otherwise read the heartbeat spool",
     )
@@ -19278,6 +19598,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "answer-gates":
             return cmd_answer_gates(items, now, args.ref, args.answer,
                                     args.decider, args.run, args.agent)
+        if args.command == "hold":
+            return cmd_hold(items, now, args.ref, args.reason,
+                            until=args.until, on=args.on or (),
+                            confirmed=args.confirmed, run=args.run,
+                            agent=args.agent, instruction=args.instruction)
         if args.command == "comment":
             if args.needs_decision is not None:
                 body = _needs_decision_comment_body(args.needs_decision)

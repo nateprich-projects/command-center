@@ -198,13 +198,118 @@ def test_packet_carries_every_field():
     json.dumps(found)  # the packet is JSON by contract
 
 
+def test_packet_threads_are_chronological_verbatim_and_attributed():
+    comments = [
+        {
+            "author": {"login": "later"},
+            "body": "Second comment.\nKeep this line.",
+            "createdAt": "2026-09-15T12:00:00Z",
+        },
+        {
+            "author": {"login": "earlier"},
+            "body": "First comment.  Exact spacing.",
+            "createdAt": "2026-09-15T11:00:00Z",
+        },
+    ]
+    found = packet(issue_comments=comments)
+    assert found["issue_thread"] == (
+        "## Issue thread\n\n"
+        "### @earlier — 2026-09-15T11:00:00Z\n\n"
+        "First comment.  Exact spacing.\n\n"
+        "### @later — 2026-09-15T12:00:00Z\n\n"
+        "Second comment.\nKeep this line."
+    )
+
+
+def test_empty_issue_thread_keeps_the_existing_packet_shape():
+    without_thread = packet()
+    with_empty_thread = packet(issue_comments=[])
+    assert "issue_thread" not in without_thread
+    assert json.dumps(with_empty_thread, sort_keys=True) == json.dumps(
+        without_thread, sort_keys=True)
+
+
+def test_breakdown_reuses_the_paginated_shape_comment_reader(monkeypatch):
+    first = {
+        "author": {"login": "first"},
+        "body": "first",
+        "createdAt": "2026-09-15T11:00:00Z",
+    }
+    second = {
+        "author": {"login": "second"},
+        "body": "second",
+        "createdAt": "2026-09-15T12:00:00Z",
+    }
+    calls = []
+
+    def fake_graphql(query, **variables):
+        calls.append((query, variables))
+        if len(calls) == 1:
+            return {"shapeIssue": {"issue": {"comments": {
+                "nodes": [first],
+                "pageInfo": {
+                    "hasNextPage": True,
+                    "endCursor": "cursor-1",
+                },
+            }}}}
+        return {"repository": {"issue": {"comments": {
+            "nodes": [second],
+            "pageInfo": {
+                "hasNextPage": False,
+                "endCursor": "cursor-2",
+            },
+        }}}}
+
+    monkeypatch.setattr(funnel, "gh_graphql", fake_graphql)
+    assert funnel.read_issue_comments(REPO, 1) == [first, second]
+    assert len(calls) == 2
+    assert "shapeIssue:" in calls[0][0]
+    assert "projectV2" not in calls[0][0]
+    assert calls[1][0] == funnel.SHAPE_ISSUE_COMMENTS_PAGE_QUERY
+    assert calls[1][1] == {
+        "owner": "owner", "name": "repo", "number": 1,
+        "cursor": "cursor-1",
+    }
+
+
+def test_fetch_plan_keeps_issue_view_fields_and_reads_comments_separately(
+        monkeypatch):
+    calls = []
+    comments = [{
+        "author": {"login": "reviewer"},
+        "body": "Use the approved wording.",
+        "createdAt": "2026-09-15T11:00:00Z",
+    }]
+
+    def fake_issue_view(*args):
+        calls.append(args)
+        return plan()
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_issue_view)
+    monkeypatch.setattr(
+        funnel, "read_issue_comments", lambda repo, number: comments)
+    found = breakdown.fetch_plan(REPO, 1)
+    assert calls == [(
+        "gh", "issue", "view", "1", "--repo", REPO, "--json",
+        "number,title,url,body,state",
+    )]
+    assert found["issue_comments"] == comments
+
+
 def test_packet_with_no_siblings_says_so_plainly():
     found = packet(siblings=[])
     assert found["siblings"] == []
 
 
 def test_packet_cli_prints_valid_json(monkeypatch, capsys):
-    monkeypatch.setattr(breakdown, "fetch_plan", lambda repo, n: plan())
+    comments = [{
+        "author": {"login": "reviewer"},
+        "body": "Use the approved wording.",
+        "createdAt": "2026-09-15T11:00:00Z",
+    }]
+    monkeypatch.setattr(
+        breakdown, "fetch_plan",
+        lambda repo, n: plan(issue_comments=comments))
     monkeypatch.setattr(
         breakdown, "fetch_siblings", lambda repo, n: [sibling(2)])
     monkeypatch.setattr(
@@ -215,6 +320,29 @@ def test_packet_cli_prints_valid_json(monkeypatch, capsys):
     assert found["project"]["body"].startswith("# Plan")
     assert [entry["ref"] for entry in found["siblings"]] == [REPO + "#2"]
     assert found["sizing_standard"] == "sizing\n"
+    assert "### @reviewer — 2026-09-15T11:00:00Z" in found["issue_thread"]
+
+
+def test_breakdown_packet_failure_stops_before_siblings_or_output(
+        monkeypatch, capsys):
+    def unavailable(repo, number):
+        raise funnel.GitHubError("comments pagination is incomplete")
+
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: plan())
+    monkeypatch.setattr(funnel, "read_issue_comments", unavailable)
+    monkeypatch.setattr(
+        breakdown, "fetch_siblings",
+        lambda repo, number: pytest.fail("siblings must not be fetched"))
+    assert breakdown.packet_main([REPO + "#1"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "comments pagination is incomplete" in captured.err
+
+
+def test_breakdown_prompt_consumer_passes_the_whole_packet():
+    runner = (ROOT / "scripts" / "muse-review-engine").read_text()
+    assert 'PACKET_JSON="$(cat "$PACKET_FILE")"' in runner
+    assert 'PROMPT="${PROMPT_TEMPLATE//PACKET_JSON/$PACKET_JSON}"' in runner
 
 
 def test_packet_cli_reports_a_bad_ref_without_a_traceback(capsys):

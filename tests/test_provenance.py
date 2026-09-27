@@ -40,6 +40,18 @@ def test_provenance_parser_reads_only_its_own_marker():
     assert funnel.parse_provenance(review + "\n\n" + provenance)["voice"] == "agent"
 
 
+def test_nate_relayed_provenance_preserves_the_verbatim_instruction():
+    instruction = "  Approve this plan as asked.\nKeep this line too.  "
+    body = funnel.append_provenance(
+        "General-chat gate instruction received for `approve`.",
+        "nate-relayed", at=NOW, instruction=instruction,
+    )
+
+    parsed = funnel.parse_provenance(body)
+    assert parsed["voice"] == "nate-relayed"
+    assert parsed["instruction"] == instruction
+
+
 def test_origin_parser_reads_only_its_own_marker():
     origin = marked(
         funnel.ORIGIN_MARKER,

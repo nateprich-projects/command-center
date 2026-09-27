@@ -67,6 +67,7 @@ BEGIN_FETCH_POOL_SIZE = 4
 # reading the real ~/.claude.
 CHECKOUT_ROOT = pathlib.Path(__file__).resolve().parent
 CLAUDE_DIR = pathlib.Path.home() / ".claude"
+CODEX_ROLLOUT_ROOT = pathlib.Path.home() / ".codex" / "sessions"
 
 #: The vendor-specific facts a Codex implementation run needs in addition to
 #: the ticket packet. Keep these structured and code-owned: the shortened
@@ -3454,9 +3455,17 @@ def _heartbeat_context(run: Optional[str], agent: Optional[str]):
     return run, agent
 
 
+def _verbatim_instruction(value: str) -> str:
+    """Validate an instruction while preserving its exact supplied text."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("a non-empty verbatim instruction is required")
+    return value
+
+
 def provenance_block(voice: str, at: Optional[datetime] = None,
                      run: Optional[str] = None,
-                     agent: Optional[str] = None) -> str:
+                     agent: Optional[str] = None,
+                     instruction: Optional[str] = None) -> str:
     """Build the invisible, machine-readable provenance block."""
     if voice not in PROVENANCE_VOICES:
         raise ValueError("unknown provenance voice {!r}".format(voice))
@@ -3467,6 +3476,8 @@ def provenance_block(voice: str, at: Optional[datetime] = None,
         "run": run,
         "voice": voice,
     }
+    if instruction is not None:
+        fields["instruction"] = _verbatim_instruction(instruction)
     return "{}\n\n```json\n{}\n```".format(
         PROVENANCE_MARKER, json.dumps(fields, indent=2, sort_keys=True)
     )
@@ -3474,10 +3485,13 @@ def provenance_block(voice: str, at: Optional[datetime] = None,
 
 def append_provenance(body: str, voice: str, at: Optional[datetime] = None,
                       run: Optional[str] = None,
-                      agent: Optional[str] = None) -> str:
+                      agent: Optional[str] = None,
+                      instruction: Optional[str] = None) -> str:
     """Append one provenance block without changing the supplied body."""
     return "{}\n\n{}".format(
-        body, provenance_block(voice, at=at, run=run, agent=agent)
+        body, provenance_block(
+            voice, at=at, run=run, agent=agent, instruction=instruction
+        )
     )
 
 
@@ -7421,7 +7435,155 @@ CODEX_AUTOMATIONS_FIX = (
     "manifest, relaunch, and rerun funnel doctor (#1321)")
 
 
-def check_codex_automations(root: Optional[str] = None) -> Check:
+CODEX_AUTOMATION_ROLLOUT_ERROR_FIX = (
+    "resolve the newest Codex automation rollout error, then rerun funnel doctor")
+CODEX_AUTOMATION_ROLLOUT_UNKNOWN_FIX = (
+    "restore readable Codex automation rollouts, then rerun funnel doctor")
+CODEX_AUTOMATION_ROLLOUT_LIMIT = 5
+
+_CODEX_SENSITIVE_ERROR_KEY = re.compile(
+    r"(?i)(?:api|access|refresh|auth)?[_-]?(?:key|token|secret|credential|password|authorization)"
+)
+_CODEX_SENSITIVE_ERROR_ASSIGNMENT = re.compile(
+    r"(?i)([\"']?\b(?:[a-z0-9_-]*(?:key|token|secret|credential|password|authorization))"
+    r"\b[\"']?\s*[:=]\s*[\"']?)([^\"'\s,;}\]]+)([\"']?)"
+)
+_CODEX_BEARER_TOKEN = re.compile(
+    r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/-]{8,}"
+)
+_CODEX_MASKED_KEY = re.compile(
+    r"(?i)[A-Za-z0-9_-]*\*{4,}(?:\.{3}|\u2026)?[A-Za-z0-9_-]*"
+)
+_CODEX_API_KEY_PROVIDED_VALUE = re.compile(
+    r"(?i)(\bAPI[ \t]+key[ \t]+provided:[ \t]*)[^\s.]+"
+)
+_CODEX_KNOWN_TOKEN = re.compile(
+    r"(?i)\b(?:sk|sess|rk|pk|ghp|gho|ghu|ghs|github_pat|xox[baprs])[-_]"
+    r"[A-Za-z0-9_-]{8,}\b"
+)
+_CODEX_LONG_TOKEN = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9+/=_-]{32,}(?![A-Za-z0-9])")
+
+
+def _codex_rollout_thread_source(path: pathlib.Path) -> str:
+    """Read only the session source marker needed to classify one rollout."""
+    with path.open("r", encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if not isinstance(event, dict) or event.get("type") != "session_meta":
+                raise ValueError("rollout has no readable session metadata")
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                raise ValueError("rollout session metadata is malformed")
+            source = payload.get("thread_source")
+            if not isinstance(source, str) or not source.strip():
+                raise ValueError("rollout thread source is missing")
+            return source
+    raise ValueError("rollout is empty")
+
+
+def _codex_rollout_error(path: pathlib.Path) -> Any:
+    """Extract only task_complete.error; reject malformed rollout JSONL."""
+    found = None
+    with path.open("r", encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            if not isinstance(event, dict):
+                raise ValueError("rollout record is malformed")
+            payload = event.get("payload")
+            if (event.get("type") == "event_msg"
+                    and isinstance(payload, dict)
+                    and payload.get("type") == "task_complete"
+                    and "error" in payload
+                    and payload.get("error") is not None):
+                found = payload["error"]
+    return found
+
+
+def _redact_codex_error_value(value: Any) -> Any:
+    """Redact key and token material inside the isolated error field."""
+    if isinstance(value, dict):
+        return {
+            key: ("[REDACTED]" if _CODEX_SENSITIVE_ERROR_KEY.search(str(key))
+                  else _redact_codex_error_value(child))
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_codex_error_value(child) for child in value]
+    if not isinstance(value, str):
+        return value
+
+    text = _CODEX_SENSITIVE_ERROR_ASSIGNMENT.sub(
+        lambda match: match.group(1) + "[REDACTED]" + match.group(3), value)
+    text = _CODEX_API_KEY_PROVIDED_VALUE.sub(r"\1[REDACTED]", text)
+    text = _CODEX_MASKED_KEY.sub("[REDACTED]", text)
+    text = _CODEX_BEARER_TOKEN.sub(r"\1[REDACTED]", text)
+    text = _CODEX_KNOWN_TOKEN.sub("[REDACTED]", text)
+    return _CODEX_LONG_TOKEN.sub("[REDACTED]", text)
+
+
+def _render_codex_error(value: Any) -> str:
+    """Render a redacted copy of the error field, never its rollout record."""
+    safe = _redact_codex_error_value(value)
+    rendered = json.dumps(safe, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"))
+    if len(rendered) > 1200:
+        rendered = rendered[:1200] + "… [truncated]"
+    return rendered
+
+
+def read_codex_automation_rollout_errors(
+        root: Optional[os.PathLike] = None) -> Optional[List[str]]:
+    """Read errors from the newest five automation rollouts in place.
+
+    ``None`` means the set could not be classified or parsed completely, so
+    callers must report unknown rather than healthy. Only task_complete.error
+    is retained or returned from each selected rollout.
+    """
+    rollout_root = pathlib.Path(root) if root is not None else CODEX_ROLLOUT_ROOT
+    if not rollout_root.is_dir():
+        return None
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    try:
+        paths = []
+        for directory, directories, filenames in os.walk(
+                str(rollout_root), onerror=raise_walk_error):
+            directories.sort()
+            for filename in filenames:
+                if filename.startswith("rollout-") and filename.endswith(".jsonl"):
+                    paths.append(pathlib.Path(directory) / filename)
+        paths.sort(key=lambda path: path.as_posix(), reverse=True)
+        if not paths:
+            return None
+
+        selected = []
+        for path in paths:
+            if _codex_rollout_thread_source(path) == "automation":
+                selected.append(path)
+                if len(selected) == CODEX_AUTOMATION_ROLLOUT_LIMIT:
+                    break
+        if len(selected) != CODEX_AUTOMATION_ROLLOUT_LIMIT:
+            return None
+
+        errors = []
+        for path in selected:
+            error = _codex_rollout_error(path)
+            if error is not None:
+                errors.append(_render_codex_error(error))
+        return errors
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def check_codex_automations(
+        root: Optional[str] = None,
+        *, rollout_root: Optional[os.PathLike] = None) -> Check:
     """Report Codex automations whose settings differ from the manifest.
 
     The app holds each automation's model, effort, schedule and status
@@ -7442,11 +7604,27 @@ def check_codex_automations(root: Optional[str] = None) -> Check:
                      "could not read the Codex automations ({})".format(
                          str(exc) or type(exc).__name__),
                      CODEX_AUTOMATIONS_FIX)
-    if findings["drift"]:
-        # Drift lines only: the doctor appends the fix to every line of a
-        # failing row, and a status note is not something to fix.
-        return Check(name, False, "\n".join(
-            "  " + line for line in findings["drift"]), CODEX_AUTOMATIONS_FIX)
+    rollout_errors = read_codex_automation_rollout_errors(rollout_root)
+    if findings["drift"] or rollout_errors is None or rollout_errors:
+        # Only actionable findings go in a failing row; ordinary status notes
+        # are not things to fix.
+        lines = ["  " + line for line in findings["drift"]]
+        fixes = []
+        if findings["drift"]:
+            fixes.append(CODEX_AUTOMATIONS_FIX)
+        if rollout_errors is None:
+            lines.append(
+                "  Codex automation rollout status unknown: the newest five "
+                "automation rollouts could not be read or parsed")
+            fixes.append(CODEX_AUTOMATION_ROLLOUT_UNKNOWN_FIX)
+        elif rollout_errors:
+            lines.append(
+                "  {} of {} newest Codex automation rollouts errored; newest "
+                "error: {}".format(
+                    len(rollout_errors), CODEX_AUTOMATION_ROLLOUT_LIMIT,
+                    rollout_errors[0]))
+            fixes.append(CODEX_AUTOMATION_ROLLOUT_ERROR_FIX)
+        return Check(name, False, "\n".join(lines), "; ".join(fixes))
     return Check(name, True, "\n".join(
         "  " + note for note in findings["notes"]), "")
 
@@ -7871,7 +8049,10 @@ def cmd_doctor() -> int:
     project_item_pages = None
     project_item_count = None
     try:
-        items = load_items()
+        items = _call_with_optional_keywords(
+            load_items,
+            include_details=project_load_reads_history("doctor"),
+        )
         project_item_pages, project_item_count = project_item_load_measurement()
     except Exception as exc:
         checks = doctor_checks()
@@ -8095,11 +8276,7 @@ query($owner: String!, $name: String!, $number: Int!, $cursor: String!) {
 
 
 def _shape_issue_comments_field(repo: str, number: int) -> str:
-    """The ``shapeIssue`` selection: the idea's first comment page.
-
-    It rides the first Project request of either load, full or begin, and
-    ``_shape_issue_comments_from_response`` reads it back.
-    """
+    """Build the shared issue-thread field used by packet readers."""
     try:
         owner, name = repo.split("/", 1)
     except ValueError as exc:
@@ -8108,7 +8285,7 @@ def _shape_issue_comments_field(repo: str, number: int) -> str:
             or isinstance(number, bool) or number < 1):
         raise GitHubError("invalid shape issue ref {}#{}".format(repo, number))
     return (
-        "\n  shapeIssue: repository(owner: {}, name: {}) {{\n"
+        "  shapeIssue: repository(owner: {}, name: {}) {{\n"
         "    issue(number: {}) {{\n"
         "      comments(first: 100) {{\n"
         "        nodes {{ author {{ login }} body createdAt }}\n"
@@ -8121,11 +8298,21 @@ def _shape_issue_comments_field(repo: str, number: int) -> str:
 
 def _item_query_with_shape_comments(repo: str, number: int) -> str:
     """Add the target idea's first comment page to the Project item query."""
-    issue_field = _shape_issue_comments_field(repo, number)
+    issue_field = "\n" + _shape_issue_comments_field(repo, number)
     closing = ITEM_QUERY.rfind("\n}")
     if closing < 0:
         raise GitHubError("could not extend the Project item query")
     return ITEM_QUERY[:closing] + issue_field + ITEM_QUERY[closing:]
+
+
+def _standalone_shape_issue_comments_query(repo: str, number: int) -> str:
+    """Read one issue's first comment page without loading Project items."""
+    return (
+        "query {\n"
+        "  rateLimit { cost remaining resetAt }\n"
+        + _shape_issue_comments_field(repo, number)
+        + "}"
+    )
 
 
 def _shape_issue_comments_from_response(
@@ -8197,6 +8384,12 @@ def _shape_issue_comments_from_response(
         )
         has_next, cursor = add_page(page_connection)
     return comments
+
+
+def read_issue_comments(repo: str, number: int) -> List[Dict[str, object]]:
+    """Read a complete issue thread through the shared shape-packet reader."""
+    data = gh_graphql(_standalone_shape_issue_comments_query(repo, number))
+    return _shape_issue_comments_from_response(data, repo, number)
 
 # The paged list is the cheap gate input. History and child timestamps are
 # fetched below only for the candidate items a caller has kept after its cheap
@@ -9584,7 +9777,7 @@ def _load_begin_items(
     open_rows = 0
     items: List[Item] = []
     shape_field = (
-        _shape_issue_comments_field(*shape_issue)
+        "\n" + _shape_issue_comments_field(*shape_issue)
         if shape_issue is not None else ""
     )
     shape_comments: Optional[List[Dict[str, object]]] = None
@@ -13577,7 +13770,8 @@ def _latest_park_comment(
 
 def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
              run: Optional[str] = None, agent: Optional[str] = None,
-             wake_date: Optional[date] = None) -> int:
+             wake_date: Optional[date] = None,
+             instruction: Optional[str] = None) -> int:
     """Park a project with its durable reason attached to the issue."""
     item = find(items, ref)
     if not item.item_id:
@@ -13619,7 +13813,7 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
         ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
          "--body", append_provenance(
              park_comment, "nate-relayed", at=now,
-             run=run, agent=agent)],
+             run=run, agent=agent, instruction=instruction)],
         capture_output=True, text=True,
     )
     if comment.returncode != 0:
@@ -17566,7 +17760,8 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
 
 
 def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
-               confirmed: bool, no_tickets: bool = False) -> int:
+               confirmed: bool, no_tickets: bool = False,
+               instruction: Optional[str] = None) -> int:
     """Answer a gate: move an item to the next stage.
 
     The brief shows what is waiting and asks the question; without this, the
@@ -17647,6 +17842,23 @@ def cmd_answer(items: List[Item], now: datetime, verb: str, ref: str,
             print("and close it as completed")
         print("\nNothing was changed. Re-run with --yes to answer the gate.")
         return 1
+
+    if instruction is not None:
+        instruction = _verbatim_instruction(instruction)
+        record = append_provenance(
+            "General-chat gate instruction received for `{}`.".format(verb),
+            "nate-relayed", at=now, instruction=instruction,
+        )
+        posted = _run_gh(
+            ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+             "--body", record],
+            capture_output=True, text=True,
+        )
+        if posted.returncode != 0:
+            raise GitHubError(
+                "could not record the general-chat instruction for {}: {}"
+                .format(item.ref, posted.stderr.strip())
+            )
 
     if adoption is not None:
         adopted_class, source_line = adoption
@@ -17782,6 +17994,77 @@ def _needs_decision_comment_body(question: str) -> str:
     return "{} {}".format(NEEDS_DECISION_PREFIX, question)
 
 
+#: Whether each command's shared Project load must carry item history (#1622).
+#:
+#: History is everything ``hydrate_item_details`` adds after the paged list:
+#: ``status_since``, ``status_events``, ``blocked_since``,
+#: ``blocked_cleared_at``, ``first_child_created_at`` and
+#: ``last_child_closed_at`` (see ``_apply_item_timeline_fields`` and
+#: ``_apply_item_detail_fields``). It costs about 14 extra pages, ~100
+#: GraphQL points and most of a minute on the 2026-09 board, so a command that
+#: never reads it loads the compact list instead.
+#:
+#: Each ``False`` below was verified by walking everything the command calls
+#: for a read of those fields, including ``Item.waited`` and
+#: ``question_since``. A command that is not listed -- a new one, or one
+#: somebody forgot -- gets the full load: being slow is recoverable, a gate
+#: age or ordering silently computed from missing history is not. ``begin``
+#: is absent on purpose; it has its own compact load and hydrates only its
+#: candidates. ``snapshot``, ``main-ci`` and ``session-server`` load nothing.
+PROJECT_LOAD_READS_HISTORY: Dict[str, bool] = {
+    # Lock refusals read status, the lock, assignees, blockers and PR facts;
+    # the parent Ready -> Building write only *sets* status_since.
+    "claim": False,
+    # Clears the lock field; reads nothing but the item id.
+    "release": False,
+    # Pinned field plus a provenance comment; the dry run prints the same.
+    "pin": False,
+    "unpin": False,
+    # Writes Parked, closes, comments; the wake line records the current
+    # Status, not when it was entered.
+    "park": False,
+    # Rewrites the plan body's Gates section from the body alone.
+    "answer-gates": False,
+    # Posts a comment, optionally applying the blocked label.
+    "comment": False,
+    # Creates an issue and sets its fields; it reads no loaded item.
+    "capture": False,
+    # Review order is the PR's open time from PR facts, never gate age.
+    "next-review": False,
+    # Writes a verdict on a PR; items only locate an unmergeable PR's ticket.
+    "review": False,
+    # Doctor's consistency checks compare Status with state and merged PRs.
+    # It loads through ``cmd_doctor``, not ``main``, and consults this entry.
+    "doctor": False,
+    # rejected_merges keeps regression items by status_since.
+    "reject": True,
+    # drift_since_approval falls back to status_since; the parking prompt
+    # prints how long each candidate has waited.
+    "approve": True,
+    "accept": True,
+    # Prints the gate age and the rejected-merge history.
+    "show": True,
+    # ideas() orders by status_since and prints how long each has waited.
+    "ideas": True,
+    # merge_blockers -> rejected_merges reads regression items' status_since.
+    # #1611 hydrates those items when merge starts from a compact begin/session
+    # view, but this CLI command reads history and keeps the full load under
+    # ticket 3 of #1616.
+    "merge": True,
+    # item_json prints waited and breakdown latency.
+    "next": True,
+    # startable orders by question_since; awaiting_breakdown by status_since.
+    "queue": True,
+    # Gate ages, parked/blocked/cleared lists, maintenance load, approvals.
+    "brief": True,
+}
+
+
+def project_load_reads_history(command: Optional[str]) -> bool:
+    """Whether ``command`` needs item history; unknown commands say yes."""
+    return PROJECT_LOAD_READS_HISTORY.get(command or "", True)
+
+
 def main(argv: Optional[Sequence[str]] = None, *,
          _items: Optional[List[Item]] = None,
          _items_loader: Optional[Callable[[], List[Item]]] = None,
@@ -17842,6 +18125,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
         answer.add_argument(
             "--yes", action="store_true", dest="confirmed",
             help="actually do it; without this the command is a dry run",
+        )
+        answer.add_argument(
+            "--instruction", type=_verbatim_instruction, default=None,
+            help="verbatim instruction received from Nate; recorded in provenance",
         )
         if verb == "accept":
             answer.add_argument(
@@ -17907,6 +18194,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
     park.add_argument(
         "--wake-date", type=_parking_wake_date, default=None,
         help="future YYYY-MM-DD date to restore the prior Project Status",
+    )
+    park.add_argument(
+        "--instruction", type=_verbatim_instruction, default=None,
+        help="verbatim instruction received from Nate; recorded in provenance",
     )
     park.add_argument(
         "--run", default=None,
@@ -18177,7 +18468,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     timings=begin_timings,
                 )
             else:
-                items = _items_loader()
+                items = _call_with_optional_keywords(
+                    _items_loader,
+                    include_details=project_load_reads_history(args.command),
+                )
         elif args.command == "begin":
             # `begin` selects one job after its cheap gates. Keep the initial
             # Project scan compact; cmd_begin hydrates only the candidates it
@@ -18198,7 +18492,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
 
             begin_detail_loader = hydrate_begin_candidates
         else:
-            items = load_items()
+            # PROJECT_LOAD_READS_HISTORY decides; unknown commands load all.
+            items = _call_with_optional_keywords(
+                load_items,
+                include_details=project_load_reads_history(args.command),
+            )
         if args.command == "begin" and begin_detail_loader is None:
             def hydrate_begin_candidates(candidates):
                 return _begin_load_timed(
@@ -18282,7 +18580,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
                              args.run, args.agent)
         if args.command == "park":
             return cmd_park(items, now, args.ref, args.reason,
-                            args.run, args.agent, args.wake_date)
+                            args.run, args.agent, args.wake_date,
+                            args.instruction)
         if args.command == "answer-gates":
             return cmd_answer_gates(items, now, args.ref, args.answer,
                                     args.decider, args.run, args.agent)
@@ -18308,7 +18607,8 @@ def main(argv: Optional[Sequence[str]] = None, *,
             return cmd_reject(items, now, args.pr, args.note)
         if args.command in ANSWERS:
             return cmd_answer(items, now, args.command, args.ref, args.confirmed,
-                              getattr(args, "no_tickets", False))
+                              getattr(args, "no_tickets", False),
+                              args.instruction)
         if args.command == "show":
             return cmd_show(items, now, args.ref)
         if args.command == "ideas":
@@ -18850,6 +19150,14 @@ class FunnelSession:
         self._heartbeat_run: Optional[str] = None
         self._heartbeat_agent: Optional[str] = None
         self._heartbeat_tier: Optional[str] = None
+        # The command being dispatched, and whether the shared view came from
+        # a command that skipped history (PROJECT_LOAD_READS_HISTORY). Such a
+        # view is hydrated once, in place, by the first later command that
+        # reads history, so a cheap first command never leaves a later gate
+        # age computed from missing fields. A view loaded by ``begin`` keeps
+        # its existing contract: begin hydrates only its own candidates.
+        self._command: Optional[str] = None
+        self._history_pending = False
 
     def _load_items(
         self,
@@ -18864,6 +19172,12 @@ class FunnelSession:
                 member_repo_names=member_repo_names,
                 timings=timings,
             )
+            self._history_pending = (
+                not include_details and self._command != "begin"
+            )
+        elif include_details and self._history_pending:
+            hydrate_item_details(self.items)
+            self._history_pending = False
         return self.items
 
     def dispatch(self, argv: Sequence[str], stdin=None):
@@ -18899,8 +19213,12 @@ class FunnelSession:
                 # Reset before the lazy load so its GraphQL work is measured as
                 # part of the first command rather than erased by ``main``.
                 reset_api_usage()
+                self._command = argv[0] if argv else None
+                # A view still owed its history goes back through the loader,
+                # which hydrates it when this command reads history.
+                current = None if self._history_pending else self.items
                 if stdin is None:
-                    code = main(list(argv), _items=self.items,
+                    code = main(list(argv), _items=current,
                                 _items_loader=self._load_items,
                                 _reset_api_usage=False)
                 else:
@@ -18911,7 +19229,7 @@ class FunnelSession:
                     previous_stdin = sys.stdin
                     sys.stdin = io.StringIO(stdin)
                     try:
-                        code = main(list(argv), _items=self.items,
+                        code = main(list(argv), _items=current,
                                     _items_loader=self._load_items,
                                     _reset_api_usage=False)
                     finally:
@@ -18925,6 +19243,7 @@ class FunnelSession:
                 # the next command reloads GitHub state rather than acting on
                 # a stale Project snapshot. Never retry the command here.
                 self.items = None
+                self._history_pending = False
                 self._brief_cache.clear()
                 stdout.seek(0)
                 stdout.truncate(0)

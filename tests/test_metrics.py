@@ -143,6 +143,36 @@ def test_missing_inputs_remain_gaps_instead_of_becoming_zero():
     assert row["metrics"]["D"]["D1"]["dollars_per_day"]["gap"]
 
 
+def test_unreadable_brief_sections_remain_gaps_in_metrics():
+    snapshot, ledgers, _, outcomes, commits, lines = _inputs()
+    brief = snapshot["brief"]
+    unreadable = (
+        "maintenance_load", "disposal", "total_needing_nate",
+        "counts_by_gate", "human_steps", "blocked_human_steps",
+        "status_state_mismatches",
+    )
+    for section in unreadable:
+        brief[section] = None
+        brief.setdefault("missing", []).append({
+            "section": section,
+            "error": "brief budget exhausted",
+        })
+
+    row = metrics.derive_row(
+        snapshot, ledgers, None, outcomes, NOW, commits, lines
+    )
+
+    assert row["metrics"]["A"]["A3"]["numerator"] is None
+    assert row["metrics"]["A"]["A3"]["gap"]
+    assert row["metrics"]["A"]["A5"]["done"]["value"] is None
+    assert row["metrics"]["A"]["A5"]["done"]["gap"]
+    assert row["metrics"]["E"]["E1"]["total_needing_nate"]["gap"]
+    assert row["metrics"]["E"]["E1"]["by_gate"]["gap"]
+    assert row["metrics"]["E"]["E2"]["outstanding"]["value"] is None
+    assert row["metrics"]["E"]["E2"]["outstanding"]["gap"]
+    assert row["metrics"]["E"]["E5"]["status_state_mismatches"]["gap"]
+
+
 def test_muse_dollar_rate_gaps_without_raw_trailing_spend():
     snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
     del usage["muse"]["windows"]["seven_day"]["trailing_72h_dollars"]

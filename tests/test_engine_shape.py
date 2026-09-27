@@ -685,6 +685,57 @@ def test_preview_ignores_the_recorded_1503_no_backfill_citation():
         "origin agent")
 
 
+def test_preview_and_risk_write_share_the_rendered_escalation_scan(
+        monkeypatch):
+    item = idea(1644, klass="Broken")
+    candidate = answer(
+        proposed_class="Broken",
+        plan_markdown="# Plan\n\nDisplay source freshness.",
+        decided_by_agent=[{
+            "decision": "Backfill recent records from the canonical source.",
+            "alternative": "Leave historical gaps.",
+            "why": "The report needs an initial baseline.",
+        }],
+        escalated_risk=[],
+    )
+    scan_bodies = []
+    scan = funnel.plan_escalation_matches
+
+    def record_scan(body):
+        scan_bodies.append(body)
+        return scan(body)
+
+    monkeypatch.setattr(funnel, "plan_escalation_matches", record_scan)
+    project_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            project_writes.append((field, value)),
+    )
+    stub_gh(monkeypatch, item)
+
+    preview_status, preview_reason = shape.preview_decision(
+        [item], item, shape.validate_answer(candidate))
+
+    assert (preview_status, preview_reason) == (
+        "Shaped",
+        "escalated risk (data-migration: - Backfill recent records from "
+        "the canonical source.)",
+    )
+    assert shape.apply_shape(
+        [item], NOW, item.ref, candidate,
+        run="shape-run", agent="muse") == 0
+    assert item.status == "Shaped"
+    assert ("Risk", "escalated") in project_writes
+    assert ("Needs", "human") in project_writes
+
+    expected_scan_body = shape.render_plan(shape.validate_answer(candidate))
+    assert "Backfill recent records" in expected_scan_body
+    assert expected_scan_body != candidate["plan_markdown"]
+    assert len(scan_bodies) == 3
+    assert scan_bodies == [expected_scan_body] * 3
+
+
 def test_a_clear_declaration_with_a_clear_scan_is_ready():
     status, reason = shape.decide(
         shape.validate_answer(answer(escalated_risk=[])),

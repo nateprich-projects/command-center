@@ -501,6 +501,24 @@ def open_need_categories(answer: Dict) -> List[str]:
             if answer["needs_nate"][field] is not None]
 
 
+def _plan_escalation_scan_body(answer: Dict) -> str:
+    """Render the complete plan body without echoing typed risk declarations.
+
+    Declared risks are evaluated separately from the wording scan. Every
+    other rendered section must be in the scan so preview and the persisted
+    Risk field read the same plan.
+    """
+    scan_answer = dict(answer)
+    scan_answer["escalated_risk"] = []
+    return render_plan(scan_answer)
+
+
+def _plan_escalation_matches(answer: Dict) -> List[Dict[str, Optional[str]]]:
+    """Scan the same rendered plan body used by preview and Risk writes."""
+    return funnel.plan_escalation_matches(
+        _plan_escalation_scan_body(answer))
+
+
 def needs_nate_open(answer: Dict) -> bool:
     """Whether the answer's open-question record asks Nate anything.
 
@@ -773,12 +791,10 @@ def preview_decision(items: list, item, answer: Dict) -> Tuple[str, str]:
     effective_klass = funnel.effective_class(item, by_ref)
     if item.klass not in funnel.LADDER and origin_voice == "agent":
         effective_klass = answer["proposed_class"]
-    scan_answer = dict(answer)
     # `decide` consumes the typed declaration separately. Keep it out of the
-    # wording scan here so the durable Risk line added by `render_plan` does
-    # not report the same declaration twice.
-    scan_answer["escalated_risk"] = []
-    matches = funnel.plan_escalation_matches(render_plan(scan_answer))
+    # wording scan so the durable Risk rationale does not report the same
+    # declaration twice.
+    matches = _plan_escalation_matches(answer)
     return decide(
         answer,
         klass=effective_klass,
@@ -1212,7 +1228,7 @@ def apply_shape(items: list, now: datetime, ref: str,
                                      answer["proposed_class"]))
     risk = "escalated" if (
         answer["escalated_risk"]
-        or funnel.plan_escalation_matches(answer["plan_markdown"])
+        or _plan_escalation_matches(answer)
     ) else "standard"
     needs = "human" if status == "Shaped" else "none"
     funnel.write_project_select(item.item_id, "Risk", risk, item.ref)

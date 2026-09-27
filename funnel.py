@@ -1537,22 +1537,29 @@ _PLAN_PROPOSAL_ACTIONS = {
         r"update|updates|updated|updating|use|uses|used|using)\b",
         re.IGNORECASE,
     ),
+    # Spelled out for the same reason: "use(?:s|d|ing)?" missed "using" and
+    # "rotating" and matched "useing" (#1722).
     "credentials": re.compile(
-        r"\b(?:access(?:es|ed|ing)?|change(?:s|d|ing)?|create(?:s|d|ing)?|"
-        r"expose(?:s|d|ing)?|grant(?:s|ed|ing)?|handle(?:s|d|ing)?|"
-        r"load(?:s|ed|ing)?|read(?:s|ing)?|replace(?:s|d|ing)?|"
-        r"revoke(?:s|d|ing)?|rotate(?:s|d|ing)?|store(?:s|d|ing)?|"
-        r"supply|supplies|supplied|supplying|touch(?:es|ed|ing)?|"
-        r"use(?:s|d|ing)?|write|writes|written|writing|"
-        r"update(?:s|d|ing)?)\b",
+        r"\b(?:access|accesses|accessed|accessing|change|changes|changed|"
+        r"changing|create|creates|created|creating|expose|exposes|exposed|"
+        r"exposing|grant|grants|granted|granting|handle|handles|handled|"
+        r"handling|load|loads|loaded|loading|read|reads|reading|replace|"
+        r"replaces|replaced|replacing|revoke|revokes|revoked|revoking|"
+        r"rotate|rotates|rotated|rotating|store|stores|stored|storing|"
+        r"supply|supplies|supplied|supplying|touch|touches|touched|"
+        r"touching|update|updates|updated|updating|use|uses|used|using|"
+        r"write|writes|wrote|written|writing)\b",
         re.IGNORECASE,
     ),
     "data-migration": re.compile(
-        r"\b(?:apply|applies|applied|applying|convert(?:s|ed|ing)?|"
-        r"copy|copies|copied|copying|execute(?:s|d|ing)?|import(?:s|ed|ing)?|"
-        r"load(?:s|ed|ing)?|perform(?:s|ed|ing)?|populate(?:s|d|ing)?|"
-        r"rebuild(?:s|ing)?|rebuilt|replay(?:s|ed|ing)?|run|runs|ran|"
-        r"seed(?:s|ed|ing)?|transform(?:s|ed|ing)?|update(?:s|d|ing)?)\b",
+        r"\b(?:apply|applies|applied|applying|convert|converts|converted|"
+        r"converting|copy|copies|copied|copying|execute|executes|executed|"
+        r"executing|import|imports|imported|importing|load|loads|loaded|"
+        r"loading|perform|performs|performed|performing|populate|populates|"
+        r"populated|populating|rebuild|rebuilds|rebuilt|rebuilding|replay|"
+        r"replays|replayed|replaying|run|runs|ran|running|seed|seeds|seeded|"
+        r"seeding|transform|transforms|transformed|transforming|update|"
+        r"updates|updated|updating)\b",
         re.IGNORECASE,
     ),
     "destructive": re.compile(
@@ -1595,7 +1602,13 @@ _PLAN_DIRECT_ACTIONS = {
         r"(?:\s+[\w'’-]+){0,4}\s+permissions?)\b",
         re.IGNORECASE,
     ),
-    "data-migration": re.compile(r"\b(?:backfill|migrat\w*)\b", re.IGNORECASE),
+    # "migrat\w*" also took "migrateing" (#1722). "migration" stays: it
+    # carries the proposal in a clause-led "Schema migration ..." item.
+    "data-migration": re.compile(
+        r"\b(?:backfill|backfills|backfilled|backfilling|migrate|migrates|"
+        r"migrated|migrating|migration)\b",
+        re.IGNORECASE,
+    ),
     "destructive": re.compile(
         r"\b(?:force[- ]push|hard[- ]delete|permanently\s+delete|"
         r"drop\s+(?:the\s+)?(?:table|branch)|rewrite\s+history)\b",
@@ -2721,6 +2734,7 @@ def startable(
 def projected_pull_order(
     items: Sequence[Item], now: Optional[datetime] = None,
     paused: Collection[str] = (),
+    finished: Collection[str] = (),
 ) -> List[str]:
     """Every ticket's projected turn, found by running ``startable()`` forward.
 
@@ -2742,6 +2756,11 @@ def projected_pull_order(
     failed runs. The engineers will not take them before the hold lifts, so
     they wait until everything available now has had its turn (Nate,
     2026-09-25: a row must never claim a next step the engineers won't take).
+
+    ``finished`` names tickets ``finished_by_comments`` withholds. No begin
+    takes one until Nate closes it, so it gets no turn at all, and neither
+    does work that waits on it (#1701: the board gave #165 a turn for two
+    weeks while every begin withheld it).
     """
     sim = [copy.copy(item) for item in items]
     by_ref = {item.ref: item for item in sim}
@@ -2782,9 +2801,11 @@ def projected_pull_order(
 
     order: List[str] = []
     held = {ref: {} for ref in paused}
+    waiting_on_nate = set(finished)
     lift_blocks()
     for _ in range(len(sim) + 2):
-        queue = startable(sim, backed_off=held)
+        queue = startable(sim, awaiting_review=waiting_on_nate,
+                          backed_off=held)
         if not queue and held:
             held = {}
             continue
@@ -4037,6 +4058,27 @@ def latest_verdict(repo: str, pr) -> Optional[Dict]:
 #: until Nate closes it or a later run finishes it another way (#498).
 COMMENTS_DELIVERABLE_PREFIX = "finished by comments:"
 
+#: A GitHub issue or comment URL in a comments finish note, read as
+#: ``owner/repo#N`` (#1701). ``pull`` is read too, because GitHub serves an
+#: issue comment on a PR under that path; issues and PRs share one number
+#: space per repo, so it can never name the wrong ticket.
+_COMMENTS_NOTE_URL_RE = re.compile(
+    r"https?://github\.com/"
+    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/"
+    r"(?:issues|pull)/(?P<number>[0-9]+)",
+    flags=re.IGNORECASE,
+)
+
+
+def _comments_note_refs(note: str) -> Set[str]:
+    """Every issue a comments finish note links, as lowercased ``owner/repo#N``."""
+    return {
+        "{}/{}#{}".format(
+            found.group("owner"), found.group("repo"), found.group("number")
+        ).lower()
+        for found in _COMMENTS_NOTE_URL_RE.finditer(note)
+    }
+
 
 def finished_by_comments(items: Sequence[Item]) -> Set[str]:
     """Open tickets whose latest run finished them by comments, waiting on Nate.
@@ -4049,16 +4091,36 @@ def finished_by_comments(items: Sequence[Item]) -> Set[str]:
     never withheld. Observed 2026-09-09: eleven consecutive runs re-claimed
     #277 and re-verified the same nine comments in 85 minutes, because nothing
     recorded that the deliverable had already been delivered.
+
+    The bind alone is not trusted (#1701). A finish counts as the comments
+    deliverable only when one of the note's GitHub URLs, read as
+    ``owner/repo#N``, is the bound ticket or its parent -- a parent in another
+    repo included -- compared case-insensitively, because the note is
+    lowercased and refs such as ``The-League`` keep their case. Any other
+    finish counts as a non-marker finish under the latest-finish rule. Codex
+    run e1b3abbcf90a bound #165 on 2026-09-13 but commented on #780, and
+    #165 was withheld from every begin for two weeks.
     """
-    open_refs = {i.ref for i in items if i.state == "OPEN" and i.parent}
-    if not open_refs:
-        return set()
+    return set(finished_by_comments_runs(items))
+
+
+def finished_by_comments_runs(items: Sequence[Item]) -> Dict[str, str]:
+    """``finished_by_comments`` with the run that finished each: ref -> run id.
+
+    ``funnel queue`` names the run, so a hold can be traced to its record
+    (#1701).
+    """
+    open_items = {
+        i.ref: i for i in items if i.state == "OPEN" and i.parent
+    }
+    if not open_items:
+        return {}
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import heartbeat
     except Exception:
-        return set()
-    latest: Dict[str, Tuple[float, bool]] = {}
+        return {}
+    latest: Dict[str, Tuple[float, Optional[str]]] = {}
     for agent in sorted(heartbeat.PROVIDERS):
         if agent in heartbeat.RETIRED_AGENTS:
             continue
@@ -4074,15 +4136,18 @@ def finished_by_comments(items: Sequence[Item]) -> Set[str]:
             if not binding or binding.get("do") != "ticket":
                 continue
             ref = str(binding.get("work"))
-            if ref not in open_refs:
+            item = open_items.get(ref)
+            if item is None:
                 continue
             ts = float(row.get("ts") or 0)
             note = str(row.get("note") or "").lower()
             marker = (row.get("outcome") == "skipped-human-step"
-                      and COMMENTS_DELIVERABLE_PREFIX in note)
+                      and COMMENTS_DELIVERABLE_PREFIX in note
+                      and bool(_comments_note_refs(note)
+                               & {ref.lower(), str(item.parent).lower()}))
             if ref not in latest or ts >= latest[ref][0]:
-                latest[ref] = (ts, marker)
-    return {ref for ref, (_, marker) in latest.items() if marker}
+                latest[ref] = (ts, str(row["run"]) if marker else None)
+    return {ref: run for ref, (_, run) in latest.items() if run}
 
 
 def verdict_covers_head(
@@ -11495,10 +11560,12 @@ def dashboard_board(
         ))
     try:
         # The board's order for work in motion: each ticket's projected turn.
+        # Work finished by comments gets none, as no begin will take it (#1701).
         turn = {
             ref: index
             for index, ref in enumerate(
-                projected_pull_order(rows, now, paused=paused_rows)
+                projected_pull_order(rows, now, paused=paused_rows,
+                                     finished=finished)
             )
         }
     except Exception:
@@ -13346,9 +13413,15 @@ def cmd_queue(
                 subprocess.SubprocessError) as exc:
             pr_facts_unavailable = str(exc)
 
+    # What `cmd_next` and `begin` withhold as finished by comments is withheld
+    # here too, and listed below with its run (#1701). The queue used to list
+    # #165 as startable for two weeks while every begin refused it, and that
+    # mismatch is what hid the wedge.
+    finished = finished_by_comments_runs(items)
     decisions = awaiting_decision(items)
     tickets = startable(
-        items, awaiting_review=in_review, repo_readiness=repo_readiness
+        items, awaiting_review=set(in_review) | set(finished),
+        repo_readiness=repo_readiness,
     )
 
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
@@ -13382,6 +13455,14 @@ def cmd_queue(
             item.title,
         ),
     )
+
+    if finished:
+        print("\nWithheld — finished by comments, waiting on Nate to close "
+              "({}):".format(len(finished)))
+        for item in items:
+            if item.ref in finished:
+                print("  {:<34} run {:<14} {}".format(
+                    item.ref, finished[item.ref], item.title))
 
     withheld = readiness_blockers(items, repo_readiness=repo_readiness)
     if withheld:
@@ -14155,6 +14236,81 @@ def claim_ticket(
     return None
 
 
+def _ticket_branch_ref_sha(repo: str, ref: str) -> Optional[str]:
+    """Read one Git ref, returning None only when GitHub says it is absent."""
+    endpoint = "repos/{}/git/ref/{}".format(repo, ref[len("refs/"):])
+    result = _run_gh(
+        _gh_api_command(endpoint), capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        response = "{}\n{}".format(
+            getattr(result, "stderr", ""), getattr(result, "stdout", "")
+        )
+        if re.search(r"\bHTTP\s+404\b", response, re.IGNORECASE):
+            return None
+        raise GitHubError("could not read Git ref in {}".format(repo))
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, ValueError):
+        raise GitHubError("GitHub returned an unreadable Git ref in {}".format(repo))
+    if not isinstance(payload, dict) or payload.get("ref") != ref:
+        raise GitHubError("GitHub returned an unexpected Git ref in {}".format(repo))
+    object_data = payload.get("object")
+    sha = object_data.get("sha") if isinstance(object_data, dict) else None
+    if not isinstance(sha, str) or not sha.strip():
+        raise GitHubError("GitHub returned a Git ref without a commit in {}".format(repo))
+    return sha
+
+
+def ensure_ticket_branch(repo: str, number: int) -> str:
+    """Plant ``ticket/<number>`` at main, preserving any existing remote ref.
+
+    This runs after a ticket claim and before its heartbeat binding. Once the
+    run is bound, abandoned-claim recovery can use this branch as its liveness
+    marker. The main SHA is captured before creating the ref; a raced creation
+    is read back and left untouched rather than replaced.
+    """
+    if (not isinstance(repo, str)
+            or not isinstance(number, int) or isinstance(number, bool) or number < 1
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo)):
+        raise GitHubError("cannot establish a ticket branch for this repository")
+
+    branch_ref = "refs/heads/ticket/{}".format(number)
+    existing = _ticket_branch_ref_sha(repo, branch_ref)
+    if existing is not None:
+        return existing
+
+    base_sha = _ticket_branch_ref_sha(repo, "refs/heads/main")
+    if base_sha is None:
+        raise GitHubError("main is missing in {}".format(repo))
+
+    result = _run_gh(
+        ["gh", "api", "-X", "POST", "repos/{}/git/refs".format(repo),
+         "-f", "ref=" + branch_ref, "-f", "sha=" + base_sha],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        try:
+            payload = json.loads(result.stdout)
+        except (TypeError, ValueError):
+            payload = None
+        object_data = payload.get("object") if isinstance(payload, dict) else None
+        created_sha = object_data.get("sha") if isinstance(object_data, dict) else None
+        if (isinstance(payload, dict) and payload.get("ref") == branch_ref
+                and created_sha == base_sha):
+            return base_sha
+
+    # A competing creator may have won between the first read and the POST.
+    # Accept that ref without changing its tip; otherwise fail closed.
+    existing = _ticket_branch_ref_sha(repo, branch_ref)
+    if existing is not None:
+        return existing
+    raise GitHubError("could not push {} at the run base in {}".format(
+        branch_ref, repo
+    ))
+
+
 def cmd_claim(
     items: List[Item],
     now: datetime,
@@ -14630,6 +14786,110 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
         raise GitHubError(comment.stderr.strip())
 
     print("{} → Parked\n{}".format(item.ref, park_comment))
+    return 0
+
+
+def _hold_refusal(item: Item) -> Optional[str]:
+    """Why ``item`` cannot be held at Accept, or ``None`` when it can (#1724).
+
+    A hold means something only where ``gate_question`` would otherwise ask
+    "Accept it?": an open Building project with every ticket closed that does
+    not close itself. The unattended close (``_auto_closeable_project``)
+    never reads ``blocked``, so a hold on a project that closes itself would
+    be recorded and then ignored.
+    """
+    if item.parent is not None:
+        return "{} is a ticket; only a finished project waits at Accept".format(
+            item.ref)
+    if item.state != "OPEN":
+        return "{} is {}; only an open project waits at Accept".format(
+            item.ref, item.state)
+    if item.status != "Building":
+        return (
+            "{} is at {}, not Building; only a finished Building project "
+            "waits at Accept".format(item.ref, item.status or "no status")
+        )
+    if item.children_total == 0:
+        return (
+            "{} has no tickets; it is waiting to be broken down, not "
+            "waiting at Accept".format(item.ref)
+        )
+    if not item.children_all_closed:
+        return (
+            "{} still has open tickets ({}/{} closed); it is not waiting at "
+            "Accept yet".format(
+                item.ref, item.children_done, item.children_total)
+        )
+    if _can_close_itself(item):
+        return (
+            "{} closes itself when its tickets close (Class {}), and the "
+            "unattended close ignores `blocked`, so a hold would do "
+            "nothing".format(item.ref, item.klass or "unset")
+        )
+    return None
+
+
+def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
+             until: Optional[date] = None, on: Sequence[str] = (),
+             confirmed: bool = False, run: Optional[str] = None,
+             agent: Optional[str] = None,
+             instruction: Optional[str] = None) -> int:
+    """Record Nate's hold on a finished project at Accept (#1724).
+
+    A hold written as prose ("Accept held by Nate ...") is read by nothing, so
+    the project kept asking "Accept it?". The ``blocked`` label with a
+    parseable ``**Blocked until/on ...:**`` comment already takes an item out
+    of his queue, shows its condition, and is lifted by
+    ``clear_satisfied_blocks`` once that condition is met; this verb writes
+    exactly that form, in Nate's relayed voice.
+
+    **Dry run unless ``confirmed``**, like the gate answers: holding is
+    Nate's call at his own gate.
+    """
+    item = find(items, ref)
+    refusal = _hold_refusal(item)
+    if refusal is not None:
+        raise GitHubError(refusal)
+    if (until is None) == (not on):
+        raise GitHubError("a hold needs exactly one of --until or --on")
+    if until is not None and until <= _block_condition_date(now):
+        raise GitHubError("hold date must be after today's UTC date")
+    body = _hold_comment_body(reason, until=until, on=on)
+
+    if not confirmed:
+        print("would hold {} at Accept ({}) with the blocked label and:".format(
+            item.ref, item.title))
+        print(body)
+        print("\nNothing was changed. Re-run with --yes to record the hold.")
+        return 1
+
+    # Comment first, as ``comment --needs-decision`` does: a label without
+    # its condition would read as a silent block asking "Unblock or park?",
+    # while a comment without its label changes nothing and is superseded by
+    # the retry's newer copy.
+    comment = _run_gh(
+        ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+         "--body", append_provenance(
+             body, "nate-relayed", at=now,
+             run=run, agent=agent, instruction=instruction)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+    edit = _run_gh(
+        ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
+         "--add-label", "blocked"],
+        capture_output=True, text=True,
+    )
+    if edit.returncode != 0:
+        raise GitHubError(
+            "recorded the hold comment on {}, but could not add its blocked "
+            "label: {}".format(item.ref, edit.stderr.strip())
+        )
+    if not item.is_blocked:
+        item.labels.append("blocked")
+
+    print("{} held at Accept\n{}".format(item.ref, body))
     return 0
 
 
@@ -17331,33 +17591,55 @@ def cmd_begin(items: List[Item], now: datetime, agent: str, tier: Optional[str],
                     work=item_json(ticket, now, {i.ref: i for i in items}),
                 )
                 if agent in IMPLEMENT_VENDORS:
-                    # Bind immediately after the claim, before the packet's
-                    # slower ticket/plan/verdict reads. A process abandoned
-                    # during that load is then attributable and recoverable by
-                    # the next begin's reconciliation.
-                    _bind_run(agent, out)
                     try:
-                        out["packet"] = implementation_packet(
-                            ticket.repo, ticket.number, agent
-                        )
-                    except (GitHubError, OSError, subprocess.SubprocessError) as exc:
-                        # A packet-less implementation run is not actionable.
-                        # Undo the claim before returning a stop envelope so the
-                        # next poll can recover without waiting for the TTL.
+                        ensure_ticket_branch(ticket.repo, ticket.number)
+                    except (GitHubError, OSError,
+                            subprocess.SubprocessError) as exc:
+                        # A branchless claim still means begin was abandoned.
+                        # Release a claim whose liveness marker could not be
+                        # planted, then stop before issuing implementation work.
                         try:
                             write_lock(ticket, None)
-                        except GitHubError as release_exc:
-                            out["release_error"] = str(release_exc)
+                        except GitHubError:
+                            out["release_error"] = "could not release the ticket claim"
                         out.pop("work", None)
                         out.update(
                             do="stop",
                             gate="error",
-                            why="could not assemble implementation packet: {}".format(
-                                exc
+                            why="could not establish ticket branch for {}#{} ({})".format(
+                                ticket.repo, ticket.number, type(exc).__name__
                             ),
                         )
                     else:
-                        out["vendor"] = IMPLEMENT_VENDORS[agent]
+                        # Bind after the branch is durable and before the
+                        # packet's slower ticket/plan/verdict reads. A process
+                        # abandoned during that load is then attributable and
+                        # recoverable by the next begin's reconciliation.
+                        _bind_run(agent, out)
+                        try:
+                            out["packet"] = implementation_packet(
+                                ticket.repo, ticket.number, agent
+                            )
+                        except (GitHubError, OSError,
+                                subprocess.SubprocessError) as exc:
+                            # A packet-less implementation run is not
+                            # actionable. Undo the claim before returning a
+                            # stop envelope so the next poll can recover
+                            # without waiting for the TTL.
+                            try:
+                                write_lock(ticket, None)
+                            except GitHubError as release_exc:
+                                out["release_error"] = str(release_exc)
+                            out.pop("work", None)
+                            out.update(
+                                do="stop",
+                                gate="error",
+                                why="could not assemble implementation packet: {}".format(
+                                    exc
+                                ),
+                            )
+                        else:
+                            out["vendor"] = IMPLEMENT_VENDORS[agent]
         if "bound" not in out:
             _bind_run(agent, out)
         print(json.dumps(out, indent=2))
@@ -18809,6 +19091,51 @@ def _needs_decision_comment_body(question: str) -> str:
     return "{} {}".format(NEEDS_DECISION_PREFIX, question)
 
 
+def _hold_reference(value: str) -> str:
+    """Normalise one ``hold --on`` issue number exactly as ``--blocked-on``."""
+    try:
+        return _blocked_reference(value)
+    except argparse.ArgumentTypeError:
+        raise argparse.ArgumentTypeError(
+            "a positive issue number is required for --on"
+        )
+
+
+def _hold_until_date(value: str) -> date:
+    """Require a future calendar date for ``hold --until`` before loading.
+
+    ``satisfied_block_refs`` counts a date on or before today's UTC date as
+    met, so a hold dated today would be lifted by the next clear pass.
+    """
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        raise argparse.ArgumentTypeError("hold date must use YYYY-MM-DD")
+    try:
+        until = date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "hold date must be a valid YYYY-MM-DD calendar date"
+        )
+    if until <= _block_condition_date():
+        raise argparse.ArgumentTypeError(
+            "hold date must be after today's UTC date"
+        )
+    return until
+
+
+def _hold_comment_body(reason: str, until: Optional[date] = None,
+                       on: Sequence[str] = ()) -> str:
+    """Render an Accept hold as the block header ``BLOCK_COMMENT_RE`` owns.
+
+    Exactly one condition: a hold on both a date and an issue would parse,
+    but the verb offers one so the brief can say plainly what lifts it.
+    """
+    if (until is None) == (not on):
+        raise ValueError("a hold needs exactly one of a date or issues")
+    if until is not None:
+        return "**Blocked until {}:** {}".format(until.isoformat(), reason)
+    return _blocked_comment_body(on, reason)
+
+
 #: Whether each command's shared Project load must carry item history (#1622).
 #:
 #: History is everything ``hydrate_item_details`` adds after the paged list:
@@ -19076,6 +19403,41 @@ def main(argv: Optional[Sequence[str]] = None, *,
         help="heartbeat run id; otherwise infer a unique open local start",
     )
     comment.add_argument(
+        "--agent", default=None,
+        help="agent that wrote the comment; otherwise read the heartbeat spool",
+    )
+    hold = sub.add_parser(
+        "hold",
+        help="Nate's hold on a finished project at Accept, recorded as a "
+             "conditioned block — dry run without --yes",
+    )
+    hold.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    hold_condition = hold.add_mutually_exclusive_group(required=True)
+    hold_condition.add_argument(
+        "--until", type=_hold_until_date, default=None, metavar="YYYY-MM-DD",
+        help="hold until this future date (UTC); the block lifts itself then",
+    )
+    hold_condition.add_argument(
+        "--on", nargs="+", type=_hold_reference, default=None, metavar="N",
+        help="hold until these issues in the project's repository close",
+    )
+    hold.add_argument(
+        "--reason", required=True, type=_comment_reason,
+        help="why Nate is holding it (required)",
+    )
+    hold.add_argument(
+        "--yes", action="store_true", dest="confirmed",
+        help="actually do it; without this the command is a dry run",
+    )
+    hold.add_argument(
+        "--instruction", type=_verbatim_instruction, default=None,
+        help="verbatim instruction received from Nate; recorded in provenance",
+    )
+    hold.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    hold.add_argument(
         "--agent", default=None,
         help="agent that wrote the comment; otherwise read the heartbeat spool",
     )
@@ -19414,6 +19776,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "answer-gates":
             return cmd_answer_gates(items, now, args.ref, args.answer,
                                     args.decider, args.run, args.agent)
+        if args.command == "hold":
+            return cmd_hold(items, now, args.ref, args.reason,
+                            until=args.until, on=args.on or (),
+                            confirmed=args.confirmed, run=args.run,
+                            agent=args.agent, instruction=args.instruction)
         if args.command == "comment":
             if args.needs_decision is not None:
                 body = _needs_decision_comment_body(args.needs_decision)

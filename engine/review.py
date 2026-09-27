@@ -3,8 +3,9 @@
 
 The review runner shows the model this packet and nothing else: the ticket
 body and its comments, the parent project's comments, PR review and issue
-comments, plan.md, the diff, CI state, the newest verdict and its head, the
-changed-file overlap with every other open PR, protected-path touches, the
+comments, the PR description and its Departures as the implementer's own
+claims (#1720), plan.md, the diff, CI state, the newest verdict and its head,
+the changed-file overlap with every other open PR, protected-path touches, the
 stop-auto-merging counter, and the pull_request CI runs on the head. #798
 assembled the evidence; #799 adds
 the deterministic pre-check rows the runner evaluates before any model is
@@ -167,6 +168,50 @@ TICKET_COMMENT_BODY_LIMIT = 4000
 # PR comments are durable run evidence. Keep each body bounded while carrying
 # every comment, newest last, so a reviewer can see the complete conversation.
 PR_COMMENT_BODY_LIMIT = 4000
+
+# The PR description, and the Departures section engine/implement.py writes
+# into it (#1720). Tickets ask for records "in the PR description" (#1659,
+# #1660), and a packet without the description rejected PR #1667 at one head
+# over and over for records its description held. The body is bounded like
+# every other free text in the packet; the departures are parsed from the
+# whole body, so a section past the cut still arrives. Both are the
+# implementer's own claims: the note travels beside them in the packet so a
+# judge reading the JSON alone still sees what they are.
+PR_BODY_LIMIT = 20000
+PR_CLAIMS_NOTE = (
+    "pr_body and pr_departures are the implementer's own claims, not "
+    "verified facts: pr_body is the PR description as its author wrote it, "
+    "and pr_departures lists the entries of its Departures section. Cite "
+    "them as evidence of what the author recorded and why; weigh every "
+    "claim against the diff, and never count a departure as meeting its "
+    "requirement by itself.")
+
+# A Departures header is a label line (``Departures:``, bold or not, with or
+# without text after the colon) or a Markdown heading (``## Departures``).
+# Prose that merely starts with the word, such as "Departures were none",
+# has neither the colon nor a line of its own and is not a header.
+DEPARTURES_HEADER_RE = re.compile(
+    r"^[ \t]{0,3}(?:(?P<heading>#{1,6})[ \t]+)?(?:\*\*|__)?Departures"
+    r"(?:(?:\*\*|__)?[ \t]*:(?:\*\*|__)?|(?:\*\*|__)?[ \t]*$)"
+    r"[ \t]*(?P<rest>.*?)[ \t]*$",
+    re.IGNORECASE)
+DEPARTURE_BULLET_RE = re.compile(
+    r"^[ \t]{0,3}(?:[-*+]|[0-9]{1,3}[.)])[ \t]+(?P<text>.*)$")
+# The next section ends the list: any Markdown heading, and after a
+# ``Departures:`` label, the template's next unindented short label with a
+# colon (``Branch:``, ``Local: ...``).
+MARKDOWN_HEADING_RE = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]")
+DEPARTURES_LABEL_END_RE = re.compile(
+    r"^(?:\*\*|__)?[A-Z][A-Za-z0-9 /()'-]{0,40}?(?:\*\*|__)?:"
+    r"(?:\*\*|__)?(?:[ \t]|$)")
+# "- None." is how implement.py renders no departures; people write the
+# same thing as "none", "n/a" or "no departures". "None of the tests ran"
+# is a departure, so the word must stand alone or end at punctuation.
+NO_DEPARTURE_RE = re.compile(
+    r"^(?:none|n/a|no departures?(?: from the ticket)?)"
+    r"[ \t]*(?:[.;:,!(—–-].*)?$",
+    re.IGNORECASE)
+CODE_FENCE_RE = re.compile(r"^[ \t]{0,3}(?:```|~~~)")
 
 # A canonical run-evidence comment is a marked, fenced JSON block. Parsing its
 # shape helps the reviewer find the reported facts; it does not judge whether
@@ -1606,6 +1651,106 @@ def _shape_pr_comment(row: dict, kind: str) -> Dict[str, Any]:
     return shaped
 
 
+def parse_departures(body: object) -> List[str]:
+    """Return the entries of a PR body's Departures section (#1720).
+
+    The section is the first ``Departures:`` label or ``## Departures``
+    heading outside a code fence. Each bullet is one entry, and so is a
+    paragraph of prose; indented and wrapped lines continue the entry above
+    them. A label section ends at a blank line followed by a new paragraph,
+    at the template's next label (``Branch:``), or at a heading; a heading
+    section ends only at the next heading. A code fence ends either.
+
+    "None" entries are the template's way of saying there were none, so
+    they are dropped: a body without the section and a section reading
+    ``- None.`` both give an empty list. Anything else is kept as written,
+    because what a departure claims is for the judge to weigh.
+    """
+    if not isinstance(body, str):
+        return []
+    lines = body.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    header = None
+    in_fence = False
+    start = 0
+    for index, line in enumerate(lines):
+        if CODE_FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if not in_fence:
+            header = DEPARTURES_HEADER_RE.match(line)
+            if header is not None:
+                start = index + 1
+                break
+    if header is None:
+        return []
+    heading_form = header.group("heading") is not None
+
+    entries: List[str] = []
+    current: Optional[List[str]] = None
+    if header.group("rest"):
+        current = [header.group("rest")]
+
+    def close() -> None:
+        nonlocal current
+        if current:
+            entries.append(" ".join(current))
+        current = None
+
+    for line in lines[start:]:
+        stripped = line.strip()
+        if not stripped:
+            close()
+            continue
+        if CODE_FENCE_RE.match(line) or MARKDOWN_HEADING_RE.match(line):
+            break
+        if not heading_form and DEPARTURES_LABEL_END_RE.match(line):
+            break
+        bullet = DEPARTURE_BULLET_RE.match(line)
+        if bullet is not None:
+            close()
+            current = [bullet.group("text").strip()]
+            continue
+        if current is not None:
+            current.append(stripped)
+        elif heading_form or not entries:
+            current = [stripped]
+        elif line[:1] in (" ", "\t"):
+            # An indented paragraph after a blank line belongs to the
+            # bullet above it, as it does in Markdown.
+            entries[-1] = entries[-1] + " " + stripped
+        else:
+            break
+    close()
+    return [entry for entry in entries
+            if not NO_DEPARTURE_RE.match(entry.strip("*_` \t"))]
+
+
+def pr_body_section(pr_view: dict) -> Dict[str, object]:
+    """The packet's PR-description fields, labelled as claims (#1720).
+
+    ``pr_body`` is the stripped description cut at ``PR_BODY_LIMIT`` with
+    the packet's usual ``…[truncated N chars]`` mark, and
+    ``pr_body_truncated`` says so without parsing the text. A view that
+    carried no body reads as None, not as an empty description.
+    ``pr_departures`` comes from the whole body, not the cut one.
+    """
+    body = pr_view.get("body")
+    text: Optional[str] = None
+    truncated = False
+    if isinstance(body, str):
+        text = body.strip()
+        if len(text) > PR_BODY_LIMIT:
+            truncated = True
+            text = text[:PR_BODY_LIMIT] + (
+                "\n…[truncated {} chars]".format(len(text) - PR_BODY_LIMIT))
+    return {
+        "pr_body": text,
+        "pr_body_truncated": truncated,
+        "pr_departures": parse_departures(body),
+        "pr_claims_note": PR_CLAIMS_NOTE,
+    }
+
+
 def _pr_comments_section(comments: List[Dict[str, Any]]) -> Dict:
     """Give the packet an explicit available or empty PR-comments section."""
     comments.sort(key=lambda entry: (entry["created_at"], entry["kind"],
@@ -1714,9 +1859,15 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     gets an empty list. ``tickets`` is every ticket the PR closes —
     the branch ticket plus the closing references (#1088) — each shaped
     like ``ticket``; None reads as the branch ticket alone, so a
-    single-ticket PR's packet keeps its shape. The PR description stays
-    out on purpose: it is the author's own claims, and a reviewer that
-    trusts it can be argued into approving.
+    single-ticket PR's packet keeps its shape.
+    ``pr_body`` and ``pr_departures`` carry the PR description and its
+    Departures entries (#1720), shaped by ``pr_body_section``. They were
+    kept out once because they are the author's own claims and a reviewer
+    that trusts them can be argued into approving; that left every ticket
+    asking for a record in the description unmergeable. They now enter
+    beside ``pr_claims_note``, which labels both as the implementer's
+    claims, and the verdict rules are unchanged: a claim is weighed against
+    the diff, and a departure never meets its requirement by itself.
     ``plan_premises`` groups the fixed, structured premises section from
     each ticket's parent plan. An available empty list means that plan
     recorded none; ``available: false`` means its body could not be read
@@ -1766,6 +1917,7 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "repo": repo,
         "pr": pr_number,
         "pr_title": pr_view.get("title"),
+        **pr_body_section(pr_view),
         "branch": pr_view.get("headRefName"),
         "base": pr_view.get("baseRefName"),
         "state": pr_view.get("state"),
@@ -1823,12 +1975,13 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
     ``closingIssuesReferences`` rides the same read so the packet can
     carry every ticket the PR closes (#1088); it costs no extra call.
     ``baseRefOid`` is the PR's recorded base, the ``pr_base_sha`` the
-    packet compares the live merge base against (#1043).
+    packet compares the live merge base against (#1043). ``body`` is the
+    description the packet carries as the implementer's claims (#1720).
     """
     data = funnel._gh_json(
         "gh", "pr", "view", str(pr_number), "--repo", repo, "--json",
-        "number,title,headRefName,headRefOid,baseRefName,baseRefOid,state,"
-        "mergeable,"
+        "number,title,body,headRefName,headRefOid,baseRefName,baseRefOid,"
+        "state,mergeable,"
         "mergedAt,mergedBy,closedAt,"
         "statusCheckRollup,commits,files,closingIssuesReferences")
     if not data:

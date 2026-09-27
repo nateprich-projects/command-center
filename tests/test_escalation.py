@@ -569,3 +569,62 @@ def test_ticket_1680_gerund_authorisation_proposals_escalate(sentence):
 def test_ticket_1680_bare_authorisation_mentions_do_not_escalate(body):
     """These reach the proposal table (no negation lookbehind stops them)."""
     assert funnel.plan_escalation_matches(body) == []
+
+
+@pytest.mark.parametrize("reason, sentence", [
+    ("credentials", "Changing the API key for the runner."),
+    ("credentials", "Creating a client secret for the connector."),
+    ("credentials", "Exposing the access token to the build step."),
+    ("credentials", "Handling the private key inside the worker."),
+    ("credentials", "Replacing the password in the keychain."),
+    ("credentials", "Revoking the access token after cutover."),
+    ("credentials", "Rotating the access token during cutover."),
+    ("credentials", "Storing the API key in the environment."),
+    ("credentials", "Updating the password for the service account."),
+    ("credentials", "Using the client secret for the Muse connector."),
+    ("data-migration", "Executing the schema migration before cutover."),
+    ("data-migration", "Populating every row by backfill."),
+    ("data-migration", "Running the backfill against the live ledger."),
+    ("data-migration", "Updating the data migration for the ledger."),
+])
+def test_ticket_1722_gerund_proposals_escalate(reason, sentence):
+    """Stems ending in "e" need their -ing form spelled out (#1722)."""
+    body = "## What it is\n\n{}\n".format(sentence)
+
+    assert [m["reason"] for m in funnel.plan_escalation_matches(body)] == [
+        reason
+    ]
+
+
+@pytest.mark.parametrize("sentence", [
+    "Changeing the API key for the runner.",
+    "Createing a client secret for the connector.",
+    "Exposeing the access token to the build step.",
+    "Handleing the private key inside the worker.",
+    "Replaceing the password in the keychain.",
+    "Revokeing the access token after cutover.",
+    "Rotateing the access token during cutover.",
+    "Storeing the API key in the environment.",
+    "Updateing the password for the service account.",
+    "Useing the client secret for the Muse connector.",
+    "Executeing the schema migration before cutover.",
+    "Populateing every row by backfill.",
+    "Updateing the data migration for the ledger.",
+])
+def test_ticket_1722_misspelled_verbs_do_not_escalate(sentence):
+    """An optional suffix on an "e" stem took these as verbs (#1722)."""
+    body = "## What it is\n\n{}\n".format(sentence)
+
+    assert funnel.plan_escalation_matches(body) == []
+
+
+def test_ticket_1722_direct_migration_verbs_are_spelled_out():
+    """The direct table keeps "migration" but not "migrat" plus anything."""
+    direct = funnel._PLAN_DIRECT_ACTIONS["data-migration"]
+
+    for word in ("backfill", "backfills", "backfilled", "backfilling",
+                 "migrate", "migrates", "migrated", "migrating",
+                 "migration"):
+        assert direct.fullmatch(word), word
+    for word in ("migrateing", "migrateed", "migrat"):
+        assert direct.fullmatch(word) is None, word

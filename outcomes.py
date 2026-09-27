@@ -6,7 +6,9 @@ checks, review verdict comments, issue events and direct comments are all read
 from GitHub after the event.  Durable records live in ``outcomes.jsonl`` on the
 ``heartbeat`` branch, alongside the heartbeat history but outside the code
 checkout.  The file is an append-only projection: every line can be rebuilt
-from GitHub, and a ticket is appended at most once.
+from GitHub, and a ticket is appended at most once.  The one exception is
+``derive --heal-empty-runs`` (#1717), which replaces a record whose runs are
+empty when a fresh derivation of that ticket has them.
 """
 
 from __future__ import annotations
@@ -33,8 +35,12 @@ NATE_LOGIN = "nateprich"
 # Outcome derivation asks for a larger whole-repository scan, and refuses to
 # write if even that scan is truncated rather than silently under-counting
 # attempts.  Backfill has its own ticket; this bound keeps the normal job
-# finite while covering the current repository history.
-PR_SCAN_LIMIT = 1000
+# finite while covering the current repository history.  It was 1,000 until
+# command-center passed 1,017 closed issues (and 655 PRs) on 2026-09-27, which
+# would have refused every daily derive from 09-28 (#1751).  Closed issues grow
+# by roughly 50 a day, so 10,000 leaves months before the refusal can fire
+# again; when it does, it still refuses rather than write a partial record.
+PR_SCAN_LIMIT = 10000
 
 # zcode is read whether or not it is live: its 2026-09 app records are history,
 # and from 2026-09-23 to 2026-10-06 09:00 PDT it is the engine's z.ai standard tier.
@@ -284,25 +290,56 @@ def read_heartbeat_records(
     repo: str = REPO,
     branch: str = HEARTBEAT_BRANCH,
 ) -> Dict[str, List[Dict[str, object]]]:
-    """Read durable heartbeat rows, best effort, without using quota readings.
+    """Read durable heartbeat rows without using quota readings.
 
     The heartbeat branch supplies the run-to-ticket binding and the exact
-    harness session id.  A missing file, malformed row or temporarily
-    unreadable agent stream leaves that agent without usage rather than making
-    a GitHub-derived outcome look free.
+    harness session id.  A missing file is an agent that has never written a
+    heartbeat and reads as no rows; a malformed row is skipped.
+
+    Any other failed read raises (#1717).  This used to be best effort, and
+    "could not read" arrived looking like "no runs": over one megabyte the
+    Contents API answers ``encoding: none`` with an empty ``content``, so
+    ``codex.jsonl``, ``muse.jsonl`` and ``zcode.jsonl`` all read as nothing
+    and every outcome derived from 2026-09-24 was stored with ``runs=[]``.
+    The store is append-only, so a silently empty read is a permanent loss
+    for every ticket derived in that run; a raised one only delays them to
+    the next.
     """
     found: Dict[str, List[Dict[str, object]]] = {}
     for agent in HEARTBEAT_AGENTS:
+        path = "{}.jsonl".format(agent)
         result = _run_gh(["api", _heartbeat_remote_path(repo, agent, branch)])
         if result.returncode != 0:
-            found[agent] = []
-            continue
+            detail = (result.stderr or result.stdout or "").lower()
+            if "404" in detail or "not found" in detail:
+                found[agent] = []
+                continue
+            raise OutcomeError(
+                result.stderr.strip() or "could not read heartbeat {}".format(path)
+            )
         try:
             payload = json.loads(result.stdout)
-            content = base64.b64decode(payload.get("content", "")).decode("utf-8")
-        except (TypeError, ValueError, UnicodeDecodeError):
-            found[agent] = []
-            continue
+            if not isinstance(payload, Mapping):
+                raise ValueError("not a Contents API object")
+            content = base64.b64decode(payload.get("content") or "").decode("utf-8")
+        except (TypeError, ValueError, UnicodeDecodeError) as exc:
+            raise OutcomeError(
+                "invalid heartbeat {} response: {}".format(path, exc)
+            ) from exc
+        size, sha = payload.get("size"), payload.get("sha")
+        # The large-file shape, read as ``heartbeat._fetch`` does (#949) and
+        # through the same fail-closed blob read as outcomes.jsonl (#1294).
+        # Size zero is a genuinely empty ledger, not a declined inline.
+        declined = payload.get("encoding") == "none" or (
+            isinstance(size, int) and size > 0
+        )
+        if not content and declined and size != 0:
+            if not isinstance(sha, str) or not sha:
+                raise OutcomeError(
+                    "heartbeat {} returned no content and no sha to read "
+                    "it by".format(path)
+                )
+            content = _read_blob(repo, sha, size, path=path)
         rows = []
         for line in content.splitlines():
             try:
@@ -1167,18 +1204,44 @@ def _null_field_counts(
     return dict(sorted(counts.items()))
 
 
+def _has_token_usage(run: Mapping[str, object]) -> bool:
+    usage = run.get("token_usage")
+    return isinstance(usage, Mapping) and any(
+        value is not None for value in usage.values()
+    )
+
+
 def outcome_summary(
     records: Sequence[Mapping[str, object]], appended: int,
+    healed: Optional[Sequence[Mapping[str, object]]] = None,
 ) -> Dict[str, object]:
-    """Return the mechanical counts printed by ``derive`` and used in its PR."""
+    """Return the mechanical counts printed by ``derive`` and used in its PR.
+
+    With ``--heal-empty-runs`` it also counts what was healed, per agent and
+    with token usage, which is what the one-time heal reports on #1655.
+    """
     null_fields = _null_field_counts(records)
-    return {
+    summary: Dict[str, object] = {
         "derived": len(records),
         "appended": appended,
         "null_fields": sum(null_fields.values()),
         "null_fields_by_name": null_fields,
         "storage": "{}:{}".format(HEARTBEAT_BRANCH, OUTCOMES_PATH),
     }
+    if healed is not None:
+        by_agent: Dict[str, int] = {}
+        with_usage = 0
+        for record in healed:
+            for run in record.get("runs") or []:
+                if not isinstance(run, Mapping):
+                    continue
+                agent = str(run.get("agent"))
+                by_agent[agent] = by_agent.get(agent, 0) + 1
+                with_usage += int(_has_token_usage(run))
+        summary["healed"] = len(healed)
+        summary["healed_runs_by_agent"] = dict(sorted(by_agent.items()))
+        summary["healed_runs_with_token_usage"] = with_usage
+    return summary
 
 
 def _pr_observation(repo: str, number: int) -> Dict[str, object]:
@@ -1339,30 +1402,32 @@ def _read_remote(repo: str = REPO, branch: str = HEARTBEAT_BRANCH) -> Tuple[List
     return _decode_records(content), sha
 
 
-def _read_blob(repo: str, sha: str, size: int) -> str:
+def _read_blob(repo: str, sha: str, size: object, path: str = OUTCOMES_PATH) -> str:
     """Read a blob the Contents API declined to inline.
 
     Fails closed. Every caller of ``_read_remote`` treats its record list as
     the full ledger, so an unreadable blob must raise rather than return
-    nothing: silently empty is the shape that overwrites history.
+    nothing: silently empty is the shape that overwrites history. The
+    heartbeat ledgers are read the same way (#1717); ``path`` only names the
+    file in the error.
     """
     result = _run_gh(["api", "repos/{}/git/blobs/{}".format(repo, sha)])
     if result.returncode != 0:
         raise OutcomeError(
             result.stderr.strip()
-            or "could not read {} blob {}".format(OUTCOMES_PATH, sha)
+            or "could not read {} blob {}".format(path, sha)
         )
     try:
         payload = json.loads(result.stdout)
         content = base64.b64decode(payload.get("content") or "").decode("utf-8")
     except (TypeError, ValueError, UnicodeDecodeError) as exc:
         raise OutcomeError(
-            "invalid {} blob response: {}".format(OUTCOMES_PATH, exc)
+            "invalid {} blob response: {}".format(path, exc)
         ) from exc
     if not content:
         raise OutcomeError(
             "remote {} is {} bytes but its blob read back empty".format(
-                OUTCOMES_PATH, size)
+                path, size)
         )
     return content
 
@@ -1390,24 +1455,87 @@ def _new_records(
     return found
 
 
+def _runs_empty(record: Mapping[str, object]) -> bool:
+    runs = record.get("runs")
+    return runs is None or (isinstance(runs, list) and not runs)
+
+
+def _has_runs(record: Mapping[str, object]) -> bool:
+    runs = record.get("runs")
+    return isinstance(runs, list) and bool(runs)
+
+
+def _heal_empty_runs(
+    existing: Sequence[Mapping[str, object]],
+    derived: Iterable[Mapping[str, object]],
+) -> Tuple[List[Dict[str, object]], List[Dict[str, object]]]:
+    """Replace stored records whose runs are empty with a fresh derivation.
+
+    The one exception to append-only (#1717). A record stored while the
+    heartbeat reader returned no rows for ledgers over one megabyte carries
+    ``runs=[]`` although its runs are in those ledgers. A stored record is
+    replaced, in place, only when its ``runs`` is empty and a fresh derivation
+    of the same ticket has runs; every other record comes back exactly as it
+    was. There is deliberately no date cutoff: ``muse.jsonl`` had already
+    outgrown the inline read when Muse implemented (2026-09-18 to 09-22), so
+    its runs were never read at all (#1655).
+    """
+    fresh_by_ticket: Dict[str, Mapping[str, object]] = {}
+    for row in derived:
+        if isinstance(row, Mapping) and isinstance(row.get("ticket"), str):
+            fresh_by_ticket.setdefault(row["ticket"], row)
+    combined: List[Dict[str, object]] = []
+    healed: List[Dict[str, object]] = []
+    for row in existing:
+        fresh = fresh_by_ticket.get(row.get("ticket"))
+        if fresh is not None and _runs_empty(row) and _has_runs(fresh):
+            replacement = dict(fresh)
+            combined.append(replacement)
+            healed.append(replacement)
+        else:
+            combined.append(dict(row))
+    return combined, healed
+
+
 def append_records(
     additions: Iterable[Mapping[str, object]],
     repo: str = REPO,
     branch: str = HEARTBEAT_BRANCH,
 ) -> int:
     """Append unseen records with Contents-API compare-and-swap retries."""
+    return write_records(additions, repo, branch)[0]
+
+
+def write_records(
+    additions: Iterable[Mapping[str, object]],
+    repo: str = REPO,
+    branch: str = HEARTBEAT_BRANCH,
+    heal_empty_runs: bool = False,
+) -> Tuple[int, List[Dict[str, object]]]:
+    """Append unseen records and, when asked, heal empty-runs records.
+
+    Returns the number appended and the records healed. Both happen in one
+    compare-and-swap write, so a conflict re-reads the ledger and re-decides
+    what to heal against what is actually stored.
+    """
     pending = [dict(row) for row in additions]
     if not pending:
-        return 0
+        return 0, []
 
     for attempt in range(len(STORE_BACKOFF) + 1):
         existing, sha = _read_remote(repo, branch)
+        healed: List[Dict[str, object]] = []
+        if heal_empty_runs:
+            existing, healed = _heal_empty_runs(existing, pending)
         fresh = _new_records(existing, pending)
-        if not fresh:
-            return 0
+        if not fresh and not healed:
+            return 0, []
         body = _encode_records(existing + fresh).encode("utf-8")
+        message = "outcomes: +{} record(s)".format(len(fresh))
+        if heal_empty_runs:
+            message += ", healed {} with empty runs".format(len(healed))
         payload = {
-            "message": "outcomes: +{} record(s)".format(len(fresh)),
+            "message": message,
             "branch": branch,
             "content": base64.b64encode(body).decode("ascii"),
         }
@@ -1427,7 +1555,7 @@ def append_records(
         ]
         result = _run_gh(args, stdin=json.dumps(payload))
         if result.returncode == 0:
-            return len(fresh)
+            return len(fresh), healed
         detail = (result.stderr or result.stdout or "").lower()
         if "409" not in detail and "sha" not in detail and "conflict" not in detail:
             raise OutcomeError(result.stderr.strip() or "could not write {}".format(OUTCOMES_PATH))
@@ -1436,7 +1564,7 @@ def append_records(
                 "could not append {} after compare-and-swap retries".format(OUTCOMES_PATH)
             )
         time.sleep(STORE_BACKOFF[attempt])
-    return 0
+    return 0, []
 
 
 def resolve_derive_repos(repos: Optional[Sequence[str]],
@@ -1492,6 +1620,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--dry-run", action="store_true",
         help="print records without writing the heartbeat branch",
     )
+    derive.add_argument(
+        "--heal-empty-runs", action="store_true",
+        help="also replace a stored record whose runs are empty when its "
+             "fresh derivation has runs; every other record is untouched "
+             "(#1717)",
+    )
 
     show = sub.add_parser("read", help="print durable outcome records")
     show.add_argument("--repo", default=REPO)
@@ -1524,6 +1658,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ))
         if args.dry_run:
             print(json.dumps(records, indent=2, sort_keys=True))
+            return 0
+        if args.heal_empty_runs:
+            appended, healed = write_records(records, heal_empty_runs=True)
+            print(json.dumps(
+                outcome_summary(records, appended, healed), sort_keys=True
+            ))
             return 0
         appended = append_records(records)
         print(json.dumps(outcome_summary(records, appended), sort_keys=True))

@@ -507,18 +507,35 @@ MUSE_STUB = (
     "elif grep -q '^This call is one shape decider' \"$prompt_file\"; then shape_part=decider\n"
     "elif grep -q '^This call is the shape auditor' \"$prompt_file\"; then shape_part=auditor\n"
     "fi\n"
-    "if [[ -n \"$shape_part\" && \"$shape_part\" == \"${MUSE_SHAPE_FAIL_PART:-}\" ]]; then\n"
+    # #1719: MUSE_*_FAIL_TIMES fails only that many calls and then answers,
+    # counted per failing part; unset, every call fails. One part of a kind
+    # runs at a time in the tests that set it, so the count needs no lock.
+    # MUSE_SHAPE_FAIL_IF, like MUSE_JUDGE_FAIL_IF, fails only a call whose
+    # prompt holds that text, such as the parse retry's.
+    "fail_budget() {\n"
+    "  local counter=\"$MUSE_COUNT.failed.$1\" times=\"$2\" failed=0\n"
+    "  if [[ -f \"$counter\" ]]; then failed=$(cat \"$counter\"); fi\n"
+    "  if [[ -n \"$times\" ]] && (( failed >= times )); then return 1; fi\n"
+    "  printf '%s' \"$((failed + 1))\" > \"$counter\"\n"
+    "}\n"
+    "if [[ -n \"$shape_part\" && \"$shape_part\" == \"${MUSE_SHAPE_FAIL_PART:-}\" ]] \\\n"
+    "    && { [[ -z \"${MUSE_SHAPE_FAIL_IF:-}\" ]] \\\n"
+    "         || grep -Fq -- \"$MUSE_SHAPE_FAIL_IF\" \"$prompt_file\"; } \\\n"
+    "    && fail_budget \"$shape_part\" \"${MUSE_SHAPE_FAIL_TIMES:-}\"; then\n"
     "  printf '%s' \"${MUSE_SHAPE_FAILURE:-shape part unavailable}\" >&2\n"
     "  exit \"${MUSE_SHAPE_FAIL_STATUS:-1}\"\n"
     "fi\n"
     "if [[ -n \"$shape_part\" && \"$shape_part\" == \"${MUSE_SHAPE_SLEEP_PART:-}\" ]]; then\n"
+    "  printf '%s' \"${MUSE_SHAPE_SLEEP_STDERR:-}\" >&2\n"
     "  exec sleep 30\n"
     "fi\n"
-    "if (( judge_call )) && [[ -n \"${MUSE_JUDGE_FAIL_IF:-}\" ]] \\\n      && grep -Fq -- \"$MUSE_JUDGE_FAIL_IF\" \"$prompt_file\"; then\n"
+    "if (( judge_call )) && [[ -n \"${MUSE_JUDGE_FAIL_IF:-}\" ]] \\\n      && grep -Fq -- \"$MUSE_JUDGE_FAIL_IF\" \"$prompt_file\" \\\n"
+    "      && fail_budget judge \"${MUSE_JUDGE_FAIL_TIMES:-}\"; then\n"
     "  printf '%s' \"${MUSE_JUDGE_FAILURE:-judge unavailable}\" >&2\n"
     "  exit \"${MUSE_JUDGE_FAIL_STATUS:-1}\"\n"
     "fi\n"
     "if (( judge_call )) && [[ -n \"${MUSE_JUDGE_SLEEP_IF:-}\" ]] \\\n      && grep -Fq -- \"$MUSE_JUDGE_SLEEP_IF\" \"$prompt_file\"; then\n"
+    "  printf '%s' \"${MUSE_JUDGE_SLEEP_STDERR:-}\" >&2\n"
     "  exec sleep \"${MUSE_JUDGE_SLEEP_SECONDS:-30}\"\n"
     "fi\n"
     "parallel_call=$judge_call\n"
@@ -837,6 +854,30 @@ def _muse_calls(repo):
 def _apply_calls(repo):
     calls = repo / "apply.calls"
     return calls.read_text().splitlines() if calls.exists() else []
+
+
+#: What Muse prints when a call's provider stream stays silent (#1669).
+STREAM_IDLE = "model stream idle timeout after 180000ms"
+
+
+def _timing_lines(stderr):
+    """Each shape part's and judge chunk's timing line (#1719), by name.
+
+    Exactly one line per part: a second would mean a return path logged
+    twice, or a retry logged as a part of its own."""
+    lines = {}
+    for line in stderr.splitlines():
+        if not line.startswith("muse-review-engine: timing "):
+            continue
+        name, elapsed, calls, outcome = line.split()[2:]
+        assert name not in lines, "two timing lines for " + name
+        assert elapsed.startswith("elapsed=") and elapsed.endswith("s"), line
+        assert calls.startswith("calls="), line
+        assert outcome.startswith("outcome="), line
+        lines[name] = {"elapsed": int(elapsed[len("elapsed="):-1]),
+                       "calls": int(calls[len("calls="):]),
+                       "outcome": outcome[len("outcome="):]}
+    return lines
 
 
 # -- the prompt ---------------------------------------------------------------
@@ -1594,6 +1635,210 @@ def test_a_failed_or_timed_out_judge_rejects_its_chunk_without_dropping_it(
         assert "provider failure" in answer["requirements"][3]["evidence"]
 
 
+# -- a stream-idle judge is asked once more (#1719) -----------------------------
+# Review judges at max went stream-idle on workbench PR #51 and twice on
+# PR #1635 (#1669). A silent stream says nothing about the requirements, so
+# the chunk is asked once more before it fails closed to `unsure`.
+
+FOUR = ["requirement {}".format(i) for i in range(1, 5)]
+
+
+def _idle_judge_review(tmp_path, failure=STREAM_IDLE, times=None):
+    """A four-requirement review whose second chunk, requirement 4 alone,
+    fails with ``failure`` ``times`` times (every time when None)."""
+    extra_env = {"MUSE_DYNAMIC_JUDGES": "1",
+                 "MUSE_JUDGE_FAIL_IF": "requirement 4",
+                 "MUSE_JUDGE_FAILURE": failure}
+    if times is not None:
+        extra_env["MUSE_JUDGE_FAIL_TIMES"] = str(times)
+    return _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=(_requirements_answer(*FOUR),), extra_env=extra_env)
+
+
+def _chunk_calls(repo, requirement):
+    """The (call, prompt) of every judge call assigned ``requirement``."""
+    calls = []
+    for call in range(2, _muse_calls(repo) + 1):
+        prompt = (repo / "muse.prompt.{}".format(call)).read_text()
+        if requirement in _assigned_requirements(prompt):
+            calls.append((call, prompt))
+    return calls
+
+
+def test_a_judge_chunk_stream_idle_once_is_asked_again_and_judged(tmp_path):
+    proc, repo = _idle_judge_review(tmp_path, times=1)
+
+    assert proc.returncode == 0, proc.stderr
+    # The lister, the first chunk once, the idle chunk twice.
+    assert _muse_calls(repo) == 4
+    assert len(_chunk_calls(repo, "requirement 1")) == 1
+    (first_call, first), (again_call, again) = \
+        _chunk_calls(repo, "requirement 4")
+    # The same question again, not a parse retry, on a fresh session.
+    assert again == first
+    assert "Your previous answer could not be parsed" not in again
+    assert "--session-id" not in \
+        (repo / "muse.args.{}".format(again_call)).read_text().splitlines()
+    answer = json.loads((repo / "apply.answer").read_text())
+    assert answer["verdict"] == "approved"
+    assert [entry["status"] for entry in answer["requirements"]] == \
+        ["met"] * 4
+    assert "judge chunk 1 went stream-idle; asking it once more: " \
+        + STREAM_IDLE in proc.stderr
+    timing = _timing_lines(proc.stderr)
+    assert {name: (line["calls"], line["outcome"])
+            for name, line in timing.items()} == {
+        "judge.0": (1, "done"), "judge.1": (2, "retried-done")}
+
+
+def test_a_judge_chunk_stream_idle_twice_fails_closed(tmp_path):
+    proc, repo = _idle_judge_review(tmp_path)
+
+    assert proc.returncode == 0, proc.stderr
+    # One retry, not two: the lister, the first chunk, the idle chunk twice.
+    assert _muse_calls(repo) == 4
+    assert len(_chunk_calls(repo, "requirement 4")) == 2
+    answer = json.loads((repo / "apply.answer").read_text())
+    assert answer["verdict"] == "rejected"
+    assert [entry["status"] for entry in answer["requirements"]] == \
+        ["met", "met", "met", "unsure"]
+    assert answer["requirements"][3]["evidence"] == (
+        "judge call failed (exit 1) after its stream-idle retry: "
+        + STREAM_IDLE)
+    timing = _timing_lines(proc.stderr)
+    assert (timing["judge.1"]["calls"], timing["judge.1"]["outcome"]) == \
+        (2, "failed")
+    assert timing["judge.0"]["outcome"] == "done"
+
+
+def test_a_judge_chunk_failure_that_is_not_stream_idle_is_not_retried(
+        tmp_path):
+    """Only Muse's idle timeout is retried, not any failure that mentions
+    the stream."""
+    proc, repo = _idle_judge_review(
+        tmp_path, failure="model stream error: connection reset by peer")
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 3
+    answer = json.loads((repo / "apply.answer").read_text())
+    assert answer["verdict"] == "rejected"
+    assert answer["requirements"][3]["evidence"] == (
+        "judge call failed (exit 1): model stream error: connection reset "
+        "by peer")
+    assert "stream-idle" not in proc.stderr
+    timing = _timing_lines(proc.stderr)
+    assert (timing["judge.1"]["calls"], timing["judge.1"]["outcome"]) == \
+        (1, "failed")
+
+
+def test_every_judge_chunk_logs_its_time_and_one_of_three_outcomes(tmp_path):
+    """#1600's evidence: one line per chunk with its wall time. A chunk that
+    answered, one that answered after its idle retry, and one killed at the
+    bound, which is final even though its diagnostic names the idle
+    timeout."""
+    requirements = ["requirement {}".format(i) for i in range(1, 8)]
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=(_requirements_answer(*requirements),), bound_seconds=2,
+        extra_env={"MUSE_DYNAMIC_JUDGES": "1",
+                   "MUSE_JUDGE_FAIL_IF": "requirement 4",
+                   "MUSE_JUDGE_FAILURE": STREAM_IDLE,
+                   "MUSE_JUDGE_FAIL_TIMES": "1",
+                   "MUSE_JUDGE_SLEEP_IF": "requirement 7",
+                   "MUSE_JUDGE_SLEEP_STDERR": STREAM_IDLE,
+                   "MUSE_JUDGE_SLEEP_SECONDS": "30"},
+        timeout=60)
+
+    assert proc.returncode == 0, proc.stderr
+    timing = _timing_lines(proc.stderr)
+    assert {name: (line["calls"], line["outcome"])
+            for name, line in timing.items()} == {
+        "judge.0": (1, "done"),
+        "judge.1": (2, "retried-done"),
+        "judge.2": (1, "failed")}
+    # Wall time, not a constant: the killed chunk ran at least its bound.
+    assert timing["judge.2"]["elapsed"] >= 2
+    assert all(line["elapsed"] >= 0 for line in timing.values())
+    answer = json.loads((repo / "apply.answer").read_text())
+    assert [entry["status"] for entry in answer["requirements"]] == \
+        ["met"] * 6 + ["unsure"]
+    assert answer["requirements"][6]["evidence"] == \
+        "judge call timed out after 2 seconds"
+
+
+# -- the two retries never spend each other's (#1719) ---------------------------
+# A part has one parse retry and one stream-idle retry, whichever comes first:
+# a malformed answer after the idle retry is still asked to reply again, a
+# call that goes idle after the parse retry is still asked once more, and
+# only the idle retry makes the outcome `retried-done`.
+
+PARSE_RETRY = "Your previous answer could not be parsed"
+
+
+def _judge_prompts(repo):
+    """The one-chunk review's judge prompts, in call order after the lister."""
+    return [(repo / "muse.prompt.{}".format(call)).read_text()
+            for call in range(2, _muse_calls(repo) + 1)]
+
+
+def test_a_judge_idle_then_malformed_still_gets_its_parse_retry(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        # The idle call answers nothing; its retry answers malformed; the
+        # parse retry judges.
+        answers=_review_answers(_judge_answer(), "{not json", _judge_answer()),
+        extra_env={"MUSE_JUDGE_FAIL_IF": "This is one judge call",
+                   "MUSE_JUDGE_FAILURE": STREAM_IDLE,
+                   "MUSE_JUDGE_FAIL_TIMES": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    idle, again, reparse = _judge_prompts(repo)
+    assert again == idle
+    assert PARSE_RETRY not in again
+    assert PARSE_RETRY in reparse
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
+        "approved"
+    timing = _timing_lines(proc.stderr)["judge.0"]
+    assert (timing["calls"], timing["outcome"]) == (3, "retried-done")
+
+
+def test_a_judge_malformed_then_idle_still_gets_its_idle_retry(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        # Malformed first; the parse retry goes idle; its retry judges.
+        answers=_review_answers("{not json", _judge_answer(), _judge_answer()),
+        extra_env={"MUSE_JUDGE_FAIL_IF": PARSE_RETRY,
+                   "MUSE_JUDGE_FAILURE": STREAM_IDLE,
+                   "MUSE_JUDGE_FAIL_TIMES": "1"})
+
+    assert proc.returncode == 0, proc.stderr
+    first, reparse, again = _judge_prompts(repo)
+    assert PARSE_RETRY not in first
+    assert PARSE_RETRY in reparse
+    # The idle retry re-sends the parse retry's prompt, unbound.
+    assert again == reparse
+    assert "--session-id" not in \
+        (repo / "muse.args.4").read_text().splitlines()
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
+        "approved"
+    timing = _timing_lines(proc.stderr)["judge.0"]
+    assert (timing["calls"], timing["outcome"]) == (3, "retried-done")
+
+
+def test_a_judge_parse_retry_alone_logs_two_calls_done(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(),
+        answers=_review_answers("{not json", _judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
+        "approved"
+    assert "stream-idle" not in proc.stderr
+    timing = _timing_lines(proc.stderr)["judge.0"]
+    assert (timing["calls"], timing["outcome"]) == (2, "done")
+
+
 def test_the_model_call_carries_the_exact_no_tool_shape(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path, _begin(), _packet(), args=("standard", "high"),
@@ -2272,7 +2517,8 @@ def test_a_failed_or_timed_out_shape_part_applies_nothing(
         extra_env=extra_env, timeout=60)
 
     assert proc.returncode == 1
-    # A failed call is not retried: only a parse error is.
+    # A failed call is not retried: only a parse error or a stream-idle
+    # timeout is (#1719).
     assert _muse_calls(repo) == 4
     assert _apply_calls(repo) == []
     assert not (repo / "applied.marker").exists()
@@ -2420,6 +2666,177 @@ def test_a_retryable_shape_apply_refusal_is_final(tmp_path):
     heartbeat = _heartbeat(repo)
     assert "--outcome errored" in heartbeat
     assert "shape-apply failed on {}".format(SHAPE_REF) in heartbeat
+
+
+# -- a stream-idle shape part is asked once more (#1719) -----------------------
+# The framer on #1195 and a decider on #1658 and #1675 went stream-idle at
+# max, and each shaped on its next whole-run attempt (#1669). The idle part
+# is asked once more; the parts that answered keep their answers.
+
+#: The default split: one of each part, with these names.
+SHAPE_PART_NAMES = {"framer": "framer", "sibling": "sibling.0",
+                    "decider": "decider.0", "auditor": "auditor"}
+
+
+def _idle_shape(tmp_path, part, failure=STREAM_IDLE, times=None, env=None,
+                **kwargs):
+    """A Muse shape whose ``part`` fails with ``failure`` ``times`` times
+    (every time when None), plus any stub settings in ``env``; every other
+    part answers."""
+    extra_env = {"MUSE_SHAPE_FAIL_PART": part,
+                 "MUSE_SHAPE_FAILURE": failure}
+    if times is not None:
+        extra_env["MUSE_SHAPE_FAIL_TIMES"] = str(times)
+    extra_env.update(env or {})
+    return _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        extra_env=extra_env, **kwargs)
+
+
+def _shape_timing(proc):
+    return {name: (line["calls"], line["outcome"])
+            for name, line in _timing_lines(proc.stderr).items()}
+
+
+@pytest.mark.parametrize("part", ("framer", "decider"))
+def test_a_shape_part_stream_idle_once_is_asked_again_and_applies(
+        tmp_path, part):
+    proc, repo = _idle_shape(tmp_path, part, times=1)
+
+    assert proc.returncode == 0, proc.stderr
+    # The idle part twice; every part that answered, once.
+    parts = _shape_part_prompts(repo)
+    expected = {"framer": 1, "sibling": 1, "decider": 1, "auditor": 1}
+    expected[part] = 2
+    assert {kind: len(calls) for kind, calls in parts.items()} == expected
+    (first_call, first), (again_call, again) = parts[part]
+    # The same question again, not a parse retry, and never a resume of the
+    # silent session: only the framer's first call carries the id (#1413).
+    assert again == first
+    assert "Your previous answer could not be parsed" not in again
+    assert "--session-id" in (repo / "muse.args.1").read_text().splitlines()
+    assert "--session-id" not in \
+        (repo / "muse.args.{}".format(again_call)).read_text().splitlines()
+    assert len(_apply_calls(repo)) == 1
+    assert (repo / "applied.marker").exists()
+    assert "--outcome done" in _heartbeat(repo)
+    name = SHAPE_PART_NAMES[part]
+    assert "shape {} went stream-idle; asking it once more: {}".format(
+        name, STREAM_IDLE) in proc.stderr
+    expected_timing = {"shape." + each: (1, "done")
+                       for each in SHAPE_PART_NAMES.values()}
+    expected_timing["shape." + name] = (2, "retried-done")
+    assert _shape_timing(proc) == expected_timing
+
+
+def test_a_framer_stream_idle_twice_fails_the_run_and_asks_no_part(tmp_path):
+    proc, repo = _idle_shape(tmp_path, "framer")
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 2
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "muse exec failed (exit 1) on shape of {}: {}".format(
+        SHAPE_REF, STREAM_IDLE) in heartbeat
+    assert _shape_timing(proc) == {"shape.framer": (2, "failed")}
+
+
+def test_a_later_part_stream_idle_twice_fails_the_run(tmp_path):
+    proc, repo = _idle_shape(tmp_path, "decider")
+
+    assert proc.returncode == 1
+    # One retry, not two: the framer, sibling and auditor once each.
+    assert _muse_calls(repo) == 5
+    assert len(_shape_part_prompts(repo)["decider"]) == 2
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "shape parts failed for {}; nothing applied: shape decider.0: " \
+        "muse exec failed (exit 1) after its stream-idle retry: {}".format(
+            SHAPE_REF, STREAM_IDLE) in heartbeat
+    assert _shape_timing(proc) == {
+        "shape.framer": (1, "done"), "shape.sibling.0": (1, "done"),
+        "shape.decider.0": (2, "failed"), "shape.auditor": (1, "done")}
+
+
+@pytest.mark.parametrize("part,failure", (
+    ("framer", "model stream error: connection reset by peer"),
+    ("decider", "model stream error: connection reset by peer"),
+    ("decider", "killed at the bound"),
+))
+def test_a_shape_part_failure_that_is_not_stream_idle_is_not_retried(
+        tmp_path, part, failure):
+    """Only Muse's idle timeout is retried: not another failure that names
+    the stream, and not the bound's kill, which is final even when the idle
+    line is already in the part's diagnostic."""
+    if failure == "killed at the bound":
+        proc, repo = _stubbed_runner(
+            tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+            bound_seconds=1, timeout=60,
+            extra_env={"MUSE_SHAPE_SLEEP_PART": part,
+                       "MUSE_SHAPE_SLEEP_STDERR": STREAM_IDLE})
+    else:
+        proc, repo = _idle_shape(tmp_path, part, failure=failure)
+
+    assert proc.returncode != 0
+    assert len(_shape_part_prompts(repo)[part]) == 1
+    assert _muse_calls(repo) == (1 if part == "framer" else 4)
+    assert _apply_calls(repo) == []
+    assert "stream-idle" not in proc.stderr
+    assert _shape_timing(proc)["shape." + SHAPE_PART_NAMES[part]] == \
+        (1, "failed")
+
+
+# The shape side of the two retries (#1719): see the judge section above.
+
+def test_a_shape_part_idle_then_malformed_still_gets_its_parse_retry(
+        tmp_path):
+    proc, repo = _idle_shape(
+        tmp_path, "decider", times=1,
+        env={"MUSE_SHAPE_MALFORMED_ONCE_PART": "decider"})
+
+    assert proc.returncode == 0, proc.stderr
+    (_, idle), (_, again), (_, reparse) = _shape_part_prompts(repo)["decider"]
+    assert again == idle
+    assert PARSE_RETRY not in again
+    assert PARSE_RETRY in reparse
+    assert len(_apply_calls(repo)) == 1
+    assert _shape_timing(proc)["shape.decider.0"] == (3, "retried-done")
+
+
+def test_a_shape_part_malformed_then_idle_still_gets_its_idle_retry(
+        tmp_path):
+    proc, repo = _idle_shape(
+        tmp_path, "decider", times=1,
+        env={"MUSE_SHAPE_FAIL_IF": PARSE_RETRY,
+             "MUSE_SHAPE_MALFORMED_ONCE_PART": "decider"})
+
+    assert proc.returncode == 0, proc.stderr
+    deciders = _shape_part_prompts(repo)["decider"]
+    (_, first), (_, reparse), (again_call, again) = deciders
+    assert PARSE_RETRY not in first
+    assert PARSE_RETRY in reparse
+    # The idle retry re-sends the parse retry's prompt, unbound.
+    assert again == reparse
+    assert "--session-id" not in \
+        (repo / "muse.args.{}".format(again_call)).read_text().splitlines()
+    assert len(_apply_calls(repo)) == 1
+    assert _shape_timing(proc)["shape.decider.0"] == (3, "retried-done")
+
+
+def test_a_shape_parse_retry_alone_logs_two_calls_done(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        extra_env={"MUSE_SHAPE_MALFORMED_ONCE_PART": "decider"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert "stream-idle" not in proc.stderr
+    expected = {"shape." + each: (1, "done")
+                for each in SHAPE_PART_NAMES.values()}
+    expected["shape.decider.0"] = (2, "done")
+    assert _shape_timing(proc) == expected
 
 
 def test_a_zai_shape_is_still_one_call(tmp_path):
@@ -2860,6 +3277,54 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "malformed or incomplete blocks stay prose" in judge
     assert "throwaway `launchctl submit` probe" in judge
     assert "Install nothing; leave the keeper unchanged" in judge
+
+
+def test_the_pr_body_reaches_the_lister_and_judge_as_the_implementers_claims(
+        tmp_path):
+    """#1720: the lister and every judge chunk see the PR description and its
+    Departures, and the wording each call is given, not only the packet,
+    labels them as the implementer's claims."""
+    body = "Summary: BODY-SENTINEL records the check in the description."
+    departure = "DEPARTURE-SENTINEL: the helper moved, so bar() changed"
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(),
+        _packet(pr_body=body, pr_body_truncated=False,
+                pr_departures=[departure],
+                pr_claims_note="pr_body and pr_departures are claims"),
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    lister = (repo / "muse.prompt.1").read_text()
+    judge = (repo / "muse.prompt.2").read_text()
+    for prompt in (lister, judge):
+        assert "BODY-SENTINEL" in prompt
+        assert "DEPARTURE-SENTINEL" in prompt
+
+    def flat(text):
+        return " ".join(text.split())
+
+    lister_framing = flat(lister.split(
+        "The text after this paragraph is the review question", 1)[0])
+    assert "`pr_body`" in lister_framing
+    assert "`pr_departures`" in lister_framing
+    assert "implementer's own claims" in lister_framing
+    assert "You may cite them as evidence" in lister_framing
+    assert "add, drop or soften nothing" in lister_framing
+    assert "so its judge can weigh the departure" in lister_framing
+
+    judge_framing = flat(judge.split("The assigned requirements are:", 1)[0])
+    assert "implementer's own claims" in judge_framing
+    assert "you may cite them as evidence" in judge_framing
+    assert "judged against `pr_body`" in judge_framing
+    assert "never counts as meeting its requirement by itself" in \
+        judge_framing
+
+    # The routine's question rides in both calls ahead of the packet.
+    for prompt in (lister, judge):
+        question = flat(prompt.split("## The question", 1)[1]
+                        .split("## The packet", 1)[0])
+        assert "`pr_body`" in question
+        assert "implementer's own claims" in question
 
 
 def test_the_requirement_list_is_kept_where_the_judges_will_read_it(tmp_path):

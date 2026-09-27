@@ -1493,13 +1493,18 @@ _PLAN_REJECTED_INLINE_RE = re.compile(
 
 _PLAN_QUOTE_PAIRS = {"\"": "\"", "“": "”", "‘": "’", "«": "»"}
 _PLAN_PROPOSAL_ACTIONS = {
+    # Every inflection is spelled out: an optional suffix on a stem that
+    # ends in "e" matches "changeing", never "changing" (#1681 review).
     "authorisation": re.compile(
-        r"\b(?:add|adds|added|adding|broaden(?:s|ed|ing)?|"
-        r"change(?:s|d|ing)?|configure(?:s|d|ing)?|elevate(?:s|d|ing)?|"
-        r"enable(?:s|d|ing)?|expand(?:s|ed|ing)?|grant(?:s|ed|ing)?|"
-        r"introduce(?:s|d|ing)?|reduce(?:s|d|ing)?|require(?:s|d|ing)?|"
-        r"revoke(?:s|d|ing)?|tighten(?:s|ed|ing)?|update(?:s|d|ing)?|"
-        r"use(?:s|d|ing)?)\b",
+        r"\b(?:add|adds|added|adding|broaden|broadens|broadened|broadening|"
+        r"change|changes|changed|changing|configure|configures|"
+        r"configured|configuring|elevate|elevates|elevated|elevating|"
+        r"enable|enables|enabled|enabling|expand|expands|expanded|"
+        r"expanding|grant|grants|granted|granting|introduce|"
+        r"introduces|introduced|introducing|reduce|reduces|reduced|"
+        r"reducing|require|requires|required|requiring|revoke|revokes|"
+        r"revoked|revoking|tighten|tightens|tightened|tightening|"
+        r"update|updates|updated|updating|use|uses|used|using)\b",
         re.IGNORECASE,
     ),
     "credentials": re.compile(

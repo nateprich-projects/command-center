@@ -543,3 +543,29 @@ def test_ticket_1680_every_escalation_category_has_a_proposal_action():
 ])
 def test_ticket_1680_negated_authorisation_mentions_do_not_escalate(body):
     assert funnel.plan_escalation_matches(body) == []
+
+
+@pytest.mark.parametrize("sentence", [
+    "Enabling OAuth for the connector before cutover.",
+    "Using OAuth for the Muse connector.",
+    "Requiring OAuth for every connector.",
+    "Configuring OAuth on the connector.",
+    "Updating the access control list for runners.",
+])
+def test_ticket_1680_gerund_authorisation_proposals_escalate(sentence):
+    """Stems ending in "e" need their -ing form spelled out (#1681 review)."""
+    body = "## What it is\n\n{}\n".format(sentence)
+
+    assert [m["reason"] for m in funnel.plan_escalation_matches(body)] == [
+        "authorisation"
+    ]
+
+
+@pytest.mark.parametrize("body", [
+    "## What it is\n\nThe GitHub CLI already handles OAuth for us.\n",
+    "## What it is\n\nOAuth sign-in is how the connector reaches the "
+    "account today, and this ticket leaves it alone.\n",
+])
+def test_ticket_1680_bare_authorisation_mentions_do_not_escalate(body):
+    """These reach the proposal table (no negation lookbehind stops them)."""
+    assert funnel.plan_escalation_matches(body) == []

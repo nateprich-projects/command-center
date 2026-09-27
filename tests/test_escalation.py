@@ -17,6 +17,7 @@ pattern list is a safety boundary for tickets written before markers existed.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 
@@ -491,3 +492,14 @@ def test_a_negated_sentence_in_prose_still_matches_and_is_not_this_fix():
 def test_empty_and_missing_text_are_unchanged():
     assert funnel.asserted_text("") == ""
     assert funnel.escalation_reasons("", "") == []
+
+
+def test_ticket_1643_false_gate_fixtures_reproduce_before_the_fix():
+    """Pin the live false hits before changing the plan proposal scan."""
+    fixtures = json.loads(
+        (FIXTURES / "escalation_plan_false_gates.json").read_text()
+    )
+    for fixture in fixtures:
+        actual = funnel.plan_escalation_matches(fixture["body"])
+        assert [match["reason"] for match in actual] == \
+            fixture["pre_change_reasons"], fixture["source"]

@@ -75,6 +75,27 @@ def test_recorded_cause_regressions_ignores_prose_references():
     assert report["count"] == 0
 
 
+def test_recorded_cause_regressions_lists_recent_broken_fix_tickets():
+    broken = _item(40, "Broken project", klass="Broken")
+    improve = _item(41, "Improve project", klass="Improve")
+    fresh = _item(401, "Fix ticket", parent=broken.ref, state="CLOSED",
+                  closed_at=NOW - timedelta(days=2))
+    stale = _item(402, "Old fix ticket", parent=broken.ref, state="CLOSED",
+                  closed_at=NOW - timedelta(days=15))
+    still_open = _item(403, "Open fix ticket", parent=broken.ref)
+    feature = _item(411, "Feature ticket", parent=improve.ref, state="CLOSED",
+                    closed_at=NOW - timedelta(days=1))
+    other_repo = _item(404, "Member fix", repo="nateprich-projects/workbench",
+                       parent=broken.ref, state="CLOSED",
+                       closed_at=NOW - timedelta(days=1))
+
+    report = funnel.recorded_cause_regressions(
+        [broken, improve, fresh, stale, still_open, feature, other_repo], NOW
+    )
+
+    assert report["broken_fix_tickets"] == [{"ticket": 401, "project": 40}]
+
+
 def test_maintenance_load_exposes_project_counts_not_ticket_counts():
     broken = _item(
         20, "Closed broken project", klass="Broken", state="CLOSED",

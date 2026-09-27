@@ -379,6 +379,10 @@ GATES = {
 DECISION_ORDER = ["Building", "Ready", "Shaped"]
 
 MAINTENANCE_WINDOW = timedelta(days=30)
+#: Closed command-center tickets under Broken projects that the brief lists
+#: for the fix-on-fix measure: twice its seven-day window, so a fix and the
+#: earlier fix it rewrites are both in view (#1682).
+BROKEN_FIX_TICKET_WINDOW = timedelta(days=14)
 
 # The dashboard is a display-only consumer of a successful brief. Its spool is
 # deliberately outside the repository and is a buffer, not another source of
@@ -4855,10 +4859,27 @@ def recorded_cause_regressions(
         if ticket is not None and ticket.parent in project_refs:
             recorded.add(ticket.parent)
 
+    # The squash commits for these tickets are what fix_recurrence.py reads
+    # from git to measure fix-on-fix; the brief supplies only the join (#1683).
+    broken_refs = {item.ref for item in projects}
+    fix_cutoff = now - BROKEN_FIX_TICKET_WINDOW
+    broken_fix_tickets = sorted(
+        (
+            {"ticket": item.number,
+             "project": int(str(item.parent).rsplit("#", 1)[1])}
+            for item in rows
+            if item.repo == REPO and item.parent in broken_refs
+            and item.state == "CLOSED" and item.closed_at is not None
+            and item.closed_at >= fix_cutoff
+        ),
+        key=lambda row: row["ticket"],
+    )
+
     total = len(recent_projects)
     count = len(recorded)
     return {
         "window_days": MAINTENANCE_WINDOW.days,
+        "broken_fix_tickets": broken_fix_tickets,
         "definition": (
             "parent projects classified Broken with a created, status, or "
             "closed event in the last 30 days and a capture caused_by marker "

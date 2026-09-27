@@ -32,6 +32,7 @@ If the command fails, show the error. Do not query GitHub yourself.
 | `human_steps` | Tickets waiting on Nate to go and do the declared `reason`; outside `total_needing_nate`, their only surface |
 | `machine_local_steps` | Tickets waiting on a Claude Code session to go and do the declared `reason`; never folded into decisions or the total |
 | `unattended_merges` | Agent merges without him (`pr`, `at`, `note`, `agent`; retired agents excluded); call `self_reviewed: true` self-reviewed |
+| `connector_gate_answers` | Recent approve, accept, and park actions from the connector, with verbatim instruction and `nate-relayed` provenance; records do not add to gate counts |
 
 The code template documents these: `generated_at`, `counts_by_gate`,
 `items`, `waiting_on`, `waited`, `class`, `pinned`, `needs_class`,
@@ -41,7 +42,8 @@ The code template documents these: `generated_at`, `counts_by_gate`,
 `resend_ratio`, `outcome_signals`, `blocked`, `blocked_human_steps`,
 `blocked_machine_local_steps`, `suspected_human_steps`, `parked`,
 `closed_itself`, `cleared_blocks`, `awaiting_breakdown`,
-`prose_dependencies`, `unattended_approvals`, `run_summary`, `agent_health`,
+`prose_dependencies`, `unattended_approvals`, `connector_gate_answers`,
+`run_summary`, `agent_health`,
 `rejected_merges`, `status_state_mismatches`, `main_ci`,
 `closed_with_access_vocabulary`, `member_issues_without_project_items`, `missing`, `timings`,
 `degraded`.

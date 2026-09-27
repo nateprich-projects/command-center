@@ -665,6 +665,8 @@ BRIEF_SECTION_BUDGETS = {
     "resend_ratio": 3.0,
     "unattended_merges": 3.0,
     "unattended_approvals": 49.0,
+    # Bounded issue-comment tails, shared with the adjacent approval record.
+    "connector_gate_answers": 49.0,
     "run_summary": 1.0,
     "agent_health": 1.0,
     "working_tree_touched": 1.0,
@@ -4248,6 +4250,112 @@ def unattended_approvals(
             })
 
     return sorted(found, key=lambda row: (row["at"], row["ref"]), reverse=True)
+
+
+def _connector_gate_candidate(item: Item, cutoff: datetime,
+                              now: datetime) -> bool:
+    """Return whether an item could hold a recent connector gate answer."""
+    # Connector answers write one of these Project statuses. Limit comment
+    # reads to recent transitions rather than scanning every issue on the board.
+    for event in item.status_events:
+        if not isinstance(event, dict):
+            continue
+        if event.get("status") not in ("Ready", "Done", "Parked"):
+            continue
+        raw_at = (
+            event.get("at") or event.get("created_at") or event.get("createdAt")
+        )
+        if isinstance(raw_at, datetime):
+            at = raw_at
+        elif isinstance(raw_at, str):
+            at = parse_time(raw_at)
+        else:
+            at = None
+        if at is not None and cutoff <= at <= now:
+            return True
+    return False
+
+
+def _connector_gate_verb(body: str) -> Optional[str]:
+    """Identify a connector gate comment by its durable visible body."""
+    visible = _visible_comment(body).strip()
+    match = re.fullmatch(
+        r"General-chat gate instruction received for `([^`]+)`\.", visible
+    )
+    if match is not None and match.group(1) in ANSWERS:
+        return match.group(1)
+    if parse_park_comment(body) is not None:
+        return "park"
+    return None
+
+
+def connector_gate_answers(
+    items: Iterable[Item], now: datetime, brief_cache=None
+) -> List[Dict[str, object]]:
+    """Recent connector gate answers with their verbatim instruction record.
+
+    The connector writes a provenance comment for approve, accept and park.
+    Status history narrows the bounded comment-tail reads to items on which
+    one of those actions could have completed. These records are audit context;
+    they are deliberately separate from gate counts.
+    """
+    cutoff = now - MAINTENANCE_WINDOW
+    candidates = [
+        item for item in items
+        if _connector_gate_candidate(item, cutoff, now)
+    ]
+    if not candidates:
+        return []
+
+    cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
+    comments_by_ref = cache.comment_tails(candidates)
+    found: List[Tuple[datetime, str, Dict[str, object]]] = []
+    for item in candidates:
+        for comment in comments_by_ref.get(item.ref, []):
+            if not isinstance(comment, dict):
+                continue
+            body = comment.get("body")
+            if not isinstance(body, str):
+                continue
+            verb = _connector_gate_verb(body)
+            if verb is None:
+                continue
+            provenance = parse_provenance(body)
+            if not isinstance(provenance, dict):
+                continue
+            instruction = provenance.get("instruction")
+            if (provenance.get("voice") != "nate-relayed"
+                    or not isinstance(instruction, str)
+                    or not instruction.strip()):
+                continue
+
+            created_at = comment.get("createdAt") or comment.get("created_at")
+            if isinstance(created_at, datetime):
+                at = created_at
+            elif isinstance(created_at, str):
+                at = parse_time(created_at)
+            else:
+                at = None
+            if at is None or not cutoff <= at <= now:
+                continue
+            record = {
+                "ref": item.ref,
+                "title": item.title,
+                "url": item.url,
+                "gate": verb,
+                "at": at.isoformat(),
+                "instruction": instruction,
+                "provenance": {
+                    "voice": provenance.get("voice"),
+                    "at": provenance.get("at"),
+                    "agent": provenance.get("agent"),
+                    "run": provenance.get("run"),
+                },
+            }
+            found.append((at, item.ref, record))
+
+    found.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    return [record for _at, _ref, record in found]
 
 
 def agent_health(now: datetime) -> List[Dict[str, str]]:
@@ -13444,6 +13552,11 @@ def cmd_brief(
             lambda: unattended_approvals(items, now, brief_cache=cache),
             [],
         )
+        gate_answers = section(
+            "connector_gate_answers",
+            lambda: connector_gate_answers(items, now, brief_cache=cache),
+            [],
+        )
         run_summary = section(
             "run_summary", lambda: agent_run_summary(now), []
         )
@@ -13526,6 +13639,7 @@ def cmd_brief(
             "resend_ratio": resend,
             "unattended_merges": merges,
             "unattended_approvals": approvals,
+            "connector_gate_answers": gate_answers,
             "run_summary": run_summary,
             "agent_health": health,
             "working_tree_touched": touched,

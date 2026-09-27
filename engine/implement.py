@@ -1332,6 +1332,14 @@ def write_declined_needs(url: str, ref: str) -> None:
     breakdown_engine.write_needs(item_id, "agent", ref)
 
 
+def write_declined_external_event_needs(url: str, ref: str) -> None:
+    """Wait for a pending gate answer without creating a human block."""
+    from engine import breakdown as breakdown_engine
+
+    item_id = breakdown_engine.add_to_project(url)
+    breakdown_engine.write_needs(item_id, "external-event", ref)
+
+
 def write_declined_human_needs(url: str, ref: str) -> None:
     """Route an unhandled decline to Nate so its block cannot be stranded."""
     from engine import breakdown as breakdown_engine
@@ -1450,7 +1458,7 @@ def _landed_prerequisite_evidence(
 
 def clear_declined_ticket_block(repo: str, number: int, *,
                                 cwd: pathlib.Path) -> None:
-    """Remove a stale human block after a named prerequisite is verified landed."""
+    """Remove a stale blocked label after routing a decline out of Nate's queue."""
     data = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo,
         "--json", "labels",
@@ -1805,6 +1813,8 @@ def finish_declined(
         needs_effect: Callable[[str, str], None] = write_declined_needs,
         human_needs_effect: Callable[[str, str], None]
         = write_declined_human_needs,
+        external_event_needs_effect: Callable[[str, str], None]
+        = write_declined_external_event_needs,
         prerequisite_facts_effect: Callable[[str], Optional[Dict[str, object]]]
         = read_declined_prerequisite,
         clear_block_effect: Callable[..., None] = clear_declined_ticket_block,
@@ -1837,6 +1847,10 @@ def finish_declined(
     prerequisite_recorded = False
     prerequisite_agent_routed = False
     prerequisite_evidence: Optional[str] = None
+    unsatisfiable_acceptance_routed = (
+        decline_class == "unsatisfiable-acceptance"
+    )
+    pending_gate_answer_routed = decline_class == "pending-gate-answer"
     if accept_conflict_routed:
         # Keep this in an agent lane so review and shaping can see the ticket.
         needs_effect(ticket["url"], ref)
@@ -1863,7 +1877,9 @@ def finish_declined(
             # A failed lookup or edge write keeps today's visible block.
             prerequisite_recorded = False
     if (not prerequisite_recorded and not accept_conflict_routed
-            and not prerequisite_agent_routed):
+            and not prerequisite_agent_routed
+            and not unsatisfiable_acceptance_routed
+            and not pending_gate_answer_routed):
         # Unknown declines and failed prerequisite handoffs have no machine-
         # readable condition that can clear them. Ask Nate instead of leaving
         # a blocked ticket in the silent Needs=agent lane.
@@ -1880,6 +1896,16 @@ def finish_declined(
             resolved, context["number"], cwd=context["root"],
         )
         needs_effect(ticket["url"], ref)
+    elif unsatisfiable_acceptance_routed:
+        clear_block_effect(
+            resolved, context["number"], cwd=context["root"],
+        )
+        needs_effect(ticket["url"], ref)
+    elif pending_gate_answer_routed:
+        clear_block_effect(
+            resolved, context["number"], cwd=context["root"],
+        )
+        external_event_needs_effect(ticket["url"], ref)
     routing_failed = False
     if accept_conflict_routed:
         try:
@@ -1902,6 +1928,10 @@ def finish_declined(
         note += "; routed to review for Accept/body conflict"
     elif prerequisite_agent_routed:
         note += "; prerequisite already landed; returned to agent queue"
+    elif unsatisfiable_acceptance_routed:
+        note += "; acceptance cannot be met; returned to agent queue"
+    elif pending_gate_answer_routed:
+        note += "; waiting for gate answer as an external event"
     elif routing_failed:
         note += "; review routing failed; ticket left blocked"
     if extra_note:

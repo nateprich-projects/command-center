@@ -111,6 +111,29 @@ _DECLINED_STALE_ROUTINE_FREEZE = re.compile(
     r"(?=.{0,240}\bverdict\s+confirms\s+the\s+conflict\b)",
     re.IGNORECASE | re.DOTALL,
 )
+_DECLINED_ACCEPTANCE_IMPOSSIBLE = re.compile(
+    r"\b(?:accept|acceptance)(?:\s+(?:condition|criteria|requirement))?\b"
+    r".{0,240}\b(?:cannot|can't|can not|impossible|unsatisfiable|"
+    r"unachievable)\b.{0,80}\b(?:meet|met|satisfy|satisfied|clear|"
+    r"fulfil|fulfilled|fulfill)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_DECLINED_NO_CHANGE_CAN_CLEAR = re.compile(
+    r"\bno\s+(?:in[- ]scope\s+)?change\s+can\s+(?:ever\s+)?"
+    r"make\b.{0,100}\b(?:clear|meet|satisfy)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_DECLINED_ACCEPTANCE_TERM = re.compile(
+    r"\b(?:accept|acceptance)(?:\s+(?:condition|criteria|requirement))?\b",
+    re.IGNORECASE,
+)
+_DECLINED_PENDING_GATE_ANSWER = re.compile(
+    r"(?:\b(?:gate|question)\b.{0,100}\b(?:answer|response)\b"
+    r".{0,120}\b(?:pending|awaiting|unanswered|not\s+yet\s+answered)\b"
+    r"|\b(?:pending|awaiting|unanswered)\b.{0,120}\b(?:gate|question)\b"
+    r".{0,100}\b(?:answer|response)\b)",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _declined_conflict_pointer(reason: str) -> Optional[str]:
@@ -159,7 +182,7 @@ def declined_review_routing_comment(reason: str, pointer: str) -> str:
 def classify_decline_reason(reason: str, ticket_repo: str,
                             ticket_body: str = ""
                             ) -> Tuple[str, Optional[str]]:
-    """Classify prerequisite, Accept/body conflict, and accepted defer proof."""
+    """Classify machine-actionable declines without guessing from mentions."""
     found = {
         match.group("ref")
         for pattern in _DECLINED_PREREQUISITE_PATTERNS
@@ -197,6 +220,12 @@ def classify_decline_reason(reason: str, ticket_repo: str,
     pointer = _declined_conflict_pointer(reason)
     if pointer is not None:
         return "accept-body-conflict", pointer
+    if _DECLINED_PENDING_GATE_ANSWER.search(reason or ""):
+        return "pending-gate-answer", None
+    if (_DECLINED_ACCEPTANCE_IMPOSSIBLE.search(reason or "")
+            or (_DECLINED_ACCEPTANCE_TERM.search(reason or "")
+                and _DECLINED_NO_CHANGE_CAN_CLEAR.search(reason or ""))):
+        return "unsatisfiable-acceptance", None
     if (_is_defer_note_proof_reason(reason)
             and _accepts_defer_note_proof(ticket_body)):
         return "defer-note-proof", None

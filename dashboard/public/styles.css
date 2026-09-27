@@ -263,6 +263,8 @@ main[hidden] { display: none; }
 .usage-fill.over { background: var(--danger); }
 .usage-percent { font-size: 13px; color: var(--ink-dim); white-space: nowrap; }
 .empty { margin: 0; padding: 18px; color: var(--ink-dim); }
+.unreadable { margin: 0; padding: 12px 18px; color: var(--danger); }
+.waiting-section > .unreadable { padding: 0; }
 
 .execution-section { display: grid; gap: 24px; }
 .budget-caveat { margin: 0; padding: 14px 18px 0; color: var(--ink-dim); font-size: 13px; }

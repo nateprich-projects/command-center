@@ -322,7 +322,10 @@ def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
     }]
     assert "authority signals: gate authority, policy authority" in \
         brief["unattended_approvals"][0]["basis"]
-    assert len(calls) == 1
+    # The approval reader loads the two recent transitions; the connector
+    # record also checks the current Ready item whose transition is outside
+    # the maintenance window.
+    assert len(calls) == 2
     assert "rateLimit { cost remaining resetAt }" in calls[0]
     assert "comments(last: {})".format(
         funnel.CLOSED_ITSELF_COMMENT_PAGE_SIZE
@@ -538,7 +541,7 @@ def test_connector_gate_answer_survives_missing_ready_status_event():
             return {
                 candidate.ref: [{
                     "body": body,
-                    "createdAt": answered_at.isoformat(),
+                    "createdAt": answered_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }]
                 for candidate in candidates
             }
@@ -669,7 +672,9 @@ def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
         },
     ]
     assert brief["total_needing_nate"] == 0
-    assert len(calls) == 1
+    # The connector record also reads the recently closed accepted project,
+    # which is not a closed-itself candidate.
+    assert len(calls) == 2
     assert "rateLimit { cost remaining resetAt }" in calls[0]
     assert "comments(last: {})".format(
         funnel.CLOSED_ITSELF_COMMENT_PAGE_SIZE
@@ -1408,6 +1413,9 @@ def test_brief_keeps_readable_sections_when_one_section_cannot_be_read(
         raise funnel.GitHubError("rate limit")
 
     monkeypatch.setattr(funnel, "unattended_merges", unreadable)
+    monkeypatch.setattr(
+        funnel, "connector_gate_answers", lambda *args, **kwargs: []
+    )
 
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
@@ -1562,6 +1570,9 @@ def test_brief_emits_elapsed_seconds_for_each_section(monkeypatch, capsys):
 
     monkeypatch.setattr(funnel.time, "perf_counter", fake_perf_counter)
     monkeypatch.setattr(funnel, "recent_resend_ratio", lambda now: {})
+    monkeypatch.setattr(
+        funnel, "connector_gate_answers", lambda *args, **kwargs: []
+    )
 
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
@@ -1623,6 +1634,9 @@ def test_brief_timings_identify_a_slow_stage_without_changing_payload(
         return []
 
     monkeypatch.setattr(funnel, "closed_itself_json", slow_closed_itself)
+    monkeypatch.setattr(
+        funnel, "connector_gate_answers", lambda *args, **kwargs: []
+    )
 
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)
@@ -1714,6 +1728,7 @@ def test_brief_record_sections_allow_the_observed_two_second_read(
         ("closed_itself", "closed_itself_json"),
         ("cleared_blocks", "cleared_blocks_json"),
         ("unattended_approvals", "unattended_approvals"),
+        ("connector_gate_answers", "connector_gate_answers"),
         ("rejected_merges", "rejected_merges"),
     ],
 )
@@ -1728,7 +1743,15 @@ def test_brief_degrades_a_slow_section_without_losing_the_rest(
         status_since=NOW,
     )
     monkeypatch.setitem(funnel.BRIEF_SECTION_BUDGETS, section, 0.0)
-    monkeypatch.setattr(funnel, reader, lambda *args: {})
+    if reader == "connector_gate_answers":
+        monkeypatch.setattr(
+            funnel, reader, lambda *args, **kwargs: []
+        )
+    else:
+        monkeypatch.setattr(funnel, reader, lambda *args: {})
+        monkeypatch.setattr(
+            funnel, "connector_gate_answers", lambda *args, **kwargs: []
+        )
 
     assert funnel.cmd_brief([item], NOW) == 0
     brief = json.loads(capsys.readouterr().out)

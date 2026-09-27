@@ -321,8 +321,13 @@ def test_recorded_nine_run_401_streak_fails_and_redacts_error_tokens(tmp_path):
                   "16-00-00", "16-05-00", "16-11-00", "16-20-00",
                   "16-31-00"]
     error = {
-        "message": "401 Incorrect API key: sk-proj-0123456789abcdefgh",
-        "codex_error_info": "Authorization: Bearer " + "a" * 40,
+        "message": (
+            "401 Incorrect API key provided: sk-proj-" + "*" * 150 + "AbCd."
+        ),
+        "codex_error_info": (
+            "Authorization: Bearer " + "a" * 40
+            + "; masked key sk-proj-" + "*" * 150 + "Wxyz"
+        ),
     }
     for timestamp in timestamps:
         _write_rollout(rollouts, timestamp, error=error)
@@ -334,7 +339,9 @@ def test_recorded_nine_run_401_streak_fails_and_redacts_error_tokens(tmp_path):
     assert "5 of 5 newest Codex automation rollouts errored" in check.found
     assert "401 Incorrect API key" in check.found
     assert "[REDACTED]" in check.found
-    assert "sk-proj-0123456789abcdefgh" not in check.found
+    assert "sk-proj" not in check.found
+    assert "AbCd" not in check.found
+    assert "Wxyz" not in check.found
     assert "a" * 40 not in check.found
     assert "PRIVATE_MEMBER_REPO_TRANSCRIPT" not in check.found
 

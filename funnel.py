@@ -7438,6 +7438,12 @@ _CODEX_SENSITIVE_ERROR_ASSIGNMENT = re.compile(
 _CODEX_BEARER_TOKEN = re.compile(
     r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/-]{8,}"
 )
+_CODEX_MASKED_KEY = re.compile(
+    r"(?i)[A-Za-z0-9_-]*\*{4,}(?:\.{3}|\u2026)?[A-Za-z0-9_-]*"
+)
+_CODEX_API_KEY_PROVIDED_VALUE = re.compile(
+    r"(?i)(\bAPI[ \t]+key[ \t]+provided:[ \t]*)[^\s.]+"
+)
 _CODEX_KNOWN_TOKEN = re.compile(
     r"(?i)\b(?:sk|sess|rk|pk|ghp|gho|ghu|ghs|github_pat|xox[baprs])[-_]"
     r"[A-Za-z0-9_-]{8,}\b"
@@ -7499,6 +7505,8 @@ def _redact_codex_error_value(value: Any) -> Any:
 
     text = _CODEX_SENSITIVE_ERROR_ASSIGNMENT.sub(
         lambda match: match.group(1) + "[REDACTED]" + match.group(3), value)
+    text = _CODEX_API_KEY_PROVIDED_VALUE.sub(r"\1[REDACTED]", text)
+    text = _CODEX_MASKED_KEY.sub("[REDACTED]", text)
     text = _CODEX_BEARER_TOKEN.sub(r"\1[REDACTED]", text)
     text = _CODEX_KNOWN_TOKEN.sub("[REDACTED]", text)
     return _CODEX_LONG_TOKEN.sub("[REDACTED]", text)

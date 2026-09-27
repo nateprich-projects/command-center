@@ -1,7 +1,7 @@
 #!/bin/bash
 # A judgement engine: one review, breakdown, or shape job against its packet,
-# then stop. Muse answers by default; z.ai's GLM-5.3 answers the standard tier
-# until 2026-10-07 00:00 Beijing time, 2026-10-06 09:00 PDT (below).
+# then stop. Muse answers; z.ai's GLM-5.3 answered the standard tier until
+# 2026-09-27 06:00 PDT, brought forward from 2026-10-06 09:00 PDT (#1694, below).
 #
 # Usage: muse-review-engine [tier] [reasoning-effort]
 #   tier   -- escalated (default) or standard; substituted into begin

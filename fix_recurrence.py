@@ -48,9 +48,32 @@ class RecurrenceError(RuntimeError):
 
 def is_code_path(path: str) -> bool:
     """Non-test source: what a fix changes when it changes behaviour."""
-    if path.startswith(("tests/", "docs/")) or "/fixtures/" in path:
+    parts = path.split("/")
+    name = parts[-1]
+    if any(part in ("tests", "test", "docs", "fixtures") for part in parts[:-1]):
         return False
-    return not path.endswith(_NON_CODE_SUFFIXES)
+    if (name.startswith(("test_", ".")) or name.endswith(
+            ("_test.py", ".test.js", ".spec.js", ".svg"))):
+        return False
+    return not name.endswith(_NON_CODE_SUFFIXES)
+
+
+def _diff_path(header: str) -> Optional[str]:
+    """The path in a ``--- a/x`` or ``+++ b/x`` header, or None for /dev/null.
+
+    Git appends a tab to a path containing a space and C-quotes a path with
+    unusual bytes; both are undone here rather than silently mis-read.
+    """
+    text = header[4:].rstrip("\n")
+    if text.endswith("\t"):
+        text = text[:-1]
+    if text == "/dev/null":
+        return None
+    if text.startswith('"') and text.endswith('"'):
+        raw = text[1:-1].encode("latin-1", "backslashreplace")
+        text = raw.decode("unicode_escape").encode("latin-1").decode(
+            "utf-8", "replace")
+    return text[2:] if text[:2] in ("a/", "b/") else text
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -67,39 +90,54 @@ def _git(repo: Path, *args: str) -> str:
 def ticket_commits(repo: Path, since: datetime, until: datetime,
                    ref: str = "HEAD") -> List[Tuple[str, datetime, int]]:
     """First-parent commits in ``[since, until]`` whose subject names a ticket."""
-    out = _git(repo, "log", "--first-parent", "--format=%H%x09%ct%x09%s",
+    out = _git(repo, "log", "--first-parent", "--format=%H%x09%ct%x09%P%x09%s",
                "--since={}".format(since.isoformat()),
                "--until={}".format(until.isoformat()), ref)
     rows = []
     for line in out.splitlines():
-        sha, stamp, subject = line.split("\t", 2)
+        sha, stamp, parents, subject = line.split("\t", 3)
         match = TICKET_SUBJECT_RE.search(subject)
-        if match:
+        if match and parents.strip():
             rows.append((sha, datetime.fromtimestamp(int(stamp), timezone.utc),
                          int(match.group(1))))
     return rows
 
 
 def _hunks(repo: Path, sha: str) -> List[Tuple[str, int, int, Optional[str]]]:
-    """``(path, old_start, old_count, function)`` for each code hunk."""
-    diff = _git(repo, "diff", "-U0", "--no-color", sha + "^", sha)
-    path: Optional[str] = None
+    """``(path, old_start, old_count, function)`` for each code hunk.
+
+    The diff flags pin the output format against user git config (external
+    diff drivers, colour, ``diff.noprefix``). A ``---``/``+++`` line is a
+    header only directly after ``diff --git`` and its extended headers, so a
+    removed code line that begins ``-- `` is never taken for one.
+    """
+    diff = _git(repo, "diff", "-U0", "--no-color", "--no-ext-diff",
+                "--src-prefix=a/", "--dst-prefix=b/", sha + "^", sha)
+    old_path: Optional[str] = None
+    in_header = False
     hunks = []
     for line in diff.splitlines():
-        if line.startswith("--- "):
-            path = line[6:] if line.startswith("--- a/") else None
+        if line.startswith("diff --git "):
+            in_header = True
+            old_path = None
             continue
-        if line.startswith("+++ ") and path is None and line.startswith("+++ b/"):
-            # A new file: no old lines, but its header names the path.
-            path_new = line[6:]
-            if is_code_path(path_new):
-                hunks.append((path_new, 0, 0, None))
+        if in_header and line.startswith("--- "):
+            old_path = _diff_path(line)
             continue
+        if in_header and line.startswith("+++ "):
+            new_path = _diff_path(line)
+            in_header = False
+            if old_path is None and new_path and is_code_path(new_path):
+                # A new file has no old lines; record it for hotspots only.
+                hunks.append((new_path, 0, 0, None))
+            continue
+        if line.startswith("@@"):
+            in_header = False
         match = _HUNK_RE.match(line)
-        if match and path and is_code_path(path):
+        if match and old_path and is_code_path(old_path):
             count = int(match.group(2)) if match.group(2) is not None else 1
             function = _FUNCTION_RE.search(match.group(3) or "")
-            hunks.append((path, int(match.group(1)), count,
+            hunks.append((old_path, int(match.group(1)), count,
                           function.group(1) if function else None))
     return hunks
 

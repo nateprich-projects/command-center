@@ -135,3 +135,119 @@ def test_cli_prints_json_and_exits_nonzero_on_missing_field(repo, tmp_path,
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps({"recorded_cause_regressions": {}}))
     assert fr.main(["--snapshot", str(bad), "--repo", str(repo)]) == 2
+
+
+def _new_repo(tmp_path, name="r"):
+    root = tmp_path / name
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    return root
+
+
+def test_ticket_accept_scenario_three_fix_commits(tmp_path):
+    """#1684 Accept, literally: one cross-fix rewrite, one older, one tests."""
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["a = 1", "b = 2"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("run", ["a = 10", "b = 20"])},
+            "Older lines (#1) (#101)", NOW - timedelta(days=3))
+    _commit(root, {"app.py": _body("run", ["a = 11", "b = 21"])},
+            "Rewrite the fix (#2) (#102)", NOW - timedelta(days=2))
+    _commit(root, {"tests/test_app.py": "def test_x():\n    pass\n"},
+            "Tests only (#3) (#103)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {1: 100, 2: 200, 3: 300}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (1, 2)
+
+
+def test_a_fix_older_than_the_window_is_not_recurrence(tmp_path):
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["a = 1", "b = 2"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("run", ["a = 10", "b = 20"])},
+            "Old fix (#5) (#105)", NOW - timedelta(days=10))
+    _commit(root, {"app.py": _body("run", ["a = 11", "b = 21"])},
+            "New fix (#6) (#106)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {5: 500, 6: 600}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (0, 1)
+
+
+def test_exactly_half_recent_fix_lines_is_not_a_majority(tmp_path):
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["a = 1", "b = 2", "c = 3", "d = 4"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("run", ["a = 10", "b = 20", "c = 3", "d = 4"])},
+            "Fix two (#7) (#107)", NOW - timedelta(days=2))
+    _commit(root, {"app.py": _body("run", ["a = 11", "b = 21", "c = 31", "d = 41"])},
+            "Fix four (#8) (#108)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {7: 700, 8: 800}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (0, 2)
+
+
+def test_hotspots_leave_out_a_function_only_one_project_touched(tmp_path):
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("one", ["a = 1"]) + _body("two", ["b = 1"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("one", ["a = 2"]) + _body("two", ["b = 1"])},
+            "Fix one (#9) (#109)", NOW - timedelta(days=2))
+    _commit(root, {"app.py": _body("one", ["a = 3"]) + _body("two", ["b = 2"])},
+            "Fix both (#10) (#110)", NOW - timedelta(days=1))
+
+    hot = fr.measure(root, {9: 900, 10: 1000}, NOW)["hotspots"]
+
+    assert [(row["function"], row["count"]) for row in hot] == [("one", 2)]
+
+
+def test_removed_code_line_starting_with_dashes_is_not_a_header(tmp_path):
+    root = _new_repo(tmp_path)
+    _commit(root, {"query.sql": "select 1;\n-- one\n-- two\n"},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"query.sql": "select 1;\n-- uno\n-- dos\n"},
+            "Fix (#11) (#111)", NOW - timedelta(days=2))
+    _commit(root, {"query.sql": "select 1;\n-- eins\n-- zwei\n"},
+            "Fix again (#12) (#112)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {11: 1100, 12: 1200}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (1, 2)
+
+
+def test_paths_with_spaces_and_noprefix_config_are_read(tmp_path):
+    root = _new_repo(tmp_path)
+    _git(root, "config", "diff.noprefix", "true")
+    _commit(root, {"my mod.py": _body("run", ["a = 1"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"my mod.py": _body("run", ["a = 2"])},
+            "Fix (#13) (#113)", NOW - timedelta(days=2))
+    _commit(root, {"my mod.py": _body("run", ["a = 3"])},
+            "Fix again (#14) (#114)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {13: 1300, 14: 1400}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (1, 2)
+
+
+def test_a_root_commit_naming_a_ticket_is_skipped(tmp_path):
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["a = 1"])},
+            "Root (#15) (#115)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {15: 1500}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (0, 0)
+
+
+@pytest.mark.parametrize("path, code", [
+    ("dashboard/test/page.test.js", False),
+    ("funnel-mcp-connector/smoke_test.py", False),
+    (".gitignore", False),
+    ("dashboard/public/favicon.svg", False),
+    ("engine/review.py", True),
+])
+def test_code_path_rules(path, code):
+    assert fr.is_code_path(path) is code

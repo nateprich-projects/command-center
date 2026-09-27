@@ -4086,3 +4086,4 @@ timestamp=Sat_Sep_26_23:50:05_2026 user_processes=597 maxprocperuid=2666 load_1=
 timestamp=Sat_Sep_26_23:55:05_2026 user_processes=597 maxprocperuid=2666 load_1=29.56 load_5=28.36 load_15=23.57 codex=1 claude=1 muse=1
 timestamp=Sun_Sep_27_00:00:05_2026 user_processes=619 maxprocperuid=2666 load_1=20.61 load_5=22.26 load_15=22.00 codex=1 claude=1 muse=1
 timestamp=Sun_Sep_27_00:05:05_2026 user_processes=615 maxprocperuid=2666 load_1=19.78 load_5=21.00 load_15=21.47 codex=1 claude=1 muse=1
+timestamp=Sun_Sep_27_00:10:05_2026 user_processes=579 maxprocperuid=2666 load_1=18.07 load_5=17.23 load_15=19.21 codex=1 claude=1 muse=1 reap_sets=5 reap_procs=25 reap_failed=0 reap_fault=-

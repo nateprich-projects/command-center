@@ -3,7 +3,9 @@
 Phases 1 and 2 of #794: begin offers the work and the packet command
 assembles the evidence. A passing review calls one lister and bounded judges
 in parallel; the runner validates every chunk and derives the final verdict.
-Breakdown and shape each use one model answer. Malformed model output retries
+Breakdown uses one model answer; shape on Muse asks a framer, then sibling
+checks, deciders and an auditor in parallel, and the runner merges them
+(#1599); shape on z.ai uses one model answer. Malformed model output retries
 once, and the apply command performs every side effect.
 
 The harness below stubs the funnel, heartbeat, packet, apply, gh, and muse
@@ -190,10 +192,32 @@ def _issue_answer(job, **overrides):
     return _shape_answer(**overrides)
 
 
+def _framer_answer(**overrides):
+    """The shape framer's draft (#1599): the plan and its open points."""
+    data = {"proposed_class": "Improve",
+            "plan_markdown": "# Plan\n\nRotate the api-key monthly.\n",
+            "decision_points": ["which day the key rotates"],
+            "depends_on": []}
+    data.update(overrides)
+    return json.dumps(data)
+
+
+def _muse_issue_answers(job):
+    """A Muse issue job's scripted answers. Shape on Muse is split: the
+    framer answers call 1, and the stub answers every later part from its
+    own packet, so parallel parts need no call order (#1599)."""
+    if job == "breakdown":
+        return (_breakdown_answer(),)
+    return (_framer_answer(),)
+
+
 FUNNEL_STUB = (
     "import json, os, pathlib, sys\n"
     "CI_SUCCESS_CONCLUSIONS = ('SUCCESS', 'NEUTRAL', 'SKIPPED')\n"
     "CI_PENDING_STATES = ('EXPECTED', 'QUEUED', 'IN_PROGRESS', 'PENDING', 'WAITING')\n"
+    # engine/shape.py's validators, which the shape split (#1599) runs.
+    "LADDER = ['Investigate', 'Broken', 'Maintenance', 'Improve', 'New', 'Replace']\n"
+    "ESCALATION_PATTERNS = dict.fromkeys(('credentials', 'authorisation', 'data-migration', 'destructive', 'concurrency'), '')\n"
     "if __name__ == '__main__':\n"
     "    root = pathlib.Path(__file__).parent\n"
     "    command = sys.argv[1] if len(sys.argv) > 1 else ''\n"
@@ -431,6 +455,8 @@ SHAPE_APPLY_STUB = (
     "    malformed('proposed_class must name one ladder class')\n"
     "if not data.get('plan_markdown') or not isinstance(data.get('plan_markdown'), str):\n"
     "    malformed('plan_markdown must be non-empty')\n"
+    "if os.environ.get('APPLY_RETRYABLE', ''):\n"
+    "    malformed('refused on request')\n"
     "asked = [name for name in ('exposure', 'gates', 'scope', 'preference') if needs[name]]\n"
     "if asked:\n"
     "    status, reason = 'Shaped', 'open questions for Nate: {}'.format(', '.join(asked))\n"
@@ -470,6 +496,21 @@ MUSE_STUB = (
     "cp \"$prompt_file\" \"$MUSE_PROMPT.$n\"\n"
     "judge_call=0\n"
     "if grep -q 'This is one judge call in a larger review' \"$prompt_file\"; then judge_call=1; fi\n"
+    # #1599: which part of a split shape this call is, from the runner's
+    # header; empty for every other call.
+    "shape_part=''\n"
+    "if grep -q '^This call is the shape framer' \"$prompt_file\"; then shape_part=framer\n"
+    "elif grep -q '^This call is one shape sibling check' \"$prompt_file\"; then shape_part=sibling\n"
+    "elif grep -q '^This call is one shape decider' \"$prompt_file\"; then shape_part=decider\n"
+    "elif grep -q '^This call is the shape auditor' \"$prompt_file\"; then shape_part=auditor\n"
+    "fi\n"
+    "if [[ -n \"$shape_part\" && \"$shape_part\" == \"${MUSE_SHAPE_FAIL_PART:-}\" ]]; then\n"
+    "  printf '%s' \"${MUSE_SHAPE_FAILURE:-shape part unavailable}\" >&2\n"
+    "  exit \"${MUSE_SHAPE_FAIL_STATUS:-1}\"\n"
+    "fi\n"
+    "if [[ -n \"$shape_part\" && \"$shape_part\" == \"${MUSE_SHAPE_SLEEP_PART:-}\" ]]; then\n"
+    "  exec sleep 30\n"
+    "fi\n"
     "if (( judge_call )) && [[ -n \"${MUSE_JUDGE_FAIL_IF:-}\" ]] \\\n      && grep -Fq -- \"$MUSE_JUDGE_FAIL_IF\" \"$prompt_file\"; then\n"
     "  printf '%s' \"${MUSE_JUDGE_FAILURE:-judge unavailable}\" >&2\n"
     "  exit \"${MUSE_JUDGE_FAIL_STATUS:-1}\"\n"
@@ -477,7 +518,9 @@ MUSE_STUB = (
     "if (( judge_call )) && [[ -n \"${MUSE_JUDGE_SLEEP_IF:-}\" ]] \\\n      && grep -Fq -- \"$MUSE_JUDGE_SLEEP_IF\" \"$prompt_file\"; then\n"
     "  exec sleep \"${MUSE_JUDGE_SLEEP_SECONDS:-30}\"\n"
     "fi\n"
-    "if (( judge_call )) && [[ \"${MUSE_JUDGE_BARRIER_COUNT:-0}\" =~ ^[1-9][0-9]*$ ]]; then\n"
+    "parallel_call=$judge_call\n"
+    "if [[ -n \"$shape_part\" && \"$shape_part\" != framer ]]; then parallel_call=1; fi\n"
+    "if (( parallel_call )) && [[ \"${MUSE_JUDGE_BARRIER_COUNT:-0}\" =~ ^[1-9][0-9]*$ ]]; then\n"
     "  touch \"$MUSE_COUNT.judge.started.$n\"\n"
     "  expected=\"$MUSE_JUDGE_BARRIER_COUNT\"\n"
     "  for ((poll = 0; poll < 500; poll++)); do\n"
@@ -505,7 +548,7 @@ MUSE_STUB = (
     # directory's mode and contents before the EXIT trap removes it.
     "if [[ -n \"${MUSE_RUNDIR_PROBE:-}\" ]]; then\n"
     "  run_dir=\"${prompt_file%/*}\"\n"
-    "  if (( judge_call )); then run_dir=\"${run_dir%/*}\"; fi\n"
+    "  if (( judge_call )) || [[ -n \"$shape_part\" ]]; then run_dir=\"${run_dir%/*}\"; fi\n"
     "  {\n"
     "    printf 'dir %s\\n' \"$run_dir\"\n"
     # `find -perm 700` rather than `stat`: the mode flag is `-f` on BSD and
@@ -536,6 +579,49 @@ MUSE_STUB = (
     "    rows.append({'requirement': requirement, 'status': status,\n"
     "                 'evidence': 'thing.py:1'})\n"
     "print(json.dumps({'requirements': rows}))\n"
+    "PY\n"
+    "  )\"\n"
+    "fi\n"
+    # #1599: a shape part with no answer set for its call number answers
+    # from its own packet, so parallel parts need no call order.
+    "answer_var=\"MUSE_ANSWER_$n\"\n"
+    "if [[ -n \"$shape_part\" && -z \"${!answer_var:-}\" ]]; then\n"
+    "  dynamic_answer=\"$(python3 - \"$shape_part\" \"$prompt_file\" <<'PY'\n"
+    "import json, os, sys\n"
+    "part, prompt_path = sys.argv[1:3]\n"
+    "text = open(prompt_path).read()\n"
+    "retry = 'Your previous answer could not be parsed' in text\n"
+    "if part == os.environ.get('MUSE_SHAPE_MALFORMED_PART') or (\n"
+    "        part == os.environ.get('MUSE_SHAPE_MALFORMED_ONCE_PART')\n"
+    "        and not retry):\n"
+    "    print('{not json')\n"
+    "    raise SystemExit(0)\n"
+    "start = text.rindex('```json\\n') + len('```json\\n')\n"
+    "packet = json.loads(text[start:text.index('\\n```', start)])\n"
+    "if part == 'framer':\n"
+    "    answer = json.loads(os.environ.get('MUSE_SHAPE_FRAMER') or json.dumps({\n"
+    "        'proposed_class': 'Improve',\n"
+    "        'plan_markdown': '# Plan\\n\\nRotate the api-key monthly.\\n',\n"
+    "        'decision_points': ['which day the key rotates'],\n"
+    "        'depends_on': []}))\n"
+    "elif part == 'sibling':\n"
+    "    relations = json.loads(os.environ.get('MUSE_SHAPE_RELATIONS') or '{}')\n"
+    "    answer = {'siblings': [\n"
+    "        {'ref': row['ref'], 'relation': relations.get(row['ref'], 'independent'),\n"
+    "         'why': 'checked ' + row['ref']}\n"
+    "        for row in packet['sibling_plans']]}\n"
+    "elif part == 'decider':\n"
+    "    decided = json.loads(os.environ.get('MUSE_SHAPE_DECISIONS') or '{}')\n"
+    "    answer = {'decisions': [\n"
+    "        dict({'kind': 'agent', 'decision': 'settle ' + point,\n"
+    "              'alternative': 'leave it open', 'why': 'a fixed answer is auditable'}\n"
+    "             if point not in decided else decided[point], point=point)\n"
+    "        for point in packet['decision_points']]}\n"
+    "else:\n"
+    "    answer = {'premises': [{'claim': 'keys rotate monthly',\n"
+    "                            'evidence': 'plan.md:12', 'label': 'documented'}],\n"
+    "              'escalated_risk': []}\n"
+    "print(json.dumps(answer))\n"
     "PY\n"
     "  )\"\n"
     "fi\n"
@@ -656,6 +742,8 @@ def _stubbed_runner(tmp_path, begin, packet, *, args=(), answers=(),
     (engine / "__init__.py").write_text("")
     (engine / "review.py").write_text((ROOT / "engine" / "review.py").read_text())
     (engine / "shape.py").write_text((ROOT / "engine" / "shape.py").read_text())
+    (engine / "shape_split.py").write_text(
+        (ROOT / "engine" / "shape_split.py").read_text())
     (repo / "heartbeat.py").write_text(HEARTBEAT_STUB)
     (repo / "review-packet").write_text(PACKET_STUB)
     (repo / "review-apply").write_text(APPLY_STUB)
@@ -1736,7 +1824,7 @@ def test_the_runner_reads_the_issue_routines_at_run_time():
     assert "routines/muse-shape.md" in runner
 
 
-# -- live issue jobs: one question, one answer ---------------------------------
+# -- live issue jobs: breakdown asks one question, shape on Muse several ------
 
 def _issue_ref(job):
     return BREAKDOWN_REF if job == "breakdown" else SHAPE_REF
@@ -1800,17 +1888,20 @@ def test_a_breakdown_is_applied_and_finished_done(tmp_path):
 
 
 def test_a_shape_is_applied_and_finished_done(tmp_path):
+    """Shape on Muse (#1599): the framer, then one sibling check, one
+    decider and the auditor, merged in code and applied once."""
     proc, repo = _stubbed_runner(
         tmp_path, _issue_begin("shape"), _issue_packet("shape"),
-        answers=(_issue_answer("shape"),))
+        answers=(_framer_answer(),))
 
     assert proc.returncode == 0, proc.stderr
-    assert _muse_calls(repo) == 1
-    assert _muse_call_record(repo) == {
-        "session_ids": [(repo / "begin.session_id").read_text()],
-        "calls_made": 1,
-    }
+    assert _muse_calls(repo) == 4
+    call_record = _muse_call_record(repo)
+    assert call_record["calls_made"] == 4
+    assert call_record["session_ids"][0] == \
+        (repo / "begin.session_id").read_text()
     prompt = (repo / "muse.prompt.1").read_text()
+    assert prompt.startswith("This call is the shape framer")
     assert "What is the plan, what is settled" in prompt
     assert "PACKET_JSON" not in prompt
     assert "rotate the api-key monthly" in prompt
@@ -1824,6 +1915,14 @@ def test_a_shape_is_applied_and_finished_done(tmp_path):
     assert "--run engine-run" in calls[0]
     assert "--agent muse" in calls[0]
     assert (repo / "applied.marker").exists()
+    applied = json.loads((repo / "apply.answer").read_text())
+    assert applied["decided_by_agent"] == [
+        {"decision": "settle which day the key rotates",
+         "alternative": "leave it open",
+         "why": "a fixed answer is auditable"}]
+    assert applied["plan_markdown"].endswith(
+        "## Siblings checked\n\n- owner/repo#9 (independent): checked "
+        "owner/repo#9")
     assert _heartbeat_without_muse_call_record(repo) == (
         "finish --agent muse --run engine-run --outcome done "
         "--note shaped {}: Ready (self-approved: agent idea, finite "
@@ -1851,9 +1950,11 @@ def test_a_breakdown_question_is_asked_not_created(tmp_path):
 def test_a_shape_with_open_questions_holds_at_shaped(tmp_path):
     proc, repo = _stubbed_runner(
         tmp_path, _issue_begin("shape"), _issue_packet("shape"),
-        answers=(_shape_answer(needs_nate={
-            "exposure": "May this touch credentials?",
-            "gates": None, "scope": None, "preference": None}),))
+        answers=(_framer_answer(),),
+        extra_env={"MUSE_SHAPE_DECISIONS": json.dumps({
+            "which day the key rotates": {
+                "kind": "nate", "category": "exposure",
+                "question": "May this touch credentials?"}})})
 
     assert proc.returncode == 0, proc.stderr
     assert _heartbeat_without_muse_call_record(repo) == (
@@ -1886,9 +1987,11 @@ def test_the_issue_model_call_carries_the_no_tool_shape(tmp_path):
     assert "--approval-mode" not in invoked
 
 
-@pytest.mark.parametrize("job", ("breakdown", "shape"))
+@pytest.mark.parametrize("job", ("breakdown",))
 def test_a_malformed_issue_answer_retries_once_with_the_parse_error(
         tmp_path, job):
+    """Breakdown's one call. Shape on Muse is split (#1599): its retries
+    are pinned per part below, and its one call is z.ai's."""
     proc, repo = _stubbed_runner(
         tmp_path, _issue_begin(job), _issue_packet(job),
         answers=("{not json", _issue_answer(job)))
@@ -1911,7 +2014,7 @@ def test_a_malformed_issue_answer_retries_once_with_the_parse_error(
     assert "--outcome done" in _heartbeat(repo)
 
 
-@pytest.mark.parametrize("job", ("breakdown", "shape"))
+@pytest.mark.parametrize("job", ("breakdown",))
 def test_a_malformed_final_issue_answer_records_nothing_and_errors(
         tmp_path, job):
     """A malformed final answer records nothing — the project stays
@@ -1997,6 +2100,335 @@ def test_a_refused_breakdown_apply_finishes_errored(tmp_path):
 
 
 # --- which model carries which repository (#1301) ------------------------
+
+
+# -- #1599: shape on Muse asks small questions ---------------------------------
+# One framer in the foreground, bound to the run's session; then sibling
+# checks of at most three siblings, deciders of at most three points and the
+# auditor, together and unbound. The runner merges their answers and applies
+# once. z.ai keeps shape's one call.
+
+SHAPE_PART_MARKERS = (
+    ("This call is the shape framer", "framer"),
+    ("This call is one shape sibling check", "sibling"),
+    ("This call is one shape decider", "decider"),
+    ("This call is the shape auditor", "auditor"),
+)
+
+
+def _shape_packet_with(siblings):
+    """The shape packet with ``siblings`` sibling plans, each body marked."""
+    packet = _issue_packet("shape")
+    packet["sibling_plans"] = [
+        {"ref": "owner/repo#{}".format(20 + index),
+         "title": "Sibling {}".format(index), "status": "Shaped",
+         "klass": "Improve", "body": "SIBLING-BODY-{}".format(index)}
+        for index in range(siblings)]
+    return packet
+
+
+def _shape_part_prompts(repo):
+    """Every model call's prompt, grouped by the part its header names."""
+    parts = {}
+    for call in range(1, _muse_calls(repo) + 1):
+        prompt = (repo / "muse.prompt.{}".format(call)).read_text()
+        kind = next(kind for marker, kind in SHAPE_PART_MARKERS
+                    if prompt.startswith(marker))
+        parts.setdefault(kind, []).append((call, prompt))
+    return parts
+
+
+def _part_packet(prompt):
+    """The part packet the runner put where PACKET_JSON stood."""
+    start = prompt.rindex("```json\n") + len("```json\n")
+    return json.loads(prompt[start:prompt.index("\n```", start)])
+
+
+def test_a_muse_shape_asks_the_framer_then_every_part_at_once(tmp_path):
+    refs = ["owner/repo#{}".format(20 + index) for index in range(7)]
+    points = ["point {}".format(index) for index in range(1, 5)]
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _shape_packet_with(7),
+        answers=(_framer_answer(decision_points=points,
+                                depends_on=["owner/repo#3"]),),
+        extra_env={
+            # All six later parts must be in flight at once.
+            "MUSE_JUDGE_BARRIER_COUNT": "6",
+            "MUSE_SHAPE_RELATIONS": json.dumps({
+                "owner/repo#21": "depends_on",
+                "owner/repo#25": "overlaps"}),
+        })
+
+    assert proc.returncode == 0, proc.stderr
+    # One framer, ceil(7/3) sibling checks, ceil(4/3) deciders, one auditor.
+    assert _muse_calls(repo) == 1 + 3 + 2 + 1
+    parts = _shape_part_prompts(repo)
+    assert [call for call, _ in parts["framer"]] == [1]
+    assert len(parts["sibling"]) == 3
+    assert len(parts["decider"]) == 2
+    assert len(parts["auditor"]) == 1
+
+    # Only the framer, first and in the foreground, carries the session id:
+    # parallel calls on one id are what Muse refuses (#1413).
+    session_id = (repo / "begin.session_id").read_text()
+    for call, argv in enumerate(_model_argvs(repo), 1):
+        assert argv[argv.index("--reasoning-effort") + 1] == "max"
+        if call == 1:
+            assert argv[argv.index("--session-id") + 1] == session_id
+        else:
+            assert "--session-id" not in argv
+
+    # The framer reads the sibling index, never a sibling body.
+    framer_prompt = parts["framer"][0][1]
+    assert "SIBLING-BODY-" not in framer_prompt
+    assert "PACKET_JSON" not in framer_prompt
+    assert [row["ref"] for row in
+            _part_packet(framer_prompt)["sibling_index"]] == refs
+
+    # Each sibling check holds its own siblings' bodies and no other's.
+    checked = []
+    for _, prompt in parts["sibling"]:
+        own = [row["ref"] for row in _part_packet(prompt)["sibling_plans"]]
+        assert 1 <= len(own) <= 3
+        for index, ref in enumerate(refs):
+            assert ("SIBLING-BODY-{}".format(index) in prompt) == \
+                (ref in own), (ref, own)
+        checked.extend(own)
+    assert sorted(checked) == sorted(refs)
+
+    # Every decision point reaches exactly one decider, three at most each.
+    decided = []
+    for _, prompt in parts["decider"]:
+        own = _part_packet(prompt)["decision_points"]
+        assert 1 <= len(own) <= 3
+        assert "SIBLING-BODY-" not in prompt
+        decided.extend(own)
+    assert sorted(decided) == points
+    auditor_prompt = parts["auditor"][0][1]
+    assert "SIBLING-BODY-" not in auditor_prompt
+    assert _part_packet(auditor_prompt)["draft"]["decision_points"] == points
+
+    # One apply, of the answer merged in code.
+    calls = _apply_calls(repo)
+    assert len(calls) == 1
+    assert "--attempt 1" in calls[0]
+    applied = json.loads((repo / "apply.answer").read_text())
+    assert [entry["decision"] for entry in applied["decided_by_agent"]] == \
+        ["settle " + point for point in points]
+    assert applied["depends_on"] == ["owner/repo#3", "owner/repo#21"]
+    assert len(applied["needs_nate"]["scope"]) == 1
+    assert applied["needs_nate"]["scope"][0].startswith(
+        "owner/repo#25 overlaps this plan")
+    assert "## Siblings checked" in applied["plan_markdown"]
+    assert applied["premises"] == [{"claim": "keys rotate monthly",
+                                    "evidence": "plan.md:12",
+                                    "label": "documented"}]
+    assert _heartbeat_without_muse_call_record(repo) == (
+        "finish --agent muse --run engine-run --outcome done "
+        "--note shaped {}: Shaped (open questions for Nate: scope) "
+        "--shape-status Shaped\n".format(SHAPE_REF))
+    call_record = _muse_call_record(repo)
+    assert call_record["calls_made"] == 7
+    assert call_record["session_ids"][0] == session_id
+
+
+@pytest.mark.parametrize("failure_kind", ("failed", "timed out"))
+def test_a_failed_or_timed_out_shape_part_applies_nothing(
+        tmp_path, failure_kind):
+    """A missing part has no safe reading: the run errors, nothing is
+    applied, and the idea keeps needs-shaping for the next run."""
+    if failure_kind == "failed":
+        extra_env = {"MUSE_SHAPE_FAIL_PART": "decider",
+                     "MUSE_SHAPE_FAILURE": "provider outage"}
+        bound_seconds = 20
+    else:
+        extra_env = {"MUSE_SHAPE_SLEEP_PART": "sibling"}
+        bound_seconds = 1
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),), bound_seconds=bound_seconds,
+        extra_env=extra_env, timeout=60)
+
+    assert proc.returncode == 1
+    # A failed call is not retried: only a parse error is.
+    assert _muse_calls(repo) == 4
+    assert _apply_calls(repo) == []
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "shape parts failed for {}; nothing applied".format(SHAPE_REF) \
+        in heartbeat
+    if failure_kind == "failed":
+        assert "shape decider.0: muse exec failed (exit 1): provider outage" \
+            in heartbeat
+    else:
+        assert "shape sibling.0 was killed after 0 minutes" in heartbeat
+    assert not (tmp_path / ".claude" / "command-center-muse-quota-hold").exists()
+
+
+def test_a_malformed_shape_part_retries_once_with_the_parse_error(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),),
+        extra_env={"MUSE_SHAPE_MALFORMED_ONCE_PART": "decider"})
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 5
+    deciders = _shape_part_prompts(repo)["decider"]
+    assert len(deciders) == 2
+    retry_call, retry_prompt = deciders[1]
+    assert "Your previous answer could not be parsed" in retry_prompt
+    assert "the decider answer is not valid JSON" in retry_prompt
+    retry_args = (repo / "muse.args.{}".format(retry_call)).read_text()
+    assert "--session-id" not in retry_args.splitlines()
+    calls = _apply_calls(repo)
+    assert len(calls) == 1
+    assert (repo / "applied.marker").exists()
+
+
+def test_a_shape_part_unparseable_twice_applies_nothing(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),),
+        extra_env={"MUSE_SHAPE_MALFORMED_PART": "auditor"})
+
+    assert proc.returncode == 1
+    assert len(_shape_part_prompts(repo)["auditor"]) == 2
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "shape auditor answer could not be parsed after two attempts: " \
+        "the auditor answer is not valid JSON" in heartbeat
+
+
+def test_a_malformed_framer_retries_once_unbound(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=("{not json", _framer_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 5
+    assert [call for call, _ in _shape_part_prompts(repo)["framer"]] == [1, 2]
+    assert "--session-id" in (repo / "muse.args.1").read_text().splitlines()
+    # The retry must not resume the malformed attempt's session (#1413).
+    for call in range(2, 6):
+        assert "--session-id" not in \
+            (repo / "muse.args.{}".format(call)).read_text().splitlines()
+    retry_prompt = (repo / "muse.prompt.2").read_text()
+    assert "the framer answer is not valid JSON" in retry_prompt
+    assert len(_apply_calls(repo)) == 1
+    assert "--outcome done" in _heartbeat(repo)
+
+
+def test_a_framer_unparseable_twice_asks_no_part(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=("{not json", "still not"))
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 2
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "could not frame the shape of {}; nothing applied: shape framer " \
+        "answer could not be parsed after two attempts".format(SHAPE_REF) \
+        in heartbeat
+
+
+def test_a_framer_model_failure_finishes_like_the_one_call(tmp_path):
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),),
+        extra_env={"MUSE_STATUS": "1", "MUSE_STDERR": "provider outage"})
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 1
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "muse exec failed (exit 1) on shape of {}: provider outage".format(
+        SHAPE_REF) in heartbeat
+
+
+def test_a_sibling_without_a_ref_is_refused_before_any_part(tmp_path):
+    packet = _shape_packet_with(2)
+    del packet["sibling_plans"][1]["ref"]
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), packet,
+        answers=(_framer_answer(),))
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 1
+    assert _apply_calls(repo) == []
+    assert "could not split the shape parts for {}: a sibling plan in the " \
+        "packet has no ref".format(SHAPE_REF) in _heartbeat(repo)
+
+
+def test_a_quota_refusal_in_a_shape_part_parks_every_lane(tmp_path):
+    refusal = ("API error 429: Subscription quota exhausted. Your usage "
+               "window resets at 2099-01-01T00:00:00Z.")
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),),
+        extra_env={"MUSE_SHAPE_FAIL_PART": "auditor",
+                   "MUSE_SHAPE_FAILURE": refusal})
+
+    assert proc.returncode == 0, proc.stderr
+    hold = tmp_path / ".claude" / "command-center-muse-quota-hold"
+    assert hold.read_text().strip() == "2099-01-01T00:00:00Z"
+    assert _apply_calls(repo) == []
+    heartbeat = _heartbeat(repo)
+    assert "--outcome skipped-provider-quota" in heartbeat
+    assert "--outcome errored" not in heartbeat
+
+
+def test_a_retryable_shape_apply_refusal_is_final(tmp_path):
+    """The answer is built in code, so shape-apply's exit 3 asks no model
+    again and applies nothing."""
+    proc, repo = _stubbed_runner(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_framer_answer(),), extra_env={"APPLY_RETRYABLE": "1"})
+
+    assert proc.returncode == 1
+    assert _muse_calls(repo) == 4
+    calls = _apply_calls(repo)
+    assert len(calls) == 1
+    assert "--attempt 1" in calls[0]
+    assert not (repo / "applied.marker").exists()
+    heartbeat = _heartbeat(repo)
+    assert "--outcome errored" in heartbeat
+    assert "shape-apply failed on {}".format(SHAPE_REF) in heartbeat
+
+
+def test_a_zai_shape_is_still_one_call(tmp_path):
+    proc, repo = _zai_standard(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=(_shape_answer(),))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 1
+    prompt = (repo / "muse.prompt.1").read_text()
+    assert not any(prompt.startswith(marker)
+                   for marker, _ in SHAPE_PART_MARKERS)
+    assert "What is the plan, what is settled" in prompt
+    assert json.loads((repo / "apply.answer").read_text()) == \
+        json.loads(_shape_answer())
+
+
+def test_a_malformed_zai_shape_answer_retries_its_one_call(tmp_path):
+    proc, repo = _zai_standard(
+        tmp_path, _issue_begin("shape"), _issue_packet("shape"),
+        answers=("{not json", _shape_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    assert _muse_calls(repo) == 2
+    retry_prompt = (repo / "muse.prompt.2").read_text()
+    assert "Your previous answer could not be parsed" in retry_prompt
+    calls = _apply_calls(repo)
+    assert len(calls) == 2
+    assert "--attempt 1" in calls[0]
+    assert "--attempt 2" in calls[1]
+    assert (repo / "applied.marker").exists()
 
 
 def _engine_model(repo):
@@ -2102,7 +2534,7 @@ def test_an_issue_job_resolves_the_model_from_its_subject_repo(
         packet[key]["ref"] = ref
 
     proc, repo = _stubbed_runner(
-        tmp_path, begin, packet, answers=(_issue_answer(job),),
+        tmp_path, begin, packet, answers=_muse_issue_answers(job),
         muse_model_body=resolver_clearing("The-League"))
 
     assert proc.returncode == 0, proc.stderr
@@ -2121,7 +2553,7 @@ def test_an_issue_job_on_an_excluded_repo_uses_the_private_model(
         packet[key]["ref"] = ref
 
     proc, repo = _stubbed_runner(
-        tmp_path, begin, packet, answers=(_issue_answer(job),),
+        tmp_path, begin, packet, answers=_muse_issue_answers(job),
         muse_model_body=resolver_clearing("command-center", "FF-Weekly-Start-Sit", "The-League"))
 
     assert proc.returncode == 0, proc.stderr
@@ -2287,9 +2719,8 @@ def test_a_killed_model_call_leaves_nothing_behind_either(tmp_path):
 ])
 def test_the_packet_is_fetched_exactly_once_whatever_the_job(
         tmp_path, begin, args):
-    answers = _review_answers(_judge_answer()) if begin["do"] == "review" else (
-        _breakdown_answer() if begin["do"] == "breakdown"
-        else _shape_answer(),)
+    answers = (_review_answers(_judge_answer()) if begin["do"] == "review"
+               else _muse_issue_answers(begin["do"]))
     proc, repo = _stubbed_runner(
         tmp_path, begin, _packet(), args=args, answers=answers)
 

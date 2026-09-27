@@ -1807,7 +1807,7 @@ def _claim_state(ref: str, run: Optional[str], agent: str
 
         records = []
         for owner_agent in funnel.AGENTS_BY_ROLE.get("implement", {}):
-            records.extend(heartbeat.read(owner_agent))
+            records.extend(heartbeat.read_github_strict(owner_agent))
         bindings = heartbeat.bindings(records)
     except Exception as exc:
         raise SupersededRunError(ref, "heartbeat bindings could not be read") from exc

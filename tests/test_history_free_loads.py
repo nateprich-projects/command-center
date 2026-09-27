@@ -500,7 +500,7 @@ def test_release_claim_releases_the_same_item_without_history(monkeypatch):
         "do": "ticket", "work": ref,
     }
     monkeypatch.setattr(
-        heartbeat, "read",
+        heartbeat, "read_github_strict",
         lambda agent: [bound] if agent == "codex" else [],
     )
     old, _, new, _ = _run_both(
@@ -523,7 +523,7 @@ def test_release_claim_falls_back_to_compact_board_on_by_ref_miss(
         "do": "ticket", "work": ref,
     }
     monkeypatch.setattr(
-        heartbeat, "read",
+        heartbeat, "read_github_strict",
         lambda agent: [bound] if agent == "codex" else [],
     )
     with monkeypatch.context() as patch:

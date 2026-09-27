@@ -141,18 +141,24 @@ def test_claim_state_uses_the_latest_binding_after_the_claim(monkeypatch):
     )
     monkeypatch.setattr(funnel, "load_project_items_by_refs",
                         lambda refs: [item])
-    records = [
-        {"run": "old-run", "phase": "bind",
-         "ts": int(claim_time.timestamp()) - 1,
-         "do": "ticket", "work": ref},
-        {"run": "successor", "phase": "bind",
-         "ts": int(claim_time.timestamp()) + 1,
-         "do": "ticket", "work": ref},
-    ]
-    monkeypatch.setattr(heartbeat, "read", lambda agent: records)
+    records = {
+        "codex": [{
+            "run": "old-run", "phase": "bind",
+            "ts": int(claim_time.timestamp()) - 1,
+            "do": "ticket", "work": ref,
+        }],
+        "claude": [{
+            "run": "successor", "phase": "bind",
+            "ts": int(claim_time.timestamp()) + 1,
+            "do": "ticket", "work": ref,
+        }],
+    }
+    monkeypatch.setattr(
+        heartbeat, "read_github_strict", lambda agent: records.get(agent, []),
+    )
 
     assert implement._claim_state(ref, "old-run", "codex")[0] == "other"
-    assert implement._claim_state(ref, "successor", "codex")[0] == "owned"
+    assert implement._claim_state(ref, "successor", "claude")[0] == "owned"
 
 
 def test_claim_state_fails_closed_without_a_binding_after_the_claim(monkeypatch):
@@ -163,7 +169,7 @@ def test_claim_state_fails_closed_without_a_binding_after_the_claim(monkeypatch)
     )
     monkeypatch.setattr(funnel, "load_project_items_by_refs",
                         lambda refs: [item])
-    monkeypatch.setattr(heartbeat, "read", lambda agent: [])
+    monkeypatch.setattr(heartbeat, "read_github_strict", lambda agent: [])
 
     assert implement._claim_state(ref, "run-42", "codex")[0] == "unknown"
 
@@ -180,7 +186,7 @@ def test_claim_state_refuses_when_heartbeat_bindings_are_unreadable(monkeypatch)
     def unreadable(_agent):
         raise OSError("heartbeat is unavailable")
 
-    monkeypatch.setattr(heartbeat, "read", unreadable)
+    monkeypatch.setattr(heartbeat, "read_github_strict", unreadable)
 
     with pytest.raises(implement.SupersededRunError,
                        match="heartbeat bindings could not be read"):

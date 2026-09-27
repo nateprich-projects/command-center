@@ -1368,6 +1368,237 @@ def mark_ticket_blocked(repo: str, number: int, *, blocked_by: Optional[int] = N
                 repo, number, (proc.stderr or "").strip()))
 
 
+#: The parent's sub-issues, read before a human step is filed so a step Nate
+#: closed as not planned is never filed again for the same ticket (#1726).
+#: ``totalCount`` is requested so a short read is detectable.
+HUMAN_STEP_SIBLINGS_QUERY = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  rateLimit { cost remaining resetAt }
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      subIssues(first: 100, after: $after) {
+        totalCount
+        nodes { number state stateReason body repository { nameWithOwner } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+#: The stable line ``render_human_step_body`` writes first in every step. The
+#: ticket number is matched whole, so a step for #312 never matches #31.
+HUMAN_STEP_TICKET_RE = re.compile(
+    r"\bdiscovered while implementing #(?P<number>[1-9][0-9]*)(?![0-9])")
+
+#: The route record type a closed-step routing comment carries under the
+#: shared review-routing marker. The loop guard reads it back (#1726).
+CLOSED_HUMAN_STEP_ROUTE = "closed-human-step"
+
+
+def read_parent_sub_issues(repo: str, number: int) -> List[Dict[str, object]]:
+    """Read every sub-issue of one parent with its state, reason and body.
+
+    Fails closed: a malformed page, a missing cursor or a count that
+    disagrees with the rows raises ``GitHubError``, so a short read can never
+    look like "no closed step" and let the run file one again (#1726).
+    """
+    owner, _, name = repo.partition("/")
+    if not owner or not name:
+        raise funnel.GitHubError("invalid repository ref {}".format(repo))
+    parent = "{}#{}".format(repo, number)
+    rows: List[Dict[str, object]] = []
+    total: Optional[int] = None
+    cursor: Optional[str] = None
+    seen_cursors = set()
+    while True:
+        variables: Dict[str, object] = {
+            "owner": owner, "name": name, "number": number,
+        }
+        if cursor is not None:
+            variables["after"] = cursor
+        data = funnel.gh_graphql(HUMAN_STEP_SIBLINGS_QUERY, **variables)
+        repository = data.get("repository") if isinstance(data, dict) else None
+        issue = repository.get("issue") if isinstance(repository, dict) else None
+        connection = issue.get("subIssues") if isinstance(issue, dict) else None
+        if not isinstance(connection, dict):
+            raise funnel.GitHubError(
+                "could not read the sub-issues of {}".format(parent))
+        page_total = connection.get("totalCount")
+        nodes = connection.get("nodes")
+        page_info = connection.get("pageInfo")
+        if (
+            not isinstance(page_total, int) or isinstance(page_total, bool)
+            or page_total < 0 or not isinstance(nodes, list)
+            or not isinstance(page_info, dict)
+        ):
+            raise funnel.GitHubError(
+                "invalid sub-issue page for {}".format(parent))
+        if total is None:
+            total = page_total
+        elif page_total != total:
+            raise funnel.GitHubError(
+                "sub-issue count for {} changed while paging".format(parent))
+        for node in nodes:
+            owned = node.get("repository") if isinstance(node, dict) else None
+            child_repo = (
+                owned.get("nameWithOwner") if isinstance(owned, dict) else None
+            )
+            child = node.get("number") if isinstance(node, dict) else None
+            if (
+                not isinstance(child_repo, str) or "/" not in child_repo
+                or not isinstance(child, int) or isinstance(child, bool)
+            ):
+                raise funnel.GitHubError(
+                    "invalid sub-issue row under {}".format(parent))
+            rows.append({
+                "ref": "{}#{}".format(child_repo, child),
+                "repo": child_repo,
+                "number": child,
+                "state": str(node.get("state") or "").upper(),
+                "state_reason": str(node.get("stateReason") or "").upper(),
+                "body": node.get("body") if isinstance(
+                    node.get("body"), str) else "",
+            })
+        if not page_info.get("hasNextPage"):
+            break
+        next_cursor = page_info.get("endCursor")
+        if (not isinstance(next_cursor, str) or not next_cursor
+                or next_cursor in seen_cursors):
+            raise funnel.GitHubError(
+                "sub-issue page for {} has no usable next cursor".format(parent))
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    if len(rows) != total:
+        raise funnel.GitHubError(
+            "read {} of {} sub-issues of {}".format(len(rows), total, parent))
+    return rows
+
+
+def closed_human_steps_for(rows: Sequence[Dict[str, object]], repo: str,
+                           number: int) -> List[Dict[str, object]]:
+    """The human steps Nate closed as not planned for this ticket, oldest first.
+
+    A step names its ticket on the stable line ``render_human_step_body``
+    writes, as a short ref that means the step's own repository, so only a
+    step in the ticket's repository can name it. Open steps and steps closed
+    as completed are not an answer that the step will not happen.
+    """
+    found = []
+    for row in rows:
+        if (
+            row.get("repo") != repo
+            or row.get("state") != "CLOSED"
+            or row.get("state_reason") != "NOT_PLANNED"
+        ):
+            continue
+        match = HUMAN_STEP_TICKET_RE.search(str(row.get("body") or ""))
+        if match is not None and int(match.group("number")) == number:
+            found.append(row)
+    return sorted(found, key=lambda row: int(row["number"]))
+
+
+def read_ticket_comment_bodies(repo: str, number: int) -> List[str]:
+    """Read one ticket's comment bodies, oldest first; fail closed."""
+    payload = funnel._gh_json(
+        "gh", "issue", "view", str(number), "--repo", repo,
+        "--json", "comments",
+    )
+    comments = payload.get("comments") if isinstance(payload, dict) else None
+    if not isinstance(comments, list):
+        raise funnel.GitHubError(
+            "could not read comments for {}#{}".format(repo, number))
+    return [comment.get("body") or "" for comment in comments
+            if isinstance(comment, dict)]
+
+
+def remote_ticket_head(root: pathlib.Path, branch: str) -> Optional[str]:
+    """The ticket branch's pushed tip, or None when it was never pushed.
+
+    This is the head a review verdict judges. A blocked run neither commits
+    nor pushes, so the next run on an unchanged ticket reads the same value.
+    """
+    ref = "refs/heads/{}".format(branch)
+    proc = _run(["git", "ls-remote", "--exit-code", "--heads", "origin", ref],
+                cwd=root, check=False)
+    if proc.returncode == 2:
+        return None
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        raise ImplementError(
+            "could not inspect remote ticket branch: {}".format(detail))
+    for line in (proc.stdout or "").splitlines():
+        sha, _, name = line.partition("\t")
+        if name.strip() == ref and re.fullmatch(r"[0-9a-f]{40,64}", sha):
+            return sha
+    raise ImplementError("could not read the head of {}".format(ref))
+
+
+def routed_for_closed_step(bodies: Sequence[str], step_ref: str,
+                           head: Optional[str]) -> bool:
+    """Whether an agent already routed this ticket for the step at this head."""
+    for body in bodies:
+        if (
+            not isinstance(body, str)
+            or DECLINE_REVIEW_ROUTING_MARKER not in body
+        ):
+            continue
+        record = funnel._marked_json(body, DECLINE_REVIEW_ROUTING_MARKER)
+        provenance = funnel.parse_provenance(body)
+        if (
+            isinstance(record, dict)
+            and record.get("type") == CLOSED_HUMAN_STEP_ROUTE
+            and record.get("human_step") == step_ref
+            and "head_sha" in record
+            and record.get("head_sha") == head
+            and provenance is not None
+            and provenance.get("voice") == "agent"
+        ):
+            return True
+    return False
+
+
+def render_closed_step_route(step_ref: str, head: Optional[str],
+                             blocked: dict) -> str:
+    """Render the review-routing comment citing Nate's closed human step."""
+    action = str(blocked.get("action") or "").strip()
+    if len(action) > 1200:
+        action = action[:1197].rstrip() + "..."
+    record = {
+        "type": CLOSED_HUMAN_STEP_ROUTE,
+        "human_step": step_ref,
+        "head_sha": head,
+        "requested_reason": blocked.get("reason"),
+        "requested_action": action,
+    }
+    return "\n".join((
+        "**Review routing: Closed human step**",
+        "",
+        "This run asked for a human step, but Nate closed {} as not planned "
+        "for this ticket, so no step was filed. Review and shaping: reconcile "
+        "the ticket, its plan or the review verdict with that answer rather "
+        "than asking for the step again.".format(step_ref),
+        "",
+        DECLINE_REVIEW_ROUTING_MARKER,
+        "```json",
+        json.dumps(record, ensure_ascii=False, indent=2),
+        "```",
+    ))
+
+
+def render_closed_step_hold(step_ref: str, head: Optional[str]) -> str:
+    """Render the citation that hands a re-asking ticket to Nate."""
+    at = "head {}".format(head[:12]) if head else "no pushed branch"
+    return (
+        "**Needs Nate: closed human step {ref}**\n\n"
+        "This ticket asked again for a human step after it was routed to "
+        "review and shaping for {ref}, which Nate closed as not planned, and "
+        "nothing has changed since ({at}). No step was filed. Reopen {ref} "
+        "to allow the step, or change the ticket, its plan or the review "
+        "verdict, before returning it to the agents."
+    ).format(ref=step_ref, at=at)
+
+
 
 DECLINED_PREREQUISITE_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
@@ -1758,6 +1989,15 @@ def finish_blocked_on_human(
         block_effect: Callable[..., None] = mark_ticket_blocked,
         comment_effect: Callable[..., None] = post_agent_comment,
         needs_effect: Callable[[str, str], None] = write_human_step_needs,
+        sub_issues_effect: Callable[[str, int], List[Dict[str, object]]]
+        = read_parent_sub_issues,
+        comments_effect: Callable[[str, int], List[str]]
+        = read_ticket_comment_bodies,
+        head_effect: Callable[[pathlib.Path, str], Optional[str]]
+        = remote_ticket_head,
+        route_needs_effect: Callable[[str, str], None] = write_declined_needs,
+        human_needs_effect: Callable[[str, str], None]
+        = write_declined_human_needs,
         extra_note: Optional[str] = None) -> dict:
     """File the human step, block the ticket, release, and finish. No PR.
 
@@ -1765,6 +2005,11 @@ def finish_blocked_on_human(
     unfinished implementation and must stay exactly as the model left it.
     A failure after the sub-issue exists names it, so the retry starts
     from GitHub's truth rather than filing a second one.
+
+    A human step Nate closed as not planned for this ticket is his answer
+    that no step will happen, so nothing is filed again (#1726): the ticket
+    is routed to review and shaping instead, or, when it was already routed
+    for that step at the current head, handed to Nate.
     """
     context = checkout_context(cwd)
     resolved = resolve_checkout_repo(context["root"], repo)
@@ -1776,6 +2021,21 @@ def finish_blocked_on_human(
         raise ImplementError(
             "blocked_on_human needs the ticket's parent to file the "
             "human step under")
+    # Read before filing: a lane filed a second step for one ticket after Nate
+    # closed the first as not planned, re-blocking the ticket he had unblocked.
+    # Matching is on the ticket number the step names, never on the action's
+    # wording, which no code can judge equivalent (#1658).
+    closed = closed_human_steps_for(
+        sub_issues_effect(parent_repo(resolved, ticket), parent_number),
+        resolved, context["number"])
+    if closed:
+        return _finish_closed_human_step(
+            blocked, str(closed[-1]["ref"]), ticket=ticket, resolved=resolved,
+            context=context, run=run, agent=agent, release=release,
+            heartbeat_finish=heartbeat_finish, block_effect=block_effect,
+            comment_effect=comment_effect, comments_effect=comments_effect,
+            head_effect=head_effect, route_needs_effect=route_needs_effect,
+            human_needs_effect=human_needs_effect, extra_note=extra_note)
     title = render_human_step_title(blocked["action"])
     body = render_human_step_body(
         parent_number=parent_number, ticket_number=context["number"],
@@ -1804,6 +2064,61 @@ def finish_blocked_on_human(
             "human_step": {"number": created["number"],
                            "ref": created["ref"],
                            "url": created["url"]}}
+
+
+def _finish_closed_human_step(
+        blocked: dict, step_ref: str, *, ticket: dict, resolved: str,
+        context: dict, run: str, agent: str,
+        release: Callable[[str], None],
+        heartbeat_finish: Callable[[str, str, str, str, str], None],
+        block_effect: Callable[..., None],
+        comment_effect: Callable[..., None],
+        comments_effect: Callable[[str, int], List[str]],
+        head_effect: Callable[[pathlib.Path, str], Optional[str]],
+        route_needs_effect: Callable[[str, str], None],
+        human_needs_effect: Callable[[str, str], None],
+        extra_note: Optional[str]) -> dict:
+    """Route a ticket whose step Nate closed as not planned; file nothing.
+
+    Routed like an accept-body conflict: Needs stays with the agents and a
+    marked comment cites the closed step for review and shaping. Returning
+    the ticket unblocked would loop against the same verdict every ten
+    minutes, so a second request at an unchanged head goes to Nate instead
+    (#1658). The route comment is the guard's record; if it cannot be posted
+    the ticket falls back to Nate's visible queue, as that path does.
+    """
+    ref = ticket["ref"]
+    number = context["number"]
+    root = context["root"]
+    head = head_effect(root, context["branch"])
+    if routed_for_closed_step(comments_effect(resolved, number), step_ref,
+                              head):
+        human_needs_effect(ticket["url"], ref)
+        comment_effect(resolved, number,
+                       render_closed_step_hold(step_ref, head),
+                       run=run, agent=agent, cwd=root)
+        routed = "human"
+        outcome = "already routed at this head; Needs human"
+    else:
+        route_needs_effect(ticket["url"], ref)
+        try:
+            comment_effect(resolved, number,
+                           render_closed_step_route(step_ref, head, blocked),
+                           run=run, agent=agent, cwd=root)
+            routed = "review"
+            outcome = "routed to review and shaping"
+        except (funnel.GitHubError, OSError, subprocess.SubprocessError):
+            human_needs_effect(ticket["url"], ref)
+            block_effect(resolved, number, cwd=root)
+            routed = "blocked"
+            outcome = "review routing failed; ticket left blocked"
+    release(ref)
+    note = "human step not filed: {} was closed as not planned; {}".format(
+        step_ref, outcome)
+    if extra_note:
+        note += "; " + extra_note.strip()
+    heartbeat_finish(agent, run, "skipped-blocked", note, ref)
+    return {"ticket": ref, "closed_human_step": step_ref, "routed": routed}
 
 
 def finish_declined(

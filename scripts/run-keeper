@@ -12,6 +12,10 @@
 # (#1196). To pause a lane on purpose, move its plist out of LaunchAgents: an
 # installed plist with no loaded label is read as a failed reload and healed.
 #
+# Every run also reaps leaked Codex computer-use MCP sets older than three
+# hours under the Codex app-server (codex_reap.py, #1656) and counts them on
+# the health line as reap_sets, reap_procs, reap_failed and reap_fault.
+#
 # The Codex prompt derivation lives here, in keeper_prompts below: this script
 # is the only writer of the installed automations, and the only reader of them
 # outside the Codex app. Nothing in the pytest suite touches them.
@@ -121,7 +125,18 @@ has_process_family() {
   fi
 }
 
-health_line="timestamp=$timestamp user_processes=$user_processes maxprocperuid=$maxprocperuid load_1=$load_1 load_5=$load_5 load_15=$load_15 codex=$(has_process_family codex) claude=$(has_process_family claude) muse=$(has_process_family muse)"
+# Reap pass (#1656): SIGTERM every leaked Codex computer-use MCP set older
+# than three hours under the Codex app-server, and count it on this line.
+# codex_reap.py fails closed on an unreadable process table; a reaper that
+# does not answer at all is recorded as unknown, never as zero.
+reap_fields="$(COMMAND_CENTER_SENTINEL_PS="$PS" PYTHONDONTWRITEBYTECODE=1 \
+  python3 "$REPO/codex_reap.py" 2>/dev/null || true)"
+case "$reap_fields" in
+  "reap_sets="*" reap_procs="*" reap_failed="*" reap_fault="*) ;;
+  *) reap_fields="reap_sets=unknown reap_procs=unknown reap_failed=unknown reap_fault=reaper-error" ;;
+esac
+
+health_line="timestamp=$timestamp user_processes=$user_processes maxprocperuid=$maxprocperuid load_1=$load_1 load_5=$load_5 load_15=$load_15 codex=$(has_process_family codex) claude=$(has_process_family claude) muse=$(has_process_family muse) $reap_fields"
 
 # The installed Codex prompt for one automation, compared or written.
 # `keeper_prompts check` prints one `  DRIFTED  <name>` line per stale

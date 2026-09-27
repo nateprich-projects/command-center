@@ -11,6 +11,10 @@ def test_issue_1126_quoted_example_does_not_carry_analysis_marker():
             "analysis_marker_issue_1126.md").read_text()
 
     assert funnel.ANALYSIS_MARKER in body
+    assert not any(
+        line.strip() == funnel.ANALYSIS_MARKER
+        for line in body.splitlines()
+    )
     assert funnel.parse_analysis_marker(body) is None
     assert funnel._acceptance_waiting_reason(
         SimpleNamespace(body=body), "Accept it?"

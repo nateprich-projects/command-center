@@ -951,6 +951,24 @@ def test_brief_lists_a_held_finished_project_as_held_at_accept(
     assert brief["total_needing_nate"] == 1
 
 
+def test_held_at_accept_condition_reads_as_a_sentence():
+    """One issue "closes"; a date and an issue together name both (#1725)."""
+    one_issue = _finished_project(
+        53, labels=["blocked"], block_references=["#1699"],
+        block_reason="Wait for #1699.",
+    )
+    date_and_issue = _finished_project(
+        54, labels=["blocked"], block_references=["#1699"],
+        blocked_until=(NOW + timedelta(days=7)).date(),
+        block_reason="Wait for both.",
+    )
+
+    assert [
+        row["condition"]
+        for row in funnel.held_at_accept_json([one_issue, date_and_issue])
+    ] == ["until #1699 closes", "until 2026-09-12 and #1699 closes"]
+
+
 def test_brief_keeps_every_other_blocked_project_as_blocked_work(
     monkeypatch, capsys
 ):

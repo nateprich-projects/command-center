@@ -3,7 +3,8 @@
 A hold written as comment prose was read by nothing, so a held project kept
 asking "Accept it?". ``funnel hold`` writes the ``blocked`` label and a
 canonical ``**Blocked until/on ...:**`` comment instead. These tests read that
-comment back through the same loader the brief's ``blocked`` section uses.
+comment back through the same loader the brief uses, and the brief lists the
+result under ``held_at_accept``, not ``blocked`` (#1725).
 """
 
 from __future__ import annotations
@@ -118,12 +119,16 @@ def test_hold_until_writes_a_date_block_the_brief_reads_back(monkeypatch):
     assert item.block_event is None
     assert funnel._visible_comment(item.block_reason) == REASON
     assert item.unparseable_block_comments == []
-    # The named condition takes it out of Nate's queue ...
+    # The named condition takes it out of Nate's queue, and the brief lists
+    # it as held at Accept rather than as blocked work (#1725) ...
     assert funnel.gate_question(item) is None
-    rendered = funnel.blocked_json([item], datetime.now(timezone.utc))
+    assert funnel.blocked_json([item], datetime.now(timezone.utc)) == []
+    rendered = funnel.held_at_accept_json([item])
     assert [row["ref"] for row in rendered] == [item.ref]
     assert rendered[0]["blocked_until"] == until.isoformat()
     assert rendered[0]["conditions"] == []
+    assert rendered[0]["condition"] == "until " + until.isoformat()
+    assert rendered[0]["reason"] == REASON
     # ... and nothing lifts it before its date.
     assert funnel.satisfied_block_refs(item, {item.ref: item}) is None
 
@@ -147,8 +152,12 @@ def test_hold_on_writes_an_issue_block_that_lifts_when_they_close(monkeypatch):
     assert item.blocked_until is None
     assert funnel._visible_comment(item.block_reason) == REASON
     assert funnel.gate_question(item) is None
-    rendered = funnel.blocked_json([item], datetime.now(timezone.utc))
+    assert funnel.blocked_json([item], datetime.now(timezone.utc)) == []
+    rendered = funnel.held_at_accept_json([item])
+    assert [row["ref"] for row in rendered] == [item.ref]
     assert rendered[0]["conditions"] == ["#721", "#722"]
+    assert rendered[0]["condition"] == "until #721 and #722 close"
+    assert rendered[0]["reason"] == REASON
     assert "blocked_until" not in rendered[0]
 
     def ticket(number, state):

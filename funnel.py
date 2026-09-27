@@ -8266,13 +8266,17 @@ BEGIN_ITEM_CONNECTIONS: Tuple[Tuple[str, str], ...] = (
 )
 
 
-def _begin_item_query(aliases: Sequence[str]) -> str:
+def _begin_item_query(
+    aliases: Sequence[str], extra_field: str = "",
+) -> str:
     """One aliased Project query carrying only the named begin connections.
 
     Each connection has its own cursor variable. A request declares only the
     aliases still paging, because GraphQL refuses a declared variable that the
     document does not use. The filter strings are JSON-quoted, which is also a
-    valid GraphQL string literal for them.
+    valid GraphQL string literal for them. ``extra_field`` is a top-level
+    selection placed beside ``user``: the shape lane's ``shapeIssue`` comment
+    page rides the first request this way (#1625).
     """
     filters = dict(BEGIN_ITEM_CONNECTIONS)
     unknown = [alias for alias in aliases if alias not in filters]
@@ -8304,13 +8308,14 @@ def _begin_item_query(aliases: Sequence[str]) -> str:
         "{connections}"
         "    }}\n"
         "  }}\n"
+        "{extra}"
         "}}\n"
         "\nfragment BeginItem on ProjectV2Item {{\n"
         "{fields}"
         "}}\n"
     ).format(
         declarations=declarations, connections=connections,
-        fields=ITEM_NODE_FIELDS,
+        fields=ITEM_NODE_FIELDS, extra=extra_field,
     )
 
 
@@ -9865,15 +9870,36 @@ def _begin_connection_page(
     return nodes, has_next, cursor if has_next else None
 
 
+def _attach_shape_comments(
+    items: Sequence[Item],
+    shape_issue: Tuple[str, int],
+    shape_comments: Optional[List[Dict[str, object]]],
+) -> None:
+    """Put the shape idea's thread on its item, failing closed when unread."""
+    if shape_comments is None:
+        raise GitHubError(
+            "could not read comments for {}#{}".format(*shape_issue)
+        )
+    target_ref = "{}#{}".format(*shape_issue)
+    for item in items:
+        if item.ref == target_ref:
+            item.issue_comments = shape_comments
+            break
+
+
 def _load_begin_items(
     members: Set[str],
     timings: Optional[Dict[str, object]],
+    shape_issue: Optional[Tuple[str, int]] = None,
 ) -> List[Item]:
     """Page the filtered begin connections and return the member items.
 
     Every connection pages on its own cursor; a request carries only the
     connections that still have a next page. A row is kept once, by Project
     item id, when the predicate its connection stands for holds.
+
+    ``shape_issue`` adds the idea's comment page to the first request only,
+    exactly as the full load adds it to its first page (#1625).
     """
     global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     paging = [alias for alias, _query in BEGIN_ITEM_CONNECTIONS]
@@ -9882,6 +9908,12 @@ def _load_begin_items(
     kept: Dict[str, Item] = {}
     open_rows = 0
     items: List[Item] = []
+    shape_field = (
+        _shape_issue_comments_field(*shape_issue)
+        if shape_issue is not None else ""
+    )
+    shape_comments: Optional[List[Dict[str, object]]] = None
+    first_request = True
     project_started = time.perf_counter() if timings is not None else None
     block_comment_seconds = 0.0
     try:
@@ -9893,7 +9925,17 @@ def _load_begin_items(
                 if alias in cursors:
                     variables[alias + "Cursor"] = cursors[alias]
             _PROJECT_ITEM_PAGE_COUNT += 1
-            response = gh_graphql(_begin_item_query(paging), **variables)
+            response = gh_graphql(
+                _begin_item_query(
+                    paging, shape_field if first_request else ""
+                ),
+                **variables,
+            )
+            if shape_issue is not None and first_request:
+                shape_comments = _shape_issue_comments_from_response(
+                    response, *shape_issue
+                )
+            first_request = False
             project = _begin_project_from_response(response)
             still_paging: List[str] = []
             for alias in paging:
@@ -9965,6 +10007,8 @@ def _load_begin_items(
             _record_begin_load_phase(
                 timings, "block_comments", block_comment_seconds
             )
+    if shape_issue is not None:
+        _attach_shape_comments(items, shape_issue, shape_comments)
     return items
 
 
@@ -10118,6 +10162,51 @@ def load_project_items_by_refs(
     return [found[ref] for ref in requested]
 
 
+def load_regression_items(
+    member_repo_names: Optional[Sequence[str]] = None,
+) -> List[Item]:
+    """Load the regression set through #1607's filtered Project connection."""
+    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
+    members = set(
+        member_repo_names if member_repo_names is not None else member_repos()
+    )
+    cursors: Dict[str, str] = {}
+    seen_cursors: Set[str] = set()
+    kept: Dict[str, Item] = {}
+    while True:
+        variables: Dict[str, object] = {
+            "login": PROJECT_OWNER, "number": PROJECT_NUMBER,
+        }
+        if "regress" in cursors:
+            variables["regressCursor"] = cursors["regress"]
+        _PROJECT_ITEM_PAGE_COUNT += 1
+        response = gh_graphql(_begin_item_query(["regress"]), **variables)
+        project = _begin_project_from_response(response)
+        nodes, has_next, cursor = _begin_connection_page(project, "regress")
+        _PROJECT_ITEM_ROW_COUNT += len(nodes)
+        for node in nodes:
+            try:
+                item = _from_node(node)
+            except (KeyError, TypeError, AttributeError) as exc:
+                raise GitHubError(
+                    "begin Project connection regress returned a malformed "
+                    "row"
+                ) from exc
+            if (
+                item is not None
+                and item.repo in members
+                and _is_regression_item(item)
+            ):
+                kept.setdefault(item.item_id or item.ref, item)
+        if not has_next:
+            break
+        if cursor in seen_cursors:
+            raise GitHubError("begin Project connection regress did not advance")
+        seen_cursors.add(cursor)
+        cursors["regress"] = cursor
+    return list(kept.values())
+
+
 def _load_begin_anchor_items(
     items: Sequence[Item], members: Set[str],
     timings: Optional[Dict[str, object]],
@@ -10156,20 +10245,21 @@ def load_items(
     every open item and only the closed items a begin consumer needs, through
     ``BEGIN_ITEM_CONNECTIONS``, then fetches by ref the parents, blockers,
     freeze owner and heartbeat-bound tickets those left out (#1591).
+
+    ``shape_issue`` (``(repo, number)``) reads that issue's comment thread in
+    the first Project request of either scope and puts it on the item's
+    ``issue_comments``; an unreadable thread fails the load.
     """
     global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
     if scope not in (None, "full", "begin"):
         raise ValueError("unknown load_items scope {!r}".format(scope))
-    if scope == "begin" and shape_issue is not None:
-        # The shape lane reads the full board; nothing asks for both yet.
-        raise ValueError("the begin load does not read a shape issue thread")
     members = set(
         member_repo_names
         if member_repo_names is not None
         else _begin_load_timed(timings, "member_repos", member_repos)
     )
     if scope == "begin":
-        begin_items = _load_begin_items(members, timings)
+        begin_items = _load_begin_items(members, timings, shape_issue)
         begin_items.extend(
             _load_begin_anchor_items(begin_items, members, timings)
         )
@@ -10242,15 +10332,7 @@ def load_items(
                 timings, "block_comments", block_comment_seconds
             )
     if shape_issue is not None:
-        if shape_comments is None:
-            raise GitHubError(
-                "could not read comments for {}#{}".format(*shape_issue)
-            )
-        target_ref = "{}#{}".format(*shape_issue)
-        for item in items:
-            if item.ref == target_ref:
-                item.issue_comments = shape_comments
-                break
+        _attach_shape_comments(items, shape_issue, shape_comments)
     if include_details:
         _begin_load_timed(
             timings, "item_details", lambda: hydrate_item_details(items)

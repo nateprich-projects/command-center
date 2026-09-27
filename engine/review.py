@@ -1947,11 +1947,11 @@ def fetch_verdict(repo: str, pr_number: int) -> Optional[dict]:
 
 
 def load_board_items() -> list:
-    """The board without item history, the default packet loader (#1621).
+    """The full Project board without item history.
 
-    The packet needs history only for regression items, which
-    ``fetch_stop_counter`` reads. The full history read cost about a
-    minute and a hundred GraphQL points per packet.
+    ``collect`` uses the PR's ticket refs and filtered regression
+    connection instead. The full history read cost about a minute and a
+    hundred GraphQL points per packet.
     """
     return funnel.load_items(include_details=False)
 
@@ -1985,8 +1985,6 @@ def collect(repo: Optional[str], pr_number: int, *,
     the packet falls back to the PR reads with ``scope_source`` ``"pr"``.
     """
     resolved = funnel.resolve_repo(repo)
-    loaded_items = (items_loader or load_board_items)()
-    project_rows = {item.ref: item for item in loaded_items}
     pr_view = fetch_pr(resolved, pr_number)
     ref = funnel.ticket_ref_from_branch(
         resolved, pr_view.get("headRefName") or "")
@@ -2005,6 +2003,31 @@ def collect(repo: Optional[str], pr_number: int, *,
             continue
         seen.add((closing_repo, closing_number))
         tickets.append(fetch_ticket(closing_repo, closing_number))
+
+    # The PR supplies the bounded ticket refs. Reuse the existing by-ref
+    # Project loader, then read the filtered regression set for the packet's
+    # stop counter. A by-ref miss falls back to the history-free full board,
+    # preserving the previous packet when a ticket is absent from the Project.
+    # Keep the loader injection point for parity fixtures and callers that
+    # intentionally provide a complete board snapshot.
+    if items_loader is None:
+        members = funnel.member_repos()
+        refs = [row["ref"] for row in tickets
+                if isinstance(row.get("ref"), str)]
+        loaded_items = funnel.load_project_items_by_refs(
+            refs, member_repo_names=members,
+        )
+        if loaded_items is None:
+            loaded_items = funnel.load_items(include_details=False)
+        else:
+            by_ref = {item.ref: item for item in loaded_items}
+            for item in funnel.load_regression_items(
+                    member_repo_names=members):
+                by_ref.setdefault(item.ref, item)
+            loaded_items = list(by_ref.values())
+    else:
+        loaded_items = items_loader()
+    project_rows = {item.ref: item for item in loaded_items}
     for row in tickets:
         project_item = project_rows.get(row.get("ref"))
         row["risk"] = getattr(project_item, "risk", None)

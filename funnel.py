@@ -9991,6 +9991,75 @@ def _begin_anchor_refs(items: Sequence[Item], members: Set[str]) -> List[str]:
     return refs
 
 
+def _load_project_items_by_refs(
+    refs: Sequence[str], *, context: str = "Project item",
+) -> List[Item]:
+    """Read exact Project items for refs through #1608's filtered connections."""
+    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
+    found: List[Item] = []
+    for start in range(0, len(refs), BEGIN_ANCHOR_ALIASES_PER_REQUEST):
+        batch = refs[start:start + BEGIN_ANCHOR_ALIASES_PER_REQUEST]
+        _PROJECT_ITEM_PAGE_COUNT += 1
+        response = gh_graphql(
+            _begin_anchor_query(batch),
+            login=PROJECT_OWNER, number=PROJECT_NUMBER,
+        )
+        project = _begin_project_from_response(response)
+        for index, ref in enumerate(batch):
+            alias = "r{}".format(index)
+            nodes, has_next, _cursor = _begin_connection_page(
+                project, alias
+            )
+            _PROJECT_ITEM_ROW_COUNT += len(nodes)
+            match = None
+            for node in nodes:
+                try:
+                    item = _from_node(node)
+                except (KeyError, TypeError, AttributeError) as exc:
+                    raise GitHubError(
+                        "{} {} returned a malformed row".format(context, ref)
+                    ) from exc
+                if item is not None and item.ref == ref:
+                    match = item
+                    break
+            if match is None:
+                if has_next:
+                    raise GitHubError(
+                        "{} {} matched more than one page without the issue "
+                        "itself".format(context, ref)
+                    )
+                continue  # not in the Project: absent, as under the full load
+            found.append(match)
+    return found
+
+
+def load_items_by_refs(
+    refs: Sequence[str],
+    member_repo_names: Optional[Sequence[str]] = None,
+) -> List[Item]:
+    """Load only member-repo Project items named by issue refs.
+
+    Each ref uses #1608's exact repo-and-number Project filter. A filter can
+    return nearby matches, so the parsed repo and number still have to match.
+    """
+    members = set(
+        member_repo_names if member_repo_names is not None else member_repos()
+    )
+    wanted: List[str] = []
+    for ref in refs:
+        if not isinstance(ref, str):
+            continue
+        match = _BEGIN_ANCHOR_REF_RE.match(ref)
+        if (
+            match is None
+            or match.group(1) not in members
+            or ref in wanted
+        ):
+            continue
+        wanted.append(ref)
+    return _load_project_items_by_refs(wanted)
+
+
 def _load_begin_anchor_items(
     items: Sequence[Item], members: Set[str],
     timings: Optional[Dict[str, object]],
@@ -10008,48 +10077,61 @@ def _load_begin_anchor_items(
     found: List[Item] = []
     try:
         refs = _begin_anchor_refs(items, members)
-        for start in range(0, len(refs), BEGIN_ANCHOR_ALIASES_PER_REQUEST):
-            batch = refs[start:start + BEGIN_ANCHOR_ALIASES_PER_REQUEST]
-            _PROJECT_ITEM_PAGE_COUNT += 1
-            response = gh_graphql(
-                _begin_anchor_query(batch),
-                login=PROJECT_OWNER, number=PROJECT_NUMBER,
-            )
-            project = _begin_project_from_response(response)
-            for index, ref in enumerate(batch):
-                alias = "r{}".format(index)
-                nodes, has_next, _cursor = _begin_connection_page(
-                    project, alias
-                )
-                _PROJECT_ITEM_ROW_COUNT += len(nodes)
-                match = None
-                for node in nodes:
-                    try:
-                        item = _from_node(node)
-                    except (KeyError, TypeError, AttributeError) as exc:
-                        raise GitHubError(
-                            "begin anchor {} returned a malformed row"
-                            .format(ref)
-                        ) from exc
-                    if item is not None and item.ref == ref:
-                        match = item
-                        break
-                if match is None:
-                    if has_next:
-                        raise GitHubError(
-                            "begin anchor {} matched more than one page "
-                            "without the issue itself".format(ref)
-                        )
-                    continue  # not in the Project: absent, as in full
-                if match.state == "OPEN" and match.is_blocked:
-                    _load_block_comment(match)
-                found.append(match)
+        found = _load_project_items_by_refs(refs, context="begin anchor")
+        for match in found:
+            if match.state == "OPEN" and match.is_blocked:
+                _load_block_comment(match)
     finally:
         if started is not None:
             _record_begin_load_phase(
                 timings, "anchor_items", time.perf_counter() - started
             )
     return found
+
+
+def load_regression_items(
+    member_repo_names: Optional[Sequence[str]] = None,
+) -> List[Item]:
+    """Load the regression set through #1607's filtered Project connection."""
+    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
+    members = set(
+        member_repo_names if member_repo_names is not None else member_repos()
+    )
+    cursors: Dict[str, str] = {}
+    seen_cursors: Set[str] = set()
+    kept: Dict[str, Item] = {}
+    while True:
+        variables: Dict[str, object] = {
+            "login": PROJECT_OWNER, "number": PROJECT_NUMBER,
+        }
+        if "regress" in cursors:
+            variables["regressCursor"] = cursors["regress"]
+        _PROJECT_ITEM_PAGE_COUNT += 1
+        response = gh_graphql(_begin_item_query(["regress"]), **variables)
+        project = _begin_project_from_response(response)
+        nodes, has_next, cursor = _begin_connection_page(project, "regress")
+        _PROJECT_ITEM_ROW_COUNT += len(nodes)
+        for node in nodes:
+            try:
+                item = _from_node(node)
+            except (KeyError, TypeError, AttributeError) as exc:
+                raise GitHubError(
+                    "begin Project connection regress returned a malformed "
+                    "row"
+                ) from exc
+            if (
+                item is not None
+                and item.repo in members
+                and _is_regression_item(item)
+            ):
+                kept.setdefault(item.item_id or item.ref, item)
+        if not has_next:
+            break
+        if cursor in seen_cursors:
+            raise GitHubError("begin Project connection regress did not advance")
+        seen_cursors.add(cursor)
+        cursors["regress"] = cursor
+    return list(kept.values())
 
 
 def load_items(

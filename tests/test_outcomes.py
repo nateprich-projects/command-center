@@ -1293,6 +1293,49 @@ def test_derive_heal_empty_runs_writes_one_ledger_with_only_the_heal(
     assert summary["healed_runs_with_token_usage"] == 1
 
 
+def test_derive_heal_empty_runs_writes_when_nothing_new_needs_appending(
+        monkeypatch, capsys):
+    """The one-time heal re-derives tickets that are all already stored, so
+    there is nothing to append. A write gated on new records alone would
+    return before the PUT, and `--heal-empty-runs` would report success
+    having healed nothing."""
+    stored = [_outcome(1, []), _outcome(2, [_run(run="old")])]
+    stored_text = outcomes._encode_records(stored)
+    later = datetime(2026, 9, 28, tzinfo=timezone.utc)
+    fresh = [
+        outcomes.derive_outcome(ticket(1), now=later, run_observations=[_run()]),
+        outcomes.derive_outcome(
+            ticket(2), now=later, run_observations=[_run(run="new")]),
+    ]
+    monkeypatch.setattr(
+        outcomes, "derive_repository",
+        lambda repo, limit, ticket_numbers: fresh)
+    writes = []
+
+    def run(args, stdin=None):
+        if "PUT" in args:
+            writes.append(json.loads(stdin))
+            return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps({
+            "content": base64.b64encode(stored_text.encode()).decode(),
+            "size": len(stored_text), "sha": "old",
+        }), stderr="")
+
+    monkeypatch.setattr(outcomes, "_run_gh", run)
+
+    assert outcomes.main(["derive", "--repo", REPO, "--heal-empty-runs"]) == 0
+
+    assert len(writes) == 1
+    assert writes[0]["sha"] == "old"
+    written = base64.b64decode(writes[0]["content"]).decode().splitlines()
+    assert len(written) == 2
+    assert json.loads(written[0]) == fresh[0]
+    assert written[1] == stored_text.splitlines()[1]
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["appended"] == 0
+    assert summary["healed"] == 1
+
+
 def test_derive_without_the_heal_flag_never_replaces_a_stored_record(
         monkeypatch):
     stored_text = outcomes._encode_records([_outcome(1, [])])

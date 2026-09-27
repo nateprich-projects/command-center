@@ -1327,12 +1327,25 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
         return validation_exit(args.attempt)
     try:
         resolved = funnel.resolve_repo(args.repo)
-        # Neither the decision, the output review, nor any write guard
-        # (including the closed-issue Status refusal) reads Project
-        # history, so the detail batch is skipped (#1620). `_write_status`
-        # only assigns status_since/status_events after a confirmed write.
-        items = funnel.load_items(include_details=False)
         ref = "{}#{}".format(resolved, args.idea)
+        # Shape validation reads the idea and its parent for effective Class.
+        # Fetch those Project rows by ref; if either filter misses, keep the
+        # history-free full-board behavior so the decision inputs stay exact.
+        members = funnel.member_repos()
+        items = funnel.load_project_items_by_refs(
+            [ref], member_repo_names=members)
+        if items is None or len(items) != 1 or items[0].ref != ref:
+            items = funnel.load_items(include_details=False)
+        else:
+            parent_ref = items[0].parent
+            if parent_ref and parent_ref not in {item.ref for item in items}:
+                parent_items = funnel.load_project_items_by_refs(
+                    [parent_ref], member_repo_names=members)
+                if (parent_items is None or len(parent_items) != 1
+                        or parent_items[0].ref != parent_ref):
+                    items = funnel.load_items(include_details=False)
+                else:
+                    items.extend(parent_items)
         if args.validate_only:
             item = funnel.find(items, ref)
             answer, rejected_signals = review_shape_output_for_item(

@@ -170,10 +170,14 @@ wrong.
   clock: a `standard` run before 1791302400 runs as agent `zcode` and asks GLM-5.3
   through `scripts/zai-exec`, one Messages call with no tools offered to z.ai's
   Anthropic-compatible endpoint, refused unless `glm-5.3` is the model that answered.
-  The same review, breakdown and shape questions, packets and apply steps serve both
+  The same review and breakdown questions, packets and apply steps serve both
   backends, except that z.ai's review judges run one at a time, because the Lite plan
-  refuses concurrent requests. The plist is unchanged. At the cutoff the standard tier
-  is Muse's again with nothing to undo, and `heartbeat.retired_agents` retires `zcode`
+  refuses concurrent requests. Shape on Muse runs the framer → sibling → decider →
+  auditor split through `engine/shape_split.py`, per Nate's 2026-09-26 ruling on #1581
+  that escalated shaping stays at `max` and is split, not lowered. z.ai shape remains
+  one call, and breakdown remains one call on either backend. The plist is unchanged.
+  At the cutoff the standard tier is Muse's again with nothing to undo, and
+  `heartbeat.retired_agents` retires `zcode`
   at the same instant. The cutoff is the start of the expiry date in z.ai's own time
   zone (UTC+8), the earliest reading of "expires 2026-10-07": it gives up most of a day
   rather than risk runs erroring on an expired key.

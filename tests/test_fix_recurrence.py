@@ -161,6 +161,8 @@ def test_ticket_accept_scenario_three_fix_commits(tmp_path):
     result = fr.measure(root, {1: 100, 2: 200, 3: 300}, NOW)
 
     assert (result["numerator"], result["denominator"]) == (1, 2)
+    assert [(row["path"], row["function"], row["projects"])
+            for row in result["hotspots"]] == [("app.py", "run", [100, 200])]
 
 
 def test_a_fix_older_than_the_window_is_not_recurrence(tmp_path):
@@ -286,3 +288,110 @@ def test_a_pure_insertion_is_counted_for_hotspots_only(tmp_path):
     assert [(row["function"], row["count"]) for row in result["hotspots"]] == [
         ("run", 2)
     ]
+
+
+def test_most_but_not_all_lines_from_another_fix_counts(tmp_path):
+    """Three of four modified lines are the other project's: a majority."""
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["a = 1", "b = 2", "c = 3", "d = 4"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("run", ["a = 10", "b = 20", "c = 30", "d = 4"])},
+            "Fix three (#20) (#120)", NOW - timedelta(days=2))
+    _commit(root, {"app.py": _body("run", ["a = 11", "b = 21", "c = 31", "d = 41"])},
+            "Fix four (#21) (#121)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {20: 2000, 21: 2100}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (1, 2)
+
+
+def test_commits_after_now_are_outside_the_window(tmp_path):
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["a = 1"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("run", ["a = 2"])},
+            "Fix (#22) (#122)", NOW - timedelta(days=2))
+    _commit(root, {"app.py": _body("run", ["a = 3"])},
+            "Later fix (#23) (#123)", NOW + timedelta(hours=1))
+
+    result = fr.measure(root, {22: 2200, 23: 2300}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (0, 1)
+
+
+def test_only_the_squash_subject_form_names_a_ticket(tmp_path):
+    """'Title (#ticket) (#pr)' only; a bare '(#N)' is not a ticket commit."""
+    root = _new_repo(tmp_path)
+    _commit(root, {"app.py": _body("run", ["a = 1"])},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"app.py": _body("run", ["a = 2"])},
+            "Fix (#24) (#124)", NOW - timedelta(days=2))
+    _commit(root, {"app.py": _body("run", ["a = 3"])},
+            "Unrelated mention (#25)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {24: 2400, 25: 2500}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (0, 1)
+
+
+def test_hotspots_order_by_count_then_path_and_name_class_methods(tmp_path):
+    """Newest-first processing meets the lower count first; output is sorted."""
+    root = _new_repo(tmp_path)
+    klass = "class Item:\n    def size(self):\n        return {}\n"
+    _commit(root, {"a.py": _body("zed", ["x = 1"]), "b.py": klass.format(1)},
+            "Initial", NOW - timedelta(days=30))
+    _commit(root, {"b.py": klass.format(2)},
+            "Fix (#25) (#125)", NOW - timedelta(days=4))
+    _commit(root, {"b.py": klass.format(3)},
+            "Fix (#26) (#126)", NOW - timedelta(days=3))
+    _commit(root, {"a.py": _body("zed", ["x = 2"]), "b.py": klass.format(4)},
+            "Fix (#27) (#127)", NOW - timedelta(days=2))
+    _commit(root, {"a.py": _body("zed", ["x = 3"])},
+            "Fix (#28) (#128)", NOW - timedelta(days=1))
+
+    hot = fr.measure(root, {25: 2500, 26: 2600, 27: 2700, 28: 2800},
+                     NOW)["hotspots"]
+
+    assert [(row["path"], row["function"], row["count"]) for row in hot] == [
+        ("b.py", "Item", 3), ("a.py", "zed", 2)]
+
+
+def test_blame_covers_only_the_modified_hunk_mid_file(tmp_path):
+    """Recent neighbour lines outside the hunk must not tip the majority."""
+    root = _new_repo(tmp_path)
+    lines = ["v{} = {}".format(n, n) for n in range(6)]
+    _commit(root, {"app.py": _body("run", lines)},
+            "Initial", NOW - timedelta(days=30))
+    fixed = list(lines)
+    fixed[3] = "v3 = 30"
+    fixed[4] = "v4 = 40"
+    _commit(root, {"app.py": _body("run", fixed)},
+            "Fix neighbours (#29) (#129)", NOW - timedelta(days=2))
+    again = list(fixed)
+    again[2] = "v2 = 20"
+    _commit(root, {"app.py": _body("run", again)},
+            "Fix one old line (#30) (#130)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {29: 2900, 30: 3000}, NOW)
+
+    assert (result["numerator"], result["denominator"]) == (0, 2)
+
+
+def test_examples_count_exactly_the_hunk_lines(tmp_path):
+    root = _new_repo(tmp_path)
+    lines = ["v{} = {}".format(n, n) for n in range(6)]
+    _commit(root, {"app.py": _body("run", lines)},
+            "Initial", NOW - timedelta(days=30))
+    fixed = list(lines)
+    fixed[1], fixed[2] = "v1 = 10", "v2 = 20"
+    _commit(root, {"app.py": _body("run", fixed)},
+            "Fix (#31) (#131)", NOW - timedelta(days=2))
+    again = list(fixed)
+    again[1], again[2] = "v1 = 11", "v2 = 21"
+    _commit(root, {"app.py": _body("run", again)},
+            "Fix again (#32) (#132)", NOW - timedelta(days=1))
+
+    result = fr.measure(root, {31: 3100, 32: 3200}, NOW)
+
+    assert [(row["ticket"], row["lines"], row["recent_fix_lines"])
+            for row in result["examples"]] == [(32, 2, 2)]

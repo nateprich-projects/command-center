@@ -1444,7 +1444,7 @@ def prerequisite_project_landed(
 
 def _landed_prerequisite_evidence(
         ref: str, facts: Dict[str, object]) -> str:
-    """Explain the GitHub facts that disprove a closed-project decline."""
+    """Explain when closed child tickets disprove an unlanded claim."""
     match = shape.REF_RE.fullmatch(ref)
     if match is None:
         raise ImplementError("cannot render invalid prerequisite ref")
@@ -1453,10 +1453,10 @@ def _landed_prerequisite_evidence(
         match.group("owner"), match.group("repo"), match.group("number"),
     )
     return (
-        "**Prerequisite check:** GitHub reports [{}]({}) has all {} child "
-        "tickets completed ({}/{}). The project is landed by ticket "
-        "completion; its own PR link and drift or rejected-review records "
-        "do not change that result."
+        "**False unlanded-prerequisite check:** GitHub reports [{}]({}) has "
+        "all {} child tickets completed ({}/{}). The project is landed by "
+        "ticket completion; its own PR link and drift or rejected-review "
+        "records do not change that result."
     ).format(ref, url, total, total, total)
 
 
@@ -1849,7 +1849,7 @@ def finish_declined(
         decline_class == "accept-body-conflict" and decline_target is not None
     )
     prerequisite_recorded = False
-    prerequisite_agent_routed = False
+    false_unlanded_prerequisite_routed = False
     prerequisite_evidence: Optional[str] = None
     unsatisfiable_acceptance_routed = (
         decline_class == "unsatisfiable-acceptance"
@@ -1866,7 +1866,7 @@ def finish_declined(
                 prerequisite_evidence = _landed_prerequisite_evidence(
                     decline_target, prerequisite_facts or {},
                 )
-                prerequisite_agent_routed = True
+                false_unlanded_prerequisite_routed = True
             elif (
                 isinstance(prerequisite_facts, dict)
                 and prerequisite_facts.get("state") == "OPEN"
@@ -1881,7 +1881,7 @@ def finish_declined(
             # A failed lookup or edge write keeps today's visible block.
             prerequisite_recorded = False
     if (not prerequisite_recorded and not accept_conflict_routed
-            and not prerequisite_agent_routed
+            and not false_unlanded_prerequisite_routed
             and not unsatisfiable_acceptance_routed
             and not pending_gate_answer_routed):
         # Unknown declines and failed prerequisite handoffs have no machine-
@@ -1894,7 +1894,7 @@ def finish_declined(
         declined_comment += "\n\n" + prerequisite_evidence
     comment_effect(resolved, context["number"], declined_comment,
                    run=run, agent=agent, cwd=context["root"])
-    if prerequisite_agent_routed:
+    if false_unlanded_prerequisite_routed:
         # Record proof before returning a false decline to the agent queue.
         clear_block_effect(
             resolved, context["number"], cwd=context["root"],
@@ -1958,8 +1958,11 @@ def finish_declined(
     note = "declined: {}".format(first)
     if accept_conflict_routed and not routing_failed:
         note += "; routed to review for Accept/body conflict"
-    elif prerequisite_agent_routed:
-        note += "; prerequisite already landed; returned to agent queue"
+    elif false_unlanded_prerequisite_routed:
+        note += (
+            "; false unlanded-prerequisite claim disproved by closed child "
+            "tickets; returned to agent queue"
+        )
     elif unsatisfiable_acceptance_routed:
         note += (
             "; acceptance cannot be met; routed for reshaping"

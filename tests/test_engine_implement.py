@@ -1067,6 +1067,26 @@ def test_finish_declined_requeues_false_ff_225_claim_with_evidence(
         tmp_path, monkeypatch, ff_225_landed_prerequisite_facts):
     _, clone = make_clone(tmp_path)
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    summaries = []
+
+    def read_ticket_completion(query, *, owner, name, number):
+        summaries.append((query, owner, name, number))
+        return {
+            "repository": {
+                "issue": {
+                    "number": number,
+                    "state": "CLOSED",
+                    "subIssuesSummary": {
+                        "total": ff_225_landed_prerequisite_facts[
+                            "children_total"],
+                        "completed": ff_225_landed_prerequisite_facts[
+                            "children_completed"],
+                    },
+                },
+            },
+        }
+
+    monkeypatch.setattr(funnel, "gh_graphql", read_ticket_completion)
     reason = (
         "Named prerequisite nateprich-projects/Fantasy-GM#225 is unlanded: "
         "it self-closed after plan drift and a rejected review verdict, "
@@ -1089,8 +1109,6 @@ def test_finish_declined_requeues_false_ff_225_claim_with_evidence(
         needs_effect=lambda url, ref: effects["needs"].append((url, ref)),
         human_needs_effect=lambda url, ref: effects["human_needs"].append(
             (url, ref)),
-        prerequisite_facts_effect=lambda ref: (
-            ff_225_landed_prerequisite_facts),
         clear_block_effect=lambda repo, number, **kwargs:
             effects["cleared"].append((repo, number, kwargs)),
         prerequisite_edge_effect=lambda *args, **kwargs: pytest.fail(
@@ -1100,14 +1118,24 @@ def test_finish_declined_requeues_false_ff_225_claim_with_evidence(
     assert result == {"ticket": REPO + "#42", "declined": reason}
     assert effects["blocked"] == []
     assert effects["human_needs"] == []
+    assert len(summaries) == 1
+    query, owner, name, number = summaries[0]
+    assert (owner, name, number) == ("nateprich-projects", "Fantasy-GM", 225)
+    assert "subIssuesSummary { total completed }" in query
+    assert ff_225_landed_prerequisite_facts["parent_merge_pr"] is None
+    assert ff_225_landed_prerequisite_facts["drift"]
     assert effects["cleared"] == [(REPO, 42, {"cwd": clone})]
     assert effects["needs"] == [(ticket()["url"], REPO + "#42")]
     posted = effects["comments"][0][0][2]
     assert posted.startswith("**Declined:** {}".format(reason))
     assert "Fantasy-GM#225" in posted
+    assert "**False unlanded-prerequisite check:**" in posted
     assert "all 5 child tickets completed (5/5)" in posted
     assert effects["released"] == [REPO + "#42"]
-    assert "prerequisite already landed; returned to agent queue" in (
+    assert (
+        "false unlanded-prerequisite claim disproved by closed child tickets; "
+        "returned to agent queue"
+    ) in (
         effects["finished"][0][3])
 
 

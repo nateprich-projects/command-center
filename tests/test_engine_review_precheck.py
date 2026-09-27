@@ -27,11 +27,18 @@ SHA = "abc123def456"
 
 @pytest.fixture(autouse=True)
 def project_risk(monkeypatch):
+    row = type("Row", (), {"ref": REPO + "#9", "risk": "standard"})()
+    monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
     monkeypatch.setattr(
-        funnel, "load_items",
-        lambda **kwargs: [
-            type("Row", (), {"ref": REPO + "#9", "risk": "standard"})()],
+        funnel, "load_project_items_by_refs",
+        lambda refs, member_repo_names=None: [row] if row.ref in refs else [],
     )
+    monkeypatch.setattr(
+        funnel, "load_regression_items",
+        lambda member_repo_names=None: [],
+    )
+
+
 OTHER_SHA = "7890fedcba98"
 HEAD_DATE = "2026-09-13T12:00:00Z"
 NEWER = "2026-09-13T13:00:00Z"

@@ -1022,8 +1022,13 @@ def test_finish_declined_open_prerequisite_records_only_native_edge(
             (args, kwargs)),
         needs_effect=lambda *args: pytest.fail(
             "a prerequisite edge must leave Needs unchanged"),
-        prerequisite_open_effect=lambda ref: (
-            effects["looked_up"].append(ref) or True),
+        prerequisite_facts_effect=lambda ref: (
+            effects["looked_up"].append(ref) or {
+                "number": int(ref.rsplit("#", 1)[1]),
+                "state": "OPEN",
+                "children_total": 0,
+                "children_completed": 0,
+            }),
         prerequisite_edge_effect=lambda repo, number, ref, **kwargs:
             effects["edges"].append((repo, number, ref, kwargs)),
     )
@@ -1038,6 +1043,54 @@ def test_finish_declined_open_prerequisite_records_only_native_edge(
         ("codex", "run-42", "skipped-blocked",
          "declined: {}".format(reason), REPO + "#42")
     ]
+
+
+def test_finish_declined_requeues_false_ff_225_claim_with_evidence(
+        tmp_path, monkeypatch, ff_225_landed_prerequisite_facts):
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    reason = (
+        "Named prerequisite nateprich-projects/Fantasy-GM#225 is unlanded: "
+        "it self-closed after plan drift and a rejected review verdict, "
+        "with no linked merge PR."
+    )
+    effects = {"blocked": [], "comments": [], "released": [], "finished": [],
+               "needs": [], "human_needs": [], "cleared": []}
+
+    result = implement.finish_declined(
+        reason,
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        block_effect=lambda *args, **kwargs: effects["blocked"].append(
+            (args, kwargs)),
+        comment_effect=lambda *args, **kwargs: effects["comments"].append(
+            (args, kwargs)),
+        needs_effect=lambda url, ref: effects["needs"].append((url, ref)),
+        human_needs_effect=lambda url, ref: effects["human_needs"].append(
+            (url, ref)),
+        prerequisite_facts_effect=lambda ref: (
+            ff_225_landed_prerequisite_facts),
+        clear_block_effect=lambda repo, number, **kwargs:
+            effects["cleared"].append((repo, number, kwargs)),
+        prerequisite_edge_effect=lambda *args, **kwargs: pytest.fail(
+            "a completed project must not become a blocked-by edge"),
+    )
+
+    assert result == {"ticket": REPO + "#42", "declined": reason}
+    assert effects["blocked"] == []
+    assert effects["human_needs"] == []
+    assert effects["cleared"] == [(REPO, 42, {"cwd": clone})]
+    assert effects["needs"] == [(ticket()["url"], REPO + "#42")]
+    posted = effects["comments"][0][0][2]
+    assert posted.startswith("**Declined:** {}".format(reason))
+    assert "Fantasy-GM#225" in posted
+    assert "all 5 child tickets completed (5/5)" in posted
+    assert effects["released"] == [REPO + "#42"]
+    assert "prerequisite already landed; returned to agent queue" in (
+        effects["finished"][0][3])
 
 
 def test_accept_body_conflict_branch_skips_blocked_label_and_routes_to_review(
@@ -1062,7 +1115,7 @@ def test_accept_body_conflict_branch_skips_blocked_label_and_routes_to_review(
             ("agent", url, ref)),
         human_needs_effect=lambda *args: pytest.fail(
             "a pointed Accept conflict must not ask Nate"),
-        prerequisite_open_effect=lambda ref: pytest.fail(
+        prerequisite_facts_effect=lambda ref: pytest.fail(
             "an Accept conflict must not be treated as a prerequisite"),
     )
 
@@ -1332,8 +1385,13 @@ def test_finish_declined_falls_back_to_blocked_for_non_prerequisite_cases(
             "a blocked decline without a machine condition must ask Nate"),
         human_needs_effect=lambda url, ref: effects["human_needs"].append(
             (url, ref)),
-        prerequisite_open_effect=lambda ref: (
-            effects["looked_up"].append(ref) or open_state),
+        prerequisite_facts_effect=lambda ref: (
+            effects["looked_up"].append(ref) or {
+                "number": 165,
+                "state": "OPEN" if open_state else "CLOSED",
+                "children_total": 0,
+                "children_completed": 0,
+            }),
         prerequisite_edge_effect=edge_effect,
     )
 
@@ -1393,25 +1451,153 @@ def test_classify_decline_reason_routes_only_pointed_accept_conflicts(
     assert implement.classify_decline_reason(reason, REPO) == expected
 
 
-@pytest.mark.parametrize(("payload", "expected"), [
-    ({"number": 165, "state": "OPEN"}, True),
-    ({"number": 165, "state": "CLOSED"}, False),
-    ({"number": 166, "state": "OPEN"}, False),
-    (None, False),
-])
-def test_declined_prerequisite_verification_requires_open_matching_issue(
-        monkeypatch, payload, expected):
+@pytest.fixture
+def ff_225_landed_prerequisite_facts():
+    """The #225 shape: five child tickets closed before its self-close."""
+    return {
+        "number": 225,
+        "state": "CLOSED",
+        "closed_at": "2026-09-25T21:13:39Z",
+        "children_total": 5,
+        "children_completed": 5,
+        "children": [
+            {"number": 226, "state": "CLOSED", "merged_pr": 233,
+             "merge_sha": "f97b156"},
+            {"number": 227, "state": "CLOSED", "merged_pr": 235,
+             "merge_sha": "453e640"},
+            {"number": 228, "state": "CLOSED", "merged_pr": 236,
+             "merge_sha": "f1efab1"},
+            {"number": 229, "state": "CLOSED", "merged_pr": 241,
+             "merge_sha": "2290f2d"},
+            {"number": 230, "state": "CLOSED",
+             "closed_at": "2026-09-25T21:11:53Z"},
+        ],
+        # This reproduction has no parent PR and carries drift/rejected-review
+        # markers. Neither is part of the child-ticket completion predicate.
+        "parent_merge_pr": None,
+        "drift": ["plan edited after Ready", "review verdict rejected"],
+    }
+
+
+@pytest.fixture
+def project_with_open_prerequisite_ticket_facts():
+    return {
+        "number": 225,
+        "state": "CLOSED",
+        "children_total": 5,
+        "children_completed": 4,
+        "children": [
+            {"number": 226, "state": "CLOSED"},
+            {"number": 227, "state": "CLOSED"},
+            {"number": 228, "state": "CLOSED"},
+            {"number": 229, "state": "CLOSED"},
+            {"number": 230, "state": "OPEN"},
+        ],
+        "open_child": {"number": 230, "state": "OPEN"},
+    }
+
+
+def test_prerequisite_project_landed_reproduces_ff_225(
+        ff_225_landed_prerequisite_facts):
+    assert len(ff_225_landed_prerequisite_facts["children"]) == 5
+    assert all(
+        child["state"] == "CLOSED"
+        for child in ff_225_landed_prerequisite_facts["children"]
+    )
+    assert implement.prerequisite_project_landed(
+        ff_225_landed_prerequisite_facts) is True
+
+
+def test_prerequisite_project_with_open_ticket_is_unlanded(
+        project_with_open_prerequisite_ticket_facts):
+    assert project_with_open_prerequisite_ticket_facts["open_child"] == {
+        "number": 230, "state": "OPEN",
+    }
+    assert implement.prerequisite_project_landed(
+        project_with_open_prerequisite_ticket_facts) is False
+
+
+def test_clear_declined_ticket_block_removes_a_stale_blocked_label(
+        tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(
         funnel, "_gh_json",
-        lambda *args: calls.append(args) or payload,
+        lambda *args: {
+            "labels": [{"name": "blocked"}, {"name": "needs-shaping"}],
+        },
     )
 
-    assert implement.declined_prerequisite_is_open(REPO + "#165") is expected
-    assert calls == [(
-        "gh", "issue", "view", "165", "--repo", REPO,
-        "--json", "number,state",
-    )]
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(funnel, "_run_gh", fake_run)
+
+    implement.clear_declined_ticket_block(REPO, 42, cwd=tmp_path)
+
+    (args, kwargs), = calls
+    assert args == [
+        "gh", "issue", "edit", "42", "--repo", REPO,
+        "--remove-label", "blocked",
+    ]
+    assert kwargs["cwd"] == str(tmp_path)
+
+
+def test_read_declined_prerequisite_uses_github_ticket_completion_summary(
+        monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        funnel, "gh_graphql",
+        lambda query, **variables: calls.append((query, variables)) or {
+            "repository": {
+                "issue": {
+                    "number": 225,
+                    "state": "CLOSED",
+                    "subIssuesSummary": {"total": 5, "completed": 5},
+                },
+            },
+        },
+    )
+
+    facts = implement.read_declined_prerequisite(
+        "nateprich-projects/Fantasy-GM#225")
+
+    assert facts == {
+        "number": 225,
+        "state": "CLOSED",
+        "children_total": 5,
+        "children_completed": 5,
+    }
+    (query, variables), = calls
+    assert variables == {
+        "owner": "nateprich-projects", "name": "Fantasy-GM", "number": 225,
+    }
+    assert "subIssuesSummary { total completed }" in query
+    assert "pullRequests" not in query
+    assert "timelineItems" not in query
+
+
+def test_read_declined_prerequisite_rejects_incomplete_or_wrong_issue(
+        monkeypatch):
+    payloads = [
+        {"number": 166, "state": "OPEN",
+         "subIssuesSummary": {"total": 0, "completed": 0}},
+        {"number": 165, "state": "OPEN",
+         "subIssuesSummary": {"total": 2, "completed": 3}},
+        {"number": 165, "state": "OPEN"},
+    ]
+
+    for index, payload in enumerate(payloads):
+        monkeypatch.setattr(
+            funnel, "gh_graphql",
+            lambda query, **variables: {"repository": {"issue": payload}},
+        )
+        facts = implement.read_declined_prerequisite(REPO + "#165")
+        if index == 0:
+            assert facts is None
+        else:
+            assert facts is not None and facts["state"] == "OPEN"
+            assert implement.prerequisite_project_landed(facts) is None
 
 
 @pytest.mark.parametrize(("prerequisite", "edge_value"), [

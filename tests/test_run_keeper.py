@@ -187,9 +187,111 @@ def test_keeper_appends_one_parseable_line_per_run(tmp_path):
             "codex": "1",
             "claude": "0",
             "muse": "1",
+            # This checkout carries no codex_reap.py: a reaper that does not
+            # answer is recorded as unknown, never as zero (#1656).
+            "reap_sets": "unknown",
+            "reap_procs": "unknown",
+            "reap_failed": "unknown",
+            "reap_fault": "reaper-error",
         }
         for record in fields
     )
+
+
+REAP_TABLE = """  PID  PPID     ELAPSED COMMAND
+  500     1  2-00:00:00 /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex -c features.code_mode_host=true app-server
+ 1000   500    04:00:00 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+ 1001   500    04:00:00 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+ 1002   500    04:00:00 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+ 1003   500    04:00:00 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node /Applications/ChatGPT.app/Contents/Resources/cua_node/lib/node_modules/@oai/cua-repl/bin/cua-repl.mjs
+ 1004  1003    03:59:59 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
+ 1010   500       10:00 /Users/nateprich/.codex/computer-use/Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient messages mcp
+ 1011   500       10:00 /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs
+"""
+
+
+def test_keeper_sentinel_line_carries_the_reap_count(tmp_path):
+    """The reap pass runs from the checkout and its count lands on the
+    sentinel line. The kill is a logging stub: no signal is sent (#1656)."""
+    bare, checkout = make_heartbeat_remote(tmp_path)
+    seed = tmp_path / "seed"
+    (seed / "codex_reap.py").write_bytes((ROOT / "codex_reap.py").read_bytes())
+    commit_and_push(seed, "reaper")
+    run_git("-C", str(checkout), "pull", "--ff-only")
+
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    write_tool_stubs(tools)
+    (tools / "table").write_text(REAP_TABLE)
+    write_executable(
+        tools / "ps",
+        """
+case "$*" in
+  *axo*) cat "{table}" ;;
+  *lstart*) printf '%s\\n' 'Sat Sep 12 21:00:00 2026' ;;
+  *-A*) printf '%s\\n' '501' '501' '502' ;;
+  *) printf '%s\\n' '501' ;;
+esac
+""".format(table=tools / "table"),
+    )
+    kills = tmp_path / "kills"
+    write_executable(tools / "kill", 'echo "$@" >> "{}"\n'.format(kills))
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "COMMAND_CENTER_RUN_REPO": str(checkout),
+            "COMMAND_CENTER_SENTINEL_PS": str(tools / "ps"),
+            "COMMAND_CENTER_SENTINEL_PGREP": str(tools / "pgrep"),
+            "COMMAND_CENTER_SENTINEL_SYSCTL": str(tools / "sysctl"),
+            "COMMAND_CENTER_SENTINEL_UPTIME": str(tools / "uptime"),
+            "COMMAND_CENTER_SENTINEL_FILE": "sentinel.log",
+            "COMMAND_CENTER_KEEPER_REAP_KILL": str(tools / "kill"),
+            "HOME": str(tmp_path / "home"),
+        }
+    )
+    done = subprocess.run([str(SCRIPT)], env=env, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+
+    line = show_heartbeat_file(bare, "sentinel.log").splitlines()[-1]
+    record = dict(part.split("=", 1) for part in line.split())
+    assert (record["reap_sets"], record["reap_procs"], record["reap_failed"],
+            record["reap_fault"]) == ("1", "5", "0", "-")
+    assert sorted(kills.read_text().splitlines()) == [
+        "-TERM {}".format(pid) for pid in range(1000, 1005)]
+
+
+def test_keeper_records_an_unreadable_process_table_as_a_fault(tmp_path):
+    bare, checkout = make_heartbeat_remote(tmp_path)
+    seed = tmp_path / "seed"
+    (seed / "codex_reap.py").write_bytes((ROOT / "codex_reap.py").read_bytes())
+    commit_and_push(seed, "reaper")
+    run_git("-C", str(checkout), "pull", "--ff-only")
+
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    write_tool_stubs(tools)  # its ps answers the table read with '501'
+    kills = tmp_path / "kills"
+    write_executable(tools / "kill", 'echo "$@" >> "{}"\n'.format(kills))
+    env = os.environ.copy()
+    env.update(
+        {
+            "COMMAND_CENTER_RUN_REPO": str(checkout),
+            "COMMAND_CENTER_SENTINEL_PS": str(tools / "ps"),
+            "COMMAND_CENTER_SENTINEL_PGREP": str(tools / "pgrep"),
+            "COMMAND_CENTER_SENTINEL_SYSCTL": str(tools / "sysctl"),
+            "COMMAND_CENTER_SENTINEL_UPTIME": str(tools / "uptime"),
+            "COMMAND_CENTER_SENTINEL_FILE": "sentinel.log",
+            "COMMAND_CENTER_KEEPER_REAP_KILL": str(tools / "kill"),
+            "HOME": str(tmp_path / "home"),
+        }
+    )
+    done = subprocess.run([str(SCRIPT)], env=env, capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    line = show_heartbeat_file(bare, "sentinel.log").splitlines()[-1]
+    assert line.endswith(
+        "reap_sets=0 reap_procs=0 reap_failed=0 reap_fault=ps-unreadable")
+    assert not kills.exists()
 
 
 def make_install_remote(tmp_path: Path) -> tuple[Path, Path, Path]:

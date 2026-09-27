@@ -667,8 +667,8 @@ def test_a_scan_hit_holds_with_an_empty_declaration():
         "Shaped", "escalated risk (credentials)")
 
 
-def test_preview_keeps_the_recorded_1503_residual_citation_hit():
-    """The adapter removes the Rejected hit; a later source citation remains."""
+def test_preview_ignores_the_recorded_1503_no_backfill_citation():
+    """A sibling citation about no backfill is not a proposed migration."""
     item = idea(1503, klass="Broken")
     recorded = (ROOT / "tests/fixtures/escalation_plan_1503_recorded.md").read_text(
         encoding="utf-8")
@@ -679,12 +679,10 @@ def test_preview_keeps_the_recorded_1503_residual_citation_hit():
 
     status, reason = shape.preview_decision([item], item, candidate)
 
-    assert status == "Shaped"
+    assert status == "Ready"
     assert reason == (
-        "escalated risk (data-migration: - The fix is forward-only and the "
-        "14 invalid-JSON lines and the lost escalated fire stand as the "
-        "before-measurement. (source: sibling convention #1393 and #1182 "
-        "no-backfill decisions))")
+        "needs_nate all null; class Broken self-approvable; "
+        "origin agent")
 
 
 def test_a_clear_declaration_with_a_clear_scan_is_ready():

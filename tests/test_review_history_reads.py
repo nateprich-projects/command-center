@@ -1,10 +1,8 @@
-"""Review packet and review-apply read history only where it is used (#1621).
+"""Review packet and merge paths read only the Project rows they need.
 
-Both used to load the whole board with every item's history: about a minute
-and a hundred GraphQL points each time. They now load the board without
-history and read it back only for regression items (the rejected-merge
-counter) and, before a merge, for the branch ticket and its project (the
-drift fallback when the project closes itself).
+The review packet loads its ticket rows by ref and its rejected-merge counter
+from the filtered regression connection (#1624). Before a merge, review-apply
+reads history for the branch ticket and project plus regression items (#1621).
 
 These tests serve one fixture board, with real history, through a fake
 ``gh_graphql`` and check that the old full load and the new narrow load give
@@ -15,6 +13,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -61,6 +60,11 @@ class Board:
         self.history = {}
         self.children = {}
         self.detail_calls = []
+        self.item_queries = []
+        self.item_filters = []
+        self.full_load_calls = 0
+        self.events = []
+        self.missing_refs = set()
         self.writes = []
         self.fail_history = False
 
@@ -134,11 +138,48 @@ class Board:
             self.children[item_id] = list(child_rows)
 
     def graphql(self, query, **variables):
+        self.events.append("project")
         if query == funnel.ITEM_QUERY:
+            self.full_load_calls += 1
             return {"user": {"projectV2": {"items": {
                 "nodes": self.nodes,
                 "pageInfo": {"hasNextPage": False, "endCursor": None},
             }}}}
+        filtered = re.findall(
+            r'(?m)^\s*(\w+): items\(.+query: (".+")\) \{$', query
+        )
+        if filtered:
+            self.item_queries.append(query)
+            project = {}
+            for alias, encoded_filter in filtered:
+                query_filter = json.loads(encoded_filter)
+                self.item_filters.append(query_filter)
+                if query_filter == '"Regression from PR"':
+                    nodes = [
+                        node for node in self.nodes
+                        if node["content"]["title"].startswith(
+                            funnel.REGRESSION_PREFIX
+                        )
+                    ]
+                else:
+                    match = re.fullmatch(
+                        r"repo:([^ ]+) #([1-9][0-9]*)", query_filter
+                    )
+                    assert match, "unexpected Project item filter"
+                    repo, number = match.group(1), int(match.group(2))
+                    nodes = [
+                        node for node in self.nodes
+                        if node["content"]["repository"]["nameWithOwner"]
+                        == repo
+                        and node["content"]["number"] == number
+                    ]
+                    if f"{repo}#{number}" in self.missing_refs:
+                        nodes = []
+                project[alias] = {
+                    "nodes": nodes,
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            return {"user": {"projectV2": project}}
         if query in (funnel.ITEM_DETAILS_QUERY,
                      funnel.ITEM_TIMELINE_DETAILS_QUERY):
             self.detail_calls.append(
@@ -228,12 +269,20 @@ def install(monkeypatch, board):
 
 # -- review packet -------------------------------------------------------------
 
-def wire_packet(monkeypatch):
-    monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: {
-        "number": 7, "title": "do the thing", "headRefName": "ticket/9",
-        "headRefOid": SHA, "baseRefName": "main", "state": "OPEN",
-        "mergedAt": None, "closedAt": None, "body": "Closes #9",
-        "files": [], "closingIssuesReferences": []})
+def wire_packet(monkeypatch, events=None):
+    def fetch_pr(repo, pr):
+        if events is not None:
+            events.append("pr")
+        return {
+            "number": 7, "title": "do the thing", "headRefName": "ticket/9",
+            "headRefOid": SHA, "baseRefName": "main", "state": "OPEN",
+            "mergedAt": None, "closedAt": None, "body": "Closes #9",
+            "files": [],
+            "closingIssuesReferences": [{
+                "number": 10, "repository": {"nameWithOwner": REPO},
+            }],
+        }
+    monkeypatch.setattr(review, "fetch_pr", fetch_pr)
     monkeypatch.setattr(review, "fetch_scope", lambda *args: (
         (_ for _ in ()).throw(funnel.GitHubError("compare unavailable"))))
     monkeypatch.setattr(review, "fetch_diff", lambda repo, pr: "diff text")
@@ -278,6 +327,47 @@ def test_packet_reads_history_only_for_regression_items(monkeypatch):
 
     assert board.detail_calls == [(
         ["item-100", "item-101", "item-110", "item-111", "item-112"], [])]
+    assert board.item_filters == [
+        "repo:owner/repo #9",
+        "repo:owner/repo #10",
+        '"Regression from PR"',
+    ]
+    assert board.full_load_calls == 0
+
+
+def test_packet_reads_the_pr_before_loading_project_items(monkeypatch):
+    board = Board()
+    install(monkeypatch, board)
+    wire_packet(monkeypatch, events=board.events)
+
+    review.collect(REPO, 7, now=NOW)
+
+    assert board.events[0] == "pr"
+    assert board.events[1] == "project"
+
+
+def test_packet_falls_back_when_a_ticket_ref_is_missing(monkeypatch):
+    wire_packet(monkeypatch)
+    board = Board(recent_regressions=1)
+    board.missing_refs.add(REPO + "#10")
+    install(monkeypatch, board)
+
+    old = review.collect(
+        REPO, 7, items_loader=lambda: funnel.load_items(), now=NOW,
+    )
+    old_board = board
+    board = Board(recent_regressions=1)
+    board.missing_refs.add(REPO + "#10")
+    install(monkeypatch, board)
+    new = review.collect(REPO, 7, now=NOW)
+
+    assert json.dumps(new, sort_keys=True) == json.dumps(old, sort_keys=True)
+    assert old_board.full_load_calls == 1
+    assert board.full_load_calls == 1
+    assert board.item_filters[:2] == [
+        "repo:owner/repo #9",
+        "repo:owner/repo #10",
+    ]
 
 
 def test_an_unreadable_regression_history_fails_the_packet(

@@ -379,6 +379,10 @@ GATES = {
 DECISION_ORDER = ["Building", "Ready", "Shaped"]
 
 MAINTENANCE_WINDOW = timedelta(days=30)
+#: Closed command-center tickets under Broken projects that the brief lists
+#: for the fix-on-fix measure: twice its seven-day window, so a fix and the
+#: earlier fix it rewrites are both in view (#1682).
+BROKEN_FIX_TICKET_WINDOW = timedelta(days=14)
 
 # The dashboard is a display-only consumer of a successful brief. Its spool is
 # deliberately outside the repository and is a buffer, not another source of
@@ -1017,7 +1021,7 @@ def _acceptance_waiting_reason(
     if question != GATES["Building"]:
         return None
     body = item.body if isinstance(item.body, str) else ""
-    if ANALYSIS_MARKER in body:
+    if parse_analysis_marker(body) is not None:
         return "Analysis review"
     return "Ordinary accept"
 
@@ -1475,6 +1479,12 @@ def plan_is_escalated(plan_body: str) -> List[str]:
 _PLAN_ATX_HEADING_RE = re.compile(
     r"^ {0,3}(?P<hashes>#{1,6})(?:[ \t]+(?P<title>.*?)|[ \t]*)$"
 )
+_PLAN_FENCE_OPEN_RE = re.compile(
+    r"^ {0,3}(?P<marker>`{3,}|~{3,})"
+)
+_PLAN_FENCE_CLOSE_RE = re.compile(
+    r"^ {0,3}(?P<marker>`+|~+)[ \t]*$"
+)
 _PLAN_MALFORMED_ATX_RE = re.compile(
     r"^ {0,3}(?:#{7,}|#{1,6}(?!#)\S).*$"
 )
@@ -1485,17 +1495,170 @@ _PLAN_REJECTED_INLINE_RE = re.compile(
     r"[ \t]+\(rejected:[^\r\n]*\)[ \t]*$", re.IGNORECASE
 )
 
+_PLAN_QUOTE_PAIRS = {"\"": "\"", "“": "”", "‘": "’", "«": "»"}
+_PLAN_PROPOSAL_ACTIONS = {
+    "credentials": re.compile(
+        r"\b(?:access(?:es|ed|ing)?|change(?:s|d|ing)?|create(?:s|d|ing)?|"
+        r"expose(?:s|d|ing)?|grant(?:s|ed|ing)?|handle(?:s|d|ing)?|"
+        r"load(?:s|ed|ing)?|read(?:s|ing)?|replace(?:s|d|ing)?|"
+        r"revoke(?:s|d|ing)?|rotate(?:s|d|ing)?|store(?:s|d|ing)?|"
+        r"supply|supplies|supplied|supplying|touch(?:es|ed|ing)?|"
+        r"use(?:s|d|ing)?|write|writes|written|writing|"
+        r"update(?:s|d|ing)?)\b",
+        re.IGNORECASE,
+    ),
+    "data-migration": re.compile(
+        r"\b(?:apply|applies|applied|applying|convert(?:s|ed|ing)?|"
+        r"copy|copies|copied|copying|execute(?:s|d|ing)?|import(?:s|ed|ing)?|"
+        r"load(?:s|ed|ing)?|perform(?:s|ed|ing)?|populate(?:s|d|ing)?|"
+        r"rebuild(?:s|ing)?|rebuilt|replay(?:s|ed|ing)?|run|runs|ran|"
+        r"seed(?:s|ed|ing)?|transform(?:s|ed|ing)?|update(?:s|d|ing)?)\b",
+        re.IGNORECASE,
+    ),
+    "destructive": re.compile(
+        r"\b(?:delete|deletes|deleted|deleting|drop|drops|dropped|dropping|"
+        r"force[- ]push|hard[- ]delete|purge|purges|purged|purging|"
+        r"remove|removes|removed|removing|rewrite|rewrites|rewrote|rewriting|"
+        r"permanently delete)\b",
+        re.IGNORECASE,
+    ),
+    "concurrency": re.compile(
+        r"\b(?:add|adds|added|adding|allow|allows|allowed|allowing|"
+        r"coordinate|coordinates|coordinated|coordinating|create|creates|"
+        r"created|creating|enable|enables|enabled|enabling|fix|fixes|fixed|"
+        r"fixing|handle|handles|handled|handling|implement|implements|"
+        r"implemented|implementing|introduce|introduces|introduced|"
+        r"introducing|perform|performs|performed|performing|run|runs|ran|"
+        r"serialize|serializes|serialized|serializing|synchronize|"
+        r"synchronizes|synchronized|synchronizing|support|supports|supported|"
+        r"supporting|use|uses|used|using|write|writes|written|writing|"
+        r"commit|commits|committed|committing)\b",
+        re.IGNORECASE,
+    ),
+}
+_PLAN_DIRECT_PROPOSAL_PREFIX_RE = re.compile(
+    r"^\s*(?:[-*+]\s*)?(?:(?:proposal|decision|implementation)\s*:?\s*)?"
+    r"(?:(?:we|i|our|this(?:\s+(?:plan|project|change|"
+    r"implementation|system|service|worker|job|process|ticket))?|the\s+"
+    r"(?:plan|project|change|implementation|system|service|worker|job|"
+    r"process|ticket))\s+"
+    r"(?:(?:will|shall|must|should|can|need\s+to|needs\s+to|plan\s+to|"
+    r"plans\s+to|intend\s+to|intends\s+to|is\s+going\s+to)\s+)?)?$",
+    re.IGNORECASE,
+)
+_PLAN_DIRECT_ACTIONS = {
+    "data-migration": re.compile(r"\b(?:backfill|migrat\w*)\b", re.IGNORECASE),
+    "destructive": re.compile(
+        r"\b(?:force[- ]push|hard[- ]delete|permanently\s+delete|"
+        r"drop\s+(?:the\s+)?(?:table|branch)|rewrite\s+history)\b",
+        re.IGNORECASE,
+    ),
+}
+_PLAN_CLAUSE_BOUNDARY_RE = re.compile(
+    r"[.!?;—–]|\n[ \t]*\n|\n(?=[ \t]*(?:[-*+]\s+|#{1,6}[ \t]+))"
+)
+_PLAN_NEGATED_PREFIX_RE = re.compile(
+    r"\bno[- \t]*$|\b(?:no|not|never|without|nothing|none|neither|nor)\b"
+    r"(?:[- \t]+[\w'’-]+){0,5}[ \t]*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_plan_code_blocks(text: str) -> str:
+    """Blank fenced and indented Markdown code blocks, preserving lines."""
+    visible: List[str] = []
+    fence: Optional[str] = None
+    for line in (text or "").splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        ending = line[len(content):]
+        if fence is not None:
+            closing = _PLAN_FENCE_CLOSE_RE.match(content)
+            if (closing
+                    and closing.group("marker")[0] == fence[0]
+                    and len(closing.group("marker")) >= len(fence)):
+                fence = None
+            visible.append(ending)
+            continue
+        opening = _PLAN_FENCE_OPEN_RE.match(content)
+        if opening:
+            fence = opening.group("marker")
+            visible.append(ending)
+            continue
+        if content.startswith("    ") or content.startswith("\t"):
+            visible.append(ending)
+            continue
+        visible.append(line)
+    return "".join(visible)
+
+
+def _strip_plan_prose_quotes(text: str) -> str:
+    """Blank balanced prose quotations while preserving offsets and lines."""
+    if not text:
+        return text or ""
+    stack = []
+    spans = []
+    for index, char in enumerate(text):
+        if stack:
+            if char == stack[-1][0]:
+                start = stack.pop()[1]
+                spans.append((start, index + 1))
+            elif char in _PLAN_QUOTE_PAIRS:
+                stack.append((_PLAN_QUOTE_PAIRS[char], index))
+        elif char in _PLAN_QUOTE_PAIRS:
+            stack.append((_PLAN_QUOTE_PAIRS[char], index))
+    # An unmatched quote is ambiguous, so leave the body searchable.
+    if stack:
+        return text
+    characters = list(text)
+    for start, end in spans:
+        for index in range(start, end):
+            if characters[index] not in "\r\n":
+                characters[index] = " "
+    return "".join(characters)
+
+
+def _plan_clause_prefix(text: str, match_start: int) -> str:
+    """Return only the current sentence or Markdown list clause prefix."""
+    start = 0
+    for boundary in _PLAN_CLAUSE_BOUNDARY_RE.finditer(text, 0, match_start):
+        start = boundary.end()
+    prefix = text[start:match_start]
+    prefix = re.sub(r"(?m)^\s*#{1,6}[ \t]+[^\n]*(?:\n|$)", "", prefix)
+    return re.sub(r"^\s*(?:[-*+]\s*)?", "", prefix)
+
+
+def _plan_match_is_proposed(text: str, match: re.Match,
+                            reason: str) -> bool:
+    """Require an affirmative action in the same clause as the risk term."""
+    prefix = _plan_clause_prefix(text, match.start())
+    if _PLAN_NEGATED_PREFIX_RE.search(prefix + match.group(0)):
+        return False
+    action = _PLAN_PROPOSAL_ACTIONS[reason]
+    for action_match in reversed(list(action.finditer(prefix))):
+        intervening_words = re.findall(
+            r"[\w'’-]+", prefix[action_match.end():]
+        )
+        if len(intervening_words) <= 4:
+            return True
+    direct_action = _PLAN_DIRECT_ACTIONS.get(reason)
+    return bool(
+        direct_action
+        and direct_action.search(match.group(0))
+        and _PLAN_DIRECT_PROPOSAL_PREFIX_RE.fullmatch(prefix)
+    )
+
 
 def _plan_escalation_scan_text(plan_body: str) -> str:
-    """Remove plan-only rejected prose before using the shared word matcher.
+    """Remove code blocks and rejected prose before using the shared matcher.
 
     A malformed Rejected heading or a malformed heading inside its section
     makes the section boundary ambiguous. In that case keep the original body
-    intact so an uncertain parse cannot hide a scan hit.
+    intact outside code blocks so an uncertain parse cannot hide an asserted
+    scan hit.
     """
-    body = plan_body or ""
+    body = _strip_plan_code_blocks(plan_body or "")
     raw_lines = body.splitlines(keepends=True)
-    visible_lines = asserted_text(body).splitlines()
+    visible_lines = _strip_plan_prose_quotes(asserted_text(body)).splitlines()
     if len(visible_lines) > len(raw_lines):
         return body
     visible_lines.extend([""] * (len(raw_lines) - len(visible_lines)))
@@ -1559,13 +1722,35 @@ def _plan_escalation_scan_text(plan_body: str) -> str:
 
 def plan_escalation_matches(plan_body: str
                             ) -> List[Dict[str, Optional[str]]]:
-    """Return plan risks after excluding its recorded rejected alternatives.
+    """Return risks a plan affirmatively proposes after removing quoted text.
 
-    Plan-section knowledge stays here; ticket text still uses the canonical
-    matcher unchanged. If a Rejected boundary cannot be parsed, the whole body
-    is scanned as written.
+    Plan-only section and proposal rules stay here; ticket text still uses the
+    canonical matcher unchanged. If a Rejected boundary cannot be parsed, the
+    whole asserted body is scanned, but a risk term still needs an affirmative
+    action in its sentence or list clause. If a Risk marker is present, its
+    existing authority remains unchanged.
     """
-    return escalation_matches("", _plan_escalation_scan_text(plan_body))
+    text = _strip_plan_prose_quotes(
+        asserted_text(_plan_escalation_scan_text(plan_body))
+    )
+    if RISK_LINE.search(text):
+        return escalation_matches("", text)
+
+    found: List[Dict[str, Optional[str]]] = []
+    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            if not _plan_match_is_proposed(text, match, name):
+                continue
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.start())
+            if line_end < 0:
+                line_end = len(text)
+            found.append({
+                "reason": name,
+                "line": text[line_start:line_end].strip(),
+            })
+            break
+    return found
 
 
 def plan_needs_nate(plan_body: str) -> bool:
@@ -2969,12 +3154,71 @@ def parse_analysis_marker(body: str) -> Optional[bool]:
 
     A valid marker carries ``{"analysis": true}``. Any marker occurrence that
     cannot be read in that shape is malformed and still opts into the safe
-    outcome: wait for Nate rather than silently closing the project.
+    outcome: wait for Nate rather than silently closing the project. A marker
+    is carried only when declared on its own line outside quotes and fenced
+    code; a prose example is absent.
     """
-    if not isinstance(body, str) or ANALYSIS_MARKER not in body:
+    if not isinstance(body, str):
         return None
 
-    found = _marked_json(body, ANALYSIS_MARKER)
+    # _marked_json intentionally finds marker strings anywhere in a body.
+    # For this marker, prose can quote the declaration as an example, so mask
+    # every occurrence except a standalone declaration outside quoted and
+    # fenced Markdown. Keep the surrounding text for the JSON reader.
+    lines = []
+    marker_found = False
+    fence_char = None
+    fence_size = 0
+    in_quote = False
+    opening_fence = r"^ {0,3}(`{3,}|~{3,})(.*)$"
+    closing_fence = r"^ {0,3}(`{3,}|~{3,})[ \t]*$"
+    for line in body.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        if fence_char is not None:
+            closing = re.fullmatch(closing_fence, content)
+            if (closing is not None and closing.group(1)[0] == fence_char
+                    and len(closing.group(1)) >= fence_size):
+                fence_char = None
+                fence_size = 0
+            lines.append(line.replace(
+                ANALYSIS_MARKER, "<!-- ignored-analysis-marker-example -->"))
+            continue
+
+        opening = re.match(opening_fence, content)
+        if opening is not None:
+            run, info = opening.group(1), opening.group(2)
+            if run[0] != "`" or "`" not in info:
+                fence_char, fence_size = run[0], len(run)
+                lines.append(line.replace(
+                    ANALYSIS_MARKER,
+                    "<!-- ignored-analysis-marker-example -->"))
+                continue
+
+        if re.match(r"^ {0,3}>", content):
+            in_quote = True
+            lines.append(line.replace(
+                ANALYSIS_MARKER, "<!-- ignored-analysis-marker-example -->"))
+            continue
+        if not content.strip():
+            in_quote = False
+        elif in_quote:
+            # Markdown permits unprefixed lazy continuation lines in a quote.
+            lines.append(line.replace(
+                ANALYSIS_MARKER, "<!-- ignored-analysis-marker-example -->"))
+            continue
+
+        if re.fullmatch(
+            r" {0,3}" + re.escape(ANALYSIS_MARKER) + r"[ \t]*", content
+        ):
+            marker_found = True
+            lines.append(line)
+        else:
+            lines.append(line.replace(
+                ANALYSIS_MARKER, "<!-- ignored-analysis-marker-example -->"))
+
+    if not marker_found:
+        return None
+    found = _marked_json("".join(lines), ANALYSIS_MARKER)
     if found is not None:
         return found.get("analysis") is True
     return False
@@ -4615,10 +4859,27 @@ def recorded_cause_regressions(
         if ticket is not None and ticket.parent in project_refs:
             recorded.add(ticket.parent)
 
+    # The squash commits for these tickets are what fix_recurrence.py reads
+    # from git to measure fix-on-fix; the brief supplies only the join (#1683).
+    broken_refs = {item.ref for item in projects}
+    fix_cutoff = now - BROKEN_FIX_TICKET_WINDOW
+    broken_fix_tickets = sorted(
+        (
+            {"ticket": item.number,
+             "project": int(str(item.parent).rsplit("#", 1)[1])}
+            for item in rows
+            if item.repo == REPO and item.parent in broken_refs
+            and item.state == "CLOSED" and item.closed_at is not None
+            and item.closed_at >= fix_cutoff
+        ),
+        key=lambda row: row["ticket"],
+    )
+
     total = len(recent_projects)
     count = len(recorded)
     return {
         "window_days": MAINTENANCE_WINDOW.days,
+        "broken_fix_tickets": broken_fix_tickets,
         "definition": (
             "parent projects classified Broken with a created, status, or "
             "closed event in the last 30 days and a capture caused_by marker "
@@ -10103,6 +10364,51 @@ def load_project_items_by_refs(
     return [found[ref] for ref in requested]
 
 
+def load_regression_items(
+    member_repo_names: Optional[Sequence[str]] = None,
+) -> List[Item]:
+    """Load the regression set through #1607's filtered Project connection."""
+    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
+    members = set(
+        member_repo_names if member_repo_names is not None else member_repos()
+    )
+    cursors: Dict[str, str] = {}
+    seen_cursors: Set[str] = set()
+    kept: Dict[str, Item] = {}
+    while True:
+        variables: Dict[str, object] = {
+            "login": PROJECT_OWNER, "number": PROJECT_NUMBER,
+        }
+        if "regress" in cursors:
+            variables["regressCursor"] = cursors["regress"]
+        _PROJECT_ITEM_PAGE_COUNT += 1
+        response = gh_graphql(_begin_item_query(["regress"]), **variables)
+        project = _begin_project_from_response(response)
+        nodes, has_next, cursor = _begin_connection_page(project, "regress")
+        _PROJECT_ITEM_ROW_COUNT += len(nodes)
+        for node in nodes:
+            try:
+                item = _from_node(node)
+            except (KeyError, TypeError, AttributeError) as exc:
+                raise GitHubError(
+                    "begin Project connection regress returned a malformed "
+                    "row"
+                ) from exc
+            if (
+                item is not None
+                and item.repo in members
+                and _is_regression_item(item)
+            ):
+                kept.setdefault(item.item_id or item.ref, item)
+        if not has_next:
+            break
+        if cursor in seen_cursors:
+            raise GitHubError("begin Project connection regress did not advance")
+        seen_cursors.add(cursor)
+        cursors["regress"] = cursor
+    return list(kept.values())
+
+
 def _load_begin_anchor_items(
     items: Sequence[Item], members: Set[str],
     timings: Optional[Dict[str, object]],
@@ -10126,6 +10432,68 @@ def _load_begin_anchor_items(
             _record_begin_load_phase(
                 timings, "anchor_items", time.perf_counter() - started
             )
+
+
+class ScopedItems(list):
+    """A Project read that says which view it is.
+
+    ``load_items(scope="begin")`` returns one of these so a ``FunnelSession``
+    that cached it can tell the filtered begin view from the full board. A
+    plain list, as every other load and every test loader returns, reads as
+    the full board.
+    """
+
+    def __init__(self, items: Iterable[Item] = (), scope: str = "full"):
+        super().__init__(items)
+        self.scope = scope
+
+
+def items_scope(items: Optional[Sequence[Item]]) -> str:
+    """The view a loaded item list holds: ``"begin"`` or ``"full"``."""
+    return getattr(items, "scope", None) or "full"
+
+
+#: Session commands the filtered begin view serves as the full board would
+#: (#1591). What each reads from the item list:
+#: - ``begin``: the view is built for it (``BEGIN_ITEM_CONNECTIONS`` and
+#:   ``_begin_anchor_refs``; ``tests/test_begin_scoped_parity.py``).
+#: - ``review``: the PR's ticket, for a claim to hand back. An open ticket is
+#:   in the view; a closed one only matters holding a claim (``claims``).
+#: - ``merge``: ``rejected_merges`` (``regress``), the PR's ticket (open,
+#:   since only open tickets are offered for review) and its parent (an
+#:   anchor). A ticket missing from the view refuses with "no ticket in the
+#:   funnel": it fails closed rather than merging on a partial read.
+#: - ``claim``: ``in_motion`` and ``stale_locks`` read open items only; the
+#:   target and its parent (``effective_class``, ``_begin_parent``).
+#: - ``release`` and ``comment``: the named item alone.
+#: - ``capture``: no item at all.
+#: Everything else (brief, publisher, dashboard, doctor, metrics, queue, show,
+#: next, ...) reads closed items for its own reasons and reloads the full
+#: board first.
+BEGIN_VIEW_COMMANDS = frozenset({
+    "begin", "review", "merge", "release", "claim", "comment", "capture",
+})
+
+#: Of those, the commands that act on one named item. The view serves them
+#: only when the ref or URL matches an item in it exactly: ``find`` resolves a
+#: bare number by uniqueness, and a number unique among the view's items can
+#: be ambiguous on the full board.
+BEGIN_VIEW_REF_COMMANDS = frozenset({"release", "claim", "comment"})
+
+
+def begin_view_serves(command: str, ref: Optional[str],
+                      items: Sequence[Item]) -> bool:
+    """Whether ``command`` reads the same answer from ``items`` as from the
+    full board. Always true for a full read."""
+    if items_scope(items) == "full":
+        return True
+    if command not in BEGIN_VIEW_COMMANDS:
+        return False
+    if command in BEGIN_VIEW_REF_COMMANDS:
+        return ref is not None and any(
+            item.ref == ref or item.url == ref for item in items
+        )
+    return True
 
 
 def load_items(
@@ -10164,7 +10532,7 @@ def load_items(
                 timings, "item_details",
                 lambda: hydrate_item_details(begin_items),
             )
-        return begin_items
+        return ScopedItems(begin_items, scope="begin")
     items: List[Item] = []
     cursor = None
     shape_comments: Optional[List[Dict[str, object]]] = None
@@ -18702,6 +19070,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
         time.perf_counter() if brief_timings is not None else None
     )
     begin_detail_loader: Optional[Callable[[Sequence[Item]], None]] = None
+    if _items is not None and not begin_view_serves(
+        args.command, getattr(args, "ref", None), _items
+    ):
+        # A session's first `begin` cached the filtered view. This command
+        # reads closed items that view left out, so the session loader reads
+        # the full board in its place (#1591).
+        _items = None
     try:
         if _items is not None:
             items = _items
@@ -18712,6 +19087,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     include_details=False,
                     member_repo_names=begin_member_repo_names,
                     timings=begin_timings,
+                    scope="begin",
                 )
             else:
                 items = _call_with_optional_keywords(
@@ -18720,13 +19096,15 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
         elif args.command == "begin":
             # `begin` selects one job after its cheap gates. Keep the initial
-            # Project scan compact; cmd_begin hydrates only the candidates it
-            # actually needs to order or hand out.
+            # Project scan compact: every open item and only the closed items
+            # a begin consumer reads (#1591). cmd_begin hydrates only the
+            # candidates it actually needs to order or hand out.
             items = _call_with_optional_keywords(
                 load_items,
                 include_details=False,
                 member_repo_names=begin_member_repo_names,
                 timings=begin_timings,
+                scope="begin",
             )
 
             def hydrate_begin_candidates(candidates):
@@ -19410,20 +19788,36 @@ class FunnelSession:
         include_details: bool = True,
         member_repo_names: Optional[Sequence[str]] = None,
         timings: Optional[Dict[str, object]] = None,
+        scope: Optional[str] = None,
     ) -> List[Item]:
-        if self.items is None:
-            self.items = _call_with_optional_keywords(
-                self._loader,
-                include_details=include_details,
-                member_repo_names=member_repo_names,
-                timings=timings,
-            )
-            self._history_pending = (
-                not include_details and self._command != "begin"
-            )
-        elif include_details and self._history_pending:
-            hydrate_item_details(self.items)
-            self._history_pending = False
+        """Load once per session, or again when the cached read is a
+        narrower view than this command asked for.
+
+        ``main`` asks with ``scope="begin"`` for ``begin`` and with no scope
+        otherwise. A cached full read serves either; a cached begin view
+        serves only a begin-scoped ask, and a full ask replaces it, along with
+        any local mutation state, by a fresh read of GitHub (#1591). A full
+        read loaded without history by a cheaper first command is hydrated
+        once, in place, by the first later command that reads history
+        (PROJECT_LOAD_READS_HISTORY).
+        """
+        if self.items is not None and (
+            scope == "begin" or items_scope(self.items) == "full"
+        ):
+            if include_details and self._history_pending:
+                hydrate_item_details(self.items)
+                self._history_pending = False
+            return self.items
+        self.items = _call_with_optional_keywords(
+            self._loader,
+            include_details=include_details,
+            member_repo_names=member_repo_names,
+            timings=timings,
+            scope=scope,
+        )
+        self._history_pending = (
+            not include_details and self._command != "begin"
+        )
         return self.items
 
     def dispatch(self, argv: Sequence[str], stdin=None):

@@ -812,7 +812,7 @@ def test_the_begin_loader_tags_its_view_and_the_full_load_does_not(
     monkeypatch,
 ):
     monkeypatch.setattr(funnel, "_load_begin_items",
-                        lambda members, timings: [_view_item(7)])
+                        lambda members, timings, *args, **kwargs: [_view_item(7)])
     monkeypatch.setattr(funnel, "_load_begin_anchor_items",
                         lambda items, members, timings: [])
     view = funnel.load_items(include_details=False,

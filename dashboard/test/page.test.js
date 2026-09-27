@@ -807,6 +807,10 @@ test("the Budget panel renders D1-D6, marks Muse pace resets, and explains the D
     readFile(new URL("../public/index.html", import.meta.url), "utf8"),
   ]);
   const fixture = JSON.parse(fixtureText);
+  fixture.metrics.D.D3.reading_type = {
+    kind: "category",
+    daily: new Array(fixture.days.length).fill("estimated"),
+  };
   const previousDocument = globalThis.document;
   globalThis.document = new TestDocument();
   try {
@@ -825,6 +829,7 @@ test("the Budget panel renders D1-D6, marks Muse pace resets, and explains the D
     assert.match(cards[1].textContent, /personal share/i);
     assert.match(cards[2].textContent, /Five-hour window/);
     assert.match(cards[2].textContent, /Seven-day window/);
+    assert.match(cards[2].textContent, /Estimated transcript fallback/);
 
     const cost = cards[3];
     assert.equal(cost.querySelectorAll(".metric-gap").length, 3);

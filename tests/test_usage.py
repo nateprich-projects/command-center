@@ -280,10 +280,13 @@ def transcript(path, entries, ts="2026-09-05T08:00:00.000Z"):
     for e in entries:
         model, out = e[0], e[1]
         stamp = e[2] if len(e) > 2 else ts
+        message = {"role": "assistant", "model": model,
+                   "usage": {"output_tokens": out}}
+        if len(e) > 3 and e[3] is not None:
+            message["id"] = e[3]
         lines.append(json.dumps({
             "type": "assistant", "timestamp": stamp,
-            "message": {"role": "assistant", "model": model,
-                        "usage": {"output_tokens": out}},
+            "message": message,
         }))
     path.write_text("\n".join(lines) + "\n")
     return path
@@ -353,6 +356,46 @@ def test_records_outside_the_window_are_not_counted(tmp_path, monkeypatch):
 def test_no_transcripts_reads_as_none_not_as_zero(tmp_path, monkeypatch):
     monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "none/*.jsonl"))
     assert usage.read_claude_local(NOW) is None
+
+
+def test_repeated_message_ids_count_once_across_transcripts(tmp_path, monkeypatch):
+    import time as _time
+    now = _time.time()
+    monkeypatch.setattr(usage, "last_weekly_reset", lambda n: n - 7 * 86400)
+    transcript(tmp_path / "a.jsonl", [
+        ("claude-opus-5", 1000, _at(now, 1), "message-1"),
+        ("claude-opus-5", 300, _at(now, 1), "message-2"),
+    ])
+    transcript(tmp_path / "b.jsonl", [
+        ("claude-opus-5", 1000, _at(now, 1), "message-1"),
+    ])
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
+
+    reading = usage.read_claude_local(now)
+
+    assert reading["opus_output_tokens"] == {"five_hour": 1300, "seven_day": 1300}
+
+
+def test_recalibrated_capacities_reproduce_the_paired_app_sample(
+        tmp_path, monkeypatch):
+    """The deduplicated transcript counts match the paired 43% / 14% app sample."""
+    import time as _time
+    sample_at = _time.time()
+    monkeypatch.setattr(usage, "last_weekly_reset", lambda n: sample_at - 8 * 3600)
+    monkeypatch.setattr(usage, "promo_multiplier", lambda window, now: 1.0)
+    transcript(tmp_path / "paired.jsonl", [
+        ("claude-opus-5", 530879, _at(sample_at, 1), "five-hour-message"),
+        ("claude-opus-5", 406755, _at(sample_at, 6), "weekly-only-message"),
+    ])
+    monkeypatch.setattr(usage, "CLAUDE_TRANSCRIPTS", str(tmp_path / "*.jsonl"))
+
+    reading = usage.read_claude_local(sample_at)
+
+    assert reading["opus_output_tokens"] == {
+        "five_hour": 530879, "seven_day": 937634,
+    }
+    assert reading["windows"]["five_hour"]["used_percent"] == pytest.approx(43.0)
+    assert reading["windows"]["seven_day"]["used_percent"] == pytest.approx(14.0)
 
 
 # -- promos are read at runtime, never written into the file ----------------

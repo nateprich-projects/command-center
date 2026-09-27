@@ -92,6 +92,7 @@ def test_derive_row_covers_plan_metrics_and_preserves_rate_pairs():
     ] == 1
     assert row["metrics"]["D"]["D4"]["value"] is None
     assert row["metrics"]["D"]["D4"]["gap"]
+    assert row["metrics"]["D"]["D3"]["reading_type"]["value"] == "estimated"
     assert row["metrics"]["D"]["D1"]["dollars_per_day"]["numerator"] == 21
     assert row["metrics"]["D"]["D1"]["dollars_per_day"]["denominator"] == 3
     assert row["metrics"]["D"]["D1"]["dollars_per_day"]["source"] == (

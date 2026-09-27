@@ -1625,6 +1625,8 @@ def usage_snapshot(agent: str) -> Optional[Dict]:
                 if spent is not None and spent >= 0:
                     snapshot["spent_dollars"] = spent
             snapshots[name] = snapshot
+        if isinstance(reading.get("estimated"), bool):
+            snapshots["estimated"] = reading["estimated"]
         return snapshots
     except Exception:
         return None

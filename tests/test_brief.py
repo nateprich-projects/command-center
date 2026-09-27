@@ -514,6 +514,46 @@ def test_connector_gate_answers_keep_verbatim_instruction_and_provenance():
     ]
 
 
+def test_connector_gate_answer_survives_missing_ready_status_event():
+    now = datetime(2026, 9, 27, 4, 10, tzinfo=timezone.utc)
+    item = funnel.Item(
+        repo="nateprich-projects/command-center", number=1540,
+        title="Connector gate approval", url="https://example.invalid/1540",
+        state="OPEN", status="Ready",
+        status_events=[{
+            "previous_status": None, "status": "Ideas",
+            "at": datetime(2026, 9, 26, 0, 42, tzinfo=timezone.utc),
+        }],
+    )
+    answered_at = datetime(2026, 9, 27, 4, 5, tzinfo=timezone.utc)
+    instruction = "Approve the prepared plan."
+    body = funnel.append_provenance(
+        "General-chat gate instruction received for `approve`.",
+        "nate-relayed", at=answered_at, run="connector-run-1540",
+        agent="codex", instruction=instruction,
+    )
+
+    class FixtureCommentCache:
+        def comment_tails(self, candidates):
+            return {
+                candidate.ref: [{
+                    "body": body,
+                    "createdAt": answered_at.isoformat(),
+                }]
+                for candidate in candidates
+            }
+
+    records = funnel.connector_gate_answers(
+        [item], now, brief_cache=FixtureCommentCache()
+    )
+
+    assert len(records) == 1
+    assert records[0]["ref"] == "nateprich-projects/command-center#1540"
+    assert records[0]["gate"] == "approve"
+    assert records[0]["instruction"] == instruction
+    assert records[0]["provenance"]["voice"] == "nate-relayed"
+
+
 def test_brief_keeps_connector_answer_records_out_of_gate_counts(
     monkeypatch, capsys
 ):

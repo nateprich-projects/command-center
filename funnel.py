@@ -4551,8 +4551,15 @@ def unattended_approvals(
 def _connector_gate_candidate(item: Item, cutoff: datetime,
                               now: datetime) -> bool:
     """Return whether an item could hold a recent connector gate answer."""
-    # Connector answers write one of these Project statuses. Limit comment
-    # reads to recent transitions rather than scanning every issue on the board.
+    # API status writes do not always emit a status event. Current Ready and
+    # Parked items can still carry a recent answer even when history is stale.
+    if item.state == "OPEN" and item.status in ("Ready", "Parked"):
+        return True
+    if (item.status in ("Done", "Parked") and item.closed_at is not None
+            and cutoff <= item.closed_at <= now):
+        return True
+
+    # Retain recent transition history for items that have since moved on.
     for event in item.status_events:
         if not isinstance(event, dict):
             continue

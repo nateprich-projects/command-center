@@ -594,6 +594,49 @@ def _latency_sums(
     return {"by_agent_and_job": grouped}, None
 
 
+FIX_RECURRENCE_SOURCE = (
+    "fix_recurrence.py: Broken fixes whose modified lines were mostly written "
+    "by another Broken project's fix in the prior 7 days / Broken fixes that "
+    "modify existing code (#1682)"
+)
+
+
+def _fix_recurrence_pair(result: Optional[Mapping[str, object]]) -> Dict:
+    """B3 from a fix_recurrence measurement, or a gap that says why not."""
+    if not isinstance(result, Mapping):
+        return _pair(None, None, FIX_RECURRENCE_SOURCE,
+                     "fix recurrence was not measured for this hour")
+    if result.get("gap"):
+        return _pair(None, None, FIX_RECURRENCE_SOURCE, str(result["gap"]))
+    pair = _rate_pair(result.get("numerator"), result.get("denominator"),
+                      FIX_RECURRENCE_SOURCE,
+                      "fix recurrence numerator or denominator is missing")
+    hotspots = result.get("hotspots")
+    if isinstance(hotspots, list):
+        pair["hotspots"] = [
+            {key: row.get(key) for key in ("path", "function", "count", "projects")}
+            for row in hotspots[:10] if isinstance(row, Mapping)
+        ]
+    return pair
+
+
+def measure_fix_recurrence(snapshot: Mapping[str, object], at: datetime,
+                           repo: Optional[Path] = None) -> Dict[str, object]:
+    """Measure fix-on-fix in this checkout for the window ending ``at``.
+
+    The snapshot supplies the Broken-fix tickets (#1683); git supplies the
+    rest. Any failure is returned as a gap, never as zero.
+    """
+    import fix_recurrence
+
+    try:
+        projects = fix_recurrence.fix_projects_from_snapshot(snapshot)
+        return fix_recurrence.measure(
+            repo or Path(__file__).resolve().parent, projects, at)
+    except (fix_recurrence.RecurrenceError, OSError, ValueError) as exc:
+        return {"gap": "fix recurrence could not be measured: {}".format(exc)}
+
+
 def derive_row(
     snapshot: Mapping[str, object],
     ledgers: Optional[Mapping[str, Optional[Sequence[Mapping[str, object]]]]],
@@ -604,6 +647,7 @@ def derive_row(
     funnel_line_count: Optional[int] = None,
     hour_start: Optional[datetime] = None,
     derived_at: Optional[datetime] = None,
+    fix_recurrence_result: Optional[Mapping[str, object]] = None,
 ) -> Dict:
     """Build a JSON-safe UTC-hour observation from fixture or live inputs."""
     observed_at = now or datetime.now(timezone.utc)
@@ -765,13 +809,7 @@ def derive_row(
                        if isinstance(rework, Mapping) else None)
         or "rework signal unavailable",
     )
-    causes, causes_gap = _section(brief, "recorded_cause_regressions", "brief.recorded_cause_regressions")
-    metrics["B"]["B3"] = _rate_pair(
-        causes.get("with_recorded_cause") if causes else None,
-        causes.get("broken_projects") if causes else None,
-        "brief.recorded_cause_regressions.with_recorded_cause/broken_projects",
-        causes_gap or "recorded-cause signal unavailable",
-    )
+    metrics["B"]["B3"] = _fix_recurrence_pair(fix_recurrence_result)
     main_ci = brief.get("main_ci")
     main_ci_problem = _section_gap(brief, "main_ci")
     if not isinstance(main_ci, list) or main_ci_problem:
@@ -1962,6 +2000,12 @@ def _series_kind(path: Tuple[str, ...]) -> str:
     return "mean"
 
 
+#: Leaves whose definition changed: an hour measured under another source is
+#: not an observation of the current leaf, so old and new never blend in one
+#: series (#1685: B3 moved from capture markers to fix_recurrence.py).
+SERIES_LEAF_SOURCES = {("B", "B3"): FIX_RECURRENCE_SOURCE}
+
+
 def _flatten_series_row(row: Mapping[str, object]):
     """Return numeric/categorical leaves plus code-level gap information."""
     root = row.get("metrics")
@@ -2077,6 +2121,10 @@ def _flatten_series_row(row: Mapping[str, object]):
             code_path = (group, code)
             present_codes.add(code_path)
             walk(value, code_path)
+    for leaf_path, expected in SERIES_LEAF_SOURCES.items():
+        for path in [key for key in leaves if key[:len(leaf_path)] == leaf_path]:
+            if leaves[path].get("source") != expected:
+                del leaves[path]
     return leaves, present_codes, code_gaps
 
 
@@ -2793,6 +2841,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     derive.add_argument("--usage", help="fixture usage readings JSON")
     derive.add_argument("--commits", help="fixture commit activity JSON")
     derive.add_argument("--line-count", type=int, help="fixture funnel.py line count")
+    derive.add_argument("--fix-recurrence", help="fixture fix_recurrence.py result JSON")
     derive.add_argument("--now", help="UTC hour timestamp, for fixture reproduction")
     derive.add_argument("--dry-run", action="store_true", help="print the row without appending")
     backfill = sub.add_parser(
@@ -2828,12 +2877,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         fixture_mode = bool(
             args.snapshot or args.ledger or args.outcomes or args.usage
             or args.commits or args.line_count is not None
+            or args.fix_recurrence
         )
         if fixture_mode:
             ledgers, readings, records, activity, line_count = _load_fixture_inputs(args)
+            fix_result = None
+            if args.fix_recurrence:
+                try:
+                    fix_result = json.loads(
+                        Path(args.fix_recurrence).read_text(encoding="utf-8"))
+                except (OSError, ValueError) as exc:
+                    raise MetricsError(
+                        "could not read fix recurrence fixture: {}".format(exc)
+                    ) from exc
         else:
             ledgers, readings, records, activity, line_count = _live_inputs(now)
-        row = derive_row(snapshot, ledgers, readings, records, now, activity, line_count)
+            fix_result = measure_fix_recurrence(snapshot, _interval(now)[1])
+        row = derive_row(snapshot, ledgers, readings, records, now, activity,
+                         line_count, fix_recurrence_result=fix_result)
         if args.dry_run or fixture_mode:
             print(json.dumps(row, indent=2, sort_keys=True))
             return 0

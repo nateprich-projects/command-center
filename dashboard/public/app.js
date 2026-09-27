@@ -1431,10 +1431,10 @@ const QUALITY_METRICS = [
   {
     code: "B3",
     title: "Fix recurrence",
-    description: "Broken projects with a recorded cause ÷ Broken projects created.",
+    description: "Broken fixes whose changed lines were mostly written by another Broken project's fix in the prior 7 days ÷ Broken fixes that change existing code (fix_recurrence.py, #1682).",
     format: "percent",
-    sources: [],
-    gapMessage: "Blind input: no capture has recorded a cause yet.",
+    sources: [{ path: ["B", "B3"] }],
+    gapMessage: "No reading yet: no hour has measured fix recurrence.",
   },
   {
     code: "B4",

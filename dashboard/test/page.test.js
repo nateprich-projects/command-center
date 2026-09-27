@@ -899,7 +899,7 @@ test("the Runs panel renders C1-C6 by agent and job and preserves their gaps", a
   }
 });
 
-test("the Quality panel renders B1, B2 and B4 while keeping B3 blind", async () => {
+test("the Quality panel renders B1, B2 and B4, and B3 shows its gap until an hour measures it", async () => {
   const [seriesText, snapshotText, html] = await Promise.all([
     readFile(new URL("../fixtures/execution_metrics.json", import.meta.url), "utf8"),
     readFile(new URL("../../tests/fixtures/metrics_snapshot.json", import.meta.url), "utf8"),
@@ -929,7 +929,8 @@ test("the Quality panel renders B1, B2 and B4 while keeping B3 blind", async () 
     assert.equal(b2Series.r28[last], expectedRework);
 
     const b3 = panels[2];
-    assert.match(b3.textContent, /Blind input: no capture has recorded a cause yet\./);
+    assert.match(b3.textContent, /mostly written by another Broken project's fix/);
+    assert.match(b3.textContent, /No reading yet: no hour has measured fix recurrence\./);
     assert.equal(b3.querySelectorAll(".metric-reading").length, 0);
     assert.equal(b3.querySelectorAll(".metric-chart").length, 0);
     assert.equal(series.metrics.B.B3, undefined);

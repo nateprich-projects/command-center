@@ -858,8 +858,10 @@ def test_paused_and_finished_tickets_name_their_hold_not_a_false_owner():
     assert finished["owner"] == "Nate" and finished["finished_by_comments"]
     assert by_title["finished"]["next_owner"] == "Nate"
     # The paused Broken project no longer leads: its turn comes after the
-    # work available now.
-    assert [row["title"] for row in found["items"]][-1] == "paused"
+    # work available now. The finished one gets no turn at all, since no
+    # begin takes it until Nate closes it (#1701), so it sits below both.
+    assert [row["title"] for row in found["items"]] == [
+        "moving", "paused", "finished"]
 
 
 def test_a_projection_failure_still_renders_the_board(monkeypatch):

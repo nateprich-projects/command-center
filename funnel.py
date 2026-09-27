@@ -2721,6 +2721,7 @@ def startable(
 def projected_pull_order(
     items: Sequence[Item], now: Optional[datetime] = None,
     paused: Collection[str] = (),
+    finished: Collection[str] = (),
 ) -> List[str]:
     """Every ticket's projected turn, found by running ``startable()`` forward.
 
@@ -2742,6 +2743,11 @@ def projected_pull_order(
     failed runs. The engineers will not take them before the hold lifts, so
     they wait until everything available now has had its turn (Nate,
     2026-09-25: a row must never claim a next step the engineers won't take).
+
+    ``finished`` names tickets ``finished_by_comments`` withholds. No begin
+    takes one until Nate closes it, so it gets no turn at all, and neither
+    does work that waits on it (#1701: the board gave #165 a turn for two
+    weeks while every begin withheld it).
     """
     sim = [copy.copy(item) for item in items]
     by_ref = {item.ref: item for item in sim}
@@ -2782,9 +2788,11 @@ def projected_pull_order(
 
     order: List[str] = []
     held = {ref: {} for ref in paused}
+    waiting_on_nate = set(finished)
     lift_blocks()
     for _ in range(len(sim) + 2):
-        queue = startable(sim, backed_off=held)
+        queue = startable(sim, awaiting_review=waiting_on_nate,
+                          backed_off=held)
         if not queue and held:
             held = {}
             continue
@@ -4037,6 +4045,27 @@ def latest_verdict(repo: str, pr) -> Optional[Dict]:
 #: until Nate closes it or a later run finishes it another way (#498).
 COMMENTS_DELIVERABLE_PREFIX = "finished by comments:"
 
+#: A GitHub issue or comment URL in a comments finish note, read as
+#: ``owner/repo#N`` (#1701). ``pull`` is read too, because GitHub serves an
+#: issue comment on a PR under that path; issues and PRs share one number
+#: space per repo, so it can never name the wrong ticket.
+_COMMENTS_NOTE_URL_RE = re.compile(
+    r"https?://github\.com/"
+    r"(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)/"
+    r"(?:issues|pull)/(?P<number>[0-9]+)",
+    flags=re.IGNORECASE,
+)
+
+
+def _comments_note_refs(note: str) -> Set[str]:
+    """Every issue a comments finish note links, as lowercased ``owner/repo#N``."""
+    return {
+        "{}/{}#{}".format(
+            found.group("owner"), found.group("repo"), found.group("number")
+        ).lower()
+        for found in _COMMENTS_NOTE_URL_RE.finditer(note)
+    }
+
 
 def finished_by_comments(items: Sequence[Item]) -> Set[str]:
     """Open tickets whose latest run finished them by comments, waiting on Nate.
@@ -4049,16 +4078,36 @@ def finished_by_comments(items: Sequence[Item]) -> Set[str]:
     never withheld. Observed 2026-09-09: eleven consecutive runs re-claimed
     #277 and re-verified the same nine comments in 85 minutes, because nothing
     recorded that the deliverable had already been delivered.
+
+    The bind alone is not trusted (#1701). A finish counts as the comments
+    deliverable only when one of the note's GitHub URLs, read as
+    ``owner/repo#N``, is the bound ticket or its parent -- a parent in another
+    repo included -- compared case-insensitively, because the note is
+    lowercased and refs such as ``The-League`` keep their case. Any other
+    finish counts as a non-marker finish under the latest-finish rule. Codex
+    run e1b3abbcf90a bound #165 on 2026-09-13 but commented on #780, and
+    #165 was withheld from every begin for two weeks.
     """
-    open_refs = {i.ref for i in items if i.state == "OPEN" and i.parent}
-    if not open_refs:
-        return set()
+    return set(finished_by_comments_runs(items))
+
+
+def finished_by_comments_runs(items: Sequence[Item]) -> Dict[str, str]:
+    """``finished_by_comments`` with the run that finished each: ref -> run id.
+
+    ``funnel queue`` names the run, so a hold can be traced to its record
+    (#1701).
+    """
+    open_items = {
+        i.ref: i for i in items if i.state == "OPEN" and i.parent
+    }
+    if not open_items:
+        return {}
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import heartbeat
     except Exception:
-        return set()
-    latest: Dict[str, Tuple[float, bool]] = {}
+        return {}
+    latest: Dict[str, Tuple[float, Optional[str]]] = {}
     for agent in sorted(heartbeat.PROVIDERS):
         if agent in heartbeat.RETIRED_AGENTS:
             continue
@@ -4074,15 +4123,18 @@ def finished_by_comments(items: Sequence[Item]) -> Set[str]:
             if not binding or binding.get("do") != "ticket":
                 continue
             ref = str(binding.get("work"))
-            if ref not in open_refs:
+            item = open_items.get(ref)
+            if item is None:
                 continue
             ts = float(row.get("ts") or 0)
             note = str(row.get("note") or "").lower()
             marker = (row.get("outcome") == "skipped-human-step"
-                      and COMMENTS_DELIVERABLE_PREFIX in note)
+                      and COMMENTS_DELIVERABLE_PREFIX in note
+                      and bool(_comments_note_refs(note)
+                               & {ref.lower(), str(item.parent).lower()}))
             if ref not in latest or ts >= latest[ref][0]:
-                latest[ref] = (ts, marker)
-    return {ref for ref, (_, marker) in latest.items() if marker}
+                latest[ref] = (ts, str(row["run"]) if marker else None)
+    return {ref: run for ref, (_, run) in latest.items() if run}
 
 
 def verdict_covers_head(
@@ -11495,10 +11547,12 @@ def dashboard_board(
         ))
     try:
         # The board's order for work in motion: each ticket's projected turn.
+        # Work finished by comments gets none, as no begin will take it (#1701).
         turn = {
             ref: index
             for index, ref in enumerate(
-                projected_pull_order(rows, now, paused=paused_rows)
+                projected_pull_order(rows, now, paused=paused_rows,
+                                     finished=finished)
             )
         }
     except Exception:
@@ -13346,9 +13400,15 @@ def cmd_queue(
                 subprocess.SubprocessError) as exc:
             pr_facts_unavailable = str(exc)
 
+    # What `cmd_next` and `begin` withhold as finished by comments is withheld
+    # here too, and listed below with its run (#1701). The queue used to list
+    # #165 as startable for two weeks while every begin refused it, and that
+    # mismatch is what hid the wedge.
+    finished = finished_by_comments_runs(items)
     decisions = awaiting_decision(items)
     tickets = startable(
-        items, awaiting_review=in_review, repo_readiness=repo_readiness
+        items, awaiting_review=set(in_review) | set(finished),
+        repo_readiness=repo_readiness,
     )
 
     print("Waiting on Nate ({}), bottom-up:".format(len(decisions)))
@@ -13382,6 +13442,14 @@ def cmd_queue(
             item.title,
         ),
     )
+
+    if finished:
+        print("\nWithheld — finished by comments, waiting on Nate to close "
+              "({}):".format(len(finished)))
+        for item in items:
+            if item.ref in finished:
+                print("  {:<34} run {:<14} {}".format(
+                    item.ref, finished[item.ref], item.title))
 
     withheld = readiness_blockers(items, repo_readiness=repo_readiness)
     if withheld:

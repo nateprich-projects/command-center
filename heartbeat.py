@@ -215,7 +215,7 @@ PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
 #: PDT (#1694). It was first the start of the plan's expiry day in Beijing
 #: time, 2026-10-06 09:00 PDT (1791302400; Nate, 2026-09-23; #1411), and was
 #: brought forward when z.ai's weekly window was spent until 2026-10-03,
-#: which stopped the standard lane while Muse's week went unused.
+#: which stopped the standard lane while Muse's week went mostly unused.
 #: `scripts/muse-review-engine` routes on the same instant and a test pins
 #: the two together.
 ZAI_STANDARD_UNTIL = 1790514000

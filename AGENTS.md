@@ -178,9 +178,9 @@ wrong.
 
   **The cutoff.** It was first 1791302400 (2026-10-07 00:00 Beijing time, 2026-10-06
   09:00 PDT), the earliest reading of the plan's expiry date. On 2026-09-27 z.ai's weekly
-  window was spent (99.8%, reopening 2026-10-03 00:22 PDT), which stopped every
-  standard-tier review, breakdown and shape for six days while Muse had used 19% of its
-  week. The no-fallback rule assumed Muse's week was nearly spent, which no longer held,
+  window was spent (99.8%, reopening 2026-10-03 00:22 PDT): from 04:15 PDT every
+  standard fire stopped over pace, and every standard-tier review, breakdown and shape
+  would have stopped for six days while Muse had used 19% of its week. The no-fallback rule assumed Muse's week was nearly spent, which no longer held,
   so the cutoff was brought forward to 1790514000 (2026-09-27 06:00 PDT) under Nate's
   2026-09-27 instruction to override directives strongly likely to be creating problems.
   Since then the standard tier is Muse's with nothing else to undo, and
@@ -190,7 +190,8 @@ wrong.
 
   Shape on Muse runs the framer → sibling → decider → auditor split through
   `engine/shape_split.py`, per Nate's 2026-09-26 ruling on #1581 that escalated shaping
-  stays at `max` and is split, not lowered; breakdown is one call. The plist is unchanged.
+  stays at `max` and is split, not lowered; breakdown is one call. The review-engine plists
+  did not change for the bridge or its end.
 
   **It was his risk call on unread terms, as Muse's is.** This was headless use of a
   Coding Plan key from launchd, and z.ai's terms were not read here. Nothing in this

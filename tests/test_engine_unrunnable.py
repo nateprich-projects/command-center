@@ -104,6 +104,162 @@ def test_rejected_1612_packet_carries_a_verified_deferred_answer(monkeypatch):
     assert "Probe the parent plan" in fixture["rejected_requirement"]
 
 
+def test_lister_requirement_is_normalized_to_the_verified_deferral():
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+    packet["plan_premises"][0]["premises"][0]["deferred_answer"] = (
+        fixture["expected_deferred_answer"])
+    probe = fixture["rejected_requirement"]
+
+    result = review.normalize_deferred_premise_requirements(packet, [probe])
+
+    assert result == [
+        "Defer the inferred premise 'The split framer may itself still go "
+        "silent' to its evidence pointer 'ticket 4, #1600, checks' until "
+        "ticket #1598 is complete."
+    ]
+    assert all("Probe the parent plan" not in row for row in result)
+
+
+def test_verified_deferral_does_not_remain_unsure_at_judgement():
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+    packet["plan_premises"][0]["premises"][0]["deferred_answer"] = (
+        fixture["expected_deferred_answer"])
+    requirement = review.normalize_deferred_premise_requirements(
+        packet, [fixture["rejected_requirement"]])[0]
+
+    result = review.mark_verified_deferred_requirements(packet, [{
+        "requirement": requirement,
+        "status": "unsure",
+        "evidence": "the model could not resolve this",
+    }])
+
+    assert result == [{
+        "requirement": requirement,
+        "status": "met",
+        "evidence": (
+            "Verified packet deferral: the inferred premise's evidence "
+            "pointer and reviewed ticket match its live deferred_answer."),
+    }]
+
+
+def test_unverified_deferred_fields_keep_the_probe_requirement():
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+    packet["plan_premises"][0]["premises"][0]["deferred_answer"] = {
+        **fixture["expected_deferred_answer"],
+        "reviewed_ticket": REPO + "#1597",
+    }
+
+    assert review.normalize_deferred_premise_requirements(
+        packet, [fixture["rejected_requirement"]]) == [
+            fixture["rejected_requirement"]]
+
+
+def test_inferred_premises_attach_records_for_cited_tickets_and_prs(
+        monkeypatch):
+    fetched = []
+    packet = {
+        "ticket": {"ref": REPO + "#1652"},
+        "plan_premises": [{
+            "parent_ref": REPO + "#1626",
+            "available": True,
+            "premises": [{
+                "claim": ("PR #1613 for ticket #1597 has the same "
+                          "later-sibling evidence shape as PR #1612"),
+                "evidence": (REPO + "#1613 for #1597 shares #1581 "
+                            "later-sibling evidence shape"),
+                "label": "inferred",
+            }],
+        }],
+    }
+
+    def fake_pr(repo, number):
+        fetched.append(("pr", repo, number))
+        return {
+            "number": number,
+            "title": "PR {}".format(number),
+            "state": "CLOSED",
+            "mergedAt": "2026-09-27T00:00:00Z",
+            "headRefName": "ticket/{}".format(number),
+            "headRefOid": "sha-{}".format(number),
+            "files": [{"path": "engine/review.py"}],
+        }
+
+    def fake_ticket(repo, number):
+        fetched.append(("issue", repo, number))
+        parent = None
+        body = "Body {}".format(number)
+        if number == 1597:
+            parent = {
+                "number": 1581,
+                "ref": REPO + "#1581",
+                "body": ("# Plan\n\n## Premises\n\n"
+                         "None recorded.\n\nProposed class: Broken\n"),
+                "comments": [],
+            }
+        return {
+            "ref": REPO + "#{}".format(number),
+            "number": number,
+            "title": "Issue {}".format(number),
+            "url": "https://github.com/{}/issues/{}".format(REPO, number),
+            "body": body,
+            "state": "CLOSED",
+            "parent": parent,
+            "comments": [],
+        }
+
+    monkeypatch.setattr(review, "fetch_pr", fake_pr)
+    monkeypatch.setattr(review, "fetch_pr_comments", lambda repo, number: {
+        "status": "empty", "message": "No PR comments.", "comments": []})
+    monkeypatch.setattr(review, "fetch_ticket", fake_ticket)
+
+    result = review.attach_inferred_premise_evidence(packet, REPO)
+    premise = result["plan_premises"][0]["premises"][0]
+    records = premise["referenced_evidence"]["records"]
+
+    assert premise["referenced_evidence"]["status"] == "available"
+    assert {row["ref"] for row in records} == {
+        REPO + "#1581", REPO + "#1597", REPO + "#1612", REPO + "#1613"}
+    assert {row["kind"] for row in records} == {"issue", "pull_request"}
+    assert {row[1] for row in fetched} == {REPO}
+    assert {row[2] for row in fetched} == {1581, 1597, 1612, 1613}
+    assert any(row.get("comments", {}).get("status") == "empty"
+               for row in records if row["kind"] == "pull_request")
+
+
+def test_unreadable_referenced_inferred_evidence_is_not_reported_empty(
+        monkeypatch):
+    packet = {
+        "ticket": {"ref": REPO + "#9"},
+        "plan_premises": [{
+            "available": True,
+            "premises": [{
+                "claim": "The claim has support",
+                "evidence": "PR #1700",
+                "label": "inferred",
+            }],
+        }],
+    }
+    monkeypatch.setattr(
+        review, "fetch_pr",
+        lambda repo, number: (_ for _ in ()).throw(
+            funnel.GitHubError("transport detail")))
+
+    review.attach_inferred_premise_evidence(packet, REPO)
+
+    evidence = packet["plan_premises"][0]["premises"][0][
+        "referenced_evidence"]
+    assert evidence["status"] == "partial"
+    assert evidence["records"] == [{
+        "ref": REPO + "#1700",
+        "kind": "pull_request",
+        "status": "could_not_read",
+        "message": "Could not read this cited reference.",
+    }]
+
+
 @pytest.mark.parametrize("label", ["measured", "documented"])
 def test_only_inferred_premises_get_deferred_answers(monkeypatch, label):
     install_github_fixture(monkeypatch, live_fixture())

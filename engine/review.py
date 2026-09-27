@@ -114,10 +114,19 @@ PLAN_PREMISE_ROW_RE = re.compile(
 # same forms GitHub renders elsewhere: owner/repo#n, #n, or an issue URL.
 EVIDENCE_ISSUE_REF_RE = re.compile(
     r"(?P<url>https?://github\.com/(?P<url_owner>[A-Za-z0-9_.-]+)/"
-    r"(?P<url_repo>[A-Za-z0-9_.-]+)/issues/(?P<url_number>[1-9][0-9]*)/?)"
+    r"(?P<url_repo>[A-Za-z0-9_.-]+)/(?:issues|pull)/"
+    r"(?P<url_number>[1-9][0-9]*)/?)"
     r"|(?<![A-Za-z0-9_.-])(?P<full>(?P<owner>[A-Za-z0-9_.-]+)/"
     r"(?P<repo>[A-Za-z0-9_.-]+)#(?P<number>[1-9][0-9]*))"
     r"|(?<![A-Za-z0-9_/])#(?P<bare_number>[1-9][0-9]*)")
+PULL_REQUEST_REF_RE = re.compile(
+    r"(?P<url>https?://github\.com/(?P<url_owner>[A-Za-z0-9_.-]+)/"
+    r"(?P<url_repo>[A-Za-z0-9_.-]+)/pull/"
+    r"(?P<url_number>[1-9][0-9]*)/?)"
+    r"|(?<![A-Za-z0-9_])(?:PR|pull request)\s+"
+    r"(?:(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)\s*)?"
+    r"#(?P<number>[1-9][0-9]*)",
+    re.IGNORECASE)
 ISSUE_REF_RE = re.compile(
     r"\A(?P<owner>[A-Za-z0-9_.-]+)/(?P<repo>[A-Za-z0-9_.-]+)"
     r"#(?P<number>[1-9][0-9]*)\Z")
@@ -163,6 +172,11 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
 #: long ticket cannot flood the prompt.
 TICKET_COMMENT_LIMIT = 30
 TICKET_COMMENT_BODY_LIMIT = 4000
+
+# Keep one inferred premise from turning an ordinary review into an unbounded
+# series of GitHub reads. Any references beyond this limit stay visible in the
+# packet as omitted refs, so judges can preserve the unresolved state.
+MAX_PREMISE_EVIDENCE_REFS = 8
 
 # PR comments are durable run evidence. Keep each body bounded while carrying
 # every comment, newest last, so a reviewer can see the complete conversation.
@@ -1280,6 +1294,32 @@ def _evidence_issue_refs(evidence_pointer: object,
     return refs
 
 
+def _evidence_pull_request_refs(text: object,
+                                default_repo: str) -> List[str]:
+    """Find PR refs explicitly named in premise prose or evidence pointers."""
+    if not isinstance(text, str):
+        return []
+    refs: List[str] = []
+    seen = set()
+    for match in PULL_REQUEST_REF_RE.finditer(text):
+        if match.group("url_number"):
+            repo = "{}/{}".format(match.group("url_owner"),
+                                  match.group("url_repo"))
+            number = int(match.group("url_number"))
+        elif match.group("number"):
+            repo = ("{}/{}".format(match.group("owner"), match.group("repo"))
+                    if match.group("owner") else default_repo)
+            number = int(match.group("number"))
+        else:
+            continue
+        ref = _issue_ref(repo, number)
+        key = _issue_ref_key(ref)
+        if key not in seen:
+            seen.add(key)
+            refs.append(ref)
+    return refs
+
+
 def _read_evidence_issue(ref: str) -> Optional[Dict[str, object]]:
     """Read one issue's current state and complete native blocked-by edges."""
     parts = _issue_ref_parts(ref)
@@ -1575,6 +1615,229 @@ def annotate_unrunnable_inferred_premises(packet: Dict) -> Dict:
                         "complete"
                     ),
                 }
+    return packet
+
+
+def _verified_deferred_premises(packet: Dict) -> List[Dict[str, str]]:
+    """Return only deferrals whose packet fields match the live premise."""
+    ticket = packet.get("ticket")
+    reviewed_ref = ticket.get("ref") if isinstance(ticket, dict) else None
+    if not isinstance(reviewed_ref, str):
+        return []
+    groups = packet.get("plan_premises")
+    if not isinstance(groups, list):
+        return []
+    verified: List[Dict[str, str]] = []
+    for group in groups:
+        if not isinstance(group, dict) or group.get("available") is not True:
+            continue
+        premises = group.get("premises")
+        if not isinstance(premises, list):
+            continue
+        for premise in premises:
+            if (not isinstance(premise, dict)
+                    or premise.get("label") != "inferred"):
+                continue
+            claim = premise.get("claim")
+            evidence = premise.get("evidence")
+            deferred = premise.get("deferred_answer")
+            if (not isinstance(claim, str) or not claim
+                    or not isinstance(evidence, str) or not evidence
+                    or not isinstance(deferred, dict)
+                    or deferred.get("status") != "deferred"
+                    or deferred.get("evidence_pointer") != evidence
+                    or deferred.get("reviewed_ticket") != reviewed_ref):
+                continue
+            verified.append({
+                "claim": claim,
+                "evidence": evidence,
+                "reviewed_ticket": reviewed_ref,
+            })
+    return verified
+
+
+def _deferred_premise_requirement(premise: Dict[str, str]) -> str:
+    parts = _issue_ref_parts(premise["reviewed_ticket"])
+    reviewed_ticket = ("#{}".format(parts[1]) if parts
+                       else premise["reviewed_ticket"])
+    return ("Defer the inferred premise '{}' to its evidence pointer '{}' "
+            "until ticket {} is complete.").format(
+                premise["claim"], premise["evidence"], reviewed_ticket)
+
+
+def normalize_deferred_premise_requirements(
+        packet: Dict, requirements: Sequence[str]) -> List[str]:
+    """Replace model probe requirements with verified, pointer-preserving rows.
+
+    The runner verifies these fields itself, so a lister wording lapse cannot
+    turn a verified deferral back into an unsure live-evidence probe.
+    """
+    deferred = _verified_deferred_premises(packet)
+    if not deferred:
+        return list(requirements)
+
+    kept: List[str] = []
+    for requirement in requirements:
+        text = requirement.casefold()
+        if any(premise["claim"].casefold() in text
+               or (premise["evidence"].casefold() in text
+                   and "premise" in text)
+               for premise in deferred):
+            continue
+        kept.append(requirement)
+
+    for premise in deferred:
+        canonical = _deferred_premise_requirement(premise)
+        if canonical not in kept:
+            kept.append(canonical)
+    return kept
+
+
+def mark_verified_deferred_requirements(
+        packet: Dict, results: Sequence[Dict]) -> List[Dict]:
+    """Satisfy canonical deferral checks from the matching packet evidence."""
+    verified = {
+        _deferred_premise_requirement(premise): (
+            "Verified packet deferral: the inferred premise's evidence pointer "
+            "and reviewed ticket match its live deferred_answer.")
+        for premise in _verified_deferred_premises(packet)
+    }
+    marked: List[Dict] = []
+    for result in results:
+        if not isinstance(result, dict):
+            marked.append(result)
+            continue
+        requirement = result.get("requirement")
+        evidence = verified.get(requirement)
+        if evidence is None:
+            marked.append(result)
+            continue
+        resolved = dict(result)
+        resolved["status"] = "met"
+        resolved["evidence"] = evidence
+        marked.append(resolved)
+    return marked
+
+
+def _read_premise_reference(ref: str, is_pull_request: bool) -> Dict:
+    """Fetch one cited issue or PR as packet evidence, retaining read status."""
+    parts = _issue_ref_parts(ref)
+    if parts is None:
+        raise funnel.GitHubError("cannot read an invalid premise evidence ref")
+    repo, number = parts
+    if is_pull_request:
+        view = fetch_pr(repo, number)
+        files = view.get("files") if isinstance(view, dict) else None
+        changed_files = None
+        if isinstance(files, list):
+            changed_files = [
+                row.get("path") for row in files
+                if isinstance(row, dict) and isinstance(row.get("path"), str)
+            ]
+        comments = fetch_pr_comments(repo, number)
+        complete = (
+            isinstance(view.get("title"), str)
+            and isinstance(view.get("state"), str)
+            and isinstance(files, list)
+            and isinstance(comments, dict)
+            and comments.get("status") in ("available", "empty")
+        )
+        return {
+            "ref": ref,
+            "kind": "pull_request",
+            "status": "available" if complete else "partial",
+            "title": view.get("title"),
+            "state": view.get("state"),
+            "merged_at": view.get("mergedAt"),
+            "head_ref": view.get("headRefName"),
+            "head_sha": view.get("headRefOid"),
+            "changed_files": changed_files,
+            "comments": comments,
+        }
+
+    issue = fetch_ticket(repo, number)
+    parent_plans = packet_plan_premises([issue])
+    complete = (
+        isinstance(issue.get("state"), str)
+        and all(group.get("available") is True for group in parent_plans)
+    )
+    return {
+        "ref": ref,
+        "kind": "issue",
+        "status": "available" if complete else "partial",
+        "state": issue.get("state"),
+        "issue": shape_ticket(issue),
+        "parent_plan_premises": parent_plans,
+    }
+
+
+def attach_inferred_premise_evidence(packet: Dict,
+                                     default_repo: str) -> Dict:
+    """Add live records named by each non-deferred inferred premise.
+
+    The judge sees only the packet. Explicitly cited issues and PRs therefore
+    need their own bounded records here before the lister can ask it to probe
+    the pointer. A failed read stays marked as unreadable, never as empty.
+    """
+    groups = packet.get("plan_premises")
+    if not isinstance(groups, list):
+        return packet
+    verified = {
+        (row["claim"], row["evidence"])
+        for row in _verified_deferred_premises(packet)
+    }
+    cache: Dict[Tuple[str, bool], Dict] = {}
+    for group in groups:
+        if not isinstance(group, dict) or group.get("available") is not True:
+            continue
+        premises = group.get("premises")
+        if not isinstance(premises, list):
+            continue
+        for premise in premises:
+            if (not isinstance(premise, dict)
+                    or premise.get("label") != "inferred"):
+                continue
+            if (premise.get("claim"), premise.get("evidence")) in verified:
+                continue
+            texts = [premise.get("claim"), premise.get("evidence")]
+            refs: List[str] = []
+            pull_refs = set()
+            for text in texts:
+                for ref in _evidence_issue_refs(text, default_repo):
+                    if ref not in refs:
+                        refs.append(ref)
+                pull_refs.update(_evidence_pull_request_refs(
+                    text, default_repo))
+            if not refs:
+                continue
+
+            selected = refs[:MAX_PREMISE_EVIDENCE_REFS]
+            records: List[Dict] = []
+            for ref in selected:
+                is_pull_request = ref in pull_refs
+                key = (ref, is_pull_request)
+                if key not in cache:
+                    try:
+                        cache[key] = _read_premise_reference(
+                            ref, is_pull_request)
+                    except (funnel.GitHubError, OSError, TypeError, ValueError):
+                        cache[key] = {
+                            "ref": ref,
+                            "kind": ("pull_request" if is_pull_request
+                                     else "issue"),
+                            "status": "could_not_read",
+                            "message": "Could not read this cited reference.",
+                        }
+                records.append(cache[key])
+            omitted = refs[MAX_PREMISE_EVIDENCE_REFS:]
+            incomplete = any(row.get("status") != "available"
+                             for row in records)
+            premise["referenced_evidence"] = {
+                "status": "partial" if omitted or incomplete else "available",
+                "records": records,
+            }
+            if omitted:
+                premise["referenced_evidence"]["omitted_refs"] = omitted
     return packet
 
 
@@ -2247,7 +2510,7 @@ def fetch_ticket(repo: str, number: int) -> dict:
     """
     data = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo, "--json",
-        "number,title,url,body,parent,comments")
+        "number,title,url,state,body,parent,comments")
     if not data:
         raise funnel.GitHubError(
             "could not read ticket {}#{}".format(repo, number))
@@ -2475,7 +2738,8 @@ def collect(repo: Optional[str], pr_number: int, *,
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),
     )
     # Keep build_packet pure; unrunnability depends on fresh GitHub state.
-    return annotate_unrunnable_inferred_premises(packet)
+    packet = annotate_unrunnable_inferred_premises(packet)
+    return attach_inferred_premise_evidence(packet, resolved)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

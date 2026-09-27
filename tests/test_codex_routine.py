@@ -47,6 +47,17 @@ def test_runtime_follows_the_packet_and_returns_one_structured_judgement():
     assert "outside the ticket checkout" in normalized
 
 
+def test_runtime_uses_an_owner_only_per_run_checkout_and_cleanup():
+    runtime = routine().split("\n---\n", 1)[1]
+    normalized = " ".join(runtime.split())
+
+    assert "owner-only (`0700`) directory" in normalized
+    assert "runtime root’s `codex-runs/` subtree" in normalized
+    assert "ticket-<number>-<YYYYMMDDTHHMMSSffffffZ>" in normalized
+    assert "if a push fails, it leaves the directory for diagnosis" in normalized
+    assert "Clone `packet.repo` inside the current per-session workspace" not in normalized
+
+
 def test_runtime_waits_for_the_same_slow_begin_session():
     runtime = routine().split("\n---\n", 1)[1]
     normalized = " ".join(runtime.split())
@@ -72,6 +83,7 @@ def test_setup_header_keeps_the_sandbox_boundary_for_nate():
 
     assert "per-session directory" in setup
     assert "command-center-heartbeat" in setup
+    assert "`codex-runs/` subtree is writable" in setup
     assert "/Users/nateprich/.claude/command-center-run" in setup
     assert "read-and-execute access only" in setup
     assert "Never invoke the Codex CLI headlessly" in setup

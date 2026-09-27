@@ -173,7 +173,7 @@ class Board:
                         == repo
                         and node["content"]["number"] == number
                     ]
-                    if query_filter in self.missing_refs:
+                    if f"{repo}#{number}" in self.missing_refs:
                         nodes = []
                 project[alias] = {
                     "nodes": nodes,

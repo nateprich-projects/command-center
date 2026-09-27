@@ -1537,22 +1537,29 @@ _PLAN_PROPOSAL_ACTIONS = {
         r"update|updates|updated|updating|use|uses|used|using)\b",
         re.IGNORECASE,
     ),
+    # Spelled out for the same reason: "use(?:s|d|ing)?" missed "using" and
+    # "rotating" and matched "useing" (#1722).
     "credentials": re.compile(
-        r"\b(?:access(?:es|ed|ing)?|change(?:s|d|ing)?|create(?:s|d|ing)?|"
-        r"expose(?:s|d|ing)?|grant(?:s|ed|ing)?|handle(?:s|d|ing)?|"
-        r"load(?:s|ed|ing)?|read(?:s|ing)?|replace(?:s|d|ing)?|"
-        r"revoke(?:s|d|ing)?|rotate(?:s|d|ing)?|store(?:s|d|ing)?|"
-        r"supply|supplies|supplied|supplying|touch(?:es|ed|ing)?|"
-        r"use(?:s|d|ing)?|write|writes|written|writing|"
-        r"update(?:s|d|ing)?)\b",
+        r"\b(?:access|accesses|accessed|accessing|change|changes|changed|"
+        r"changing|create|creates|created|creating|expose|exposes|exposed|"
+        r"exposing|grant|grants|granted|granting|handle|handles|handled|"
+        r"handling|load|loads|loaded|loading|read|reads|reading|replace|"
+        r"replaces|replaced|replacing|revoke|revokes|revoked|revoking|"
+        r"rotate|rotates|rotated|rotating|store|stores|stored|storing|"
+        r"supply|supplies|supplied|supplying|touch|touches|touched|"
+        r"touching|update|updates|updated|updating|use|uses|used|using|"
+        r"write|writes|wrote|written|writing)\b",
         re.IGNORECASE,
     ),
     "data-migration": re.compile(
-        r"\b(?:apply|applies|applied|applying|convert(?:s|ed|ing)?|"
-        r"copy|copies|copied|copying|execute(?:s|d|ing)?|import(?:s|ed|ing)?|"
-        r"load(?:s|ed|ing)?|perform(?:s|ed|ing)?|populate(?:s|d|ing)?|"
-        r"rebuild(?:s|ing)?|rebuilt|replay(?:s|ed|ing)?|run|runs|ran|"
-        r"seed(?:s|ed|ing)?|transform(?:s|ed|ing)?|update(?:s|d|ing)?)\b",
+        r"\b(?:apply|applies|applied|applying|convert|converts|converted|"
+        r"converting|copy|copies|copied|copying|execute|executes|executed|"
+        r"executing|import|imports|imported|importing|load|loads|loaded|"
+        r"loading|perform|performs|performed|performing|populate|populates|"
+        r"populated|populating|rebuild|rebuilds|rebuilt|rebuilding|replay|"
+        r"replays|replayed|replaying|run|runs|ran|running|seed|seeds|seeded|"
+        r"seeding|transform|transforms|transformed|transforming|update|"
+        r"updates|updated|updating)\b",
         re.IGNORECASE,
     ),
     "destructive": re.compile(
@@ -1595,7 +1602,13 @@ _PLAN_DIRECT_ACTIONS = {
         r"(?:\s+[\w'’-]+){0,4}\s+permissions?)\b",
         re.IGNORECASE,
     ),
-    "data-migration": re.compile(r"\b(?:backfill|migrat\w*)\b", re.IGNORECASE),
+    # "migrat\w*" also took "migrateing" (#1722). "migration" stays: it
+    # carries the proposal in a clause-led "Schema migration ..." item.
+    "data-migration": re.compile(
+        r"\b(?:backfill|backfills|backfilled|backfilling|migrate|migrates|"
+        r"migrated|migrating|migration)\b",
+        re.IGNORECASE,
+    ),
     "destructive": re.compile(
         r"\b(?:force[- ]push|hard[- ]delete|permanently\s+delete|"
         r"drop\s+(?:the\s+)?(?:table|branch)|rewrite\s+history)\b",

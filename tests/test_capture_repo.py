@@ -33,7 +33,11 @@ def _bound(monkeypatch, run, do, work, repo=None, members=(CC, FF)):
 def _run_shape_apply(monkeypatch, *args):
     applied = []
     monkeypatch.setattr(shape, "validate_answer", lambda data: data)
-    monkeypatch.setattr(funnel, "load_items", lambda: [])
+    monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [])
+    # Shape-apply loads its own rows by ref first (#1623); a miss falls back
+    # to load_items, which is what these repo-resolution tests exercise.
+    monkeypatch.setattr(
+        funnel, "load_project_items_by_refs", lambda refs, **kwargs: None)
     monkeypatch.setattr(
         shape, "apply_shape",
         lambda items, now, ref, answer, **kwargs: applied.append(ref) or 0,

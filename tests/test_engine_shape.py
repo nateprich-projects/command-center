@@ -534,6 +534,18 @@ def test_render_drops_a_trailing_model_line_and_keeps_prose_mentions():
         "Improve", "Proposed class: Improve")
 
 
+def test_render_drops_every_model_line_including_the_first_line():
+    # Every model line goes, not only the first match, and the plan's own
+    # first line is filtered like any other.
+    plan = "Proposed class: Broken\n\n# Plan\n\nBody.\n\nProposed class: New"
+    body = shape.render_plan(shape.validate_answer(answer(
+        plan_markdown=plan)))
+    assert _proposed_class_lines(body) == ["Proposed class: Improve"]
+    assert funnel.proposed_class_for_approval(body) == (
+        "Improve", "Proposed class: Improve")
+    assert "# Plan\n\nBody.\n\n## Premises" in body
+
+
 def test_render_without_a_model_line_carries_one_as_before():
     body = shape.render_plan(shape.validate_answer(answer()))
     assert _proposed_class_lines(body) == ["Proposed class: Improve"]

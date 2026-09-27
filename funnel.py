@@ -655,6 +655,7 @@ BRIEF_SECTION_BUDGETS = {
     # 1091-item board at 20.93 s, 25.17 s, 22.94 s.
     "cleared_blocks": 30.0,
     "blocked": 0.25,
+    "held_at_accept": 0.25,
     "human_steps": 0.25,
     "machine_local_steps": 0.25,
     "blocked_human_steps": 0.25,
@@ -707,6 +708,7 @@ BRIEF_PURE_SECTIONS = frozenset({
     "counts_by_gate",
     "in_motion",
     "blocked",
+    "held_at_accept",
     "human_steps",
     "machine_local_steps",
     "blocked_human_steps",
@@ -1050,6 +1052,36 @@ def _acceptance_waiting_reason(
     if parse_analysis_marker(body) is not None:
         return "Analysis review"
     return "Ordinary accept"
+
+
+def is_held_at_accept(item: Item) -> bool:
+    """Whether a finished project is held at Accept by Nate (#1725).
+
+    Nate's hold is recorded in the ordinary blocked form (``funnel hold``,
+    #1724): the ``blocked`` label with a ``**Blocked until ...:**`` or
+    ``**Blocked on #N:**`` comment. That named condition already keeps the
+    project out of ``total_needing_nate`` and out of the "Ordinary accept"
+    list, because ``gate_question`` asks nothing of a conditioned block; what
+    it did not do is say so. The brief listed the hold as blocked work.
+
+    Only a project that would otherwise ask "Accept it?" is held there: open,
+    at Building, every ticket closed, and not one that closes itself (the
+    unattended close ignores ``blocked``, so such a block holds nothing). A
+    block with no date or issue condition still asks "Unblock or park?", and
+    an event condition is an agent's wait, so both stay blocked work.
+    """
+    return (
+        item.state == "OPEN"
+        and item.parent is None
+        and item.status == "Building"
+        and item.is_blocked
+        and item.children_all_closed
+        and not _can_close_itself(item)
+        and (
+            bool(item.block_references)
+            or _item_blocked_until(item) is not None
+        )
+    )
 
 
 def question_since(item: Item) -> Optional[datetime]:
@@ -12339,8 +12371,65 @@ def _blocked_item_json(item: Item, now: datetime) -> Dict[str, object]:
 def blocked_json(
     items: Iterable[Item], now: datetime,
 ) -> List[Dict[str, object]]:
-    """The brief's blocked section, reusing one load-time comment fetch."""
-    return [_blocked_item_json(item, now) for item in blocked_items(items)]
+    """The brief's blocked section, reusing one load-time comment fetch.
+
+    A finished project Nate holds at Accept is not blocked work: it is listed
+    in ``held_at_accept`` instead (#1725).
+    """
+    return [
+        _blocked_item_json(item, now) for item in blocked_items(items)
+        if not is_held_at_accept(item)
+    ]
+
+
+def _held_at_accept_condition(item: Item) -> str:
+    """Say in words what lifts an Accept hold: a date, issues closing, or both."""
+    parts = []
+    blocked_until = _item_blocked_until(item)
+    if blocked_until is not None:
+        parts.append(blocked_until.isoformat())
+    if item.block_references:
+        parts.append("{} {}".format(
+            " and ".join(item.block_references),
+            "closes" if len(item.block_references) == 1 else "close",
+        ))
+    return "until " + " and ".join(parts)
+
+
+def _held_at_accept_item_json(item: Item) -> Dict[str, object]:
+    """Render one Accept hold with its condition and Nate's reason (#1725).
+
+    The block parser keeps everything after the header as the reason, the
+    provenance trailer included, so the reason is cut at that marker.
+    """
+    reason = _visible_comment(item.block_reason or "").strip()
+    rendered = {
+        "ref": item.ref,
+        "title": item.title,
+        "url": item.url,
+        "condition": _held_at_accept_condition(item),
+        "conditions": list(item.block_references),
+        "reason": reason or None,
+        "held_since": (
+            item.blocked_since.isoformat() if item.blocked_since else None
+        ),
+    }
+    blocked_until = _item_blocked_until(item)
+    if blocked_until is not None:
+        rendered["blocked_until"] = blocked_until.isoformat()
+    return rendered
+
+
+def held_at_accept_json(items: Iterable[Item]) -> List[Dict[str, object]]:
+    """The brief's held-at-Accept section, in the blocked section's order.
+
+    Neither a decision nor blocked work: the hold lifts itself when its
+    condition is met, and the project then asks "Accept it?" again.
+    """
+    return [
+        _held_at_accept_item_json(item) for item in blocked_items(items)
+        if is_held_at_accept(item)
+    ]
 
 
 def _event_block_mismatch(item: Item) -> Optional[str]:
@@ -13952,6 +14041,7 @@ def cmd_brief(
             "cleared_blocks", lambda: cleared_blocks_json(items, now)
         )
         blocked = section("blocked", lambda: blocked_json(items, now))
+        held = section("held_at_accept", lambda: held_at_accept_json(items))
         human = section("human_steps", lambda: human_step_json(items, now))
         machine_local = section(
             "machine_local_steps",
@@ -14036,6 +14126,7 @@ def cmd_brief(
         counts = pure_values["counts_by_gate"]
         running = pure_values["in_motion"]
         blocked = pure_values["blocked"]
+        held = pure_values["held_at_accept"]
         human = pure_values["human_steps"]
         machine_local = pure_values["machine_local_steps"]
         blocked_human = pure_values["blocked_human_steps"]
@@ -14092,6 +14183,7 @@ def cmd_brief(
             "closed_itself": closed_itself,
             "cleared_blocks": cleared_blocks,
             "blocked": blocked,
+            "held_at_accept": held,
             "human_steps": human,
             "machine_local_steps": machine_local,
             "blocked_human_steps": blocked_human,

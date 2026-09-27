@@ -211,13 +211,14 @@ def _muse_call_record(value: str) -> Dict[str, object]:
 PROVIDERS = {"claude": "anthropic", "codex": "openai", "zcode": "zai",
              "muse": "meta"}
 
-#: When z.ai stops answering the standard judgement tier: 2026-10-07 00:00
-#: in Beijing time (UTC+8), 2026-10-06 09:00 PDT. The cancelled z.ai plan
-#: expires on 2026-10-07 (Nate, 2026-09-23), and z.ai may count that date in
-#: its own zone, so the lane ends at the earliest reading of it rather than
-#: risk runs erroring on an expired key (#1411). `scripts/muse-review-engine`
-#: routes on the same instant and a test pins the two together.
-ZAI_STANDARD_UNTIL = 1791302400
+#: When z.ai stops answering the standard judgement tier: 2026-09-27 06:00
+#: PDT (#1694). It was first the start of the plan's expiry day in Beijing
+#: time, 2026-10-06 09:00 PDT (1791302400; Nate, 2026-09-23; #1411), and was
+#: brought forward when z.ai's weekly window was spent until 2026-10-03,
+#: which stopped the standard lane while Muse's week went mostly unused.
+#: `scripts/muse-review-engine` routes on the same instant and a test pins
+#: the two together.
+ZAI_STANDARD_UNTIL = 1790514000
 
 
 def retired_agents(now: Optional[float] = None) -> frozenset:
@@ -228,9 +229,10 @@ def retired_agents(now: Optional[float] = None) -> frozenset:
     died. zcode was retired on 2026-09-09 by Nate's decision: measured over
     24h it did work in 18 of 93 runs and was refused on the z.ai pace line in
     63, while Muse carried every job it had on the separate Meta pool (#431).
-    It runs again, as the engine's z.ai standard tier, from 2026-09-23 until
-    ``ZAI_STANDARD_UNTIL``, and retires again at that instant by itself, so
-    its silence after the plan expires is not read as a lane that died.
+    It ran again, as the engine's z.ai standard tier, from 2026-09-23 until
+    ``ZAI_STANDARD_UNTIL`` (2026-09-27 06:00 PDT, #1694), and retires again
+    at that instant by itself, so its silence after the cutoff is not read
+    as a lane that died.
     codex was retired from 2026-09-18 to 2026-09-22, while Muse implemented
     both tiers (#1106). It returned when its automations went live again
     (Nate, #1315, #1325): Codex implements both tiers, so its silence is a

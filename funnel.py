@@ -14633,6 +14633,110 @@ def cmd_park(items: List[Item], now: datetime, ref: str, reason: str,
     return 0
 
 
+def _hold_refusal(item: Item) -> Optional[str]:
+    """Why ``item`` cannot be held at Accept, or ``None`` when it can (#1724).
+
+    A hold means something only where ``gate_question`` would otherwise ask
+    "Accept it?": an open Building project with every ticket closed that does
+    not close itself. The unattended close (``_auto_closeable_project``)
+    never reads ``blocked``, so a hold on a project that closes itself would
+    be recorded and then ignored.
+    """
+    if item.parent is not None:
+        return "{} is a ticket; only a finished project waits at Accept".format(
+            item.ref)
+    if item.state != "OPEN":
+        return "{} is {}; only an open project waits at Accept".format(
+            item.ref, item.state)
+    if item.status != "Building":
+        return (
+            "{} is at {}, not Building; only a finished Building project "
+            "waits at Accept".format(item.ref, item.status or "no status")
+        )
+    if item.children_total == 0:
+        return (
+            "{} has no tickets; it is waiting to be broken down, not "
+            "waiting at Accept".format(item.ref)
+        )
+    if not item.children_all_closed:
+        return (
+            "{} still has open tickets ({}/{} closed); it is not waiting at "
+            "Accept yet".format(
+                item.ref, item.children_done, item.children_total)
+        )
+    if _can_close_itself(item):
+        return (
+            "{} closes itself when its tickets close (Class {}), and the "
+            "unattended close ignores `blocked`, so a hold would do "
+            "nothing".format(item.ref, item.klass or "unset")
+        )
+    return None
+
+
+def cmd_hold(items: List[Item], now: datetime, ref: str, reason: str,
+             until: Optional[date] = None, on: Sequence[str] = (),
+             confirmed: bool = False, run: Optional[str] = None,
+             agent: Optional[str] = None,
+             instruction: Optional[str] = None) -> int:
+    """Record Nate's hold on a finished project at Accept (#1724).
+
+    A hold written as prose ("Accept held by Nate ...") is read by nothing, so
+    the project kept asking "Accept it?". The ``blocked`` label with a
+    parseable ``**Blocked until/on ...:**`` comment already takes an item out
+    of his queue, shows its condition, and is lifted by
+    ``clear_satisfied_blocks`` once that condition is met; this verb writes
+    exactly that form, in Nate's relayed voice.
+
+    **Dry run unless ``confirmed``**, like the gate answers: holding is
+    Nate's call at his own gate.
+    """
+    item = find(items, ref)
+    refusal = _hold_refusal(item)
+    if refusal is not None:
+        raise GitHubError(refusal)
+    if (until is None) == (not on):
+        raise GitHubError("a hold needs exactly one of --until or --on")
+    if until is not None and until <= _block_condition_date(now):
+        raise GitHubError("hold date must be after today's UTC date")
+    body = _hold_comment_body(reason, until=until, on=on)
+
+    if not confirmed:
+        print("would hold {} at Accept ({}) with the blocked label and:".format(
+            item.ref, item.title))
+        print(body)
+        print("\nNothing was changed. Re-run with --yes to record the hold.")
+        return 1
+
+    # Comment first, as ``comment --needs-decision`` does: a label without
+    # its condition would read as a silent block asking "Unblock or park?",
+    # while a comment without its label changes nothing and is superseded by
+    # the retry's newer copy.
+    comment = _run_gh(
+        ["gh", "issue", "comment", str(item.number), "--repo", item.repo,
+         "--body", append_provenance(
+             body, "nate-relayed", at=now,
+             run=run, agent=agent, instruction=instruction)],
+        capture_output=True, text=True,
+    )
+    if comment.returncode != 0:
+        raise GitHubError(comment.stderr.strip())
+    edit = _run_gh(
+        ["gh", "issue", "edit", str(item.number), "--repo", item.repo,
+         "--add-label", "blocked"],
+        capture_output=True, text=True,
+    )
+    if edit.returncode != 0:
+        raise GitHubError(
+            "recorded the hold comment on {}, but could not add its blocked "
+            "label: {}".format(item.ref, edit.stderr.strip())
+        )
+    if not item.is_blocked:
+        item.labels.append("blocked")
+
+    print("{} held at Accept\n{}".format(item.ref, body))
+    return 0
+
+
 def cmd_answer_gates(items: List[Item], now: datetime, ref: str,
                      answer: str, decider: str,
                      run: Optional[str] = None,
@@ -18809,6 +18913,51 @@ def _needs_decision_comment_body(question: str) -> str:
     return "{} {}".format(NEEDS_DECISION_PREFIX, question)
 
 
+def _hold_reference(value: str) -> str:
+    """Normalise one ``hold --on`` issue number exactly as ``--blocked-on``."""
+    try:
+        return _blocked_reference(value)
+    except argparse.ArgumentTypeError:
+        raise argparse.ArgumentTypeError(
+            "a positive issue number is required for --on"
+        )
+
+
+def _hold_until_date(value: str) -> date:
+    """Require a future calendar date for ``hold --until`` before loading.
+
+    ``satisfied_block_refs`` counts a date on or before today's UTC date as
+    met, so a hold dated today would be lifted by the next clear pass.
+    """
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        raise argparse.ArgumentTypeError("hold date must use YYYY-MM-DD")
+    try:
+        until = date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            "hold date must be a valid YYYY-MM-DD calendar date"
+        )
+    if until <= _block_condition_date():
+        raise argparse.ArgumentTypeError(
+            "hold date must be after today's UTC date"
+        )
+    return until
+
+
+def _hold_comment_body(reason: str, until: Optional[date] = None,
+                       on: Sequence[str] = ()) -> str:
+    """Render an Accept hold as the block header ``BLOCK_COMMENT_RE`` owns.
+
+    Exactly one condition: a hold on both a date and an issue would parse,
+    but the verb offers one so the brief can say plainly what lifts it.
+    """
+    if (until is None) == (not on):
+        raise ValueError("a hold needs exactly one of a date or issues")
+    if until is not None:
+        return "**Blocked until {}:** {}".format(until.isoformat(), reason)
+    return _blocked_comment_body(on, reason)
+
+
 #: Whether each command's shared Project load must carry item history (#1622).
 #:
 #: History is everything ``hydrate_item_details`` adds after the paged list:
@@ -19076,6 +19225,41 @@ def main(argv: Optional[Sequence[str]] = None, *,
         help="heartbeat run id; otherwise infer a unique open local start",
     )
     comment.add_argument(
+        "--agent", default=None,
+        help="agent that wrote the comment; otherwise read the heartbeat spool",
+    )
+    hold = sub.add_parser(
+        "hold",
+        help="Nate's hold on a finished project at Accept, recorded as a "
+             "conditioned block — dry run without --yes",
+    )
+    hold.add_argument("ref", help="issue number, owner/repo#number, or URL")
+    hold_condition = hold.add_mutually_exclusive_group(required=True)
+    hold_condition.add_argument(
+        "--until", type=_hold_until_date, default=None, metavar="YYYY-MM-DD",
+        help="hold until this future date (UTC); the block lifts itself then",
+    )
+    hold_condition.add_argument(
+        "--on", nargs="+", type=_hold_reference, default=None, metavar="N",
+        help="hold until these issues in the project's repository close",
+    )
+    hold.add_argument(
+        "--reason", required=True, type=_comment_reason,
+        help="why Nate is holding it (required)",
+    )
+    hold.add_argument(
+        "--yes", action="store_true", dest="confirmed",
+        help="actually do it; without this the command is a dry run",
+    )
+    hold.add_argument(
+        "--instruction", type=_verbatim_instruction, default=None,
+        help="verbatim instruction received from Nate; recorded in provenance",
+    )
+    hold.add_argument(
+        "--run", default=None,
+        help="heartbeat run id; otherwise infer a unique open local start",
+    )
+    hold.add_argument(
         "--agent", default=None,
         help="agent that wrote the comment; otherwise read the heartbeat spool",
     )
@@ -19414,6 +19598,11 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "answer-gates":
             return cmd_answer_gates(items, now, args.ref, args.answer,
                                     args.decider, args.run, args.agent)
+        if args.command == "hold":
+            return cmd_hold(items, now, args.ref, args.reason,
+                            until=args.until, on=args.on or (),
+                            confirmed=args.confirmed, run=args.run,
+                            agent=args.agent, instruction=args.instruction)
         if args.command == "comment":
             if args.needs_decision is not None:
                 body = _needs_decision_comment_body(args.needs_decision)

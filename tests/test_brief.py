@@ -871,6 +871,165 @@ def test_brief_surfaces_blocked_projects_and_tickets_oldest_first(
     assert calls == []
 
 
+def _finished_project(number, **fields):
+    """An open Building project whose two tickets have both closed."""
+    values = dict(
+        repo="nateprich/beta", number=number,
+        title="Project {}".format(number),
+        url="https://example.invalid/{}".format(number), state="OPEN",
+        status="Building", klass="New", children_total=2, children_done=2,
+    )
+    values.update(fields)
+    return funnel.Item(**values)
+
+
+HOLD_TRAILER = (
+    "\n\n" + funnel.PROVENANCE_MARKER
+    + '\n\n```json\n{"agent": "claude", "voice": "nate-relayed"}\n```'
+)
+
+
+def test_brief_lists_a_held_finished_project_as_held_at_accept(
+    monkeypatch, capsys
+):
+    """Nate's Accept hold is its own section, not blocked work (#1725).
+
+    ``funnel hold`` (#1724) writes the ordinary conditioned block, so the
+    project already left the decision queue; the brief listed it under
+    ``blocked`` as though it were stuck work.
+    """
+    dated = _finished_project(
+        50, title="Saturday lane", labels=["blocked"],
+        status_since=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        blocked_since=datetime(2026, 9, 4, 18, tzinfo=timezone.utc),
+        blocked_until=(NOW + timedelta(days=7)).date(),
+        block_reason="Accept if the Saturday run works tickets."
+        + HOLD_TRAILER,
+    )
+    on_issues = _finished_project(
+        51, title="Metrics tab", klass="Replace", labels=["blocked"],
+        status_since=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        block_references=["#1654", "#1655"],
+        block_reason="Accept once the tiles show real numbers."
+        + HOLD_TRAILER,
+    )
+    unheld = _finished_project(
+        52, title="Ordinary finish",
+        status_since=datetime(2026, 9, 3, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([unheld, on_issues, dated], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["held_at_accept"] == [
+        {
+            "ref": "nateprich/beta#50",
+            "title": "Saturday lane",
+            "url": "https://example.invalid/50",
+            "condition": "until 2026-09-12",
+            "conditions": [],
+            "reason": "Accept if the Saturday run works tickets.",
+            "held_since": "2026-09-04T18:00:00+00:00",
+            "blocked_until": "2026-09-12",
+        },
+        {
+            "ref": "nateprich/beta#51",
+            "title": "Metrics tab",
+            "url": "https://example.invalid/51",
+            "condition": "until #1654 and #1655 close",
+            "conditions": ["#1654", "#1655"],
+            "reason": "Accept once the tiles show real numbers.",
+            "held_since": None,
+        },
+    ]
+    assert brief["blocked"] == []
+    # Only the unheld project is a decision, and it is the ordinary accept.
+    assert [row["ref"] for row in brief["items"]] == ["nateprich/beta#52"]
+    assert brief["items"][0]["waiting_on"] == "Accept it?"
+    assert brief["items"][0]["waiting_reason"] == "Ordinary accept"
+    assert brief["total_needing_nate"] == 1
+
+
+def test_brief_keeps_every_other_blocked_project_as_blocked_work(
+    monkeypatch, capsys
+):
+    """Only a conditioned block on a project that would ask "Accept it?" is
+    a hold (#1725). Open tickets, no condition, a project that closes
+    itself, or a stage other than Building each leave the block as it was."""
+    open_tickets = _finished_project(
+        60, children_done=1, labels=["blocked"],
+        status_since=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        block_references=["#70"], block_reason="Wait for #70.",
+    )
+    silent = _finished_project(
+        61, labels=["blocked"],
+        status_since=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        block_reason="Nate needs to decide.",
+    )
+    closes_itself = _finished_project(
+        62, klass="Broken", labels=["blocked"],
+        status_since=datetime(2026, 9, 3, tzinfo=timezone.utc),
+        block_references=["#71"], block_reason="Wait for #71.",
+    )
+    not_building = _finished_project(
+        63, status="Ready", labels=["blocked"],
+        status_since=datetime(2026, 9, 4, tzinfo=timezone.utc),
+        blocked_until=(NOW + timedelta(days=7)).date(),
+        block_reason="Wait a week.",
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief(
+        [not_building, closes_itself, silent, open_tickets], NOW
+    ) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["held_at_accept"] == []
+    assert [row["ref"] for row in brief["blocked"]] == [
+        "nateprich/beta#60", "nateprich/beta#61",
+        "nateprich/beta#62", "nateprich/beta#63",
+    ]
+    assert brief["blocked"][0] == {
+        "ref": "nateprich/beta#60",
+        "title": "Project 60",
+        "url": "https://example.invalid/60",
+        "reason": "Wait for #70.",
+        "conditions": ["#70"],
+        "blocked_at": "2026-09-01T00:00:00+00:00",
+    }
+    # The silent block still asks its own question, and is still counted.
+    assert [row["ref"] for row in brief["items"]] == ["nateprich/beta#61"]
+    assert brief["items"][0]["waiting_on"] == "Unblock or park?"
+    assert "waiting_reason" not in brief["items"][0]
+    assert brief["total_needing_nate"] == 1
+
+
+def test_brief_unblocked_finished_project_still_reads_as_ordinary_accept(
+    monkeypatch, capsys
+):
+    """No block, no hold: the finished project is Nate's decision (#1725)."""
+    finished = _finished_project(
+        64, status_since=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
+
+    assert funnel.cmd_brief([finished], NOW) == 0
+    brief = json.loads(capsys.readouterr().out)
+
+    assert brief["held_at_accept"] == []
+    assert brief["blocked"] == []
+    assert [
+        (row["ref"], row["waiting_on"], row["waiting_reason"])
+        for row in brief["items"]
+    ] == [("nateprich/beta#64", "Accept it?", "Ordinary accept")]
+    assert brief["total_needing_nate"] == 1
+    # The label is what holds: a leftover condition without it holds nothing.
+    assert not funnel.is_held_at_accept(
+        _finished_project(65, block_references=["#70"])
+    )
+
+
 def test_brief_renders_event_condition_and_elapsed_wait_from_after(
     monkeypatch, capsys
 ):

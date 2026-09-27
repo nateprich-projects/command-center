@@ -51,6 +51,24 @@ def test_the_template_keeps_the_observer_rendering():
     )
 
 
+def test_the_template_renders_an_accept_hold_as_held_not_as_a_decision():
+    """#1725: a held finished project reads as held at Accept by Nate, with
+    what lifts the hold and why, and is never counted as waiting on him."""
+    template = funnel_render.render_template()
+    section = template.split("Then `held_at_accept`", 1)[1].split("\n\n", 1)[0]
+    required = (
+        "held at Accept by Nate",
+        "`condition`",
+        "`reason`",
+        "`blocked`",
+        "`total_needing_nate`",
+    )
+    missing = [phrase for phrase in required if phrase not in section]
+    assert not missing, (
+        "the held_at_accept rendering lost: " + ", ".join(missing)
+    )
+
+
 def test_the_skill_invokes_the_code_template():
     skill = SKILL.read_text(encoding="utf-8")
     assert "funnel_render.py" in skill

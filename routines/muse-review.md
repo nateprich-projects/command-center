@@ -30,10 +30,13 @@ the plan rejected?
 Walk each ticket and plan requirement one at a time against the diff.
 Quote each and cite the diff lines that meet it.
 
-Probe every `plan_premises` entry labelled `inferred` against live
-evidence in this packet, using its `evidence` pointer. Do not
-re-derive it from plan prose. Cite support or contradiction; unresolved or
-unavailable probes are `unsure`.
+For each `plan_premises` entry labelled `inferred`, use its `evidence` pointer
+without re-deriving the premise from plan prose. If the entry has a
+`deferred_answer`, preserve that exact pointer as a visible deferral until the
+named `reviewed_ticket` is complete; do not probe for current live evidence or
+mark the expected absence `unsure`. Otherwise, probe the pointer against live
+evidence in this packet and cite support or contradiction; unresolved or
+unavailable probes remain `unsure`.
 
 For count requirements (one, once, per day, exactly, at most), list every
 effect call site and trace each path, including success, traps, `finally`,

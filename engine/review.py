@@ -1525,6 +1525,59 @@ def evidence_ticket_is_unrunnable(evidence_pointer: object,
     return False
 
 
+def annotate_unrunnable_inferred_premises(packet: Dict) -> Dict:
+    """Expose code-verified evidence deferrals in a live review packet.
+
+    ``build_packet`` stays pure. ``collect`` calls this after assembling its
+    packet so only a live GitHub read can add ``deferred_answer``. Other
+    premise labels, unavailable plan groups, and unresolved issue reads keep
+    the existing review path.
+    """
+    ticket = packet.get("ticket")
+    reviewed_ref = ticket.get("ref") if isinstance(ticket, dict) else None
+    if (not isinstance(reviewed_ref, str)
+            or _issue_ref_parts(reviewed_ref) is None):
+        return packet
+
+    groups = packet.get("plan_premises")
+    if not isinstance(groups, list):
+        return packet
+
+    checked: Dict[str, bool] = {}
+    for group in groups:
+        if not isinstance(group, dict) or group.get("available") is not True:
+            continue
+        premises = group.get("premises")
+        if not isinstance(premises, list):
+            continue
+        for premise in premises:
+            if (not isinstance(premise, dict)
+                    or premise.get("label") != "inferred"):
+                continue
+            evidence = premise.get("evidence")
+            if not isinstance(evidence, str) or not evidence.strip():
+                continue
+            if evidence not in checked:
+                try:
+                    checked[evidence] = evidence_ticket_is_unrunnable(
+                        evidence, reviewed_ref)
+                except funnel.GitHubError:
+                    # No verified deferral: preserve the existing probe path.
+                    checked[evidence] = False
+            if checked[evidence]:
+                premise["deferred_answer"] = {
+                    "status": "deferred",
+                    "evidence_pointer": evidence,
+                    "reviewed_ticket": reviewed_ref,
+                    "reason": (
+                        "live issue state shows the named evidence ticket is "
+                        "open and cannot run before the reviewed ticket is "
+                        "complete"
+                    ),
+                }
+    return packet
+
+
 def _comment_connection_page(connection: object, label: str
                              ) -> Tuple[List[dict], bool, Optional[str]]:
     """Read one GraphQL comment page, failing closed on an incomplete shape."""
@@ -2401,7 +2454,7 @@ def collect(repo: Optional[str], pr_number: int, *,
             scope_source = "compare"
     if scope_diff is None:
         scope_diff = fetch_diff(resolved, pr_number)
-    return build_packet(
+    packet = build_packet(
         repo=resolved,
         pr_number=pr_number,
         pr_view=pr_view,
@@ -2421,6 +2474,8 @@ def collect(repo: Optional[str], pr_number: int, *,
         stop_counter=fetch_stop_counter(lambda: loaded_items, now),
         collected_at=(now or datetime.now(timezone.utc)).isoformat(),
     )
+    # Keep build_packet pure; unrunnability depends on fresh GitHub state.
+    return annotate_unrunnable_inferred_premises(packet)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

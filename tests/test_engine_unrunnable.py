@@ -17,10 +17,15 @@ from engine import review  # noqa: E402
 REPO = "nateprich-projects/command-center"
 REVIEWED = REPO + "#1598"
 FIXTURE = ROOT / "tests" / "fixtures" / "review_unrunnable_1581.json"
+REJECTED_1612 = ROOT / "tests" / "fixtures" / "review_rejected_1612.json"
 
 
 def live_fixture():
     return json.loads(FIXTURE.read_text())
+
+
+def rejected_1612_fixture():
+    return json.loads(REJECTED_1612.read_text())
 
 
 def _parts(ref):
@@ -84,6 +89,42 @@ def test_1581_cycle_evidence_ticket_is_unrunnable(monkeypatch):
 
     assert review.evidence_ticket_is_unrunnable(
         "Ticket 4 (#1600)", REVIEWED)
+
+
+def test_rejected_1612_packet_carries_a_verified_deferred_answer(monkeypatch):
+    install_github_fixture(monkeypatch, live_fixture())
+    fixture = rejected_1612_fixture()
+    packet = fixture["packet"]
+
+    result = review.annotate_unrunnable_inferred_premises(packet)
+
+    assert result is packet
+    premise = packet["plan_premises"][0]["premises"][0]
+    assert premise["deferred_answer"] == fixture["expected_deferred_answer"]
+    assert "Probe the parent plan" in fixture["rejected_requirement"]
+
+
+@pytest.mark.parametrize("label", ["measured", "documented"])
+def test_only_inferred_premises_get_deferred_answers(monkeypatch, label):
+    install_github_fixture(monkeypatch, live_fixture())
+    packet = rejected_1612_fixture()["packet"]
+    premise = packet["plan_premises"][0]["premises"][0]
+    premise["label"] = label
+
+    review.annotate_unrunnable_inferred_premises(packet)
+
+    assert "deferred_answer" not in premise
+
+
+def test_a_checkable_inferred_pointer_keeps_the_probe_path(monkeypatch):
+    install_github_fixture(monkeypatch, live_fixture())
+    packet = rejected_1612_fixture()["packet"]
+    premise = packet["plan_premises"][0]["premises"][0]
+    premise["evidence"] = "#1700"
+
+    review.annotate_unrunnable_inferred_premises(packet)
+
+    assert "deferred_answer" not in premise
 
 
 def test_later_same_plan_ticket_is_unrunnable_without_dependency_edges(

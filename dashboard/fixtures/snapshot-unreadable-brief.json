@@ -1,0 +1,29 @@
+{
+  "generated_at": "2026-09-26T00:00:00Z",
+  "brief": {
+    "total_needing_nate": null,
+    "items": null,
+    "human_steps": null,
+    "machine_local_steps": null,
+    "blocked": null,
+    "blocked_human_steps": null,
+    "status_state_mismatches": null,
+    "counts_by_gate": null,
+    "maintenance_load": {},
+    "disposal": {},
+    "resend_ratio": null,
+    "rejected_merges": {},
+    "missing": [
+      "items",
+      "human_steps",
+      "machine_local_steps",
+      "blocked",
+      "blocked_human_steps",
+      "status_state_mismatches",
+      "counts_by_gate",
+      "resend_ratio",
+      "total_needing_nate"
+    ]
+  },
+  "board": { "columns": [] }
+}

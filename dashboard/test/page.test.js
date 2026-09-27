@@ -11,6 +11,7 @@ import {
   renderAttentionMetrics, renderChurnMetrics,
   renderOutputPanel,
   renderQualityMetrics,
+  renderWaiting,
   CHART_WINDOW_DAYS,
   tabFromUrl, tabUrl,
 } from "../public/app.js";
@@ -92,6 +93,38 @@ class TestDocument {
     const node = new TestNode(tagName);
     node.namespaceURI = namespace;
     return node;
+  }
+}
+
+function renderWaitingFixture(brief) {
+  const container = new TestNode("div");
+  const emptyState = {
+    content: {
+      cloneNode() {
+        const fragment = new TestNode("fragment");
+        const message = new TestNode("p");
+        message.className = "empty";
+        message.textContent = "Nothing is waiting on you.";
+        fragment.append(message);
+        return fragment;
+      },
+    },
+  };
+  const previousDocument = globalThis.document;
+  globalThis.document = {
+    createElement(tagName) { return new TestNode(tagName); },
+    querySelector(selector) {
+      if (selector === "#waiting") return container;
+      if (selector === "#empty-state") return emptyState;
+      return null;
+    },
+  };
+  try {
+    renderWaiting(brief);
+    return container;
+  } finally {
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
   }
 }
 
@@ -206,6 +239,29 @@ test("the repository filter keeps producer order and drops only other repos", ()
   assert.equal(repoOf({ repo: "nateprich-projects/workbench" }), "nateprich-projects/workbench");
 });
 
+test("the waiting panel distinguishes unreadable sections from completed empty values", async () => {
+  const empty = JSON.parse(await readFile(
+    new URL("../fixtures/snapshot-empty-brief.json", import.meta.url), "utf8",
+  ));
+  const unreadable = JSON.parse(await readFile(
+    new URL("../fixtures/snapshot-unreadable-brief.json", import.meta.url), "utf8",
+  ));
+
+  const emptyPanel = renderWaitingFixture(empty.brief);
+  assert.match(emptyPanel.textContent, /Nothing is waiting on you\./);
+  assert.doesNotMatch(emptyPanel.textContent, /could not be read/i);
+
+  const unreadablePanel = renderWaitingFixture(unreadable.brief);
+  assert.match(unreadablePanel.textContent, /Decisions waiting on you/);
+  assert.match(unreadablePanel.textContent, /Actions waiting on you/);
+  assert.match(unreadablePanel.textContent, /Could not be read\./);
+  assert.match(unreadablePanel.textContent, /Counts by gate could not be read\./);
+  assert.match(unreadablePanel.textContent, /Machine-local steps could not be read\./);
+  assert.match(unreadablePanel.textContent, /Status\/state mismatches could not be read\./);
+  assert.doesNotMatch(unreadablePanel.textContent, /Maintenance load could not be read/);
+  assert.match(unreadablePanel.textContent, /The total waiting on you could not be read\./);
+});
+
 test("the dropdown lists every repository once, alphabetically, and keeps the choice", () => {
   const snapshot = {
     board: { columns: [
@@ -222,6 +278,7 @@ test("the dropdown lists every repository once, alphabetically, and keeps the ch
   const names = repoOptions(snapshot, null);
   assert.deepEqual(names, ["owner/Alpha", "other/beta", "owner/beta", "owner/mid", "owner/zeta"]);
   assert.deepEqual(repoOptions(snapshot, "owner/gone").length, 6);
+  assert.deepEqual(repoOptions({ brief: { items: null, human_steps: null } }, null), []);
   // Short names, unless two owners share one.
   assert.deepEqual(repoLabels(names).map(([, label]) => label),
     ["Alpha", "other/beta", "owner/beta", "mid", "zeta"]);
@@ -328,7 +385,7 @@ test("engine holds the Project fields do not show read on the row (Nate, 2026-09
   }
 });
 
-test("the page renders no brief section other than the board and human steps", async () => {
+test("the page does not render values from other brief sections", async () => {
   const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
   for (const dropped of [
     "missing", "working_tree_touched", "machine_local_steps", "closed_itself",

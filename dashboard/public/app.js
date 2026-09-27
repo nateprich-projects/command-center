@@ -1,8 +1,9 @@
 // The dashboard renders exactly what the publisher sent, in the order it sent
 // it: funnel.py owns ordering, and a second opinion here is how two views of
 // the same board drift apart. Nate, 2026-09-15: the page carries the board and
-// human steps, and no other brief section. The one thing the page drops is
-// what the viewer's repository filter hides, and it keeps the order of what
+// human steps, and no other brief values. It does surface when any nullable
+// brief section could not be read, rather than making that state look empty.
+// The repository filter drops only what it hides and keeps the order of what
 // remains (Nate, 2026-09-24).
 
 
@@ -18,6 +19,25 @@ const OWNER_CLASS = {
   Muse: "owner-muse",
   Codex: "owner-codex",
 };
+
+// These sections are not otherwise displayed on the dashboard, but null is
+// still meaningful: the publisher could not compute them. Keep the schema
+// types here so an unavailable object or list is never mistaken for a result.
+const OPTIONAL_BRIEF_SECTIONS = [
+  ["machine_local_steps", "Machine-local steps", Array.isArray],
+  ["blocked", "Blocked items", Array.isArray],
+  ["blocked_human_steps", "Blocked human steps", Array.isArray],
+  ["status_state_mismatches", "Status/state mismatches", Array.isArray],
+  ["counts_by_gate", "Counts by gate", isRecord],
+  ["maintenance_load", "Maintenance load", isRecord],
+  ["disposal", "Disposal", isRecord],
+  ["resend_ratio", "Resend ratio", isRecord],
+  ["rejected_merges", "Rejected merges", isRecord],
+];
+
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 // The repository the viewer picked, or null for every repository. It lives in
 // the URL, so a reload or a shared link keeps it.
@@ -56,9 +76,12 @@ function repoOptions(snapshot, current = selectedRepo) {
     }
   }
   const brief = (snapshot && snapshot.brief) || {};
-  for (const entry of [...(brief.items || []), ...(brief.human_steps || [])]) {
-    const name = repoOf(entry);
-    if (name) names.add(name);
+  for (const entries of [brief.items, brief.human_steps]) {
+    if (!Array.isArray(entries)) continue;
+    for (const entry of entries) {
+      const name = repoOf(entry);
+      if (name) names.add(name);
+    }
   }
   if (current) names.add(current);
   return [...names].sort((a, b) => (
@@ -692,14 +715,22 @@ function humanStepRow(step) {
   return row;
 }
 
-function waitingSection(title, count, rows) {
+function waitingSection(title, value, rows, renderRow, emptyText) {
   const section = element("div", "waiting-section");
   const head = element("div", "waiting-head");
   head.append(element("h3", null, title));
-  if (Number.isFinite(count)) head.append(element("span", "count", count));
+  if (Array.isArray(value)) head.append(element("span", "count", rows.length));
   section.append(head);
+  if (!Array.isArray(value)) {
+    section.append(element("p", "unreadable", "Could not be read."));
+    return section;
+  }
+  if (!rows.length) {
+    section.append(element("p", "empty", emptyText));
+    return section;
+  }
   const list = element("ul", "waiting-list");
-  for (const row of rows) list.append(row);
+  for (const row of rows) list.append(renderRow(row));
   section.append(list);
   return section;
 }
@@ -708,34 +739,48 @@ function renderWaiting(brief) {
   const container = document.querySelector("#waiting");
   container.replaceChildren();
   const total = brief.total_needing_nate;
-  const decisions = visible(brief.items);
-  const steps = visible(brief.human_steps);
+  const decisionsKnown = Array.isArray(brief.items);
+  const stepsKnown = Array.isArray(brief.human_steps);
+  const totalKnown = Number.isSafeInteger(total) && total >= 0;
+  const decisions = decisionsKnown ? visible(brief.items) : [];
+  const steps = stepsKnown ? visible(brief.human_steps) : [];
+  const noVisibleRows = !decisions.length && !steps.length;
 
-  if (selectedRepo && !decisions.length && !steps.length) {
+  if (selectedRepo && decisionsKnown && stepsKnown && noVisibleRows) {
     container.append(element("p", "empty",
       `Nothing in ${shortRepo(selectedRepo)} is waiting on you.`));
-    return;
-  }
-  if (total === 0 && !present(steps)) {
+  } else if (
+    !selectedRepo && totalKnown && total === 0 && decisionsKnown && stepsKnown && noVisibleRows
+  ) {
     container.append(document.querySelector("#empty-state").content.cloneNode(true));
-    return;
+  } else {
+    // Keep the two rendered brief sections in the same order as /funnel:
+    // Nate's decisions first, then work he owes. The value itself determines
+    // whether each section is empty or unreadable.
+    const sections = element("div", "brief-sections");
+    sections.append(waitingSection(
+      "Decisions waiting on you", brief.items, decisions, decisionRow,
+      selectedRepo ? `Nothing in ${shortRepo(selectedRepo)} is waiting on you.`
+        : "No decisions are waiting on you.",
+    ));
+    sections.append(waitingSection(
+      "Actions waiting on you", brief.human_steps, steps, humanStepRow,
+      selectedRepo ? `Nothing in ${shortRepo(selectedRepo)} is waiting on you.`
+        : "No actions are waiting on you.",
+    ));
+    container.append(sections);
   }
 
-  // Keep the two rendered brief sections in the same order as /funnel: Nate's
-  // decisions first, then work he owes. CSS changes their narrow presentation
-  // without changing the producer's payload or its ordering.
-  const sections = element("div", "brief-sections");
-  if (decisions.length) {
-    sections.append(waitingSection(
-      "Decisions waiting on you", decisions.length, decisions.map(decisionRow),
-    ));
+  if (!totalKnown) {
+    container.append(element("p", "unreadable",
+      "The total waiting on you could not be read."));
   }
-  if (present(steps)) {
-    sections.append(waitingSection(
-      "Actions waiting on you", steps.length, steps.map(humanStepRow),
-    ));
+
+  for (const [field, label, isValid] of OPTIONAL_BRIEF_SECTIONS) {
+    if (!isValid(brief[field])) {
+      container.append(element("p", "unreadable", `${label} could not be read.`));
+    }
   }
-  container.append(sections);
 }
 
 function failureState(snapshot) {
@@ -2003,6 +2048,7 @@ export {
   phoneState, pipState, projectBlocked, projectHold, holdChip, localTime,
   renderPhoneBoard, ticketHold, unblocksChip,
   repoLabels, repoOf, repoOptions, rowTier, shortRepo, visible,
+  renderWaiting,
   renderExecutionTiles, renderMetricChart, renderBudgetMetrics, renderRunMetrics,
   renderAttentionMetrics,
   renderChurnMetrics,

@@ -35,8 +35,14 @@
     "human_steps": [
       { "ref": "nateprich-projects/command-center#649", "reason": "human" }
     ],
+    "machine_local_steps": [],
+    "blocked": [],
+    "blocked_human_steps": [],
+    "status_state_mismatches": [],
     "maintenance_load": { "upkeep_share": 0.25 },
     "disposal": { "finished_vs_abandoned": 3, "done": 3, "parked": 1, "net_open_growth": 0 },
+    "resend_ratio": {},
+    "rejected_merges": {},
     "missing": []
   },
   "board": {

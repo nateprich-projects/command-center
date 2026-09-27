@@ -1,0 +1,19 @@
+{
+  "generated_at": "2026-09-26T00:00:00Z",
+  "brief": {
+    "total_needing_nate": 0,
+    "items": [],
+    "human_steps": [],
+    "machine_local_steps": [],
+    "blocked": [],
+    "blocked_human_steps": [],
+    "status_state_mismatches": [],
+    "counts_by_gate": {},
+    "maintenance_load": {},
+    "disposal": {},
+    "resend_ratio": {},
+    "rejected_merges": {},
+    "missing": []
+  },
+  "board": { "columns": [] }
+}

@@ -27,6 +27,7 @@ from __future__ import annotations
 import copy
 import io
 import json
+import re
 import pathlib
 import sys
 import time
@@ -325,6 +326,28 @@ class _Fakes:
                     ],
                     "pageInfo": {"hasNextPage": False, "endCursor": None},
                 }}}}
+            if "comments(last:" in query:
+                # #1592's batched parked-wakes read: answer every aliased
+                # issue from the board's comments, as `gh issue view` would.
+                data = {}
+                for repo_alias, owner, name, body in re.findall(
+                        r'(repo\d+): repository\(owner: "([^"]+)", '
+                        r'name: "([^"]+)"\) \{(.*?)\n  \}', query, re.S):
+                    issues = {}
+                    for issue_alias, number in re.findall(
+                            r"(issue\d+): issue\(number: (\d+)\)", body):
+                        ref = "{}/{}#{}".format(owner, name, number)
+                        issues[issue_alias] = {"comments": {"nodes": [
+                            dict(comment, createdAt=comment.get(
+                                "createdAt", "2026-09-01T00:00:00Z"))
+                            for comment in board.comments.get(ref, [])
+                        ]}}
+                    data[repo_alias] = issues
+                self.writes.append(("read", "batched-comments", tuple(
+                    sorted("{}/{}".format(repo_alias, issue_alias)
+                           for repo_alias, issues in data.items()
+                           for issue_alias in issues))))
+                return data
             raise AssertionError(
                 "unexpected GraphQL in begin parity: {}".format(query[:80]))
 

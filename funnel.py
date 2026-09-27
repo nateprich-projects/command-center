@@ -10103,6 +10103,51 @@ def load_project_items_by_refs(
     return [found[ref] for ref in requested]
 
 
+def load_regression_items(
+    member_repo_names: Optional[Sequence[str]] = None,
+) -> List[Item]:
+    """Load the regression set through #1607's filtered Project connection."""
+    global _PROJECT_ITEM_PAGE_COUNT, _PROJECT_ITEM_ROW_COUNT
+    members = set(
+        member_repo_names if member_repo_names is not None else member_repos()
+    )
+    cursors: Dict[str, str] = {}
+    seen_cursors: Set[str] = set()
+    kept: Dict[str, Item] = {}
+    while True:
+        variables: Dict[str, object] = {
+            "login": PROJECT_OWNER, "number": PROJECT_NUMBER,
+        }
+        if "regress" in cursors:
+            variables["regressCursor"] = cursors["regress"]
+        _PROJECT_ITEM_PAGE_COUNT += 1
+        response = gh_graphql(_begin_item_query(["regress"]), **variables)
+        project = _begin_project_from_response(response)
+        nodes, has_next, cursor = _begin_connection_page(project, "regress")
+        _PROJECT_ITEM_ROW_COUNT += len(nodes)
+        for node in nodes:
+            try:
+                item = _from_node(node)
+            except (KeyError, TypeError, AttributeError) as exc:
+                raise GitHubError(
+                    "begin Project connection regress returned a malformed "
+                    "row"
+                ) from exc
+            if (
+                item is not None
+                and item.repo in members
+                and _is_regression_item(item)
+            ):
+                kept.setdefault(item.item_id or item.ref, item)
+        if not has_next:
+            break
+        if cursor in seen_cursors:
+            raise GitHubError("begin Project connection regress did not advance")
+        seen_cursors.add(cursor)
+        cursors["regress"] = cursor
+    return list(kept.values())
+
+
 def _load_begin_anchor_items(
     items: Sequence[Item], members: Set[str],
     timings: Optional[Dict[str, object]],

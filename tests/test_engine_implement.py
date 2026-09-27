@@ -271,7 +271,8 @@ def test_finish_refusal_records_superseded_without_keeping_work(
     assert "superseded" in finished[3]
     assert "work not kept" in finished[3]
     assert run_git(
-        "--git-dir", str(remote), "show-ref", "refs/heads/ticket/42",
+        "--git-dir", str(remote), "for-each-ref", "--format=%(refname)",
+        "refs/heads/ticket/42",
     ).stdout == ""
     assert not clone.exists()
 
@@ -910,6 +911,7 @@ def test_finish_ticket_releases_and_errors_when_tests_fail(tmp_path, monkeypatch
 def test_finish_ticket_removes_owner_only_codex_run_checkout_after_push(
         tmp_path, monkeypatch):
     remote, clone = make_codex_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
     sibling = clone.parent / "ticket-42-20260927T163001123456Z"
     sibling.mkdir(mode=0o700)
     (clone / "implemented.txt").write_text("done\n")

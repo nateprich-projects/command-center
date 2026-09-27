@@ -94,6 +94,8 @@ def test_server_registers_only_the_read_and_gate_tools(
     assert set(server.tools) == {
         "brief", "ideas", "show", "queue",
         "approve", "accept", "park",
+        # #704 adds the two nate-relayed write tools.
+        "capture", "shaped",
     }
     assert not set(server.tools) & {
         "next", "claim", "release", "gate", "heartbeat", "merge", "start",

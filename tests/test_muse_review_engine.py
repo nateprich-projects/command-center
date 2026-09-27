@@ -2862,6 +2862,54 @@ def test_the_lister_asks_for_requirements_before_the_judge_is_asked(tmp_path):
     assert "Install nothing; leave the keeper unchanged" in judge
 
 
+def test_the_pr_body_reaches_the_lister_and_judge_as_the_implementers_claims(
+        tmp_path):
+    """#1720: the lister and every judge chunk see the PR description and its
+    Departures, and the wording each call is given, not only the packet,
+    labels them as the implementer's claims."""
+    body = "Summary: BODY-SENTINEL records the check in the description."
+    departure = "DEPARTURE-SENTINEL: the helper moved, so bar() changed"
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(),
+        _packet(pr_body=body, pr_body_truncated=False,
+                pr_departures=[departure],
+                pr_claims_note="pr_body and pr_departures are claims"),
+        answers=_review_answers(_judge_answer()))
+
+    assert proc.returncode == 0, proc.stderr
+    lister = (repo / "muse.prompt.1").read_text()
+    judge = (repo / "muse.prompt.2").read_text()
+    for prompt in (lister, judge):
+        assert "BODY-SENTINEL" in prompt
+        assert "DEPARTURE-SENTINEL" in prompt
+
+    def flat(text):
+        return " ".join(text.split())
+
+    lister_framing = flat(lister.split(
+        "The text after this paragraph is the review question", 1)[0])
+    assert "`pr_body`" in lister_framing
+    assert "`pr_departures`" in lister_framing
+    assert "implementer's own claims" in lister_framing
+    assert "You may cite them as evidence" in lister_framing
+    assert "add, drop or soften nothing" in lister_framing
+    assert "so its judge can weigh the departure" in lister_framing
+
+    judge_framing = flat(judge.split("The assigned requirements are:", 1)[0])
+    assert "implementer's own claims" in judge_framing
+    assert "you may cite them as evidence" in judge_framing
+    assert "judged against `pr_body`" in judge_framing
+    assert "never counts as meeting its requirement by itself" in \
+        judge_framing
+
+    # The routine's question rides in both calls ahead of the packet.
+    for prompt in (lister, judge):
+        question = flat(prompt.split("## The question", 1)[1]
+                        .split("## The packet", 1)[0])
+        assert "`pr_body`" in question
+        assert "implementer's own claims" in question
+
+
 def test_the_requirement_list_is_kept_where_the_judges_will_read_it(tmp_path):
     proc, repo = _with_probe(
         tmp_path, begin=_begin(), packet=_packet(),

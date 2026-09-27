@@ -499,6 +499,60 @@ def test_render_carries_the_plan_and_every_field():
             "## Decided from precedent") in body
 
 
+def _proposed_class_lines(body):
+    return [line for line in body.splitlines()
+            if funnel.PROPOSED_CLASS_LINE_RE.fullmatch(line)]
+
+
+@pytest.mark.parametrize("model_line", [
+    "Proposed class: Broken",
+    "  proposed class:   Broken  ",
+    "Proposed class: Broken or Improve",
+    "Proposed class: Improve",
+])
+def test_render_drops_the_models_own_proposed_class_line(model_line):
+    # #1638 and #1595 carried two lines, so approval could not adopt the
+    # Class (#1697). The runner's line from proposed_class is the one kept.
+    plan = "# Plan\n\n{}\n\nDo the thing.\n\nLast word.".format(model_line)
+    body = shape.render_plan(shape.validate_answer(answer(
+        plan_markdown=plan)))
+    assert _proposed_class_lines(body) == ["Proposed class: Improve"]
+    assert funnel.proposed_class_for_approval(body) == (
+        "Improve", "Proposed class: Improve")
+    assert body.startswith("# Plan\n\n")
+    assert "Do the thing.\n\nLast word.\n\n## Premises" in body
+
+
+def test_render_drops_a_trailing_model_line_and_keeps_prose_mentions():
+    plan = ("# Plan\n\nThe runner writes the Proposed class: line itself.\n"
+            "\nProposed class: Broken")
+    body = shape.render_plan(shape.validate_answer(answer(
+        plan_markdown=plan)))
+    assert "The runner writes the Proposed class: line itself." in body
+    assert _proposed_class_lines(body) == ["Proposed class: Improve"]
+    assert funnel.proposed_class_for_approval(body) == (
+        "Improve", "Proposed class: Improve")
+
+
+def test_render_drops_every_model_line_including_the_first_line():
+    # Every model line goes, not only the first match, and the plan's own
+    # first line is filtered like any other.
+    plan = "Proposed class: Broken\n\n# Plan\n\nBody.\n\nProposed class: New"
+    body = shape.render_plan(shape.validate_answer(answer(
+        plan_markdown=plan)))
+    assert _proposed_class_lines(body) == ["Proposed class: Improve"]
+    assert funnel.proposed_class_for_approval(body) == (
+        "Improve", "Proposed class: Improve")
+    assert "# Plan\n\nBody.\n\n## Premises" in body
+
+
+def test_render_without_a_model_line_carries_one_as_before():
+    body = shape.render_plan(shape.validate_answer(answer()))
+    assert _proposed_class_lines(body) == ["Proposed class: Improve"]
+    assert funnel.proposed_class_for_approval(body) == (
+        "Improve", "Proposed class: Improve")
+
+
 def test_render_omits_all_clear_needs_boilerplate():
     body = shape.render_plan(shape.validate_answer(answer()))
     assert "nothing outstanding" not in body

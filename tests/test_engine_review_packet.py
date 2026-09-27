@@ -541,6 +541,133 @@ def test_graphql_failure_is_an_explicit_could_not_read_section(monkeypatch):
     assert found["message"] == "Could not read PR comments: fixture unavailable"
 
 
+# -- the PR description and its Departures (#1720) --------------------------
+# Tickets ask for records "in the PR description", and PR #1667 was rejected
+# at one head over and over for records its description held, because the
+# packet carried only the title. The body now enters, bounded and labelled
+# as the implementer's own claims, with its Departures entries parsed out.
+
+def test_fetch_pr_requests_the_body(monkeypatch):
+    seen = {}
+
+    def fake(*args):
+        seen["args"] = list(args)
+        return {"number": 7}
+
+    monkeypatch.setattr(funnel, "_gh_json", fake)
+    review.fetch_pr(REPO, 7)
+    fields = seen["args"][seen["args"].index("--json") + 1].split(",")
+    assert "body" in fields
+    assert "title" in fields
+
+
+def test_packet_carries_the_pr_body_and_its_departures_as_claims():
+    body = ("Closes #9\n\nSummary:\nRecorded the renderWaiting check here.\n\n"
+            "Departures:\n- The ticket named app.js ~707; the reader moved "
+            "to ~712.\n- Skipped the screenshot: no display on the runner.\n"
+            "\nLocal: tests/test_x.py 4 passed\n")
+    found = packet(pr_view=pr_view(body=body))
+    assert found["pr_body"] == body.strip()
+    assert found["pr_body_truncated"] is False
+    assert found["pr_departures"] == [
+        "The ticket named app.js ~707; the reader moved to ~712.",
+        "Skipped the screenshot: no display on the runner.",
+    ]
+    # Labelled in the packet itself, so the JSON alone says what they are.
+    assert found["pr_claims_note"] == review.PR_CLAIMS_NOTE
+    assert "implementer's own claims" in found["pr_claims_note"]
+    assert "pr_body" in found["pr_claims_note"]
+    assert "pr_departures" in found["pr_claims_note"]
+    assert "never count a departure as meeting" in found["pr_claims_note"]
+    json.dumps(found)
+
+
+def test_a_body_over_the_limit_is_cut_and_marked_truncated():
+    body = "x" * (review.PR_BODY_LIMIT + 10)
+    found = packet(pr_view=pr_view(body=body))
+    assert review.PR_BODY_LIMIT == 20000
+    assert found["pr_body"].startswith("x" * review.PR_BODY_LIMIT)
+    assert found["pr_body"].endswith("…[truncated 10 chars]")
+    assert "x" * (review.PR_BODY_LIMIT + 1) not in found["pr_body"]
+    assert found["pr_body_truncated"] is True
+
+
+def test_a_body_at_the_limit_is_left_alone():
+    body = "x" * review.PR_BODY_LIMIT
+    found = packet(pr_view=pr_view(body=body))
+    assert found["pr_body"] == body
+    assert found["pr_body_truncated"] is False
+
+
+def test_departures_past_the_cut_still_reach_the_packet():
+    body = ("y" * review.PR_BODY_LIMIT
+            + "\n\nDepartures:\n- A departure recorded past the cut.\n")
+    found = packet(pr_view=pr_view(body=body))
+    assert found["pr_body_truncated"] is True
+    assert "past the cut" not in found["pr_body"]
+    assert found["pr_departures"] == ["A departure recorded past the cut."]
+
+
+@pytest.mark.parametrize("body", [
+    "Closes #9\n\nSummary: did the thing.\n",
+    "Departures were none; everything is as the ticket says.\n",
+    "",
+])
+def test_a_pr_without_a_departures_section_yields_an_empty_list(body):
+    found = packet(pr_view=pr_view(body=body))
+    assert found["pr_departures"] == []
+    assert found["pr_body"] == body.strip()
+
+
+def test_a_view_without_a_body_reads_as_none_not_an_empty_description():
+    found = packet()
+    assert found["pr_body"] is None
+    assert found["pr_body_truncated"] is False
+    assert found["pr_departures"] == []
+    assert found["pr_claims_note"] == review.PR_CLAIMS_NOTE
+
+
+def test_departures_round_trip_through_the_implement_pr_template():
+    """The section engine/implement.py writes is the one this reads back."""
+    from engine import implement
+
+    row = ticket(parent={"number": 1})
+    departures = ["The ticket named foo(); it moved to bar(), so bar() "
+                  "changed.", "Skipped the fixture rename: nothing uses it."]
+    written = implement.render_pr_body(
+        row, {"done": True, "summary": "Did it.", "departures": departures},
+        continued=False, tests=["python3 -m pytest -q tests/test_x.py"])
+    assert review.parse_departures(written) == departures
+
+    none_written = implement.render_pr_body(
+        row, {"done": True, "summary": "Did it.", "departures": []},
+        continued=False, tests=[])
+    assert "- None." in none_written
+    assert review.parse_departures(none_written) == []
+
+
+@pytest.mark.parametrize("body,expected", [
+    ("Departures: none\n\nLocal: tests/x.py 3 passed\n", []),
+    ("Departures: none\nLocal: tests/x.py 3 passed\n", []),
+    ("Departures:\n- N/A\n", []),
+    ("Departures:\n- None of the fixtures existed, so I wrote them.\n",
+     ["None of the fixtures existed, so I wrote them."]),
+    ("**Departures:**\n- one\n- two\n  wrapped\n\nOther paragraph.\n",
+     ["one", "two wrapped"]),
+    ("## Summary\nx\n\n## Departures\n\nTicket line 2: the helper moved.\n\n"
+     "- another\n\n## Tests\nok\n",
+     ["Ticket line 2: the helper moved.", "another"]),
+    ("Departures:\nThe ticket says X but\nthe code says Y.\n\nLocal: ok\n",
+     ["The ticket says X but the code says Y."]),
+    ("```\nDepartures:\n- quoted, not the section\n```\n\nDepartures:\n"
+     "- the real one\n", ["the real one"]),
+    ("Departures:\r\n- a\r\n- b\r\n\r\nBranch:\r\nfresh\r\n", ["a", "b"]),
+    ("Departures:\n1. first\n2) second\n", ["first", "second"]),
+])
+def test_departures_parse_the_forms_prs_write_them_in(body, expected):
+    assert review.parse_departures(body) == expected
+
+
 # -- the assembled packet ---------------------------------------------------
 
 def test_packet_carries_every_field():
@@ -1404,6 +1531,17 @@ def test_the_review_question_names_the_tickets_union_as_the_spec():
     assert "tickets" in text and "union" in text
     assert "authorised" in text
     assert "branch ticket" in text
+
+
+def test_the_review_question_labels_the_pr_body_as_the_implementers_claims():
+    """#1720: the body is evidence to weigh, and the verdict rules hold."""
+    text = (ROOT / "routines" / "muse-review.md").read_text()
+    prompt = " ".join(text.split("\n---\n", 1)[1].split())
+    assert "`pr_body`" in prompt and "`pr_departures`" in prompt
+    assert "implementer's own claims" in prompt
+    assert "weigh them against the diff" in prompt
+    assert "read from `pr_body`" in prompt
+    assert "A departure never meets its requirement by itself" in prompt
 
 
 # -- diffs over GitHub's line cap (#1114) -----------------------------------

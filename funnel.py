@@ -379,6 +379,10 @@ GATES = {
 DECISION_ORDER = ["Building", "Ready", "Shaped"]
 
 MAINTENANCE_WINDOW = timedelta(days=30)
+#: Closed command-center tickets under Broken projects that the brief lists
+#: for the fix-on-fix measure: twice its seven-day window, so a fix and the
+#: earlier fix it rewrites are both in view (#1682).
+BROKEN_FIX_TICKET_WINDOW = timedelta(days=14)
 
 # The dashboard is a display-only consumer of a successful brief. Its spool is
 # deliberately outside the repository and is a buffer, not another source of
@@ -693,6 +697,30 @@ BRIEF_SECTION_BUDGETS = {
     "decline_routing": 10.0,
     "rejected_merges": 0.25,
 }
+
+# These sections compute only from Project items and facts already loaded for
+# the brief. Keep each within its own section budget, but do not let slow
+# reader-bound sections consume the time they need to publish.
+BRIEF_PURE_SECTIONS = frozenset({
+    "items",
+    "counts_by_gate",
+    "in_motion",
+    "blocked",
+    "human_steps",
+    "machine_local_steps",
+    "blocked_human_steps",
+    "blocked_machine_local_steps",
+    "closed_with_access_vocabulary",
+    "unclassed_captures",
+    "needs_class",
+    "awaiting_breakdown",
+    "stranded",
+    "stale_locks_taken_over",
+    "maintenance_load",
+    "disposal",
+    "status_state_mismatches",
+    "rejected_merges",
+})
 
 # No brief section feeds a gate any more: the merge gate reads the
 # rejected-merge counter itself (#801), and every other consumer reads the
@@ -1475,6 +1503,12 @@ def plan_is_escalated(plan_body: str) -> List[str]:
 _PLAN_ATX_HEADING_RE = re.compile(
     r"^ {0,3}(?P<hashes>#{1,6})(?:[ \t]+(?P<title>.*?)|[ \t]*)$"
 )
+_PLAN_FENCE_OPEN_RE = re.compile(
+    r"^ {0,3}(?P<marker>`{3,}|~{3,})"
+)
+_PLAN_FENCE_CLOSE_RE = re.compile(
+    r"^ {0,3}(?P<marker>`+|~+)[ \t]*$"
+)
 _PLAN_MALFORMED_ATX_RE = re.compile(
     r"^ {0,3}(?:#{7,}|#{1,6}(?!#)\S).*$"
 )
@@ -1485,17 +1519,192 @@ _PLAN_REJECTED_INLINE_RE = re.compile(
     r"[ \t]+\(rejected:[^\r\n]*\)[ \t]*$", re.IGNORECASE
 )
 
+_PLAN_QUOTE_PAIRS = {"\"": "\"", "“": "”", "‘": "’", "«": "»"}
+_PLAN_PROPOSAL_ACTIONS = {
+    # Every inflection is spelled out: an optional suffix on a stem that
+    # ends in "e" matches "changeing", never "changing" (#1681 review).
+    "authorisation": re.compile(
+        r"\b(?:add|adds|added|adding|broaden|broadens|broadened|broadening|"
+        r"change|changes|changed|changing|configure|configures|"
+        r"configured|configuring|elevate|elevates|elevated|elevating|"
+        r"enable|enables|enabled|enabling|expand|expands|expanded|"
+        r"expanding|grant|grants|granted|granting|introduce|"
+        r"introduces|introduced|introducing|reduce|reduces|reduced|"
+        r"reducing|require|requires|required|requiring|revoke|revokes|"
+        r"revoked|revoking|tighten|tightens|tightened|tightening|"
+        r"update|updates|updated|updating|use|uses|used|using)\b",
+        re.IGNORECASE,
+    ),
+    "credentials": re.compile(
+        r"\b(?:access(?:es|ed|ing)?|change(?:s|d|ing)?|create(?:s|d|ing)?|"
+        r"expose(?:s|d|ing)?|grant(?:s|ed|ing)?|handle(?:s|d|ing)?|"
+        r"load(?:s|ed|ing)?|read(?:s|ing)?|replace(?:s|d|ing)?|"
+        r"revoke(?:s|d|ing)?|rotate(?:s|d|ing)?|store(?:s|d|ing)?|"
+        r"supply|supplies|supplied|supplying|touch(?:es|ed|ing)?|"
+        r"use(?:s|d|ing)?|write|writes|written|writing|"
+        r"update(?:s|d|ing)?)\b",
+        re.IGNORECASE,
+    ),
+    "data-migration": re.compile(
+        r"\b(?:apply|applies|applied|applying|convert(?:s|ed|ing)?|"
+        r"copy|copies|copied|copying|execute(?:s|d|ing)?|import(?:s|ed|ing)?|"
+        r"load(?:s|ed|ing)?|perform(?:s|ed|ing)?|populate(?:s|d|ing)?|"
+        r"rebuild(?:s|ing)?|rebuilt|replay(?:s|ed|ing)?|run|runs|ran|"
+        r"seed(?:s|ed|ing)?|transform(?:s|ed|ing)?|update(?:s|d|ing)?)\b",
+        re.IGNORECASE,
+    ),
+    "destructive": re.compile(
+        r"\b(?:delete|deletes|deleted|deleting|drop|drops|dropped|dropping|"
+        r"force[- ]push|hard[- ]delete|purge|purges|purged|purging|"
+        r"remove|removes|removed|removing|rewrite|rewrites|rewrote|rewriting|"
+        r"permanently delete)\b",
+        re.IGNORECASE,
+    ),
+    "concurrency": re.compile(
+        r"\b(?:add|adds|added|adding|allow|allows|allowed|allowing|"
+        r"coordinate|coordinates|coordinated|coordinating|create|creates|"
+        r"created|creating|enable|enables|enabled|enabling|fix|fixes|fixed|"
+        r"fixing|handle|handles|handled|handling|implement|implements|"
+        r"implemented|implementing|introduce|introduces|introduced|"
+        r"introducing|perform|performs|performed|performing|run|runs|ran|"
+        r"serialize|serializes|serialized|serializing|synchronize|"
+        r"synchronizes|synchronized|synchronizing|support|supports|supported|"
+        r"supporting|use|uses|used|using|write|writes|written|writing|"
+        r"commit|commits|committed|committing)\b",
+        re.IGNORECASE,
+    ),
+}
+_PLAN_DIRECT_PROPOSAL_PREFIX_RE = re.compile(
+    r"^\s*(?:[-*+]\s*)?(?:(?:proposal|decision|implementation)\s*:?\s*)?"
+    r"(?:(?:we|i|our|this(?:\s+(?:plan|project|change|"
+    r"implementation|system|service|worker|job|process|ticket))?|the\s+"
+    r"(?:plan|project|change|implementation|system|service|worker|job|"
+    r"process|ticket))\s+"
+    r"(?:(?:will|shall|must|should|can|need\s+to|needs\s+to|plan\s+to|"
+    r"plans\s+to|intend\s+to|intends\s+to|is\s+going\s+to)\s+)?)?$",
+    re.IGNORECASE,
+)
+_PLAN_DIRECT_ACTIONS = {
+    # The authorisation pattern's own terms can carry the verb: "authorise
+    # the client", or "grant ... permissions" (#1678).
+    "authorisation": re.compile(
+        r"\b(?:authori[sz](?:e|es|ed|ing)|"
+        r"(?:broaden|chang|elevat|expand|grant|reduc|revok|tighten)\w*"
+        r"(?:\s+[\w'’-]+){0,4}\s+permissions?)\b",
+        re.IGNORECASE,
+    ),
+    "data-migration": re.compile(r"\b(?:backfill|migrat\w*)\b", re.IGNORECASE),
+    "destructive": re.compile(
+        r"\b(?:force[- ]push|hard[- ]delete|permanently\s+delete|"
+        r"drop\s+(?:the\s+)?(?:table|branch)|rewrite\s+history)\b",
+        re.IGNORECASE,
+    ),
+}
+_PLAN_CLAUSE_BOUNDARY_RE = re.compile(
+    r"[.!?;—–]|\n[ \t]*\n|\n(?=[ \t]*(?:[-*+]\s+|#{1,6}[ \t]+))"
+)
+_PLAN_NEGATED_PREFIX_RE = re.compile(
+    r"\bno[- \t]*$|\b(?:no|not|never|without|nothing|none|neither|nor)\b"
+    r"(?:[- \t]+[\w'’-]+){0,5}[ \t]*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_plan_code_blocks(text: str) -> str:
+    """Blank fenced and indented Markdown code blocks, preserving lines."""
+    visible: List[str] = []
+    fence: Optional[str] = None
+    for line in (text or "").splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        ending = line[len(content):]
+        if fence is not None:
+            closing = _PLAN_FENCE_CLOSE_RE.match(content)
+            if (closing
+                    and closing.group("marker")[0] == fence[0]
+                    and len(closing.group("marker")) >= len(fence)):
+                fence = None
+            visible.append(ending)
+            continue
+        opening = _PLAN_FENCE_OPEN_RE.match(content)
+        if opening:
+            fence = opening.group("marker")
+            visible.append(ending)
+            continue
+        if content.startswith("    ") or content.startswith("\t"):
+            visible.append(ending)
+            continue
+        visible.append(line)
+    return "".join(visible)
+
+
+def _strip_plan_prose_quotes(text: str) -> str:
+    """Blank balanced prose quotations while preserving offsets and lines."""
+    if not text:
+        return text or ""
+    stack = []
+    spans = []
+    for index, char in enumerate(text):
+        if stack:
+            if char == stack[-1][0]:
+                start = stack.pop()[1]
+                spans.append((start, index + 1))
+            elif char in _PLAN_QUOTE_PAIRS:
+                stack.append((_PLAN_QUOTE_PAIRS[char], index))
+        elif char in _PLAN_QUOTE_PAIRS:
+            stack.append((_PLAN_QUOTE_PAIRS[char], index))
+    # An unmatched quote is ambiguous, so leave the body searchable.
+    if stack:
+        return text
+    characters = list(text)
+    for start, end in spans:
+        for index in range(start, end):
+            if characters[index] not in "\r\n":
+                characters[index] = " "
+    return "".join(characters)
+
+
+def _plan_clause_prefix(text: str, match_start: int) -> str:
+    """Return only the current sentence or Markdown list clause prefix."""
+    start = 0
+    for boundary in _PLAN_CLAUSE_BOUNDARY_RE.finditer(text, 0, match_start):
+        start = boundary.end()
+    prefix = text[start:match_start]
+    prefix = re.sub(r"(?m)^\s*#{1,6}[ \t]+[^\n]*(?:\n|$)", "", prefix)
+    return re.sub(r"^\s*(?:[-*+]\s*)?", "", prefix)
+
+
+def _plan_match_is_proposed(text: str, match: re.Match,
+                            reason: str) -> bool:
+    """Require an affirmative action in the same clause as the risk term."""
+    prefix = _plan_clause_prefix(text, match.start())
+    if _PLAN_NEGATED_PREFIX_RE.search(prefix + match.group(0)):
+        return False
+    action = _PLAN_PROPOSAL_ACTIONS[reason]
+    for action_match in reversed(list(action.finditer(prefix))):
+        intervening_words = re.findall(
+            r"[\w'’-]+", prefix[action_match.end():]
+        )
+        if len(intervening_words) <= 4:
+            return True
+    direct_action = _PLAN_DIRECT_ACTIONS.get(reason)
+    return bool(
+        direct_action
+        and direct_action.search(match.group(0))
+        and _PLAN_DIRECT_PROPOSAL_PREFIX_RE.fullmatch(prefix)
+    )
+
 
 def _plan_escalation_scan_text(plan_body: str) -> str:
-    """Remove plan-only rejected prose before using the shared word matcher.
+    """Remove code blocks and rejected prose before using the shared matcher.
 
     A malformed Rejected heading or a malformed heading inside its section
     makes the section boundary ambiguous. In that case keep the original body
-    intact so an uncertain parse cannot hide a scan hit.
+    intact outside code blocks so an uncertain parse cannot hide an asserted
+    scan hit.
     """
-    body = plan_body or ""
+    body = _strip_plan_code_blocks(plan_body or "")
     raw_lines = body.splitlines(keepends=True)
-    visible_lines = asserted_text(body).splitlines()
+    visible_lines = _strip_plan_prose_quotes(asserted_text(body)).splitlines()
     if len(visible_lines) > len(raw_lines):
         return body
     visible_lines.extend([""] * (len(raw_lines) - len(visible_lines)))
@@ -1559,13 +1768,35 @@ def _plan_escalation_scan_text(plan_body: str) -> str:
 
 def plan_escalation_matches(plan_body: str
                             ) -> List[Dict[str, Optional[str]]]:
-    """Return plan risks after excluding its recorded rejected alternatives.
+    """Return risks a plan affirmatively proposes after removing quoted text.
 
-    Plan-section knowledge stays here; ticket text still uses the canonical
-    matcher unchanged. If a Rejected boundary cannot be parsed, the whole body
-    is scanned as written.
+    Plan-only section and proposal rules stay here; ticket text still uses the
+    canonical matcher unchanged. If a Rejected boundary cannot be parsed, the
+    whole asserted body is scanned, but a risk term still needs an affirmative
+    action in its sentence or list clause. If a Risk marker is present, its
+    existing authority remains unchanged.
     """
-    return escalation_matches("", _plan_escalation_scan_text(plan_body))
+    text = _strip_plan_prose_quotes(
+        asserted_text(_plan_escalation_scan_text(plan_body))
+    )
+    if RISK_LINE.search(text):
+        return escalation_matches("", text)
+
+    found: List[Dict[str, Optional[str]]] = []
+    for name, pattern in sorted(ESCALATION_PATTERNS.items()):
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            if not _plan_match_is_proposed(text, match, name):
+                continue
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            line_end = text.find("\n", match.start())
+            if line_end < 0:
+                line_end = len(text)
+            found.append({
+                "reason": name,
+                "line": text[line_start:line_end].strip(),
+            })
+            break
+    return found
 
 
 def plan_needs_nate(plan_body: str) -> bool:
@@ -2856,6 +3087,9 @@ def checks_still_running(checks: Sequence[dict]) -> bool:
     return ci_rollup_state(entries) == "unknown"
 
 
+_LINE_LEADING_MARKER_RE = re.compile(r"(?m)^[ \t]*<!-- command-center-")
+
+
 def _marked_json_blocks(body: str, marker: str) -> List[Tuple[Dict, str]]:
     """Return parseable JSON blocks owned by ``marker``, newest first.
 
@@ -2876,9 +3110,12 @@ def _marked_json_blocks(body: str, marker: str) -> List[Tuple[Dict, str]]:
     blocks = []
     for marker_at in reversed(marker_positions):
         rest = body[marker_at + len(marker):]
-        next_marker = rest.find("<!-- command-center-")
-        if next_marker >= 0:
-            rest = rest[:next_marker]
+        # Only a marker that begins a line starts another block. A reviewer
+        # model that quotes an earlier verdict puts marker text inside its
+        # own JSON strings, and cutting there lost every such verdict (#1688).
+        next_marker = _LINE_LEADING_MARKER_RE.search(rest)
+        if next_marker:
+            rest = rest[:next_marker.start()]
 
         fenced = re.search(
             r"```json[ \t]*\r?\n(.*?)\r?\n```", rest, flags=re.DOTALL
@@ -4674,10 +4911,27 @@ def recorded_cause_regressions(
         if ticket is not None and ticket.parent in project_refs:
             recorded.add(ticket.parent)
 
+    # The squash commits for these tickets are what fix_recurrence.py reads
+    # from git to measure fix-on-fix; the brief supplies only the join (#1683).
+    broken_refs = {item.ref for item in projects}
+    fix_cutoff = now - BROKEN_FIX_TICKET_WINDOW
+    broken_fix_tickets = sorted(
+        (
+            {"ticket": item.number,
+             "project": int(str(item.parent).rsplit("#", 1)[1])}
+            for item in rows
+            if item.repo == REPO and item.parent in broken_refs
+            and item.state == "CLOSED" and item.closed_at is not None
+            and item.closed_at >= fix_cutoff
+        ),
+        key=lambda row: row["ticket"],
+    )
+
     total = len(recent_projects)
     count = len(recorded)
     return {
         "window_days": MAINTENANCE_WINDOW.days,
+        "broken_fix_tickets": broken_fix_tickets,
         "definition": (
             "parent projects classified Broken with a created, status, or "
             "closed event in the last 30 days and a capture caused_by marker "
@@ -10232,6 +10486,68 @@ def _load_begin_anchor_items(
             )
 
 
+class ScopedItems(list):
+    """A Project read that says which view it is.
+
+    ``load_items(scope="begin")`` returns one of these so a ``FunnelSession``
+    that cached it can tell the filtered begin view from the full board. A
+    plain list, as every other load and every test loader returns, reads as
+    the full board.
+    """
+
+    def __init__(self, items: Iterable[Item] = (), scope: str = "full"):
+        super().__init__(items)
+        self.scope = scope
+
+
+def items_scope(items: Optional[Sequence[Item]]) -> str:
+    """The view a loaded item list holds: ``"begin"`` or ``"full"``."""
+    return getattr(items, "scope", None) or "full"
+
+
+#: Session commands the filtered begin view serves as the full board would
+#: (#1591). What each reads from the item list:
+#: - ``begin``: the view is built for it (``BEGIN_ITEM_CONNECTIONS`` and
+#:   ``_begin_anchor_refs``; ``tests/test_begin_scoped_parity.py``).
+#: - ``review``: the PR's ticket, for a claim to hand back. An open ticket is
+#:   in the view; a closed one only matters holding a claim (``claims``).
+#: - ``merge``: ``rejected_merges`` (``regress``), the PR's ticket (open,
+#:   since only open tickets are offered for review) and its parent (an
+#:   anchor). A ticket missing from the view refuses with "no ticket in the
+#:   funnel": it fails closed rather than merging on a partial read.
+#: - ``claim``: ``in_motion`` and ``stale_locks`` read open items only; the
+#:   target and its parent (``effective_class``, ``_begin_parent``).
+#: - ``release`` and ``comment``: the named item alone.
+#: - ``capture``: no item at all.
+#: Everything else (brief, publisher, dashboard, doctor, metrics, queue, show,
+#: next, ...) reads closed items for its own reasons and reloads the full
+#: board first.
+BEGIN_VIEW_COMMANDS = frozenset({
+    "begin", "review", "merge", "release", "claim", "comment", "capture",
+})
+
+#: Of those, the commands that act on one named item. The view serves them
+#: only when the ref or URL matches an item in it exactly: ``find`` resolves a
+#: bare number by uniqueness, and a number unique among the view's items can
+#: be ambiguous on the full board.
+BEGIN_VIEW_REF_COMMANDS = frozenset({"release", "claim", "comment"})
+
+
+def begin_view_serves(command: str, ref: Optional[str],
+                      items: Sequence[Item]) -> bool:
+    """Whether ``command`` reads the same answer from ``items`` as from the
+    full board. Always true for a full read."""
+    if items_scope(items) == "full":
+        return True
+    if command not in BEGIN_VIEW_COMMANDS:
+        return False
+    if command in BEGIN_VIEW_REF_COMMANDS:
+        return ref is not None and any(
+            item.ref == ref or item.url == ref for item in items
+        )
+    return True
+
+
 def load_items(
     include_details: bool = True,
     member_repo_names: Optional[Sequence[str]] = None,
@@ -10268,7 +10584,7 @@ def load_items(
                 timings, "item_details",
                 lambda: hydrate_item_details(begin_items),
             )
-        return begin_items
+        return ScopedItems(begin_items, scope="begin")
     items: List[Item] = []
     cursor = None
     shape_comments: Optional[List[Dict[str, object]]] = None
@@ -13285,10 +13601,11 @@ def _brief_timed(
     deadline: Optional[float] = None,
     budget: Optional[float] = None,
 ) -> object:
-    """Run one brief section, enforce its budget, and record its timing.
+    """Run one brief section, enforce its start budget, and record its timing.
 
-    An over-budget section degrades into an explicit record and yields
-    ``_BRIEF_UNAVAILABLE``; no section fails the whole brief.
+    A section skipped before it starts or whose reader times out is unavailable.
+    A reader that finishes over budget keeps its computed value and records the
+    degradation; no section fails the whole brief.
     """
     degraded = degraded if degraded is not None else []
     budget = float(
@@ -13332,6 +13649,7 @@ def _brief_timed(
         degraded.append(_brief_degraded_record(
             section, elapsed, budget, reason
         ))
+        return value
     return value
 
 
@@ -13357,35 +13675,16 @@ def cmd_brief(
         deadline = time.perf_counter() + BRIEF_TOTAL_BUDGET_SECONDS
     cache = brief_cache or _ACTIVE_BRIEF_CACHE.get() or BriefCache()
     cache_token = _ACTIVE_BRIEF_CACHE.set(cache)
+    deferred_pure: Dict[str, Callable[[], object]] = {}
+    deferred_section = object()
 
-    def section(
-        name: str,
-        reader: Callable[[], object],
-        default,
-    ):
+    def run_section(name: str, reader: Callable[[], object]):
         value = _brief_timed(
             name,
             lambda: _brief_read(name, reader, missing),
             timings,
             degraded,
-            deadline=deadline,
-        )
-        return default if value is _BRIEF_UNAVAILABLE else value
-
-    def named_section(name: str, reader: Callable[[], object]):
-        """A section whose unread state must not look like an empty result.
-
-        `parked` and `cleared_blocks` both read as *news* when empty — nothing
-        is parked, nothing was unblocked — so degrading them to `[]` reports
-        the opposite of what happened. These return null and name themselves
-        in `missing`, the same shape the shared PR-facts read uses.
-        """
-        value = _brief_timed(
-            name,
-            lambda: _brief_read(name, reader, missing),
-            timings,
-            degraded,
-            deadline=deadline,
+            deadline=None if name in BRIEF_PURE_SECTIONS else deadline,
         )
         if value is _BRIEF_UNAVAILABLE:
             if not any(entry.get("section") == name for entry in missing):
@@ -13397,6 +13696,12 @@ def cmd_brief(
             return None
         return value
 
+    def section(name: str, reader: Callable[[], object]):
+        if name in BRIEF_PURE_SECTIONS:
+            deferred_pure[name] = reader
+            return deferred_section
+        return run_section(name, reader)
+
     def decision_payload():
         decisions = awaiting_decision(items)
         by_ref = {i.ref: i for i in items}
@@ -13405,11 +13710,11 @@ def cmd_brief(
         ]
 
     try:
-        decision_result = section("items", decision_payload, None)
-        if decision_result is None:
-            decisions = []
-            by_ref = {i.ref: i for i in items}
-            decision_rows = []
+        decision_result = section("items", decision_payload)
+        if decision_result is deferred_section or decision_result is None:
+            decisions = None
+            by_ref = None
+            decision_rows = None
         else:
             decisions, by_ref, decision_rows = decision_result
 
@@ -13422,102 +13727,119 @@ def cmd_brief(
                 for stage in STAGES
                 if stage != "Ideas"
             },
-            {},
         )
         running = section(
             "in_motion",
             lambda: in_motion(items, now, pr_facts=pr_facts),
-            [],
         )
-        parked = named_section("parked", lambda: parked_json(items))
-        pending_wakes = pending_wakes_json(parked)
+        parked = section("parked", lambda: parked_json(items))
         closed_itself = section(
             "closed_itself",
             lambda: closed_itself_json(items, now, brief_cache=cache),
-            [],
         )
-        cleared_blocks = named_section(
+        cleared_blocks = section(
             "cleared_blocks", lambda: cleared_blocks_json(items, now)
         )
-        blocked = section("blocked", lambda: blocked_json(items, now), [])
-        human = section("human_steps", lambda: human_step_json(items, now), [])
+        blocked = section("blocked", lambda: blocked_json(items, now))
+        human = section("human_steps", lambda: human_step_json(items, now))
         machine_local = section(
             "machine_local_steps",
             lambda: machine_local_step_json(items),
-            [],
         )
         blocked_human = section(
             "blocked_human_steps",
             lambda: blocked_human_step_json(items),
-            [],
         )
         blocked_machine_local = section(
             "blocked_machine_local_steps",
             lambda: blocked_machine_local_step_json(items),
-            [],
         )
         closed_access = section(
             "closed_with_access_vocabulary",
             lambda: closed_with_access_vocabulary_json(items),
-            [],
         )
         unclassed = section(
             "unclassed_captures",
             lambda: unclassed_captures_json(items),
-            [],
         )
         needs = section(
             "needs_class",
             lambda: [item_json(i, now, by_ref) for i in items if needs_class(i)],
-            [],
         )
         breakdown = section(
             "awaiting_breakdown",
             lambda: [
                 item_json(i, now, by_ref) for i in awaiting_breakdown(items)
             ],
-            [],
         )
         stranded = section(
             "stranded",
             lambda: stranded_json(items, now, pr_facts=pr_facts),
-            [],
         )
         stale = section(
             "stale_locks_taken_over",
             lambda: stale_locks(items, now, pr_facts=pr_facts),
-            [],
         )
         maintenance = section(
-            "maintenance_load", lambda: maintenance_load(items, now), {}
+            "maintenance_load", lambda: maintenance_load(items, now)
         )
-        disposal_report = section(
-            "disposal", lambda: disposal(items, now), {}
-        )
-        resend = section("resend_ratio", lambda: recent_resend_ratio(now), {})
+        disposal_report = section("disposal", lambda: disposal(items, now))
+        resend = section("resend_ratio", lambda: recent_resend_ratio(now))
         merges = section(
-            "unattended_merges", lambda: unattended_merges(now), []
+            "unattended_merges", lambda: unattended_merges(now)
         )
         approvals = section(
             "unattended_approvals",
             lambda: unattended_approvals(items, now, brief_cache=cache),
-            [],
         )
-        run_summary = section(
-            "run_summary", lambda: agent_run_summary(now), []
-        )
-        health = section("agent_health", lambda: agent_health(now), [])
+        run_summary = section("run_summary", lambda: agent_run_summary(now))
+        health = section("agent_health", lambda: agent_health(now))
         touched = section(
-            "working_tree_touched", lambda: working_tree_touched(now), []
+            "working_tree_touched", lambda: working_tree_touched(now)
         )
         rejected = section(
-            "rejected_merges", lambda: rejected_merges(items, now), {}
+            "rejected_merges", lambda: rejected_merges(items, now)
         )
         status_mismatches = section(
             "status_state_mismatches",
             lambda: status_state_mismatches(items),
-            [],
         )
+
+        # The reader-bound sections have now had their deadline-bounded turn.
+        # These renderers use only the loaded Project items and preloaded PR
+        # facts, so run them even when those reads exhausted the shared budget.
+        pure_values = {
+            "items": run_section("items", deferred_pure.pop("items")),
+        }
+        decision_result = pure_values["items"]
+        if decision_result is None:
+            decisions = None
+            by_ref = {i.ref: i for i in items}
+            decision_rows = None
+        else:
+            decisions, by_ref, decision_rows = decision_result
+        pure_values.update({
+            name: run_section(name, reader)
+            for name, reader in deferred_pure.items()
+        })
+        counts = pure_values["counts_by_gate"]
+        running = pure_values["in_motion"]
+        blocked = pure_values["blocked"]
+        human = pure_values["human_steps"]
+        machine_local = pure_values["machine_local_steps"]
+        blocked_human = pure_values["blocked_human_steps"]
+        blocked_machine_local = pure_values["blocked_machine_local_steps"]
+        closed_access = pure_values["closed_with_access_vocabulary"]
+        unclassed = pure_values["unclassed_captures"]
+        needs = pure_values["needs_class"]
+        breakdown = pure_values["awaiting_breakdown"]
+        stranded = pure_values["stranded"]
+        stale = pure_values["stale_locks_taken_over"]
+        maintenance = pure_values["maintenance_load"]
+        disposal_report = pure_values["disposal"]
+        rejected = pure_values["rejected_merges"]
+        status_mismatches = pure_values["status_state_mismatches"]
+        pending_wakes = pending_wakes_json(parked)
 
         blocked_comment_errors = [
             "{}: {}".format(item.ref, item.block_comments_error)
@@ -13549,7 +13871,9 @@ def cmd_brief(
         assembly_started = time.perf_counter()
         brief = {
             "generated_at": now.isoformat(),
-            "total_needing_nate": len(decisions),
+            "total_needing_nate": (
+                len(decisions) if decisions is not None else None
+            ),
             "counts_by_gate": counts,
             "items": decision_rows,
             "parked": parked,
@@ -14494,11 +14818,16 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
                 agent: Optional[str] = None,
                 origin: Optional[str] = None,
                 klass: Optional[str] = None,
-                caused_by: Optional[Sequence[str]] = None) -> int:
+                caused_by: Optional[Sequence[str]] = None,
+                voice: str = "agent") -> int:
     """Capture an idea. Unbounded and guilt-free, by design."""
     if origin not in ORIGIN_VOICES:
         raise GitHubError(
             "capture requires an explicit --origin (nate-relayed or agent)"
+        )
+    if voice not in ("agent", "nate-relayed"):
+        raise GitHubError(
+            "capture --voice must be agent or nate-relayed"
         )
     if origin == "agent" and klass is None:
         raise GitHubError("capture requires --class when --origin agent")
@@ -14518,7 +14847,7 @@ def cmd_capture(items: List[Item], now: datetime, title: str, note: Optional[str
             raise GitHubError("--caused-by requires a non-empty PR or ticket reference")
     repo = capture_repo(repo, run, agent)
     body = append_provenance(
-        note or "Captured from chat. Not yet thought through.", "agent",
+        note or "Captured from chat. Not yet thought through.", voice,
         at=now, run=run, agent=agent,
     )
     if caused_by_refs:
@@ -18505,6 +18834,10 @@ def main(argv: Optional[Sequence[str]] = None, *,
         help="idea origin: nate-relayed if Nate raised it, agent if observed",
     )
     capture.add_argument(
+        "--voice", choices=("agent", "nate-relayed"), default="agent",
+        help="provenance voice for the body written by this command",
+    )
+    capture.add_argument(
         "--class", dest="klass", choices=LADDER, default=None,
         help="ladder class; required when --origin agent",
     )
@@ -18806,6 +19139,13 @@ def main(argv: Optional[Sequence[str]] = None, *,
         time.perf_counter() if brief_timings is not None else None
     )
     begin_detail_loader: Optional[Callable[[Sequence[Item]], None]] = None
+    if _items is not None and not begin_view_serves(
+        args.command, getattr(args, "ref", None), _items
+    ):
+        # A session's first `begin` cached the filtered view. This command
+        # reads closed items that view left out, so the session loader reads
+        # the full board in its place (#1591).
+        _items = None
     try:
         if _items is not None:
             items = _items
@@ -18816,6 +19156,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
                     include_details=False,
                     member_repo_names=begin_member_repo_names,
                     timings=begin_timings,
+                    scope="begin",
                 )
             else:
                 items = _call_with_optional_keywords(
@@ -18824,13 +19165,15 @@ def main(argv: Optional[Sequence[str]] = None, *,
                 )
         elif args.command == "begin":
             # `begin` selects one job after its cheap gates. Keep the initial
-            # Project scan compact; cmd_begin hydrates only the candidates it
-            # actually needs to order or hand out.
+            # Project scan compact: every open item and only the closed items
+            # a begin consumer reads (#1591). cmd_begin hydrates only the
+            # candidates it actually needs to order or hand out.
             items = _call_with_optional_keywords(
                 load_items,
                 include_details=False,
                 member_repo_names=begin_member_repo_names,
                 timings=begin_timings,
+                scope="begin",
             )
 
             def hydrate_begin_candidates(candidates):
@@ -18966,7 +19309,7 @@ def main(argv: Optional[Sequence[str]] = None, *,
         if args.command == "capture":
             return cmd_capture(items, now, args.title, args.note, args.repo,
                                args.run, args.agent, args.origin, args.klass,
-                               args.caused_by)
+                               args.caused_by, args.voice)
         if args.command == "begin":
             begin_kwargs = {
                 "repo_readiness": repo_readiness,
@@ -19514,20 +19857,36 @@ class FunnelSession:
         include_details: bool = True,
         member_repo_names: Optional[Sequence[str]] = None,
         timings: Optional[Dict[str, object]] = None,
+        scope: Optional[str] = None,
     ) -> List[Item]:
-        if self.items is None:
-            self.items = _call_with_optional_keywords(
-                self._loader,
-                include_details=include_details,
-                member_repo_names=member_repo_names,
-                timings=timings,
-            )
-            self._history_pending = (
-                not include_details and self._command != "begin"
-            )
-        elif include_details and self._history_pending:
-            hydrate_item_details(self.items)
-            self._history_pending = False
+        """Load once per session, or again when the cached read is a
+        narrower view than this command asked for.
+
+        ``main`` asks with ``scope="begin"`` for ``begin`` and with no scope
+        otherwise. A cached full read serves either; a cached begin view
+        serves only a begin-scoped ask, and a full ask replaces it, along with
+        any local mutation state, by a fresh read of GitHub (#1591). A full
+        read loaded without history by a cheaper first command is hydrated
+        once, in place, by the first later command that reads history
+        (PROJECT_LOAD_READS_HISTORY).
+        """
+        if self.items is not None and (
+            scope == "begin" or items_scope(self.items) == "full"
+        ):
+            if include_details and self._history_pending:
+                hydrate_item_details(self.items)
+                self._history_pending = False
+            return self.items
+        self.items = _call_with_optional_keywords(
+            self._loader,
+            include_details=include_details,
+            member_repo_names=member_repo_names,
+            timings=timings,
+            scope=scope,
+        )
+        self._history_pending = (
+            not include_details and self._command != "begin"
+        )
         return self.items
 
     def dispatch(self, argv: Sequence[str], stdin=None):

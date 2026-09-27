@@ -1,0 +1,32 @@
+[
+  {
+    "source": "What it is: schema migration and backfill",
+    "body": "## What it is\n\nThis change will migrate the active schema and backfill the new column.\n",
+    "expected_reasons": ["data-migration"]
+  },
+  {
+    "source": "Decided by the agent: token rotation",
+    "body": "## Decided by the agent\n\n- Rotate the access token during cutover.\n",
+    "expected_reasons": ["credentials"]
+  },
+  {
+    "source": "Decided by the agent: permanent deletion",
+    "body": "## Decided by the agent\n\n- Permanently delete expired records after the retention cutoff.\n",
+    "expected_reasons": ["destructive"]
+  },
+  {
+    "source": "Decided by the agent: concurrent writes",
+    "body": "## Decided by the agent\n\n- Perform concurrent writes to partitioned records during replay.\n",
+    "expected_reasons": ["concurrency"]
+  },
+  {
+    "source": "What it is: verb-led permissions change (#1678)",
+    "body": "## What it is\n\nThis ticket will grant write permissions to the deploy key.\n",
+    "expected_reasons": ["authorisation"]
+  },
+  {
+    "source": "Decided by the agent: add an auth scheme (#1678)",
+    "body": "## Decided by the agent\n\n- Add OAuth to the connector before cutover.\n",
+    "expected_reasons": ["authorisation"]
+  }
+]

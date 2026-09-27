@@ -501,6 +501,24 @@ def open_need_categories(answer: Dict) -> List[str]:
             if answer["needs_nate"][field] is not None]
 
 
+def _plan_escalation_scan_body(answer: Dict) -> str:
+    """Render the complete plan body without echoing typed risk declarations.
+
+    Declared risks are evaluated separately from the wording scan. Every
+    other rendered section must be in the scan so preview and the persisted
+    Risk field read the same plan.
+    """
+    scan_answer = dict(answer)
+    scan_answer["escalated_risk"] = []
+    return render_plan(scan_answer)
+
+
+def _plan_escalation_matches(answer: Dict) -> List[Dict[str, Optional[str]]]:
+    """Scan the same rendered plan body used by preview and Risk writes."""
+    return funnel.plan_escalation_matches(
+        _plan_escalation_scan_body(answer))
+
+
 def needs_nate_open(answer: Dict) -> bool:
     """Whether the answer's open-question record asks Nate anything.
 
@@ -773,12 +791,10 @@ def preview_decision(items: list, item, answer: Dict) -> Tuple[str, str]:
     effective_klass = funnel.effective_class(item, by_ref)
     if item.klass not in funnel.LADDER and origin_voice == "agent":
         effective_klass = answer["proposed_class"]
-    scan_answer = dict(answer)
     # `decide` consumes the typed declaration separately. Keep it out of the
-    # wording scan here so the durable Risk line added by `render_plan` does
-    # not report the same declaration twice.
-    scan_answer["escalated_risk"] = []
-    matches = funnel.plan_escalation_matches(render_plan(scan_answer))
+    # wording scan so the durable Risk rationale does not report the same
+    # declaration twice.
+    matches = _plan_escalation_matches(answer)
     return decide(
         answer,
         klass=effective_klass,
@@ -1101,7 +1117,8 @@ def packet_main(argv: Optional[Sequence[str]] = None) -> int:
 def apply_shape(items: list, now: datetime, ref: str,
                 answer_data: object,
                 run: Optional[str] = None,
-                agent: Optional[str] = None) -> int:
+                agent: Optional[str] = None,
+                voice: str = "agent") -> int:
     """Validate one shape answer and record the plan it carries.
 
     Renders the issue body from the answer fields, applies the
@@ -1119,6 +1136,8 @@ def apply_shape(items: list, now: datetime, ref: str,
     the edges together, so a ref GitHub cannot resolve fails the whole
     write instead of recording a plan whose dependency is missing.
     """
+    if voice not in ("agent", "nate-relayed"):
+        raise ShapeError("shape provenance voice must be agent or nate-relayed")
     item = funnel.find(items, ref)
     answer = validate_answer(answer_data)
     answer, rejected_signals = review_shape_output_for_item(
@@ -1141,7 +1160,7 @@ def apply_shape(items: list, now: datetime, ref: str,
     status, reason = preview_decision(items, item, answer)
     authority_signals = funnel.needs_nate_signals(rendered)
     body = funnel.append_provenance(
-        rendered, "agent", at=now, run=run, agent=agent)
+        rendered, voice, at=now, run=run, agent=agent)
     for block in carried_blocks:
         body = "{}\n\n{}".format(body, block)
 
@@ -1212,7 +1231,7 @@ def apply_shape(items: list, now: datetime, ref: str,
                                      answer["proposed_class"]))
     risk = "escalated" if (
         answer["escalated_risk"]
-        or funnel.plan_escalation_matches(answer["plan_markdown"])
+        or _plan_escalation_matches(answer)
     ) else "standard"
     needs = "human" if status == "Shaped" else "none"
     funnel.write_project_select(item.item_id, "Risk", risk, item.ref)
@@ -1303,6 +1322,9 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
                         help="run id recorded in provenance blocks")
     parser.add_argument("--agent", default=None,
                         help="agent name recorded in provenance blocks")
+    parser.add_argument("--voice", choices=("agent", "nate-relayed"),
+                        default="agent",
+                        help="provenance voice for the plan body")
     parser.add_argument("--attempt", type=int, default=None,
                         help="attempt number in the runner protocol: a "
                              "malformed answer exits 3 below attempt 2 "
@@ -1340,7 +1362,7 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
         print("shape-apply: {}".format(exc), file=sys.stderr)
         return validation_exit(args.attempt)
     try:
-        resolved = funnel.resolve_repo(args.repo)
+        resolved = funnel.capture_repo(args.repo, args.run, args.agent)
         ref = "{}#{}".format(resolved, args.idea)
         # Shape validation reads the idea and its parent for effective Class.
         # Fetch those Project rows by ref; if either filter misses, keep the
@@ -1372,7 +1394,7 @@ def apply_main(argv: Optional[Sequence[str]] = None) -> int:
             return 0
         return apply_shape(
             items, datetime.now(timezone.utc), ref, data,
-            run=args.run, agent=args.agent)
+            run=args.run, agent=args.agent, voice=args.voice)
     except (ShapeError, funnel.GitHubError) as exc:
         print("shape-apply: {}".format(exc), file=sys.stderr)
         return 1

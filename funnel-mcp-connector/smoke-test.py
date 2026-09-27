@@ -4,8 +4,8 @@
   ./smoke-test.py http://127.0.0.1:3003
 
 The token is read from INBOUND_STATIC_TOKEN or --token. After the auth checks, the
-authenticated MCP session verifies exactly the four read tools and the three gate
-tools are registered.
+authenticated MCP session verifies exactly the four read tools, two write tools, and
+three gate tools are registered.
 """
 
 from __future__ import annotations
@@ -67,6 +67,7 @@ async def main() -> int:
                 expected = {
                     "brief", "ideas", "show", "queue",
                     "approve", "accept", "park",
+                    "capture", "shaped",
                 }
                 actual = {tool.name for tool in tools}
                 if actual != expected:
@@ -76,7 +77,10 @@ async def main() -> int:
                         )
                     )
                 else:
-                    print("  PASS  initialize and tools/list completed; read and gate tools are registered")
+                    print(
+                        "  PASS  initialize and tools/list completed; all four read, "
+                        "two write, and three gate tools are registered"
+                    )
         except Exception as exc:  # noqa: BLE001 - report protocol and auth failures
             failures.append(f"authenticated MCP session: {type(exc).__name__}: {exc}")
 

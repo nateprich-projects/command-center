@@ -33,22 +33,23 @@ def _quiet_after_a_busy_cadence(agent, minutes_silent=90, every=15, count=40):
     return rows
 
 
-#: 2026-10-07 00:00 in Beijing time (UTC+8), 2026-10-06 09:00 PDT: the
-#: earliest reading of the z.ai plan's expiry date (Nate, 2026-09-23; #1411).
-ZAI_CUTOFF = datetime(2026, 10, 7, 0, 0,
-                      tzinfo=timezone(timedelta(hours=8))).timestamp()
+#: 2026-09-27 06:00 PDT: brought forward from the plan's expiry day when
+#: z.ai's weekly window was spent until 2026-10-03 (#1694; first cutoff
+#: 2026-10-06 09:00 PDT, Nate 2026-09-23, #1411).
+ZAI_CUTOFF = datetime(2026, 9, 27, 6, 0,
+                      tzinfo=timezone(timedelta(hours=-7))).timestamp()
 
 
-def test_the_zai_cutoff_is_the_start_of_the_expiry_day_in_beijing_time():
-    assert heartbeat.ZAI_STANDARD_UNTIL == ZAI_CUTOFF == 1791302400
+def test_the_zai_cutoff_is_2026_09_27_0600_pacific():
+    assert heartbeat.ZAI_STANDARD_UNTIL == ZAI_CUTOFF == 1790514000
     pacific = datetime.fromtimestamp(ZAI_CUTOFF, timezone(timedelta(hours=-7)))
-    assert (pacific.month, pacific.day, pacific.hour) == (10, 6, 9)
+    assert (pacific.month, pacific.day, pacific.hour) == (9, 27, 6)
 
 
 def test_zcode_is_live_until_the_zai_cutoff_and_retired_from_it():
-    """zcode is the engine's z.ai standard tier from 2026-09-23; its
-    silence alarms while it runs, and stops alarming by itself when the plan
-    expires, with no edit to make."""
+    """zcode was the engine's z.ai standard tier from 2026-09-23; its
+    silence alarmed while it ran, and stops alarming by itself at the
+    cutoff (2026-09-27 06:00 PDT since #1694), with no edit to make."""
     assert heartbeat.retired_agents(ZAI_CUTOFF - 1) == frozenset()
     assert heartbeat.retired_agents(ZAI_CUTOFF) == {"zcode"}
     assert heartbeat.retired_agents(ZAI_CUTOFF + 86400) == {"zcode"}

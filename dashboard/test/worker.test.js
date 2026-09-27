@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, createSign } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import worker, { METRICS_KEY, REFRESH_KEY, verifyAccessJwt } from "../worker.js";
@@ -97,6 +98,29 @@ test("an authorized request reads the snapshot without changing its order", asyn
 
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), snapshot);
+});
+
+test("the snapshot endpoint preserves null brief sections from its fixture", async () => {
+  const fixture = JSON.parse(await readFile(
+    new URL("../fixtures/snapshot-unreadable-brief.json", import.meta.url), "utf8",
+  ));
+  const access = accessFixture();
+  const env = {
+    ACCESS_TEAM_DOMAIN: access.teamDomain,
+    ACCESS_AUD: access.audience,
+    ACCESS_JWKS_FETCH: access.fetchImpl,
+    FUNNEL_SNAPSHOT: { async get() { return fixture; } },
+  };
+  const response = await worker.fetch(new Request("https://funnel.nateprich.com/api/snapshot", {
+    headers: { "Cf-Access-Jwt-Assertion": access.sign() },
+  }), env);
+
+  assert.equal(response.status, 200);
+  const snapshot = await response.json();
+  assert.deepEqual(snapshot, fixture);
+  assert.equal(snapshot.brief.counts_by_gate, null);
+  assert.equal(snapshot.brief.items, null);
+  assert.equal(snapshot.brief.total_needing_nate, null);
 });
 
 test("an authorized metrics request reads the separate metrics key", async () => {

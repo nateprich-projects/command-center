@@ -1,0 +1,82 @@
+[
+  {
+    "source": "#1503",
+    "body": "The fix is forward-only and the 14 invalid-JSON lines and the lost escalated fire stand unrewritten as the before-measurement. (source: sibling convention #1393 and #1182 no-backfill decisions)",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1494",
+    "body": "The fix is forward-only with no rewrite of the nine wasted runs or of the watch's two hand-closes, which stand as the before-measurement. (source: sibling convention #1393 and #1182 no-backfill decisions)",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1488",
+    "body": "On a residual refusal — a concurrent writer raced the read — re-read the edges and treat the ref as satisfied only when the edge is confirmed present; absent or unreadable keeps the failure named, never a match on the refusal string.",
+    "pre_change_reasons": ["concurrency"]
+  },
+  {
+    "source": "#1517",
+    "body": "The fix is forward-only; the 2026-09-25 rejection, the refused merge and the watch's re-record stand as the before-measurement. (source: sibling convention #1393 and #1182 no-backfill decisions)",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1519",
+    "body": "The fix is forward-only; the 16 escalated and 8 standard lost fires and their absent records stand as the before-measurement with no backfill. (source: sibling convention: the no-backfill decisions in #1393 and #1182)",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1514",
+    "body": "On #1503 funnel.plan_escalation_matches returns exactly one hit, a data-migration reason on the Backfill-or-rewrite line that sits under ## Rejected and negates a backfill rather than proposing one.",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1539",
+    "body": "The fix makes the newest automation-thread rollout errors visible in doctor without touching any credential. The credential fix itself is Nate's and out of scope.",
+    "pre_change_reasons": ["credentials"]
+  },
+  {
+    "source": "#1539",
+    "body": "#1541 publisher retry floor is publisher-side spend versus doctor health, shared log-as-comparison-source and no-backfill conventions, keep both.",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1539",
+    "body": "The doctor reported \"401 Incorrect API key\" in the newest task error; the credential fix is outside this plan.",
+    "pre_change_reasons": ["credentials"]
+  },
+  {
+    "source": "#1545",
+    "body": "The fix is forward-only; the 2026-09-25 evening timings and the 7-of-12 timeout count stand as the before-measurement with no backfill. (source: sibling convention, the no-backfill decisions in #1393 and #1182, followed by #1417, #1519, #1541 and #1542)",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1566",
+    "body": "The fix is forward-only with no backfill or re-run of past breakdowns. (source: sibling convention, the no-backfill decisions in #1393 and #1182, followed by #1514 through #1545)",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1576",
+    "body": "The fix is forward-only; the three 2026-09-25/26 failed finish runs stand as the before-measurement with no backfill or re-run. (source: sibling convention, the no-backfill decisions in #1393 and #1182, followed by #1514 through #1545)",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1540: Decided from precedent",
+    "body": "## Decided from precedent\n- The measurement is forward-only; the 2026-09-24 to 09-26 windows and the 44 reserve-skips stand as the before-measurement with no backfill (source: sibling convention, the no-backfill decisions in #1393 and #1182)\n",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1595: Decided from precedent",
+    "body": "## Decided from precedent\n- The fix is forward-only; the 2026-09-26 snapshot and its eleven-minute serve window stand as the before-measurement with no backfill or re-publish. (source: sibling convention, the no-backfill decisions in #1393 and #1182, followed by #1514 through #1582)\n",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1582: Decided from precedent",
+    "body": "## Decided from precedent\n- The fix is forward-only: the 2026-09-26 census, the 70.3 percent alert and the manual reap stand as the before-measurement with no backfill. (source: sibling convention, the no-backfill decisions in #1393 and #1182, followed by #1514 through #1576)\n",
+    "pre_change_reasons": ["data-migration"]
+  },
+  {
+    "source": "#1632: sibling citation",
+    "body": "## Siblings checked\n- #1626 (Shaped) — review-lister deadlock fix on #1581's tickets; engine code, not AGENTS.md; keep both.\n",
+    "pre_change_reasons": ["concurrency"]
+  }
+]

@@ -3028,11 +3028,12 @@ def test_a_lister_call_past_the_bound_is_killed_like_any_other(tmp_path):
 
 # -- the z.ai standard tier (Nate, 2026-09-23) ---------------------------------
 #
-# Until 2026-10-07 00:00 Beijing time (2026-10-06 09:00 PDT) the standard
-# tier is answered by GLM-5.3 through scripts/zai-exec and recorded as agent
-# `zcode`, its judges one at a time (#1411); the escalated tier stays on
-# Muse, and at the cutoff the standard tier returns to Muse by itself. The
-# cutoff is moved by MUSE_REVIEW_ENGINE_ZAI_UNTIL here only.
+# Before heartbeat.ZAI_STANDARD_UNTIL (2026-09-27 06:00 PDT since #1694;
+# first 2026-10-06 09:00 PDT) the standard tier was answered by GLM-5.3
+# through scripts/zai-exec and recorded as agent `zcode`, its judges one at a
+# time (#1411); the escalated tier stays on Muse, and at the cutoff the
+# standard tier returns to Muse by itself. These tests move the cutoff with
+# MUSE_REVIEW_ENGINE_ZAI_UNTIL.
 
 FUTURE = "9999999999"
 
@@ -3083,7 +3084,7 @@ def test_the_engine_cutoff_is_the_one_heartbeat_retires_zcode_at():
     runner = SCRIPT.read_text()
     assert 'MUSE_REVIEW_ENGINE_ZAI_UNTIL:-{}}}'.format(
         heartbeat.ZAI_STANDARD_UNTIL) in runner
-    assert heartbeat.ZAI_STANDARD_UNTIL == 1791302400
+    assert heartbeat.ZAI_STANDARD_UNTIL == 1790514000
 
 
 def test_a_standard_review_before_the_cutoff_runs_on_zai_as_zcode(tmp_path):

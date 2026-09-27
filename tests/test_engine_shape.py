@@ -667,8 +667,8 @@ def test_a_scan_hit_holds_with_an_empty_declaration():
         "Shaped", "escalated risk (credentials)")
 
 
-def test_preview_keeps_the_recorded_1503_residual_citation_hit():
-    """The adapter removes the Rejected hit; a later source citation remains."""
+def test_preview_ignores_the_recorded_1503_no_backfill_citation():
+    """A sibling citation about no backfill is not a proposed migration."""
     item = idea(1503, klass="Broken")
     recorded = (ROOT / "tests/fixtures/escalation_plan_1503_recorded.md").read_text(
         encoding="utf-8")
@@ -679,12 +679,61 @@ def test_preview_keeps_the_recorded_1503_residual_citation_hit():
 
     status, reason = shape.preview_decision([item], item, candidate)
 
-    assert status == "Shaped"
+    assert status == "Ready"
     assert reason == (
-        "escalated risk (data-migration: - The fix is forward-only and the "
-        "14 invalid-JSON lines and the lost escalated fire stand as the "
-        "before-measurement. (source: sibling convention #1393 and #1182 "
-        "no-backfill decisions))")
+        "needs_nate all null; class Broken self-approvable; "
+        "origin agent")
+
+
+def test_preview_and_risk_write_share_the_rendered_escalation_scan(
+        monkeypatch):
+    item = idea(1644, klass="Broken")
+    candidate = answer(
+        proposed_class="Broken",
+        plan_markdown="# Plan\n\nDisplay source freshness.",
+        decided_by_agent=[{
+            "decision": "Backfill recent records from the canonical source.",
+            "alternative": "Leave historical gaps.",
+            "why": "The report needs an initial baseline.",
+        }],
+        escalated_risk=[],
+    )
+    scan_bodies = []
+    scan = funnel.plan_escalation_matches
+
+    def record_scan(body):
+        scan_bodies.append(body)
+        return scan(body)
+
+    monkeypatch.setattr(funnel, "plan_escalation_matches", record_scan)
+    project_writes = []
+    monkeypatch.setattr(
+        funnel, "write_project_select",
+        lambda item_id, field, value, ref:
+            project_writes.append((field, value)),
+    )
+    stub_gh(monkeypatch, item)
+
+    preview_status, preview_reason = shape.preview_decision(
+        [item], item, shape.validate_answer(candidate))
+
+    assert (preview_status, preview_reason) == (
+        "Shaped",
+        "escalated risk (data-migration: - Backfill recent records from "
+        "the canonical source.)",
+    )
+    assert shape.apply_shape(
+        [item], NOW, item.ref, candidate,
+        run="shape-run", agent="muse") == 0
+    assert item.status == "Shaped"
+    assert ("Risk", "escalated") in project_writes
+    assert ("Needs", "human") in project_writes
+
+    expected_scan_body = shape.render_plan(shape.validate_answer(candidate))
+    assert "Backfill recent records" in expected_scan_body
+    assert expected_scan_body != candidate["plan_markdown"]
+    assert len(scan_bodies) == 3
+    assert scan_bodies == [expected_scan_body] * 3
 
 
 def test_a_clear_declaration_with_a_clear_scan_is_ready():
@@ -1347,10 +1396,23 @@ def test_apply_advances_an_all_clear_agent_plan_to_ready(
     assert funnel.parse_self_approval(comments[0][1][-1]) == (
         "needs_nate all null; class Improve self-approvable; "
         "origin agent; no escalated risk")
-
     output = capsys.readouterr().out
     assert "owner/repo#42 → Ready" in output
     assert "advanced to Ready: needs_nate all null" in output
+
+
+def test_apply_can_stamp_nate_relayed_provenance(monkeypatch):
+    item = idea(42)
+    calls = stub_gh(monkeypatch, item)
+
+    assert shape.apply_shape(
+        [item], NOW, item.ref, answer(),
+        run="shape-run", agent="codex", voice="nate-relayed") == 0
+
+    written = gh_calls(calls, "gh", "issue", "edit")[0][1][-1]
+    assert funnel.parse_provenance(written) == {
+        "agent": "codex", "at": NOW.isoformat(), "run": "shape-run",
+        "voice": "nate-relayed"}
 
 
 def test_apply_reviews_false_holds_on_an_agent_broken_replay(
@@ -1928,12 +1990,15 @@ def test_apply_cli_reads_the_answer_from_stdin(
     monkeypatch.setattr(funnel, "load_items", lambda **kwargs: [item])
     monkeypatch.setattr(
         sys, "stdin", io.StringIO(json.dumps(answer())))
-    stub_gh(monkeypatch, item)
+    calls = stub_gh(monkeypatch, item)
     assert shape.apply_main(
         ["42", "--repo", REPO, "--answer", "-",
-         "--run", "shape-run", "--agent", "muse"]) == 0
+         "--run", "shape-run", "--agent", "muse",
+         "--voice", "nate-relayed"]) == 0
     assert item.status == "Ready"
     assert "→ Ready" in capsys.readouterr().out
+    written = gh_calls(calls, "gh", "issue", "edit")[0][1][-1]
+    assert funnel.parse_provenance(written)["voice"] == "nate-relayed"
 
 
 def test_apply_cli_rejects_invalid_json_before_any_read(

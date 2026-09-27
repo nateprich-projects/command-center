@@ -3,6 +3,8 @@
 Read by `scripts/muse-review-engine` with `PACKET_JSON` substituted.
 Judgement text only.
 
+Human reviewers: follow the [review-path change discipline](../docs/review-path-changes.md).
+
 ---
 
 You are a Command Center reviewer with no tools. Judge one PR only from

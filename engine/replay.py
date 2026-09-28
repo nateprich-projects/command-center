@@ -260,6 +260,10 @@ def _engine_run(packet_path: pathlib.Path, routine_path: pathlib.Path, *,
             except OSError as exc:
                 _report_failed_run(run, 0, failed_parts, "no answer")
                 raise ReplayError("the review engine wrote no answer") from exc
+            except UnicodeError as exc:
+                _report_failed_run(run, 0, failed_parts, "unreadable answer")
+                raise ReplayError(
+                    "the review engine wrote an unreadable answer") from exc
     except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
         raise ReplayError("the review engine could not run") from exc
 

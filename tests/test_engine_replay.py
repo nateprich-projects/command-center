@@ -12,6 +12,7 @@ import json
 import pathlib
 import re
 import stat
+import string
 import subprocess
 import sys
 
@@ -299,8 +300,12 @@ def test_the_default_engine_is_this_checkouts_runner():
         ({"STUB_ENGINE_SILENT_RUN": "2"}, "exit status 0, no answer"),
         ({"STUB_ENGINE_ANSWER_2": "not json"},
          "exit status 0, unscorable answer"),
+        # A lone 0xff byte in the answer file: not UTF-8 at all.
+        ({"STUB_ENGINE_ANSWER_2": "\udcff"},
+         "exit status 0, unreadable answer"),
     ],
-    ids=["non-zero exit", "no answer", "unscorable answer"],
+    ids=["non-zero exit", "no answer", "unscorable answer",
+         "unreadable answer"],
 )
 def test_an_engine_failure_fails_the_whole_replay(
         tmp_path, monkeypatch, capfd, stub_engine, failure, reported):
@@ -449,9 +454,12 @@ def test_timing_lines_drop_every_line_that_quotes_requirement_text(line):
 # below accepts it. Listing counterexamples one loosening at a time left a new
 # batch of plausible widenings passing each time (#1784).
 
-#: Letters of both cases, digits, the punctuation a widening would let
+#: Every ASCII letter, digits, the punctuation a widening would let
 #: through, a non-ASCII digit that \\d takes, and a space.
-EDIT_ALPHABET = "azAZ09_-.:\u0663 "
+EDIT_ALPHABET = string.ascii_letters + "09_-.:\u0663 "
+#: A widening that admits a separator and then a word, inserted anywhere.
+EDIT_SEPARATORS = ["", "-", ".", ":", "_", "/", " ", "="]
+EDIT_WORDS = ["a", "payouts", "payoutsroundhalfeven"]
 VALID_PARTS = ["judge.3", "judge.12", "shape.framer", "shape.auditor",
                "shape.sibling.0", "shape.decider.2", "lister"]
 VALID_OUTCOMES = ["done", "retried-done", "failed"]
@@ -462,6 +470,10 @@ def _edits(value):
     for i in range(len(value) + 1):
         for c in EDIT_ALPHABET:
             found.add(value[:i] + c + value[i:])
+        for sep in EDIT_SEPARATORS:
+            for word in EDIT_WORDS:
+                found.add(value[:i] + sep + word + value[i:])
+                found.add(value[:i] + word + sep + value[i:])
     for i in range(len(value)):
         found.add(value[:i] + value[i + 1:])
         for c in EDIT_ALPHABET:
@@ -510,6 +522,23 @@ def test_an_outcome_is_only_one_of_the_three():
                     and _accepted(_timing("judge.3", 412, 2, outcome)))
 
     assert leaked == []
+
+
+def test_the_pattern_is_pinned_to_its_reviewed_source():
+    # The pattern is a privacy boundary, and no finite set of counterexamples
+    # catches every widening of it: four reviews each found a new batch that
+    # passed. So its exact source is pinned too, and changing it means
+    # changing this test in the same diff, where review sees it (#1784).
+    assert replay.TIMING_LINE.pattern == (
+        r"muse-review-engine: timing "
+        r"(?P<part>judge\.[0-9]{1,4}"
+        r"|shape\.(?:framer|auditor|(?:sibling|decider)\.[0-9]{1,4})"
+        r"|lister) "
+        r"elapsed=(?P<elapsed>[0-9]{1,9})s "
+        r"calls=(?P<calls>[0-9]{1,4}) "
+        r"outcome=(?P<outcome>done|retried-done|failed)"
+    )
+    assert replay.TIMING_LINE.flags == re.UNICODE
 
 
 def test_every_valid_value_is_accepted():

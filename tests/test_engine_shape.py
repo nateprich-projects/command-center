@@ -1237,7 +1237,8 @@ def test_improve_is_explicitly_covered_by_agent_output_review_and_close_policy()
     assert funnel.gate_question(item) is None
 
 
-@pytest.mark.parametrize("klass", ["Broken", "Investigate", "Maintenance"])
+@pytest.mark.parametrize(
+    "klass", ["Broken", "Investigate", "Maintenance", "Bug"])
 @pytest.mark.parametrize("origin", ["agent", "nate-direct", "nate-relayed"])
 def test_self_approvable_upkeep_classes_close_after_all_tickets(klass, origin):
     item = idea(

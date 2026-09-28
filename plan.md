@@ -91,9 +91,11 @@ predicate for both the `Accept it?` gate and unattended close:
 3. **New and Replace are unchanged:** they always wait at `Accept it?` after
    their tickets close. **Confirmed by Nate, 2026-09-17.**
 
-   `Bug` (added by #1845) is in none of these rules yet. Whether a Bug project
-   closes itself like Broken or waits at `Accept it?` is the open gate question
-   on #1832; until Nate answers it, a finished Bug project waits.
+   `Bug` (added by #1845) closes itself exactly as Broken does, whoever asked
+   for it. #987, which coded these rules, names the upkeep classes as
+   `SELF_APPROVABLE_CLASSES` and closes every one of them but Improve; Bug is a
+   defect class, upkeep like Broken, so the rules already decide it. #1832 had
+   listed it as a gate question; it is settled from that precedent.
    _(agent rule, unconfirmed — advisory)_
 4. **The #145 amendment is superseded for upkeep classes.** A project that
    carried a human-step ticket does not thereby return to the accept gate;

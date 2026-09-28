@@ -156,6 +156,10 @@ def _completion_policy_body(origin, override=None):
         ("Broken", "nate-relayed", None, True),
         ("Maintenance", None, None, True),
         ("Maintenance", "nate-relayed", None, True),
+        # Bug closes itself exactly as Broken does, by #987's rule (#1845).
+        ("Bug", "agent", None, True),
+        ("Bug", "nate-relayed", None, True),
+        ("Bug", None, None, True),
         ("Improve", "agent", None, True),
         ("Improve", "nate-relayed", None, False),
         ("Improve", None, None, False),

@@ -12380,10 +12380,11 @@ def _can_close_itself(item: Item) -> bool:
     if parse_analysis_marker(body) is not None:
         return False
 
-    # Bug is deliberately absent: whether a Bug project closes itself like
-    # Broken or waits at `Accept it?` is a gate question #1832 left for Nate,
-    # so until he answers it falls through to the wait (#1845).
-    if item.klass in {"Investigate", "Broken", "Maintenance"}:
+    # Bug closes itself exactly as Broken does (#1845). #987's final accept
+    # rule names the upkeep classes as SELF_APPROVABLE_CLASSES and lets every
+    # one but Improve close itself whoever raised it; Bug is a defect class,
+    # upkeep like Broken, so no Bug project waits at `Accept it?`.
+    if item.klass in {"Investigate", "Broken", "Maintenance", "Bug"}:
         return True
     if item.klass != "Improve":
         return False

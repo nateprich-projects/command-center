@@ -1264,7 +1264,8 @@ def test_begin_leaves_non_reconcilable_projects_untouched(
     ]
 
 
-@pytest.mark.parametrize("klass", ["Broken", "Investigate", "Maintenance"])
+@pytest.mark.parametrize(
+    "klass", ["Broken", "Investigate", "Maintenance", "Bug"])
 @pytest.mark.parametrize("origin", ["agent", "nate-direct", "nate-relayed"])
 def test_begin_reconciles_parented_upkeep_items_regardless_of_origin(
     monkeypatch, capsys, klass, origin

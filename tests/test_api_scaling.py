@@ -298,6 +298,49 @@ def test_project_item_list_is_compact_and_detail_read_is_candidate_bounded(
     assert items[0].status_since is not None
 
 
+def test_shared_startable_candidates_are_filtered_before_hydration(monkeypatch):
+    project = _node(1, children_total=1)
+    ticket = _node(2, parent=1)
+    for number, node in enumerate((project, ticket), start=1):
+        node["id"] = "project-item-{}".format(number)
+        node["needs"] = {"name": "none"}
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        if "nodes(ids: $ids)" in query:
+            assert variables == {"ids": ["project-item-2"]}
+            return {
+                "nodes": [{
+                    "id": "project-item-2",
+                    "content": {"timelineItems": {"nodes": []}},
+                }],
+            }
+        return {
+            "user": {
+                "projectV2": {
+                    "items": {
+                        "nodes": [project, ticket],
+                        "pageInfo": {
+                            "hasNextPage": False,
+                            "endCursor": None,
+                        },
+                    },
+                },
+            },
+        }
+
+    monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+
+    items = funnel.load_items(include_startable=True)
+
+    assert [item.number for item in items.startable_candidates] == [2]
+    assert [variables["ids"] for _query, variables in calls[1:]] == [
+        ["project-item-2"]
+    ]
+
+
 def test_detail_query_only_requests_child_times_for_items_with_children(
     monkeypatch,
 ):

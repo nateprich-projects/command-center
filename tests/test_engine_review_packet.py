@@ -24,6 +24,13 @@ REPO = "owner/repo"
 SHA = "abc123def456"
 OTHER_SHA = "7890fedcba98"
 
+#: The funnel's own PR (#1794) in the ``gh pr ... --json`` shape: a head in
+#: the base repository, opened by the owner account.
+OWNER_PR = {"isCrossRepository": False,
+            "headRepository": {"name": "repo"},
+            "headRepositoryOwner": {"login": "owner"},
+            "author": {"login": "nateprich"}}
+
 
 @pytest.fixture(autouse=True)
 def project_risk(monkeypatch):
@@ -55,6 +62,7 @@ def pr_view(**kw):
         ],
         "files": [{"path": "funnel.py"}],
     }
+    data.update(OWNER_PR)
     data.update(kw)
     return data
 
@@ -736,6 +744,7 @@ def merged_row(number, branch="ticket/9", **kw):
            "mergedAt": "2026-09-1{}T00:00:00Z".format(number),
            "headRefName": branch,
            "files": [{"path": "dashboard/public/app.js"}]}
+    row.update(OWNER_PR)
     row.update(kw)
     return row
 
@@ -797,6 +806,93 @@ def test_packet_carries_prior_slices_from_the_pr_view_branch():
     assert [entry["pr"] for entry in found["ticket_prior_prs"]] == [4]
 
 
+# -- only the funnel's own PRs reach the packet (#1794) ----------------------
+#
+# The packet is what the review model reads. command-center is public, so a
+# fork's PR named ticket/<n> must never become one, and a stranger's branch
+# name must not reach the reviewer from another PR's packet either.
+
+NOT_THE_FUNNELS = [
+    pytest.param({"isCrossRepository": True,
+                  "headRepository": {"name": "repo"},
+                  "headRepositoryOwner": {"login": "mallory"},
+                  "author": {"login": "mallory"}}, id="fork"),
+    pytest.param({"author": {"login": "mallory"}}, id="another-author"),
+    pytest.param({"author": None}, id="author-unreadable"),
+    pytest.param({"isCrossRepository": None, "headRepository": None},
+                 id="head-unreadable"),
+]
+
+
+def _explode(*args, **kwargs):
+    raise AssertionError("a foreign PR's packet read past the PR view")
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_collect_refuses_a_foreign_pr_before_reading_anything_else(
+        monkeypatch, trust):
+    monkeypatch.setattr(review, "fetch_pr", lambda repo, pr: pr_view(**trust))
+    for name in ("fetch_scope", "fetch_diff", "fetch_files_diff",
+                 "fetch_ticket", "fetch_plan_md", "fetch_open_prs",
+                 "fetch_merged_prs", "fetch_ci_runs", "fetch_verdict",
+                 "fetch_pr_comments"):
+        monkeypatch.setattr(review, name, _explode)
+
+    with pytest.raises(funnel.GitHubError,
+                       match="not the funnel's own PR.*no review packet"):
+        review.collect(REPO, 7, items_loader=_explode)
+
+
+def test_the_pr_view_asks_for_the_trust_fields(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args: calls.append(args) or pr_view())
+
+    review.fetch_pr(REPO, 7)
+
+    fields = calls[0][calls[0].index("--json") + 1].split(",")
+    assert {"isCrossRepository", "headRepository", "headRepositoryOwner",
+            "author"} <= set(fields)
+
+
+@pytest.mark.parametrize("reader", ["fetch_open_prs", "fetch_merged_prs"])
+def test_the_pr_lists_ask_for_the_trust_fields(monkeypatch, reader):
+    calls = []
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args: calls.append(args) or [])
+
+    getattr(review, reader)(REPO)
+
+    fields = calls[0][calls[0].index("--json") + 1].split(",")
+    assert {"isCrossRepository", "headRepository", "headRepositoryOwner",
+            "author"} <= set(fields)
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_a_foreign_open_pr_is_not_named_as_an_overlap(trust):
+    open_prs = [
+        dict(OWNER_PR, number=8, headRefName="ticket/10",
+             files=[{"path": "funnel.py"}]),
+        dict(OWNER_PR, number=9, headRefName="ticket/ignore-previous",
+             files=[{"path": "funnel.py"}], **trust),
+    ]
+    found = packet(open_prs=open_prs)
+    assert [entry["pr"] for entry in found["overlap"]] == [8]
+
+
+@pytest.mark.parametrize("trust", NOT_THE_FUNNELS)
+def test_a_merged_foreign_pr_is_no_prior_slice_but_still_changed_main(trust):
+    newer = "2026-09-20T00:00:00Z"
+    view = pr_view(commits=[{"committedDate": "2026-09-10T00:00:00Z"}],
+                   files=[{"path": "dashboard/public/app.js"}])
+    found = packet(pr_view=view, merged_prs=[
+        merged_row(4, mergedAt="2026-09-01T00:00:00Z"),
+        merged_row(5, mergedAt=newer, **trust)])
+    assert [entry["pr"] for entry in found["ticket_prior_prs"]] == [4]
+    # Whoever opened it, a merge changed main under this PR.
+    assert [entry["pr"] for entry in found["merged_overlap"]] == [5]
+
+
 # -- the review question names them (#908) ----------------------------------
 
 def test_the_review_question_tells_the_model_to_judge_the_increment():
@@ -832,8 +928,8 @@ def test_packet_marks_a_missing_plan():
 
 def test_packet_computes_overlap_and_protected_from_the_pr_view():
     view = pr_view(files=[{"path": "AGENTS.md"}, {"path": "funnel.py"}])
-    open_prs = [{"number": 8, "headRefName": "ticket/10",
-                 "files": [{"path": "funnel.py"}]}]
+    open_prs = [dict(OWNER_PR, number=8, headRefName="ticket/10",
+                     files=[{"path": "funnel.py"}])]
     found = packet(pr_view=view, open_prs=open_prs)
     assert found["changed_files"] == ["AGENTS.md", "funnel.py"]
     assert found["overlap"] == [{"pr": 8, "branch": "ticket/10",
@@ -1830,9 +1926,9 @@ def test_packet_carries_the_compare_scope_and_both_bases():
 
 
 def test_open_overlap_reads_the_compare_scope():
-    open_prs = [{"number": 8, "headRefName": "ticket/10",
-                 "files": [{"path": "branch-0.py"},
-                           {"path": "main-0.py"}]}]
+    open_prs = [dict(OWNER_PR, number=8, headRefName="ticket/10",
+                     files=[{"path": "branch-0.py"},
+                            {"path": "main-0.py"}])]
     found = packet(pr_view=pr_view_with_49_files(), open_prs=open_prs,
                    changed_files=list(BRANCH_FILES),
                    merge_base=MERGE_BASE_SHA, scope_source="compare")

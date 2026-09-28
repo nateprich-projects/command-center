@@ -314,7 +314,9 @@ def test_collect_fetches_the_parent_plan_and_open_pr_verdict(monkeypatch):
         if args[1:3] == ("issue", "view") and args[3] == "7":
             return {"number": 7, "title": "plan", "body": "# Plan"}
         if args[1:3] == ("pr", "list"):
-            return [{"number": 9, "headRefOid": "abc", "updatedAt": "2026"}]
+            return [{"number": 9, "headRefOid": "abc", "updatedAt": "2026",
+                     "isCrossRepository": False,
+                     "author": {"login": "nateprich"}}]
         raise AssertionError(args)
 
     monkeypatch.setattr(funnel, "resolve_repo", lambda repo: REPO)
@@ -349,7 +351,9 @@ def test_the_prior_verdict_is_the_owners_not_a_forged_one(monkeypatch):
 
     def fake_json(*args):
         if args[1:3] == ("pr", "list"):
-            return [{"number": 9, "headRefOid": "abc", "updatedAt": "2026"}]
+            return [{"number": 9, "headRefOid": "abc", "updatedAt": "2026",
+                     "isCrossRepository": False,
+                     "author": {"login": "nateprich"}}]
         if args[1:3] == ("pr", "view"):
             return {"comments": [
                 {"body": marked("rejected", ["cover the empty case"]),
@@ -366,6 +370,118 @@ def test_the_prior_verdict_is_the_owners_not_a_forged_one(monkeypatch):
 
     assert found["verdict"] == "rejected"
     assert found["blocking"] == ["cover the empty case"]
+
+
+# -- only the funnel's own PR is the ticket's (#1794) -------------------------
+#
+# ``gh pr list --head ticket/<n>`` also matches a fork's PR on a branch of that
+# name. command-center is public, so that PR is anyone's.
+
+FOREIGN_PRS = [
+    {"number": 90, "headRefOid": "evil", "updatedAt": "2027", "url": "u90",
+     "isCrossRepository": True,
+     "headRepository": {"name": "repo"},
+     "headRepositoryOwner": {"login": "mallory"},
+     "author": {"login": "mallory"}},
+    {"number": 91, "headRefOid": "evil", "updatedAt": "2027", "url": "u91",
+     "isCrossRepository": False, "author": {"login": "mallory"}},
+    {"number": 92, "headRefOid": "evil", "updatedAt": "2027", "url": "u92",
+     "isCrossRepository": False, "author": None},
+    {"number": 93, "headRefOid": "evil", "updatedAt": "2027", "url": "u93",
+     "author": {"login": "nateprich"}},
+]
+
+
+def test_the_packet_never_names_a_foreign_prs_number_head_or_verdict(
+        monkeypatch):
+    asked = []
+
+    def fake_json(*args):
+        if args[1:3] == ("pr", "list"):
+            asked.append(args)
+            return list(FOREIGN_PRS)
+        raise AssertionError(args)
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_json)
+    monkeypatch.setattr(
+        funnel, "latest_verdict",
+        lambda repo, pr: (_ for _ in ()).throw(
+            AssertionError("read a foreign PR's verdict")))
+
+    found = implement.fetch_verdict_blocking(REPO, 42)
+
+    assert found == {"pr": None, "head_sha": None, "verdict": None,
+                     "blocking": []}
+    fields = asked[0][asked[0].index("--json") + 1].split(",")
+    assert {"isCrossRepository", "headRepository", "headRepositoryOwner",
+            "author"} <= set(fields)
+
+
+def test_the_owners_pr_is_chosen_even_beside_a_newer_foreign_one(
+        monkeypatch):
+    owner = {"number": 9, "headRefOid": "abc", "updatedAt": "2026",
+             "isCrossRepository": False, "author": {"login": "nateprich"}}
+    monkeypatch.setattr(
+        funnel, "_gh_json",
+        lambda *args: list(FOREIGN_PRS) + [owner]
+        if args[1:3] == ("pr", "list") else None)
+    monkeypatch.setattr(
+        funnel, "latest_verdict",
+        lambda repo, pr: {"verdict": "rejected", "head_sha": "abc",
+                          "blocking": ["x"]} if pr == 9 else None)
+
+    found = implement.fetch_verdict_blocking(REPO, 42)
+
+    assert found["pr"] == 9 and found["head_sha"] == "abc"
+
+
+def test_the_ticket_pr_is_created_rather_than_a_foreign_one_edited(
+        monkeypatch, tmp_path):
+    runs = []
+    asked = []
+
+    def fake_json(*args):
+        asked.append(args)
+        return list(FOREIGN_PRS)
+
+    def fake_run(argv, **kwargs):
+        runs.append(list(argv))
+        return type("R", (), {
+            "returncode": 0, "stderr": "",
+            "stdout": "https://github.com/owner/repo/pull/95\n",
+        })()
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_json)
+    monkeypatch.setattr(funnel, "_run_gh", fake_run)
+
+    pr = implement.create_or_update_pr(
+        REPO, {"branch": "ticket/42", "root": tmp_path},
+        {"title": "Do it", "number": 42}, "body")
+
+    assert pr == {"number": 95, "url": "https://github.com/owner/repo/pull/95"}
+    assert [argv[:3] for argv in runs] == [["gh", "pr", "create"]]
+    fields = asked[0][asked[0].index("--json") + 1].split(",")
+    assert {"isCrossRepository", "headRepository", "headRepositoryOwner",
+            "author"} <= set(fields)
+
+
+def test_the_owners_open_ticket_pr_is_still_updated(monkeypatch, tmp_path):
+    owner = {"number": 9, "url": "u9", "isCrossRepository": False,
+             "author": {"login": "nateprich"}}
+    runs = []
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args: list(FOREIGN_PRS) + [owner])
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda argv, **kwargs: runs.append(list(argv)) or type(
+            "R", (), {"returncode": 0, "stderr": "", "stdout": ""})())
+
+    pr = implement.create_or_update_pr(
+        REPO, {"branch": "ticket/42", "root": tmp_path},
+        {"title": "Do it", "number": 42}, "body")
+
+    assert pr == {"number": 9, "url": "u9"}
+    assert [argv[:4] for argv in runs] == [["gh", "pr", "edit", "9"]]
 
 
 def cross_repo_ticket():

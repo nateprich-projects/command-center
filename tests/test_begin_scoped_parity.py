@@ -117,6 +117,10 @@ def _pr(repo, number, ticket, *, state="OPEN", verdict=None, head=None,
             {"name": "tests", "conclusion": "SUCCESS", "status": "COMPLETED"}
         ],
         "comments": [_verdict_comment(verdict, head)] if verdict else [],
+        # The funnel's own PR: same-repository head, owner author (#1794).
+        "isCrossRepository": False,
+        "headRepository": {"nameWithOwner": repo},
+        "author": {"login": "nateprich"},
     }
     if state == "MERGED":
         row["mergedAt"] = _stamp(NOW - timedelta(hours=20))

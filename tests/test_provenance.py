@@ -196,7 +196,9 @@ def test_comment_posts_body_with_the_requested_voice(monkeypatch):
 def test_review_comment_keeps_verdict_parseable_after_provenance(monkeypatch):
     monkeypatch.setattr(
         funnel, "_gh_json",
-        lambda *args: {"state": "OPEN", "headRefOid": "abc123"},
+        lambda *args: {"state": "OPEN", "headRefOid": "abc123",
+                       "isCrossRepository": False,
+                       "author": {"login": "nateprich"}},
     )
     calls = []
 

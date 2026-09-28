@@ -47,7 +47,6 @@ def _node(
         "lock": {"text": lock} if lock else None,
         "status": {"name": status} if status else None,
         "class": {"name": "New"},
-        "risk": {"name": "standard"},
         "needs": {"name": needs} if needs else None,
         "content": {
             "number": number,
@@ -185,7 +184,6 @@ def test_startable_scan_projects_only_shared_listing_fields():
         'status: fieldValueByName(name: "Status")',
         'class: fieldValueByName(name: "Class")',
         'gate: fieldValueByName(name: "Needs")',
-        'risk: fieldValueByName(name: "Risk")',
         'pinned: fieldValueByName(name: "Pinned")',
         "startable: content",
     ):
@@ -195,14 +193,15 @@ def test_startable_scan_projects_only_shared_listing_fields():
 
 
 def test_from_node_accepts_shared_startable_projection_aliases():
-    source = _node(2, parent=1, needs="none")
+    source = _node(
+        2, parent=1, needs="none", lock="2026-09-28T10:00:00Z",
+    )
     item = funnel._from_node({
         "id": source["id"],
         "claim": source["lock"],
         "status": source["status"],
         "class": source["class"],
         "gate": source["needs"],
-        "risk": {"name": "standard"},
         "pinned": None,
         "startable": source["content"],
     })
@@ -211,33 +210,63 @@ def test_from_node_accepts_shared_startable_projection_aliases():
     assert item.ref == REPO + "#2"
     assert item.parent == REPO + "#1"
     assert item.needs == "none"
-    assert item.risk == "standard"
+    assert item.risk is None
     assert item.item_id == source["id"]
+    assert item.in_motion_since == funnel.parse_time(source["lock"]["text"])
+
+
+def test_shared_projection_does_not_default_an_unset_parent_class():
+    source = _node(1, children_total=1, status="Ready")
+    parent = funnel._from_node({
+        "id": source["id"],
+        "status": source["status"],
+        "class": None,
+        "gate": {"name": "none"},
+        "claim": None,
+        "pinned": None,
+        "startable": source["content"],
+    })
+    ticket = funnel.Item(
+        repo=REPO, number=2, title="ticket", url="", state="OPEN",
+        parent=parent.ref, needs="none",
+    )
+
+    assert parent.klass is None
+    assert funnel._startable_candidate_items([parent, ticket]) == []
 
 
 @pytest.mark.parametrize(
-    ("risk", "needs"),
-    [
-        (None, "none"),
-        ("unknown", "none"),
-        ("standard", None),
-        ("standard", "unknown"),
-    ],
+    ("needs", "expected"),
+    [("none", True), ("agent", True), ("human", False),
+     ("claude-code-environment", False), ("external-event", False),
+     ("unknown", False)],
 )
-def test_startable_filter_fails_closed_on_missing_or_unknown_routing(
-    risk, needs,
-):
+def test_shared_gate_alias_preserves_needs_routing(needs, expected):
     parent = funnel.Item(
         repo=REPO, number=1, title="parent", url="", state="OPEN",
         status="Building", klass="Improve", origin="agent",
-        risk="standard", needs="none", children_total=1,
+        needs="none", children_total=1,
     )
     ticket = funnel.Item(
         repo=REPO, number=2, title="ticket", url="", state="OPEN",
-        parent=parent.ref, origin="agent", risk=risk, needs=needs,
+        parent=parent.ref, origin="agent", risk=None, needs=needs,
     )
 
-    assert funnel._startable_candidate_items([parent, ticket]) == []
+    assert bool(funnel._startable_candidate_items([parent, ticket])) is expected
+
+
+def test_unset_risk_does_not_drop_a_startable_ticket():
+    parent = funnel.Item(
+        repo=REPO, number=1, title="parent", url="", state="OPEN",
+        status="Building", klass="Improve", needs="none", children_total=1,
+    )
+    ticket = funnel.Item(
+        repo=REPO, number=2, title="ticket", url="", state="OPEN",
+        body="ordinary implementation details", parent=parent.ref,
+        needs="none", risk=None,
+    )
+
+    assert funnel._startable_candidate_items([parent, ticket]) == [ticket]
 
 
 def test_begin_filters_startable_candidates_before_detail_hydration(
@@ -252,11 +281,11 @@ def test_begin_filters_startable_candidates_before_detail_hydration(
         repo=REPO, number=2, title="eligible", url="", state="OPEN",
         parent=parent.ref, origin="agent", risk="standard", needs="none",
     )
-    unknown_risk = funnel.Item(
-        repo=REPO, number=3, title="unknown risk", url="", state="OPEN",
+    missing_risk = funnel.Item(
+        repo=REPO, number=3, title="missing risk", url="", state="OPEN",
         parent=parent.ref, origin="agent", risk=None, needs="none",
     )
-    rows = [parent, eligible, unknown_risk]
+    rows = [parent, eligible, missing_risk]
     events = []
     hydrated = []
     original_filter = funnel._startable_candidate_items
@@ -291,10 +320,10 @@ def test_begin_filters_startable_candidates_before_detail_hydration(
         include_details=True,
     )
 
-    assert loaded.startable_candidates == [eligible]
+    assert loaded.startable_candidates == [eligible, missing_risk]
     assert events == ["minimal-list", "filter", "hydrate"]
     assert eligible.ref in hydrated
-    assert unknown_risk.ref not in hydrated
+    assert missing_risk.ref in hydrated
 
 
 def test_second_page_is_requested_for_the_paging_alias_only(monkeypatch):

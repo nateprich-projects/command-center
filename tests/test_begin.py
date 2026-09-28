@@ -2103,15 +2103,15 @@ def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):
     assert [ref for ref, value in writes if value] == [standard.ref]
 
 
-def test_begin_routes_tickets_by_canonical_risk_field_not_issue_text():
+def test_begin_routes_unset_risk_tickets_with_existing_escalation_scan():
     standard_project, standard = _ticket(
-        8, 9, body="Risk: escalated — database migration"
+        8, 9, body="ordinary implementation details"
     )
     escalated_project, escalated = _ticket(
-        10, 11, body="ordinary implementation details"
+        10, 11, body="Risk: escalated — database migration"
     )
-    standard.risk = "standard"
-    escalated.risk = "escalated"
+    standard.risk = None
+    escalated.risk = None
     rows = [
         standard_project, standard,
         escalated_project, escalated,
@@ -2140,8 +2140,8 @@ def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
     ticket = funnel.Item(
         repo=repo, number=165, title="Ticket 165",
         url="https://github.com/{}/issues/165".format(repo),
-        state="OPEN", body="Risk: standard", origin="agent",
-        risk="standard", needs="none", parent=project.ref,
+        state="OPEN", body="ordinary implementation details", origin="agent",
+        risk=None, needs="none", parent=project.ref,
         item_id="item-165",
         status_since=NOW - timedelta(days=30),
     )

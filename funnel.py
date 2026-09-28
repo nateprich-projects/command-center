@@ -2066,10 +2066,6 @@ def _startable_without_repo_readiness(
         or item.open_blockers
         or item.children_total
         or needs not in NEEDS_OPTIONS
-        # Routing fields are canonical Project values. A ticket with no known
-        # Risk cannot be assigned to a begin lane; its body is explanatory,
-        # not a second machine-readable routing source.
-        or item.risk not in RISK_OPTIONS
         or (
             needs in ("agent", "external-event")
             and item.block_comments_error is not None
@@ -4547,10 +4543,7 @@ def next_ticket_for_tier(items: Sequence[Item], now: datetime,
         if ticket is None or tier is None:
             return ticket
 
-        if ticket.risk not in RISK_OPTIONS:
-            excluded.add(ticket.ref)
-            continue
-        if ticket.risk == tier:
+        if required_tier(ticket.title, _loaded_item_body(ticket)) == tier:
             return ticket
         excluded.add(ticket.ref)
 
@@ -8878,8 +8871,8 @@ ITEM_NODE_FIELDS = """\
 # issue body is needed for startability checks; timeline and child history are
 # read only after the candidate set is known.
 # The response aliases name the shared listing contract: startable issue
-# facts, Status, Class, gate (Needs), Risk, and claim. Pinned is also read for
-# the settled ordering rule; Origin is not used to route ticket work.
+# facts, Status, Class, gate (Needs), and claim. Pinned is also read for the
+# settled ordering rule; Origin and Risk do not route ticket work here.
 STARTABLE_ITEM_NODE_FIELDS = """\
           id
           claim: fieldValueByName(name: "In motion since") {
@@ -8892,9 +8885,6 @@ STARTABLE_ITEM_NODE_FIELDS = """\
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           gate: fieldValueByName(name: "Needs") {
-            ... on ProjectV2ItemFieldSingleSelectValue { name }
-          }
-          risk: fieldValueByName(name: "Risk") {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           pinned: fieldValueByName(name: "Pinned") {

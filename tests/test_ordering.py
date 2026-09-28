@@ -1200,6 +1200,32 @@ def test_broken_preempts_the_limit():
     assert next_ticket(rows, NOW).number == 4
 
 
+def test_shared_listing_preserves_finite_order_and_investigate_position():
+    rows = [
+        project(1, "Building", "Broken"), ticket(2, 1),
+        project(3, "Building", "Maintenance"), ticket(4, 3),
+        project(5, "Building", "Investigate"), ticket(6, 5),
+        project(7, "Building", "Improve"), ticket(8, 7),
+    ]
+
+    assert [item.number for item in funnel.startable_listing(rows)] == [
+        2, 4, 6, 8,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("klass", "should_start"),
+    [("Broken", True), ("Maintenance", False), ("Investigate", False)],
+)
+def test_shared_order_keeps_the_wip_exception_broken_only(klass, should_start):
+    rows = _at_limit([project(3, "Building", klass), ticket(4, 3)])
+    shared_order = funnel.startable_listing(rows)
+
+    selected = next_ticket(rows, NOW, startable_order=shared_order)
+
+    assert (selected is not None) is should_start
+
+
 def test_maintenance_does_not_preempt_the_limit():
     """Maintenance may preempt in-flight *ranking*, but not exceed the cap."""
     rows = _at_limit([project(3, "Building", "Maintenance"), ticket(4, 3)])

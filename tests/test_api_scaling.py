@@ -22,7 +22,6 @@ def _node(
     return {
         "status": {"name": "Building"},
         "class": {"name": "New"},
-        "risk": {"name": "standard"},
         "content": {
             "number": number,
             "title": "issue {}".format(number),

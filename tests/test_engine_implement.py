@@ -2614,8 +2614,7 @@ def test_unsatisfiable_decline_is_withheld_until_acceptance_changes():
     body = "Accept: a condition no agent can satisfy"
     item = funnel.Item(
         repo=REPO, number=42, title="implementation", url="https://example/42",
-        state="OPEN", body=body, needs="agent", risk="standard",
-        parent=parent.ref,
+        state="OPEN", body=body, needs="agent", parent=parent.ref,
         decline_route={
             "type": "unsatisfiable-acceptance",
             "acceptance_digest": hashlib.sha256(
@@ -2643,7 +2642,7 @@ def test_pending_gate_decline_waits_then_clears_needs(monkeypatch):
     item = funnel.Item(
         repo=REPO, number=42, title="implementation", url="https://example/42",
         state="OPEN", body="Accept: wait for the gate", needs="external-event",
-        risk="standard", parent=parent.ref, item_id="project-item-42",
+        parent=parent.ref, item_id="project-item-42",
         decline_route={
             "type": "pending-gate-answer",
             "gate_ref": gate.ref,

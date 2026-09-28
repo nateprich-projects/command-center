@@ -656,6 +656,17 @@ def test_shared_startable_order_puts_finite_work_before_pins_and_pins_before_cla
     assert [i.number for i in startable(rows)] == [6, 4, 2]
 
 
+def test_shared_startable_order_puts_pins_before_repository_tier():
+    rows = [
+        tier_project(HOBBY, 1, "Ready", "Improve", pinned=True),
+        tier_ticket(HOBBY, 2, 1),
+        tier_project(TOOLING, 3, "Ready", "Improve"),
+        tier_ticket(TOOLING, 4, 3),
+    ]
+
+    assert [item.number for item in funnel.startable_listing(rows)] == [2, 4]
+
+
 def test_shared_startable_order_uses_tier_before_building_then_ladder():
     rows = [
         repo_project("nateprich/command-center", 1, "Ready", "Improve"),
@@ -669,6 +680,32 @@ def test_shared_startable_order_uses_tier_before_building_then_ladder():
     ]
 
     assert [item.number for item in startable(rows)] == [2, 4, 6, 8]
+
+
+def test_shared_startable_order_keeps_building_commitment_ahead_of_ladder():
+    rows = [
+        project(1, "Building", "Replace"), ticket(2, 1),
+        project(3, "Ready", "Investigate"), ticket(4, 3),
+    ]
+
+    assert [item.number for item in funnel.startable_listing(rows)] == [2, 4]
+
+
+def test_shared_startable_order_keeps_ladder_ahead_of_unblock_count():
+    investigate_project = project(1, "Building", "Investigate")
+    investigate = ticket(2, 1)
+    improve_project = project(3, "Building", "Improve")
+    improve = ticket(4, 3)
+    dependent_a = ticket(6, 5, open_blockers=[improve.ref])
+    dependent_b = ticket(8, 7, open_blockers=[improve.ref])
+    rows = [
+        investigate_project, investigate,
+        improve_project, improve,
+        project(5, "Building", "New"), dependent_a,
+        project(7, "Building", "New"), dependent_b,
+    ]
+
+    assert [item.number for item in funnel.startable_listing(rows)] == [2, 4]
 
 
 def test_shared_startable_order_inherits_blocker_class_and_higher_tier():
@@ -757,12 +794,7 @@ def test_a_pin_does_not_preempt_the_wip_cap_for_an_unbounded_class():
 
 
 def test_in_flight_work_finishes_before_anything_new_starts():
-    """Passing a gate is a commitment; nothing may silently un-commit it.
-
-    Both parents are Building — the only startable state — so this isolates the
-    ladder: the in-flight Replace ticket still precedes the newer New one,
-    because its project is already committed to.
-    """
+    """With both parents Building, this isolates the ladder within that state."""
     older = project(1, "Building", "Replace", days=30)
     in_flight = ticket(2, 1, days=30)
     newer = project(3, "Building", "New", days=1)
@@ -1206,10 +1238,12 @@ def test_shared_listing_preserves_finite_order_and_investigate_position():
         project(3, "Building", "Maintenance"), ticket(4, 3),
         project(5, "Building", "Investigate"), ticket(6, 5),
         project(7, "Building", "Improve"), ticket(8, 7),
+        project(9, "Building", "New"), ticket(10, 9),
+        project(11, "Building", "Replace"), ticket(12, 11),
     ]
 
     assert [item.number for item in funnel.startable_listing(rows)] == [
-        2, 4, 6, 8,
+        2, 4, 6, 8, 10, 12,
     ]
 
 

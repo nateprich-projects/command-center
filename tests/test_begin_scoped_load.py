@@ -305,6 +305,15 @@ def test_unset_risk_does_not_drop_a_startable_ticket():
     assert funnel._startable_candidate_items([parent, ticket]) == [ticket]
 
 
+def test_standard_risk_uses_the_canonical_field_not_issue_prose():
+    ticket = funnel.Item(
+        repo=REPO, number=2, title="ticket", url="", state="OPEN",
+        body="Risk: escalated — concurrency", risk="standard",
+    )
+
+    assert funnel._ticket_work_tier(ticket) == "standard"
+
+
 def test_unknown_risk_fails_closed_in_shared_startable_candidates():
     parent = funnel.Item(
         repo=REPO, number=1, title="parent", url="", state="OPEN",
@@ -374,6 +383,13 @@ def test_shared_candidates_clear_an_answered_pending_gate_before_selection(
     gate.body += "\n\n" + funnel.gates_answer_block(
         "the plan is good", "Nate",
     )
+    candidates = funnel._startable_candidate_items(rows)
+    listing = funnel.startable_listing(rows, candidate_items=candidates)
+
+    assert ticket.needs == "external-event"
+    assert candidates == [ticket]
+    assert listing == [ticket]
+
     assert funnel.clear_answered_decline_routes(rows) == [
         {"ref": ticket.ref, "gate_ref": gate.ref}
     ]

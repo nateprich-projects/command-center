@@ -2025,7 +2025,7 @@ def _ticket_work_tier(item: Item) -> Optional[str]:
         return None
     if item.risk == "escalated":
         return "escalated"
-    return required_tier(item.title, _loaded_item_body(item))
+    return "standard"
 
 
 def _decline_route_withholds_startability(

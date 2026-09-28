@@ -628,3 +628,23 @@ def test_ticket_1722_direct_migration_verbs_are_spelled_out():
         assert direct.fullmatch(word), word
     for word in ("migrateing", "migrateed", "migrat"):
         assert direct.fullmatch(word) is None, word
+
+
+def test_ticket_1770_every_verb_carrying_category_has_a_direct_action_entry():
+    """These three categories can carry their own proposing verb."""
+    assert {"data-migration", "authorisation", "credentials"} <= set(
+        funnel._PLAN_DIRECT_ACTIONS
+    )
+
+
+def test_ticket_1770_credentials_direct_actions_use_literal_rotate_forms_and_terms():
+    direct = funnel._PLAN_DIRECT_ACTIONS["credentials"]
+    for verb in ("rotate", "rotates", "rotated", "rotating"):
+        assert direct.search("{} the deploy credentials".format(verb)), verb
+
+    for noun in ("API key", "access token", "client secret",
+                 "credential store", "password", "private key", "credential",
+                 "credentials"):
+        assert direct.search("rotate the deploy {}".format(noun)), noun
+
+    assert direct.search("rotate the deploy secret key") is None

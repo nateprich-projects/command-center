@@ -827,6 +827,7 @@ test("the Budget panel renders D1-D6, marks Muse pace resets, and explains the D
     assert.match(cards[2].textContent, /Seven-day window/);
 
     const cost = cards[3];
+    assert.match(cost.textContent, /Notional API cost per merged PR by lane/i);
     assert.equal(cost.querySelectorAll(".metric-gap").length, 3);
     assert.match(cost.textContent, /complete priced cost/);
     assert.match(cards[4].textContent, /points per run/i);

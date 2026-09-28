@@ -20,8 +20,10 @@ import math
 import sys
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+import api_pricing
 import funnel
 import session_usage
 
@@ -560,6 +562,41 @@ def _aggregate_token_usage(
     return totals
 
 
+def _aggregate_notional_api_cost(
+    runs: Sequence[Mapping[str, object]],
+) -> Optional[Dict[str, object]]:
+    """Sum complete per-run API estimates without hiding an unknown run."""
+    if not runs:
+        return None
+    total = Decimal("0")
+    for run in runs:
+        cost = run.get("notional_api_cost")
+        if not isinstance(cost, Mapping) or cost.get("status") != "priced":
+            return {
+                "value": None,
+                "unit": "USD",
+                "basis": api_pricing.BASIS,
+                "status": "incomplete",
+                "reason": "one_or_more_run_costs_incomplete",
+            }
+        value = cost.get("value")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return {
+                "value": None,
+                "unit": "USD",
+                "basis": api_pricing.BASIS,
+                "status": "incomplete",
+                "reason": "one_or_more_run_costs_incomplete",
+            }
+        total += Decimal(str(value))
+    return {
+        "value": float(total),
+        "unit": "USD",
+        "basis": api_pricing.BASIS,
+        "status": "priced",
+    }
+
+
 def _top_level_run_metadata(
     runs: Sequence[Mapping[str, object]],
     name: str,
@@ -582,6 +619,7 @@ def derive_outcome(
     issue_events: object = (),
     now: Optional[datetime] = None,
     run_observations: object = (),
+    rate_rows: Optional[Sequence[Mapping[str, object]]] = None,
 ) -> Dict[str, object]:
     """Derive one JSON-safe outcome record from supplied GitHub observations.
 
@@ -677,6 +715,10 @@ def derive_outcome(
         dict(row) for row in (run_observations or [])
         if isinstance(row, Mapping)
     ]
+    if runs:
+        pricing_rows = list(rate_rows) if rate_rows is not None else api_pricing.load_rates()
+        for run in runs:
+            run["notional_api_cost"] = api_pricing.price_run(run, pricing_rows)
 
     return {
         "schema_version": 1,
@@ -701,11 +743,11 @@ def derive_outcome(
         "reopened_at": _timestamp_text(reopened_at),
         "human_intervention_required": bool(intervention),
         "prs": recorded_prs,
-        # Raw per-run usage is intentionally retained beside the aggregate.
-        # #165 prices these timestamped observations; this ticket does not
-        # invent a dollar value or reuse heartbeat's provider quota meter.
+        # Raw per-run usage and its effective rates remain inspectable beside
+        # the aggregate. Unknown counts and unpriced models stay null.
         "runs": runs,
         "token_usage": _aggregate_token_usage(runs),
+        "notional_api_cost": _aggregate_notional_api_cost(runs),
         "provider": _top_level_run_metadata(runs, "provider"),
         "harness": _top_level_run_metadata(runs, "harness"),
         "model": _top_level_run_metadata(runs, "model"),
@@ -779,12 +821,24 @@ def _merged_pr_count(row: Mapping[str, object]) -> Optional[int]:
 
 
 def _cost_observation(row: Mapping[str, object]) -> Optional[Tuple[float, str]]:
-    """Read explicit, already-priced costs; token usage is never priced here.
+    """Read explicit prices and derived notional API rates, never raw tokens.
 
-    Token counts stay a separate observation until a rate table supplies a
-    price. This join accepts only cost fields that already carry a price and
-    unit, so missing prices remain gaps rather than becoming estimates.
+    Run token counts are priced during outcome derivation with the effective
+    rate table. This join accepts that explicit estimate or existing costs
+    that already carry a price and unit, so missing prices stay gaps.
     """
+    raw_notional = row.get("notional_api_cost")
+    if isinstance(raw_notional, Mapping):
+        value = _nonnegative_number(raw_notional.get("value"))
+        if (
+            value is not None
+            and raw_notional.get("unit") == "USD"
+            and raw_notional.get("basis") == api_pricing.BASIS
+            and raw_notional.get("status") == "priced"
+        ):
+            return value, "USD"
+        return None
+
     # Keep the accepted price inputs visible at the join boundary: raw
     # ``token_usage`` is deliberately not a cost source.
     for name, unit in (("cost_usd", "USD"), ("credits", "credits")):
@@ -808,12 +862,27 @@ def _cost_parts(
     row: Mapping[str, object],
 ) -> Optional[List[Tuple[float, str, str]]]:
     """Return priced record/run costs, or None for an incomplete run roll-up."""
+    runs = row.get("runs")
+    if isinstance(runs, list) and runs and any(
+        isinstance(run, Mapping) and "notional_api_cost" in run
+        for run in runs
+    ):
+        parts: List[Tuple[float, str, str]] = []
+        for run in runs:
+            if not isinstance(run, Mapping):
+                return None
+            cost = _cost_observation(run)
+            if cost is None:
+                return None
+            value, unit = cost
+            parts.append((value, unit, _lane(run)))
+        return parts
+
     record_cost = _cost_observation(row)
     if record_cost is not None:
         value, unit = record_cost
         return [(value, unit, _record_lane(row))]
 
-    runs = row.get("runs")
     if not isinstance(runs, list) or not runs:
         return []
     parts: List[Tuple[float, str, str]] = []
@@ -856,17 +925,22 @@ def _cost_signal(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
             missing.append(row.get("ticket") or "record {}".format(index))
             continue
         priced_records += 1
+        per_record: Dict[Tuple[str, str], float] = {}
         for value, unit, lane in parts:
+            key = (unit, lane)
+            per_record[key] = per_record.get(key, 0.0) + value
+        for (unit, lane), record_total in per_record.items():
             key = (unit, lane)
             group = groups.setdefault(key, {
                 "total_cost": 0.0,
                 "merged_prs": 0,
             })
-            group["total_cost"] = float(group["total_cost"]) + value
+            group["total_cost"] = float(group["total_cost"]) + record_total
             # A run with a different lane still contributes to the merged
             # ticket's cost in that lane.  The denominator is intentionally
             # explicit so a later reader does not mistake a lane contribution
-            # for a global composite score.
+            # for a global composite score. Multiple runs in the same lane are
+            # summed before this ticket contributes one merged-PR denominator.
             group["merged_prs"] = int(group["merged_prs"]) + merged_count
 
     by_lane = []
@@ -884,7 +958,8 @@ def _cost_signal(rows: Sequence[Mapping[str, object]]) -> Dict[str, object]:
     status = _signal_status(priced_records, len(missing))
     return {
         "definition": (
-            "complete priced cost divided by merged PRs, grouped by observed "
+            "complete priced cost, including notional API list price, divided "
+            "by merged PRs, grouped by observed "
             "agent/model/effort lane"
         ),
         "status": status,

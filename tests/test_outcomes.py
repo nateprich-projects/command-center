@@ -129,6 +129,87 @@ def test_no_verdicts_are_unknown_turns_not_zero():
     assert record["merged"] is False
 
 
+def test_derive_prices_each_run_and_keeps_missing_tokens_unknown():
+    rates = []
+    for token_kind, amount in zip(
+        ("fresh_input_tokens", "cache_read_input_tokens",
+         "cache_write_input_tokens", "output_tokens"),
+        (1, 2, 3, 4),
+    ):
+        rates.append({
+            "provider": "openai",
+            "model": "gpt-test",
+            "token_kind": token_kind,
+            "usd_per_million_tokens": amount,
+            "effective_from": "2026-09-01T00:00:00Z",
+            "source_url": "https://example.test/pricing",
+            "recorded_at": "2026-09-10T12:00:00Z",
+        })
+    observation = {
+        "run": "run-priced",
+        "agent": "codex",
+        "provider": "openai",
+        "model": "gpt-test",
+        "started_at": "2026-09-09T12:00:00Z",
+        "token_usage": {
+            "fresh_input_tokens": 100,
+            "cache_read_input_tokens": 200,
+            "cache_write_input_tokens": 300,
+            "output_tokens": 400,
+        },
+    }
+
+    record = outcomes.derive_outcome(
+        ticket(), now=NOW, run_observations=[observation], rate_rows=rates
+    )
+
+    assert record["runs"][0]["notional_api_cost"]["value"] == pytest.approx(.003)
+    assert record["notional_api_cost"]["value"] == pytest.approx(.003)
+
+    observation["token_usage"]["cache_read_input_tokens"] = None
+    incomplete = outcomes.derive_outcome(
+        ticket(43), now=NOW, run_observations=[observation], rate_rows=rates
+    )
+    assert incomplete["runs"][0]["notional_api_cost"]["value"] is None
+    assert incomplete["runs"][0]["notional_api_cost"]["missing_token_kinds"] == [
+        "cache_read_input_tokens"
+    ]
+    assert incomplete["notional_api_cost"]["value"] is None
+
+
+def test_cost_signal_sums_same_lane_runs_before_counting_merged_pr():
+    row = signal_record(1, cost=None)
+    row["runs"] = [
+        {
+            "agent": "codex", "model": "gpt-5.6-sol", "reasoning_effort": "high",
+            "notional_api_cost": {
+                "value": 2.0, "unit": "USD",
+                "basis": "notional_api_list_price", "status": "priced",
+            },
+        },
+        {
+            "agent": "codex", "model": "gpt-5.6-sol", "reasoning_effort": "high",
+            "notional_api_cost": {
+                "value": 3.0, "unit": "USD",
+                "basis": "notional_api_list_price", "status": "priced",
+            },
+        },
+    ]
+
+    cost = outcomes.signal_summary([row], now=NOW)["signals"][
+        "cost_per_merged_pr"
+    ]
+
+    assert cost["status"] == "available"
+    assert cost["by_lane"] == [{
+        "lane": "codex/gpt-5.6-sol/high",
+        "unit": "USD",
+        "merged_prs": 1,
+        "total_cost": 5.0,
+        "cost_per_merged_pr": 5.0,
+    }]
+
+
 @pytest.mark.parametrize(
     "checks, expected",
     [

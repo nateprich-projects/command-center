@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
 from engine import implement  # noqa: E402
+from engine import review  # noqa: E402
 
 
 REPO = "owner/repo"
@@ -599,6 +600,24 @@ def test_done_answer_accepts_optional_nonempty_evidence_list():
     assert found["evidence"] == [
         "https://github.com/nateprich-projects/repo/issues/12",
     ]
+
+
+def test_done_answer_accepts_an_optional_trimmed_risks_list():
+    """The implementer's own pointer to where review should look (#1807)."""
+    found = implement.parse_answer(json.dumps({
+        **answer(), "risks": ["  The retry bound is new; check it stops at two. "],
+    }))
+    assert found["risks"] == ["The retry bound is new; check it stops at two."]
+    assert implement.parse_answer(
+        json.dumps({**answer(), "risks": []}))["risks"] == []
+
+
+@pytest.mark.parametrize(
+    "risks", ("check the bound", [""], ["  "], [None], ["ok", 3], {"a": "b"}))
+def test_done_answer_rejects_a_malformed_risks_list(risks):
+    with pytest.raises(implement.ImplementError,
+                       match="answer risks must be a list of non-empty strings"):
+        implement.parse_answer(json.dumps({**answer(), "risks": risks}))
 
 
 def test_no_diff_with_verified_evidence_closes_and_finishes(
@@ -1669,6 +1688,69 @@ def test_pr_template_lists_departures_and_verification():
     assert "- Kept the old entry point for compatibility." in found
     assert "Continued the existing remote ticket branch." in found
     assert "- `python3 -m pytest -q`" in found
+
+
+#: The PR body for ``ticket()`` and ``answer()``, written out by hand: an
+#: answer without risks must keep giving exactly this (#1807).
+PLAIN_PR_BODY = (
+    "Part of #7.\n"
+    "\n"
+    "Implements #42.\n"
+    "\n"
+    "Summary:\n"
+    "Added the bounded implementation runner.\n"
+    "\n"
+    "Departures:\n"
+    "- None.\n"
+    "\n"
+    "Branch:\n"
+    "Created fresh from origin/main; no existing remote ticket branch.\n"
+    "\n"
+    "Verified:\n"
+    "- `python3 -m pytest -q`\n"
+)
+
+
+@pytest.mark.parametrize("extra", ({}, {"risks": []}))
+def test_pr_body_without_risks_is_unchanged(extra):
+    found = implement.render_pr_body(
+        ticket(), implement.parse_answer(json.dumps({**answer(), **extra})),
+        continued=False, tests=["python3 -m pytest -q"])
+    assert found == PLAIN_PR_BODY
+
+
+def test_pr_body_lists_risks_after_the_departures():
+    parsed = implement.parse_answer(json.dumps({
+        **answer(),
+        "departures": ["Kept the old entry point."],
+        "risks": ["The retry bound is new; check it stops at two.",
+                  "Private repos must still get counts only."],
+    }))
+    found = implement.render_pr_body(
+        ticket(), parsed, continued=False, tests=["python3 -m pytest -q"])
+    assert found == (
+        "Part of #7.\n"
+        "\n"
+        "Implements #42.\n"
+        "\n"
+        "Summary:\n"
+        "Added the bounded implementation runner.\n"
+        "\n"
+        "Departures:\n"
+        "- Kept the old entry point.\n"
+        "\n"
+        "Risks:\n"
+        "- The retry bound is new; check it stops at two.\n"
+        "- Private repos must still get counts only.\n"
+        "\n"
+        "Branch:\n"
+        "Created fresh from origin/main; no existing remote ticket branch.\n"
+        "\n"
+        "Verified:\n"
+        "- `python3 -m pytest -q`\n"
+    )
+    # The review packet's pr_departures must not take the risks as departures.
+    assert review.parse_departures(found) == ["Kept the old entry point."]
 
 
 def test_funnel_finish_ticket_forwards_without_importing_engine(monkeypatch):

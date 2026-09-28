@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import stat
+import subprocess
 import sys
 
 import pytest
@@ -167,8 +169,9 @@ def test_budget_gate_stops_for_an_active_provider_quota_hold(monkeypatch):
 
 
 #: Stands in for scripts/muse-review-engine. It logs what it was handed and
-#: where its answer path stood, prints private text on both streams, and then
-#: answers, fails, or exits 0 with no answer, per run.
+#: where its answer path stood, prints private text on both streams and any
+#: stderr lines the test gives this run, and then answers, fails, or exits 0
+#: with no answer, per run.
 STUB_ENGINE = (
     "#!/bin/bash\n"
     "count=\"$STUB_ENGINE_COUNT\"\n"
@@ -191,7 +194,11 @@ STUB_ENGINE = (
     "PY\n"
     "echo 'NEVER PRINT THIS PRIVATE DIFF on stdout'\n"
     "echo 'NEVER PRINT THIS PRIVATE DIFF on stderr' >&2\n"
-    "if [[ \"${STUB_ENGINE_FAIL_RUN:-}\" == \"$n\" ]]; then exit 1; fi\n"
+    "err=\"STUB_ENGINE_STDERR_$n\"\n"
+    "if [[ -n \"${!err:-}\" ]]; then printf '%s\\n' \"${!err}\" >&2; fi\n"
+    "if [[ \"${STUB_ENGINE_FAIL_RUN:-}\" == \"$n\" ]]; then\n"
+    "  exit \"${STUB_ENGINE_FAIL_STATUS:-1}\"\n"
+    "fi\n"
     "if [[ \"${STUB_ENGINE_SILENT_RUN:-}\" == \"$n\" ]]; then exit 0; fi\n"
     "var=\"STUB_ENGINE_ANSWER_$n\"\n"
     "printf '%s' \"${!var:-$STUB_ENGINE_ANSWER}\" > \"$MUSE_REVIEW_ENGINE_REPLAY_ANSWER\"\n"
@@ -249,7 +256,7 @@ def test_each_run_is_one_engine_run_scored_through_review_apply(
                 for raw in raws]
     assert expected == ["approved", "rejected", "rejected"]
     assert summary == {"expected": "approved", "verdicts": expected,
-                       "pass": False}
+                       "failed_parts": [[], [], []], "pass": False}
     runs = stub_engine()
     assert len(runs) == 3
     # A fresh, owner-only directory under the runtime root for each run's
@@ -286,16 +293,17 @@ def test_the_default_engine_is_this_checkouts_runner():
 
 
 @pytest.mark.parametrize(
-    "failure",
+    "failure,reported",
     [
-        {"STUB_ENGINE_FAIL_RUN": "2"},
-        {"STUB_ENGINE_SILENT_RUN": "2"},
-        {"STUB_ENGINE_ANSWER_2": "not json"},
+        ({"STUB_ENGINE_FAIL_RUN": "2"}, "exit status 1"),
+        ({"STUB_ENGINE_SILENT_RUN": "2"}, "exit status 0, no answer"),
+        ({"STUB_ENGINE_ANSWER_2": "not json"},
+         "exit status 0, unscorable answer"),
     ],
     ids=["non-zero exit", "no answer", "unscorable answer"],
 )
 def test_an_engine_failure_fails_the_whole_replay(
-        tmp_path, monkeypatch, capfd, stub_engine, failure):
+        tmp_path, monkeypatch, capfd, stub_engine, failure, reported):
     for name, value in failure.items():
         monkeypatch.setenv(name, value)
 
@@ -304,25 +312,201 @@ def test_an_engine_failure_fails_the_whole_replay(
 
     assert result == 1
     assert output.out == ""
-    assert output.err == "review-replay: replay failed\n"
+    assert output.err == (
+        "review-replay: run 2 failed: {}; failed parts: none\n"
+        "review-replay: replay failed\n".format(reported))
     # The first failure ends the replay: no third run, and no verdicts.
     assert len(stub_engine()) == 2
 
 
-def test_cli_prints_only_verdicts_and_pass_result(tmp_path, capfd, stub_engine):
+# -- the engine's timing lines (#1784) ----------------------------------------
+
+#: Text from a private ticket's requirement, as a failing judge's diagnostic
+#: could quote it. None of it may leave the replay on either stream.
+REQUIREMENT = "NEVER PRINT THIS PRIVATE REQUIREMENT: payouts round half-even"
+
+
+def _timing(part, elapsed, calls, outcome):
+    return "muse-review-engine: timing {} elapsed={}s calls={} outcome={}".format(
+        part, elapsed, calls, outcome)
+
+
+#: Engine stderr lines that must never pass, each with requirement text in it.
+QUOTING_LINES = [
+    # What model_failed prints for a judge's failed call.
+    "muse-review-engine: muse exec failed (exit 1): the judge could not "
+    "settle '{}'".format(REQUIREMENT),
+    # The lister's stream-idle notice quotes the head of its diagnostic.
+    "muse-review-engine: the lister went stream-idle; asking it once more: "
+    + REQUIREMENT,
+    # A later line of a multi-line diagnostic, with no engine prefix at all.
+    REQUIREMENT,
+    # A real timing line with requirement text after it, before it, or
+    # ahead of a carriage return on the same line.
+    _timing("judge.3", 412, 2, "failed") + " " + REQUIREMENT,
+    REQUIREMENT + " " + _timing("judge.3", 412, 2, "failed"),
+    REQUIREMENT + "\r" + _timing("judge.3", 412, 2, "failed"),
+    # Requirement text where the part name or outcome goes.
+    _timing(REQUIREMENT, 412, 2, "failed"),
+    _timing("judge.3", 412, 2, "failed: " + REQUIREMENT),
+]
+
+
+@pytest.mark.parametrize(
+    "line,part,outcome",
+    [
+        (_timing("judge.3", 412, 2, "failed"), "judge.3", "failed"),
+        (_timing("judge.0", 38, 1, "done"), "judge.0", "done"),
+        (_timing("shape.decider.0", 412, 2, "retried-done"),
+         "shape.decider.0", "retried-done"),
+        (_timing("shape.auditor", 7, 1, "done"), "shape.auditor", "done"),
+        (_timing("lister", 95, 3, "done"), "lister", "done"),
+    ],
+)
+def test_timing_lines_parse_the_engines_fixed_format(line, part, outcome):
+    [timing] = replay.timing_lines((line + "\n").encode())
+
+    assert timing["part"] == part
+    assert timing["outcome"] == outcome
+
+
+@pytest.mark.parametrize(
+    "part,answered,idle_retried,outcome",
+    [
+        ("judge.3", 1, 0, "done"),
+        ("shape.decider.0", 1, 1, "retried-done"),
+        ("judge.12", 0, 1, "failed"),
+    ],
+)
+def test_the_pattern_reads_what_log_call_timing_writes(
+        part, answered, idle_retried, outcome):
+    # The engine's own function, run as the engine runs it: if its line
+    # changes shape, replay would drop every timing line, and this fails.
+    source = (ROOT / "scripts" / "muse-review-engine").read_text()
+    function = re.search(r"^log_call_timing\(\) \{\n.*?^\}\n", source,
+                         re.M | re.S).group(0)
+    proc = subprocess.run(
+        ["/bin/bash", "-c", function
+         + 'log_call_timing "$1" "$(( $(date +%s) - 5 ))" 2 "$2" "$3"',
+         "bash", part, str(answered), str(idle_retried)],
+        capture_output=True, check=True,
+    )
+
+    [timing] = replay.timing_lines(proc.stderr)
+
+    assert timing["part"] == part
+    assert timing["calls"] == "2"
+    assert timing["outcome"] == outcome
+
+
+@pytest.mark.parametrize("line", QUOTING_LINES)
+def test_timing_lines_drop_every_line_that_quotes_requirement_text(line):
+    assert replay.timing_lines((line + "\n").encode()) == []
+
+
+def test_timing_lines_pass_through_under_the_run_number(
+        tmp_path, monkeypatch, capfd, stub_engine):
+    monkeypatch.setenv("STUB_ENGINE_STDERR_1", "\n".join([
+        _timing("judge.0", 38, 1, "done"),
+        _timing("judge.1", 412, 2, "retried-done"),
+    ]))
+    monkeypatch.setenv("STUB_ENGINE_STDERR_2", _timing("judge.0", 41, 1, "done"))
+
+    assert _replay_cli(tmp_path, runs=2) == 0
+    output = capfd.readouterr()
+
+    assert output.err.splitlines() == [
+        "review-replay: run 1: timing judge.0 elapsed=38s calls=1 outcome=done",
+        "review-replay: run 1: timing judge.1 elapsed=412s calls=2 "
+        "outcome=retried-done",
+        "review-replay: run 2: timing judge.0 elapsed=41s calls=1 outcome=done",
+    ]
+    assert "timing" not in output.out
+
+
+def test_a_line_quoting_requirement_text_is_dropped(
+        tmp_path, monkeypatch, capfd, stub_engine):
+    monkeypatch.setenv("STUB_ENGINE_STDERR_1", "\n".join(
+        QUOTING_LINES + [_timing("judge.3", 412, 2, "failed")]))
+
+    assert _replay_cli(tmp_path, runs=1) == 0
+    output = capfd.readouterr()
+
+    # Only the one real timing line survives; the diagnostics around it,
+    # and every line that merely contains a timing line, are dropped whole.
+    assert output.err == (
+        "review-replay: run 1: timing judge.3 elapsed=412s calls=2 "
+        "outcome=failed\n")
+    for stream in (output.out, output.err):
+        assert "NEVER PRINT" not in stream
+        assert "half-even" not in stream
+
+
+def test_a_failed_run_reports_its_exit_status_and_failed_parts(
+        tmp_path, monkeypatch, capfd, stub_engine):
+    monkeypatch.setenv("STUB_ENGINE_FAIL_RUN", "2")
+    monkeypatch.setenv("STUB_ENGINE_FAIL_STATUS", "7")
+    monkeypatch.setenv("STUB_ENGINE_STDERR_1", _timing("judge.0", 38, 1, "done"))
+    monkeypatch.setenv("STUB_ENGINE_STDERR_2", "\n".join([
+        _timing("judge.0", 40, 1, "done"),
+        "muse-review-engine: muse exec failed (exit 1): " + REQUIREMENT,
+        _timing("judge.3", 412, 2, "failed"),
+        _timing("judge.4", 380, 2, "retried-done"),
+        _timing("judge.5", 181, 2, "failed"),
+    ]))
+
+    assert _replay_cli(tmp_path) == 1
+    output = capfd.readouterr()
+
+    assert output.out == ""
+    assert output.err.splitlines() == [
+        "review-replay: run 1: timing judge.0 elapsed=38s calls=1 outcome=done",
+        "review-replay: run 2: timing judge.0 elapsed=40s calls=1 outcome=done",
+        "review-replay: run 2: timing judge.3 elapsed=412s calls=2 "
+        "outcome=failed",
+        "review-replay: run 2: timing judge.4 elapsed=380s calls=2 "
+        "outcome=retried-done",
+        "review-replay: run 2: timing judge.5 elapsed=181s calls=2 "
+        "outcome=failed",
+        "review-replay: run 2 failed: exit status 7; "
+        "failed parts: judge.3, judge.5",
+        "review-replay: replay failed",
+    ]
+    assert len(stub_engine()) == 2
+
+
+def test_cli_prints_only_verdicts_and_pass_result(
+        tmp_path, monkeypatch, capfd, stub_engine):
+    # Run 2 finishes with a judge failed closed, as the must-approve seed's
+    # diagnostic run did; the others only retried or answered first time.
+    monkeypatch.setenv("STUB_ENGINE_STDERR_1", _timing("judge.0", 38, 1, "done"))
+    monkeypatch.setenv("STUB_ENGINE_STDERR_2", "\n".join([
+        _timing("judge.3", 412, 2, "failed"),
+        "muse-review-engine: muse exec failed (exit 1): " + REQUIREMENT,
+        _timing("judge.6", 380, 2, "retried-done"),
+    ]))
+    monkeypatch.setenv("STUB_ENGINE_STDERR_3", _timing("judge.6", 90, 2,
+                                                       "retried-done"))
+
     result = _replay_cli(tmp_path, expected="approved")
     output = capfd.readouterr()
 
     assert result == 0
+    # Verdicts, and each run's failed parts by name: nothing else.
     assert json.loads(output.out) == {
         "expected": "approved",
+        "failed_parts": [[], ["judge.3"], []],
         "pass": True,
         "verdicts": ["approved", "approved", "approved"],
     }
-    # The engine printed private text on both streams; none of it is passed on.
-    assert "NEVER PRINT THIS PRIVATE DIFF" not in output.out
+    assert output.out.count("\n") == 1
+    # The engine printed private text on both streams; none of it is passed
+    # on, and its timing lines go to stderr alone.
+    assert "NEVER PRINT" not in output.out
     assert "private" not in output.out
-    assert output.err == ""
+    assert "timing" not in output.out
+    assert "NEVER PRINT" not in output.err
+    assert "review-replay: run 2: timing judge.3" in output.err
 
 
 def test_replay_reserves_one_engine_run_per_replay(

@@ -9,8 +9,10 @@ call went silent past Muse's stream-idle limit where the lanes' split would
 not have (#1698).
 
 Packet paths are relative to Command Center's documented runtime root unless
-absolute. The model sees the routine and packet; stdout contains verdicts
-only, and the engine's own output is never passed on.
+absolute. The model sees the routine and packet; stdout carries verdicts and
+failed part names only. Of the engine's own output, only its fixed-format
+timing lines are passed on, to stderr, so a failed replay can be diagnosed
+without any packet content leaving the run (#1784).
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -44,6 +47,25 @@ ENGINE = CHECKOUT / "scripts" / "muse-review-engine"
 ROUTINE_DEFAULT = (
     pathlib.Path(__file__).resolve().parents[1]
     / "routines" / "muse-review.md"
+)
+#: One engine timing line, exactly as `log_call_timing` in
+#: scripts/muse-review-engine writes it (#1719):
+#:
+#:   muse-review-engine: timing judge.3 elapsed=412s calls=2 outcome=failed
+#:
+#: The part is the call's directory in the engine's run directory (`judge.3`,
+#: `shape.decider.0`), so nothing in a matching line comes from the packet.
+#: The whole line must match: the engine's other stderr lines can quote a
+#: failing judge's diagnostic, which can quote a requirement drawn from a
+#: private ticket, and a line that merely contains a timing line is one of
+#: those (#1784). The bounds cap what a line that only looks like one could
+#: carry at a lowercase dotted name.
+TIMING_LINE = re.compile(
+    r"muse-review-engine: timing "
+    r"(?P<part>[a-z]{1,32}(?:\.[a-z0-9]{1,32}){0,3}) "
+    r"elapsed=(?P<elapsed>[0-9]{1,9})s "
+    r"calls=(?P<calls>[0-9]{1,4}) "
+    r"outcome=(?P<outcome>done|retried-done|failed)"
 )
 
 
@@ -152,15 +174,60 @@ def check_budget(runs: int, now: Optional[float] = None) -> None:
         raise ReplayError("Muse budget gate is closed")
 
 
+def timing_lines(stderr: bytes) -> list[dict]:
+    """The engine's timing lines in its stderr, parsed; every other line dropped.
+
+    Split on newlines only, as the engine writes them: a line that holds a
+    timing line after a carriage return is still one line, and dropped.
+    """
+    found = []
+    for line in stderr.decode("utf-8", "replace").split("\n"):
+        match = TIMING_LINE.fullmatch(line)
+        if match:
+            found.append(match.groupdict())
+    return found
+
+
+def _pass_timing_lines(stderr: bytes, run: int) -> list[str]:
+    """Print this run's timing lines to stderr; return its failed parts.
+
+    Each line is rebuilt from the parsed fields rather than echoed, so
+    nothing but a part name, two numbers and an outcome can reach the
+    output (#1784).
+    """
+    failed_parts = []
+    for timing in timing_lines(stderr):
+        print("review-replay: run {}: timing {part} elapsed={elapsed}s "
+              "calls={calls} outcome={outcome}".format(run, **timing),
+              file=sys.stderr)
+        if timing["outcome"] == "failed":
+            failed_parts.append(timing["part"])
+    return failed_parts
+
+
+def _report_failed_run(run: int, status: int, failed_parts: Sequence[str],
+                       why: str = "") -> None:
+    """One stderr line for a run that failed the replay: its exit status,
+    why when the engine exited 0, and its failed parts by name (#1784)."""
+    print("review-replay: run {} failed: exit status {}{}; failed parts: {}"
+          .format(run, status, ", " + why if why else "",
+                  ", ".join(failed_parts) or "none"),
+          file=sys.stderr)
+
+
 def _engine_run(packet_path: pathlib.Path, routine_path: pathlib.Path, *,
-                runtime_root: pathlib.Path) -> str:
-    """Run the engine's replay entry once and return its derived answer.
+                runtime_root: pathlib.Path, run: int = 1
+                ) -> tuple[str, list[str]]:
+    """Run the engine's replay entry once; return its answer and failed parts.
 
     The answer path sits in a fresh owner-only directory under the runtime
     root, and the engine refuses a path that already exists, so what is read
     back can only be this run's. Its stdout and stderr are captured and
     dropped: the stderr of a failing judge can quote a requirement drawn from
-    a private ticket. A non-zero exit or a missing answer is a failed replay.
+    a private ticket. The one exception is the engine's timing lines, which
+    name parts and outcomes only; they go to stderr under the run number, so
+    a failed replay says which part failed (#1784). A non-zero exit or a
+    missing answer is a failed replay, reported with its exit status.
     """
     try:
         with tempfile.TemporaryDirectory(
@@ -180,11 +247,14 @@ def _engine_run(packet_path: pathlib.Path, routine_path: pathlib.Path, *,
                 env=env, stdin=subprocess.DEVNULL, capture_output=True,
                 check=False,
             )
+            failed_parts = _pass_timing_lines(result.stderr, run)
             if result.returncode != 0:
+                _report_failed_run(run, result.returncode, failed_parts)
                 raise ReplayError("the review engine failed")
             try:
-                return answer_path.read_text(encoding="utf-8")
+                return answer_path.read_text(encoding="utf-8"), failed_parts
             except OSError as exc:
+                _report_failed_run(run, 0, failed_parts, "no answer")
                 raise ReplayError("the review engine wrote no answer") from exc
     except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
         raise ReplayError("the review engine could not run") from exc
@@ -199,6 +269,11 @@ def replay(packet: str | pathlib.Path, routine: str | pathlib.Path, *,
     the whole replay with no verdicts: a lister that went silent records no
     verdict on a live PR either, and counting it as rejected would turn that
     stall into a plausible-looking must-approve failure (#1698).
+
+    A run can also finish with a part failed: a judge chunk that failed
+    closed reads `unsure`, and so rejected. ``failed_parts`` lists each
+    run's by name, in run order beside ``verdicts``, so a surprising verdict
+    says which part produced it (#1784).
     """
     if isinstance(runs, bool) or not isinstance(runs, int) or runs < 1:
         raise ReplayError("runs must be a positive integer")
@@ -210,15 +285,20 @@ def replay(packet: str | pathlib.Path, routine: str | pathlib.Path, *,
     routine_path = resolve_routine_path(routine)
 
     verdicts = []
-    for _ in range(runs):
-        verdict = score_answer(
-            _engine_run(packet_path, routine_path, runtime_root=root))
+    failed_parts = []
+    for run in range(1, runs + 1):
+        raw, failed = _engine_run(packet_path, routine_path,
+                                  runtime_root=root, run=run)
+        verdict = score_answer(raw)
         if verdict is None:
+            _report_failed_run(run, 0, failed, "unscorable answer")
             raise ReplayError("the review engine wrote an unscorable answer")
         verdicts.append(verdict)
+        failed_parts.append(failed)
     return {
         "expected": expected,
         "verdicts": verdicts,
+        "failed_parts": failed_parts,
         "pass": all_match(verdicts, expected),
     }
 

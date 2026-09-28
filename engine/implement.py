@@ -2615,29 +2615,50 @@ def _push_ticket_branch(root: pathlib.Path, branch: str, *, ref: str,
 
 def _remove_codex_run_checkout(root: pathlib.Path, number: int,
                                agent: str) -> bool:
-    """Remove only this Codex ticket checkout under the runtime codex-runs/.
+    """Remove only this Codex ticket checkout under a runtime codex-runs/.
 
     The per-run clone is named ``ticket-<number>-<UTC timestamp>`` and is
     owner-only. Restrict removal to that exact direct child; finish-ticket also
     runs from session workspaces and other agents' checkouts, which must remain
     untouched.
+
+    Live runs clone into the heartbeat directory's ``codex-runs/``
+    (``heartbeat.SPOOL_DIR``), because that is the Codex sandbox's only
+    writable root. ``CLAUDE_DIR/codex-runs`` does not exist there, and while
+    it was the only root every live checkout was kept (#1856). Either root
+    counts, and one that is missing or a symlink is skipped rather than
+    fatal. The merged suite's temporary
+    worktrees also sit in the runs root (#1804), but one level down, under
+    ``review-evidence-*``, so no guard below can match them; they are
+    removed by review_evidence itself.
     """
     if agent != "codex":
         return False
     checkout = pathlib.Path(root)
-    runs_root = pathlib.Path(funnel.CLAUDE_DIR) / "codex-runs"
-    if checkout.is_symlink() or runs_root.is_symlink():
+    if checkout.is_symlink():
         return False
     try:
-        runs_root = runs_root.resolve(strict=True)
         checkout = checkout.resolve(strict=True)
     except (OSError, RuntimeError):
         return False
+    import heartbeat
+    runs_root = None
+    for candidate in (pathlib.Path(funnel.CLAUDE_DIR) / "codex-runs",
+                      pathlib.Path(heartbeat.SPOOL_DIR) / "codex-runs"):
+        if candidate.is_symlink():
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        if checkout.parent == resolved:
+            runs_root = resolved
+            break
     match = re.fullmatch(
         r"ticket-([1-9][0-9]*)-([0-9]{8}T[0-9]{12}Z)", checkout.name,
     )
     if (match is None or int(match.group(1)) != number
-            or checkout.parent != runs_root):
+            or runs_root is None):
         return False
     try:
         info = checkout.stat()

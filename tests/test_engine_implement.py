@@ -133,6 +133,36 @@ def make_codex_run_clone(tmp_path, monkeypatch, number=42):
     return remote, clone
 
 
+#: A live Codex run directory's name, from the heartbeat's codex-runs/ on
+#: 2026-09-28 with the ticket number replaced (#1856).
+LIVE_RUN_NAME = "ticket-{}-20260928T152532553962Z"
+
+
+def point_runs_roots_at(tmp_path, monkeypatch):
+    """Both cleanup roots under tmp_path, laid out as on the live host.
+
+    Codex's sandbox can write only the heartbeat directory, so live runs
+    clone into ``<heartbeat>/codex-runs``; ``CLAUDE_DIR/codex-runs`` does
+    not exist there (#1856). Returns the heartbeat runs root.
+    """
+    claude_dir = tmp_path / "claude"
+    claude_dir.mkdir()
+    monkeypatch.setattr(funnel, "CLAUDE_DIR", str(claude_dir))
+    heartbeat_root = tmp_path / "heartbeat"
+    monkeypatch.setattr(heartbeat, "SPOOL_DIR", str(heartbeat_root))
+    runs_root = heartbeat_root / "codex-runs"
+    runs_root.mkdir(parents=True, mode=0o700)
+    return runs_root
+
+
+def make_heartbeat_codex_run_clone(tmp_path, monkeypatch, number=42):
+    runs_root = point_runs_roots_at(tmp_path, monkeypatch)
+    remote, clone = make_clone(
+        tmp_path, clone_path=runs_root / LIVE_RUN_NAME.format(number))
+    clone.chmod(0o700)
+    return remote, clone
+
+
 def _stub_claim_state(monkeypatch, state):
     monkeypatch.setattr(
         implement, "_claim_state",
@@ -1191,6 +1221,48 @@ def test_finish_ticket_removes_owner_only_codex_run_checkout_after_push(
     assert pathlib.Path.cwd() == clone.parent
 
 
+def test_finish_removes_a_checkout_under_the_heartbeat_runs_root(
+        tmp_path, monkeypatch):
+    # Reproduction (#1856): the live layout. Every Codex run clones into
+    # the heartbeat's codex-runs/, and ~/.claude/codex-runs does not exist,
+    # so the cleanup used to keep all 55 of them.
+    remote, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    assert not (tmp_path / "claude" / "codex-runs").exists()
+    _stub_claim_state(monkeypatch, "owned")
+    sibling = clone.parent / LIVE_RUN_NAME.format(4200)
+    sibling.mkdir(mode=0o700)
+    (clone / "implemented.txt").write_text("done\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.chdir(clone)
+    effects = {"released": [], "finished": []}
+
+    def open_pr(repo, context, found_ticket, body):
+        assert clone.is_dir()
+        return {
+            "number": 99,
+            "url": "https://github.com/{}/pull/99".format(REPO),
+        }
+
+    implement.finish_done(
+        answer(),
+        run="run-42",
+        repo=REPO,
+        cwd=clone,
+        test_commands=[[sys.executable, "-c", "pass"]],
+        release=effects["released"].append,
+        heartbeat_finish=lambda *args: effects["finished"].append(args),
+        pr_effect=open_pr,
+    )
+
+    assert effects["finished"][0][:3] == ("codex", "run-42", "done")
+    assert run_git("--git-dir", str(remote), "show",
+                   "ticket/42:implemented.txt").stdout == "done\n"
+    assert not clone.exists()
+    assert sibling.is_dir()
+    assert pathlib.Path.cwd() == tmp_path / "heartbeat" / "codex-runs"
+
+
 def test_finish_ticket_removes_codex_run_checkout_after_recording_not_kept(
         tmp_path, monkeypatch):
     _, clone = make_codex_run_clone(tmp_path, monkeypatch)
@@ -1274,6 +1346,103 @@ def test_codex_run_cleanup_leaves_checkout_outside_runtime_root(
 
     assert not implement._remove_codex_run_checkout(clone, 42, "codex")
     assert clone.is_dir()
+
+
+# --- The guards hold at the heartbeat runs root (#1856) ---
+#
+# Each refusal is paired with the same directory passing once only the
+# guarded difference is gone, so the refusal is the guard's and not the
+# root's.
+
+def _run_dir(path):
+    """An owner-only directory standing in for a run checkout."""
+    path.mkdir(parents=True)
+    path.chmod(0o700)
+    (path / "work.txt").write_text("uncommitted work\n")
+    return path
+
+
+def test_heartbeat_root_cleanup_refuses_another_tickets_checkout(
+        tmp_path, monkeypatch):
+    runs_root = point_runs_roots_at(tmp_path, monkeypatch)
+    checkout = _run_dir(runs_root / LIVE_RUN_NAME.format(42))
+
+    # 4 is a prefix of 42, which a string match would take.
+    assert not implement._remove_codex_run_checkout(checkout, 4, "codex")
+    assert not implement._remove_codex_run_checkout(checkout, 43, "codex")
+    assert (checkout / "work.txt").exists()
+    assert implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert not checkout.exists()
+
+
+@pytest.mark.parametrize("mode", (0o740, 0o704),
+                         ids=("group-readable", "world-readable"))
+def test_heartbeat_root_cleanup_refuses_a_directory_others_can_read(
+        tmp_path, monkeypatch, mode):
+    runs_root = point_runs_roots_at(tmp_path, monkeypatch)
+    checkout = _run_dir(runs_root / LIVE_RUN_NAME.format(42))
+    checkout.chmod(mode)
+
+    assert not implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert (checkout / "work.txt").exists()
+    checkout.chmod(0o700)
+    assert implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert not checkout.exists()
+
+
+def test_heartbeat_root_cleanup_refuses_a_symlinked_checkout(
+        tmp_path, monkeypatch):
+    runs_root = point_runs_roots_at(tmp_path, monkeypatch)
+    checkout = _run_dir(runs_root / LIVE_RUN_NAME.format(42))
+    # Well named and in the root, but resolving to another run's directory.
+    link = runs_root / "ticket-42-20260928T160000000000Z"
+    link.symlink_to(checkout, target_is_directory=True)
+
+    assert not implement._remove_codex_run_checkout(link, 42, "codex")
+    assert link.is_symlink()
+    assert (checkout / "work.txt").exists()
+    assert implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert not checkout.exists()
+
+
+def test_cleanup_refuses_under_a_symlinked_heartbeat_runs_root(
+        tmp_path, monkeypatch):
+    runs_root = point_runs_roots_at(tmp_path, monkeypatch)
+    real_root = tmp_path / "elsewhere" / "codex-runs"
+    real_root.parent.mkdir()
+    runs_root.rename(real_root)
+    runs_root.symlink_to(real_root, target_is_directory=True)
+    checkout = runs_root / LIVE_RUN_NAME.format(42)
+    _run_dir(real_root / checkout.name)
+
+    assert not implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert (real_root / checkout.name / "work.txt").exists()
+    runs_root.unlink()
+    real_root.rename(runs_root)
+    assert implement._remove_codex_run_checkout(checkout, 42, "codex")
+    assert not checkout.exists()
+
+
+@pytest.mark.parametrize("parent", (
+    "elsewhere",
+    # Each root's own parent, rather than its codex-runs/.
+    "heartbeat",
+    "claude",
+    # A level down, where the merged suite's worktrees go (#1804).
+    "heartbeat/codex-runs/review-evidence-k3j2h1g0",
+))
+def test_cleanup_refuses_a_checkout_outside_both_runs_roots(
+        tmp_path, monkeypatch, parent):
+    runs_root = point_runs_roots_at(tmp_path, monkeypatch)
+    (tmp_path / "claude" / "codex-runs").mkdir(mode=0o700)
+    outside = _run_dir(tmp_path / parent / LIVE_RUN_NAME.format(42))
+
+    assert not implement._remove_codex_run_checkout(outside, 42, "codex")
+    assert (outside / "work.txt").exists()
+    inside = _run_dir(runs_root / "ticket-42-20260928T160000000000Z")
+    assert implement._remove_codex_run_checkout(inside, 42, "codex")
+    assert not inside.exists()
+    assert (outside / "work.txt").exists()
 
 
 def test_a_failure_note_names_the_failing_tests():
@@ -4257,8 +4426,12 @@ def make_merge_clone(tmp_path, monkeypatch, *, ancestor, main, codex=False):
     """A ticket clone at ``ancestor`` whose remote main then lands ``main``.
 
     Returns the remote, the clone, the new main's SHA and the test log.
+    ``codex="heartbeat"`` puts the clone under the heartbeat runs root, as
+    live runs are (#1856).
     """
-    if codex:
+    if codex == "heartbeat":
+        remote, clone = make_heartbeat_codex_run_clone(tmp_path, monkeypatch)
+    elif codex:
         remote, clone = make_codex_run_clone(tmp_path, monkeypatch)
     else:
         remote, clone = make_clone(tmp_path)
@@ -4548,6 +4721,34 @@ def test_nothing_from_the_merge_is_committed(tmp_path, monkeypatch):
          main_sha, "ticket/42"]).returncode == 1
     # The finish removed its checkout, and the merge worktree is gone too.
     assert list(runs_root.iterdir()) == []
+
+
+def test_a_heartbeat_run_finish_leaves_another_runs_merge_worktree(
+        tmp_path, monkeypatch):
+    # Live runs share the heartbeat's codex-runs/, and the merged suite puts
+    # its worktrees there, beside the checkout (#1804). The finish removes
+    # its own checkout and review_evidence its own worktree; a concurrent
+    # run's worktree in the same root is not the cleanup's (#1856).
+    _, clone, _, log = make_merge_clone(
+        tmp_path, monkeypatch,
+        ancestor={"calc.py": CALC, "tests/test_calc.py": CALC_TESTS},
+        main=MAIN_TEST, codex="heartbeat")
+    runs_root = clone.parent.resolve()
+    concurrent = runs_root / "review-evidence-concurrent" / "merge"
+    concurrent.mkdir(parents=True)
+    (concurrent / "calc.py").write_text(CALC)
+    (clone / "feature.txt").write_text("feature\n")
+
+    effects = _merged_finish(clone, monkeypatch)
+
+    assert effects["raised"] is None
+    ran_in = {directory for directory, _ in started_in(log)}
+    assert ran_in and all(directory.name == "merge"
+                          and directory.parent.parent == runs_root
+                          for directory in ran_in)
+    assert concurrent not in ran_in
+    assert list(runs_root.iterdir()) == [concurrent.parent]
+    assert (concurrent / "calc.py").read_text() == CALC
 
 
 # --- Every finish writes the runner's evidence block (#1805) ---

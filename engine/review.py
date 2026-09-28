@@ -541,6 +541,11 @@ def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
     not re-read as prose. Only the newest TICKET_COMMENT_LIMIT rows are
     kept, and each body is capped at TICKET_COMMENT_BODY_LIMIT characters
     with the cut marked, so a long ticket cannot flood the prompt.
+
+    The login cannot establish a voice, but it can rule one out (#1788):
+    only the owner account's comments are read. Any other author's comment
+    is a one-line placeholder naming who posted it and when, with voice
+    ``unknown``, so a pasted ``nate-direct`` block never amends a ticket.
     """
     shaped = []
     for row in rows or []:
@@ -551,6 +556,14 @@ def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
             author = author.get("login")
         elif not isinstance(author, str):
             author = None
+        if not funnel.trusted_comment(row):
+            shaped.append({
+                "author": author,
+                "created_at": row.get("createdAt") or row.get("created_at"),
+                "voice": "unknown",
+                "body": funnel.untrusted_comment_placeholder(row),
+            })
+            continue
         body = row.get("body") or ""
         provenance = funnel.parse_provenance(body)
         voice = provenance.get("voice") if provenance else "unknown"
@@ -1061,6 +1074,16 @@ def precheck_verdict(packet: dict) -> List[str]:
         and isinstance(comments_section.get("comments"), list)
         else None
     )
+    if comments is not None:
+        # The packet keeps each comment's login as a plain string, a shape
+        # ``trusted_comment`` never trusts. Restore GitHub's ``author.login``
+        # shape so the shared predicate decides which comment is new evidence
+        # (#1788); a withheld row keeps its outside author and stays untrusted.
+        comments = [
+            {"author": {"login": entry.get("author")},
+             "createdAt": entry.get("created_at")}
+            for entry in comments if isinstance(entry, dict)
+        ]
     if not funnel.verdict_covers_head(
         packet.get("verdict"), packet.get("head_sha"), comments
     ):
@@ -1905,7 +1928,13 @@ def parse_run_evidence_comment(body: str) -> Optional[Dict[str, object]]:
 
 
 def _shape_pr_comment(row: dict, kind: str) -> Dict[str, Any]:
-    """Return one reviewer-visible PR comment with a capped body."""
+    """Return one reviewer-visible PR comment with a capped body.
+
+    Only a trusted author's text reaches the lister and the judges (#1788).
+    command-center is public, so anyone can comment on a PR; an untrusted
+    comment becomes a one-line placeholder naming its author and time, marked
+    ``withheld``, and is never read as ``**Run evidence:**``.
+    """
     body = row.get("body")
     created_at = row.get("createdAt")
     if not isinstance(body, str) or not isinstance(created_at, str) or not created_at:
@@ -1914,6 +1943,14 @@ def _shape_pr_comment(row: dict, kind: str) -> Dict[str, Any]:
     login = author.get("login") if isinstance(author, dict) else None
     if not isinstance(login, str) or not login:
         login = "unknown"
+    if not funnel.trusted_comment(row):
+        return {
+            "kind": kind,
+            "author": login,
+            "created_at": created_at,
+            "body": funnel.untrusted_comment_placeholder(row, created_at),
+            "withheld": True,
+        }
     body = body.strip()
     if len(body) > PR_COMMENT_BODY_LIMIT:
         body = body[:PR_COMMENT_BODY_LIMIT] + (

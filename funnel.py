@@ -3325,9 +3325,72 @@ def trusted_comment(row: object) -> bool:
 
     Fail closed: a comment with no readable author is untrusted. GitHub logins
     are unique regardless of case, so the comparison ignores it.
+
+    The same test gates every other runner marker and voice read out of a
+    comment (#1788): block conditions, Needs-decision questions, declines and
+    their routes, park and wake headers, self-approval and closed-itself
+    records, satisfied blocks, the provenance voice, and the comments a model
+    reads in a packet. ``tests/test_comment_trust.py`` enumerates those readers
+    so a new one cannot skip it.
     """
     author = comment_author(row)
     return author is not None and author.lower() in TRUSTED_COMMENT_AUTHORS
+
+
+def trusted_comments(rows: object) -> List[Mapping[str, object]]:
+    """The rows of a comment list that may carry a marker or a voice (#1788).
+
+    An untrusted row is not dropped from what a person is shown; it is only
+    kept away from every parser, so an outsider's text never becomes a
+    block, a route, a wake date or Nate's voice.
+    """
+    if not isinstance(rows, (list, tuple)):
+        return []
+    return [
+        row for row in rows
+        if isinstance(row, Mapping) and trusted_comment(row)
+    ]
+
+
+def untrusted_comment_author(row: object) -> str:
+    """How an untrusted comment's author is named where it is shown (#1788)."""
+    author = comment_author(row)
+    if author is None and isinstance(row, Mapping):
+        # A packet row already reduced to its login (engine/review.py) still
+        # names who posted it, although that shape is never trusted.
+        raw = row.get("author")
+        author = raw if isinstance(raw, str) and raw else None
+    return "@{}".format(author) if author else "an unknown author"
+
+
+def untrusted_comment_placeholder(row: object,
+                                  created_at: Optional[str] = None) -> str:
+    """The one line a model reads in place of an untrusted comment (#1788).
+
+    command-center is public, so a comment from anyone but the owner account
+    is a prompt-injection route into every packet a lister, judge, shaper or
+    breakdown reads. The line names who posted it and when, so a reader knows
+    something was said, and carries none of its text.
+    """
+    if created_at is None and isinstance(row, Mapping):
+        stamp = row.get("createdAt") or row.get("created_at")
+        created_at = stamp if isinstance(stamp, str) else None
+    return ("[Comment by {} at {} withheld: it was not posted by the owner "
+            "account, so its text is not read.]").format(
+                untrusted_comment_author(row), created_at or "an unknown time")
+
+
+def render_comment_voice(row: object) -> str:
+    """Render one comment's voice, reading the provenance only when trusted.
+
+    An outsider can paste a ``nate-direct`` provenance block into a comment on
+    a public repository; reading it would show outsider text as Nate's own
+    words (#1788). An untrusted comment is labelled by its author instead.
+    """
+    if not trusted_comment(row):
+        return "{} (not the owner account)".format(untrusted_comment_author(row))
+    body = row.get("body") if isinstance(row, Mapping) else None
+    return render_voice(body if isinstance(body, str) else "")
 
 
 def _verdict_from_comment(row: Mapping[str, object]) -> Optional[Dict]:
@@ -4241,6 +4304,8 @@ def verdict_covers_head(
     the new evidence needs a fresh judgement. All other verdicts keep their
     existing same-head coverage. Missing timestamps or comment reads do not
     establish that evidence arrived later, so they preserve current coverage.
+    Only a trusted author's comment is new evidence (#1788): otherwise anyone
+    could comment on a public PR and send it back to review on every tick.
     """
     if not verdict or not head_oid or verdict.get("head_sha") != head_oid:
         return False
@@ -4258,7 +4323,7 @@ def verdict_covers_head(
     if verdict_at is None:
         return True
     for comment in pr_comments or ():
-        if not isinstance(comment, Mapping):
+        if not isinstance(comment, Mapping) or not trusted_comment(comment):
             continue
         created_at = comment.get("createdAt") or comment.get("created_at")
         comment_at = parse_time(
@@ -4739,7 +4804,9 @@ def _self_approval_markers(
 
     found: List[Dict[str, object]] = []
     for comment in comments:
-        if not isinstance(comment, dict):
+        # A forged marker would report Nate's own approval as an agent's
+        # self-approval in the brief (#1788).
+        if not isinstance(comment, dict) or not trusted_comment(comment):
             continue
         basis = parse_self_approval(comment.get("body") or "")
         if basis is None:
@@ -5405,7 +5472,7 @@ query($search: String!, $cursor: String) {
         }
         comments(last: 100) {
           pageInfo { hasPreviousPage }
-          nodes { body createdAt }
+          nodes { body createdAt author { login } }
         }
       }
     }
@@ -5507,7 +5574,12 @@ def _decline_routing_issue_pages(
 def _decline_routing_comment_rows(
     issue: Mapping, start: datetime
 ) -> List[Dict[str, object]]:
-    """Validate the comment tail and return its rows without reading old bodies."""
+    """Validate the comment tail and return its rows without reading old bodies.
+
+    Every row's time bounds the page, but only a trusted author's rows are
+    returned (#1788): the decline and its routing record are runner markers,
+    and an outsider's copy of either must not move the metric.
+    """
     comments = issue.get("comments")
     if not isinstance(comments, dict):
         raise GitHubError("decline-search issue has no comments connection")
@@ -5525,7 +5597,8 @@ def _decline_routing_comment_rows(
         if created_at is None or not isinstance(body, str):
             raise GitHubError("decline-search issue has an unreadable comment")
         times.append(created_at)
-        rows.append({"body": body, "created_at": created_at})
+        if trusted_comment(node):
+            rows.append({"body": body, "created_at": created_at})
 
     # The last 100 comments are enough unless more comments on this issue
     # also fall inside the reporting window. In that case fail closed instead
@@ -12159,7 +12232,8 @@ def _parked_item_json(item: Item) -> Dict[str, object]:
     """
     comments = _issue_comments(item)
     parsed = None
-    for comment in reversed(comments):
+    # Only the owner's park header is the reason and wake date (#1788).
+    for comment in reversed(trusted_comments(comments)):
         body = comment.get("body") or ""
         parsed = parse_park_comment(body)
         if parsed is not None:
@@ -12273,9 +12347,13 @@ def _could_carry_closed_itself_marker(
 def _closed_itself_item_json(
     item: Item, comments: Sequence[dict]
 ) -> Optional[Dict[str, object]]:
-    """Render one funnel-close marker, or omit an ordinary accepted close."""
+    """Render one funnel-close marker, or omit an ordinary accepted close.
+
+    Only a trusted author's marker counts (#1788): a forged one would report
+    Nate's own acceptance as a close the funnel made by itself.
+    """
     for comment in reversed(comments):
-        if not isinstance(comment, dict):
+        if not isinstance(comment, dict) or not trusted_comment(comment):
             continue
         payload = _marked_json(
             comment.get("body") or "", CLOSED_ITSELF_PREFIX
@@ -12335,7 +12413,9 @@ def _cleared_block_item_json(item: Item) -> Optional[Dict[str, object]]:
     """Render the newest valid satisfied-block record on one unblocked item."""
     comments = _issue_comments(item)
     for comment in reversed(comments):
-        if not isinstance(comment, dict):
+        # The record's agent voice is only an agent's when the owner account
+        # posted it (#1788).
+        if not isinstance(comment, dict) or not trusted_comment(comment):
             continue
         record = parse_satisfied_block_comment(comment.get("body") or "")
         if record is None:
@@ -14864,9 +14944,13 @@ def reconcile_parked_wakes(
 def _latest_park_comment(
     comments: Sequence[object],
 ) -> Optional[Dict[str, object]]:
-    """Parse the newest park header in oldest-first comments, if any."""
+    """Parse the newest park header in oldest-first comments, if any.
+
+    Only a trusted author's header counts (#1788): the wake date reopens the
+    issue and restores its Status, and anyone can comment on a public repo.
+    """
     for comment in reversed(comments):
-        if not isinstance(comment, dict):
+        if not isinstance(comment, dict) or not trusted_comment(comment):
             continue
         parsed = parse_park_comment(comment.get("body") or "")
         if parsed is not None:
@@ -15557,7 +15641,7 @@ def _brief_comment_query(
             issue_alias = "issue{}".format(issue_index)
             lines.append(
                 "    {}: issue(number: {}) {{ comments(last: {}) {{ "
-                "nodes {{ body createdAt }} }} }}".format(
+                "nodes {{ body createdAt author {{ login }} }} }} }}".format(
                     issue_alias, item.number, CLOSED_ITSELF_COMMENT_PAGE_SIZE
                 )
             )
@@ -15816,10 +15900,14 @@ def _load_block_comment(item: Item) -> None:
     if not isinstance(payload, dict) or not isinstance(payload.get("comments"), list):
         item.block_comments_error = "could not read comments"
         return
+    # Every parser below reads runner markers: a block condition, a
+    # Needs-decision question, a decline and its route, a satisfied block.
+    # Only the owner account's comments carry them (#1788); anyone can
+    # comment on a public repository, and an outsider's copy of any of these
+    # would block, unblock or re-route real work.
     bodies = [
         comment.get("body") or ""
-        for comment in payload["comments"]
-        if isinstance(comment, dict)
+        for comment in trusted_comments(payload["comments"])
     ]
     item.unparseable_block_comments = unparseable_block_comment_lines(bodies)
     item.block_event = None
@@ -19128,8 +19216,10 @@ def cmd_show(items: List[Item], now: datetime, ref: str) -> int:
         for c in comments[-4:]:
             body = c.get("body") or ""
             text = " ".join(_visible_comment(body).split())
+            # An untrusted comment is shown under its author's login, never
+            # under a voice its own text claims (#1788).
             print("  {}: {}".format(
-                render_voice(body), text[:200]))
+                render_comment_voice(c), text[:200]))
         print("")
 
     if item.status == "Building":

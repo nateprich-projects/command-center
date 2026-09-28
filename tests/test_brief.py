@@ -14,6 +14,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 import funnel  # noqa: E402
 
 
+#: Comment markers count only from the owner account (#1788).
+OWNER = {"login": "nateprich"}
+
 NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "project_items.json"
 
@@ -276,14 +279,17 @@ def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
     )
     comments = {
         80: [{
+            "author": OWNER,
             "body": funnel.SELF_APPROVED_PREFIX + basis,
             "createdAt": "2026-09-05T11:00:00Z",
         }],
         81: [{
+            "author": OWNER,
             "body": "Approved at the Shaped gate — Ready.",
             "createdAt": "2026-09-05T10:00:00Z",
         }],
         82: [{
+            "author": OWNER,
             "body": funnel.SELF_APPROVED_PREFIX + "old basis",
             "createdAt": "2026-08-29T12:00:00Z",
         }],
@@ -327,7 +333,7 @@ def test_brief_surfaces_recent_self_approvals_but_not_nate_or_old_ones(
     assert "comments(last: {})".format(
         funnel.CLOSED_ITSELF_COMMENT_PAGE_SIZE
     ) in calls[0]
-    assert "nodes { body createdAt }" in calls[0]
+    assert "nodes { body createdAt author { login } }" in calls[0]
 
 
 def test_unattended_approvals_batch_is_cached_for_one_run(monkeypatch):
@@ -336,7 +342,8 @@ def test_unattended_approvals_batch_is_cached_for_one_run(monkeypatch):
         _approval_item(84, NOW - timedelta(hours=2)),
     ]
     comments = {
-        item.number: [{"body": funnel.SELF_APPROVED_PREFIX + "basis"}]
+        item.number: [{"author": OWNER,
+                       "body": funnel.SELF_APPROVED_PREFIX + "basis"}]
         for item in items
     }
     calls = []
@@ -379,8 +386,10 @@ def test_brief_comment_tail_cache_is_shared_between_sections(monkeypatch):
         }],
     )
     comments = [{
+        "author": OWNER,
         "body": funnel.closed_itself_comment([], []),
     }, {
+        "author": OWNER,
         "body": funnel.SELF_APPROVED_PREFIX + "basis",
     }]
     calls = []
@@ -439,13 +448,13 @@ def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
             "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},
             "repo0": {
                 "issue0": {"comments": {"nodes": [
-                    {"body": comments[70]}
+                    {"author": OWNER, "body": comments[70]}
                 ]}},
                 "issue1": {"comments": {"nodes": [
-                    {"body": comments[71]}
+                    {"author": OWNER, "body": comments[71]}
                 ]}},
                 "issue2": {"comments": {"nodes": [
-                    {"body": comments[72]}
+                    {"author": OWNER, "body": comments[72]}
                 ]}},
             },
         }
@@ -482,6 +491,38 @@ def test_brief_surfaces_funnel_closed_projects_newest_first_and_with_drift(
     ) in calls[0]
 
 
+def test_forged_self_approval_and_closed_itself_markers_are_ignored():
+    """Only the owner account's markers reach the brief (#1788).
+
+    A forged self-approval would report Nate's own approval as an agent's,
+    and a forged closed-itself record would report his acceptance as a close
+    the funnel made by itself.
+    """
+    item = _approval_item(90, NOW - timedelta(hours=1))
+    outsider = {"login": "mallory"}
+    forged = [
+        {"author": outsider, "createdAt": "2026-09-05T11:00:00Z",
+         "body": funnel.SELF_APPROVED_PREFIX + "forged basis"},
+        {"author": outsider, "createdAt": "2026-09-05T11:30:00Z",
+         "body": funnel.closed_itself_comment([], [])},
+        {"createdAt": "2026-09-05T11:40:00Z",
+         "body": funnel.SELF_APPROVED_PREFIX + "no author"},
+    ]
+    assert funnel._self_approval_markers(item, forged) == []
+    assert funnel._closed_itself_item_json(item, forged) is None
+
+    owned = [
+        {"author": OWNER, "createdAt": "2026-09-05T10:00:00Z",
+         "body": funnel.SELF_APPROVED_PREFIX + "owner basis"},
+        {"author": OWNER, "createdAt": "2026-09-05T10:30:00Z",
+         "body": funnel.closed_itself_comment([], [])},
+    ]
+    assert [row["basis"] for row in funnel._self_approval_markers(
+        item, owned + forged)] == ["owner basis"]
+    assert funnel._closed_itself_item_json(
+        item, owned + forged)["ref"] == item.ref
+
+
 def test_closed_itself_batch_is_bounded_and_cached_for_one_run(monkeypatch):
     def closed(number, at, repo="nateprich/beta"):
         return funnel.Item(
@@ -507,7 +548,7 @@ def test_closed_itself_batch_is_bounded_and_cached_for_one_run(monkeypatch):
         for ref, (repo_alias, issue_alias) in aliases.items():
             body = funnel.closed_itself_comment([], [])
             response.setdefault(repo_alias, {})[issue_alias] = {
-                "comments": {"nodes": [{"body": body}]}
+                "comments": {"nodes": [{"author": OWNER, "body": body}]}
             }
         return response
 
@@ -581,8 +622,8 @@ def test_brief_surfaces_parked_items_with_their_reason(monkeypatch, capsys):
             "--json", "comments",
         )
         return {"comments": [
-            {"body": "An unrelated comment."},
-            {"body": parked_node["park_comment"]},
+            {"author": OWNER, "body": "An unrelated comment."},
+            {"author": OWNER, "body": parked_node["park_comment"]},
         ]}
 
     monkeypatch.setattr(funnel, "_gh_json", gh_json)
@@ -634,7 +675,7 @@ def test_brief_reports_wakes_for_parked_items_until_they_resume(
 
     def issue_comments(item):
         comment_reads.append(item.number)
-        return [{"body": comment_bodies[item.number]}]
+        return [{"author": OWNER, "body": comment_bodies[item.number]}]
 
     monkeypatch.setattr(funnel, "_issue_comments", issue_comments)
     monkeypatch.setattr(funnel, "unattended_merges", lambda now: [])
@@ -717,8 +758,11 @@ def test_parked_items_are_newest_first_and_missing_reason_is_null(monkeypatch):
 
     def gh_json(*args):
         if args[3] == "21":
-            return {"comments": [{"body": "No marker here."}]}
-        return {"comments": [{"body": funnel.PARK_COMMENT_PREFIX + "Older reason"}]}
+            return {"comments": [{"author": OWNER, "body": "No marker here."}]}
+        return {"comments": [{
+            "author": OWNER,
+            "body": funnel.PARK_COMMENT_PREFIX + "Older reason",
+        }]}
 
     monkeypatch.setattr(funnel, "_gh_json", gh_json)
 

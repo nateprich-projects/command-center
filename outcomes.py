@@ -29,7 +29,6 @@ import session_usage
 REPO = "nateprich-projects/command-center"
 HEARTBEAT_BRANCH = "heartbeat"
 OUTCOMES_PATH = "outcomes.jsonl"
-NATE_LOGIN = "nateprich"
 
 # ``funnel.ticket_pr_index`` defaults to the brief's 100-row diagnostic bound.
 # Outcome derivation asks for a larger whole-repository scan, and refuses to
@@ -91,17 +90,6 @@ def _number(value: object) -> Optional[int]:
     if isinstance(value, int) and value > 0:
         return value
     return None
-
-
-def _login(value: object) -> Optional[str]:
-    if not isinstance(value, Mapping):
-        return None
-    found = value.get("login")
-    return found if isinstance(found, str) and found else None
-
-
-def _author_login(row: Mapping[str, object]) -> Optional[str]:
-    return _login(row.get("author")) or _login(row.get("user"))
 
 
 def _body(row: Mapping[str, object]) -> str:
@@ -177,8 +165,11 @@ def _direct_nate_comment(row: object) -> bool:
     unmarked or ``nate-direct``/``nate-relayed`` comment is treated as human
     involvement.  This is intentionally conservative: ambiguity counts as
     intervention rather than being mistaken for unattended work.
+
+    Only the owner account's comment is read (#1788), through the same
+    predicate as every other comment-marker reader.
     """
-    if not isinstance(row, Mapping) or _author_login(row) != NATE_LOGIN:
+    if not isinstance(row, Mapping) or not funnel.trusted_comment(row):
         return False
     provenance = _provenance(_body(row))
     return provenance is None or provenance.get("voice") != "agent"

@@ -1299,6 +1299,12 @@ def _verify_evidence_url(url: str, started: datetime) -> None:
         raise ImplementError(
             "evidence URL {} did not resolve to its named artifact".format(url)
         )
+    if kind == "comment" and not funnel.trusted_comment(data):
+        # A comment is this run's evidence only when the owner account posted
+        # it (#1788); anyone can comment on a public repository mid-run.
+        raise ImplementError(
+            "evidence URL {} was not posted by the owner account".format(url)
+        )
     if kind == "closed" and str(data.get("state", "")).lower() != "closed":
         raise ImplementError("evidence URL {} is not closed".format(url))
     occurred = _parse_github_timestamp(data.get(stamp_field))
@@ -1630,7 +1636,12 @@ def closed_human_steps_for(rows: Sequence[Dict[str, object]], repo: str,
 
 
 def read_ticket_comment_bodies(repo: str, number: int) -> List[str]:
-    """Read one ticket's comment bodies, oldest first; fail closed."""
+    """Read one ticket's trusted comment bodies, oldest first; fail closed.
+
+    The caller parses routing records out of these, so only the owner
+    account's comments are returned (#1788): an outsider's forged record would
+    read as a route this run already posted, and the guard would skip it.
+    """
     payload = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo,
         "--json", "comments",
@@ -1639,8 +1650,8 @@ def read_ticket_comment_bodies(repo: str, number: int) -> List[str]:
     if not isinstance(comments, list):
         raise funnel.GitHubError(
             "could not read comments for {}#{}".format(repo, number))
-    return [comment.get("body") or "" for comment in comments
-            if isinstance(comment, dict)]
+    return [comment.get("body") or ""
+            for comment in funnel.trusted_comments(comments)]
 
 
 def remote_ticket_head(root: pathlib.Path, branch: str) -> Optional[str]:

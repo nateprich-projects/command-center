@@ -29,6 +29,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import urlsplit
@@ -965,13 +966,15 @@ def pinned_interpreter(root: pathlib.Path) -> str:
 
 
 def run_tests(root: pathlib.Path,
-              commands: Optional[Sequence[Sequence[str]]] = None
+              commands: Optional[Sequence[Sequence[str]]] = None, *,
+              timeout: Optional[float] = None
               ) -> Tuple[List[str], Optional[str]]:
     """Run the checkout's tests without writing Python bytecode.
 
     Returns the rendered commands and the test-command source, which is
     None when the caller injected explicit commands or no test slot was
-    resolved.
+    resolved. ``timeout`` lowers each command's bound, for a caller with a
+    budget of its own (the finish's reproduction run, #1805).
     """
     if commands is not None:
         selected = list(commands)
@@ -998,11 +1001,12 @@ def run_tests(root: pathlib.Path,
         # Mac has no bare `python` on PATH (#890), so run the chosen one.
         if argv and argv[0] in ("python", "python3"):
             argv[0] = python
+        bound = (COMPILE_COMMAND_TIMEOUT_SECONDS
+                 if _is_compile_command(argv)
+                 else TEST_COMMAND_TIMEOUT_SECONDS)
         _run(
             argv, cwd=root, env=env,
-            timeout=(COMPILE_COMMAND_TIMEOUT_SECONDS
-                     if _is_compile_command(argv)
-                     else TEST_COMMAND_TIMEOUT_SECONDS),
+            timeout=bound if timeout is None else min(bound, timeout),
         )
         rendered.append(shlex.join(argv))
     return rendered, source
@@ -1044,7 +1048,8 @@ def _merged_failure(record: dict) -> MergedSuiteError:
 
 def _run_finish_tests(root: pathlib.Path,
                       commands: Optional[Sequence[Sequence[str]]] = None
-                      ) -> Tuple[List[str], Optional[str], Optional[str]]:
+                      ) -> Tuple[List[str], Optional[str], Optional[str],
+                                 Optional[dict]]:
     """Run the finish's suite on the work merged with current main (#1804).
 
     A head passing its own suite says nothing about the merge it becomes:
@@ -1067,12 +1072,13 @@ def _run_finish_tests(root: pathlib.Path,
     runs as it always has. Explicit ``commands`` are a caller's choice and
     run on the head: the merged suite resolves the repository's own plan.
 
-    Returns the commands run, the test-command source, and a phrase for the
-    finish note when they ran on the merge (None on the head alone).
+    Returns the commands run, the test-command source, a phrase for the
+    finish note when they ran on the merge, and the merged suite's record
+    for the PR's evidence block (#1805); both are None on the head alone.
     """
     if commands is not None:
         tests, source = run_tests(root, commands)
-        return tests, source, None
+        return tests, source, None, None
     # A failed fetch leaves origin/main where this clone last saw it, which
     # is still a merge worth testing; the record names the base it used.
     _run(["git", "fetch", "origin",
@@ -1091,7 +1097,7 @@ def _run_finish_tests(root: pathlib.Path,
             record = None
     if record is None:
         tests, source = run_tests(root, None)
-        return tests, source, None
+        return tests, source, None, None
     if record["result"] == "conflict":
         raise MergeConflictError(record["base"], record["conflicts"])
     if record["blocking"]:
@@ -1103,7 +1109,46 @@ def _run_finish_tests(root: pathlib.Path,
         tested += " ({} failing as on origin/main)".format(
             len(record["failing"]))
     return ([entry["command"] for entry in record["commands"]],
-            record["test_source"], tested)
+            record["test_source"], tested, record)
+
+
+#: How long a finish gives the classification of the PR's added tests on
+#: origin/main, after the merged suite (#1805, plan #1783 ticket 5). It
+#: took 3.7s on this repository (#1829); the budget keeps a slow member
+#: suite from doubling a finish, and over it the block says so.
+REPRODUCTION_BUDGET_SECONDS = 4 * 60
+
+#: The stand-in record when no classification ran: the merge could not be
+#: made or tested, or ``reproduction`` itself failed. Its line is the
+#: block's only word on it, so no error text reaches the PR body.
+_REPRODUCTION_NOT_RUN = {"reproduction": "not run",
+                         "line": "reproduction: not run", "tests": []}
+
+
+def _run_reproduction(root: pathlib.Path,
+                      merged: Optional[dict]) -> dict:
+    """Classify the PR's added tests on the merged suite's base (#1805).
+
+    ``review_evidence.reproduction`` runs the tests the branch adds or
+    changes on the base the merged suite used, within
+    ``REPRODUCTION_BUDGET_SECONDS``, and says red, passes-on-base, no
+    signal, unsupported or over budget. It runs only after a merged suite:
+    where none could be made, the base could not be worked in either.
+    Evidence is recorded, never a reason to fail a finish, so this never
+    raises; a failure is ``reproduction: not run``.
+    """
+    if merged is None:
+        return dict(_REPRODUCTION_NOT_RUN)
+    try:
+        evidence = _review_evidence()
+    except OSError:
+        return dict(_REPRODUCTION_NOT_RUN)
+    try:
+        return evidence.reproduction(
+            root, merged["base"], work_dir=root.parent,
+            budget=REPRODUCTION_BUDGET_SECONDS)
+    except (evidence.ReviewEvidenceError, ImplementError, OSError):
+        return dict(_REPRODUCTION_NOT_RUN)
 
 
 _GITHUB_REMOTE_RE = re.compile(
@@ -1132,10 +1177,104 @@ def resolve_checkout_repo(root: pathlib.Path, explicit: Optional[str]) -> str:
     return repo
 
 
+#: The runner-written evidence block that ends every finished PR's body
+#: (#1805, plan #1783 ticket 5). The review packet carries it when its
+#: ``sha`` is the head under review (#1812). Only the runner writes these
+#: markers: ``render_pr_body`` strips them from everything else in the
+#: body, the model's summary, departures and risks among it, so a model
+#: cannot forge a block. Each finish re-renders the whole body, so a
+#: continued PR's block is always the latest push's. The format, one line
+#: each and in this order:
+#:
+#:   <!-- command-center-evidence -->
+#:   Evidence, written by the runner:
+#:   - sha: <the 40-hex commit this finish pushed, after any merge the
+#:     push added>
+#:   - merged suite: pass on origin/main <12-hex>
+#:     | fail, <n> failing as on origin/main <12-hex>
+#:     | not run (the head's own suite passed)
+#:   - reproduction: red | passes-on-base | no signal | unsupported
+#:     | over budget | not run
+#:   - added tests: <n> red, <n> passes-on-base, <n> no signal
+#:   - <outcome>: <node id>    (command-center only, at most
+#:     MAX_EVIDENCE_TEST_IDS, then "- (+<n> more)")
+#:   <!-- /command-center-evidence -->
+#:
+#: Every other repository's block carries the counts and no node id, as
+#: its notes do (#1796).
+EVIDENCE_MARKER = "<!-- command-center-evidence -->"
+EVIDENCE_END_MARKER = "<!-- /command-center-evidence -->"
+
+#: How many added tests a command-center block names; the rest are counted.
+#: It keeps the block well inside the review packet's 8 KB (#1812).
+MAX_EVIDENCE_TEST_IDS = 30
+
+#: Either marker, however spaced or cased, so a near-miss cannot pass for
+#: one with a looser reader.
+_EVIDENCE_MARKER_RE = re.compile(
+    r"<!--\s*/?\s*command-center-evidence\s*-->", re.IGNORECASE)
+
+
+def _strip_evidence_markers(text: str) -> str:
+    """``text`` without either marker, repeated until none is left, so a
+    marker split around another cannot close up into one (#1805)."""
+    while True:
+        stripped = _EVIDENCE_MARKER_RE.sub("", text)
+        if stripped == text:
+            return text
+        text = stripped
+
+
+def render_evidence_block(*, sha: str, merged: Optional[dict],
+                          reproduction: dict, repo: str) -> str:
+    """The runner's evidence block for a PR body (``EVIDENCE_MARKER``).
+
+    ``sha`` is the commit the finish pushed, ``merged`` the merged suite's
+    record (None when the head's suite ran alone) and ``reproduction`` the
+    added-test classification's (#1805).
+    """
+    if merged is None:
+        suite = "not run (the head's own suite passed)"
+    elif merged["result"] == "pass":
+        suite = "pass on origin/main {}".format(merged["base"][:12])
+    else:
+        # A PR opens past a failing merge only when main fails the same way.
+        suite = "fail, {} failing as on origin/main {}".format(
+            len(merged["failing"]), merged["base"][:12])
+    tests = reproduction.get("tests") or []
+    counts = Counter(test["outcome"] for test in tests)
+    lines = [
+        EVIDENCE_MARKER,
+        "Evidence, written by the runner:",
+        "- sha: {}".format(sha),
+        "- merged suite: {}".format(suite),
+        "- {}".format(reproduction["line"]),
+        "- added tests: {} red, {} passes-on-base, {} no signal".format(
+            counts["red"], counts["passes-on-base"], counts["no signal"]),
+    ]
+    if _is_public_repo(repo):
+        shown = tests[:MAX_EVIDENCE_TEST_IDS]
+        for test in shown:
+            # A node id holds a path the branch chose; it must not carry
+            # a marker, or a line break that would start a line of its own.
+            node_id = " ".join(_strip_evidence_markers(test["id"]).split())
+            lines.append("- {}: {}".format(test["outcome"], node_id[:200]))
+        if len(tests) > len(shown):
+            lines.append("- (+{} more)".format(len(tests) - len(shown)))
+    lines.append(EVIDENCE_END_MARKER)
+    return "\n".join(lines) + "\n"
+
+
 def render_pr_body(ticket: dict, answer: dict, *, continued: bool,
                    tests: Sequence[str],
-                   test_source: Optional[str] = None) -> str:
-    """Render the stable PR template from the model's structured answer."""
+                   test_source: Optional[str] = None,
+                   evidence: Optional[str] = None) -> str:
+    """Render the stable PR template from the model's structured answer.
+
+    ``evidence`` is the runner's block (``render_evidence_block``), which
+    ends the body (#1805). Marker text is stripped from everything before
+    it, so the runner's block is the only one.
+    """
     parent = ticket.get("parent") or {}
     parent_number = parent.get("number")
     lines = []
@@ -1179,7 +1318,12 @@ def render_pr_body(ticket: dict, answer: dict, *, continued: bool,
             "Test command source:",
             test_source,
         ])
-    return "\n".join(lines) + "\n"
+    # Every line so far is the model's answer or text the branch can shape
+    # (a CI step's name), none of it the runner's block (#1805).
+    body = _strip_evidence_markers("\n".join(lines) + "\n")
+    if evidence is not None:
+        body += "\n" + evidence
+    return body
 
 
 def _remote_branch_exists(root: pathlib.Path, branch: str) -> bool:
@@ -2652,8 +2796,9 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             ref=ref, run=run, agent=agent,
         )
         phase = "tests"
-        tests, test_source, tested = _run_finish_tests(
+        tests, test_source, tested, merged = _run_finish_tests(
             context["root"], test_commands)
+        reproduced = _run_reproduction(context["root"], merged)
     except SupersededRunError:
         raise
     except StrayFileError as exc:
@@ -2748,6 +2893,10 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             context["root"], context["branch"],
             ref=ref, run=run, agent=agent,
         )
+        # The evidence block is keyed to this, the commit the PR's head now
+        # is, after any merge the push added (#1805).
+        pushed = _run(["git", "rev-parse", "HEAD"], cwd=context["root"],
+                      timeout=LOCAL_GIT_TIMEOUT_SECONDS).stdout.strip()
         # Recheck before the PR effect in case the merge or push surfaced
         # another scratch file.
         _check_no_run_scratch(context["root"])
@@ -2768,8 +2917,12 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             _remove_codex_run_checkout(
                 context["root"], context["number"], agent)
         raise
-    body = render_pr_body(ticket, answer, continued=continued, tests=tests,
-                         test_source=test_source)
+    body = render_pr_body(
+        ticket, answer, continued=continued, tests=tests,
+        test_source=test_source,
+        evidence=render_evidence_block(
+            sha=pushed, merged=merged, reproduction=reproduced,
+            repo=resolved))
     pr = pr_effect(resolved, context, ticket, body)
     release_effect(ref)
     note = "PR #{}".format(pr["number"])

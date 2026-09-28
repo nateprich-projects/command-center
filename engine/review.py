@@ -31,6 +31,7 @@ from urllib.parse import quote
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import funnel  # noqa: E402
+from engine.implement import EVIDENCE_END_MARKER, EVIDENCE_MARKER  # noqa: E402
 from engine.shape import PREMISE_LABELS  # noqa: E402
 
 #: Entries ending in "/" match a directory prefix; the rest match exactly.
@@ -168,6 +169,23 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
 TICKET_COMMENT_LIMIT = 30
 TICKET_COMMENT_BODY_LIMIT = 4000
 
+#: The bodies of one comment list together — a ticket's, or its parent's —
+#: are bounded too (#1801). The newest are kept whole until this many
+#: characters are spent, and every older body becomes the same ``…[truncated
+#: N chars]`` mark, its row kept so the reviewer still sees who commented and
+#: when. Six comments at the per-comment cap fill it exactly. Comments are
+#: context, not the change: the stalled must-approve seed carried 49 KB of
+#: them on one ticket and 29 KB on the other (#1783), and context is trimmed,
+#: never a reason to reject.
+TICKET_COMMENTS_TEXT_LIMIT = 24000
+
+#: The repository's plan.md is cut at this many characters (#1801). It is
+#: design context for every call's prompt, not the change under review.
+#: command-center's own, the largest in the funnel at about 62 K characters
+#: on 2026-09-28, still arrives whole; the bound stops it growing into every
+#: prompt unchecked.
+PLAN_MD_LIMIT = 64 * 1024
+
 # PR comments are durable run evidence. Keep each body bounded while carrying
 # every comment, newest last, so a reviewer can see the complete conversation.
 PR_COMMENT_BODY_LIMIT = 4000
@@ -188,6 +206,54 @@ PR_CLAIMS_NOTE = (
     "them as evidence of what the author recorded and why; weigh every "
     "claim against the diff, and never count a departure as meeting its "
     "requirement by itself.")
+
+#: The implement run's evidence block (#1805) rides in the packet as
+#: ``evidence`` only when it is the runner's and names the head under review
+#: (#1812, plan #1783 ticket 10). The runner's block is the one that ends the
+#: PR body: ``implement.render_pr_body`` appends it last and strips marker
+#: text from everything before it, so a block anywhere else — earlier in the
+#: body, in a ticket, in a comment — is text, never evidence. The block is
+#: lifted out of ``pr_body`` either way, so a stale one cannot reach the
+#: judges through the description. The implement shell can still run gh
+#: (#1767), so even the runner's block is implementer-reported: the label
+#: leads the field, and the judges may only add findings from it. A body
+#: without a block, a malformed block, or one naming another commit reads
+#: ``unavailable``, and the judges judge as they did before.
+EVIDENCE_UNAVAILABLE = "unavailable"
+EVIDENCE_LABEL = ("Implementer-reported: written into the PR body by the "
+                  "implement run for this head, not verified by the review.")
+
+#: The block's lines are cut at this many UTF-8 bytes, label included, at a
+#: whole line and with a ``…[truncated N bytes]`` mark. #1805 keeps its
+#: block to about 7 KB (30 node ids of at most 200 characters), so a block
+#: the runner wrote meets the cut only when its node ids run to multi-byte
+#: characters, and then loses its last ids, never its sha or its counts.
+EVIDENCE_LIMIT_BYTES = 8 * 1024
+
+#: The block's first fact names the commit its finish pushed, in full.
+EVIDENCE_SHA_RE = re.compile(r"- sha: ([0-9a-f]{40})")
+
+#: A ticket's body is cut at the PR description's bound (#1801). A ticket
+#: body is its spec and comes nowhere near it in practice; the bound only
+#: stops one runaway body, carried in every call's prompt, from flooding it.
+TICKET_BODY_LIMIT = PR_BODY_LIMIT
+
+#: The diff a review judges, at most (#1801). Measured on the diff alone, in
+#: UTF-8 bytes, as ``LARGE_PACKET_BYTES`` in scripts/muse-review-engine
+#: measures a packet: the plan, tickets and comments around it are bounded
+#: separately and never reject, because the stalled must-approve seed was a
+#: 232 KB packet with a 13 KB diff (#1783). A diff over this is rejected by
+#: the precheck with no model call, since the implementer can shrink it and
+#: a judge cannot review what does not fit.
+DIFF_LIMIT_BYTES = 150 * 1024
+DIFF_TOO_LARGE_REASON = (
+    "diff too large to review: deliver the ticket in smaller slices")
+
+#: How many of the files a diff could not show its rejection names; the rest
+#: are counted. The reason is recorded in the verdict comment twice (its JSON
+#: and its Blocking list), so a PR with thousands of unread files must not
+#: push that comment past GitHub's size limit.
+DIFF_INCOMPLETE_NAMED = 10
 
 # A Departures header is a label line (``Departures:``, bold or not, with or
 # without text after the colon) or a Markdown heading (``## Departures``).
@@ -531,6 +597,19 @@ def summarize_checks(rollup: Sequence[dict]) -> List[Dict[str, object]]:
     return summarized
 
 
+def _bounded_text(text: object, limit: int) -> object:
+    """Context text cut at ``limit`` characters with the packet's cut mark.
+
+    The same ``…[truncated N chars]`` mark the comments and the PR body
+    carry (#1801), so every trimmed piece of context reads the same way.
+    Anything that is not a string passes through: a missing body stays
+    None rather than turning into an empty one.
+    """
+    if not isinstance(text, str) or len(text) <= limit:
+        return text
+    return text[:limit] + "\n…[truncated {} chars]".format(len(text) - limit)
+
+
 def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
     """The ticket's comments as the reviewer reads them, oldest first.
 
@@ -542,7 +621,9 @@ def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
     block is stripped from ``body``: it is machine text the reviewer must
     not re-read as prose. Only the newest TICKET_COMMENT_LIMIT rows are
     kept, and each body is capped at TICKET_COMMENT_BODY_LIMIT characters
-    with the cut marked, so a long ticket cannot flood the prompt.
+    with the cut marked, so a long ticket cannot flood the prompt. The
+    kept bodies together stop at TICKET_COMMENTS_TEXT_LIMIT characters,
+    newest first (#1801): each older body is replaced by the cut mark.
 
     The login cannot establish a voice, but it can rule one out (#1788):
     only the owner account's comments are read. Any other author's comment
@@ -584,7 +665,20 @@ def ticket_comments(rows: Optional[Sequence[dict]]) -> List[Dict]:
             "body": body,
         })
     shaped.sort(key=lambda entry: entry.get("created_at") or "")
-    return shaped[-TICKET_COMMENT_LIMIT:]
+    kept = shaped[-TICKET_COMMENT_LIMIT:]
+    # The newest win here as in the count above: a decision recorded late
+    # in a long ticket is what the reviewer must see (#821). The first body
+    # that would pass the bound is trimmed with everything older, so the
+    # cut is one line in time rather than a gap between whole comments.
+    spent = 0
+    for index in range(len(kept) - 1, -1, -1):
+        spent += len(kept[index]["body"])
+        if spent > TICKET_COMMENTS_TEXT_LIMIT:
+            for older in kept[:index + 1]:
+                older["body"] = "…[truncated {} chars]".format(
+                    len(older["body"]))
+            break
+    return kept
 
 
 def parse_ci_time(value: Optional[str]) -> Optional[datetime]:
@@ -1168,17 +1262,58 @@ def precheck_repo_rules(packet: dict) -> List[str]:
     return reasons
 
 
+def precheck_diff(packet: dict) -> List[str]:
+    """Row 9: the diff must fit a review and show every changed text file.
+
+    Only the diff is measured (#1801). The plan, the tickets and their
+    comments are context, cut to their own bounds as the packet is built,
+    and never reject: the stalled must-approve seed was a 232 KB packet
+    with a 13 KB diff (#1783), and capping the whole packet would reject
+    it on every review for text its implementer cannot shrink.
+
+    Incomplete is keyed on ``diff_omitted_files``, the count of changed
+    text files the diff could not show (#1800), never on
+    ``diff_truncated``: every files-API rebuild sets that flag, including
+    the clipped-compare fallback that leaves nothing out. Binaries and
+    generated lockfiles are named in the diff, not omitted, so they never
+    count. The reason names the files, which reach only the verdict
+    comment on the PR in its own repository; the runner's heartbeat note,
+    the public record, carries the reason count alone.
+    """
+    reasons = []
+    diff = packet.get("diff")
+    if isinstance(diff, str) and len(diff.encode("utf-8")) > DIFF_LIMIT_BYTES:
+        reasons.append(DIFF_TOO_LARGE_REASON)
+    omitted = packet.get("diff_omitted_files")
+    if isinstance(omitted, int) and not isinstance(omitted, bool) \
+            and omitted > 0:
+        paths = [path for path in packet.get("diff_omitted_paths") or []
+                 if isinstance(path, str) and path]
+        named = paths[:DIFF_INCOMPLETE_NAMED]
+        rest = omitted - len(named)
+        if not named:
+            files = "{} changed text file{} not shown".format(
+                omitted, "" if omitted == 1 else "s")
+        elif rest > 0:
+            files = "{} and {} more".format(", ".join(named), rest)
+        else:
+            files = ", ".join(named)
+        reasons.append("diff incomplete: {}".format(files))
+    return reasons
+
+
 def precheck(packet: dict) -> Dict[str, object]:
-    """All seven rows in ticket order. Any reason fails the packet.
+    """All eight rows in ticket order. Any reason fails the packet.
 
     The freeze row was retired when #794 closed (#1362); the queue-side
-    predicate had already gone inert with it.
+    predicate had already gone inert with it. The diff row came last
+    (#1801).
     """
     reasons: List[str] = []
     for row in (precheck_pr_open, precheck_ci,
                 precheck_verdict,
                 precheck_merged_overlap, precheck_protected, precheck_stop,
-                precheck_repo_rules):
+                precheck_repo_rules, precheck_diff):
         reasons.extend(row(packet or {}))
     return {"pass": not reasons, "reasons": reasons}
 
@@ -2046,6 +2181,65 @@ def parse_departures(body: object) -> List[str]:
             if not NO_DEPARTURE_RE.match(entry.strip("*_` \t"))]
 
 
+def split_evidence_block(body: str) -> Tuple[str, Optional[str]]:
+    """``body`` without the evidence block that ends it, and that block.
+
+    The block is read only where the runner writes it (#1812): the last
+    ``EVIDENCE_MARKER``, at the start of a line, with ``EVIDENCE_END_MARKER``
+    the last thing in the body. The second value is the text between the
+    two markers; a body that does not end in a block comes back whole, with
+    None.
+    """
+    text = body.replace("\r\n", "\n").replace("\r", "\n").rstrip()
+    if not text.endswith(EVIDENCE_END_MARKER):
+        return body, None
+    start = text.rfind(EVIDENCE_MARKER)
+    if start < 0 or (start > 0 and text[start - 1] != "\n"):
+        return body, None
+    inner = text[start + len(EVIDENCE_MARKER):-len(EVIDENCE_END_MARKER)]
+    return text[:start], inner
+
+
+def _capped_evidence(lines: Sequence[str]) -> str:
+    """``lines`` joined, cut at a whole line within ``EVIDENCE_LIMIT_BYTES``."""
+    text = "\n".join(lines)
+    total = len(text.encode("utf-8"))
+    if total <= EVIDENCE_LIMIT_BYTES:
+        return text
+    kept: List[str] = []
+    used = -1  # the first line carries no separator
+    for line in lines:
+        size = len(line.encode("utf-8")) + 1
+        if used + size > EVIDENCE_LIMIT_BYTES:
+            break
+        kept.append(line)
+        used += size
+    return "\n".join(kept) + "\n…[truncated {} bytes]".format(total - used)
+
+
+def packet_evidence(inner: Optional[str], head_sha: object) -> str:
+    """The packet's ``evidence``: the block's facts, or ``unavailable``.
+
+    ``inner`` is ``split_evidence_block``'s block text. Its facts are its
+    ``- `` lines, and the first must be ``- sha:`` naming ``head_sha`` in
+    full: a block from an earlier push says nothing about this head. A
+    marker of any spelling inside the block means it is not the runner's,
+    which strips them from everything it writes (#1805). The block's own
+    header line is replaced by ``EVIDENCE_LABEL``, which says whose report
+    it is.
+    """
+    if inner is None or not isinstance(head_sha, str) or not head_sha:
+        return EVIDENCE_UNAVAILABLE
+    if "command-center-evidence" in inner.lower():
+        return EVIDENCE_UNAVAILABLE
+    facts = [line.strip() for line in inner.split("\n")
+             if line.strip().startswith("- ")]
+    match = EVIDENCE_SHA_RE.fullmatch(facts[0]) if facts else None
+    if match is None or match.group(1) != head_sha.lower():
+        return EVIDENCE_UNAVAILABLE
+    return _capped_evidence([EVIDENCE_LABEL] + facts)
+
+
 def pr_body_section(pr_view: dict) -> Dict[str, object]:
     """The packet's PR-description fields, labelled as claims (#1720).
 
@@ -2054,11 +2248,17 @@ def pr_body_section(pr_view: dict) -> Dict[str, object]:
     ``pr_body_truncated`` says so without parsing the text. A view that
     carried no body reads as None, not as an empty description.
     ``pr_departures`` comes from the whole body, not the cut one.
+    ``evidence`` is the block that ends the body when it names the view's
+    head, read from the whole body too, and ``unavailable`` otherwise
+    (#1812); the block never stays in ``pr_body``.
     """
     body = pr_view.get("body")
     text: Optional[str] = None
     truncated = False
+    evidence = EVIDENCE_UNAVAILABLE
     if isinstance(body, str):
+        body, inner = split_evidence_block(body)
+        evidence = packet_evidence(inner, pr_view.get("headRefOid"))
         text = body.strip()
         if len(text) > PR_BODY_LIMIT:
             truncated = True
@@ -2069,6 +2269,7 @@ def pr_body_section(pr_view: dict) -> Dict[str, object]:
         "pr_body_truncated": truncated,
         "pr_departures": parse_departures(body),
         "pr_claims_note": PR_CLAIMS_NOTE,
+        "evidence": evidence,
     }
 
 
@@ -2189,6 +2390,9 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     beside ``pr_claims_note``, which labels both as the implementer's
     claims, and the verdict rules are unchanged: a claim is weighed against
     the diff, and a departure never meets its requirement by itself.
+    ``evidence`` is the implement run's block from the end of the body when
+    its ``sha`` is ``head_sha``, labelled implementer-reported and capped at
+    ``EVIDENCE_LIMIT_BYTES``; otherwise it reads ``unavailable`` (#1812).
     ``plan_premises`` groups the fixed, structured premises section from
     each ticket's parent plan. An available empty list means that plan
     recorded none; ``available: false`` means its body could not be read
@@ -2200,8 +2404,11 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     before #1019.
     A ``diff`` rebuilt from the files API (an ``AssembledDiff``, #1114) adds
     ``diff_truncated: true`` and ``diff_omitted_files``, the count of changed
-    text files the diff could not show (#1800); an ordinary diff adds
-    neither key.
+    text files the diff could not show (#1800), and ``diff_omitted_paths``,
+    those files' paths, which the diff row names when it rejects (#1801); an
+    ordinary diff adds none of them. ``plan_md`` is cut at
+    ``PLAN_MD_LIMIT`` with the packet's cut mark (#1801): context is
+    bounded, never rejected.
     ``changed_files`` overrides the PR view's file list with the live
     compare scope (#1043); None derives it from the view as before, and the
     overlap and protected rows read whichever list the packet carries.
@@ -2252,7 +2459,7 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
         "tickets": tickets_packet,
         "plan_premises": plan_premises,
         "pr_comments": pr_comments,
-        "plan_md": plan_md,
+        "plan_md": _bounded_text(plan_md, PLAN_MD_LIMIT),
         "plan_md_missing": plan_md_missing,
         "diff": diff,
         "changed_files": changed_files,
@@ -2290,6 +2497,7 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     if isinstance(diff, AssembledDiff):
         assembled["diff_truncated"] = True
         assembled["diff_omitted_files"] = diff.omitted_patches
+        assembled["diff_omitted_paths"] = list(diff.omitted_paths)
     assembled["precheck"] = precheck(assembled)
     # The re-run is the runner's next action, not a fact about the overlap:
     # it is set only when the whole precheck passes, so a failing row
@@ -2333,10 +2541,13 @@ class AssembledDiff(str):
     without a ``patch`` and they could not be read at both ends (#1800). A
     patch-less file that was read is in the text, and binaries and
     generated lockfiles are named in it with their size, so neither
-    counts. ``changed_files`` is every path the entries listed.
+    counts. ``omitted_paths`` names the files ``omitted_patches`` counts,
+    for the precheck's rejection (#1801). ``changed_files`` is every path
+    the entries listed.
     """
 
     omitted_patches = 0
+    omitted_paths: Sequence[str] = ()
     changed_files: Sequence[str] = ()
 
 
@@ -2449,8 +2660,8 @@ def _named_section(old_path: str, path: str, kind: str, status: object,
 
 def _assemble_entries(repo: str, entries: Sequence[dict],
                       base_sha: Optional[str],
-                      head_sha: Optional[str]) -> Tuple[str, int]:
-    """The diff text of API file entries, and how many text files it omits.
+                      head_sha: Optional[str]) -> Tuple[str, List[str]]:
+    """The diff text of API file entries, and the text files it omits.
 
     Each entry's ``patch`` goes under a ``diff --git a/<path> b/<path>``
     header, in API order. GitHub leaves ``patch`` out of large and binary
@@ -2458,12 +2669,13 @@ def _assemble_entries(repo: str, entries: Sequence[dict],
     missing three files (#1782). Every changed text file is shown instead
     (#1800): a patch-less file is read at ``base_sha`` and ``head_sha`` and
     diffed here. A binary, and any generated lockfile whether or not it has
-    a patch, is named with its size and not shown. The count is the text
-    files left out because a read failed or a SHA was unknown; a file that
-    could not be read cannot be called binary, so it counts too.
+    a patch, is named with its size and not shown. The list is the text
+    files left out because a read failed or a SHA was unknown, in API
+    order; a file that could not be read cannot be called binary, so it is
+    listed too.
     """
     parts: List[str] = []
-    omitted = 0
+    omitted: List[str] = []
     for entry in entries:
         path = entry.get("filename") or ""
         old_path = entry.get("previous_filename") or path
@@ -2484,7 +2696,7 @@ def _assemble_entries(repo: str, entries: Sequence[dict],
         head = (b"" if status == "removed"
                 else _read_file_at(repo, path, head_sha))
         if base is None or head is None:
-            omitted += 1
+            omitted.append(path)
             continue
         base_text, head_text = _file_text(base), _file_text(head)
         if base_text is None or head_text is None:
@@ -2534,7 +2746,8 @@ def fetch_files_diff(repo: str, pr_number: int,
             break
     text, omitted = _assemble_entries(repo, entries, base_sha, head_sha)
     diff = AssembledDiff(text)
-    diff.omitted_patches = omitted
+    diff.omitted_patches = len(omitted)
+    diff.omitted_paths = omitted
     diff.changed_files = sorted({row.get("filename") for row in entries
                                  if row.get("filename")})
     return diff
@@ -2597,7 +2810,8 @@ def fetch_scope(repo: str, base_ref: str,
     diff: str = text
     if omitted:
         assembled = AssembledDiff(text)
-        assembled.omitted_patches = omitted
+        assembled.omitted_patches = len(omitted)
+        assembled.omitted_paths = omitted
         diff = assembled
     return (changed, diff, merge_sha)
 
@@ -2667,6 +2881,9 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
     ``tickets`` list, so both carry the same fields: the parent with its
     comments shaped, and the ticket's newest comments with their recorded
     voices. None reads as the empty ticket a ticketless branch gets.
+    The body is cut at TICKET_BODY_LIMIT and each comment list is bounded
+    by ``ticket_comments``, so the context every ticket adds is bounded
+    and marked where cut (#1801); none of it can fail the precheck.
     """
     if ticket is None:
         return {
@@ -2686,7 +2903,7 @@ def shape_ticket(ticket: Optional[dict]) -> Dict[str, Optional[object]]:
         "number": ticket.get("number"),
         "title": ticket.get("title"),
         "url": ticket.get("url"),
-        "body": ticket.get("body"),
+        "body": _bounded_text(ticket.get("body"), TICKET_BODY_LIMIT),
         "risk": ticket.get("risk"),
         "parent": parent,
         "comments": ticket_comments(ticket.get("comments")),

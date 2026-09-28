@@ -1845,7 +1845,7 @@ function renderBudgetMetrics(series, container) {
   }
   appendBudgetGap(claude, root.D && root.D.D3 && root.D.D3.gap);
 
-  const cost = appendBudgetTile(container, "D4", "Cost per merged PR by lane");
+  const cost = appendBudgetTile(container, "D4", "Notional API cost per merged PR by lane");
   const costLeaves = metricLeaves(root.D && root.D.D4);
   let costShown = false;
   for (const item of costLeaves) {

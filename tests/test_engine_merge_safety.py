@@ -67,7 +67,8 @@ def pr(**kw):
 def wire(monkeypatch, pr_json, comments):
     fact = dict(pr_json)
     fact["number"] = 5
-    fact["comments"] = [{"body": body} for body in comments]
+    fact["comments"] = [{"body": body, "author": {"login": "nateprich"}}
+                        for body in comments]
     fact["verdict"] = funnel._latest_verdict_from_comments(fact["comments"])
     monkeypatch.setattr(
         funnel, "_pr_fact_for_number", lambda repo, number, **kwargs: dict(fact)

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Derive and append one completed-hour execution-metrics row.
+"""Derive the current hour and refresh recent stale outcome tiles.
 
-``metrics.jsonl`` is an append-only projection on the heartbeat branch. Rows
-keep source facts (and numerator/denominator pairs for rates) so ``series`` can
-roll up days without averaging rounded daily percentages.
+``metrics.jsonl`` is a projection on the heartbeat branch. Rows keep source
+facts (and numerator/denominator pairs for rates) so ``series`` can roll up
+days without averaging rounded percentages. Outcome-dependent gaps in recent
+rows are refreshed when the outcomes source catches up.
 Missing evidence stays ``null`` with a source and reason; an empty observation
 is represented by a real zero only when the source was readable.
 
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import glob
 import json
 import math
@@ -45,6 +47,16 @@ FINISH_OUTCOMES = (
 )
 HISTORY_AGENT_PATHS = {agent: "{}.jsonl".format(agent) for agent in AGENTS}
 HISTORY_OVERLAP_GRACE = HOUR_SECONDS
+OUTCOMES_STALE_GAP = (
+    "outcomes.jsonl is stale; newest derived_at precedes this hour's end"
+)
+OUTCOME_TILE_PATHS = (
+    ("A", "A1"),
+    ("A", "A6", "reopened_tickets"),
+    ("B", "B1"),
+    ("C", "C6"),
+)
+OUTCOME_REMEASURE_WINDOW = timedelta(hours=48)
 
 
 class MetricsError(RuntimeError):
@@ -324,7 +336,7 @@ def _outcomes_freshness_gap(
     if not derived_at:
         return "outcomes.jsonl has no parseable derived_at timestamp"
     if max(derived_at) < hour_end:
-        return "outcomes.jsonl is stale; newest derived_at precedes this hour's end"
+        return OUTCOMES_STALE_GAP
     return None
 
 
@@ -1956,6 +1968,89 @@ def append_rows_many(
         appended += 1
     return found, appended
 
+
+def _nested_value(value: object, path: Sequence[str]) -> object:
+    current = value
+    for key in path:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _set_nested_value(value: Dict, path: Sequence[str], replacement: object) -> None:
+    current = value
+    for key in path[:-1]:
+        child = current.get(key)
+        if not isinstance(child, dict):
+            raise MetricsError(
+                "cannot update missing metrics path {}".format(".".join(path))
+            )
+        current = child
+    current[path[-1]] = copy.deepcopy(replacement)
+
+
+def remeasure_stale_outcome_rows(
+    rows: Sequence[Mapping[str, object]],
+    ledgers: Optional[Mapping[str, Optional[Sequence[Mapping[str, object]]]]],
+    outcome_records: Optional[Sequence[Mapping[str, object]]],
+    now: datetime,
+) -> Tuple[List[Dict], int]:
+    """Refresh stale outcome tiles in rows whose hours are still recent."""
+    observed_at = _timestamp(now)
+    if observed_at is None:
+        raise MetricsError("remeasure time must be a parseable timestamp")
+    observed_at = observed_at.astimezone(timezone.utc)
+    cutoff = observed_at - OUTCOME_REMEASURE_WINDOW
+    updated_rows = [copy.deepcopy(dict(row)) for row in rows]
+    updated_count = 0
+
+    for original, row in zip(rows, updated_rows):
+        hour_start = _timestamp(row.get("hour"))
+        if hour_start is None:
+            continue
+        hour_start = hour_start.astimezone(timezone.utc)
+        if (
+            hour_start < cutoff
+            or hour_start > observed_at
+            or hour_start.minute != 0
+            or hour_start.second != 0
+            or hour_start.microsecond != 0
+        ):
+            continue
+
+        stale_paths = [
+            path for path in OUTCOME_TILE_PATHS
+            if isinstance((tile := _nested_value(row, ("metrics",) + path)), Mapping)
+            and tile.get("gap") == OUTCOMES_STALE_GAP
+        ]
+        if not stale_paths:
+            continue
+        hour_end = hour_start + timedelta(hours=1)
+        if _outcomes_freshness_gap(outcome_records, hour_end) is not None:
+            continue
+
+        recomputed = derive_row(
+            {},
+            ledgers,
+            None,
+            outcome_records,
+            now=observed_at,
+            hour_start=hour_start,
+        )
+        for path in stale_paths:
+            replacement = _nested_value(recomputed, ("metrics",) + path)
+            if not isinstance(replacement, Mapping):
+                raise MetricsError(
+                    "derived metrics are missing path {}".format(".".join(path))
+                )
+            _set_nested_value(row, ("metrics",) + path, replacement)
+        if row != original:
+            updated_count += 1
+
+    return updated_rows, updated_count
+
+
 _SERIES_SUM_PREFIXES = (
     ("A", "A1"),
     ("A", "A4", "new_projects_started"),
@@ -2461,6 +2556,47 @@ def append_remote_rows(
     return 0
 
 
+def remeasure_remote_stale_outcome_rows(
+    ledgers: Optional[Mapping[str, Optional[Sequence[Mapping[str, object]]]]],
+    outcome_records: Optional[Sequence[Mapping[str, object]]],
+    now: datetime,
+    repo: str = REPO,
+    branch: str = BRANCH,
+) -> int:
+    """Refresh recent stale outcome tiles with Contents API compare-and-swap."""
+    for attempt in range(len(STORE_BACKOFF) + 1):
+        existing, sha = _read_remote(repo, branch)
+        refreshed, updated_count = remeasure_stale_outcome_rows(
+            existing, ledgers, outcome_records, now
+        )
+        if not updated_count:
+            return 0
+        payload = {
+            "message": "metrics: refresh outcomes for recent rows",
+            "branch": branch,
+            "content": base64.b64encode(
+                _encode_rows(refreshed).encode("utf-8")
+            ).decode("ascii"),
+        }
+        if sha:
+            payload["sha"] = sha
+        result = _gh([
+            "api", "-X", "PUT", "repos/{}/contents/{}".format(repo, METRICS_PATH),
+            "--input", "-",
+        ], stdin=json.dumps(payload))
+        if result.returncode == 0:
+            return updated_count
+        detail = (result.stderr or result.stdout or "").lower()
+        if "409" not in detail and "sha" not in detail and "conflict" not in detail:
+            raise MetricsError(
+                result.stderr.strip() or "could not refresh {}".format(METRICS_PATH)
+            )
+        if attempt >= len(STORE_BACKOFF):
+            raise MetricsError("could not refresh {} after compare-and-swap retries".format(METRICS_PATH))
+        time.sleep(STORE_BACKOFF[attempt])
+    return 0
+
+
 def _read_snapshot(path: Optional[str]) -> Mapping[str, object]:
     if path:
         try:
@@ -2834,7 +2970,9 @@ def _backfill_command(args) -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Derive and report execution metrics")
     sub = parser.add_subparsers(dest="command", required=True)
-    derive = sub.add_parser("derive", help="derive one UTC-hour metrics row")
+    derive = sub.add_parser(
+        "derive", help="derive the current UTC-hour row and refresh recent outcome gaps"
+    )
     derive.add_argument("--snapshot", help="fixture snapshot JSON; default reads the newest brief")
     derive.add_argument("--ledger", action="append", help="fixture heartbeat JSONL as AGENT=PATH")
     derive.add_argument("--outcomes", help="fixture outcomes.jsonl")
@@ -2899,7 +3037,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(json.dumps(row, indent=2, sort_keys=True))
             return 0
         appended = append_remote(row)
-        print(json.dumps({"hour": row["hour"], "appended": appended}, sort_keys=True))
+        remeasured = remeasure_remote_stale_outcome_rows(ledgers, records, now)
+        print(json.dumps({
+            "hour": row["hour"],
+            "appended": appended,
+            "remeasured": remeasured,
+        }, sort_keys=True))
         return 0
     except Exception as exc:
         print("metrics: {}".format(exc), file=sys.stderr)

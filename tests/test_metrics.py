@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import copy
 import json
 import os
 import pathlib
@@ -274,6 +276,128 @@ def test_stale_outcomes_leave_hourly_counts_as_gaps():
     assert metrics_by_group["B"]["B1"]["gap"]
     assert metrics_by_group["C"]["C6"]["value"] is None
     assert metrics_by_group["C"]["C6"]["gap"]
+
+
+def _stale_outcome_rows():
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    stale_outcomes = copy.deepcopy(outcomes)
+    stale_outcomes[0]["derived_at"] = "2026-09-23T04:59:59Z"
+    old_hour = datetime(2026, 9, 23, 4, tzinfo=timezone.utc)
+    stale_row = metrics.derive_row(
+        snapshot, ledgers, usage, stale_outcomes, NOW, commits, lines,
+        hour_start=old_hour,
+    )
+
+    fresh_outcomes = copy.deepcopy(outcomes)
+    fresh_outcomes[0]["derived_at"] = "2026-09-23T06:00:00Z"
+    current_now = NOW + timedelta(hours=1)
+    current_row = metrics.derive_row(
+        snapshot, ledgers, usage, fresh_outcomes, current_now, commits, lines,
+    )
+    return (
+        stale_row, current_row, snapshot, ledgers, usage, fresh_outcomes,
+        commits, lines, old_hour, current_now,
+    )
+
+
+def _without_outcome_tiles(row):
+    preserved = copy.deepcopy(row)
+    for path in metrics.OUTCOME_TILE_PATHS:
+        parent = preserved
+        for key in ("metrics",) + path[:-1]:
+            parent = parent[key]
+        parent[path[-1]] = "<outcome tile>"
+    return preserved
+
+
+def _nested(row, path):
+    value = row
+    for key in ("metrics",) + path:
+        value = value[key]
+    return value
+
+
+def test_remeasure_recent_outcome_tiles_and_preserve_the_current_append():
+    (
+        stale_row, current_row, snapshot, ledgers, usage, fresh_outcomes,
+        commits, lines, old_hour, current_now,
+    ) = _stale_outcome_rows()
+    previous = copy.deepcopy(stale_row)
+    expected = metrics.derive_row(
+        snapshot, ledgers, usage, fresh_outcomes, current_now, commits, lines,
+        hour_start=old_hour,
+    )
+
+    refreshed, updated_count = metrics.remeasure_stale_outcome_rows(
+        [stale_row, current_row], ledgers, fresh_outcomes, current_now,
+    )
+
+    assert updated_count == 1
+    for path in metrics.OUTCOME_TILE_PATHS:
+        assert _nested(refreshed[0], path) == _nested(expected, path)
+    assert refreshed[0]["metrics"]["A"]["A1"]["value"] is not None
+    assert refreshed[0]["metrics"]["A"]["A6"]["reopened_tickets"]["value"] is not None
+    assert refreshed[0]["metrics"]["B"]["B1"]["numerator"] is not None
+    assert refreshed[0]["metrics"]["C"]["C6"]["value"] is not None
+    assert _without_outcome_tiles(refreshed[0]) == _without_outcome_tiles(previous)
+    assert refreshed[1] == current_row
+
+
+def test_remeasure_keeps_uncovered_and_over_48_hour_rows_unchanged():
+    stale_row, _, _, ledgers, _, fresh_outcomes, _, _, _, current_now = _stale_outcome_rows()
+    uncovered = copy.deepcopy(stale_row)
+    uncovered_records = copy.deepcopy(fresh_outcomes)
+    uncovered_records[0]["derived_at"] = "2026-09-23T04:59:59Z"
+
+    unchanged, count = metrics.remeasure_stale_outcome_rows(
+        [uncovered], ledgers, uncovered_records, current_now,
+    )
+    assert count == 0
+    assert unchanged == [uncovered]
+
+    old = copy.deepcopy(stale_row)
+    beyond_window = current_now + timedelta(hours=49)
+    unchanged, count = metrics.remeasure_stale_outcome_rows(
+        [old], ledgers, fresh_outcomes, beyond_window,
+    )
+    assert count == 0
+    assert unchanged == [old]
+
+
+def test_remote_remeasure_writes_rows_with_compare_and_swap(monkeypatch):
+    (
+        stale_row, current_row, _, ledgers, _, fresh_outcomes,
+        _, _, _, current_now,
+    ) = _stale_outcome_rows()
+    source_rows = [stale_row, current_row]
+    writes = []
+
+    monkeypatch.setattr(
+        metrics, "_read_remote",
+        lambda repo, branch: (copy.deepcopy(source_rows), "blob-sha"),
+    )
+
+    def fake_gh(args, stdin=None):
+        writes.append((args, stdin))
+        return subprocess.CompletedProcess(args, 0, "{}", "")
+
+    monkeypatch.setattr(metrics, "_gh", fake_gh)
+
+    updated_count = metrics.remeasure_remote_stale_outcome_rows(
+        ledgers, fresh_outcomes, current_now, repo="owner/repo", branch="heartbeat",
+    )
+
+    assert updated_count == 1
+    assert len(writes) == 1
+    args, stdin = writes[0]
+    assert "repos/owner/repo/contents/metrics.jsonl" in args
+    payload = json.loads(stdin)
+    assert payload["sha"] == "blob-sha"
+    written_rows = metrics._decode_rows(
+        base64.b64decode(payload["content"]).decode("utf-8")
+    )
+    assert written_rows[1] == current_row
+    assert written_rows[0]["metrics"]["A"]["A1"]["value"] is not None
 
 
 def test_old_snapshot_leaves_in_hour_counts_as_gaps():
@@ -636,6 +760,39 @@ def test_live_derive_measures_at_the_hour_end_with_the_snapshot(monkeypatch, cap
     assert calls == [(snapshot, metrics._interval(NOW)[1])]
     assert (row["metrics"]["B"]["B3"]["numerator"],
             row["metrics"]["B"]["B3"]["denominator"]) == (2, 5)
+
+
+def test_live_derive_appends_before_remeasuring_recent_rows(monkeypatch, capsys):
+    snapshot, ledgers, usage, outcomes, commits, lines = _inputs()
+    calls = []
+
+    monkeypatch.setattr(metrics, "_read_snapshot", lambda path: snapshot)
+    monkeypatch.setattr(
+        metrics, "_live_inputs",
+        lambda now: (ledgers, usage, outcomes, commits, lines),
+    )
+    monkeypatch.setattr(metrics, "measure_fix_recurrence", lambda snapshot, at: None)
+
+    def fake_append(row):
+        calls.append(("append", row))
+        return 1
+
+    def fake_remeasure(actual_ledgers, records, now):
+        calls.append(("remeasure", actual_ledgers, records, now))
+        return 2
+
+    monkeypatch.setattr(metrics, "append_remote", fake_append)
+    monkeypatch.setattr(metrics, "remeasure_remote_stale_outcome_rows", fake_remeasure)
+
+    assert metrics.main(["derive", "--now", NOW.isoformat()]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert [call[0] for call in calls] == ["append", "remeasure"]
+    assert calls[0][1]["hour"] == "2026-09-23T04:00:00Z"
+    assert calls[1][1:] == (ledgers, outcomes, NOW)
+    assert output == {
+        "hour": "2026-09-23T04:00:00Z", "appended": 1, "remeasured": 2,
+    }
 
 
 def test_series_never_blends_b3_rows_from_the_retired_definition():

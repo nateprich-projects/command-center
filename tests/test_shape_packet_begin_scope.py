@@ -40,9 +40,9 @@ IDEA_BODY = "Captured note.\n\n" + funnel.origin_block(
     run="capture-run", agent="muse")
 
 THREAD = [
-    {"author": {"login": "nate"}, "body": "The old premise is false.",
+    {"author": {"login": "nateprich"}, "body": "The old premise is false.",
      "createdAt": "2026-09-25T01:00:00Z"},
-    {"author": {"login": "muse"}, "body": "Noted; re-reading the plan.",
+    {"author": {"login": "nateprich"}, "body": "Noted; re-reading the plan.",
      "createdAt": "2026-09-25T02:00:00Z"},
 ]
 
@@ -302,7 +302,7 @@ def test_packet_parity_holds_for_a_long_thread(monkeypatch):
     """A thread past its first page pages through the follow-up query in
     either load, and the whole thread lands in the packet."""
     long_thread = [
-        {"author": {"login": "nate"}, "body": "comment {}".format(n),
+        {"author": {"login": "nateprich"}, "body": "comment {}".format(n),
          "createdAt": "2026-09-25T0{}:00:00Z".format(n)}
         for n in range(1, 4)
     ]

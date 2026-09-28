@@ -20,6 +20,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import funnel  # noqa: E402
 
+#: Comment markers count only from the owner account (#1788).
+OWNER = {"login": "nateprich"}
+
 
 REASON = "Hold until the Saturday lane has run once"
 
@@ -68,8 +71,8 @@ def _read_back(monkeypatch, item, posted):
     """Load the posted comment through the brief's block-comment reader."""
     monkeypatch.setattr(
         funnel, "_gh_json",
-        lambda *args: {"comments": [{"body": "An older prose note."},
-                                    {"body": posted}]},
+        lambda *args: {"comments": [{"author": OWNER, "body": "An older prose note."},
+                                    {"author": OWNER, "body": posted}]},
     )
     funnel._load_block_comment(item)
 

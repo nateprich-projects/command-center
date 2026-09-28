@@ -147,7 +147,13 @@ def _recent_merged_prs(rows, calls):
     def gh_graphql(query, **variables):
         calls.append((query, variables))
         offset = 100 if variables.get("cursor") == "cursor-1" else 0
-        page = rows[offset:offset + 100]
+        # Every fixture merge is the funnel's own PR: a same-repository head
+        # opened by the owner (#1794), unless a row says otherwise.
+        page = [
+            dict({"isCrossRepository": False,
+                  "author": {"login": "nateprich"}}, **row)
+            for row in rows[offset:offset + 100]
+        ]
         has_next = offset + len(page) < len(rows)
         return {
             "rateLimit": {
@@ -230,6 +236,34 @@ def test_command_center_ticket_pr_share_stops_after_window(monkeypatch):
     assert report["merged_prs"] == 100
     assert report["ticket_merged_prs"] == 100
     assert len(calls) == 2
+
+
+def test_a_merged_foreign_pr_named_ticket_is_no_ticket_merge(monkeypatch):
+    """It merged, so it counts as a merge; it is not ticket work (#1794)."""
+    recent = (NOW - timedelta(hours=1)).isoformat()
+    rows = [
+        {"state": "MERGED", "mergedAt": recent, "updatedAt": recent,
+         "headRefName": "ticket/1"},
+        {"state": "MERGED", "mergedAt": recent, "updatedAt": recent,
+         "headRefName": "ticket/2", "isCrossRepository": True,
+         "headRepository": {"nameWithOwner": "mallory/command-center"},
+         "author": {"login": "mallory"}},
+        {"state": "MERGED", "mergedAt": recent, "updatedAt": recent,
+         "headRefName": "ticket/3", "author": {"login": "mallory"}},
+        {"state": "MERGED", "mergedAt": recent, "updatedAt": recent,
+         "headRefName": "ticket/4", "author": None},
+    ]
+    calls = []
+    monkeypatch.setattr(funnel, "gh_graphql", _recent_merged_prs(rows, calls))
+
+    report = funnel.command_center_ticket_pr_share([], NOW)
+
+    assert report["merged_prs"] == 4
+    assert report["ticket_merged_prs"] == 1
+    query = " ".join(calls[0][0].split())
+    assert "isCrossRepository" in query
+    assert "headRepository { nameWithOwner }" in query
+    assert "author { login }" in query
 
 
 @pytest.mark.parametrize("value", ["", "notes", "owner/repo"])

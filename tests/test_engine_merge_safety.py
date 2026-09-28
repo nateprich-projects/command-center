@@ -59,7 +59,9 @@ def pr(**kw):
     data = {"state": "OPEN", "headRefName": "ticket/9", "headRefOid": SHA,
             "mergeable": "MERGEABLE",
             "statusCheckRollup": [{"name": "tests",
-                                   "conclusion": "SUCCESS"}]}
+                                   "conclusion": "SUCCESS"}],
+            # The funnel's own PR: same-repository head, owner author (#1794).
+            "isCrossRepository": False, "author": {"login": "nateprich"}}
     data.update(kw)
     return data
 

@@ -170,10 +170,13 @@ def test_recent_merged_pr_rows_include_number_for_cutoff_lookup(monkeypatch):
 
     assert found == [{
         "number": 1491, "state": "MERGED", "headRefName": "ticket/1491",
-        "mergedAt": merged_at.isoformat(),
+        "mergedAt": merged_at.isoformat(), "isCrossRepository": None,
+        "headRepository": None, "author": None,
     }]
     assert len(queries) == 1
-    assert "nodes { number state headRefName mergedAt updatedAt }" in queries[0]
+    query = " ".join(queries[0].split())
+    assert "nodes { number state headRefName mergedAt updatedAt" in query
+    assert "isCrossRepository headRepository { nameWithOwner } author { login }" in query
 
 
 def test_rows_outside_the_window_fall_out(monkeypatch):

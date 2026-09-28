@@ -22,6 +22,10 @@ import usage  # noqa: E402
 
 NOW = datetime(2026, 9, 5, 12, 0, 0, tzinfo=timezone.utc)
 
+#: What makes a PR row the funnel's own (#1794): a same-repository head
+#: opened by the owner account. The batched read carries both.
+OWNER_PR = {"isCrossRepository": False, "author": {"login": "nateprich"}}
+
 
 @pytest.fixture(autouse=True)
 def _bindings_never_touch_the_real_spool(monkeypatch):
@@ -708,7 +712,7 @@ def _reconcile_begin(monkeypatch, capsys, items, rows, verdicts, merge_result=0)
     def facts():
         by_ref = {}
         for raw in rows:
-            row = dict(raw)
+            row = dict(OWNER_PR, **raw)
             row.setdefault("state", "OPEN")
             row["verdict"] = verdicts.get(row.get("number"))
             ref = funnel.ticket_ref_from_branch(
@@ -924,7 +928,7 @@ def test_begin_reconcile_is_idempotent_when_the_pr_is_no_longer_open(
     _allow_begin(monkeypatch)
 
     def facts(_items):
-        current = [dict(row, state="OPEN", verdict={
+        current = [dict(OWNER_PR, **row, state="OPEN", verdict={
             "verdict": "approved", "head_sha": "head"
         }) for row in rows]
         by_ref = {ticket.ref: current} if current else {}
@@ -2839,6 +2843,9 @@ def _recorded_conflict_fixture(verdict=None):
     recorded = json.loads(
         (ROOT / "tests/fixtures/conflict_begin_stdout_pr1501.json").read_text()
     )["pr"]
+    # Recorded before the batched read carried the trust fields (#1794);
+    # PR #1501 was the owner's same-repository PR.
+    recorded.update(OWNER_PR)
     if verdict is not None:
         recorded["verdict"] = verdict
     return recorded
@@ -3454,7 +3461,7 @@ def _selecting_reconcile_begin(monkeypatch, capsys, items, rows, verdicts,
     def facts(_items):
         by_ref = {}
         for raw in rows:
-            row = dict(raw)
+            row = dict(OWNER_PR, **raw)
             row.setdefault("state", "OPEN")
             row["verdict"] = verdicts.get(row.get("number"))
             ref = funnel.ticket_ref_from_branch(

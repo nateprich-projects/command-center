@@ -142,16 +142,23 @@ def fetch_plan(repo: str, ticket: dict) -> Optional[dict]:
 
 
 def fetch_verdict_blocking(repo: str, number: int) -> dict:
-    """Read the newest verdict for the ticket's open PR, when one exists."""
+    """Read the newest verdict for the ticket's open PR, when one exists.
+
+    ``--head`` matches the branch name in any fork, so only the funnel's own
+    PR is the ticket's (#1794): a stranger's PR named ``ticket/<n>`` must not
+    hand the engineer its number, head or review.
+    """
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "open",
         "--head", "ticket/{}".format(number), "--json",
-        "number,headRefOid,updatedAt", "--limit", "10",
+        "number,headRefOid,updatedAt," + funnel.PR_TRUST_JSON_FIELDS,
+        "--limit", "10",
     )
     if rows is None or not isinstance(rows, list):
         raise funnel.GitHubError(
             "could not list open PRs for {}#{}".format(repo, number)
         )
+    rows = [row for row in rows if funnel.is_funnel_pr(repo, row)]
     if not rows:
         return {"pr": None, "head_sha": None, "verdict": None,
                 "blocking": []}
@@ -368,7 +375,15 @@ def _read_done_answer(answer: dict) -> dict:
     ):
         raise ImplementError(
             "answer evidence must be a non-empty list of non-empty GitHub URLs")
-    extra = sorted(set(answer) - {"done", "summary", "departures", "evidence"})
+    # Where the implementer says review should look hardest (#1807). It is
+    # optional and may be empty, so an answer without it parses as before.
+    risks = answer.get("risks")
+    if "risks" in answer and (not isinstance(risks, list) or not all(
+        isinstance(value, str) and value.strip() for value in risks
+    )):
+        raise ImplementError("answer risks must be a list of non-empty strings")
+    extra = sorted(
+        set(answer) - {"done", "summary", "departures", "evidence", "risks"})
     if extra:
         raise ImplementError("answer has unknown field(s): {}".format(", ".join(extra)))
     found = {
@@ -378,6 +393,8 @@ def _read_done_answer(answer: dict) -> dict:
     }
     if "evidence" in answer:
         found["evidence"] = [value.strip() for value in evidence]
+    if "risks" in answer:
+        found["risks"] = [value.strip() for value in risks]
     return found
 
 
@@ -1021,6 +1038,12 @@ def render_pr_body(ticket: dict, answer: dict, *, continued: bool,
         lines.extend("- " + value for value in answer["departures"])
     else:
         lines.append("- None.")
+    if answer.get("risks"):
+        # Only when there are some (#1807): a body without risks stays the
+        # template it always was. The label also ends the Departures section
+        # review.parse_departures reads, so a risk never reads as a departure.
+        lines.extend(["", "Risks:"])
+        lines.extend("- " + value for value in answer["risks"])
     lines.extend([
         "",
         "Branch:",
@@ -1327,6 +1350,12 @@ def _verify_evidence_url(url: str, started: datetime) -> None:
         raise ImplementError(
             "evidence URL {} did not resolve to its named artifact".format(url)
         )
+    if kind == "comment" and not funnel.trusted_comment(data):
+        # A comment is this run's evidence only when the owner account posted
+        # it (#1788); anyone can comment on a public repository mid-run.
+        raise ImplementError(
+            "evidence URL {} was not posted by the owner account".format(url)
+        )
     if kind == "closed" and str(data.get("state", "")).lower() != "closed":
         raise ImplementError("evidence URL {} is not closed".format(url))
     occurred = _parse_github_timestamp(data.get(stamp_field))
@@ -1369,16 +1398,24 @@ def close_no_diff_ticket(repo: str, number: int, *,
 
 def create_or_update_pr(repo: str, context: dict, ticket: dict,
                         body: str) -> dict:
-    """Create the ticket PR, or update the one already open for the branch."""
+    """Create the ticket PR, or update the one already open for the branch.
+
+    Only the funnel's own open PR is updated (#1794): ``--head`` also matches
+    a fork's PR on a branch of the same name, and editing that would act on
+    a stranger's PR.
+    """
     rows = funnel._gh_json(
         "gh", "pr", "list", "--repo", repo, "--state", "open",
-        "--head", context["branch"], "--json", "number,url", "--limit", "10",
+        "--head", context["branch"],
+        "--json", "number,url," + funnel.PR_TRUST_JSON_FIELDS,
+        "--limit", "10",
     )
     if rows is None or not isinstance(rows, list):
         raise funnel.GitHubError("could not list the branch's open PR")
+    rows = [row for row in rows if funnel.is_funnel_pr(repo, row)]
     title = "{} (#{})".format(ticket["title"], ticket["number"])
     if rows:
-        pr = rows[0]
+        pr = {"number": rows[0].get("number"), "url": rows[0].get("url")}
         proc = funnel._run_gh(
             ["gh", "pr", "edit", str(pr["number"]), "--repo", repo,
              "--title", title, "--body-file", "-"],
@@ -1658,7 +1695,12 @@ def closed_human_steps_for(rows: Sequence[Dict[str, object]], repo: str,
 
 
 def read_ticket_comment_bodies(repo: str, number: int) -> List[str]:
-    """Read one ticket's comment bodies, oldest first; fail closed."""
+    """Read one ticket's trusted comment bodies, oldest first; fail closed.
+
+    The caller parses routing records out of these, so only the owner
+    account's comments are returned (#1788): an outsider's forged record would
+    read as a route this run already posted, and the guard would skip it.
+    """
     payload = funnel._gh_json(
         "gh", "issue", "view", str(number), "--repo", repo,
         "--json", "comments",
@@ -1667,8 +1709,8 @@ def read_ticket_comment_bodies(repo: str, number: int) -> List[str]:
     if not isinstance(comments, list):
         raise funnel.GitHubError(
             "could not read comments for {}#{}".format(repo, number))
-    return [comment.get("body") or "" for comment in comments
-            if isinstance(comment, dict)]
+    return [comment.get("body") or ""
+            for comment in funnel.trusted_comments(comments)]
 
 
 def remote_ticket_head(root: pathlib.Path, branch: str) -> Optional[str]:

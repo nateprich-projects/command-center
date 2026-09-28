@@ -875,8 +875,12 @@ def test_merged_pr_facts_intersects_one_bounded_repo_scan(monkeypatch):
             "repo0": {
                 "pullRequests": {
                     "nodes": [
-                        {"number": 7, "headRefName": "ticket/7", "state": "MERGED"},
-                        {"number": 8, "headRefName": "feature/not-a-ticket", "state": "MERGED"},
+                        {"number": 7, "headRefName": "ticket/7", "state": "MERGED",
+                         "isCrossRepository": False,
+                         "author": {"login": "nateprich"}},
+                        {"number": 8, "headRefName": "feature/not-a-ticket", "state": "MERGED",
+                         "isCrossRepository": False,
+                         "author": {"login": "nateprich"}},
                     ],
                     "pageInfo": {"hasNextPage": False, "endCursor": None},
                 }
@@ -910,7 +914,9 @@ def test_merged_pr_scan_truncation_is_visible_in_the_finding(monkeypatch):
         nodes = []
         for index, row in enumerate(rows[:first], start=1):
             node = dict(row)
-            node.update({"number": index, "state": "MERGED"})
+            node.update({"number": index, "state": "MERGED",
+                         "isCrossRepository": False,
+                         "author": {"login": "nateprich"}})
             nodes.append(node)
         return {
             "rateLimit": {"cost": 1, "remaining": 99, "resetAt": "later"},

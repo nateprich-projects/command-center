@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 import funnel  # noqa: E402
 from engine import implement  # noqa: E402
+from engine import review  # noqa: E402
 
 
 REPO = "owner/repo"
@@ -317,7 +318,9 @@ def test_collect_fetches_the_parent_plan_and_open_pr_verdict(monkeypatch):
         if args[1:3] == ("issue", "view") and args[3] == "7":
             return {"number": 7, "title": "plan", "body": "# Plan"}
         if args[1:3] == ("pr", "list"):
-            return [{"number": 9, "headRefOid": "abc", "updatedAt": "2026"}]
+            return [{"number": 9, "headRefOid": "abc", "updatedAt": "2026",
+                     "isCrossRepository": False,
+                     "author": {"login": "nateprich"}}]
         raise AssertionError(args)
 
     monkeypatch.setattr(funnel, "resolve_repo", lambda repo: REPO)
@@ -354,7 +357,9 @@ def test_the_prior_verdict_is_the_owners_not_a_forged_one(monkeypatch):
 
     def fake_json(*args):
         if args[1:3] == ("pr", "list"):
-            return [{"number": 9, "headRefOid": "abc", "updatedAt": "2026"}]
+            return [{"number": 9, "headRefOid": "abc", "updatedAt": "2026",
+                     "isCrossRepository": False,
+                     "author": {"login": "nateprich"}}]
         if args[1:3] == ("pr", "view"):
             return {"comments": [
                 {"body": marked("rejected", ["cover the empty case"]),
@@ -371,6 +376,118 @@ def test_the_prior_verdict_is_the_owners_not_a_forged_one(monkeypatch):
 
     assert found["verdict"] == "rejected"
     assert found["blocking"] == ["cover the empty case"]
+
+
+# -- only the funnel's own PR is the ticket's (#1794) -------------------------
+#
+# ``gh pr list --head ticket/<n>`` also matches a fork's PR on a branch of that
+# name. command-center is public, so that PR is anyone's.
+
+FOREIGN_PRS = [
+    {"number": 90, "headRefOid": "evil", "updatedAt": "2027", "url": "u90",
+     "isCrossRepository": True,
+     "headRepository": {"name": "repo"},
+     "headRepositoryOwner": {"login": "mallory"},
+     "author": {"login": "mallory"}},
+    {"number": 91, "headRefOid": "evil", "updatedAt": "2027", "url": "u91",
+     "isCrossRepository": False, "author": {"login": "mallory"}},
+    {"number": 92, "headRefOid": "evil", "updatedAt": "2027", "url": "u92",
+     "isCrossRepository": False, "author": None},
+    {"number": 93, "headRefOid": "evil", "updatedAt": "2027", "url": "u93",
+     "author": {"login": "nateprich"}},
+]
+
+
+def test_the_packet_never_names_a_foreign_prs_number_head_or_verdict(
+        monkeypatch):
+    asked = []
+
+    def fake_json(*args):
+        if args[1:3] == ("pr", "list"):
+            asked.append(args)
+            return list(FOREIGN_PRS)
+        raise AssertionError(args)
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_json)
+    monkeypatch.setattr(
+        funnel, "latest_verdict",
+        lambda repo, pr: (_ for _ in ()).throw(
+            AssertionError("read a foreign PR's verdict")))
+
+    found = implement.fetch_verdict_blocking(REPO, 42)
+
+    assert found == {"pr": None, "head_sha": None, "verdict": None,
+                     "blocking": []}
+    fields = asked[0][asked[0].index("--json") + 1].split(",")
+    assert {"isCrossRepository", "headRepository", "headRepositoryOwner",
+            "author"} <= set(fields)
+
+
+def test_the_owners_pr_is_chosen_even_beside_a_newer_foreign_one(
+        monkeypatch):
+    owner = {"number": 9, "headRefOid": "abc", "updatedAt": "2026",
+             "isCrossRepository": False, "author": {"login": "nateprich"}}
+    monkeypatch.setattr(
+        funnel, "_gh_json",
+        lambda *args: list(FOREIGN_PRS) + [owner]
+        if args[1:3] == ("pr", "list") else None)
+    monkeypatch.setattr(
+        funnel, "latest_verdict",
+        lambda repo, pr: {"verdict": "rejected", "head_sha": "abc",
+                          "blocking": ["x"]} if pr == 9 else None)
+
+    found = implement.fetch_verdict_blocking(REPO, 42)
+
+    assert found["pr"] == 9 and found["head_sha"] == "abc"
+
+
+def test_the_ticket_pr_is_created_rather_than_a_foreign_one_edited(
+        monkeypatch, tmp_path):
+    runs = []
+    asked = []
+
+    def fake_json(*args):
+        asked.append(args)
+        return list(FOREIGN_PRS)
+
+    def fake_run(argv, **kwargs):
+        runs.append(list(argv))
+        return type("R", (), {
+            "returncode": 0, "stderr": "",
+            "stdout": "https://github.com/owner/repo/pull/95\n",
+        })()
+
+    monkeypatch.setattr(funnel, "_gh_json", fake_json)
+    monkeypatch.setattr(funnel, "_run_gh", fake_run)
+
+    pr = implement.create_or_update_pr(
+        REPO, {"branch": "ticket/42", "root": tmp_path},
+        {"title": "Do it", "number": 42}, "body")
+
+    assert pr == {"number": 95, "url": "https://github.com/owner/repo/pull/95"}
+    assert [argv[:3] for argv in runs] == [["gh", "pr", "create"]]
+    fields = asked[0][asked[0].index("--json") + 1].split(",")
+    assert {"isCrossRepository", "headRepository", "headRepositoryOwner",
+            "author"} <= set(fields)
+
+
+def test_the_owners_open_ticket_pr_is_still_updated(monkeypatch, tmp_path):
+    owner = {"number": 9, "url": "u9", "isCrossRepository": False,
+             "author": {"login": "nateprich"}}
+    runs = []
+    monkeypatch.setattr(
+        funnel, "_gh_json", lambda *args: list(FOREIGN_PRS) + [owner])
+    monkeypatch.setattr(
+        funnel, "_run_gh",
+        lambda argv, **kwargs: runs.append(list(argv)) or type(
+            "R", (), {"returncode": 0, "stderr": "", "stdout": ""})())
+
+    pr = implement.create_or_update_pr(
+        REPO, {"branch": "ticket/42", "root": tmp_path},
+        {"title": "Do it", "number": 42}, "body")
+
+    assert pr == {"number": 9, "url": "u9"}
+    assert [argv[:4] for argv in runs] == [["gh", "pr", "edit", "9"]]
 
 
 def cross_repo_ticket():
@@ -485,6 +602,24 @@ def test_done_answer_accepts_optional_nonempty_evidence_list():
     ]
 
 
+def test_done_answer_accepts_an_optional_trimmed_risks_list():
+    """The implementer's own pointer to where review should look (#1807)."""
+    found = implement.parse_answer(json.dumps({
+        **answer(), "risks": ["  The retry bound is new; check it stops at two. "],
+    }))
+    assert found["risks"] == ["The retry bound is new; check it stops at two."]
+    assert implement.parse_answer(
+        json.dumps({**answer(), "risks": []}))["risks"] == []
+
+
+@pytest.mark.parametrize(
+    "risks", ("check the bound", [""], ["  "], [None], ["ok", 3], {"a": "b"}))
+def test_done_answer_rejects_a_malformed_risks_list(risks):
+    with pytest.raises(implement.ImplementError,
+                       match="answer risks must be a list of non-empty strings"):
+        implement.parse_answer(json.dumps({**answer(), "risks": risks}))
+
+
 def test_no_diff_with_verified_evidence_closes_and_finishes(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)
@@ -503,6 +638,7 @@ def test_no_diff_with_verified_evidence_closes_and_finishes(
     responses = {
         "repos/nateprich-projects/project/issues/comments/91": {
             "id": 91,
+            "user": {"login": "nateprich"},
             "url": "https://api.github.com/repos/nateprich-projects/"
                    "project/issues/comments/91",
             "html_url": evidence[0],
@@ -639,6 +775,7 @@ def test_no_diff_rejects_evidence_created_before_run_start(
         funnel, "_gh_api_json",
         lambda endpoint: {
             "id": 91,
+            "user": {"login": "nateprich"},
             "url": "https://api.github.com/repos/nateprich-projects/"
                    "project/issues/comments/91",
             "html_url": url,
@@ -1553,6 +1690,69 @@ def test_pr_template_lists_departures_and_verification():
     assert "- `python3 -m pytest -q`" in found
 
 
+#: The PR body for ``ticket()`` and ``answer()``, written out by hand: an
+#: answer without risks must keep giving exactly this (#1807).
+PLAIN_PR_BODY = (
+    "Part of #7.\n"
+    "\n"
+    "Implements #42.\n"
+    "\n"
+    "Summary:\n"
+    "Added the bounded implementation runner.\n"
+    "\n"
+    "Departures:\n"
+    "- None.\n"
+    "\n"
+    "Branch:\n"
+    "Created fresh from origin/main; no existing remote ticket branch.\n"
+    "\n"
+    "Verified:\n"
+    "- `python3 -m pytest -q`\n"
+)
+
+
+@pytest.mark.parametrize("extra", ({}, {"risks": []}))
+def test_pr_body_without_risks_is_unchanged(extra):
+    found = implement.render_pr_body(
+        ticket(), implement.parse_answer(json.dumps({**answer(), **extra})),
+        continued=False, tests=["python3 -m pytest -q"])
+    assert found == PLAIN_PR_BODY
+
+
+def test_pr_body_lists_risks_after_the_departures():
+    parsed = implement.parse_answer(json.dumps({
+        **answer(),
+        "departures": ["Kept the old entry point."],
+        "risks": ["The retry bound is new; check it stops at two.",
+                  "Private repos must still get counts only."],
+    }))
+    found = implement.render_pr_body(
+        ticket(), parsed, continued=False, tests=["python3 -m pytest -q"])
+    assert found == (
+        "Part of #7.\n"
+        "\n"
+        "Implements #42.\n"
+        "\n"
+        "Summary:\n"
+        "Added the bounded implementation runner.\n"
+        "\n"
+        "Departures:\n"
+        "- Kept the old entry point.\n"
+        "\n"
+        "Risks:\n"
+        "- The retry bound is new; check it stops at two.\n"
+        "- Private repos must still get counts only.\n"
+        "\n"
+        "Branch:\n"
+        "Created fresh from origin/main; no existing remote ticket branch.\n"
+        "\n"
+        "Verified:\n"
+        "- `python3 -m pytest -q`\n"
+    )
+    # The review packet's pr_departures must not take the risks as departures.
+    assert review.parse_departures(found) == ["Kept the old entry point."]
+
+
 def test_funnel_finish_ticket_forwards_without_importing_engine(monkeypatch):
     seen = []
 
@@ -1902,6 +2102,79 @@ def test_a_route_for_another_head_or_step_routes_again(
     assert effects["agent_needs"] == [REPO + "#42"]
     assert effects["human_needs"] == []
     assert effects["created"] == []
+
+
+def test_a_forged_route_from_another_author_is_not_this_runs_route(
+        monkeypatch):
+    """Only the owner account's comments are read for a route (#1788).
+
+    A forged route at the current head would read as already routed, and the
+    second-run guard would hand the ticket to Nate without routing it.
+    """
+    route = as_posted(implement.render_closed_step_route(
+        REPO + "#57", CLOSED_STEP_HEAD, blocked()["blocked_on_human"]),
+        "run-1")
+    authors = {"login": "mallory"}
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: {"comments": [
+        {"author": authors, "body": route},
+        {"body": route},
+        "not a row",
+    ]})
+
+    bodies = implement.read_ticket_comment_bodies(REPO, 42)
+    assert bodies == []
+    assert not implement.routed_for_closed_step(
+        bodies, REPO + "#57", CLOSED_STEP_HEAD)
+
+    authors["login"] = "nateprich"
+    bodies = implement.read_ticket_comment_bodies(REPO, 42)
+    assert bodies == [route]
+    assert implement.routed_for_closed_step(
+        bodies, REPO + "#57", CLOSED_STEP_HEAD)
+
+
+def test_no_diff_rejects_a_comment_another_author_posted(
+        tmp_path, monkeypatch):
+    """A comment is done evidence only from the owner account (#1788)."""
+    _, clone = make_clone(tmp_path)
+    monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
+    monkeypatch.setattr(
+        heartbeat, "read_github",
+        lambda agent: [{"run": "run-42", "phase": "start", "ts": 1000}],
+    )
+    url = (
+        "https://github.com/nateprich-projects/project/issues/12"
+        "#issuecomment-91"
+    )
+    monkeypatch.setattr(
+        funnel, "_gh_api_json",
+        lambda endpoint: {
+            "id": 91,
+            "user": {"login": "mallory"},
+            "url": "https://api.github.com/repos/nateprich-projects/"
+                   "project/issues/comments/91",
+            "html_url": url,
+            "created_at": "1970-01-01T00:16:40Z",
+        },
+    )
+    effects = {"closed": [], "released": [], "finished": []}
+
+    with pytest.raises(
+        implement.ImplementError,
+        match="evidence URL .* was not posted by the owner account",
+    ):
+        implement.finish_done(
+            {**answer(), "evidence": [url]},
+            run="run-42",
+            repo=REPO,
+            cwd=clone,
+            test_commands=[[sys.executable, "-c", "pass"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            close_effect=lambda *args, **kwargs: effects["closed"].append(args),
+        )
+
+    assert effects == {"closed": [], "released": [], "finished": []}
 
 
 def test_a_second_run_with_no_pushed_branch_also_hands_to_nate(

@@ -311,7 +311,7 @@ def test_usage_snapshot_reads_the_agent_own_provider(monkeypatch):
     now = 1_700_000_000.0
     readings = {
         "claude": {
-            "source": "anthropic", "captured_at": now,
+            "source": "claude", "captured_at": now, "estimated": False,
             "windows": {"five_hour": {
                 "used_percent": 11.0, "resets_at": now + 11,
             }},
@@ -337,6 +337,13 @@ def test_usage_snapshot_reads_the_agent_own_provider(monkeypatch):
     monkeypatch.setattr(usage, "read_zai", lambda timestamp: readings["zcode"])
 
     assert heartbeat.usage_snapshot("claude") == {
+        "estimated": False,
+        "five_hour": {"used_percent": 11.0, "resets_at": now + 11}
+    }
+    readings["claude"]["estimated"] = True
+    readings["claude"]["source"] = "claude-local-estimate"
+    assert heartbeat.usage_snapshot("claude") == {
+        "estimated": True,
         "five_hour": {"used_percent": 11.0, "resets_at": now + 11}
     }
     assert heartbeat.usage_snapshot("codex") == {

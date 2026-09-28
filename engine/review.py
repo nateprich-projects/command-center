@@ -19,12 +19,14 @@ content read. Anything that changes remote state belongs in a later
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
 import sys
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -2197,8 +2199,9 @@ def build_packet(*, repo: str, pr_number: int, pr_view: dict, diff: str,
     scanned, which fails closed — an overlap then rejects as stale, as
     before #1019.
     A ``diff`` rebuilt from the files API (an ``AssembledDiff``, #1114) adds
-    ``diff_truncated: true`` and ``diff_omitted_files``, the count of files
-    GitHub listed without a patch; an ordinary diff adds neither key.
+    ``diff_truncated: true`` and ``diff_omitted_files``, the count of changed
+    text files the diff could not show (#1800); an ordinary diff adds
+    neither key.
     ``changed_files`` overrides the PR view's file list with the live
     compare scope (#1043); None derives it from the view as before, and the
     overlap and protected rows read whichever list the packet carries.
@@ -2322,18 +2325,56 @@ def fetch_pr(repo: str, pr_number: int) -> dict:
 
 
 class AssembledDiff(str):
-    """A diff rebuilt from the PR files API because ``gh pr diff`` refused.
+    """A diff rebuilt from API file entries, not read from ``gh pr diff``.
 
-    ``omitted_patches`` counts the files GitHub listed without a ``patch``
-    (large or binary entries): they are in the PR but not in this text.
+    It comes from the PR files API when ``gh pr diff`` refused (#1114), or
+    from a compare that left a text file out. ``omitted_patches`` counts
+    the changed text files this text does not show: GitHub listed them
+    without a ``patch`` and they could not be read at both ends (#1800). A
+    patch-less file that was read is in the text, and binaries and
+    generated lockfiles are named in it with their size, so neither
+    counts. ``changed_files`` is every path the entries listed.
     """
 
     omitted_patches = 0
+    changed_files: Sequence[str] = ()
 
 
 #: GitHub serves at most 3,000 files per PR, so 30 pages of 100 is the end.
 _FILES_PAGE_SIZE = 100
 _FILES_MAX_PAGES = 30
+
+#: The compare endpoint lists at most 300 changed files and stops there
+#: without saying so (#1800). A compare listing that many may be clipped,
+#: so the packet takes its scope and text from the PR files API instead.
+COMPARE_FILES_CAP = 300
+
+#: Generated lockfiles, by file name. They are named with their size and
+#: never shown (#1800): a resolver's output is not reviewable line by line,
+#: and one regenerated lockfile can outweigh the change that caused it.
+GENERATED_LOCKFILES = frozenset({
+    "Cargo.lock", "Gemfile.lock", "Package.resolved", "Pipfile.lock",
+    "Podfile.lock", "bun.lock", "bun.lockb", "composer.lock", "deno.lock",
+    "flake.lock", "go.sum", "gradle.lockfile", "mix.lock",
+    "npm-shrinkwrap.json", "package-lock.json", "packages.lock.json",
+    "pdm.lock", "pnpm-lock.yaml", "poetry.lock", "pubspec.lock", "uv.lock",
+    "yarn.lock",
+})
+
+
+class CompareClipped(Exception):
+    """The compare listed ``COMPARE_FILES_CAP`` files, so it may be clipped.
+
+    Raised by ``fetch_scope`` before any file is read. ``merge_base`` is the
+    compare's merge base (None when the answer omitted it), so the files-API
+    fallback reads patch-less files at the same base the compare used.
+    """
+
+    def __init__(self, merge_base: Optional[str]):
+        super().__init__(
+            "the compare listed {} files, as many as it ever lists".format(
+                COMPARE_FILES_CAP))
+        self.merge_base = merge_base
 
 
 def _diff_too_large(stderr: str) -> bool:
@@ -2341,12 +2382,132 @@ def _diff_too_large(stderr: str) -> bool:
     return "too_large" in stderr or "HTTP 406" in stderr
 
 
-def fetch_files_diff(repo: str, pr_number: int) -> AssembledDiff:
-    """Rebuild a unified diff from ``pulls/<n>/files``, page by page (#1114).
+def _read_file_at(repo: str, path: str,
+                  ref: Optional[str]) -> Optional[bytes]:
+    """One file's bytes at a commit, from the contents API, or None (#1800).
+
+    The raw media type serves files up to 100 MB, where the JSON form stops
+    carrying the content at 1 MB. It is the plain ``vnd.github.raw``, as
+    ``fetch_plan_md`` asks: with ``raw+json`` GitHub labels the body JSON
+    and ``gh`` fails on a binary one ("transform: short source buffer",
+    measured 2026-09-28 on a GIF). The body is read as bytes, never
+    decoded here. No ref, or any failed read, gives None: the caller then
+    counts the file as not shown rather than guess at it.
+    """
+    if not path or not ref:
+        return None
+    endpoint = "repos/{}/contents/{}?ref={}".format(
+        repo, quote(path, safe="/"), ref)
+    proc = funnel._run_gh(
+        ["gh", "api", "-H", "Accept: application/vnd.github.raw", endpoint],
+        capture_output=True, timeout=120)
+    if proc.returncode != 0:
+        return None
+    data = proc.stdout or b""
+    return data.encode("utf-8") if isinstance(data, str) else data
+
+
+def _file_text(data: bytes) -> Optional[str]:
+    """The file as text, or None when it is binary.
+
+    Binary as git decides it, by a NUL byte, and also any file that is not
+    UTF-8, which the packet's JSON could not carry as written.
+    """
+    if b"\0" in data:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _local_patch(base_text: str, head_text: str) -> str:
+    """The hunks between two texts, in the API's ``patch`` form (#1800).
+
+    ``difflib`` writes the same ``@@`` ranges git does. Its ``---``/``+++``
+    pair is dropped, because each section writes its own header.
+    """
+    lines = list(difflib.unified_diff(
+        base_text.splitlines(), head_text.splitlines(), lineterm=""))
+    return "\n".join(lines[2:])
+
+
+def _diff_section(old_path: str, path: str, patch: str) -> str:
+    """One file's hunks under a ``diff --git a/<path> b/<path>`` header."""
+    body = patch.rstrip("\n")
+    return "diff --git a/{} b/{}\n--- a/{}\n+++ b/{}\n{}".format(
+        old_path, path, old_path, path, body + "\n" if body else "")
+
+
+def _named_section(old_path: str, path: str, kind: str, status: object,
+                   size: Optional[int]) -> str:
+    """A file the diff names without showing: its path, change and size."""
+    return "diff --git a/{} b/{}\n{} not shown: {}, {}\n".format(
+        old_path, path, kind, status or "modified",
+        "size unknown" if size is None else "{} bytes".format(size))
+
+
+def _assemble_entries(repo: str, entries: Sequence[dict],
+                      base_sha: Optional[str],
+                      head_sha: Optional[str]) -> Tuple[str, int]:
+    """The diff text of API file entries, and how many text files it omits.
 
     Each entry's ``patch`` goes under a ``diff --git a/<path> b/<path>``
-    header, in API order. Entries without a patch add nothing to the text
-    and are counted in ``omitted_patches``.
+    header, in API order. GitHub leaves ``patch`` out of large and binary
+    entries, and dropping them let Muse approve workbench#64 on a diff
+    missing three files (#1782). Every changed text file is shown instead
+    (#1800): a patch-less file is read at ``base_sha`` and ``head_sha`` and
+    diffed here. A binary, and any generated lockfile whether or not it has
+    a patch, is named with its size and not shown. The count is the text
+    files left out because a read failed or a SHA was unknown; a file that
+    could not be read cannot be called binary, so it counts too.
+    """
+    parts: List[str] = []
+    omitted = 0
+    for entry in entries:
+        path = entry.get("filename") or ""
+        old_path = entry.get("previous_filename") or path
+        status = entry.get("status")
+        patch = entry.get("patch")
+        if path.rsplit("/", 1)[-1] in GENERATED_LOCKFILES:
+            data = _read_file_at(
+                repo, path, base_sha if status == "removed" else head_sha)
+            parts.append(_named_section(
+                old_path, path, "Generated lockfile", status,
+                None if data is None else len(data)))
+            continue
+        if isinstance(patch, str) and patch:
+            parts.append(_diff_section(old_path, path, patch))
+            continue
+        base = (b"" if status == "added"
+                else _read_file_at(repo, old_path, base_sha))
+        head = (b"" if status == "removed"
+                else _read_file_at(repo, path, head_sha))
+        if base is None or head is None:
+            omitted += 1
+            continue
+        base_text, head_text = _file_text(base), _file_text(head)
+        if base_text is None or head_text is None:
+            parts.append(_named_section(
+                old_path, path, "Binary file", status,
+                len(base if status == "removed" else head)))
+            continue
+        parts.append(_diff_section(
+            old_path, path, _local_patch(base_text, head_text)))
+    return "".join(parts), omitted
+
+
+def fetch_files_diff(repo: str, pr_number: int,
+                     base_sha: Optional[str] = None,
+                     head_sha: Optional[str] = None) -> AssembledDiff:
+    """Rebuild a unified diff from ``pulls/<n>/files``, page by page (#1114).
+
+    The entries are assembled as the compare's are (#1800): a patch-less
+    text file is read at ``base_sha`` and ``head_sha`` and diffed, and
+    binaries and lockfiles are named. The clipped-compare fallback passes
+    the compare's merge base and the head. The ``gh pr diff`` refusal path
+    has no merge base, so a patch-less file there that needs one stays out
+    of the text and is counted in ``omitted_patches``, as before.
     """
     entries: List[dict] = []
     for page in range(1, _FILES_MAX_PAGES + 1):
@@ -2371,19 +2532,11 @@ def fetch_files_diff(repo: str, pr_number: int) -> AssembledDiff:
         entries.extend(row for row in rows if isinstance(row, dict))
         if len(rows) < _FILES_PAGE_SIZE:
             break
-    parts: List[str] = []
-    omitted = 0
-    for entry in entries:
-        path = entry.get("filename") or ""
-        patch = entry.get("patch")
-        if not isinstance(patch, str) or not patch:
-            omitted += 1
-            continue
-        old_path = entry.get("previous_filename") or path
-        parts.append("diff --git a/{} b/{}\n--- a/{}\n+++ b/{}\n{}\n".format(
-            old_path, path, old_path, path, patch.rstrip("\n")))
-    diff = AssembledDiff("".join(parts))
+    text, omitted = _assemble_entries(repo, entries, base_sha, head_sha)
+    diff = AssembledDiff(text)
     diff.omitted_patches = omitted
+    diff.changed_files = sorted({row.get("filename") for row in entries
+                                 if row.get("filename")})
     return diff
 
 
@@ -2414,11 +2567,14 @@ def fetch_scope(repo: str, base_ref: str,
     three-dot compare diffs the merge base against the head, so files main
     gained after the branch merged it are not reported as the branch's own
     (#194: 49 PR files against 6 real). Returns the changed-file list, the
-    unified diff assembled from the entries' patches, and
-    ``merge_base_commit.sha`` (None when the answer omits it). Entries
-    without a patch (large or binary files) stay in the scope but out of
-    the text, counted exactly as the #1114 files-API rebuild counts them.
-    Raises ``funnel.GitHubError`` when the call fails or the answer is
+    unified diff assembled from the entries, and ``merge_base_commit.sha``
+    (None when the answer omits it). Entries without a patch are read at
+    that merge base and the head and diffed, or named when binary, as the
+    files-API rebuild does (#1800); only a text file that could not be read
+    is left out of the text, and it is counted in ``omitted_patches``.
+    Raises ``CompareClipped`` when the answer lists ``COMPARE_FILES_CAP``
+    files, before reading any: the list may be clipped. Raises
+    ``funnel.GitHubError`` when the call fails or the answer is
     unreadable; the caller falls back to the PR reads.
     """
     data = funnel._gh_json(
@@ -2428,29 +2584,22 @@ def fetch_scope(repo: str, base_ref: str,
         raise funnel.GitHubError(
             "could not read compare {}...{} in {}".format(
                 base_ref, head_sha, repo))
-    entries = [row for row in data["files"] if isinstance(row, dict)]
-    changed = sorted({row.get("filename") for row in entries
-                      if row.get("filename")})
-    parts: List[str] = []
-    omitted = 0
-    for row in entries:
-        path = row.get("filename") or ""
-        patch = row.get("patch")
-        if not isinstance(patch, str) or not patch:
-            omitted += 1
-            continue
-        old_path = row.get("previous_filename") or path
-        parts.append("diff --git a/{} b/{}\n--- a/{}\n+++ b/{}\n{}\n".format(
-            old_path, path, old_path, path, patch.rstrip("\n")))
-    diff: str = "".join(parts)
-    if omitted:
-        assembled = AssembledDiff(diff)
-        assembled.omitted_patches = omitted
-        diff = assembled
     merge_base = data.get("merge_base_commit")
     merge_sha = (merge_base.get("sha") if isinstance(merge_base, dict)
                  else None)
-    return (changed, diff, merge_sha if isinstance(merge_sha, str) else None)
+    merge_sha = merge_sha if isinstance(merge_sha, str) else None
+    if len(data["files"]) >= COMPARE_FILES_CAP:
+        raise CompareClipped(merge_sha)
+    entries = [row for row in data["files"] if isinstance(row, dict)]
+    changed = sorted({row.get("filename") for row in entries
+                      if row.get("filename")})
+    text, omitted = _assemble_entries(repo, entries, merge_sha, head_sha)
+    diff: str = text
+    if omitted:
+        assembled = AssembledDiff(text)
+        assembled.omitted_patches = omitted
+        diff = assembled
+    return (changed, diff, merge_sha)
 
 
 _ISSUE_URL = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/issues/\d+")
@@ -2819,6 +2968,8 @@ def collect(repo: Optional[str], pr_number: int, *,
     The changed-file scope comes from the live compare against the merge
     base (#1043); when that call fails or the base and head are unknown,
     the packet falls back to the PR reads with ``scope_source`` ``"pr"``.
+    A compare that lists 300 files may be clipped, so the scope and the
+    diff then come from the PR files API, also as ``"pr"`` (#1800).
     """
     resolved = funnel.resolve_repo(repo)
     pr_view = fetch_pr(resolved, pr_number)
@@ -2888,6 +3039,17 @@ def collect(repo: Optional[str], pr_number: int, *,
         try:
             scope_files, scope_diff, merge_base = fetch_scope(
                 resolved, base_ref, head_sha)
+        except CompareClipped as clipped:
+            # The compare stops at 300 files without saying so (#1800), so
+            # its list may be short. The PR files API lists up to 3,000:
+            # the scope and the text come from there, with patch-less files
+            # read at the compare's merge base. The packet reports the PR
+            # scope, as on any other fallback.
+            files_diff = fetch_files_diff(
+                resolved, pr_number, base_sha=clipped.merge_base,
+                head_sha=head_sha)
+            scope_files = list(files_diff.changed_files)
+            scope_diff = files_diff
         except (funnel.GitHubError, OSError, TypeError, ValueError):
             # The compare is advisory scope: any failure falls back to
             # today's PR reads, which raise exactly as before.

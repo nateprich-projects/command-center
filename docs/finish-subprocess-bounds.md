@@ -18,7 +18,7 @@ git show origin/main:engine/implement.py | rg -n "def _run|subprocess\\.run|time
 
 ## Finish-path command inventory
 
-The AST inventory test pins **16 bounded Git callsites** in `engine/implement.py`:
+The AST inventory test pins **17 bounded Git callsites** in `engine/implement.py`:
 
 | Callsite | Git commands |
 | --- | --- |
@@ -30,6 +30,7 @@ The AST inventory test pins **16 bounded Git callsites** in `engine/implement.py
 | `_commit_if_needed` | `git commit -m <summary>`; `git rev-list --count origin/main..HEAD` |
 | `_push_ticket_branch` | `git fetch origin <ticket refspec>`; `git merge-base --is-ancestor origin/<branch> HEAD`; conditional `git merge -s ours`; `git push --set-upstream origin <branch>` |
 | `_keep_work` | `git commit -m <WIP reason>`; `git rev-list --count origin/main..HEAD` |
+| `_checkpoint_work` | `git commit -m <WIP checkpoint>` |
 
 `_git_name_paths` expands to these five distinct command forms; the cached diff
 form is reused by two callers:

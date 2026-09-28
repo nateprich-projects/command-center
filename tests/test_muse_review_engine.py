@@ -896,7 +896,8 @@ STREAM_IDLE = "model stream idle timeout after 180000ms"
 
 
 def _timing_lines(stderr):
-    """Each shape part's and judge chunk's timing line (#1719), by name.
+    """Each shape part's, judge chunk's and the lister's timing line
+    (#1719, #1855), by name.
 
     Exactly one line per part: a second would mean a return path logged
     twice, or a retry logged as a part of its own."""
@@ -1725,6 +1726,7 @@ def test_a_judge_chunk_stream_idle_once_is_asked_again_and_judged(tmp_path):
     timing = _timing_lines(proc.stderr)
     assert {name: (line["calls"], line["outcome"])
             for name, line in timing.items()} == {
+        "lister": (1, "done"),
         "judge.0": (1, "done"), "judge.1": (2, "retried-done")}
 
 
@@ -1790,6 +1792,7 @@ def test_every_judge_chunk_logs_its_time_and_one_of_three_outcomes(tmp_path):
     timing = _timing_lines(proc.stderr)
     assert {name: (line["calls"], line["outcome"])
             for name, line in timing.items()} == {
+        "lister": (1, "done"),
         "judge.0": (1, "done"),
         "judge.1": (2, "retried-done"),
         "judge.2": (1, "failed")}
@@ -1926,6 +1929,7 @@ def test_a_large_packet_judge_stream_idle_twice_is_asked_again_and_judged(
     timing = _timing_lines(proc.stderr)
     assert {name: (line["calls"], line["outcome"])
             for name, line in timing.items()} == {
+        "lister": (1, "done"),
         "judge.0": (1, "done"), "judge.1": (3, "retried-done")}
 
 
@@ -4927,3 +4931,104 @@ def test_a_replay_refuses_a_bad_setup_before_any_call(tmp_path, case):
         assert answer_path.read_text() == "a stale answer"
     else:
         assert not answer_path.exists()
+
+
+# -- the lister's timing line (#1855) -------------------------------------------
+# The lister writes one timing line, as each judge chunk and shape part does
+# (#1719), on every way out of it. model_failed exits the engine, so on a
+# model failure the line comes first. Without it a failed lister reads
+# `failed parts: none` in review-replay, as the must-approve seed's engine
+# failures on 2026-09-27 and 2026-09-28 did, which names nothing to
+# diagnose (plan #1854).
+
+@pytest.mark.parametrize("failure,calls,status", [
+    ({"MUSE_LISTER_FAILURE": "provider outage"}, 1, 1),
+    ({"MUSE_LISTER_FAILURE": STREAM_IDLE}, 2, 1),
+    ({"MUSE_ANSWER": "{not json"}, 2, 1),
+    ({"MUSE_SLEEP": "30"}, 1, 124),
+    # A spent window ends the run cleanly, through model_failed all the same.
+    ({"MUSE_LISTER_FAILURE": REFUSAL}, 1, 0),
+], ids=["failed", "stream-idle twice", "malformed twice", "timed out",
+        "quota refusal"])
+def test_a_failed_lister_writes_one_failed_timing_line(
+        tmp_path, failure, calls, status):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), _packet(), extra_env=failure,
+        bound_seconds=1 if status == 124 else 20, timeout=60)
+
+    assert proc.returncode == status, proc.stderr
+    assert _muse_calls(repo) == calls
+    assert _apply_calls(repo) == []
+    timing = _timing_lines(proc.stderr)
+    assert {name: (line["calls"], line["outcome"])
+            for name, line in timing.items()} == {"lister": (calls, "failed")}
+    if status == 124:
+        # Wall time from the first call, not a constant: the killed lister
+        # ran at least its bound.
+        assert timing["lister"]["elapsed"] >= 1
+
+
+def test_review_replay_names_a_failed_lister(tmp_path, monkeypatch, capfd):
+    """The engine's replay entry, run by review-replay itself: a lister that
+    fails is reported by name, where it used to read `failed parts: none`."""
+    monkeypatch.syspath_prepend(str(ROOT))
+    from engine import replay
+
+    repo, env = _stub_repo(tmp_path, _begin(), _packet())
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("MUSE_LISTER_FAILURE", "provider outage")
+    # This checkout's engine, run against the stub repository.
+    monkeypatch.setattr(replay, "CHECKOUT", repo)
+    monkeypatch.setattr(replay, "check_budget", lambda _runs: None)
+    corpus = tmp_path / "corpus"
+    corpus.mkdir(mode=0o700)
+    packet_path = corpus / "packet.json"
+    packet_path.write_text(json.dumps(_packet()))
+    packet_path.chmod(0o600)
+
+    assert replay.ENGINE == SCRIPT
+    assert replay.main([
+        str(packet_path), "--routine", str(ROUTINE), "--runs", "1",
+        "--expected-verdict", "approved", "--runtime-root", str(tmp_path),
+    ]) == 1
+    output = capfd.readouterr()
+
+    assert _muse_calls(repo) == 1
+    assert output.out == ""
+    lines = output.err.splitlines()
+    assert lines[-2:] == [
+        "review-replay: run 1 failed: exit status 1; failed parts: lister",
+        "review-replay: replay failed"]
+    [timing] = lines[:-2]
+    assert timing.startswith("review-replay: run 1: timing lister elapsed=")
+    assert timing.endswith("s calls=1 outcome=failed")
+
+
+@pytest.mark.parametrize("packet,answers,extra_env,expected", [
+    (_packet(), _review_answers(_judge_answer()), {}, (1, "done")),
+    # A parse retry is a second call, not a stream-idle retry.
+    (_packet(), ("{not json",) + _review_answers(_judge_answer()), {},
+     (2, "done")),
+    (_packet(), (_requirements_answer(),) + _review_answers(_judge_answer()),
+     {"MUSE_LISTER_FAILURE": STREAM_IDLE, "MUSE_LISTER_FAIL_TIMES": "1"},
+     (2, "retried-done")),
+    (_sized_packet(LARGE_PACKET_BYTES + 1),
+     (_requirements_answer(), _requirements_answer())
+     + _review_answers(_judge_answer()),
+     {"MUSE_LISTER_FAILURE": STREAM_IDLE, "MUSE_LISTER_FAIL_TIMES": "2"},
+     (3, "retried-done")),
+], ids=["first call", "parse retry", "stream-idle retry",
+        "large packet, two stream-idle retries"])
+def test_a_lister_that_answers_writes_done_or_retried_done(
+        tmp_path, packet, answers, extra_env, expected):
+    proc, repo = _stubbed_runner(
+        tmp_path, _begin(), packet, answers=answers, extra_env=extra_env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads((repo / "apply.answer").read_text())["verdict"] == \
+        "approved"
+    timing = _timing_lines(proc.stderr)
+    assert {name: (line["calls"], line["outcome"])
+            for name, line in timing.items()} == {
+        "lister": expected, "judge.0": (1, "done")}

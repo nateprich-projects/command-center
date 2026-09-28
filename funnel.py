@@ -3237,17 +3237,88 @@ def checks_still_running(checks: Sequence[dict]) -> bool:
 
 _LINE_LEADING_MARKER_RE = re.compile(r"(?m)^[ \t]*<!-- command-center-")
 
+#: Every line break ``str.splitlines`` honours, with the blanks around it.
+_COMMENT_LINE_BREAK_RE = re.compile(
+    r"\s*[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]\s*")
+
+
+def inert_comment_text(text: object) -> str:
+    """Model text made safe to write outside a JSON block in a comment (#1798).
+
+    A runner comment is the owner's own, so the author filter (#1787, #1788)
+    trusts all of it, the model's words it echoes included: a blocking or
+    unsure item, a decline reason, a question. A blocking reason once carried
+    a line-leading ``<!-- command-center-review -->`` and a JSON block, and
+    the owner's rejection read as an approval (#1797). Line breaks collapse to
+    one space, so the text never begins a line or opens a fence, and ``<!--``
+    becomes ``&lt;!--``, so it holds no marker even mid-line. GitHub renders
+    the entity as ``<!--``, so a reader still sees every word. One pass is
+    enough: neither replacement can put a ``<!--`` together.
+
+    Text inside a JSON block needs none of this: ``json.dumps`` escapes the
+    line breaks, and a marker quoted there is content (#1688).
+    """
+    cleaned = _COMMENT_LINE_BREAK_RE.sub(
+        " ", "" if text is None else str(text)).strip()
+    return cleaned.replace("<!--", "&lt;!--")
+
+
+def _marked_json_block_at(
+    body: str, marker: str, marker_at: int,
+) -> Optional[Tuple[Dict, str]]:
+    """The JSON block the ``marker`` occurrence at ``marker_at`` owns, if any.
+
+    It owns only the first fenced JSON block (or an immediately following
+    bare object for compatibility with early markers) before another Command
+    Center marker. A comment may carry both a review verdict and provenance,
+    and parsing from one marker to the last closing brace would join those
+    two objects and make the review gate silently lose a valid verdict.
+    """
+    rest = body[marker_at + len(marker):]
+    # Only a marker that begins a line starts another block. A reviewer
+    # model that quotes an earlier verdict puts marker text inside its
+    # own JSON strings, and cutting there lost every such verdict (#1688).
+    next_marker = _LINE_LEADING_MARKER_RE.search(rest)
+    if next_marker:
+        rest = rest[:next_marker.start()]
+
+    fenced = re.search(
+        r"```json[ \t]*\r?\n(.*?)\r?\n```", rest, flags=re.DOTALL
+    )
+    if fenced:
+        raw = fenced.group(1)
+        try:
+            found = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(found, dict):
+            end = marker_at + len(marker) + fenced.end()
+            return found, body[marker_at:end]
+        return None
+
+    leading = len(rest) - len(rest.lstrip())
+    raw = rest.lstrip()
+    if not raw.startswith("{"):
+        return None
+    try:
+        found, end = json.JSONDecoder().raw_decode(raw)
+    except (TypeError, ValueError):
+        return None
+    if isinstance(found, dict):
+        block_end = marker_at + len(marker) + leading + end
+        return found, body[marker_at:block_end]
+    return None
+
 
 def _marked_json_blocks(body: str, marker: str) -> List[Tuple[Dict, str]]:
     """Return parseable JSON blocks owned by ``marker``, newest first.
 
-    A comment may carry both a review verdict and provenance. Parsing from one
-    marker to the last closing brace would join those two objects and make the
-    review gate silently lose a valid verdict. Each marker occurrence therefore
-    owns only the first fenced JSON block (or an immediately following bare
-    object for compatibility with early markers) before another Command Center
-    marker. A quoted marker can precede the real block, so occurrences are tried
-    from last to first and malformed occurrences are skipped.
+    Each occurrence owns what ``_marked_json_block_at`` says. A quoted marker
+    can precede the real block, so occurrences are tried from last to first
+    and malformed occurrences are skipped. Last is the runner's position for
+    a trailer such as provenance, which ``append_provenance`` writes after
+    any model text; a marker the runner writes at the top of its comment is
+    read with ``_first_marked_json`` instead (#1798).
     """
     if not isinstance(body, str):
         return []
@@ -3257,40 +3328,31 @@ def _marked_json_blocks(body: str, marker: str) -> List[Tuple[Dict, str]]:
     ]
     blocks = []
     for marker_at in reversed(marker_positions):
-        rest = body[marker_at + len(marker):]
-        # Only a marker that begins a line starts another block. A reviewer
-        # model that quotes an earlier verdict puts marker text inside its
-        # own JSON strings, and cutting there lost every such verdict (#1688).
-        next_marker = _LINE_LEADING_MARKER_RE.search(rest)
-        if next_marker:
-            rest = rest[:next_marker.start()]
-
-        fenced = re.search(
-            r"```json[ \t]*\r?\n(.*?)\r?\n```", rest, flags=re.DOTALL
-        )
-        if fenced:
-            raw = fenced.group(1)
-            try:
-                found = json.loads(raw)
-            except (TypeError, ValueError):
-                continue
-            if isinstance(found, dict):
-                end = marker_at + len(marker) + fenced.end()
-                blocks.append((found, body[marker_at:end]))
-            continue
-
-        leading = len(rest) - len(rest.lstrip())
-        raw = rest.lstrip()
-        if not raw.startswith("{"):
-            continue
-        try:
-            found, end = json.JSONDecoder().raw_decode(raw)
-        except (TypeError, ValueError):
-            continue
-        if isinstance(found, dict):
-            block_end = marker_at + len(marker) + leading + end
-            blocks.append((found, body[marker_at:block_end]))
+        found = _marked_json_block_at(body, marker, marker_at)
+        if found is not None:
+            blocks.append(found)
     return blocks
+
+
+def _first_marked_json(body: str, marker: str) -> Optional[Dict]:
+    """Read the block owned by the first line-leading ``marker`` (#1798).
+
+    A verdict comment starts with its marker, before any model text, so the
+    first line-leading occurrence is the runner's own. Read from the last, a
+    blocking reason that carried a line-leading marker and a JSON block was
+    the verdict, and the owner's rejection read as an approval (#1797). A
+    marker quoted mid-line, as a verdict quoting an earlier one puts it inside
+    its JSON strings, is content (#1688) and never a start. There is no
+    fallback to a later occurrence: if the runner's block cannot be read, the
+    comment carries no verdict.
+    """
+    if not isinstance(body, str):
+        return None
+    first = re.search(r"(?m)^[ \t]*(" + re.escape(marker) + ")", body)
+    if first is None:
+        return None
+    found = _marked_json_block_at(body, marker, first.start(1))
+    return found[0] if found is not None else None
 
 
 def _marked_json(body: str, marker: str) -> Optional[Dict]:
@@ -3317,8 +3379,12 @@ def parse_self_approval(body: str) -> Optional[str]:
 
 
 def parse_verdict(body: str) -> Optional[Dict]:
-    """The verdict carried by one comment, or None if it is not one."""
-    return _marked_json(body, REVIEW_MARKER)
+    """The verdict carried by one comment, or None if it is not one.
+
+    Read from the comment's first line-leading review marker, where
+    ``_write_verdict`` puts it (#1798).
+    """
+    return _first_marked_json(body, REVIEW_MARKER)
 
 
 def comment_author(row: object) -> Optional[str]:
@@ -18612,7 +18678,10 @@ def _write_verdict(repo: str, pr: int, sha: str, verdict: str, ci: str,
     comment = "{}\n\n**Review: {}** (CI {})\n\n```json\n{}\n```".format(
         REVIEW_MARKER, verdict, ci, json.dumps(body, indent=2, sort_keys=True))
     if blocking:
-        comment += "\n\nBlocking:\n" + "\n".join("- " + b for b in blocking)
+        # The echo is the model's words outside the JSON, so each is made
+        # inert: one line, no ``<!--`` (#1798). The JSON keeps them exactly.
+        comment += "\n\nBlocking:\n" + "\n".join(
+            "- " + inert_comment_text(b) for b in blocking)
     comment = append_provenance(comment, "agent", run=run, agent=agent)
 
     out = _run_gh(
@@ -19776,8 +19845,11 @@ def _blocked_comment_body(blocked_on: Sequence[str], because: str) -> str:
 
 
 def _needs_decision_comment_body(question: str) -> str:
-    """Render the breakdown-question header owned by its parser."""
-    return "{} {}".format(NEEDS_DECISION_PREFIX, question)
+    """Render the breakdown-question header owned by its parser.
+
+    The question is a model's words, so it is made inert (#1798).
+    """
+    return "{} {}".format(NEEDS_DECISION_PREFIX, inert_comment_text(question))
 
 
 def _hold_reference(value: str) -> str:

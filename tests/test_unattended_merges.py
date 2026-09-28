@@ -60,7 +60,7 @@ def _wire(monkeypatch, spools, retired=frozenset({"zcode"})):
     return read
 
 
-def test_every_live_agent_is_read_and_each_record_names_its_agent(monkeypatch):
+def test_every_provider_is_read_and_each_record_names_its_agent(monkeypatch):
     spools = {
         "claude": [_finish("claude", merged=101, days_ago=1, note="merged PR #101")],
         "muse": [_finish("muse", merged=202, days_ago=2, note="merged PR #202"),
@@ -73,7 +73,7 @@ def test_every_live_agent_is_read_and_each_record_names_its_agent(monkeypatch):
 
     assert [(m["pr"], m["agent"]) for m in found] == [(202, "muse"), (101, "claude")]
     assert all(set(m) == {"pr", "at", "note", "agent"} for m in found)
-    assert set(read) == {"claude", "codex", "muse"}
+    assert set(read) == {"claude", "codex", "muse", "zcode"}
 
 
 def test_already_merged_finish_note_is_rendered_from_the_done_record(monkeypatch):
@@ -90,18 +90,140 @@ def test_already_merged_finish_note_is_rendered_from_the_done_record(monkeypatch
     assert "observed already-merged PR" in found[0]["note"]
 
 
-def test_a_retired_agent_is_never_read(monkeypatch):
-    spools = {"zcode": [_finish("zcode", merged=303)],
-              "muse": [_finish("muse", merged=202)]}
+def test_retired_merges_stop_at_cutoff_but_stay_out_of_silence_alarms(monkeypatch):
+    retired_at = datetime.fromtimestamp(
+        heartbeat.ZAI_STANDARD_UNTIL, timezone.utc
+    )
+    now = retired_at + timedelta(days=1)
+    spools = {
+        "zcode": [
+            {"agent": "zcode", "phase": "finish", "run": "before",
+             "ts": (retired_at + timedelta(seconds=30)).timestamp(),
+             "merged": 1491, "note": "merged PR #1491"},
+            {"agent": "zcode", "phase": "finish", "run": "at",
+             "ts": (retired_at + timedelta(seconds=30)).timestamp(),
+             "merged": 1553, "note": "merged PR #1553"},
+            {"agent": "zcode", "phase": "finish", "run": "after",
+             "ts": (retired_at + timedelta(minutes=1)).timestamp(),
+             "merged": 1568, "note": "merged PR #1568"},
+            {"agent": "zcode", "phase": "finish", "run": "old-count-zero",
+             "ts": (retired_at - timedelta(days=1)).timestamp(),
+             "merged": "0", "note": "legacy merge count"},
+            {"agent": "zcode", "phase": "finish", "run": "old-count-one",
+             "ts": (retired_at - timedelta(days=1)).timestamp(),
+             "merged": "1", "note": "legacy merge count"},
+            {"agent": "zcode", "phase": "finish", "run": "old-count-bool",
+             "ts": (retired_at - timedelta(days=1)).timestamp(),
+             "merged": True, "note": "legacy merge count"},
+        ],
+        "muse": [_finish("muse", merged=202)],
+    }
     read = _wire(monkeypatch, spools)
+    queries = []
 
-    found = funnel.unattended_merges(NOW)
+    def fake_graphql(query, **variables):
+        queries.append(" ".join(query.split()))
+        return {"repo0": {
+            "pr0": {
+                "number": 1491,
+                "mergedAt": (retired_at - timedelta(days=1)).isoformat(),
+            },
+            "pr1": {"number": 1553, "mergedAt": retired_at.isoformat()},
+            "pr2": {
+                "number": 1568,
+                "mergedAt": (retired_at + timedelta(seconds=1)).isoformat(),
+            },
+        }}
 
-    assert [m["pr"] for m in found] == [202]
+    def reject_broad_scan(*args, **kwargs):
+        raise AssertionError("retired merge lookup must not scan every merged PR")
+
+    monkeypatch.setattr(funnel, "gh_graphql", fake_graphql)
+    monkeypatch.setattr(funnel, "_recent_merged_pr_rows", reject_broad_scan)
+    timings = {}
+    degraded = []
+
+    found = funnel._brief_timed(
+        "unattended_merges",
+        lambda: funnel.unattended_merges(now),
+        timings,
+        degraded,
+    )
+
+    assert {(row["pr"], row["agent"]) for row in found} == {
+        (1491, "zcode"), (1553, "zcode"), (202, "muse"),
+    }
+    by_pr = {row["pr"]: row for row in found}
+    assert by_pr[1491]["at"] == (
+        retired_at - timedelta(days=1)
+    ).isoformat()
+    assert by_pr[1553]["at"] == retired_at.isoformat()
+    assert "zcode" in read
+    assert len(queries) == 1
+    assert all(
+        "pullRequest(number: {})".format(number) in queries[0]
+        for number in (1491, 1553, 1568)
+    )
+    assert "pullRequests(" not in queries[0]
+    assert timings["unattended_merges"] <= funnel.BRIEF_SECTION_BUDGETS[
+        "unattended_merges"
+    ]
+    assert degraded == []
+
+    read.clear()
+    health = funnel.agent_health(now)
+    assert all(row["agent"] != "zcode" for row in health)
     assert "zcode" not in read
 
 
+def test_each_retired_provider_uses_its_own_cutoff(monkeypatch):
+    zcode_cutoff = datetime(2026, 9, 7, 6, 0, tzinfo=timezone.utc)
+    legacy_cutoff = datetime(2026, 9, 9, 6, 0, tzinfo=timezone.utc)
+    merge_times = {
+        301: zcode_cutoff,
+        302: datetime(2026, 9, 7, 6, 0, 1, tzinfo=timezone.utc),
+        303: legacy_cutoff,
+        304: datetime(2026, 9, 9, 6, 0, 1, tzinfo=timezone.utc),
+    }
+    spools = {
+        "zcode": [_finish("zcode", merged=301), _finish("zcode", merged=302)],
+        "legacy": [
+            _finish("legacy", merged=303), _finish("legacy", merged=304),
+        ],
+        "claude": [_finish("claude", merged=305)],
+    }
+    read = _wire(monkeypatch, spools, retired={"zcode", "legacy"})
+    providers = dict(heartbeat.PROVIDERS)
+    providers["legacy"] = "test"
+    monkeypatch.setattr(heartbeat, "PROVIDERS", providers)
+    monkeypatch.setattr(heartbeat, "RETIRED_AGENT_CUTOFFS", {
+        "zcode": zcode_cutoff.timestamp(),
+        "legacy": legacy_cutoff.timestamp(),
+    })
+    queries = []
+
+    def fake_graphql(query, **variables):
+        queries.append(query)
+        rows = {}
+        for index, number in enumerate(sorted(merge_times)):
+            rows["pr{}".format(index)] = {
+                "mergedAt": merge_times[number].isoformat(),
+            }
+        return {"repo0": rows}
+
+    monkeypatch.setattr(funnel, "gh_graphql", fake_graphql)
+
+    found = funnel.unattended_merges(NOW)
+
+    assert {(row["pr"], row["agent"]) for row in found} == {
+        (301, "zcode"), (303, "legacy"), (305, "claude"),
+    }
+    assert {"zcode", "legacy"}.issubset(read)
+    assert len(queries) == 1
+
+
 def test_rows_outside_the_window_fall_out(monkeypatch):
+    assert funnel.MAINTENANCE_WINDOW == timedelta(days=30)
     days = funnel.MAINTENANCE_WINDOW.days
     spools = {"muse": [_finish("muse", merged=1, days_ago=days + 1),
                        _finish("muse", merged=2, days_ago=days - 1)]}

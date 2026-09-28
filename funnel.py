@@ -4742,17 +4742,68 @@ def _dashboard_authoring_pr_agents() -> Dict[str, Set[str]]:
     return authored_by
 
 
+def _retired_merge_times(repo: str, numbers: Set[int]) -> Dict[int, datetime]:
+    """Read merge timestamps for only the retired PRs named by heartbeats."""
+    if not numbers:
+        return {}
+    try:
+        owner, name = repo.split("/", 1)
+    except ValueError:
+        raise GitHubError("invalid repository ref {}".format(repo))
+
+    aliases = {
+        number: "pr{}".format(index)
+        for index, number in enumerate(sorted(numbers))
+    }
+    selections = "\n".join(
+        "{}: pullRequest(number: {}) {{ mergedAt }}".format(alias, number)
+        for number, alias in aliases.items()
+    )
+    query = """query {{
+  rateLimit {{ cost remaining resetAt }}
+  repo0: repository(owner: {owner}, name: {name}) {{
+    {pull_requests}
+  }}
+}}""".format(
+        owner=json.dumps(owner),
+        name=json.dumps(name),
+        pull_requests=selections,
+    )
+    data = gh_graphql(query)
+    if not isinstance(data, dict):
+        raise GitHubError("retired PR response was not an object")
+    repository = data.get("repo0")
+    if not isinstance(repository, dict):
+        raise GitHubError(
+            "could not read repository {} in retired PR response".format(repo)
+        )
+
+    found: Dict[int, datetime] = {}
+    for number, alias in aliases.items():
+        row = repository.get(alias)
+        if row is None:
+            continue
+        if not isinstance(row, dict):
+            raise GitHubError("invalid retired pull-request row")
+        merged_at = _metric_time(row.get("mergedAt"))
+        if merged_at is None:
+            raise GitHubError(
+                "PR #{} has no parseable mergedAt".format(number)
+            )
+        found[number] = merged_at
+    return found
+
+
 def unattended_merges(now: datetime) -> List[Dict[str, object]]:
-    """Merges a reviewer made without Nate, read from every live agent's heartbeat.
+    """Merges a reviewer made without Nate, read from agent heartbeats.
 
     plan.md makes these a condition of unattended merging being allowed at all:
     they must appear in the brief as a record. Until 2026-09-10 this read only
     the retired Claude routine's spool, so every Muse merge since the review
-    handover was missing from the brief (#489). The reader set is the live
-    provider set -- ``heartbeat.PROVIDERS`` minus ``heartbeat.RETIRED_AGENTS`` --
-    the same pattern ``agent_health`` and ``working_tree_touched`` use, so the
-    next rotation cannot reintroduce the blind spot. Each record carries the
-    ``agent`` that merged, oldest first.
+    handover was missing from the brief (#489). A retired provider contributes
+    only merges inside the brief window whose GitHub ``mergedAt`` is at or
+    before that provider's retirement cutoff; its silence remains retired.
+    Each record carries the ``agent`` that merged, oldest first.
     """
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -4763,15 +4814,43 @@ def unattended_merges(now: datetime) -> List[Dict[str, object]]:
     cutoff = (now - MAINTENANCE_WINDOW).timestamp()
     found: List[Dict[str, object]] = []
     live_rows: List[Tuple[str, List[Dict[str, object]]]] = []
+    retired = getattr(heartbeat, "RETIRED_AGENTS", frozenset())
+    retirement_cutoffs = getattr(heartbeat, "RETIRED_AGENT_CUTOFFS", {})
     for agent in sorted(heartbeat.PROVIDERS):
-        if agent in heartbeat.RETIRED_AGENTS:
-            # A stopped schedule must not read as activity (#431).
-            continue
+        if agent in retired and agent not in retirement_cutoffs:
+            raise GitHubError(
+                "retirement cutoff is unavailable for retired agent {}".format(agent)
+            )
         try:
             rows = _brief_heartbeat_rows(agent)
         except Exception:
             continue
         live_rows.append((agent, rows))
+
+    retired_prs: Set[int] = set()
+    for agent, rows in live_rows:
+        if agent not in retired:
+            continue
+        for row in rows:
+            value = row.get("merged")
+            if (
+                row.get("phase") != "finish"
+                or isinstance(value, bool)
+                or not value
+                or (row.get("ts") or 0) < cutoff
+            ):
+                continue
+            try:
+                number = int(str(value).lstrip("#"))
+            except (TypeError, ValueError):
+                continue
+            # Older zcode finishes stored the merge count (0 or 1), not a PR
+            # number. This repository has no PR #1, so discard that sentinel.
+            if number > 1:
+                retired_prs.add(number)
+    retired_merge_times: Dict[int, datetime] = {}
+    if retired_prs:
+        retired_merge_times = _retired_merge_times(REPO, retired_prs)
 
     authored_by: Dict[str, Set[str]] = {}
     for _agent, rows in live_rows:
@@ -4780,11 +4859,32 @@ def unattended_merges(now: datetime) -> List[Dict[str, object]]:
 
     for agent, rows in live_rows:
         for row in rows:
-            if not row.get("merged") or (row.get("ts") or 0) < cutoff:
+            if not row.get("merged"):
                 continue
+            if agent in retired:
+                try:
+                    value = row["merged"]
+                    if isinstance(value, bool):
+                        continue
+                    number = int(str(value).lstrip("#"))
+                    if number <= 0:
+                        continue
+                    merged_at = retired_merge_times[number]
+                    retired_at = datetime.fromtimestamp(
+                        retirement_cutoffs[agent], timezone.utc
+                    )
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    continue
+                if merged_at < now - MAINTENANCE_WINDOW or merged_at > retired_at:
+                    continue
+                at = merged_at
+            else:
+                if (row.get("ts") or 0) < cutoff:
+                    continue
+                at = datetime.fromtimestamp(row["ts"], timezone.utc)
             record = {
                 "pr": row.get("merged"),
-                "at": datetime.fromtimestamp(row["ts"], timezone.utc).isoformat(),
+                "at": at.isoformat(),
                 "note": row.get("note"),
                 "agent": agent,
             }
@@ -5314,8 +5414,8 @@ def _recent_merged_pr_rows(
 ) -> List[Dict[str, object]]:
     """Read merged PRs updated within the window using a light paged query.
 
-    The portfolio metric only needs the branch, the merge timestamps, and
-    the fields that say whether a PR is the funnel's own (#1794). Reusing
+    The portfolio metric needs the branch, merge timestamps, and fields that
+    show whether a PR is the funnel's own (#1794). Reusing
     ``ticket_pr_index`` would also request CI rollups and scan every PR state;
     the brief's 100-row bound can also hide valid merges. Merged PRs sort by
     ``updatedAt``, so the first row older than the cutoff proves that later
@@ -17062,8 +17162,6 @@ def reconcile_orphaned_starts(
     by_ref = {item.ref: item for item in items}
     spools: Dict[str, List[Dict]] = {}
     for agent in sorted(heartbeat.PROVIDERS):
-        if agent in heartbeat.RETIRED_AGENTS:
-            continue
         try:
             spools[agent] = heartbeat.read(agent)
         except Exception:
@@ -17081,6 +17179,10 @@ def reconcile_orphaned_starts(
 
     candidates = []
     for agent, records in spools.items():
+        # Retired providers' finish records still establish historical merges,
+        # but their open starts must not enter the liveness reconciliation.
+        if agent in heartbeat.RETIRED_AGENTS:
+            continue
         bound = heartbeat.bindings(records)
         for start in heartbeat.open_starts(records):
             binding = bound.get(start.get("run"))

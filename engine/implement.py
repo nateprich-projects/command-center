@@ -1996,6 +1996,7 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
     """
     push_attempted = False
     try:
+        _require_current_claim(ref, run, agent)
         paths = _working_tree_paths(root)
         if paths:
             _stage_explicit_paths(root, paths)
@@ -2016,6 +2017,28 @@ def _keep_work(root: pathlib.Path, number: int, branch: str, *, ref: str,
     except ImplementError as exc:
         first = str(exc).splitlines()[0] if str(exc) else "unknown error"
         return "work NOT kept: {}".format(first[:120]), push_attempted
+
+
+def _checkpoint_work(root: pathlib.Path, number: int, branch: str, *,
+                     ref: str, run: Optional[str], agent: str) -> bool:
+    """Push the current implementation before a long test run can lose it.
+
+    Ticket work is checkpointed on its deterministic remote branch at each
+    meaningful step. The final answer is validated before this helper runs;
+    tests and PR creation still happen afterward. A superseded run checks its
+    claim before committing and again immediately before pushing.
+    """
+    paths = _working_tree_paths(root)
+    if not paths:
+        _check_no_run_scratch(root)
+        return False
+    _stage_explicit_paths(root, paths)
+    _check_no_run_scratch(root, about_to_commit=paths)
+    _require_current_claim(ref, run, agent)
+    _run(["git", "commit", "-m",
+          "WIP #{}: checkpoint implementation".format(number)], cwd=root)
+    _push_ticket_branch(root, branch, ref=ref, run=run, agent=agent)
+    return True
 
 
 def _recover_answer_error(
@@ -2071,25 +2094,46 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
     release_effect = release or (
         lambda target: release_claim(target, run=run, agent=agent)
     )
+    phase = "checkpoint"
     try:
-        tests, test_source = run_tests(context["root"], test_commands)
-    except ImplementError as exc:
-        # A failing checkout must not strand the run or lose its work (#877):
-        # commit and push the ticket branch without opening a PR, release the
-        # claim, and finish errored naming what failed, so the next run
-        # continues the branch instead of starting again from main.
-        kept, push_failed = _keep_work(
+        continued = _remote_branch_exists(context["root"], context["branch"])
+        _checkpoint_work(
             context["root"], context["number"], context["branch"],
             ref=ref, run=run, agent=agent,
         )
+        phase = "tests"
+        tests, test_source = run_tests(context["root"], test_commands)
+    except SupersededRunError:
+        raise
+    except StrayFileError as exc:
         release_effect(ref)
-        heartbeat_finish(agent, run, "errored", _failure_note(exc, kept), ref)
+        heartbeat_finish(agent, run, "errored", str(exc), ref)
+        _remove_codex_run_checkout(context["root"], context["number"], agent)
+        raise
+    except ImplementError as exc:
+        # A failed checkpoint or test must not strand the run. Retry saving
+        # remaining work without opening a PR, then finish errored so the next
+        # run continues the branch instead of starting again from main.
+        kept, push_failed = _keep_work(
+            context["root"], context["number"], context["branch"],
+            ref=ref, run=run, agent=agent,
+            reason=("tests failed" if phase == "tests" else "checkpoint retry"),
+        )
+        release_effect(ref)
+        note = (
+            _failure_note(exc, kept) if phase == "tests" else
+            "checkpoint failed: {}; {}".format(
+                str(exc).splitlines()[0][:200], kept,
+            )
+        )
+        heartbeat_finish(agent, run, "errored", note, ref)
         if not push_failed:
             _remove_codex_run_checkout(
                 context["root"], context["number"], agent)
         raise
-    continued = _remote_branch_exists(context["root"], context["branch"])
     try:
+        if _working_tree_paths(context["root"]):
+            _require_current_claim(ref, run, agent)
         committed = _commit_if_needed(
             context["root"], context["number"], answer["summary"],
             allow_empty=True,
@@ -2098,6 +2142,7 @@ def finish_done(answer: dict, *, run: str, agent: str = "codex",
             evidence = _verify_done_evidence(
                 answer.get("evidence") or [], run=run, agent=agent,
             )
+            _require_current_claim(ref, run, agent)
             close_effect(
                 resolved, context["number"], cwd=context["root"],
             )

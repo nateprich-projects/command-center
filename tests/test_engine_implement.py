@@ -452,6 +452,7 @@ def test_done_answer_accepts_optional_nonempty_evidence_list():
 def test_no_diff_with_verified_evidence_closes_and_finishes(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)
+    _stub_claim_state(monkeypatch, "empty")
     monkeypatch.setattr(implement, "fetch_ticket", lambda repo, number: ticket(number))
     monkeypatch.setattr(
         heartbeat, "read_github",
@@ -738,6 +739,63 @@ def test_finish_ticket_pushes_opens_pr_releases_and_finishes(tmp_path, monkeypat
     assert pushed == "done\n"
 
 
+def test_finish_ticket_checkpoints_before_tests_and_refuses_later_superseded_push(
+        tmp_path, monkeypatch, capsys):
+    remote, clone = make_codex_run_clone(tmp_path, monkeypatch)
+    (clone / "implemented.txt").write_text("checkpointed work\n")
+    answer_path = tmp_path / "answer.json"
+    answer_path.write_text(json.dumps(answer()))
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number),
+    )
+
+    states = iter(("owned", "owned", "owned", "owned", "other"))
+    monkeypatch.setattr(
+        implement, "_claim_state",
+        lambda ref, run, agent: (next(states), []),
+    )
+    effects = {"released": [], "finished": []}
+    monkeypatch.setattr(
+        implement, "release_claim",
+        lambda ref, **kwargs: effects["released"].append(ref),
+    )
+    monkeypatch.setattr(
+        implement, "finish_heartbeat",
+        lambda *args: effects["finished"].append(args),
+    )
+    checkpoint = {}
+
+    def inspect_checkpoint(root, commands):
+        checkpoint["content"] = run_git(
+            "--git-dir", str(remote), "show",
+            "refs/heads/ticket/42:implemented.txt",
+        ).stdout
+        checkpoint["head"] = run_git(
+            "--git-dir", str(remote), "rev-parse", "refs/heads/ticket/42",
+        ).stdout.strip()
+        return ["python3 -m pytest -q"], None
+
+    monkeypatch.setattr(implement, "run_tests", inspect_checkpoint)
+    monkeypatch.chdir(clone)
+
+    assert implement.finish_main([
+        "--answer-file", str(answer_path), "--run", "run-42",
+        "--repo", REPO,
+    ]) == 0
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["superseded"] is True
+    assert checkpoint["content"] == "checkpointed work\n"
+    assert run_git(
+        "--git-dir", str(remote), "rev-parse", "refs/heads/ticket/42",
+    ).stdout.strip() == checkpoint["head"]
+    assert effects["released"] == []
+    (finished,) = effects["finished"]
+    assert finished[:3] == ("codex", "run-42", "errored")
+    assert "superseded" in finished[3]
+    assert "work not kept" in finished[3]
+
+
 def test_pre_pr_stray_check_names_answer_and_never_opens_a_pr(
         tmp_path, monkeypatch):
     _, clone = make_clone(tmp_path)
@@ -905,7 +963,7 @@ def test_finish_ticket_releases_and_errors_when_tests_fail(tmp_path, monkeypatch
     assert pushed == "done\n"
     subject = run_git("--git-dir", str(remote), "log", "-1", "--format=%s",
                       "ticket/42").stdout.strip()
-    assert subject == "WIP #42: tests failing"
+    assert subject == "WIP #42: checkpoint implementation"
 
 
 def test_finish_ticket_removes_owner_only_codex_run_checkout_after_push(
@@ -994,14 +1052,19 @@ def test_finish_ticket_removes_codex_run_checkout_after_recording_not_kept(
 def test_finish_ticket_keeps_codex_run_checkout_when_push_fails(
         tmp_path, monkeypatch):
     _, clone = make_codex_run_clone(tmp_path, monkeypatch)
+    _stub_claim_state(monkeypatch, "owned")
     (clone / "implemented.txt").write_text("done\n")
     monkeypatch.setattr(
         implement, "fetch_ticket", lambda repo, number: ticket(number))
-    monkeypatch.setattr(
-        implement, "_push_ticket_branch",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            implement.ImplementError("git push failed: remote unavailable")),
-    )
+    pushes = {"count": 0}
+
+    def fail_the_post_test_push(*args, **kwargs):
+        pushes["count"] += 1
+        if pushes["count"] > 1:
+            raise implement.ImplementError(
+                "git push failed: remote unavailable")
+
+    monkeypatch.setattr(implement, "_push_ticket_branch", fail_the_post_test_push)
     effects = {"released": [], "finished": []}
 
     with pytest.raises(implement.ImplementError, match="SystemExit"):

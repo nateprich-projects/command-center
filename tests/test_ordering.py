@@ -995,6 +995,16 @@ def test_a_claim_past_the_ttl_is_stale_and_takeable():
     assert [i.number for i in stale_locks([stale], NOW)] == [1]
 
 
+def test_a_claim_just_before_the_ttl_stays_live_with_a_ticket_branch():
+    claimed_ticket = ticket(1, 9, in_motion_since=claimed(119))
+    facts = {claimed_ticket.ref: {"branch_exists": True}}
+
+    assert funnel.in_motion([claimed_ticket], NOW, pr_facts=facts) == [
+        claimed_ticket
+    ]
+    assert stale_locks([claimed_ticket], NOW, pr_facts=facts) == []
+
+
 def test_a_31_minute_claim_without_a_ticket_branch_is_stale():
     claimed_ticket = ticket(1, 9, in_motion_since=claimed(31))
     facts = {claimed_ticket.ref: None}
@@ -1024,7 +1034,7 @@ def test_a_20_minute_claim_without_a_ticket_branch_is_live():
 
 
 def test_the_two_hour_ttl_stays_stale_even_with_a_ticket_branch():
-    claimed_ticket = ticket(1, 9, in_motion_since=claimed(180))
+    claimed_ticket = ticket(1, 9, in_motion_since=claimed(120))
     facts = {claimed_ticket.ref: {"branch_exists": True}}
 
     assert funnel.in_motion([claimed_ticket], NOW, pr_facts=facts) == []

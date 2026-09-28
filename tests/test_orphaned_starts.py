@@ -132,6 +132,37 @@ def test_the_run_that_merged_its_own_pr_is_not_an_orphan(monkeypatch):
     assert appended == []
 
 
+def test_retired_merge_can_reconcile_live_start_without_reconciling_retired_start(
+    monkeypatch,
+):
+    project = _project(1)
+    active_ticket = _ticket(9, project)
+    retired_ticket = _ticket(10, project)
+    facts = {
+        active_ticket.ref: {"number": 70, "state": "MERGED"},
+        retired_ticket.ref: {"number": 70, "state": "MERGED"},
+    }
+    spools = {
+        "codex": _open_work_start("active", active_ticket.ref),
+        "zcode": (
+            _merge_finish("retired-merge", 70, agent="zcode")
+            + _open_work_start("retired", retired_ticket.ref, agent="zcode")
+        ),
+    }
+    appended = _wire(monkeypatch, spools, facts)
+
+    closed = funnel.reconcile_orphaned_starts(
+        [project, active_ticket, retired_ticket], NOW
+    )
+
+    assert [(row["run"], row["agent"]) for row in closed] == [
+        ("active", "codex"),
+    ]
+    assert [(agent, record["run"]) for agent, record in appended] == [
+        ("codex", "active"),
+    ]
+
+
 def test_no_candidates_means_no_pr_read(monkeypatch):
     project = _project(1)
     ticket = _ticket(9, project)

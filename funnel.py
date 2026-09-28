@@ -1641,6 +1641,24 @@ _PLAN_DIRECT_ACTIONS = {
         r"migrated|migrating|migration)\b",
         re.IGNORECASE,
     ),
+    # The credentials matcher can include its proposing verb in the matched
+    # phrase ("rotate the deploy credentials"). Spell every inflection out
+    # and reuse only that matcher's credential terms (#1770).
+    "credentials": re.compile(
+        r"\b(?:access|accesses|accessed|accessing|change|changes|changed|"
+        r"changing|create|creates|created|creating|expose|exposes|exposed|"
+        r"exposing|grant|grants|granted|granting|handle|handles|handled|"
+        r"handling|load|loads|loaded|loading|read|reads|reading|replace|"
+        r"replaces|replaced|replacing|revoke|revokes|revoked|revoking|"
+        r"rotate|rotates|rotated|rotating|store|stores|stored|storing|"
+        r"supply|supplies|supplied|supplying|touch|touches|touched|"
+        r"touching|update|updates|updated|updating|use|uses|used|using|"
+        r"write|writes|wrote|written|writing)"
+        r"(?:\s+[\w'’-]+){0,4}\s+"
+        r"(?:api[- ]key|access token|client secret|credential store|"
+        r"password|private key|credentials?)\b",
+        re.IGNORECASE,
+    ),
     "destructive": re.compile(
         r"\b(?:force[- ]push|hard[- ]delete|permanently\s+delete|"
         r"drop\s+(?:the\s+)?(?:table|branch)|rewrite\s+history)\b",

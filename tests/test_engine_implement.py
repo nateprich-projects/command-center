@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import pathlib
 import shlex
+import signal
 import stat
 import subprocess
 import sys
+from collections import Counter
 from types import SimpleNamespace
 
 import pytest
@@ -2876,6 +2879,9 @@ def _spy_run(monkeypatch):
     real_run = implement._run
 
     def spy(argv, **kwargs):
+        if (len(argv) >= 3 and argv[1] == "-c" and
+                "sys.version_info" in argv[2]):
+            return real_run(argv, **kwargs)
         seen.append((list(argv), kwargs.get("env") or {}))
         return real_run([sys.executable, "-c", "pass"], **kwargs)
 
@@ -2996,3 +3002,293 @@ def test_checkout_repo_falls_back_to_gh_for_a_non_github_origin(
     monkeypatch.setattr(
         funnel, "_gh_json", lambda *args: {"nameWithOwner": REPO})
     assert implement.resolve_checkout_repo(tmp_path, None) == REPO
+
+
+def test_run_passes_a_measured_bound_to_each_command_kind(
+        tmp_path, monkeypatch):
+    seen = []
+
+    class CompletedCommand:
+        pid = 1
+        returncode = 0
+        stdin = stdout = stderr = None
+
+        def __init__(self, command):
+            self.command = command
+
+        def communicate(self, input=None, timeout=None):
+            seen.append((self.command, timeout))
+            return "", ""
+
+    monkeypatch.setattr(
+        implement.subprocess, "Popen",
+        lambda command, **kwargs: CompletedCommand(command),
+    )
+    # These fixtures pin timeout classification. The full Git callsite
+    # inventory is checked below and recorded in docs/finish-subprocess-bounds.md.
+    commands = [
+        (["git", "rev-parse", "--show-toplevel"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "branch", "--show-current"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "remote", "get-url", "origin"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "diff", "--name-only", "-z"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "diff", "--cached", "--name-only", "-z"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "ls-files", "--others", "--exclude-standard", "-z"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "diff", "--name-only", "-z", "origin/main...HEAD"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "ls-files", "-z", "--", "engine/implement.py"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "add", "--", "engine/implement.py"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "commit", "-m", "Finish #42"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "rev-list", "--count", "origin/main..HEAD"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "merge", "-s", "ours", "--no-edit", "-m",
+          "Record the previous ticket/42 tip before pushing the rebased branch",
+          "origin/ticket/42"],
+         implement.LOCAL_GIT_TIMEOUT_SECONDS),
+        (["git", "ls-remote", "--exit-code", "--heads", "origin",
+          "refs/heads/ticket/42"],
+         implement.REMOTE_GIT_TIMEOUT_SECONDS),
+        (["git", "fetch", "origin",
+          "+refs/heads/ticket/42:refs/remotes/origin/ticket/42"],
+         implement.REMOTE_GIT_TIMEOUT_SECONDS),
+        (["git", "push", "--set-upstream", "origin", "ticket/42"],
+         implement.REMOTE_GIT_TIMEOUT_SECONDS),
+        (["make", "check", "test"],
+         implement.TEST_COMMAND_TIMEOUT_SECONDS),
+        ([sys.executable, "-m", "pytest", "-q"],
+         implement.TEST_COMMAND_TIMEOUT_SECONDS),
+        (["sh", "-c", "make check test"],
+         implement.TEST_COMMAND_TIMEOUT_SECONDS),
+        (["sh", "-c", "python3 -m pytest tests/ -q"],
+         implement.TEST_COMMAND_TIMEOUT_SECONDS),
+        ([sys.executable, "-m", "compileall", "engine"],
+         implement.COMPILE_COMMAND_TIMEOUT_SECONDS),
+        ([sys.executable, "-c",
+          "from pathlib import Path; compile(Path('funnel.py').read_text(), "
+          "'funnel.py', 'exec')"],
+         implement.COMPILE_COMMAND_TIMEOUT_SECONDS),
+        ([sys.executable, "-c",
+          "import sys; print('%d.%d' % sys.version_info[:2])"],
+         implement.INTERPRETER_PROBE_TIMEOUT_SECONDS),
+    ]
+
+    for command, _ in commands:
+        implement._run(command, cwd=tmp_path)
+
+    assert seen == commands
+    assert all(timeout < implement.CLAIM_TTL_SECONDS
+               for _, timeout in seen)
+
+
+def test_every_subprocess_callsite_has_an_explicit_timeout():
+    source = pathlib.Path(implement.__file__).read_text()
+    tree = ast.parse(source)
+    run_calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_run"
+    ]
+    direct_runs = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "subprocess"
+        and node.func.attr == "run"
+    ]
+
+    def has_timeout(call):
+        return any(keyword.arg == "timeout" for keyword in call.keywords)
+
+    assert run_calls
+    assert [call.lineno for call in run_calls if not has_timeout(call)] == []
+    # Packet collection is the sole direct subprocess.run path; it already has
+    # its own 30-second cap and is outside finish-ticket's _run inventory.
+    assert len(direct_runs) == 1
+    assert all(has_timeout(call) for call in direct_runs)
+
+
+def test_finish_git_invocation_sites_match_the_recorded_inventory():
+    source = pathlib.Path(implement.__file__).read_text()
+    tree = ast.parse(source)
+    actual = Counter()
+    for node in ast.walk(tree):
+        if (not isinstance(node, ast.Call)
+                or not isinstance(node.func, ast.Name)
+                or node.func.id != "_run" or not node.args
+                or not isinstance(node.args[0], ast.List)):
+            continue
+        command = node.args[0].elts
+        if (not command or not isinstance(command[0], ast.Constant)
+                or command[0].value != "git"):
+            continue
+        if len(command) < 2:
+            actual[("<missing-subcommand>", "")] += 1
+            continue
+        subcommand = command[1]
+        if isinstance(subcommand, ast.Constant):
+            second = str(subcommand.value)
+        elif isinstance(subcommand, ast.Starred):
+            second = "<path-command>"
+        else:
+            second = "<dynamic>"
+        following = ""
+        if len(command) > 2 and isinstance(command[2], ast.Constant):
+            following = str(command[2].value)
+        actual[(second, following)] += 1
+
+    expected = Counter({
+        ("rev-parse", "--show-toplevel"): 1,
+        ("branch", "--show-current"): 1,
+        ("remote", "get-url"): 2,
+        ("ls-remote", "--exit-code"): 2,
+        ("<path-command>", ""): 1,
+        ("add", "--"): 1,
+        ("commit", "-m"): 2,
+        ("rev-list", "--count"): 2,
+        ("fetch", "origin"): 1,
+        ("merge-base", "--is-ancestor"): 1,
+        ("merge", "-s"): 1,
+        ("push", "--set-upstream"): 1,
+    })
+    assert actual == expected
+
+    inventory = (ROOT / "docs" / "finish-subprocess-bounds.md").read_text()
+    assert "16 bounded Git callsites" in inventory
+    for command in (
+        "git diff --name-only -z",
+        "git diff --cached --name-only -z",
+        "git ls-files --others --exclude-standard -z",
+        "git diff --name-only -z origin/main...HEAD",
+        "git ls-files -z -- <selected paths>",
+        "git fetch origin",
+        "git merge-base --is-ancestor",
+        "git merge -s ours",
+        "git push --set-upstream origin",
+        "make",
+        "python3 -m pytest",
+    ):
+        assert command in inventory
+
+
+def test_slow_command_finishes_before_its_bound(tmp_path):
+    result = implement._run(
+        [sys.executable, "-c",
+         "import time; time.sleep(0.05); print('finished')"],
+        cwd=tmp_path, timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "finished"
+
+
+def test_run_tests_applies_test_bound_to_shell_wrapped_command(
+        tmp_path, monkeypatch):
+    seen = []
+
+    def record(command, **kwargs):
+        seen.append(kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(implement, "_run", record)
+    implement.run_tests(tmp_path, [
+        ["sh", "-c", "python3 -m pytest tests/ -q"],
+        ["sh", "-c", "make check test"],
+        [sys.executable, "-m", "unittest", "discover"],
+        [sys.executable, "-c",
+         "from pathlib import Path; compile(Path('funnel.py').read_text(), "
+         "'funnel.py', 'exec')"],
+    ])
+
+    assert [call["timeout"] for call in seen] == [
+        implement.TEST_COMMAND_TIMEOUT_SECONDS,
+        implement.TEST_COMMAND_TIMEOUT_SECONDS,
+        implement.TEST_COMMAND_TIMEOUT_SECONDS,
+        implement.COMPILE_COMMAND_TIMEOUT_SECONDS,
+    ]
+
+
+def test_timed_out_test_is_abandoned_and_finished_without_keeping_work(
+        tmp_path, monkeypatch):
+    remote, clone = make_clone(tmp_path)
+    (clone / "implemented.txt").write_text("unfinished\n")
+    monkeypatch.setattr(
+        implement, "fetch_ticket", lambda repo, number: ticket(number))
+    effects = {"released": [], "finished": []}
+    real_popen = subprocess.Popen
+    spawned = []
+    killed = []
+
+    class NeverReturns:
+        pid = 23456
+        returncode = None
+        stdin = stdout = stderr = None
+
+        def __init__(self, command):
+            self.command = command
+            self.timeout = None
+            self.waited = False
+            self.killed = False
+
+        def communicate(self, input=None, timeout=None):
+            self.timeout = timeout
+            raise subprocess.TimeoutExpired(self.command, timeout)
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, *args, **kwargs):
+            self.waited = True
+            raise AssertionError("timeout handling must not wait for the child")
+
+    def fake_popen(command, **kwargs):
+        if command == ["make", "test"]:
+            process = NeverReturns(command)
+            spawned.append(process)
+            return process
+        return real_popen(command, **kwargs)
+
+    monkeypatch.setattr(implement.subprocess, "Popen", fake_popen)
+    if implement.os.name == "posix":
+        monkeypatch.setattr(
+            implement.os, "killpg",
+            lambda pid, sig: killed.append((pid, sig)),
+        )
+
+    with pytest.raises(implement.CommandTimeoutError, match="make test timed out"):
+        implement.finish_done(
+            answer(), run="run-42", repo=REPO, cwd=clone,
+            test_commands=[["make", "test"]],
+            release=effects["released"].append,
+            heartbeat_finish=lambda *args: effects["finished"].append(args),
+            pr_effect=lambda *args: pytest.fail(
+                "a timed-out checkout must not open a PR"),
+        )
+
+    (process,) = spawned
+    assert process.timeout == implement.TEST_COMMAND_TIMEOUT_SECONDS
+    assert process.waited is False
+    if implement.os.name == "posix":
+        assert killed == [(process.pid, signal.SIGKILL)]
+    else:
+        assert process.killed is True
+    assert effects["released"] == [REPO + "#42"]
+    (finished,) = effects["finished"]
+    assert finished[:3] == ("codex", "run-42", "errored")
+    assert finished[3].endswith("work NOT kept")
+
+    # Restore the real process launcher before checking the bare remote.
+    monkeypatch.setattr(implement.subprocess, "Popen", real_popen)
+    refs = run_git("--git-dir", str(remote), "show-ref").stdout
+    assert "ticket/42" not in refs

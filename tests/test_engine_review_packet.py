@@ -959,6 +959,24 @@ def test_packet_marks_a_missing_plan():
     assert found["plan_md"] == "" and found["plan_md_missing"] is True
 
 
+def test_a_plan_md_over_64k_characters_is_cut_and_marked():
+    """Context is bounded, never rejected (#1801)."""
+    found = packet(plan_md="d" * 65546, verdict=None)
+    assert found["plan_md"] == "d" * 65536 + "\n…[truncated 10 chars]"
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert packet(plan_md="d" * 65536)["plan_md"] == "d" * 65536
+
+
+def test_a_ticket_body_over_20000_characters_is_cut_and_marked():
+    long_body = ticket(body="b" * 20100)
+    found = packet(ticket=long_body, tickets=[long_body], verdict=None)
+    for shaped in (found["ticket"], found["tickets"][0]):
+        assert shaped["body"] == "b" * 20000 + "\n…[truncated 100 chars]"
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    at_bound = packet(ticket=ticket(body="b" * 20000))
+    assert at_bound["ticket"]["body"] == "b" * 20000
+
+
 def test_packet_computes_overlap_and_protected_from_the_pr_view():
     view = pr_view(files=[{"path": "AGENTS.md"}, {"path": "funnel.py"}])
     open_prs = [dict(OWNER_PR, number=8, headRefName="ticket/10",
@@ -1140,6 +1158,25 @@ def test_a_long_body_is_capped_with_its_cut_marked():
 def test_a_body_at_the_cap_is_left_alone():
     (found,) = review.ticket_comments([comment("y" * 4000)])
     assert found["body"] == "y" * 4000
+
+
+def test_comment_bodies_stop_at_24000_characters_newest_first():
+    """Six comments at the per-comment cap fill the bound exactly (#1801).
+
+    The seventh newest is trimmed, and so is everything older, however
+    short: the cut is one line in time.
+    """
+    rows = [comment("tiny", created_at="2026-09-01T00:00:00Z")] + [
+        comment(str(day) * 4000,
+                created_at="2026-09-{:02d}T00:00:00Z".format(day))
+        for day in range(2, 9)]
+    found = review.ticket_comments(rows)
+    assert [entry["body"] for entry in found] == [
+        "…[truncated 4 chars]", "…[truncated 4000 chars]",
+        "3" * 4000, "4" * 4000, "5" * 4000, "6" * 4000, "7" * 4000,
+        "8" * 4000]
+    assert [entry["created_at"][:10] for entry in found] == [
+        "2026-09-0{}".format(day) for day in range(1, 9)]
 
 
 def test_another_authors_nate_direct_comment_never_amends_the_ticket():
@@ -2002,6 +2039,302 @@ def test_protected_row_ignores_main_only_files_outside_the_compare_scope():
                    merge_base=MERGE_BASE_SHA, scope_source="compare")
     assert found["protected"]["touched"] == []
     assert found["protected"]["rules"] == []
+
+
+# -- every changed text file reaches the judges (#1800) -----------------------
+
+RAW = "Accept: application/vnd.github.raw"
+
+
+def _stub_reads(monkeypatch, blobs, pages=()):
+    """Answer contents reads from ``blobs`` and files pages from ``pages``.
+
+    ``blobs`` maps (path, sha) to the file's bytes at that commit; a read
+    of anything else fails as GitHub's 404 does.
+    """
+    calls = []
+
+    def fake(args, **kwargs):
+        calls.append(list(args))
+        endpoint = args[-1]
+        if "/contents/" in endpoint:
+            path, ref = endpoint.split("/contents/", 1)[1].split("?ref=")
+            if (path, ref) not in blobs:
+                return _proc(args, 1, stdout=b"",
+                             stderr=b"gh: Not Found (HTTP 404)")
+            return _proc(args, stdout=blobs[(path, ref)])
+        page = int(endpoint.rsplit("page=", 1)[1])
+        return _proc(args, stdout=json.dumps(pages[page - 1]))
+
+    monkeypatch.setattr(funnel, "_run_gh", fake)
+    return calls
+
+
+def _read_calls(calls):
+    return [c[-1] for c in calls if "/contents/" in c[-1]]
+
+
+def _assemble(monkeypatch, route, entries, blobs):
+    """The diff one route builds from ``entries``, and its omitted count.
+
+    ``compare`` is ``fetch_scope``; ``files`` is ``fetch_files_diff`` with
+    the merge base and head the clipped-compare fallback passes it.
+    """
+    calls = _stub_reads(monkeypatch, blobs, [entries])
+    if route == "compare":
+        monkeypatch.setattr(funnel, "_gh_json", lambda *args: {
+            "merge_base_commit": {"sha": MERGE_BASE_SHA}, "files": entries})
+        _, diff, _ = review.fetch_scope(REPO, "main", HEAD_SHA)
+    else:
+        diff = review.fetch_files_diff(REPO, 7, base_sha=MERGE_BASE_SHA,
+                                       head_sha=HEAD_SHA)
+    return diff, getattr(diff, "omitted_patches", 0), calls
+
+
+PATCHLESS_ENTRIES = [
+    {"filename": "a.py", "status": "modified",
+     "patch": "@@ -1 +1 @@\n-x\n+y"},
+    {"filename": "gen.py", "status": "modified"},
+    {"filename": "new.txt", "status": "added"},
+]
+
+PATCHLESS_BLOBS = {
+    ("gen.py", MERGE_BASE_SHA): b"one\ntwo\nthree\n",
+    ("gen.py", HEAD_SHA): b"one\nTWO\nthree\n",
+    ("new.txt", HEAD_SHA): b"hello\nworld\n",
+}
+
+PATCHLESS_DIFF = (
+    "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n"
+    "@@ -1 +1 @@\n-x\n+y\n"
+    "diff --git a/gen.py b/gen.py\n--- a/gen.py\n+++ b/gen.py\n"
+    "@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n"
+    "diff --git a/new.txt b/new.txt\n--- a/new.txt\n+++ b/new.txt\n"
+    "@@ -0,0 +1,2 @@\n+hello\n+world\n")
+
+
+@pytest.mark.parametrize("route", ["compare", "files"])
+def test_a_patchless_text_file_is_read_at_both_ends_and_shown(
+        monkeypatch, route):
+    """#1782: Muse approved a PR whose packet was missing three files."""
+    diff, omitted, calls = _assemble(
+        monkeypatch, route, PATCHLESS_ENTRIES, PATCHLESS_BLOBS)
+    assert diff == PATCHLESS_DIFF
+    assert omitted == 0
+    # Read at the merge base and the head, not the base branch; an added
+    # file has no base to read.
+    assert sorted(_read_calls(calls)) == sorted([
+        "repos/owner/repo/contents/gen.py?ref=" + MERGE_BASE_SHA,
+        "repos/owner/repo/contents/gen.py?ref=" + HEAD_SHA,
+        "repos/owner/repo/contents/new.txt?ref=" + HEAD_SHA,
+    ])
+    read = [c for c in calls if "/contents/" in c[-1]][0]
+    assert read[:4] == ["gh", "api", "-H", RAW]
+
+
+def test_a_filled_compare_packet_is_not_marked_truncated(monkeypatch):
+    _stub_collect_prereqs(
+        monkeypatch, pr_view(baseRefOid=PR_BASE_SHA, headRefOid=HEAD_SHA))
+    _stub_reads(monkeypatch, PATCHLESS_BLOBS)
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: {
+        "merge_base_commit": {"sha": MERGE_BASE_SHA},
+        "files": PATCHLESS_ENTRIES})
+    found = review.collect(REPO, 7, items_loader=lambda: [])
+    assert found["scope_source"] == "compare"
+    assert found["diff"] == PATCHLESS_DIFF
+    assert "diff_truncated" not in found
+    assert "diff_omitted_files" not in found
+
+
+@pytest.mark.parametrize("route", ["compare", "files"])
+def test_binaries_and_lockfiles_are_named_with_their_size(monkeypatch, route):
+    entries = [
+        {"filename": "logo.png", "status": "added"},
+        {"filename": "data.bin", "status": "modified"},
+        {"filename": "package-lock.json", "status": "modified",
+         "patch": "@@ -1 +1 @@\n-\"lockfileVersion\": 2\n"
+                  "+\"lockfileVersion\": 3"},
+        {"filename": "web/yarn.lock", "status": "removed"},
+    ]
+    blobs = {
+        ("logo.png", HEAD_SHA): b"\x89PNG\r\n\x1a\n\x00\x00",
+        ("data.bin", MERGE_BASE_SHA): b"text so far",
+        ("data.bin", HEAD_SHA): b"\xff\xfe\xfd not utf-8",
+        ("package-lock.json", HEAD_SHA): b"x" * 2048,
+        ("web/yarn.lock", MERGE_BASE_SHA): b"y" * 300,
+    }
+    diff, omitted, _ = _assemble(monkeypatch, route, entries, blobs)
+    assert diff == (
+        "diff --git a/logo.png b/logo.png\n"
+        "Binary file not shown: added, 10 bytes\n"
+        "diff --git a/data.bin b/data.bin\n"
+        "Binary file not shown: modified, 13 bytes\n"
+        "diff --git a/package-lock.json b/package-lock.json\n"
+        "Generated lockfile not shown: modified, 2048 bytes\n"
+        "diff --git a/web/yarn.lock b/web/yarn.lock\n"
+        "Generated lockfile not shown: removed, 300 bytes\n")
+    # Named, so none is counted among the files the diff leaves out.
+    assert omitted == 0
+    if route == "compare":
+        assert type(diff) is str
+
+
+@pytest.mark.parametrize("route", ["compare", "files"])
+def test_only_an_unreadable_patchless_file_is_counted(monkeypatch, route):
+    """A read that fails cannot say the file is binary, so it counts."""
+    entries = [{"filename": "a.py", "status": "modified",
+                "patch": "@@ -1 +1 @@\n-x\n+y"},
+               {"filename": "big.py", "status": "modified"},
+               {"filename": "logo.png", "status": "added"}]
+    diff, omitted, _ = _assemble(monkeypatch, route, entries, {
+        ("big.py", HEAD_SHA): b"only head\n",
+        ("logo.png", HEAD_SHA): b"\x89PNG\r\n\x1a\n\x00\x00",
+    })
+    assert omitted == 1
+    assert "big.py" not in diff
+    assert "Binary file not shown: added, 10 bytes\n" in diff
+    assert isinstance(diff, review.AssembledDiff)
+    # Named for the precheck's rejection (#1801).
+    assert list(diff.omitted_paths) == ["big.py"]
+
+
+def test_the_files_rebuild_without_a_merge_base_counts_what_it_cannot_read(
+        monkeypatch):
+    """The ``gh pr diff`` refusal path has no compare, so no merge base.
+
+    Its patch-less files stay out and count, as before #1800, and a
+    lockfile is still named rather than shown.
+    """
+    entries = PATCHLESS_ENTRIES + [
+        {"filename": "Cargo.lock", "status": "modified",
+         "patch": "@@ -1 +1 @@\n-version = 1\n+version = 2"}]
+    calls = _stub_reads(monkeypatch, PATCHLESS_BLOBS, [entries])
+    diff = review.fetch_files_diff(REPO, 7)
+    assert diff.omitted_patches == 2
+    assert "gen.py" not in diff and "new.txt" not in diff
+    assert diff.endswith(
+        "diff --git a/Cargo.lock b/Cargo.lock\n"
+        "Generated lockfile not shown: modified, size unknown\n")
+    assert _read_calls(calls) == []
+
+
+def _compare_files(count):
+    return [{"filename": "f{}.py".format(index), "status": "modified",
+             "patch": "@@ -1 +1 @@\n-a\n+b"} for index in range(count)]
+
+
+def test_fetch_scope_raises_at_the_300_file_cap_before_reading_a_file(
+        monkeypatch):
+    entries = [{"filename": "f{}.py".format(index), "status": "modified"}
+               for index in range(300)]
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: {
+        "merge_base_commit": {"sha": MERGE_BASE_SHA}, "files": entries})
+
+    def no_reads(args, **kwargs):
+        raise AssertionError("a clipped compare reads no files")
+
+    monkeypatch.setattr(funnel, "_run_gh", no_reads)
+    with pytest.raises(review.CompareClipped) as caught:
+        review.fetch_scope(REPO, "main", HEAD_SHA)
+    assert caught.value.merge_base == MERGE_BASE_SHA
+
+
+def test_a_300_file_compare_falls_back_to_the_files_api(monkeypatch):
+    _stub_collect_prereqs(
+        monkeypatch, pr_view(files=[{"path": "f0.py"}],
+                             baseRefOid=PR_BASE_SHA, headRefOid=HEAD_SHA))
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: {
+        "merge_base_commit": {"sha": MERGE_BASE_SHA},
+        "files": _compare_files(300)})
+
+    def no_pr_diff(repo, pr):
+        raise AssertionError("the clipped fallback reads the files API")
+
+    monkeypatch.setattr(review, "fetch_diff", no_pr_diff)
+    # The files API lists the 301st file the compare never showed, without
+    # a patch: it is read at the compare's merge base and the head.
+    pages = [_files_page(0, 100), _files_page(100, 100),
+             _files_page(200, 100),
+             [{"filename": "f300.py", "status": "modified"}]]
+    calls = _stub_reads(monkeypatch, {
+        ("f300.py", MERGE_BASE_SHA): b"old\n",
+        ("f300.py", HEAD_SHA): b"new\n",
+    }, pages)
+    found = review.collect(REPO, 7, items_loader=lambda: [])
+    assert len(found["changed_files"]) == 301
+    assert "f300.py" in found["changed_files"]
+    assert found["scope_source"] == "pr"
+    assert found["diff_omitted_files"] == 0
+    assert found["diff"].endswith(
+        "diff --git a/f300.py b/f300.py\n--- a/f300.py\n+++ b/f300.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n")
+    # The rebuild marks itself truncated with nothing left out, and the
+    # diff row reads the count, not the flag (#1801).
+    assert found["diff_truncated"] is True
+    assert review.precheck_diff(found) == []
+    assert found["precheck"] == {"pass": True, "reasons": []}
+    assert [c[-1] for c in calls if "/pulls/" in c[-1]] == [
+        "repos/owner/repo/pulls/7/files?per_page=100&page={}".format(page)
+        for page in (1, 2, 3, 4)]
+
+
+def test_a_compare_under_the_cap_is_the_scope(monkeypatch):
+    _stub_collect_prereqs(
+        monkeypatch, pr_view(baseRefOid=PR_BASE_SHA, headRefOid=HEAD_SHA))
+    monkeypatch.setattr(funnel, "_gh_json", lambda *args: {
+        "merge_base_commit": {"sha": MERGE_BASE_SHA},
+        "files": _compare_files(298) + [
+            {"filename": "new.txt", "status": "added"}]})
+
+    def no_files_api(*args, **kwargs):
+        raise AssertionError("a compare under the cap is complete")
+
+    monkeypatch.setattr(review, "fetch_files_diff", no_files_api)
+    calls = _stub_reads(monkeypatch, PATCHLESS_BLOBS)
+    found = review.collect(REPO, 7, items_loader=lambda: [])
+    assert len(found["changed_files"]) == 299
+    assert found["scope_source"] == "compare"
+    assert found["merge_base"] == MERGE_BASE_SHA
+    assert found["diff"].endswith(
+        "diff --git a/new.txt b/new.txt\n--- a/new.txt\n+++ b/new.txt\n"
+        "@@ -0,0 +1,2 @@\n+hello\n+world\n")
+    assert _read_calls(calls) == [
+        "repos/owner/repo/contents/new.txt?ref=" + HEAD_SHA]
+
+
+# -- a diff the review cannot judge is rejected before any model (#1801) -------
+
+def test_an_unread_file_rejects_the_packet_and_is_named(monkeypatch):
+    """The ``gh pr diff`` refusal path has no merge base to read at."""
+    pages = [_files_page(0, 100, missing={3}),
+             _files_page(100, 2, missing={101})]
+    _stub_gh(monkeypatch, lambda args: _proc(args, 1, stderr=TOO_LARGE),
+             pages)
+    found = _collect_with_diff(monkeypatch)
+    assert found["diff_omitted_paths"] == ["f3.py", "f101.py"]
+    assert found["precheck"] == {
+        "pass": False, "reasons": ["diff incomplete: f3.py, f101.py"]}
+    json.dumps(found)
+
+
+@pytest.mark.parametrize("route", ["compare", "files"])
+def test_named_binaries_and_lockfiles_never_make_a_diff_incomplete(
+        monkeypatch, route):
+    entries = [
+        {"filename": "logo.png", "status": "added"},
+        {"filename": "package-lock.json", "status": "modified",
+         "patch": "@@ -1 +1 @@\n-1\n+2"},
+        {"filename": "Cargo.lock", "status": "modified"},
+    ]
+    diff, omitted, _ = _assemble(monkeypatch, route, entries, {
+        ("logo.png", HEAD_SHA): b"GIF89a\x00\x01",
+        ("package-lock.json", HEAD_SHA): b"{}",
+        ("Cargo.lock", HEAD_SHA): b"lock",
+    })
+    assert omitted == 0
+    found = packet(diff=diff, verdict=None)
+    assert review.precheck_diff(found) == []
+    assert found["precheck"] == {"pass": True, "reasons": []}
 
 
 def test_the_packet_verdict_is_the_owners_not_a_forged_one(monkeypatch):

@@ -338,6 +338,36 @@ def test_packet_cli_prints_valid_json(monkeypatch, capsys):
     assert "### @reviewer — 2026-09-15T11:00:00Z" in found["issue_thread"]
 
 
+def test_packet_asks_for_seams_a_reproduction_and_sequenced_wide_changes(
+        monkeypatch, capsys):
+    """The printed packet, read from the real skill, carries what the
+    implementer routines act on (#1807): named seams and a `Reproduction:`
+    first Accept item. It also carries the expand-migrate-contract and
+    prefactor rules with their brake on small work (#1808). Read from the
+    packet, not the skill file: skill text outside the sizing slice never
+    reaches the model."""
+    monkeypatch.setattr(breakdown, "fetch_plan", lambda repo, n: plan())
+    monkeypatch.setattr(breakdown, "fetch_siblings", lambda repo, n: [])
+    assert breakdown.packet_main(["owner/repo#1"]) == 0
+    sizing = json.loads(capsys.readouterr().out)["sizing_standard"]
+    normalized = " ".join(sizing.replace("**", "").split())
+
+    assert ("A ticket's `Accept` names the one to three seams its tests go "
+            "at" in normalized)
+    assert ("A ticket that fixes a reported defect makes its first `Accept` "
+            "item `Reproduction: <the failing test at a named seam>`"
+            in normalized)
+    assert ("Only the ticket whose change makes it pass carries it; a "
+            "prefactor or expand ticket passes on base by design"
+            in normalized)
+    assert ("A genuinely wide change, one that moves a shape many callers "
+            "share, is sequenced expand, migrate, contract" in normalized)
+    assert ("A refactor the change cannot land without is a prefactor: its "
+            "own ticket, first" in normalized)
+    assert ("Neither is a reason to split small work: what fits one run "
+            "stays one ticket" in normalized)
+
+
 def test_breakdown_packet_failure_stops_before_siblings_or_output(
         monkeypatch, capsys):
     def unavailable(repo, number):

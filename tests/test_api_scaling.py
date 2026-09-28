@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
 
 import pytest
@@ -296,6 +297,73 @@ def test_project_item_list_is_compact_and_detail_read_is_candidate_bounded(
     assert "children: nodes(ids: $childIds)" in detail_query
     assert items[0].first_child_created_at is not None
     assert items[0].status_since is not None
+
+
+def test_shared_startable_candidates_are_filtered_before_hydration(monkeypatch):
+    project = _node(1, children_total=1)
+    ticket = _node(2, parent=1)
+    for number, node in enumerate((project, ticket), start=1):
+        node["id"] = "project-item-{}".format(number)
+        node["needs"] = {"name": "none"}
+    calls = []
+
+    def graphql(query, **variables):
+        calls.append((query, variables))
+        if "nodes(ids: $ids)" in query:
+            assert variables == {"ids": ["project-item-2"]}
+            return {
+                "nodes": [{
+                    "id": "project-item-2",
+                    "content": {"timelineItems": {"nodes": []}},
+                }],
+            }
+        if "open: items(" in query:
+            aliases = re.findall(r"(\w+): items\(", query)
+            return {
+                "user": {
+                    "projectV2": {
+                        alias: {
+                            "nodes": [project, ticket] if alias == "open" else [],
+                            "pageInfo": {
+                                "hasNextPage": False,
+                                "endCursor": None,
+                            },
+                        }
+                        for alias in aliases
+                    },
+                },
+            }
+        return {
+            "user": {
+                "projectV2": {
+                    "items": {
+                        "nodes": [project, ticket],
+                        "pageInfo": {
+                            "hasNextPage": False,
+                            "endCursor": None,
+                        },
+                    },
+                },
+            },
+        }
+
+    monkeypatch.setattr(funnel, "member_repos", lambda: [REPO])
+    monkeypatch.setattr(funnel, "gh_graphql", graphql)
+    monkeypatch.setattr(funnel, "_load_begin_anchor_items", lambda *args: [])
+
+    items = funnel.load_items(include_startable=True)
+
+    assert [item.number for item in items.startable_items] == [1, 2]
+    assert [item.number for item in items.startable_candidates] == [2]
+    assert items.startable_candidates[0] is items.startable_items[1]
+    assert funnel.STARTABLE_ITEM_NODE_FIELDS in calls[1][0]
+    detail_calls = [
+        variables for query, variables in calls
+        if "nodes(ids: $ids)" in query
+    ]
+    assert [variables["ids"] for variables in detail_calls] == [
+        ["project-item-2"]
+    ]
 
 
 def test_detail_query_only_requests_child_times_for_items_with_children(

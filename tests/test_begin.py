@@ -2107,6 +2107,163 @@ def test_codex_begin_skips_the_other_tier_before_claiming(monkeypatch, capsys):
     assert [ref for ref, value in writes if value] == [standard.ref]
 
 
+def test_begin_routes_unset_risk_tickets_with_existing_escalation_scan():
+    standard_project, standard = _ticket(
+        8, 9, body="ordinary implementation details"
+    )
+    escalated_project, escalated = _ticket(
+        10, 11, body="Risk: escalated — database migration"
+    )
+    standard.risk = None
+    escalated.risk = None
+    rows = [
+        standard_project, standard,
+        escalated_project, escalated,
+    ]
+
+    assert funnel.next_ticket_for_tier(
+        rows, NOW, tier="standard",
+    ) is standard
+    assert funnel.next_ticket_for_tier(
+        rows, NOW, tier="escalated",
+    ) is escalated
+
+
+def test_queue_and_begin_share_one_startable_view_for_the_165_regression(
+    monkeypatch, capsys,
+):
+    import heartbeat
+
+    repo = "nateprich-projects/command-center"
+    project = funnel.Item(
+        repo=repo, number=162, title="Project 162",
+        url="https://github.com/{}/issues/162".format(repo),
+        state="OPEN", status="Building", klass="Broken",
+        origin="agent", risk="standard", needs="none", children_total=1,
+    )
+    ticket = funnel.Item(
+        repo=repo, number=165, title="Ticket 165",
+        url="https://github.com/{}/issues/165".format(repo),
+        state="OPEN", body="ordinary implementation details", origin="agent",
+        risk=None, needs="none", parent=project.ref,
+        item_id="item-165",
+        status_since=NOW - timedelta(days=30),
+    )
+    newer_project = funnel.Item(
+        repo=repo, number=169, title="Newer Broken project",
+        url="https://github.com/{}/issues/169".format(repo),
+        state="OPEN", status="Building", klass="Broken",
+        origin="agent", risk="standard", needs="none", children_total=1,
+    )
+    newer_ticket = funnel.Item(
+        repo=repo, number=170, title="Newer Broken ticket",
+        url="https://github.com/{}/issues/170".format(repo),
+        state="OPEN", body="Risk: standard", origin="agent",
+        risk="standard", needs="none", parent=newer_project.ref,
+        item_id="item-170", status_since=NOW - timedelta(days=2),
+    )
+    pinned_project = funnel.Item(
+        repo=repo, number=167, title="Pinned project",
+        url="https://github.com/{}/issues/167".format(repo),
+        state="OPEN", status="Building", klass="Replace",
+        origin="agent", risk="standard", needs="none", children_total=1,
+        pinned=True,
+    )
+    pinned_ticket = funnel.Item(
+        repo=repo, number=168, title="Pinned ticket",
+        url="https://github.com/{}/issues/168".format(repo),
+        state="OPEN", body="Risk: standard", origin="agent",
+        risk="standard", needs="none", parent=pinned_project.ref,
+        item_id="item-168", status_since=NOW - timedelta(days=2),
+    )
+    records = [
+        {"run": "e1b3abbcf90a", "phase": "bind", "do": "ticket",
+         "work": ticket.ref, "ts": 100},
+        {"run": "e1b3abbcf90a", "phase": "finish", "ts": 150,
+         "outcome": "skipped-human-step",
+         "note": ("finished by comments: https://github.com/"
+                  "nateprich-projects/command-center/issues/780; "
+                  "waiting on Nate to close #781")},
+    ]
+    monkeypatch.setattr(heartbeat, "PROVIDERS", {"codex": "openai"})
+    monkeypatch.setattr(heartbeat, "RETIRED_AGENTS", frozenset())
+    monkeypatch.setattr(heartbeat, "read", lambda _agent: records)
+    monkeypatch.setattr(
+        funnel, "finished_by_comments",
+        lambda rows: set(funnel.finished_by_comments_runs(rows)),
+    )
+
+    view = funnel.ScopedItems(
+        [
+            project, ticket, newer_project, newer_ticket,
+            pinned_project, pinned_ticket,
+        ],
+        scope="full",
+        startable_candidates=[ticket, newer_ticket, pinned_ticket],
+        startable_items=[
+            project, ticket, newer_project, newer_ticket,
+            pinned_project, pinned_ticket,
+        ],
+        startable_agent="codex",
+    )
+    readiness = {
+        repo: funnel.MemberRepoReadiness(
+            repo, topic=True, ci_workflow=True,
+            stock_labels=(), dependabot=True,
+        ),
+    }
+    calls = []
+    events = []
+    original_listing = funnel.startable_listing
+    original_next = funnel.next_ticket_for_tier
+
+    def counted_listing(items, *args, **kwargs):
+        result = original_listing(items, *args, **kwargs)
+        refs = [item.ref for item in result]
+        events.append(("listing", refs))
+        calls.append((
+            items is view.startable_items,
+            kwargs.get("candidate_items") is view.startable_candidates,
+            refs,
+        ))
+        return result
+
+    def counted_next(*args, **kwargs):
+        events.append((
+            "select",
+            [item.ref for item in kwargs["startable_order"]],
+        ))
+        return original_next(*args, **kwargs)
+
+    monkeypatch.setattr(funnel, "startable_listing", counted_listing)
+    monkeypatch.setattr(funnel, "next_ticket_for_tier", counted_next)
+    result, writes = _implementing_begin(
+        monkeypatch, capsys, view, tier="standard",
+        repo_readiness=readiness,
+    )
+
+    assert result["do"] == "ticket"
+    assert result["work"]["ref"] == ticket.ref
+    assert [ref for ref, value in writes if value] == [ticket.ref]
+    assert funnel.cmd_queue(
+        view, NOW, repo_readiness=readiness, pr_facts={},
+    ) == 0
+    queue_output = capsys.readouterr().out
+    assert "Startable by Codex (3)" in queue_output
+    assert ticket.ref in queue_output
+    assert newer_ticket.ref in queue_output
+    assert pinned_ticket.ref in queue_output
+    assert calls == [
+        (True, True, [ticket.ref, newer_ticket.ref, pinned_ticket.ref]),
+        (True, True, [ticket.ref, newer_ticket.ref, pinned_ticket.ref]),
+    ]
+    assert events == [
+        ("listing", [ticket.ref, newer_ticket.ref, pinned_ticket.ref]),
+        ("select", [ticket.ref, newer_ticket.ref, pinned_ticket.ref]),
+        ("listing", [ticket.ref, newer_ticket.ref, pinned_ticket.ref]),
+    ]
+
+
 def test_muse_escalated_begin_no_longer_claims_a_ticket(monkeypatch, capsys):
     """Muse judges and Codex implements (Nate, 2026-09-22, #1315, #1322):
     an escalated Muse begin with no role takes the review path."""

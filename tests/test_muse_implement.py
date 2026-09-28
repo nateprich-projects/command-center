@@ -595,20 +595,40 @@ def test_a_missing_answer_releases_and_finishes_errored(tmp_path):
 
 
 def test_a_finish_ticket_failure_releases_and_finishes_errored(tmp_path):
+    # example/widgets stands for a private member repo: finish-ticket's
+    # stderr can carry its whole test run, so the public note omits it and
+    # only the local log keeps it (#1796).
     proc, repo = _stubbed_runner(
         tmp_path, _begin(),
         extra_env={"FINISH_STATUS": "1",
-                   "FINISH_ERROR": "answer is not valid JSON: boom"})
+                   "FINISH_ERROR": "FAILED tests/test_widgets.py::test_vault"})
 
     assert proc.returncode == 1
     assert _muse_calls(repo) == 1
     assert len(_calls(repo, "finish")) == 1
     assert _heartbeat(repo) == (
         "finish --agent muse --run writer-run --outcome errored --note "
-        "finish-ticket failed for example/widgets#42: "
-        "answer is not valid JSON: boom\n"
+        "finish-ticket failed for example/widgets#42\n"
     )
+    assert "FAILED tests/test_widgets.py::test_vault" in proc.stderr
     assert "release example/widgets#42" in (repo / "funnel.calls").read_text()
+
+
+def test_a_command_center_finish_ticket_failure_keeps_its_error_in_the_note(
+        tmp_path):
+    ref = "nateprich-projects/command-center#42"
+    proc, repo = _stubbed_runner(
+        tmp_path,
+        _begin(work={"ref": ref, "repo": "nateprich-projects/command-center"}),
+        extra_env={"FINISH_STATUS": "1",
+                   "FINISH_ERROR": "answer is not valid JSON: boom"})
+
+    assert proc.returncode == 1
+    assert _heartbeat(repo) == (
+        "finish --agent muse --run writer-run --outcome errored --note "
+        "finish-ticket failed for {}: answer is not valid JSON: boom\n"
+        .format(ref)
+    )
 
 
 def test_the_wall_clock_bound_kills_the_process_group_and_finishes_errored(

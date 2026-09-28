@@ -573,8 +573,16 @@ if ! (cd "$WORKSPACE" && python3 "$REPO/finish-ticket" --answer-file "$ANSWER_HA
   finish_err="$(cat "$DIAG_FILE")"
   echo "muse-implement: finish-ticket failed: $finish_err" >&2
   release_ticket
+  # finish-ticket's stderr can carry a whole failing test run, and the
+  # heartbeat branch is public while every member repository is private, so
+  # only command-center's own text reaches the note (#1796). The line above
+  # keeps the rest in this machine's log.
+  finish_note="finish-ticket failed for $BEGIN_REF"
+  if [[ "$BEGIN_REPO" == "nateprich-projects/command-center" ]]; then
+    finish_note="$finish_note: $finish_err"
+  fi
   python3 "$REPO/heartbeat.py" finish --agent muse --run "$BEGIN_RUN" \
-    --outcome errored --note "finish-ticket failed for $BEGIN_REF: $finish_err" >&2 || true
+    --outcome errored --note "$finish_note" >&2 || true
   exit 1
 fi
 exit 0

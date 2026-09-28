@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -648,3 +649,25 @@ def test_ticket_1770_credentials_direct_actions_use_literal_rotate_forms_and_ter
         assert direct.search("rotate the deploy {}".format(noun)), noun
 
     assert direct.search("rotate the deploy secret key") is None
+
+
+def test_ticket_1770_credentials_direct_actions_reuse_existing_vocabulary():
+    direct = funnel._PLAN_DIRECT_ACTIONS["credentials"].pattern
+    proposal = funnel._PLAN_PROPOSAL_ACTIONS["credentials"].pattern
+
+    def action_terms(pattern):
+        assert pattern.startswith(r"\b(?:")
+        return pattern[len(r"\b(?:"):pattern.index(")", len(r"\b(?:"))]
+
+    assert action_terms(direct) == action_terms(proposal)
+
+    direct_tail = direct.split(
+        r"(?:\s+[\w'’-]+){0,4}\s+", 1
+    )[1]
+    assert direct_tail.startswith("(?:") and direct_tail.endswith(r")\b")
+    direct_credentials = direct_tail[3:-3]
+
+    matcher = funnel.ESCALATION_PATTERNS["credentials"]
+    plain_terms = re.search(r"\\b\(([^()]*)\)\\b\|", matcher).group(1)
+    final_term = re.search(r"\\s\+([^\\]+)\\b$", matcher).group(1)
+    assert direct_credentials == "{}|{}".format(plain_terms, final_term)

@@ -1889,8 +1889,14 @@ def test_apply_reports_an_unconfirmed_status_without_marking(monkeypatch):
     assert all("--remove-label" not in args[0] for args in watched)
 
 
+@pytest.mark.parametrize(("plan_markdown", "matched_line"), [
+    ("# Plan\n\nRotate the api-key monthly.\n",
+     "Rotate the api-key monthly."),
+    ("# Plan\n\nRotate the deploy credentials during cutover.\n",
+     "Rotate the deploy credentials during cutover."),
+], ids=("existing-api-key", "verb-inside-credentials-phrase"))
 def test_apply_advances_a_scan_only_plan_with_risk_escalated(
-        monkeypatch, capsys):
+        monkeypatch, capsys, plan_markdown, matched_line):
     # #1721: the wording scan alone raises the review tier, records its
     # reasons and matching lines in one comment, and holds nothing.
     item = idea(42)
@@ -1903,7 +1909,7 @@ def test_apply_advances_a_scan_only_plan_with_risk_escalated(
     calls = stub_gh(monkeypatch, item)
     assert shape.apply_shape(
         [item], NOW, item.ref,
-        answer(plan_markdown="# Plan\n\nRotate the api-key monthly.\n"),
+        answer(plan_markdown=plan_markdown),
         run="shape-run", agent="muse") == 0
     assert item.status == "Ready"
     assert item.risk == "escalated"
@@ -1924,7 +1930,7 @@ def test_apply_advances_a_scan_only_plan_with_risk_escalated(
         "no declared risk"]
     scans = [body for body in comments if body not in approvals]
     assert len(scans) == 1
-    assert "- `credentials`\n  > Rotate the api-key monthly." in scans[0]
+    assert "- `credentials`\n  > {}".format(matched_line) in scans[0]
     assert "review tier raised, plan not held" in scans[0]
     assert funnel.parse_provenance(scans[0]) == {
         "agent": "muse", "at": NOW.isoformat(), "run": "shape-run",
@@ -1932,7 +1938,7 @@ def test_apply_advances_a_scan_only_plan_with_risk_escalated(
     output = capsys.readouterr().out
     assert "advanced to Ready: " in output
     assert ("escalation scan raised the review tier (the scan alone holds "
-            "nothing): credentials: Rotate the api-key monthly.") in output
+            "nothing): credentials: {}".format(matched_line)) in output
 
 
 def test_apply_lists_every_scan_reason_in_one_comment(monkeypatch, capsys):
